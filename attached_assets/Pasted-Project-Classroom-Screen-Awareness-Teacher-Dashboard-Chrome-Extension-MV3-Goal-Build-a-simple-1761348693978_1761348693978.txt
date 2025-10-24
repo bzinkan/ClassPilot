@@ -1,0 +1,209 @@
+Project: Classroom Screen Awareness (Teacher Dashboard + Chrome Extension MV3)
+
+Goal: Build a simple, privacy-aware system that helps teachers see what students are doing on their managed Chromebooks. The default mode is lightweight monitoring (active tab title + URL + last-seen heartbeat). A separate opt-in screen share lets a student share a tab or screen only after an explicit click. All features must be compatible with Chrome OS and Google Admin force-install workflows.
+
+Deliverables
+
+Teacher Web App (Server + UI)
+
+Stack: Node.js + Express, WebSocket (ws), minimal frontend (HTML/JS or React—your choice).
+
+Pages:
+
+/dashboard: live grid of “student tiles” with name, device ID, active tab title, URL, last heartbeat, optional tiny favicon/thumbnail if provided, and status (Online/Idle).
+
+/class/{classId}: same as dashboard but filtered to a roster list uploaded as CSV.
+
+/settings: school name, classes/rosters upload (CSV), WebSocket key, and retention rules.
+
+API:
+
+POST /api/register (from extension) — register device + student display name + schoolId + classId.
+
+POST /api/heartbeat — deviceId, activeTabTitle, activeTabUrl, timestamp.
+
+POST /api/event — discrete events (tab change, blocked domain hit, consent toggled).
+
+POST /api/signal/{deviceId} — teacher sends a WebRTC signal (only used after student consent).
+
+GET /api/students — list with latest state for dashboard.
+
+WebSocket:
+
+One teacher channel (auth with a shared key).
+
+One student channel (connects by deviceId + schoolId).
+
+Broadcast updates in near-real time to dashboards.
+
+Security:
+
+ENV vars: WS_SHARED_KEY, SCHOOL_ID, SESSION_SECRET.
+
+Rate-limit POSTs from extensions; validate schoolId + signature header.
+
+Store minimal data (tab title/URL, timestamps). Retention: default 24 hours.
+
+FERPA/COPPA-aware notices: must show a “Monitoring in effect” banner in the extension UI.
+
+Chrome Extension (Manifest V3)
+
+Purpose: run on student Chromebooks (force-installed by Google Admin).
+
+Default “Awareness” features (NO screenshots, NO covert capture):
+
+On interval (e.g., every 5–10s), send active tab title + URL + timestamp via fetch to /api/heartbeat.
+
+On tab changes, immediately send an update.
+
+Lightweight student popup UI shows: school name, teacher contact line, “Monitoring enabled by your school.”
+
+Optional Opt-In Screen Share (student must click a button):
+
+Use getDisplayMedia (or chrome.tabCapture if user gestures allow) only after the student clicks “Share this tab/screen with teacher”.
+
+Show a clear red “Sharing” indicator; button to stop sharing at any time.
+
+Use WebRTC to stream to the teacher app: negotiate via /api/signal/{deviceId} + WebSocket signaling.
+
+Permissions (MV3):
+
+"permissions": ["tabs", "activeTab", "storage"]
+
+"host_permissions": ["<all_urls>"] (or a safe allowlist you generate)
+
+Do not include background screen capture or any hidden capture APIs.
+
+Policies:
+
+No intercepting keystrokes.
+
+No hiding the extension UI.
+
+Respect user gestures for any capture.
+
+All monitoring is visible and disclosed.
+
+Non-Goals / Constraints
+
+Do not attempt covert or silent screen capture. Any viewing beyond title/URL must be opt-in with a user click.
+
+Designed for managed Chromebooks (Google Admin force-install). Do not provide ways to bypass IT policies.
+
+Keep storage minimal; provide a simple retention setting.
+
+Teacher App Details
+
+Data model (simple JSON or SQLite):
+
+Student: deviceId, studentName, schoolId, classId.
+
+Status: deviceId, activeTabTitle, activeTabUrl, lastSeenAt, isSharing (bool).
+
+Roster: classId, list of deviceIds or emails.
+
+UI behaviors:
+
+Tiles auto-update via WebSocket.
+
+Color states: Online (<30s), Idle (30–120s), Offline (>120s).
+
+Click a tile → open detail drawer with full URL history (last 20), and if isSharing = true, show embedded WebRTC viewer.
+
+Admin/Settings:
+
+Upload roster CSV: columns: studentName,deviceId,classId.
+
+Blocklist domains (optional): highlight tiles in red if URL matches.
+
+Export daily CSV of activity summary.
+
+Auth:
+
+Simple password login for teacher; store hashed.
+
+WebSocket teacher connections must include WS_SHARED_KEY.
+
+Dev scripts:
+
+npm run dev — start server with nodemon.
+
+npm run build — (if React) build frontend.
+
+npm start — production start.
+
+Extension Details
+
+Files:
+
+manifest.json (MV3, name “Classroom Screen Awareness”)
+
+service_worker.js — schedules heartbeats, handles messages.
+
+content.js — listens for tab changes to report current tab title/URL.
+
+popup.html/js — shows status UI + “Share Screen” button (opt-in).
+
+webrtc.js — initiates getDisplayMedia after user click, sends SDP via WebSocket/HTTP to teacher app.
+
+options.html/js — read-only school info pulled from server.
+
+Behaviors:
+
+On install: prompt student to confirm their display name + class from a dropdown preloaded via /api/classes?schoolId=....
+
+Heartbeat every 10s (configurable via remote setting).
+
+On tab update/activate: immediate POST to /api/heartbeat.
+
+Share flow:
+
+Button click → call navigator.mediaDevices.getDisplayMedia().
+
+Show “Sharing ON” badge in the popup; add a pageAction/icon badge on the toolbar.
+
+Stop button → stream.getTracks().forEach(t => t.stop()) and notify server.
+
+Compliance / Transparency
+
+Show a visible banner in popup: “This school-managed device sends active tab titles/URLs to your teacher during class.”
+
+Provide a “What’s collected?” link in popup: explain tab title, URL, timestamps; no keystrokes; no microphone/camera; no hidden screen capture.
+
+Log consent events for audit: event: "consent_granted" | "consent_revoked" with timestamps.
+
+Default retention 24h; configurable in Settings.
+
+Minimal Acceptance Criteria
+
+Teacher dashboard loads and shows live tiles within 2s of a student’s heartbeat.
+
+Extension reliably sends title/URL on tab changes and every 10s.
+
+Opt-in screen share works for a single student to one teacher viewer using WebRTC; obvious stop control.
+
+Roster upload filters /class/{classId} view.
+
+Basic auth for teacher; WS_SHARED_KEY required for WebSocket.
+
+No covert capture; all capture requires student click; visible indicator during sharing.
+
+Nice-to-Have (if time)
+
+Domain blocklist highlight (red border) + simple CSV export.
+
+“Ping student” action (sends extension a notification).
+
+Small tab-preview favicon (no screenshots; just the site icon).
+
+Simple rate-limiting and IP allowlist.
+
+Deployment Notes (write basic docs)
+
+Replit: set SESSION_SECRET, WS_SHARED_KEY, SCHOOL_ID.
+
+Expose HTTPS URL. (If behind Replit proxy, document the public URL.)
+
+Extension: produce a ZIP for Google Admin force-install. Include a JSON with server base URL and schoolId.
+
+Provide a short Google Admin guide: Upload ZIP to Admin Console → Apps → Chrome → Managed browsers → Force-install → set policy with the server URL.
