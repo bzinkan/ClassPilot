@@ -12,7 +12,9 @@
     "tabs",
     "activeTab",
     "storage",
-    "notifications"
+    "notifications",
+    "tabCapture",
+    "desktopCapture"
   ],
   "host_permissions": [
     "<all_urls>"

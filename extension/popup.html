@@ -263,8 +263,8 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
       </svg>
       <div class="banner-content">
-        <h3>Monitoring In Effect</h3>
-        <p>Your active tab titles and URLs are shared with your teacher during class.</p>
+        <h3>Automatic Monitoring Active</h3>
+        <p>Your screen, tab titles and URLs are automatically shared with your teacher during class as permitted by school policy.</p>
       </div>
     </div>
     
@@ -292,26 +292,23 @@
     </div>
     
     <div class="section">
-      <h2>Screen Sharing (Optional)</h2>
+      <h2>Screen Sharing Status</h2>
       <div id="share-section">
         <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">
-          Your teacher can request to view your screen. Click below to share after explicit permission.
+          Screen sharing starts automatically when this extension is active. Your teacher can view your screen at any time for classroom management purposes.
         </p>
-        <button class="share-button" id="share-button">
-          <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path>
-          </svg>
-          Share My Screen
-        </button>
+        <div style="background: #f1f5f9; padding: 8px 12px; border-radius: 4px; font-size: 11px; color: #475569;">
+          ⏳ Screen sharing will start automatically...
+        </div>
       </div>
       <div id="sharing-section" class="hidden">
         <div class="sharing-indicator">
           <div class="pulse-dot"></div>
           <span>Screen Sharing Active</span>
         </div>
-        <button class="share-button stop-button" id="stop-button" style="margin-top: 12px;">
-          Stop Sharing
-        </button>
+        <p style="font-size: 11px; color: #991b1b; margin-top: 8px; text-align: center;">
+          Your teacher can see your screen
+        </p>
       </div>
     </div>
     
