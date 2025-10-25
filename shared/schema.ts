@@ -8,12 +8,21 @@ export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull().unique(),
   password: text("password").notNull(),
+  role: text("role").notNull().default("teacher"), // 'admin' or 'teacher'
   schoolName: text("school_name").notNull().default("School"),
 });
 
 export const insertUserSchema = createInsertSchema(users).omit({ id: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
+
+// Schema for creating teacher accounts (admin-only)
+export const createTeacherSchema = z.object({
+  username: z.string().min(3, "Username must be at least 3 characters"),
+  password: z.string().min(6, "Password must be at least 6 characters"),
+  schoolName: z.string().optional(),
+});
+export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 
 // Student device registration
 export const students = pgTable("students", {
