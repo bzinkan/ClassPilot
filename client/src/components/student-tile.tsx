@@ -1,8 +1,23 @@
+import { useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Clock, Monitor, ExternalLink, AlertTriangle } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2 } from "lucide-react";
 import type { StudentStatus } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 
 interface StudentTileProps {
   student: StudentStatus;
@@ -28,6 +43,49 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 }
 
 export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTileProps) {
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [newStudentName, setNewStudentName] = useState(student.studentName);
+  const { toast } = useToast();
+  
+  const updateStudentNameMutation = useMutation({
+    mutationFn: async (data: { deviceId: string; studentName: string }) => {
+      return await apiRequest("PATCH", `/api/students/${data.deviceId}`, { studentName: data.studentName });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Student name updated",
+        description: `Successfully updated student name to ${newStudentName}`,
+      });
+      setEditDialogOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update student name",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const handleEditClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setNewStudentName(student.studentName);
+    setEditDialogOpen(true);
+  };
+
+  const handleSaveStudentName = () => {
+    if (!newStudentName.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid name",
+        description: "Student name cannot be empty",
+      });
+      return;
+    }
+    updateStudentNameMutation.mutate({ deviceId: student.deviceId, studentName: newStudentName });
+  };
+  
   const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);
   
   const getStatusColor = (status: string) => {
@@ -96,9 +154,20 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="flex-1 min-w-0">
-            <h3 className="font-medium text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
-              {student.studentName}
-            </h3>
+            <div className="flex items-center gap-2">
+              <h3 className="font-medium text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
+                {student.studentName}
+              </h3>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 flex-shrink-0"
+                onClick={handleEditClick}
+                data-testid={`button-edit-student-${student.deviceId}`}
+              >
+                <Edit2 className="h-3 w-3" />
+              </Button>
+            </div>
             <p className="text-xs font-mono text-muted-foreground truncate">
               {student.deviceId}
             </p>
@@ -159,6 +228,60 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
           </span>
         </div>
       </div>
+
+      {/* Edit Student Name Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.deviceId}`}>
+          <DialogHeader>
+            <DialogTitle>Edit Student Name</DialogTitle>
+            <DialogDescription>
+              Assign a student name to this Chromebook device
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="device-id">Device</Label>
+              <Input
+                id="device-id"
+                value={student.deviceId}
+                disabled
+                className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="student-name">Student Name</Label>
+              <Input
+                id="student-name"
+                data-testid={`input-edit-student-name-${student.deviceId}`}
+                value={newStudentName}
+                onChange={(e) => setNewStudentName(e.target.value)}
+                placeholder="e.g., Lucy, John Smith"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSaveStudentName();
+                  }
+                }}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setEditDialogOpen(false)}
+              data-testid="button-cancel-edit-student"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveStudentName}
+              disabled={updateStudentNameMutation.isPending}
+              data-testid="button-save-student-name"
+            >
+              {updateStudentNameMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }
