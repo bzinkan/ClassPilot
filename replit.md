@@ -35,12 +35,14 @@ This is a full-stack web application with a teacher dashboard and Chrome Extensi
   - `POST /api/register` - Student device registration (from extension)
   - `POST /api/heartbeat` - Student activity updates (every 10 seconds)
   - `POST /api/event` - Event logging (consent changes, tab changes)
-  - `GET /api/students` - Get all students with current status
-  - `GET /api/heartbeats/:deviceId` - Get URL history for a student
+  - `GET /api/students` - Get all students with current status (protected by IP allowlist)
+  - `GET /api/heartbeats/:deviceId` - Get URL history for a student (protected by IP allowlist)
   - `POST /api/signal/:deviceId` - WebRTC signaling for screen sharing
-  - `GET/POST /api/settings` - School settings management
-  - `POST /api/roster/upload` - CSV roster upload
-  - `GET /api/export/csv` - Export activity data
+  - `POST /api/ping/:deviceId` - Send notification message to student (protected by IP allowlist)
+  - `GET/POST /api/settings` - School settings management (protected by IP allowlist)
+  - `POST /api/roster/upload` - CSV roster upload (protected by IP allowlist)
+  - `GET /api/export/activity` - Export activity data with date range filter (protected by IP allowlist)
+  - `GET /api/export/csv` - Legacy CSV export (protected by IP allowlist)
 - **WebSocket Server**: Real-time communication on `/ws` path
   - Teacher channel: Receives updates when students change activity
   - Student channel: For WebRTC signaling and extension communication
@@ -135,23 +137,35 @@ Jane Smith,device-002,class-101
 
 ## Recent Changes
 
-### October 25, 2025 - PRODUCTION READY ✅
-**Complete implementation of all features:**
+### October 25, 2025 - Enhanced Features
+**New features implemented:**
+- ✅ Domain blocklist with violation alerts - Red border on student tiles when visiting blocked domains, real-time alert notifications
+- ✅ CSV activity export with date range filtering - Export student activity data with custom date ranges (defaults to 7 days)
+- ✅ Ping student notifications - Send custom messages to students via Chrome extension notifications
+- ✅ IP allowlist security (MVP with limitations) - Restrict teacher dashboard access by IP address
+
+**IP Allowlist Implementation Notes:**
+The IP allowlist feature provides basic IP-based access control with the following characteristics:
+- ✅ Works correctly for direct server connections (development, small deployments)
+- ⚠️ **Reverse proxy deployments require additional configuration**:
+  - Production deployments behind nginx, Apache, or cloud load balancers need Express `trust proxy` configuration
+  - Without proxy configuration, the server sees the proxy's IP instead of client IPs
+  - Operators must configure allowlist with proxy IPs or disable the feature in proxy environments
+- Production-only enforcement (disabled in development to avoid breaking local workflow)
+- Exact IP matching only (no CIDR support in current implementation)
+- Fail-open error handling to prevent total lockout
+- Documented in code comments for deployment teams
+
+**Previous Core Features:**
 - ✅ Full-stack teacher dashboard with live student monitoring
 - ✅ Backend API with authentication, WebSocket server, and rate limiting
 - ✅ Chrome Extension MV3 with service worker, popup UI, and tab monitoring
 - ✅ End-to-end WebRTC screen sharing with opt-in consent flows
 - ✅ Settings page with CSV roster upload and data retention controls
-- ✅ Student detail drawer with URL history and live screen viewer
+- ✅ Student detail drawer with URL history (last 20 URLs) and live screen viewer
 - ✅ Dark/light theme support throughout application
 - ✅ Privacy-first design with FERPA/COPPA compliance features
 - ✅ Extension icons and deployment package ready for Google Admin
-
-**Critical Fixes Applied**:
-- Fixed WebRTC signaling to use single authenticated WebSocket connection
-- Fixed Settings form hydration using useEffect instead of useState
-- Added required PNG icon files (icon16.png, icon48.png, icon128.png) for extension packaging
-- Verified ICE candidate exchange works correctly for reliable WebRTC connections
 
 ## Deployment Ready ✅
 
