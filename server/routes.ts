@@ -266,6 +266,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Ping student endpoint - sends notification to student device
+  app.post("/api/ping/:deviceId", requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const { message } = req.body;
+      
+      // Forward ping message via WebSocket to the target device
+      let sent = false;
+      wsClients.forEach((client, ws) => {
+        if (client.deviceId === deviceId && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ 
+            type: 'ping', 
+            data: { 
+              message: message || 'Your teacher is requesting your attention',
+              timestamp: Date.now()
+            } 
+          }));
+          sent = true;
+        }
+      });
+
+      if (sent) {
+        res.json({ success: true, message: "Ping sent successfully" });
+      } else {
+        res.json({ success: false, message: "Student is offline" });
+      }
+    } catch (error) {
+      console.error("Ping error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Settings endpoints
   app.get("/api/settings", requireAuth, async (req, res) => {
     try {

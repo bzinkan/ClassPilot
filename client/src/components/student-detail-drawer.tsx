@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { X, ExternalLink, Clock, Monitor, Video } from "lucide-react";
+import { X, ExternalLink, Clock, Monitor, Video, Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useToast } from "@/hooks/use-toast";
+import { apiRequest } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format } from "date-fns";
 
@@ -17,10 +19,44 @@ export function StudentDetailDrawer({
   urlHistory,
   onClose,
 }: StudentDetailDrawerProps) {
+  const { toast } = useToast();
   const videoRef = useRef<HTMLVideoElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [videoLoaded, setVideoLoaded] = useState(false);
+  const [pinging, setPinging] = useState(false);
+
+  const handlePing = async () => {
+    if (!student) return;
+    
+    setPinging(true);
+    try {
+      const response = await apiRequest("POST", `/api/ping/${student.deviceId}`, {
+        message: "Your teacher is requesting your attention"
+      });
+      
+      if (response.success) {
+        toast({
+          title: "Ping sent",
+          description: `Notification sent to ${student.studentName}`,
+        });
+      } else {
+        toast({
+          variant: "destructive",
+          title: "Student offline",
+          description: "Unable to send notification - student is not connected",
+        });
+      }
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Failed to ping",
+        description: "An error occurred while sending the notification",
+      });
+    } finally {
+      setPinging(false);
+    }
+  };
 
   useEffect(() => {
     if (!student || !student.isSharing) {
@@ -205,7 +241,7 @@ export function StudentDetailDrawer({
                 <p className="text-sm font-mono text-muted-foreground truncate">
                   {student.deviceId}
                 </p>
-                <div className="flex items-center gap-2 mt-2">
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
                   <Badge variant="secondary" className="text-xs">
                     {student.classId}
                   </Badge>
@@ -218,6 +254,18 @@ export function StudentDetailDrawer({
                       Sharing
                     </Badge>
                   )}
+                </div>
+                <div className="mt-3">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handlePing}
+                    disabled={pinging || student.status === 'offline'}
+                    data-testid="button-ping-student"
+                  >
+                    <Bell className="h-4 w-4 mr-2" />
+                    {pinging ? "Sending..." : "Ping Student"}
+                  </Button>
                 </div>
               </div>
               <Button

@@ -168,6 +168,24 @@ function connectWebSocket() {
         data: message.data,
       });
     }
+    
+    // Handle ping notifications
+    if (message.type === 'ping') {
+      const { message: pingMessage } = message.data;
+      
+      // Show browser notification
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'Teacher Notification',
+        message: pingMessage || 'Your teacher is requesting your attention',
+        priority: 2,
+        requireInteraction: true, // Keeps notification visible until user dismisses
+      });
+      
+      // Also play a sound (beep)
+      // Note: Service workers cannot play audio directly, but the notification will make a sound
+    }
   };
   
   ws.onerror = (error) => {
