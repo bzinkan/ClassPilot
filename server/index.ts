@@ -2,6 +2,7 @@ import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "@neondatabase/serverless";
+import cors from "cors";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
@@ -10,6 +11,32 @@ const app = express();
 
 // CRITICAL: Trust proxy for Replit Deployments
 app.set('trust proxy', 1);
+
+// CORS configuration for chrome-extension and cross-origin requests
+const allowlist = (process.env.CORS_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    // Allow same-origin requests (no origin header)
+    if (!origin) return cb(null, true);
+    
+    // Allow chrome-extension origins
+    if (origin.startsWith('chrome-extension://')) return cb(null, true);
+    
+    // Allow configured allowlist
+    if (allowlist.some(a => origin === a || (a.endsWith('/*') && origin.startsWith(a.slice(0, -1))))) {
+      return cb(null, true);
+    }
+    
+    // Allow replit.app domains in production
+    if (origin.includes('.replit.app') || origin.includes('.replit.dev')) {
+      return cb(null, true);
+    }
+    
+    // Reject others
+    cb(new Error('CORS blocked'));
+  },
+  credentials: true, // Allow cookies to be sent
+}));
 
 // Session store configuration
 const PgStore = connectPgSimple(session);

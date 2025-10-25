@@ -27,9 +27,18 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+// Per-device heartbeat rate limiter (critical for production)
 const heartbeatLimiter = rateLimit({
-  windowMs: 10 * 1000, // 10 seconds
-  max: 5, // 5 requests per 10 seconds (very generous buffer for extensions)
+  windowMs: 60 * 1000, // 1 minute window
+  max: 120, // 120 requests per minute per device (2/sec is plenty)
+  keyGenerator: (req) => {
+    try {
+      const { deviceId } = req.body || {};
+      return `heartbeat:${deviceId || req.ip}`;
+    } catch {
+      return `heartbeat:${req.ip}`;
+    }
+  },
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
