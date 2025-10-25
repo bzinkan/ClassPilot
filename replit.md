@@ -59,7 +59,7 @@ This is a full-stack web application with a teacher dashboard and Chrome Extensi
   - Rate limiting (100 req/min general, 2 req/10s for heartbeats)
   - CSRF protection via session cookies
   - Admin middleware to protect sensitive routes
-- **Data Storage**: In-memory storage (MemStorage) for MVP - can be swapped for PostgreSQL
+- **Data Storage**: PostgreSQL database (Neon-backed) with Drizzle ORM for production-ready persistence
 
 ### Chrome Extension (Manifest V3) ✅ COMPLETE
 Located in `/extension` directory:
@@ -156,6 +156,24 @@ Jane Smith,device-002,class-101
 ```
 
 ## Recent Changes
+
+### October 25, 2025 - PostgreSQL Database Migration ✅ COMPLETE
+**Complete migration from in-memory storage to PostgreSQL database:**
+- ✅ **Data Persistence**: All data (users, students, heartbeats, settings) now persists across server restarts
+- ✅ **Admin Account Fix**: Admin accounts survive restarts - admin button no longer disappears on published app
+- ✅ **DatabaseStorage Implementation**: Complete IStorage implementation using Drizzle ORM
+- ✅ **Status Rehydration**: Student statuses load from actual heartbeat data on startup (not fabricated timestamps)
+- ✅ **Student Registration**: Uses ON CONFLICT DO UPDATE to handle re-registration and updates
+- ✅ **Consistent Status Logic**: Online/idle/offline calculations work consistently across all endpoints
+- ✅ **Heartbeat Tracking**: All heartbeats saved to database with timestamps for URL history
+- ✅ **Production Ready**: Fully tested and verified for published app at classpilot.replit.app
+
+**Technical Details:**
+- Database: PostgreSQL (Neon-backed via Replit)
+- ORM: Drizzle with type-safe queries
+- Tables: users, students, heartbeats, settings
+- In-memory cache: studentStatuses map for real-time WebSocket updates (synced with database)
+- Status calculation: Based on actual heartbeat timestamps (online <30s, idle 30-120s, offline >120s)
 
 ### October 25, 2025 - Admin System & Enhanced Features
 **Admin System Implemented (Option 1):**
