@@ -245,13 +245,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/admin/teachers", requireAdmin, async (req, res) => {
     try {
       const users = await storage.getAllUsers();
-      // Filter out passwords
-      const teachers = users.map(user => ({
-        id: user.id,
-        username: user.username,
-        role: user.role,
-        schoolName: user.schoolName,
-      }));
+      // Filter to only teachers (exclude admins) and remove passwords
+      const teachers = users
+        .filter(user => user.role === 'teacher')
+        .map(user => ({
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          schoolName: user.schoolName,
+        }));
       res.json({ success: true, teachers });
     } catch (error) {
       console.error("Get teachers error:", error);
@@ -309,11 +311,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Cannot delete your own account" });
       }
 
-      const deleted = await storage.deleteUser(id);
-      if (!deleted) {
+      // Verify the user exists and is a teacher (not an admin)
+      const user = await storage.getUser(id);
+      if (!user) {
         return res.status(404).json({ error: "Teacher not found" });
       }
+      
+      if (user.role === 'admin') {
+        return res.status(403).json({ error: "Cannot delete admin accounts" });
+      }
 
+      await storage.deleteUser(id);
       res.json({ success: true });
     } catch (error) {
       console.error("Delete teacher error:", error);
