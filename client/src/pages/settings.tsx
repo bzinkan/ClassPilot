@@ -8,6 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ArrowLeft, Upload, Download, Shield, Clock, AlertCircle } from "lucide-react";
@@ -26,6 +34,9 @@ export default function Settings() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [exportStartDate, setExportStartDate] = useState("");
+  const [exportEndDate, setExportEndDate] = useState("");
 
   const { data: settings, isLoading } = useQuery<SettingsType>({
     queryKey: ['/api/settings'],
@@ -127,31 +138,35 @@ export default function Settings() {
     }
   };
 
-  const handleExportData = async () => {
-    try {
-      const response = await fetch("/api/export/csv", {
-        credentials: "include",
-      });
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `activity-export-${new Date().toISOString().split("T")[0]}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      toast({
-        title: "Export complete",
-        description: "Activity data has been exported",
-      });
-    } catch (error) {
+  const handleOpenExportDialog = () => {
+    // Set default dates: last 7 days
+    const end = new Date();
+    const start = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    
+    setExportEndDate(end.toISOString().split('T')[0]);
+    setExportStartDate(start.toISOString().split('T')[0]);
+    setShowExportDialog(true);
+  };
+
+  const handleExportData = () => {
+    if (!exportStartDate || !exportEndDate) {
       toast({
         variant: "destructive",
-        title: "Export failed",
-        description: "Failed to export activity data",
+        title: "Invalid Dates",
+        description: "Please select both start and end dates",
       });
+      return;
     }
+
+    const startDate = new Date(exportStartDate).toISOString();
+    const endDate = new Date(exportEndDate + 'T23:59:59').toISOString();
+    
+    window.location.href = `/api/export/activity?startDate=${startDate}&endDate=${endDate}`;
+    toast({
+      title: "Exporting Data",
+      description: `Downloading activity report from ${exportStartDate} to ${exportEndDate}...`,
+    });
+    setShowExportDialog(false);
   };
 
   const onSubmit = (data: SettingsForm) => {
@@ -346,7 +361,7 @@ export default function Settings() {
           <CardContent>
             <Button
               variant="outline"
-              onClick={handleExportData}
+              onClick={handleOpenExportDialog}
               data-testid="button-export-data"
             >
               <Download className="h-4 w-4 mr-2" />
@@ -376,6 +391,49 @@ export default function Settings() {
           </CardContent>
         </Card>
       </main>
+
+      {/* Export Dialog */}
+      <Dialog open={showExportDialog} onOpenChange={setShowExportDialog}>
+        <DialogContent data-testid="dialog-export-csv">
+          <DialogHeader>
+            <DialogTitle>Export Activity Report</DialogTitle>
+            <DialogDescription>
+              Select a date range to export student activity data as CSV
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="start-date-settings">Start Date</Label>
+              <Input
+                id="start-date-settings"
+                type="date"
+                value={exportStartDate}
+                onChange={(e) => setExportStartDate(e.target.value)}
+                data-testid="input-export-start-date"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="end-date-settings">End Date</Label>
+              <Input
+                id="end-date-settings"
+                type="date"
+                value={exportEndDate}
+                onChange={(e) => setExportEndDate(e.target.value)}
+                data-testid="input-export-end-date"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowExportDialog(false)} data-testid="button-cancel-export">
+              Cancel
+            </Button>
+            <Button onClick={handleExportData} data-testid="button-confirm-export">
+              <Download className="h-4 w-4 mr-2" />
+              Export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

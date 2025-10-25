@@ -34,6 +34,7 @@ export interface IStorage {
   // Heartbeats
   addHeartbeat(heartbeat: InsertHeartbeat): Promise<Heartbeat>;
   getHeartbeatsByDevice(deviceId: string, limit?: number): Promise<Heartbeat[]>;
+  getAllHeartbeats(): Promise<Heartbeat[]>;
   cleanupOldHeartbeats(retentionHours: number): Promise<number>;
 
   // Events
@@ -178,6 +179,10 @@ export class MemStorage implements IStorage {
       .filter((h) => h.deviceId === deviceId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, limit);
+  }
+
+  async getAllHeartbeats(): Promise<Heartbeat[]> {
+    return this.heartbeats.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }
 
   async cleanupOldHeartbeats(retentionHours: number): Promise<number> {

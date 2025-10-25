@@ -314,7 +314,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Export CSV endpoint
+  // Export activity CSV endpoint with date range filtering
+  app.get("/api/export/activity", requireAuth, async (req, res) => {
+    try {
+      const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
+      
+      // Get all heartbeats within date range
+      const allHeartbeats = await storage.getAllHeartbeats();
+      const filteredHeartbeats = allHeartbeats.filter(hb => {
+        const timestamp = new Date(hb.timestamp);
+        return timestamp >= startDate && timestamp <= endDate;
+      });
+      
+      // Generate CSV with activity data
+      let csv = "Device ID,Student Name,Timestamp,URL,Tab Title\n";
+      
+      filteredHeartbeats.forEach(heartbeat => {
+        const escapedUrl = (heartbeat.activeTabUrl || '').replace(/"/g, '""');
+        const escapedTitle = (heartbeat.activeTabTitle || '').replace(/"/g, '""');
+        csv += `"${heartbeat.deviceId}","${heartbeat.studentName}","${new Date(heartbeat.timestamp).toISOString()}","${escapedUrl}","${escapedTitle}"\n`;
+      });
+      
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename=activity-export-${new Date().toISOString().split('T')[0]}.csv`);
+      res.send(csv);
+    } catch (error) {
+      console.error("Export activity error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Legacy export endpoint (for backward compatibility)
   app.get("/api/export/csv", requireAuth, async (req, res) => {
     try {
       const students = await storage.getAllStudents();
