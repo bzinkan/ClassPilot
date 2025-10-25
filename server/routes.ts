@@ -218,6 +218,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
 
+  // Get current user info
+  app.get("/api/me", requireAuth, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      
+      res.json({
+        success: true,
+        user: {
+          id: user.id,
+          username: user.username,
+          role: user.role,
+          schoolName: user.schoolName,
+        },
+      });
+    } catch (error) {
+      console.error("Get user error:", error);
+      res.status(500).json({ error: "Failed to fetch user" });
+    }
+  });
+
   // Admin routes for managing teachers
   app.get("/api/admin/teachers", requireAdmin, async (req, res) => {
     try {

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,13 @@ import { Label } from "@/components/ui/label";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import type { StudentStatus, Heartbeat, Settings } from "@shared/schema";
+
+interface CurrentUser {
+  id: string;
+  username: string;
+  role: string;
+  schoolName: string;
+}
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
@@ -42,6 +49,12 @@ export default function Dashboard() {
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
   });
+
+  const { data: currentUserData } = useQuery<{ success: boolean; user: CurrentUser }>({
+    queryKey: ['/api/me'],
+  });
+
+  const currentUser = currentUserData?.user;
 
   useEffect(() => {
     // WebSocket connection for real-time updates
@@ -207,6 +220,16 @@ export default function Dashboard() {
                 <Download className="h-4 w-4 mr-2" />
                 Export CSV
               </Button>
+              {currentUser?.role === 'admin' && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setLocation("/admin")}
+                  data-testid="button-admin"
+                >
+                  <Shield className="h-5 w-5" />
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
