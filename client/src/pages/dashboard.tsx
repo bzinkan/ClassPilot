@@ -14,6 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
@@ -30,6 +31,7 @@ export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedGrade, setSelectedGrade] = useState<string>("all");
   const [wsConnected, setWsConnected] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
@@ -96,11 +98,25 @@ export default function Dashboard() {
     };
   }, [refetch]);
 
-  const filteredStudents = students.filter((student) =>
-    student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    student.classId.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Extract grade from deviceId (e.g., "Grade 9 - CB-23" -> "9")
+  const getGradeFromDeviceId = (deviceId: string): string | null => {
+    const match = deviceId.match(/Grade (\d+)/i);
+    return match ? match[1] : null;
+  };
+
+  const filteredStudents = students.filter((student) => {
+    const matchesSearch = 
+      student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      student.classId.toLowerCase().includes(searchQuery.toLowerCase());
+    
+    if (!matchesSearch) return false;
+    
+    if (selectedGrade === "all") return true;
+    
+    const studentGrade = getGradeFromDeviceId(student.deviceId);
+    return studentGrade === selectedGrade;
+  });
 
   const onlineCount = students.filter((s) => s.status === 'online').length;
   const idleCount = students.filter((s) => s.status === 'idle').length;
@@ -300,6 +316,20 @@ export default function Dashboard() {
             className="max-w-md"
           />
         </div>
+
+        {/* Grade Level Tabs */}
+        <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
+          <TabsList className="flex-wrap h-auto">
+            <TabsTrigger value="all" data-testid="tab-grade-all">All Grades</TabsTrigger>
+            <TabsTrigger value="6" data-testid="tab-grade-6">6th</TabsTrigger>
+            <TabsTrigger value="7" data-testid="tab-grade-7">7th</TabsTrigger>
+            <TabsTrigger value="8" data-testid="tab-grade-8">8th</TabsTrigger>
+            <TabsTrigger value="9" data-testid="tab-grade-9">9th</TabsTrigger>
+            <TabsTrigger value="10" data-testid="tab-grade-10">10th</TabsTrigger>
+            <TabsTrigger value="11" data-testid="tab-grade-11">11th</TabsTrigger>
+            <TabsTrigger value="12" data-testid="tab-grade-12">12th</TabsTrigger>
+          </TabsList>
+        </Tabs>
 
         {/* Student Tiles */}
         {filteredStudents.length === 0 ? (
