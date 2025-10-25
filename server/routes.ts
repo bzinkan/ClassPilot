@@ -435,6 +435,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Update student name for a device (teacher assignment)
+  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const { studentName } = req.body;
+      
+      if (!studentName || typeof studentName !== 'string') {
+        return res.status(400).json({ error: "Student name is required" });
+      }
+      
+      const student = await storage.updateStudentName(deviceId, studentName);
+      
+      if (!student) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      
+      // Broadcast update to teachers
+      broadcastToTeachers({
+        type: 'student-update',
+        deviceId: student.deviceId,
+      });
+      
+      res.json({ success: true, student });
+    } catch (error) {
+      console.error("Update student name error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Get heartbeat history for a specific device
   app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
