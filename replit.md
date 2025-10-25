@@ -63,18 +63,20 @@ Located in `/extension` directory:
 - **WebRTC Implementation**: Full screen sharing with explicit student consent and WebSocket signaling
 
 **Extension Features**:
-- **Automatic screen sharing** - Starts automatically when extension loads (configurable via enterprise policies)
-- Privacy disclosure banner showing "Automatic Monitoring Active"
+- **Automatic tab & URL monitoring** - Fully automatic from student login, no action required
+- Privacy disclosure banner showing "Monitoring Active"
+- Optional screen sharing with explicit student consent (click to start)
 - Visual indicator when screen sharing is active (pulsing red dot)
 - WebRTC signaling through authenticated WebSocket connection
 - Heartbeat every 10 seconds with current tab title, URL, favicon
 - Ready for Google Admin force-install on managed Chromebooks
-- Supports Chrome Enterprise policies for silent screen capture
 
-**Deployment Notes**:
-- With enterprise policies configured, screen capture is fully automatic without user dialogs
-- Without enterprise policies, students see a one-time screen picker dialog on first load
-- Complies with school district monitoring policies for managed devices
+**Monitoring Capabilities**:
+- ✅ **Fully Automatic**: Tab titles, URLs, timestamps, favicons - collected every 10 seconds
+- ✅ **Real-time Alerts**: Domain blocklist violations with instant notifications
+- ✅ **URL History**: Last 20 URLs visited per student
+- ✅ **Status Tracking**: Online/Idle/Offline indicators based on heartbeat
+- ⚠️ **Optional**: Screen sharing requires student to click "Share My Screen" button
 
 ## Default Credentials
 

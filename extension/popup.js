@@ -53,11 +53,6 @@ function showMainView(config) {
   
   // Update status every 5 seconds
   setInterval(updateStatus, 5000);
-  
-  // Automatically start screen sharing (automatic monitoring mode)
-  setTimeout(() => {
-    autoStartScreenShare();
-  }, 1000);
 }
 
 async function handleSetup() {
@@ -115,55 +110,8 @@ function updateStatus() {
   document.getElementById('last-update').textContent = now.toLocaleTimeString();
 }
 
-async function autoStartScreenShare() {
-  try {
-    // Use desktopCapture API for automatic screen sharing (requires force-install by admin)
-    chrome.desktopCapture.chooseDesktopMedia(['screen'], (streamId) => {
-      if (!streamId) {
-        console.log('No stream selected, will retry on next popup open');
-        return;
-      }
-      
-      // Get media stream from streamId
-      navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: streamId,
-          },
-        },
-      }).then((stream) => {
-        mediaStream = stream;
-        console.log('Automatic screen sharing started');
-        
-        // Update UI
-        document.getElementById('share-section').classList.add('hidden');
-        document.getElementById('sharing-section').classList.remove('hidden');
-        
-        // Notify background
-        chrome.runtime.sendMessage({ type: 'sharing-started' });
-        
-        // Setup WebRTC
-        setupWebRTC(mediaStream);
-        
-        // Handle stream end - auto-restart
-        mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
-          console.log('Screen sharing ended, will restart on next popup open');
-          stopScreenShare();
-        });
-      }).catch((error) => {
-        console.error('Failed to get user media:', error);
-      });
-    });
-  } catch (error) {
-    console.error('Automatic screen sharing error:', error);
-  }
-}
-
 async function startScreenShare() {
   try {
-    // Manual screen sharing (fallback if auto-start fails)
     mediaStream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         cursor: 'always',
@@ -278,23 +226,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function showPrivacyInfo() {
   alert(`What's Being Collected?
 
-✓ Screen Display - Your full screen is automatically shared with your teacher
 ✓ Active Tab Title - The title of the webpage you're viewing
 ✓ Active Tab URL - The web address you're visiting
 ✓ Timestamps - When you visited each page
 ✓ Favicon - The small icon from the website
 
 ✗ NOT Collected:
-- Keystrokes or what you type (unless visible on screen)
+- Keystrokes or what you type
 - Microphone or camera access
-- Private messages or passwords (unless visible on screen)
+- Private messages or passwords
+- Screen captures (unless you opt-in to screen sharing)
 - Anything from incognito/private windows
 
-Automatic Screen Sharing:
-- Screen sharing starts automatically when the extension is active
-- Your teacher can view your screen in real-time for classroom management
+Automatic Monitoring:
+- Tab titles and URLs are automatically collected and sent to your teacher
+- This happens every 10 seconds while you browse
+- This is required by your school policy for classroom management
+
+Screen Sharing (Optional):
+- You can optionally share your screen with your teacher
+- Click "Share My Screen" to begin
 - A red indicator shows when sharing is active
-- This is required by your school policy for managed Chromebooks
+- You can stop sharing at any time
 
 Data Retention:
 - Your activity data is automatically deleted after 24 hours
