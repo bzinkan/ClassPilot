@@ -2,7 +2,7 @@
 // Handles background heartbeat sending and tab monitoring
 
 let CONFIG = {
-  serverUrl: 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev',
+  serverUrl: 'https://classpilot.replit.app',
   heartbeatInterval: 10000, // 10 seconds
   schoolId: 'default-school',
   deviceId: null,
