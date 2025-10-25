@@ -89,6 +89,7 @@ export const settings = pgTable("settings", {
   wsSharedKey: text("ws_shared_key").notNull(),
   retentionHours: text("retention_hours").notNull().default("24"),
   blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
+  ipAllowlist: text("ip_allowlist").array().default(sql`'{}'::text[]`),
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });

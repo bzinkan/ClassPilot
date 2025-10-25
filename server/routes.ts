@@ -61,6 +61,58 @@ function requireAuth(req: any, res: any, next: any) {
   }
 }
 
+// IP allowlist middleware (only enforced in production)
+async function checkIPAllowlist(req: any, res: any, next: any) {
+  // Skip IP check in development
+  if (process.env.NODE_ENV !== 'production') {
+    return next();
+  }
+
+  try {
+    const settings = await storage.getSettings();
+    
+    // If no allowlist configured, allow all IPs
+    if (!settings || !settings.ipAllowlist || settings.ipAllowlist.length === 0) {
+      return next();
+    }
+
+    // Get client IP - use socket address directly (don't trust proxy headers for security)
+    // In production deployments behind a trusted proxy, configure Express's "trust proxy" setting
+    // and use req.ip instead. For now, we use direct socket address for security.
+    let clientIP = req.connection?.remoteAddress || 
+                   req.socket?.remoteAddress ||
+                   '';
+
+    // Normalize IPv6-mapped IPv4 addresses (::ffff:192.168.1.1 -> 192.168.1.1)
+    if (clientIP.startsWith('::ffff:')) {
+      clientIP = clientIP.substring(7);
+    }
+
+    // Check if IP is in allowlist (exact match only - CIDR support would require ipaddr.js)
+    const isAllowed = settings.ipAllowlist.some(allowedIP => {
+      // Normalize allowed IP as well
+      let normalizedAllowedIP = allowedIP;
+      if (normalizedAllowedIP.startsWith('::ffff:')) {
+        normalizedAllowedIP = normalizedAllowedIP.substring(7);
+      }
+      
+      // Exact match only for security
+      return clientIP === normalizedAllowedIP;
+    });
+
+    if (isAllowed) {
+      next();
+    } else {
+      console.warn(`Blocked request from unauthorized IP: ${clientIP}`);
+      res.status(403).json({ error: "Access denied: IP not in allowlist" });
+    }
+  } catch (error) {
+    console.error("IP allowlist check error:", error);
+    // On error, allow the request to proceed (fail open)
+    next();
+  }
+}
+
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
@@ -220,7 +272,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get all students with current status (for dashboard)
-  app.get("/api/students", requireAuth, async (req, res) => {
+  app.get("/api/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const statuses = await storage.getAllStudentStatuses();
       res.json(statuses);
@@ -231,7 +283,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get heartbeat history for a specific device
-  app.get("/api/heartbeats/:deviceId", requireAuth, async (req, res) => {
+  app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const limit = parseInt(req.query.limit as string) || 20;
@@ -267,7 +319,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Ping student endpoint - sends notification to student device
-  app.post("/api/ping/:deviceId", requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/ping/:deviceId", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const { message } = req.body;
@@ -299,7 +351,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Settings endpoints
-  app.get("/api/settings", requireAuth, async (req, res) => {
+  app.get("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       let settings = await storage.getSettings();
       
@@ -311,6 +363,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           wsSharedKey: process.env.WS_SHARED_KEY || "change-this-key",
           retentionHours: "24",
           blockedDomains: [],
+          ipAllowlist: [],
         });
       }
       
@@ -321,7 +374,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post("/api/settings", requireAuth, async (req, res) => {
+  app.post("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const data = insertSettingsSchema.parse(req.body);
       const settings = await storage.upsertSettings(data);
@@ -333,7 +386,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Roster upload endpoint
-  app.post("/api/roster/upload", requireAuth, async (req, res) => {
+  app.post("/api/roster/upload", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       // In a real implementation, this would parse the CSV file
       // For now, we'll accept JSON data
@@ -347,7 +400,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Export activity CSV endpoint with date range filtering
-  app.get("/api/export/activity", requireAuth, async (req, res) => {
+  app.get("/api/export/activity", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
       const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
@@ -378,7 +431,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Legacy export endpoint (for backward compatibility)
-  app.get("/api/export/csv", requireAuth, async (req, res) => {
+  app.get("/api/export/csv", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const students = await storage.getAllStudents();
       const statuses = await storage.getAllStudentStatuses();

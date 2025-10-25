@@ -26,6 +26,7 @@ const settingsSchema = z.object({
   wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
   retentionHours: z.string().min(1, "Retention period is required"),
   blockedDomains: z.string(),
+  ipAllowlist: z.string(),
 });
 
 type SettingsForm = z.infer<typeof settingsSchema>;
@@ -49,6 +50,7 @@ export default function Settings() {
       wsSharedKey: settings?.wsSharedKey || "",
       retentionHours: settings?.retentionHours || "24",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
+      ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
     },
   });
 
@@ -60,6 +62,7 @@ export default function Settings() {
         wsSharedKey: settings.wsSharedKey,
         retentionHours: settings.retentionHours,
         blockedDomains: settings.blockedDomains?.join(", ") || "",
+        ipAllowlist: settings.ipAllowlist?.join(", ") || "",
       });
     }
   }, [settings, form]);
@@ -71,6 +74,10 @@ export default function Settings() {
         blockedDomains: data.blockedDomains
           .split(",")
           .map((d) => d.trim())
+          .filter(Boolean),
+        ipAllowlist: data.ipAllowlist
+          .split(",")
+          .map((ip) => ip.trim())
           .filter(Boolean),
       };
       return await apiRequest("POST", "/api/settings", payload);
@@ -284,6 +291,19 @@ export default function Settings() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Student tiles will be highlighted if they visit these domains
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="ipAllowlist">IP Allowlist (comma-separated)</Label>
+                <Input
+                  id="ipAllowlist"
+                  data-testid="input-ip-allowlist"
+                  {...form.register("ipAllowlist")}
+                  placeholder="192.168.1.100, 10.0.0.50"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Only these IPs can access the teacher dashboard (enforced in production only). Leave empty to allow all IPs.
                 </p>
               </div>
 
