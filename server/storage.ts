@@ -12,8 +12,16 @@ import {
   type InsertRoster,
   type Settings,
   type InsertSettings,
+  users,
+  students,
+  heartbeats,
+  events,
+  rosters,
+  settings,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
+import { db } from "./db";
+import { eq, desc, lt, sql as drizzleSql } from "drizzle-orm";
 
 export interface IStorage {
   // Users
@@ -264,4 +272,318 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+// Database storage implementation
+export class DatabaseStorage implements IStorage {
+  private studentStatuses: Map<string, StudentStatus>;
+
+  constructor() {
+    this.studentStatuses = new Map();
+  }
+
+  // Helper to calculate status from lastSeenAt
+  private calculateStatus(lastSeenAt: number): 'online' | 'idle' | 'offline' {
+    const timeSinceLastSeen = Date.now() - lastSeenAt;
+    if (timeSinceLastSeen < 30000) return 'online';
+    if (timeSinceLastSeen < 120000) return 'idle';
+    return 'offline';
+  }
+
+  // Rehydrate studentStatuses from database on startup
+  async rehydrateStatuses(): Promise<void> {
+    const allStudents = await this.getAllStudents();
+    for (const student of allStudents) {
+      // Get most recent heartbeat to restore actual last seen time
+      const recentHeartbeats = await this.getHeartbeatsByDevice(student.deviceId, 1);
+      const lastHeartbeat = recentHeartbeats[0];
+      
+      let lastSeenAt = 0; // Default to long ago if no heartbeat
+      let activeTabTitle = "";
+      let activeTabUrl = "";
+      let favicon: string | undefined = undefined;
+      
+      if (lastHeartbeat) {
+        lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+        activeTabTitle = lastHeartbeat.activeTabTitle;
+        activeTabUrl = lastHeartbeat.activeTabUrl;
+        favicon = lastHeartbeat.favicon ?? undefined;
+      }
+      
+      const status: StudentStatus = {
+        deviceId: student.deviceId,
+        studentName: student.studentName,
+        classId: student.classId,
+        activeTabTitle,
+        activeTabUrl,
+        favicon,
+        lastSeenAt,
+        isSharing: false,
+        status: this.calculateStatus(lastSeenAt),
+      };
+      this.studentStatuses.set(student.deviceId, status);
+    }
+  }
+
+  // Users
+  async getUser(id: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user || undefined;
+  }
+
+  async getUserByUsername(username: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user || undefined;
+  }
+
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db
+      .insert(users)
+      .values(insertUser)
+      .returning();
+    return user;
+  }
+
+  async getAllUsers(): Promise<User[]> {
+    return await db.select().from(users);
+  }
+
+  async deleteUser(id: string): Promise<boolean> {
+    const result = await db.delete(users).where(eq(users.id, id)).returning();
+    return result.length > 0;
+  }
+
+  // Students
+  async getStudent(deviceId: string): Promise<Student | undefined> {
+    const [student] = await db.select().from(students).where(eq(students.deviceId, deviceId));
+    return student || undefined;
+  }
+
+  async getAllStudents(): Promise<Student[]> {
+    return await db.select().from(students);
+  }
+
+  async registerStudent(insertStudent: InsertStudent): Promise<Student> {
+    // Upsert student (insert or update if exists)
+    const [student] = await db
+      .insert(students)
+      .values(insertStudent)
+      .onConflictDoUpdate({
+        target: students.deviceId,
+        set: {
+          studentName: insertStudent.studentName,
+          classId: insertStudent.classId,
+          schoolId: insertStudent.schoolId,
+        },
+      })
+      .returning();
+    
+    // Get most recent heartbeat to initialize status with real data
+    const recentHeartbeats = await this.getHeartbeatsByDevice(student.deviceId, 1);
+    const lastHeartbeat = recentHeartbeats[0];
+    
+    let lastSeenAt = 0; // Default to offline if no heartbeat yet
+    let activeTabTitle = "";
+    let activeTabUrl = "";
+    let favicon: string | undefined = undefined;
+    
+    if (lastHeartbeat) {
+      lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+      activeTabTitle = lastHeartbeat.activeTabTitle;
+      activeTabUrl = lastHeartbeat.activeTabUrl;
+      favicon = lastHeartbeat.favicon ?? undefined;
+    }
+    
+    // Initialize/update status with real or default data
+    const status: StudentStatus = {
+      deviceId: student.deviceId,
+      studentName: student.studentName,
+      classId: student.classId,
+      activeTabTitle,
+      activeTabUrl,
+      favicon,
+      lastSeenAt,
+      isSharing: false,
+      status: this.calculateStatus(lastSeenAt),
+    };
+    this.studentStatuses.set(student.deviceId, status);
+    
+    return student;
+  }
+
+  // Student Status (in-memory tracking)
+  async getStudentStatus(deviceId: string): Promise<StudentStatus | undefined> {
+    const status = this.studentStatuses.get(deviceId);
+    if (!status) return undefined;
+    
+    // Recalculate status based on current time for consistency
+    return {
+      ...status,
+      status: this.calculateStatus(status.lastSeenAt),
+    };
+  }
+
+  async getAllStudentStatuses(): Promise<StudentStatus[]> {
+    const now = Date.now();
+    const statuses = Array.from(this.studentStatuses.values());
+    
+    return statuses.map(status => {
+      const timeSinceLastSeen = now - status.lastSeenAt;
+      let newStatus: 'online' | 'idle' | 'offline' = 'offline';
+      
+      if (timeSinceLastSeen < 30000) {
+        newStatus = 'online';
+      } else if (timeSinceLastSeen < 120000) {
+        newStatus = 'idle';
+      } else {
+        newStatus = 'offline';
+      }
+      
+      return {
+        ...status,
+        status: newStatus,
+      };
+    });
+  }
+
+  async updateStudentStatus(status: StudentStatus): Promise<void> {
+    this.studentStatuses.set(status.deviceId, status);
+  }
+
+  // Heartbeats
+  async addHeartbeat(insertHeartbeat: InsertHeartbeat): Promise<Heartbeat> {
+    const [heartbeat] = await db
+      .insert(heartbeats)
+      .values(insertHeartbeat)
+      .returning();
+    
+    // Get or create status entry
+    let status = this.studentStatuses.get(heartbeat.deviceId);
+    if (!status) {
+      // Status missing (e.g., after restart), get student info and create
+      const student = await this.getStudent(heartbeat.deviceId);
+      if (student) {
+        status = {
+          deviceId: student.deviceId,
+          studentName: student.studentName,
+          classId: student.classId,
+          activeTabTitle: "",
+          activeTabUrl: "",
+          lastSeenAt: Date.now(),
+          isSharing: false,
+          status: 'online', // Will be recalculated below
+        };
+      }
+    }
+    
+    if (status) {
+      const now = Date.now();
+      status.activeTabTitle = heartbeat.activeTabTitle;
+      status.activeTabUrl = heartbeat.activeTabUrl;
+      status.favicon = heartbeat.favicon ?? undefined;
+      status.lastSeenAt = now;
+      status.status = this.calculateStatus(now); // Recalculate status
+      this.studentStatuses.set(heartbeat.deviceId, status);
+    }
+    
+    return heartbeat;
+  }
+
+  async getHeartbeatsByDevice(deviceId: string, limit: number = 20): Promise<Heartbeat[]> {
+    return await db
+      .select()
+      .from(heartbeats)
+      .where(eq(heartbeats.deviceId, deviceId))
+      .orderBy(desc(heartbeats.timestamp))
+      .limit(limit);
+  }
+
+  async getAllHeartbeats(): Promise<Heartbeat[]> {
+    return await db
+      .select()
+      .from(heartbeats)
+      .orderBy(desc(heartbeats.timestamp));
+  }
+
+  async cleanupOldHeartbeats(retentionHours: number): Promise<number> {
+    const cutoffTime = new Date(Date.now() - retentionHours * 60 * 60 * 1000);
+    
+    const deleted = await db
+      .delete(heartbeats)
+      .where(lt(heartbeats.timestamp, cutoffTime))
+      .returning();
+    
+    return deleted.length;
+  }
+
+  // Events
+  async addEvent(insertEvent: InsertEvent): Promise<Event> {
+    const [event] = await db
+      .insert(events)
+      .values(insertEvent)
+      .returning();
+    return event;
+  }
+
+  async getEventsByDevice(deviceId: string): Promise<Event[]> {
+    return await db
+      .select()
+      .from(events)
+      .where(eq(events.deviceId, deviceId))
+      .orderBy(desc(events.timestamp));
+  }
+
+  // Rosters
+  async getRoster(classId: string): Promise<Roster | undefined> {
+    const [roster] = await db.select().from(rosters).where(eq(rosters.classId, classId));
+    return roster || undefined;
+  }
+
+  async getAllRosters(): Promise<Roster[]> {
+    return await db.select().from(rosters);
+  }
+
+  async upsertRoster(insertRoster: InsertRoster): Promise<Roster> {
+    const existing = await this.getRoster(insertRoster.classId);
+    
+    if (existing) {
+      const [updated] = await db
+        .update(rosters)
+        .set({ ...insertRoster, uploadedAt: new Date() })
+        .where(eq(rosters.classId, insertRoster.classId))
+        .returning();
+      return updated;
+    } else {
+      const [created] = await db
+        .insert(rosters)
+        .values(insertRoster)
+        .returning();
+      return created;
+    }
+  }
+
+  // Settings
+  async getSettings(): Promise<Settings | undefined> {
+    const allSettings = await db.select().from(settings).limit(1);
+    return allSettings[0] || undefined;
+  }
+
+  async upsertSettings(insertSettings: InsertSettings): Promise<Settings> {
+    const existing = await this.getSettings();
+    
+    if (existing) {
+      const [updated] = await db
+        .update(settings)
+        .set(insertSettings)
+        .where(eq(settings.id, existing.id))
+        .returning();
+      return updated;
+    } else {
+      const [created] = await db
+        .insert(settings)
+        .values(insertSettings)
+        .returning();
+      return created;
+    }
+  }
+}
+
+export const storage = new DatabaseStorage();

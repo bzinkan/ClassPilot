@@ -44,4 +44,9 @@ export async function initializeApp() {
     });
     console.log("Created default settings");
   }
+
+  // Rehydrate student statuses from database (for DatabaseStorage)
+  if ('rehydrateStatuses' in storage) {
+    await (storage as any).rehydrateStatuses();
+  }
 }
