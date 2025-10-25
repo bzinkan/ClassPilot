@@ -32,12 +32,8 @@ const heartbeatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute window
   max: 120, // 120 requests per minute per device (2/sec is plenty)
   keyGenerator: (req) => {
-    try {
-      const { deviceId } = req.body || {};
-      return `heartbeat:${deviceId || req.ip}`;
-    } catch {
-      return `heartbeat:${req.ip}`;
-    }
+    const { deviceId } = req.body || {};
+    return `heartbeat:${deviceId || 'unknown'}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
