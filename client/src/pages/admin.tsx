@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle } from "lucide-react";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -42,6 +42,7 @@ export default function Admin() {
   const { toast } = useToast();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [teacherToDelete, setTeacherToDelete] = useState<Teacher | null>(null);
+  const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -94,6 +95,27 @@ export default function Admin() {
       toast({
         variant: "destructive",
         title: "Failed to delete teacher",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const cleanupStudentsMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", "/api/admin/cleanup-students");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+      toast({
+        title: "Student data cleared",
+        description: "All student devices and activity data have been cleared successfully.",
+      });
+      setCleanupDialogOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to cleanup student data",
         description: error.message || "An error occurred",
       });
     },
@@ -257,6 +279,41 @@ export default function Admin() {
         </Card>
       </div>
 
+      <Card className="border-destructive/50">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-5 w-5" />
+            Database Cleanup
+          </CardTitle>
+          <CardDescription>
+            Remove all student devices and monitoring data from the system
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="bg-muted p-4 rounded-lg">
+            <p className="text-sm mb-2">
+              <strong>Warning:</strong> This will permanently delete:
+            </p>
+            <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
+              <li>All registered student/Chromebook devices</li>
+              <li>All heartbeat and activity history</li>
+              <li>All URL visit records</li>
+            </ul>
+            <p className="text-sm mt-3 text-muted-foreground">
+              Use this to clean up duplicate entries or start fresh. Extensions will need to re-register after cleanup.
+            </p>
+          </div>
+          <Button
+            variant="destructive"
+            data-testid="button-cleanup-students"
+            onClick={() => setCleanupDialogOpen(true)}
+            disabled={cleanupStudentsMutation.isPending}
+          >
+            {cleanupStudentsMutation.isPending ? "Cleaning up..." : "Clear All Student Data"}
+          </Button>
+        </CardContent>
+      </Card>
+
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -274,6 +331,27 @@ export default function Admin() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Delete Account
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={cleanupDialogOpen} onOpenChange={setCleanupDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Clear All Student Data</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you absolutely sure? This will permanently delete all student devices, activity history, and monitoring data from the database. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="button-cancel-cleanup">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              data-testid="button-confirm-cleanup"
+              onClick={() => cleanupStudentsMutation.mutate()}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              Yes, Clear All Data
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

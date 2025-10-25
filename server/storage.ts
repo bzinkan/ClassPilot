@@ -35,6 +35,7 @@ export interface IStorage {
   getStudent(deviceId: string): Promise<Student | undefined>;
   getAllStudents(): Promise<Student[]>;
   registerStudent(student: InsertStudent): Promise<Student>;
+  deleteAllStudents(): Promise<void>;
 
   // Student Status (in-memory tracking)
   getStudentStatus(deviceId: string): Promise<StudentStatus | undefined>;
@@ -141,6 +142,11 @@ export class MemStorage implements IStorage {
     this.studentStatuses.set(student.deviceId, status);
     
     return student;
+  }
+
+  async deleteAllStudents(): Promise<void> {
+    this.students.clear();
+    this.heartbeats = [];
   }
 
   // Student Status
@@ -407,6 +413,13 @@ export class DatabaseStorage implements IStorage {
     this.studentStatuses.set(student.deviceId, status);
     
     return student;
+  }
+
+  async deleteAllStudents(): Promise<void> {
+    // Delete all heartbeats first (foreign key constraint)
+    await db.delete(heartbeats);
+    // Delete all students
+    await db.delete(students);
   }
 
   // Student Status (in-memory tracking)

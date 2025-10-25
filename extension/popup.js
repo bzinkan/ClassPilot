@@ -56,17 +56,21 @@ function showMainView(config) {
 }
 
 async function handleSetup() {
-  const studentName = document.getElementById('student-name').value.trim();
+  const gradeLevel = document.getElementById('student-name').value.trim();
+  const chromebookNumber = document.getElementById('chromebook-number').value.trim();
   const classId = document.getElementById('class-id').value.trim();
   
-  if (!studentName || !classId) {
+  if (!gradeLevel || !chromebookNumber || !classId) {
     alert('Please fill in all fields');
     return;
   }
   
+  // Combine grade + chromebook number into studentName
+  const studentName = `Grade ${gradeLevel} - CB-${chromebookNumber}`;
+  
   const button = document.getElementById('setup-submit');
   button.disabled = true;
-  button.textContent = 'Connecting...';
+  button.textContent = 'Registering...';
   
   // Send registration to background
   chrome.runtime.sendMessage({
@@ -83,7 +87,7 @@ async function handleSetup() {
     } else {
       alert('Registration failed: ' + response.error);
       button.disabled = false;
-      button.textContent = 'Connect to Classroom';
+      button.textContent = 'Register Chromebook';
     }
   });
 }

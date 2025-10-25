@@ -339,6 +339,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Clean up all student data
+  app.post("/api/admin/cleanup-students", requireAdmin, async (req, res) => {
+    try {
+      // Delete all students and heartbeats
+      await storage.deleteAllStudents();
+      
+      // Clear in-memory status map
+      studentStatuses.clear();
+      
+      // Notify all connected teachers
+      broadcastToTeachers({
+        type: 'students-cleared',
+      });
+      
+      res.json({ success: true, message: 'All student data cleared successfully' });
+    } catch (error) {
+      console.error("Cleanup error:", error);
+      res.status(500).json({ error: "Failed to cleanup student data" });
+    }
+  });
+
   // Student registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
