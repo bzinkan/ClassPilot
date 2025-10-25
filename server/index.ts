@@ -1,20 +1,33 @@
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { Pool } from "@neondatabase/serverless";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
 
 const app = express();
 
+// Session store configuration
+const PgStore = connectPgSimple(session);
+const sessionStore = process.env.DATABASE_URL 
+  ? new PgStore({
+      pool: new Pool({ connectionString: process.env.DATABASE_URL }),
+      createTableIfMissing: true,
+    })
+  : undefined; // Use default MemoryStore in development if no DATABASE_URL
+
 // Session configuration
 app.use(
   session({
+    store: sessionStore,
     secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "lax" : "lax",
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
   })
