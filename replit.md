@@ -43,8 +43,8 @@ This is a full-stack web application with a teacher dashboard and Chrome Extensi
   - `POST /api/ping/:deviceId` - Send notification message to student (protected by IP allowlist)
   - `GET/POST /api/settings` - School settings management (protected by IP allowlist)
   - `POST /api/roster/upload` - CSV roster upload (protected by IP allowlist)
-  - `GET /api/export/activity` - Export activity data with date range filter (protected by IP allowlist)
-  - `GET /api/export/csv` - Legacy CSV export (protected by IP allowlist)
+  - `GET /api/export/activity` - Export activity data as Excel (.xlsx) with date range filter (protected by IP allowlist)
+  - `GET /api/export/csv` - Legacy CSV export (protected by IP allowlist, deprecated)
   - **Admin Routes** (admin-only):
     - `GET /api/admin/teachers` - List all teacher accounts (excludes admins)
     - `POST /api/admin/teachers` - Create new teacher account
@@ -116,7 +116,7 @@ Students are classified into three states based on their last heartbeat:
 
 - Heartbeat data is automatically cleaned up based on retention hours setting (default: 24 hours)
 - Cleanup runs every hour automatically
-- Teachers can export CSV data before it's deleted
+- Teachers can export Excel (.xlsx) data before it's deleted
 
 ## WebSocket Protocol
 
@@ -175,7 +175,7 @@ Jane Smith,device-002,class-101
 
 **Other Enhanced Features:**
 - ✅ Domain blocklist with violation alerts - Red border on student tiles when visiting blocked domains, real-time alert notifications
-- ✅ CSV activity export with date range filtering - Export student activity data with custom date ranges (defaults to 7 days)
+- ✅ Excel activity export with date range filtering - Export student activity data as native Excel (.xlsx) files with custom date ranges (defaults to 7 days)
 - ✅ Ping student notifications - Send custom messages to students via Chrome extension notifications
 - ✅ IP allowlist security (MVP with limitations) - Restrict teacher dashboard access by IP address
 
