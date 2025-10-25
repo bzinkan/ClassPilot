@@ -35,6 +35,7 @@ export interface IStorage {
   getStudent(deviceId: string): Promise<Student | undefined>;
   getAllStudents(): Promise<Student[]>;
   registerStudent(student: InsertStudent): Promise<Student>;
+  updateStudentName(deviceId: string, studentName: string): Promise<Student | undefined>;
   deleteAllStudents(): Promise<void>;
 
   // Student Status (in-memory tracking)
@@ -140,6 +141,23 @@ export class MemStorage implements IStorage {
       status: 'offline',
     };
     this.studentStatuses.set(student.deviceId, status);
+    
+    return student;
+  }
+
+  async updateStudentName(deviceId: string, studentName: string): Promise<Student | undefined> {
+    const student = this.students.get(deviceId);
+    if (!student) return undefined;
+    
+    student.studentName = studentName;
+    this.students.set(deviceId, student);
+    
+    // Update status map as well
+    const status = this.studentStatuses.get(deviceId);
+    if (status) {
+      status.studentName = studentName;
+      this.studentStatuses.set(deviceId, status);
+    }
     
     return student;
   }
@@ -411,6 +429,25 @@ export class DatabaseStorage implements IStorage {
       status: this.calculateStatus(lastSeenAt),
     };
     this.studentStatuses.set(student.deviceId, status);
+    
+    return student;
+  }
+
+  async updateStudentName(deviceId: string, studentName: string): Promise<Student | undefined> {
+    const [student] = await db
+      .update(students)
+      .set({ studentName })
+      .where(eq(students.deviceId, deviceId))
+      .returning();
+    
+    if (!student) return undefined;
+    
+    // Update status map as well
+    const status = this.studentStatuses.get(deviceId);
+    if (status) {
+      status.studentName = studentName;
+      this.studentStatuses.set(deviceId, status);
+    }
     
     return student;
   }
