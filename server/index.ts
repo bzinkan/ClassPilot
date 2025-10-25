@@ -8,6 +8,9 @@ import { initializeApp } from "./init";
 
 const app = express();
 
+// CRITICAL: Trust proxy for Replit Deployments
+app.set('trust proxy', 1);
+
 // Session store configuration
 const PgStore = connectPgSimple(session);
 const sessionStore = process.env.DATABASE_URL 
@@ -20,14 +23,15 @@ const sessionStore = process.env.DATABASE_URL
 // Session configuration
 app.use(
   session({
+    name: 'classpilot_session',
     store: sessionStore,
     secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: process.env.NODE_ENV === "production" ? "lax" : "lax",
+      secure: process.env.NODE_ENV === "production", // true for HTTPS
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
   })
@@ -51,6 +55,15 @@ app.use(express.json({
   }
 }));
 app.use(express.urlencoded({ extended: false }));
+
+// Client runtime config endpoint (for dynamic URLs)
+app.get('/client-config.json', (req, res) => {
+  res.json({
+    baseUrl: process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`,
+    schoolId: process.env.SCHOOL_ID || 'default-school',
+    wsAvailable: !!process.env.WS_SHARED_KEY,
+  });
+});
 
 app.use((req, res, next) => {
   const start = Date.now();

@@ -1,0 +1,213 @@
+This “works in Preview, breaks when Published” on Replit is almost always one (or more) of these five differences:
+
+different secrets/env store
+
+different base URL baked into your client/extension at build time
+
+cookies/CORS behave differently behind the production proxy
+
+rate-limits (429) are tighter on Deployments than on Preview
+
+header/body auth stripped or not sent (401)
+
+Below is a tight, do-this checklist + drop-in fixes. You don’t have to answer anything—just apply them.
+
+0) Mirror your secrets to the Deployment
+
+Preview uses Workspace secrets; Published uses Deployment secrets.
+
+Open Replit → Deployments → your deployment → Environment Variables.
+Add the same keys you use locally:
+
+SESSION_SECRET=...
+WS_SHARED_KEY=...
+ADMIN_USER=admin
+ADMIN_PASS=admin123
+SCHOOL_ID=your-school-id
+PUBLIC_BASE_URL=https://<your-published-host>.replit.app
+CORS_ALLOWLIST=https://<your-published-host>.replit.app,chrome-extension://*
+JWT_SECRET=...
+
+
+Redeploy after saving.
+
+1) Serve a runtime config (stop hard-coding URLs)
+
+Preview often builds with localhost or preview URLs; Published needs the real host. Add a tiny endpoint your web app and extension both read on boot.
+
+Server (Express)
+// before routes
+app.get('/client-config.json', (req, res) => {
+  res.json({
+    baseUrl: process.env.PUBLIC_BASE_URL || `https://${req.headers.host}`,
+    schoolId: process.env.SCHOOL_ID,
+    wsKey: !!process.env.WS_SHARED_KEY, // not the key itself
+  });
+});
+
+Browser/Extension usage
+const cfg = await fetch(`${origin}/client-config.json`, { cache: 'no-store' }).then(r=>r.json());
+// use cfg.baseUrl for all fetch/WebSocket endpoints
+
+
+In the extension service worker, load this once on startup and cache it.
+
+2) Fix cookies, sessions, and CORS (401 on admin/teacher create)
+
+Production proxy changes cookie rules. Use this exact pattern.
+
+Server (Express)
+import cors from 'cors';
+import session from 'express-session';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+
+app.set('trust proxy', 1); // IMPORTANT on Replit Deployments
+
+// CORS
+const allowlist = (process.env.CORS_ALLOWLIST || '').split(',').map(s=>s.trim()).filter(Boolean);
+app.use(cors({
+  origin(origin, cb) {
+    if (!origin) return cb(null, true); // allow same-origin
+    if (allowlist.some(a => origin === a || (a.endsWith('/*') && origin.startsWith(a.slice(0,-1))))) {
+      return cb(null, true);
+    }
+    if (origin.startsWith('chrome-extension://')) return cb(null, true);
+    cb(new Error('CORS blocked'));
+  },
+  credentials: true
+}));
+
+// Security headers
+app.use(helmet({
+  crossOriginEmbedderPolicy: false,
+  contentSecurityPolicy: false
+}));
+
+// Session cookie works in prod + with HTTPS
+app.use(session({
+  name: 'ppsid',
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    sameSite: 'none',     // allows chrome-extension:// to send cookies
+    secure: true,         // required on https
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 8
+  }
+}));
+
+
+If your admin “shield” relies on a header that the proxy might strip, switch to JWT or the session above for the admin page.
+
+3) Adjust rate-limits for heartbeats (fix 429)
+
+Your screenshot shows 429 from /api/heartbeat. Preview is lenient; Deployment is not.
+
+Server
+// General limiter
+app.use(rateLimit({
+  windowMs: 60_000,
+  max: 300, // general endpoints
+}));
+
+// Heartbeat limiter per deviceId (much higher, keyed by device)
+const heartbeatLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 120, // 2/sec per device is plenty
+  keyGenerator: (req) => {
+    try {
+      const { deviceId } = req.body || {};
+      return `hb:${deviceId || req.ip}`;
+    } catch { return `hb:${req.ip}`; }
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.post('/api/heartbeat', heartbeatLimiter, heartbeatHandler);
+
+Extension (service worker)
+
+Add backoff + lower default frequency in production:
+
+let intervalMs = 10000; // start at 10s in prod
+let backoffMs = 0;
+
+async function sendHeartbeat() {
+  try {
+    const res = await fetch(`${cfg.baseUrl}/api/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildHeartbeat())
+    });
+    if (res.status === 429) {
+      backoffMs = Math.min(30000, (backoffMs || 5000) * 2);
+    } else {
+      backoffMs = 0;
+    }
+  } catch (e) { backoffMs = Math.min(30000, (backoffMs || 5000) * 2); }
+  setTimeout(sendHeartbeat, intervalMs + backoffMs);
+}
+sendHeartbeat();
+
+
+(Preview can keep 5s if you like, but Published should be ≥10s.)
+
+Long-term best fix: move from polling to a single WebSocket and push tab-change events.
+
+4) Explicit auth for admin create (401)
+
+Your “Create Teacher” likely posts to /api/admin/create-teacher. In Preview the session/header is present; in Published the cookie or header isn’t. Make it unambiguous:
+
+When admin logs in, issue a JWT:
+
+import jwt from 'jsonwebtoken';
+app.post('/api/admin/login', (req, res) => {
+  // validate creds …
+  const token = jwt.sign({ role:'admin', schoolId: process.env.SCHOOL_ID }, process.env.JWT_SECRET, { expiresIn:'8h' });
+  res.json({ token });
+});
+
+
+Require it on admin APIs:
+
+function requireAdmin(req, res, next) {
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : null;
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (payload.role !== 'admin') return res.sendStatus(401);
+    req.admin = payload;
+    next();
+  } catch { return res.sendStatus(401); }
+}
+app.post('/api/admin/create-teacher', requireAdmin, createTeacher);
+
+
+In the dashboard UI, store token in memory and send Authorization: Bearer <token> with every admin request. No reliance on cookies = no SameSite problems.
+
+5) WebSocket behind Replit proxy
+
+If your live tiles don’t update after publish, ensure WS uses the right URL:
+
+const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsUrl = `${wsProto}//${location.host}/ws?key=${encodeURIComponent(WS_SHARED_KEY)}`;
+const sock = new WebSocket(wsUrl);
+
+
+Avoid hardcoding localhost or preview host into the bundle.
+
+6) Quick verification script (5 minutes)
+
+Redeploy after setting Deployment secrets.
+
+Open https://<published>.replit.app/client-config.json → verify it returns your prod baseUrl.
+
+Login admin → ensure you receive a JWT (check DevTools → Network).
+
+Create teacher again → request must include Authorization: Bearer …. No more 401.
+
+Reload the extension → it should fetch /client-config.json, then send heartbeat every 10s.
+
+Check server logs → no 429; tab changes appear on dashboard.
