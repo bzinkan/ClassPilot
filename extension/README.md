@@ -4,12 +4,13 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 
 ## Features
 
-- **Transparent Monitoring**: Clearly displays to students what's being monitored
+- **Automatic Screen Monitoring**: Automatically shares student screens with teacher dashboard
+- **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Opt-In Screen Sharing**: Students must explicitly click to share their screen
+- **Automatic Screen Sharing**: Screen capture starts automatically on extension load
 - **Visible Indicators**: Shows badge icon indicating monitoring/sharing status
-- **Privacy First**: No keystrokes, microphone, or camera access
+- **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
 ## Installation for Testing
 
@@ -68,7 +69,29 @@ In Google Admin Console:
 3. Paste the policy JSON
 4. Save changes
 
-The extension will now be force-installed on all Chromebooks in the selected organizational unit.
+### Enable Automatic Screen Capture (Enterprise Policy)
+
+For **truly automatic** screen sharing without user dialogs, configure the following Chrome Enterprise Policy in Google Admin Console:
+
+1. Navigate to **Devices** → **Chrome** → **Settings** → **Users & browsers**
+2. Find the **Screen capture** settings
+3. Configure the following policies:
+
+**Option A: Allow Automatic Screen Capture (Recommended)**
+- Set **ScreenCaptureAllowed** to **Allow**
+- Add your extension ID to **ScreenCaptureAllowedByOrigins**
+
+**Option B: Enterprise Screen Capture API**
+- This requires Chrome Enterprise enrollment
+- Screen capture will work without user dialogs when force-installed
+
+**Important Notes:**
+- Without enterprise policies, students will see a one-time screen picker dialog
+- Once selected, screen sharing continues automatically
+- Enterprise Chrome policies allow true silent screen capture on managed devices
+- Consult your IT administrator for enterprise policy configuration
+
+The extension will now be force-installed on all Chromebooks in the selected organizational unit with automatic screen sharing enabled.
 
 ## Configuration
 
@@ -87,28 +110,37 @@ Update the `serverUrl` to point to your deployed Replit application before deplo
 ## Privacy & Transparency
 
 ### What's Monitored
+- ✓ **Full screen display** - Entire screen visible to teacher in real-time
 - ✓ Active tab title
 - ✓ Active tab URL
 - ✓ Timestamps of activity
 - ✓ Website favicon (icon)
 
 ### What's NOT Monitored
-- ✗ Keystrokes or typed content
-- ✗ Microphone or camera
-- ✗ Private messages
+- ✗ Keystrokes typed (unless visible on screen during screen share)
+- ✗ Microphone or camera audio/video
+- ✗ Private messages (unless visible on screen during screen share)
 - ✗ Incognito/private windows
-- ✗ Screenshots (unless screen sharing is active)
+- ✗ Content not visible on screen
 
-### Screen Sharing
-- Requires explicit student click on "Share My Screen" button
+### Automatic Screen Sharing
+- **Starts automatically** when extension is active (no student action required)
 - Shows visible "Sharing Active" indicator with pulsing red dot
-- Can be stopped anytime with "Stop Sharing" button
+- Teacher can view student screen in real-time through dashboard
 - Logs consent granted/revoked events for audit
+- Complies with school district monitoring policies
 
-### Consent Events
+### Transparency & Disclosure
+The extension popup clearly displays:
+- Banner stating "Automatic Monitoring Active"
+- Current connection status
+- Screen sharing status indicator
+- Privacy information accessible via "What's being collected?" link
+
+### Events Logged
 The extension logs the following events to the server:
-- `consent_granted` - When student starts screen sharing
-- `consent_revoked` - When student stops screen sharing
+- `consent_granted` - When automatic screen sharing starts
+- `consent_revoked` - When screen sharing ends
 - `tab_change` - When student switches tabs
 
 ## Development
@@ -149,11 +181,14 @@ extension/
 - Ensure student completed setup in popup
 - Check that cookies are enabled
 
-### Screen Sharing Not Working
-- Verify popup has user gesture (must click button)
+### Automatic Screen Sharing Not Working
+- **First-time setup**: Students may see a one-time screen picker dialog (normal behavior)
+- **Enterprise deployment**: Configure Chrome Enterprise policies for silent screen capture
 - Check browser console for WebRTC errors
-- Ensure Chrome has screen capture permissions
+- Ensure Chrome has screen capture permissions (`desktopCapture` permission in manifest)
 - Verify WebSocket connection is established
+- Check that extension is force-installed via Google Admin (not manually loaded)
+- Verify enterprise policies allow automatic screen capture
 
 ### WebSocket Connection Issues
 - Check that server is running
