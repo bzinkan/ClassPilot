@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head><title>Icon Generator</title></head>
+<body>
+<canvas id="canvas16" width="16" height="16"></canvas>
+<canvas id="canvas48" width="48" height="48"></canvas>
+<canvas id="canvas128" width="128" height="128"></canvas>
+<script>
+function createIcon(canvasId, size) {
+  const canvas = document.getElementById(canvasId);
+  const ctx = canvas.getContext('2d');
+  
+  // Blue background
+  ctx.fillStyle = '#3b82f6';
+  ctx.fillRect(0, 0, size, size);
+  
+  // White monitor icon
+  ctx.fillStyle = '#ffffff';
+  const padding = size * 0.2;
+  const w = size - (padding * 2);
+  const h = w * 0.7;
+  const x = padding;
+  const y = padding;
+  
+  // Screen
+  ctx.fillRect(x, y, w, h);
+  
+  // Stand
+  const standW = w * 0.4;
+  const standH = h * 0.15;
+  const standX = x + (w - standW) / 2;
+  const standY = y + h;
+  ctx.fillRect(standX, standY, standW, standH);
+  
+  // Base
+  const baseW = w * 0.6;
+  const baseH = h * 0.1;
+  const baseX = x + (w - baseW) / 2;
+  const baseY = standY + standH;
+  ctx.fillRect(baseX, baseY, baseW, baseH);
+  
+  // Download
+  const link = document.createElement('a');
+  link.download = 'icon' + size + '.png';
+  link.href = canvas.toDataURL();
+  link.click();
+}
+
+createIcon('canvas16', 16);
+setTimeout(() => createIcon('canvas48', 48), 100);
+setTimeout(() => createIcon('canvas128', 128), 200);
+</script>
+</body>
+</html>
