@@ -13,6 +13,7 @@ import {
   insertRosterSchema,
   insertSettingsSchema,
   loginSchema,
+  createTeacherSchema,
   type StudentStatus,
   type SignalMessage,
 } from "@shared/schema";
@@ -59,6 +60,20 @@ function requireAuth(req: any, res: any, next: any) {
   } else {
     res.status(401).json({ error: "Unauthorized" });
   }
+}
+
+// Admin middleware
+async function requireAdmin(req: any, res: any, next: any) {
+  if (!req.session?.userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  const user = await storage.getUser(req.session.userId);
+  if (!user || user.role !== 'admin') {
+    return res.status(403).json({ error: "Forbidden: Admin access required" });
+  }
+  
+  next();
 }
 
 // IP allowlist middleware (only enforced in production)
@@ -190,7 +205,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       req.session.userId = user.id;
-      res.json({ success: true, user: { id: user.id, username: user.username } });
+      res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
     } catch (error) {
       console.error("Login error:", error);
       res.status(400).json({ error: "Invalid request" });
@@ -201,6 +216,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
     req.session.destroy(() => {
       res.json({ success: true });
     });
+  });
+
+  // Admin routes for managing teachers
+  app.get("/api/admin/teachers", requireAdmin, async (req, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      // Filter out passwords
+      const teachers = users.map(user => ({
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        schoolName: user.schoolName,
+      }));
+      res.json({ success: true, teachers });
+    } catch (error) {
+      console.error("Get teachers error:", error);
+      res.status(500).json({ error: "Failed to fetch teachers" });
+    }
+  });
+
+  app.post("/api/admin/teachers", requireAdmin, async (req, res) => {
+    try {
+      const data = createTeacherSchema.parse(req.body);
+      
+      // Check if username already exists
+      const existing = await storage.getUserByUsername(data.username);
+      if (existing) {
+        return res.status(400).json({ error: "Username already exists" });
+      }
+
+      // Hash password
+      const hashedPassword = await bcrypt.hash(data.password, 10);
+      
+      // Create teacher
+      const teacher = await storage.createUser({
+        username: data.username,
+        password: hashedPassword,
+        role: 'teacher',
+        schoolName: data.schoolName || 'School',
+      });
+
+      res.json({ 
+        success: true, 
+        teacher: {
+          id: teacher.id,
+          username: teacher.username,
+          role: teacher.role,
+          schoolName: teacher.schoolName,
+        }
+      });
+    } catch (error: any) {
+      console.error("Create teacher error:", error);
+      if (error.errors) {
+        // Zod validation error
+        res.status(400).json({ error: error.errors[0].message });
+      } else {
+        res.status(500).json({ error: "Failed to create teacher" });
+      }
+    }
+  });
+
+  app.delete("/api/admin/teachers/:id", requireAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // Don't allow deleting yourself
+      if (id === req.session.userId) {
+        return res.status(400).json({ error: "Cannot delete your own account" });
+      }
+
+      const deleted = await storage.deleteUser(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "Teacher not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete teacher error:", error);
+      res.status(500).json({ error: "Failed to delete teacher" });
+    }
   });
 
   // Student registration (from extension)
