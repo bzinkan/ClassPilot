@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,13 +7,16 @@ import { Badge } from "@/components/ui/badge";
 import { StudentTile } from "@/components/student-tile";
 import { StudentDetailDrawer } from "@/components/student-detail-drawer";
 import { useLocation } from "wouter";
-import type { StudentStatus, Heartbeat } from "@shared/schema";
+import { useToast } from "@/hooks/use-toast";
+import type { StudentStatus, Heartbeat, Settings } from "@shared/schema";
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [wsConnected, setWsConnected] = useState(false);
+  const { toast } = useToast();
+  const notifiedViolations = useRef<Set<string>>(new Set());
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
     queryKey: ['/api/students'],
@@ -22,6 +25,10 @@ export default function Dashboard() {
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
     queryKey: ['/api/heartbeats', selectedStudent?.deviceId],
     enabled: !!selectedStudent,
+  });
+
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ['/api/settings'],
   });
 
   useEffect(() => {
@@ -73,6 +80,51 @@ export default function Dashboard() {
   const onlineCount = students.filter((s) => s.status === 'online').length;
   const idleCount = students.filter((s) => s.status === 'idle').length;
   const sharingCount = students.filter((s) => s.isSharing).length;
+
+  // Check for blocked domain violations and show notifications
+  useEffect(() => {
+    if (!settings?.blockedDomains || settings.blockedDomains.length === 0) return;
+
+    students.forEach((student) => {
+      const deviceId = student.deviceId;
+      
+      if (!student.activeTabUrl) {
+        // Clear all violations for this device if no URL
+        const keysToDelete = Array.from(notifiedViolations.current).filter(key => key.startsWith(deviceId + '-'));
+        keysToDelete.forEach(key => notifiedViolations.current.delete(key));
+        return;
+      }
+
+      const violationKey = `${deviceId}-${student.activeTabUrl}`;
+      
+      // Check if student is on blocked domain
+      const isBlocked = settings.blockedDomains.some(blocked => {
+        try {
+          const hostname = new URL(student.activeTabUrl!).hostname.toLowerCase();
+          const blockedLower = blocked.toLowerCase().trim();
+          return hostname === blockedLower || hostname.endsWith('.' + blockedLower);
+        } catch {
+          return false;
+        }
+      });
+
+      if (isBlocked) {
+        // Only notify if this is a new violation (not previously notified)
+        if (!notifiedViolations.current.has(violationKey)) {
+          toast({
+            variant: "destructive",
+            title: "Blocked Domain Accessed",
+            description: `${student.studentName} is accessing a blocked domain: ${student.activeTabUrl}`,
+          });
+          notifiedViolations.current.add(violationKey);
+        }
+      } else {
+        // Student is not on blocked domain - clear all violations for this device
+        const keysToDelete = Array.from(notifiedViolations.current).filter(key => key.startsWith(deviceId + '-'));
+        keysToDelete.forEach(key => notifiedViolations.current.delete(key));
+      }
+    });
+  }, [students, settings, toast]);
 
   const handleLogout = () => {
     // Clear auth and redirect to login
@@ -192,6 +244,7 @@ export default function Dashboard() {
                 key={student.deviceId}
                 student={student}
                 onClick={() => setSelectedStudent(student)}
+                blockedDomains={settings?.blockedDomains || []}
               />
             ))}
           </div>

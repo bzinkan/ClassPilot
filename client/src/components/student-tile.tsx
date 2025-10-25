@@ -1,15 +1,35 @@
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Clock, Monitor, ExternalLink } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle } from "lucide-react";
 import type { StudentStatus } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 
 interface StudentTileProps {
   student: StudentStatus;
   onClick: () => void;
+  blockedDomains?: string[];
 }
 
-export function StudentTile({ student, onClick }: StudentTileProps) {
+function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
+  if (!url || blockedDomains.length === 0) return false;
+  
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase();
+    
+    return blockedDomains.some(blocked => {
+      const blockedLower = blocked.toLowerCase().trim();
+      // Check exact match or subdomain match
+      return hostname === blockedLower || hostname.endsWith('.' + blockedLower);
+    });
+  } catch {
+    return false;
+  }
+}
+
+export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTileProps) {
+  const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);
+  
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online':
@@ -37,6 +57,10 @@ export function StudentTile({ student, onClick }: StudentTileProps) {
   };
 
   const getBorderStyle = (status: string) => {
+    if (isBlocked) {
+      return 'border-2 border-destructive';
+    }
+    
     switch (status) {
       case 'online':
         return 'border-2 border-status-online/30';
@@ -80,6 +104,12 @@ export function StudentTile({ student, onClick }: StudentTileProps) {
             </p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {isBlocked && (
+              <Badge variant="destructive" className="text-xs px-2 py-0.5" data-testid={`badge-blocked-${student.deviceId}`}>
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                Blocked
+              </Badge>
+            )}
             {student.isSharing && (
               <Badge variant="destructive" className="text-xs px-2 py-0.5 animate-pulse">
                 Sharing
