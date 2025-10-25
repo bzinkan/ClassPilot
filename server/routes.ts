@@ -6,6 +6,7 @@ import bcrypt from "bcrypt";
 import session from "express-session";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import * as XLSX from "xlsx";
 import {
   insertStudentSchema,
   insertHeartbeatSchema,
@@ -525,7 +526,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Export activity CSV endpoint with date range filtering
+  // Export activity Excel endpoint with date range filtering
   app.get("/api/export/activity", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -538,18 +539,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return timestamp >= startDate && timestamp <= endDate;
       });
       
-      // Generate CSV with activity data
-      let csv = "Device ID,Student Name,Timestamp,URL,Tab Title\n";
+      // Prepare data for Excel
+      const data = filteredHeartbeats.map(heartbeat => ({
+        'Device ID': heartbeat.deviceId,
+        'Student Name': heartbeat.studentName,
+        'Timestamp': new Date(heartbeat.timestamp).toISOString(),
+        'URL': heartbeat.activeTabUrl || '',
+        'Tab Title': heartbeat.activeTabTitle || ''
+      }));
       
-      filteredHeartbeats.forEach(heartbeat => {
-        const escapedUrl = (heartbeat.activeTabUrl || '').replace(/"/g, '""');
-        const escapedTitle = (heartbeat.activeTabTitle || '').replace(/"/g, '""');
-        csv += `"${heartbeat.deviceId}","${heartbeat.studentName}","${new Date(heartbeat.timestamp).toISOString()}","${escapedUrl}","${escapedTitle}"\n`;
-      });
+      // Create workbook and worksheet
+      const worksheet = XLSX.utils.json_to_sheet(data);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Activity Report');
       
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', `attachment; filename=activity-export-${new Date().toISOString().split('T')[0]}.csv`);
-      res.send(csv);
+      // Set column widths for better readability
+      worksheet['!cols'] = [
+        { wch: 15 }, // Device ID
+        { wch: 20 }, // Student Name
+        { wch: 20 }, // Timestamp
+        { wch: 50 }, // URL
+        { wch: 40 }  // Tab Title
+      ];
+      
+      // Generate Excel file buffer
+      const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+      
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=activity-export-${new Date().toISOString().split('T')[0]}.xlsx`);
+      res.send(excelBuffer);
     } catch (error) {
       console.error("Export activity error:", error);
       res.status(500).json({ error: "Internal server error" });
