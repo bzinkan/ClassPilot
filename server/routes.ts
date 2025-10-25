@@ -29,7 +29,7 @@ const apiLimiter = rateLimit({
 
 const heartbeatLimiter = rateLimit({
   windowMs: 10 * 1000, // 10 seconds
-  max: 2, // 2 requests per 10 seconds (allows one heartbeat every 5 seconds)
+  max: 3, // 3 requests per 10 seconds (generous buffer for 10s heartbeats)
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
