@@ -139,7 +139,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       deviceId: student.deviceId, 
       studentName: newStudentName,
       deviceName: newDeviceName,
-      gradeLevel: newGradeLevel
+      gradeLevel: newGradeLevel === 'none' ? '' : newGradeLevel
     });
   };
   
@@ -363,19 +363,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             <div className="space-y-2">
               <Label htmlFor="grade-level">Grade Level (Optional)</Label>
               <Select
-                value={newGradeLevel}
-                onValueChange={setNewGradeLevel}
+                value={newGradeLevel || undefined}
+                onValueChange={(value) => setNewGradeLevel(value || '')}
               >
                 <SelectTrigger id="grade-level" data-testid={`select-edit-grade-level-${student.deviceId}`}>
                   <SelectValue placeholder="Select grade level" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
-                  {settings?.gradeLevels?.map((grade) => (
-                    <SelectItem key={grade} value={grade}>
-                      {grade}
+                  <SelectItem value="none">None</SelectItem>
+                  {settings?.gradeLevels && settings.gradeLevels.length > 0 ? (
+                    settings.gradeLevels.map((grade) => (
+                      <SelectItem key={grade} value={grade}>
+                        Grade {grade}
+                      </SelectItem>
+                    ))
+                  ) : (
+                    <SelectItem value="loading" disabled>
+                      Loading grades...
                     </SelectItem>
-                  ))}
+                  )}
                 </SelectContent>
               </Select>
             </div>
