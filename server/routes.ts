@@ -455,6 +455,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Update student information (for roster management)
+  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const { studentName, gradeLevel } = req.body;
+
+      const updated = await storage.updateStudent(deviceId, {
+        studentName: studentName || null,
+        gradeLevel: gradeLevel || null,
+      });
+
+      if (!updated) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+
+      // Notify teachers of update
+      broadcastToTeachers({
+        type: 'student-updated',
+        deviceId,
+      });
+
+      res.json({ success: true, student: updated });
+    } catch (error) {
+      console.error("Update student error:", error);
+      res.status(500).json({ error: "Failed to update student" });
+    }
+  });
+
   // Create student manually (for roster management)
   app.post("/api/roster/student", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {

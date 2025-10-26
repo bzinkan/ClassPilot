@@ -3,150 +3,92 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { ArrowLeft, Plus, Users } from "lucide-react";
+import { ArrowLeft, Edit, Monitor } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { Roster, Student } from "@shared/schema";
+import type { Student } from "@shared/schema";
 
 export default function RosterPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const [showNewClassDialog, setShowNewClassDialog] = useState(false);
-  const [newClassName, setNewClassName] = useState("");
-  const [selectedClass, setSelectedClass] = useState<Roster | null>(null);
-  const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
+  const [showEditDialog, setShowEditDialog] = useState(false);
+  const [selectedDevice, setSelectedDevice] = useState<Student | null>(null);
 
-  // Student form state
-  const [studentName, setStudentName] = useState("");
-  const [deviceId, setDeviceId] = useState("");
-  const [deviceName, setDeviceName] = useState("");
-  const [gradeLevel, setGradeLevel] = useState("");
+  // Edit form state
+  const [editStudentName, setEditStudentName] = useState("");
+  const [editGradeLevel, setEditGradeLevel] = useState("");
 
-  // Fetch all rosters/classes
-  const { data: rosters = [], isLoading: rostersLoading } = useQuery<Roster[]>({
-    queryKey: ['/api/rosters'],
-  });
-
-  // Fetch all students to calculate counts
-  const { data: students = [], isLoading: studentsLoading } = useQuery<Student[]>({
+  // Fetch all registered devices/students
+  const { data: students = [], isLoading } = useQuery<Student[]>({
     queryKey: ['/api/roster/students'],
   });
 
-  // Calculate student counts by classId
-  const studentCountsByClass = students.reduce((acc, student) => {
-    const classId = student.classId || "general";
-    acc[classId] = (acc[classId] || 0) + 1;
+  // Group students by classroom location (classId)
+  const studentsByClassroom = students.reduce((acc, student) => {
+    const classroom = student.classId || "Unassigned";
+    if (!acc[classroom]) {
+      acc[classroom] = [];
+    }
+    acc[classroom].push(student);
     return acc;
-  }, {} as Record<string, number>);
+  }, {} as Record<string, Student[]>);
 
-  // Create new class mutation
-  const createClassMutation = useMutation({
-    mutationFn: async (data: { className: string; classId: string }) => {
-      const response = await fetch("/api/rosters", {
-        method: "POST",
+  // Update student mutation
+  const updateStudentMutation = useMutation({
+    mutationFn: async (data: { deviceId: string; studentName?: string; gradeLevel?: string }) => {
+      const response = await fetch(`/api/students/${data.deviceId}`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify(data),
+        body: JSON.stringify({
+          studentName: data.studentName || null,
+          gradeLevel: data.gradeLevel || null,
+        }),
       });
-      if (!response.ok) throw new Error("Failed to create class");
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/rosters'] });
-      toast({
-        title: "Class created",
-        description: "New class has been created successfully",
-      });
-      setShowNewClassDialog(false);
-      setNewClassName("");
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to create class",
-        description: error.message,
-      });
-    },
-  });
-
-  // Add single student mutation
-  const addStudentMutation = useMutation({
-    mutationFn: async (data: { studentName: string; deviceId: string; classId: string; gradeLevel?: string; deviceName?: string }) => {
-      const response = await fetch("/api/roster/student", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(data),
-      });
-      if (!response.ok) throw new Error("Failed to add student");
+      if (!response.ok) throw new Error("Failed to update device");
       return response.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
-        title: "Student added",
-        description: "Student has been added to the roster",
+        title: "Device updated",
+        description: "Student information has been updated successfully",
       });
-      setShowAddStudentDialog(false);
-      setStudentName("");
-      setDeviceId("");
-      setDeviceName("");
-      setGradeLevel("");
-      setSelectedClass(null);
+      setShowEditDialog(false);
+      setSelectedDevice(null);
+      setEditStudentName("");
+      setEditGradeLevel("");
     },
     onError: (error: any) => {
       toast({
         variant: "destructive",
-        title: "Failed to add student",
+        title: "Update failed",
         description: error.message,
       });
     },
   });
 
-  const handleCreateClass = () => {
-    if (!newClassName.trim()) {
-      toast({
-        variant: "destructive",
-        title: "Class name required",
-        description: "Please enter a class name",
-      });
-      return;
-    }
-
-    const classId = newClassName.toLowerCase().replace(/\s+/g, '-');
-    createClassMutation.mutate({ className: newClassName, classId });
+  const openEditDialog = (device: Student) => {
+    setSelectedDevice(device);
+    setEditStudentName(device.studentName || "");
+    setEditGradeLevel(device.gradeLevel || "");
+    setShowEditDialog(true);
   };
 
-  const handleAddStudent = () => {
-    if (!selectedClass) return;
-    if (!studentName.trim() || !deviceId.trim()) {
-      toast({
-        variant: "destructive",
-        title: "Missing information",
-        description: "Student name and device ID are required",
-      });
-      return;
-    }
+  const handleUpdateDevice = () => {
+    if (!selectedDevice) return;
 
-    addStudentMutation.mutate({
-      studentName,
-      deviceId,
-      classId: selectedClass.classId,
-      gradeLevel: gradeLevel || undefined,
-      deviceName: deviceName || undefined,
+    updateStudentMutation.mutate({
+      deviceId: selectedDevice.deviceId,
+      studentName: editStudentName.trim() || undefined,
+      gradeLevel: editGradeLevel.trim() || undefined,
     });
   };
-
-  const openAddStudentDialog = (roster: Roster) => {
-    setSelectedClass(roster);
-    setShowAddStudentDialog(true);
-  };
-
-  const isLoading = rostersLoading || studentsLoading;
 
   return (
     <div className="min-h-screen bg-background">
@@ -164,19 +106,12 @@ export default function RosterPage() {
                 <ArrowLeft className="h-5 w-5" />
               </Button>
               <div>
-                <h1 className="text-2xl font-bold">Class Roster</h1>
+                <h1 className="text-2xl font-bold">Device Roster</h1>
                 <p className="text-sm text-muted-foreground">
-                  Organize students by class or grade level
+                  Manage registered devices and assign student information
                 </p>
               </div>
             </div>
-            <Button
-              onClick={() => setShowNewClassDialog(true)}
-              data-testid="button-new-class"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              New Class
-            </Button>
           </div>
         </div>
       </header>
@@ -185,45 +120,69 @@ export default function RosterPage() {
       <main className="max-w-7xl mx-auto px-6 py-8">
         {isLoading ? (
           <div className="text-center py-12">
-            <p className="text-muted-foreground">Loading classes...</p>
+            <p className="text-muted-foreground">Loading devices...</p>
           </div>
-        ) : rosters.length === 0 ? (
+        ) : students.length === 0 ? (
           <div className="text-center py-12">
-            <Users className="h-16 w-16 mx-auto mb-4 text-muted-foreground/50" />
-            <h3 className="text-lg font-semibold mb-2">No classes yet</h3>
-            <p className="text-muted-foreground mb-4">
-              Create your first class to start organizing students
+            <Monitor className="h-16 w-16 mx-auto mb-4 text-muted-foreground/50" />
+            <h3 className="text-lg font-semibold mb-2">No devices registered</h3>
+            <p className="text-muted-foreground">
+              Devices will appear here once they register with the Chrome Extension
             </p>
-            <Button onClick={() => setShowNewClassDialog(true)} data-testid="button-create-first-class">
-              <Plus className="h-4 w-4 mr-2" />
-              Create Class
-            </Button>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {rosters.map((roster) => (
-              <Card key={roster.id} className="hover-elevate" data-testid={`card-class-${roster.classId}`}>
-                <CardHeader className="pb-3">
+          <div className="space-y-6">
+            {Object.entries(studentsByClassroom).map(([classroom, devices]) => (
+              <Card key={classroom} data-testid={`card-classroom-${classroom}`}>
+                <CardHeader>
                   <CardTitle className="flex items-center justify-between gap-2">
-                    <span className="truncate">{roster.className}</span>
-                    <div className="flex items-center gap-1 text-muted-foreground">
-                      <Users className="h-4 w-4" />
-                      <span className="text-sm font-normal" data-testid={`text-student-count-${roster.classId}`}>
-                        {studentCountsByClass[roster.classId] || 0}
-                      </span>
-                    </div>
+                    <span>{classroom}</span>
+                    <span className="text-sm font-normal text-muted-foreground">
+                      {devices.length} {devices.length === 1 ? 'device' : 'devices'}
+                    </span>
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => openAddStudentDialog(roster)}
-                    data-testid={`button-add-student-${roster.classId}`}
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    Add Student
-                  </Button>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Device ID</TableHead>
+                        <TableHead>Device Name</TableHead>
+                        <TableHead>Student Name</TableHead>
+                        <TableHead>Grade Level</TableHead>
+                        <TableHead className="text-right">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {devices.map((device) => (
+                        <TableRow key={device.deviceId} data-testid={`row-device-${device.deviceId}`}>
+                          <TableCell className="font-mono text-sm">{device.deviceId}</TableCell>
+                          <TableCell>{device.deviceName || '-'}</TableCell>
+                          <TableCell>
+                            {device.studentName ? (
+                              device.studentName
+                            ) : (
+                              <span className="text-muted-foreground italic">Not assigned</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            {device.gradeLevel || <span className="text-muted-foreground">-</span>}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => openEditDialog(device)}
+                              data-testid={`button-edit-${device.deviceId}`}
+                            >
+                              <Edit className="h-4 w-4 mr-2" />
+                              Edit
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
                 </CardContent>
               </Card>
             ))}
@@ -231,111 +190,70 @@ export default function RosterPage() {
         )}
       </main>
 
-      {/* New Class Dialog */}
-      <Dialog open={showNewClassDialog} onOpenChange={setShowNewClassDialog}>
-        <DialogContent data-testid="dialog-new-class">
+      {/* Edit Device Dialog */}
+      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
+        <DialogContent data-testid="dialog-edit-device">
           <DialogHeader>
-            <DialogTitle>Create New Class</DialogTitle>
+            <DialogTitle>Edit Device Information</DialogTitle>
             <DialogDescription>
-              Create a new class or grade level to organize students
+              Assign or update student name and grade level for this device
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="class-name">Class Name</Label>
+              <Label htmlFor="device-id-display">Device ID</Label>
               <Input
-                id="class-name"
-                placeholder="e.g., Grade 6, Period 1, Room 101"
-                value={newClassName}
-                onChange={(e) => setNewClassName(e.target.value)}
-                data-testid="input-class-name"
+                id="device-id-display"
+                value={selectedDevice?.deviceId || ''}
+                disabled
+                className="font-mono text-sm"
+                data-testid="input-device-id-display"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="device-name-display">Device Name</Label>
+              <Input
+                id="device-name-display"
+                value={selectedDevice?.deviceName || 'N/A'}
+                disabled
+                data-testid="input-device-name-display"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-student-name">Student Name</Label>
+              <Input
+                id="edit-student-name"
+                placeholder="Enter student name"
+                value={editStudentName}
+                onChange={(e) => setEditStudentName(e.target.value)}
+                data-testid="input-edit-student-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-grade-level">Grade Level</Label>
+              <Input
+                id="edit-grade-level"
+                placeholder="e.g., 9 or 10th Grade"
+                value={editGradeLevel}
+                onChange={(e) => setEditGradeLevel(e.target.value)}
+                data-testid="input-edit-grade-level"
               />
             </div>
           </div>
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setShowNewClassDialog(false)}
-              data-testid="button-cancel-new-class"
+              onClick={() => setShowEditDialog(false)}
+              data-testid="button-cancel-edit"
             >
               Cancel
             </Button>
             <Button
-              onClick={handleCreateClass}
-              disabled={createClassMutation.isPending}
-              data-testid="button-create-class"
+              onClick={handleUpdateDevice}
+              disabled={updateStudentMutation.isPending}
+              data-testid="button-save-edit"
             >
-              {createClassMutation.isPending ? "Creating..." : "Create Class"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Student Dialog */}
-      <Dialog open={showAddStudentDialog} onOpenChange={setShowAddStudentDialog}>
-        <DialogContent data-testid="dialog-add-student">
-          <DialogHeader>
-            <DialogTitle>Add Student to {selectedClass?.className}</DialogTitle>
-            <DialogDescription>
-              Add a new student to this class
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="student-name">Student Name</Label>
-              <Input
-                id="student-name"
-                placeholder="John Doe"
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                data-testid="input-student-name"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="device-id">Device ID</Label>
-              <Input
-                id="device-id"
-                placeholder="chromebook-123"
-                value={deviceId}
-                onChange={(e) => setDeviceId(e.target.value)}
-                data-testid="input-device-id"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="device-name">Device Name (optional)</Label>
-              <Input
-                id="device-name"
-                placeholder="Chromebook 1"
-                value={deviceName}
-                onChange={(e) => setDeviceName(e.target.value)}
-                data-testid="input-device-name"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="grade-level">Grade Level (optional)</Label>
-              <Input
-                id="grade-level"
-                placeholder="6"
-                value={gradeLevel}
-                onChange={(e) => setGradeLevel(e.target.value)}
-                data-testid="input-grade-level"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setShowAddStudentDialog(false)}
-              data-testid="button-cancel-add-student"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleAddStudent}
-              disabled={addStudentMutation.isPending}
-              data-testid="button-submit-add-student"
-            >
-              {addStudentMutation.isPending ? "Adding..." : "Add Student"}
+              {updateStudentMutation.isPending ? "Saving..." : "Save Changes"}
             </Button>
           </DialogFooter>
         </DialogContent>
