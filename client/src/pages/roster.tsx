@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
+import { queryClient } from "@/lib/queryClient";
 import { ArrowLeft, Upload } from "lucide-react";
 import { RosterManagement } from "@/components/roster-management";
 
@@ -26,6 +27,8 @@ export default function Roster() {
       return response.json();
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Roster uploaded",
         description: "Class roster has been uploaded successfully",
