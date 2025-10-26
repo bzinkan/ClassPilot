@@ -177,6 +177,12 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
                 <Edit2 className="h-3 w-3" />
               </Button>
             </div>
+            {student.deviceName && (
+              <p className="text-sm text-foreground/90 truncate flex items-center gap-1.5" data-testid={`text-device-name-${student.deviceId}`}>
+                <Monitor className="h-3 w-3 flex-shrink-0" />
+                {student.deviceName}
+              </p>
+            )}
             <p className="text-xs font-mono text-muted-foreground truncate">
               {student.deviceId}
             </p>
