@@ -340,8 +340,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin: Clean up all student data
   app.post("/api/admin/cleanup-students", requireAdmin, async (req, res) => {
     try {
-      // Delete all students and heartbeats
-      await storage.deleteAllStudents();
+      // Delete all students (student assignments)
+      const allStudents = await storage.getAllStudents();
+      for (const student of allStudents) {
+        await storage.deleteStudent(student.id);
+      }
+      
+      // Delete all devices
+      const allDevices = await storage.getAllDevices();
+      for (const device of allDevices) {
+        await storage.deleteDevice(device.deviceId);
+      }
       
       // Notify all connected teachers
       broadcastToTeachers({
@@ -355,36 +364,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Student registration (from extension)
+  // Device registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
-      // Parse and set defaults for new registration flow
-      const { deviceId, deviceName, classId, schoolId = 'default-school', studentName, gradeLevel } = req.body;
+      const { deviceId, deviceName, classId, schoolId = 'default-school' } = req.body;
       
-      const data = insertStudentSchema.parse({
+      // Validate device data
+      const deviceData = insertDeviceSchema.parse({
         deviceId,
         deviceName,
         classId,
         schoolId,
-        studentName: studentName || null, // Nullable - teacher adds later
-        gradeLevel: gradeLevel || null, // Nullable - teacher adds later
       });
       
-      // Check if student already exists
-      const existing = await storage.getStudent(data.deviceId);
+      // Check if device already exists
+      const existing = await storage.getDevice(deviceData.deviceId);
       if (existing) {
-        return res.json({ success: true, student: existing });
+        // Return existing device with its assigned students
+        const students = await storage.getStudentsByDevice(deviceData.deviceId);
+        return res.json({ success: true, device: existing, students });
       }
 
-      const student = await storage.registerStudent(data);
+      const device = await storage.registerDevice(deviceData);
       
       // Notify teachers
       broadcastToTeachers({
-        type: 'student-registered',
-        data: student,
+        type: 'device-registered',
+        data: device,
       });
 
-      res.json({ success: true, student });
+      res.json({ success: true, device, students: [] });
     } catch (error) {
       console.error("Registration error:", error);
       res.status(400).json({ error: "Invalid request" });
@@ -520,7 +529,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Create student manually (for roster management)
   app.post("/api/roster/student", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { studentName, deviceId, classId, gradeLevel } = req.body;
+      const { studentName, deviceId, gradeLevel } = req.body;
       
       if (!studentName || typeof studentName !== 'string') {
         return res.status(400).json({ error: "Student name is required" });
@@ -530,15 +539,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Device ID is required" });
       }
       
-      const studentData = {
+      // Verify device exists
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      
+      const studentData = insertStudentSchema.parse({
         deviceId,
         studentName,
-        schoolId: process.env.SCHOOL_ID || "default-school",
-        classId: classId || "general",
         gradeLevel: gradeLevel || null,
-      };
+      });
       
-      const student = await storage.registerStudent(studentData);
+      const student = await storage.createStudent(studentData);
       
       // Broadcast update to teachers
       broadcastToTeachers({
@@ -567,15 +580,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       for (const studentInput of studentsData) {
         try {
-          const studentData = {
+          const studentData = insertStudentSchema.parse({
             deviceId: studentInput.deviceId,
             studentName: studentInput.studentName,
-            schoolId: process.env.SCHOOL_ID || "default-school",
-            classId: studentInput.classId || "general",
             gradeLevel: studentInput.gradeLevel || null,
-          };
+          });
           
-          const student = await storage.registerStudent(studentData);
+          const student = await storage.createStudent(studentData);
           createdStudents.push(student);
         } catch (error) {
           errors.push({
