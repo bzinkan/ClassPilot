@@ -28,10 +28,10 @@ export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 export const students = pgTable("students", {
   deviceId: varchar("device_id").primaryKey(),
   deviceName: text("device_name"),
-  studentName: text("student_name").notNull(),
+  studentName: text("student_name"), // Nullable - added by teacher later
   schoolId: text("school_id").notNull(),
   classId: text("class_id").notNull(),
-  gradeLevel: text("grade_level"),
+  gradeLevel: text("grade_level"), // Nullable - added by teacher later
   registeredAt: timestamp("registered_at").notNull().default(sql`now()`),
 });
 
