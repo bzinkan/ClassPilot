@@ -15,7 +15,7 @@ I like functional programming.
 ## System Architecture
 
 ### UI/UX Decisions
-The frontend is built with React and TypeScript, using Tailwind CSS for styling with custom design tokens tailored for an educational UI. It supports dark/light mode and features a grid-based dashboard with student tiles for real-time activity display. Detailed student information is accessible via a drawer, and admin functionalities are available through a dedicated interface.
+The frontend is built with React and TypeScript, using Tailwind CSS for styling with custom design tokens tailored for an educational UI. It supports dark/light mode and features a grid-based dashboard with student tiles for real-time activity display. Detailed student information is accessible via a drawer, and admin functionalities are available through a dedicated interface. The Roster page provides a dedicated view for managing student rosters, separated from system settings for improved UX and organization.
 
 ### Technical Implementations
 The system uses a full-stack architecture:
@@ -29,15 +29,17 @@ The system uses a full-stack architecture:
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
   - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "6, 7, 8" or "9, 10, 11, 12"). Grade tabs are set in Settings and dynamically update the dashboard filtering.
   - **Delete Devices**: Teachers can delete student devices directly from the dashboard with a confirmation dialog. Deletion removes the student from both the dashboard and roster.
-- **Roster Management**: Comprehensive student roster management with:
-  - Manual student creation (individual or bulk) with name, device ID, device name, class ID, and grade level
-  - Edit student information including grade level assignment and friendly device names
-  - Delete students with confirmation dialogs from both roster table and dashboard tiles
-  - CSV upload support for bulk roster imports (format: studentName, deviceId, classId, gradeLevel, deviceName)
-  - Table view displaying all students with their assigned information
-  - Grade level tracking (nullable field to accommodate various school structures)
-  - Device name support for easier Chromebook identification (e.g., "6th Chromebook 1")
-  - Persistent database storage ensuring roster data survives server restarts
+  - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page.
+- **Roster Management Page**: A dedicated page (`/roster`) for comprehensive student roster management, separate from Settings page:
+  - **Bulk CSV Upload**: Upload CSV files to add multiple students at once (format: studentName, deviceId, classId, gradeLevel, deviceName)
+  - **Manual Student Creation**: Add individual students with name, device ID, device name, class ID, and grade level
+  - **Edit Student Information**: Update student details including grade level assignment and friendly device names
+  - **Delete Students**: Remove students with confirmation dialogs from roster table
+  - **Table View**: Displays all students with their assigned information in a sortable table
+  - **Grade Level Tracking**: Nullable field to accommodate various school structures
+  - **Device Name Support**: Easier Chromebook identification (e.g., "6th Chromebook 1")
+  - **Persistent Storage**: Database-backed storage ensures roster data survives server restarts
+  - **Automatic Refresh**: Query cache invalidation ensures roster table updates immediately after CSV upload or edits
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
 - **Website Duration Tracking**: 
   - Calculates and displays how long students spend on each website by grouping consecutive heartbeats
