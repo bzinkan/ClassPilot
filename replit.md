@@ -28,18 +28,18 @@ The system uses a full-stack architecture:
 ### Feature Specifications
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
   - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "6, 7, 8" or "9, 10, 11, 12"). Grade tabs are set in Settings and dynamically update the dashboard filtering.
-  - **Delete Devices**: Teachers can delete student devices directly from the dashboard with a confirmation dialog. Deletion removes the student from both the dashboard and roster.
+  - **Delete Devices**: Teachers can delete student devices directly from the dashboard with a confirmation dialog. Deletion removes the device from both the dashboard and roster.
   - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page.
-- **Roster Management Page**: A dedicated page (`/roster`) for comprehensive student roster management, separate from Settings page:
-  - **Bulk CSV Upload**: Upload CSV files to add multiple students at once (format: studentName, deviceId, classId, gradeLevel, deviceName)
-  - **Manual Student Creation**: Add individual students with name, device ID, device name, class ID, and grade level
-  - **Edit Student Information**: Update student details including grade level assignment and friendly device names
-  - **Delete Students**: Remove students with confirmation dialogs from roster table
-  - **Table View**: Displays all students with their assigned information in a sortable table
-  - **Grade Level Tracking**: Nullable field to accommodate various school structures
-  - **Device Name Support**: Easier Chromebook identification (e.g., "6th Chromebook 1")
+  - **Two-Stage Device Registration**: Devices register first with Device ID, Classroom Location, and Device Number via Chrome Extension, then teachers can assign student names and grade levels later from the dashboard or Roster page.
+- **Roster Management Page**: A dedicated page (`/roster`) for comprehensive device roster management, separate from Settings page:
+  - **View All Devices**: Displays all registered devices grouped by classroom location (classId)
+  - **Edit Device Information**: Attach student names and grade levels to devices, update device names and classroom assignments
+  - **Delete Devices**: Remove devices with confirmation dialogs from roster table
+  - **Table View**: Displays all devices with their assigned information organized by classroom
+  - **Grade Level Tracking**: Nullable field to accommodate various school structures and unassigned devices
+  - **Device Name Support**: Easier Chromebook identification (e.g., "Chromebook 1", "Lab Computer 5")
   - **Persistent Storage**: Database-backed storage ensures roster data survives server restarts
-  - **Automatic Refresh**: Query cache invalidation ensures roster table updates immediately after CSV upload or edits
+  - **Automatic Refresh**: Query cache invalidation ensures roster table updates immediately after edits
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
 - **Website Duration Tracking**: 
   - Calculates and displays how long students spend on each website by grouping consecutive heartbeats
