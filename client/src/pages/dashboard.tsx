@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -262,6 +262,15 @@ export default function Dashboard() {
               >
                 <Download className="h-4 w-4 mr-2" />
                 Export Excel
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setLocation("/roster")}
+                data-testid="button-roster"
+              >
+                <UserCog className="h-4 w-4 mr-2" />
+                Roster
               </Button>
               {currentUser?.role === 'admin' && (
                 <Button

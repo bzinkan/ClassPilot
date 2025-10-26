@@ -9,12 +9,14 @@ import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
 import Settings from "@/pages/settings";
 import Admin from "@/pages/admin";
+import Roster from "@/pages/roster";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
+      <Route path="/roster" component={Roster} />
       <Route path="/settings" component={Settings} />
       <Route path="/admin" component={Admin} />
       <Route path="/class/:classId">

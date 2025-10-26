@@ -18,9 +18,8 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { ArrowLeft, Upload, Download, Shield, Clock, AlertCircle } from "lucide-react";
+import { ArrowLeft, Download, Shield, Clock, AlertCircle } from "lucide-react";
 import type { Settings as SettingsType } from "@shared/schema";
-import { RosterManagement } from "@/components/roster-management";
 
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
@@ -37,7 +36,6 @@ type SettingsForm = z.infer<typeof settingsSchema>;
 export default function Settings() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const [csvFile, setCsvFile] = useState<File | null>(null);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
@@ -122,53 +120,6 @@ export default function Settings() {
       });
     },
   });
-
-  const uploadRosterMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const formData = new FormData();
-      formData.append("roster", file);
-      const response = await fetch("/api/roster/upload", {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-      if (!response.ok) throw new Error("Upload failed");
-      return response.json();
-    },
-    onSuccess: () => {
-      toast({
-        title: "Roster uploaded",
-        description: "Class roster has been uploaded successfully",
-      });
-      setCsvFile(null);
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Upload failed",
-        description: error.message,
-      });
-    },
-  });
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type === "text/csv") {
-      setCsvFile(file);
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Invalid file",
-        description: "Please select a CSV file",
-      });
-    }
-  };
-
-  const handleUploadRoster = () => {
-    if (csvFile) {
-      uploadRosterMutation.mutate(csvFile);
-    }
-  };
 
   const handleOpenExportDialog = () => {
     // Set default dates: last 7 days
@@ -368,58 +319,6 @@ export default function Settings() {
             </form>
           </CardContent>
         </Card>
-
-        {/* Roster Management */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Upload className="h-5 w-5" />
-              Class Roster Upload
-            </CardTitle>
-            <CardDescription>
-              Upload a CSV file with student names, device IDs, and class IDs
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="border-2 border-dashed border-border rounded-lg p-8 text-center">
-              <Upload className="h-12 w-12 mx-auto mb-3 text-muted-foreground/50" />
-              <div className="space-y-2">
-                <Label htmlFor="roster-file" className="cursor-pointer">
-                  <span className="text-sm font-semibold text-primary hover:underline">
-                    Choose CSV file
-                  </span>
-                  <Input
-                    id="roster-file"
-                    data-testid="input-roster-file"
-                    type="file"
-                    accept=".csv"
-                    onChange={handleFileChange}
-                    className="hidden"
-                  />
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  CSV format: studentName, deviceId, classId, gradeLevel (optional)
-                </p>
-              </div>
-              {csvFile && (
-                <div className="mt-4 p-3 bg-muted/50 rounded-md border border-border flex items-center justify-between">
-                  <span className="text-sm font-mono">{csvFile.name}</span>
-                  <Button
-                    size="sm"
-                    onClick={handleUploadRoster}
-                    data-testid="button-upload-roster"
-                    disabled={uploadRosterMutation.isPending}
-                  >
-                    {uploadRosterMutation.isPending ? "Uploading..." : "Upload"}
-                  </Button>
-                </div>
-              )}
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Roster Management Table */}
-        <RosterManagement />
 
         {/* Data Export */}
         <Card>
