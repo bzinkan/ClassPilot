@@ -549,31 +549,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update student information (for roster management)
-  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  // Get all devices from database (for roster management)
+  app.get("/api/roster/devices", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const { deviceId } = req.params;
-      const { studentName, gradeLevel } = req.body;
-
-      const updated = await storage.updateStudent(deviceId, {
-        studentName: studentName || null,
-        gradeLevel: gradeLevel || null,
-      });
-
-      if (!updated) {
-        return res.status(404).json({ error: "Device not found" });
-      }
-
-      // Notify teachers of update
-      broadcastToTeachers({
-        type: 'student-updated',
-        deviceId,
-      });
-
-      res.json({ success: true, student: updated });
+      const devices = await storage.getAllDevices();
+      res.json(devices);
     } catch (error) {
-      console.error("Update student error:", error);
-      res.status(500).json({ error: "Failed to update student" });
+      console.error("Get roster devices error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
@@ -665,33 +648,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update student information (name, device name, grade level, class)
-  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  // Update student information (student name and grade level)
+  app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const { deviceId } = req.params;
-      const updates: Partial<{studentName: string; deviceName: string | null; classId: string; gradeLevel: string | null}> = {};
+      const { studentId } = req.params;
+      const updates: Partial<InsertStudent> = {};
       
-      if (req.body.studentName) {
+      if ('studentName' in req.body) {
         updates.studentName = req.body.studentName;
       }
-      if ('deviceName' in req.body) {
-        updates.deviceName = req.body.deviceName;
-      }
-      if (req.body.classId) {
-        updates.classId = req.body.classId;
-      }
       if ('gradeLevel' in req.body) {
-        updates.gradeLevel = req.body.gradeLevel;
+        updates.gradeLevel = req.body.gradeLevel || null;
       }
       
       if (Object.keys(updates).length === 0) {
         return res.status(400).json({ error: "No fields to update" });
       }
       
-      const student = await storage.updateStudent(deviceId, updates);
+      const student = await storage.updateStudent(studentId, updates);
       
       if (!student) {
-        return res.status(404).json({ error: "Device not found" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       // Broadcast update to teachers
@@ -707,12 +684,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Delete student device (cleanup duplicate/old devices)
-  app.delete("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  // Update device information (device name and class assignment)
+  app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const updates: Partial<Omit<InsertDevice, 'deviceId'>> = {};
+      
+      if ('deviceName' in req.body) {
+        updates.deviceName = req.body.deviceName || null;
+      }
+      if ('classId' in req.body) {
+        updates.classId = req.body.classId;
+      }
+      
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No fields to update" });
+      }
+      
+      const device = await storage.updateDevice(deviceId, updates);
+      
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      
+      // Broadcast update to teachers
+      broadcastToTeachers({
+        type: 'device-update',
+        deviceId: device.deviceId,
+      });
+      
+      res.json({ success: true, device });
+    } catch (error) {
+      console.error("Update device error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Delete student assignment
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { studentId } = req.params;
+      
+      // Get student info before deleting for broadcast
+      const student = await storage.getStudent(studentId);
+      const deviceId = student?.deviceId;
+      
+      const deleted = await storage.deleteStudent(studentId);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      
+      // Broadcast update to teachers
+      if (deviceId) {
+        broadcastToTeachers({
+          type: 'student-update',
+          deviceId,
+        });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Delete device and all its student assignments
+  app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { deviceId } = req.params;
       
-      const deleted = await storage.deleteStudent(deviceId);
+      const deleted = await storage.deleteDevice(deviceId);
       
       if (!deleted) {
         return res.status(404).json({ error: "Device not found" });
@@ -720,13 +763,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // Broadcast update to teachers
       broadcastToTeachers({
-        type: 'student-update',
+        type: 'device-deleted',
         deviceId,
       });
       
       res.json({ success: true });
     } catch (error) {
-      console.error("Delete student error:", error);
+      console.error("Delete device error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

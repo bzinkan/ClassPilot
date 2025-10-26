@@ -63,10 +63,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   });
   
   const updateStudentMutation = useMutation({
-    mutationFn: async (data: { deviceId: string; studentName: string; deviceName: string; gradeLevel: string }) => {
-      return await apiRequest("PATCH", `/api/students/${data.deviceId}`, { 
+    mutationFn: async (data: { studentId: string; studentName: string; gradeLevel: string }) => {
+      return await apiRequest("PATCH", `/api/students/${data.studentId}`, { 
         studentName: data.studentName,
-        deviceName: data.deviceName || null,
         gradeLevel: data.gradeLevel || null
       });
     },
@@ -87,16 +86,38 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     },
   });
 
+  const updateDeviceMutation = useMutation({
+    mutationFn: async (data: { deviceId: string; deviceName: string }) => {
+      return await apiRequest("PATCH", `/api/devices/${data.deviceId}`, { 
+        deviceName: data.deviceName || null
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Device information updated",
+        description: `Successfully updated device information`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update device",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
   const deleteStudentMutation = useMutation({
-    mutationFn: async (deviceId: string) => {
-      return await apiRequest("DELETE", `/api/students/${deviceId}`);
+    mutationFn: async (studentId: string) => {
+      return await apiRequest("DELETE", `/api/students/${studentId}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
       toast({
-        title: "Student device deleted",
-        description: `Successfully removed ${student.studentName || student.deviceName || student.deviceId} from the dashboard`,
+        title: "Student assignment deleted",
+        description: `Successfully removed ${student.studentName} from the dashboard`,
       });
       setDeleteDialogOpen(false);
     },
@@ -123,16 +144,27 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   };
 
   const handleConfirmDelete = () => {
-    deleteStudentMutation.mutate(student.deviceId);
+    deleteStudentMutation.mutate(student.studentId);
   };
 
   const handleSaveStudent = () => {
-    updateStudentMutation.mutate({ 
-      deviceId: student.deviceId, 
-      studentName: newStudentName.trim() || '',
-      deviceName: newDeviceName,
-      gradeLevel: newGradeLevel === 'none' ? '' : newGradeLevel
-    });
+    // Update student name and grade
+    if (newStudentName.trim() !== (student.studentName || '') || 
+        (newGradeLevel === 'none' ? '' : newGradeLevel) !== (student.gradeLevel || '')) {
+      updateStudentMutation.mutate({ 
+        studentId: student.studentId, 
+        studentName: newStudentName.trim() || '',
+        gradeLevel: newGradeLevel === 'none' ? '' : newGradeLevel
+      });
+    }
+    
+    // Update device name if changed
+    if (newDeviceName !== (student.deviceName || '')) {
+      updateDeviceMutation.mutate({
+        deviceId: student.deviceId,
+        deviceName: newDeviceName
+      });
+    }
   };
   
   const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);

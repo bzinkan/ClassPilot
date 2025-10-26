@@ -5,64 +5,114 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import { queryClient } from "@/lib/queryClient";
-import { ArrowLeft, Edit, Monitor } from "lucide-react";
+import { queryClient, apiRequest } from "@/lib/queryClient";
+import { ArrowLeft, Edit, Monitor, Trash2, UserPlus } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { Student } from "@shared/schema";
+import type { Device, Student } from "@shared/schema";
+
+type DialogType = 
+  | { type: 'add-student'; deviceId: string }
+  | { type: 'edit-student'; student: Student }
+  | { type: 'edit-device'; device: Device }
+  | null;
+
+type DeleteDialogType =
+  | { type: 'delete-student'; studentId: string; studentName: string }
+  | { type: 'delete-device'; deviceId: string; deviceName: string }
+  | null;
 
 export default function RosterPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const [showEditDialog, setShowEditDialog] = useState(false);
-  const [selectedDevice, setSelectedDevice] = useState<Student | null>(null);
+  const [dialog, setDialog] = useState<DialogType>(null);
+  const [deleteDialog, setDeleteDialog] = useState<DeleteDialogType>(null);
 
-  // Edit form state
-  const [editStudentName, setEditStudentName] = useState("");
-  const [editGradeLevel, setEditGradeLevel] = useState("");
+  // Form state
+  const [formData, setFormData] = useState({
+    studentName: "",
+    gradeLevel: "",
+    deviceName: "",
+    classId: "",
+  });
 
-  // Fetch all registered devices/students
-  const { data: students = [], isLoading } = useQuery<Student[]>({
+  // Fetch devices and students in parallel
+  const { data: devices = [], isLoading: devicesLoading } = useQuery<Device[]>({
+    queryKey: ['/api/roster/devices'],
+  });
+
+  const { data: students = [], isLoading: studentsLoading } = useQuery<Student[]>({
     queryKey: ['/api/roster/students'],
   });
 
-  // Group students by classroom location (classId)
-  const studentsByClassroom = students.reduce((acc, student) => {
-    const classroom = student.classId || "Unassigned";
-    if (!acc[classroom]) {
-      acc[classroom] = [];
+  const isLoading = devicesLoading || studentsLoading;
+
+  // Group students by deviceId
+  const studentsByDevice = students.reduce((acc, student) => {
+    if (!acc[student.deviceId]) {
+      acc[student.deviceId] = [];
     }
-    acc[classroom].push(student);
+    acc[student.deviceId].push(student);
     return acc;
   }, {} as Record<string, Student[]>);
 
-  // Update student mutation
-  const updateStudentMutation = useMutation({
-    mutationFn: async (data: { deviceId: string; studentName?: string; gradeLevel?: string }) => {
-      const response = await fetch(`/api/students/${data.deviceId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          studentName: data.studentName || null,
-          gradeLevel: data.gradeLevel || null,
-        }),
+  // Group devices by classroom
+  const devicesByClassroom = devices.reduce((acc, device) => {
+    const classroom = device.classId || "Unassigned";
+    if (!acc[classroom]) {
+      acc[classroom] = [];
+    }
+    acc[classroom].push(device);
+    return acc;
+  }, {} as Record<string, Device[]>);
+
+  // Create student mutation
+  const createStudentMutation = useMutation({
+    mutationFn: async (data: { studentName: string; deviceId: string; gradeLevel?: string }) => {
+      return apiRequest('POST', '/api/roster/student', {
+        studentName: data.studentName,
+        deviceId: data.deviceId,
+        gradeLevel: data.gradeLevel || null,
       });
-      if (!response.ok) throw new Error("Failed to update device");
-      return response.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
-        title: "Device updated",
+        title: "Student assigned",
+        description: "Student has been assigned to the device successfully",
+      });
+      setDialog(null);
+      resetForm();
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to assign student",
+        description: error.message,
+      });
+    },
+  });
+
+  // Update student mutation
+  const updateStudentMutation = useMutation({
+    mutationFn: async (data: { studentId: string; studentName?: string; gradeLevel?: string }) => {
+      return apiRequest('PATCH', `/api/students/${data.studentId}`, {
+        studentName: data.studentName,
+        gradeLevel: data.gradeLevel || null,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Student updated",
         description: "Student information has been updated successfully",
       });
-      setShowEditDialog(false);
-      setSelectedDevice(null);
-      setEditStudentName("");
-      setEditGradeLevel("");
+      setDialog(null);
+      resetForm();
     },
     onError: (error: any) => {
       toast({
@@ -73,22 +123,178 @@ export default function RosterPage() {
     },
   });
 
-  const openEditDialog = (device: Student) => {
-    setSelectedDevice(device);
-    setEditStudentName(device.studentName || "");
-    setEditGradeLevel(device.gradeLevel || "");
-    setShowEditDialog(true);
-  };
+  // Update device mutation
+  const updateDeviceMutation = useMutation({
+    mutationFn: async (data: { deviceId: string; deviceName?: string; classId?: string }) => {
+      return apiRequest('PATCH', `/api/devices/${data.deviceId}`, {
+        deviceName: data.deviceName || null,
+        classId: data.classId,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/devices'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Device updated",
+        description: "Device information has been updated successfully",
+      });
+      setDialog(null);
+      resetForm();
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Update failed",
+        description: error.message,
+      });
+    },
+  });
 
-  const handleUpdateDevice = () => {
-    if (!selectedDevice) return;
+  // Delete student mutation
+  const deleteStudentMutation = useMutation({
+    mutationFn: async (studentId: string) => {
+      return apiRequest('DELETE', `/api/students/${studentId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Student removed",
+        description: "Student assignment has been removed successfully",
+      });
+      setDeleteDialog(null);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Delete failed",
+        description: error.message,
+      });
+    },
+  });
 
-    updateStudentMutation.mutate({
-      deviceId: selectedDevice.deviceId,
-      studentName: editStudentName.trim() || undefined,
-      gradeLevel: editGradeLevel.trim() || undefined,
+  // Delete device mutation
+  const deleteDeviceMutation = useMutation({
+    mutationFn: async (deviceId: string) => {
+      return apiRequest('DELETE', `/api/devices/${deviceId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/devices'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Device deleted",
+        description: "Device and all assigned students have been removed successfully",
+      });
+      setDeleteDialog(null);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Delete failed",
+        description: error.message,
+      });
+    },
+  });
+
+  const resetForm = () => {
+    setFormData({
+      studentName: "",
+      gradeLevel: "",
+      deviceName: "",
+      classId: "",
     });
   };
+
+  const openAddStudentDialog = (deviceId: string) => {
+    resetForm();
+    setDialog({ type: 'add-student', deviceId });
+  };
+
+  const openEditStudentDialog = (student: Student) => {
+    setFormData({
+      studentName: student.studentName,
+      gradeLevel: student.gradeLevel || "",
+      deviceName: "",
+      classId: "",
+    });
+    setDialog({ type: 'edit-student', student });
+  };
+
+  const openEditDeviceDialog = (device: Device) => {
+    setFormData({
+      studentName: "",
+      gradeLevel: "",
+      deviceName: device.deviceName || "",
+      classId: device.classId || "",
+    });
+    setDialog({ type: 'edit-device', device });
+  };
+
+  const handleSave = () => {
+    if (!dialog) return;
+
+    if (dialog.type === 'add-student') {
+      if (!formData.studentName.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Validation error",
+          description: "Student name is required",
+        });
+        return;
+      }
+
+      createStudentMutation.mutate({
+        deviceId: dialog.deviceId,
+        studentName: formData.studentName.trim(),
+        gradeLevel: formData.gradeLevel.trim() || undefined,
+      });
+    } else if (dialog.type === 'edit-student') {
+      if (!formData.studentName.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Validation error",
+          description: "Student name is required",
+        });
+        return;
+      }
+
+      updateStudentMutation.mutate({
+        studentId: dialog.student.id,
+        studentName: formData.studentName.trim(),
+        gradeLevel: formData.gradeLevel.trim() || undefined,
+      });
+    } else if (dialog.type === 'edit-device') {
+      if (!formData.classId.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Validation error",
+          description: "Classroom is required",
+        });
+        return;
+      }
+
+      updateDeviceMutation.mutate({
+        deviceId: dialog.device.deviceId,
+        deviceName: formData.deviceName.trim() || undefined,
+        classId: formData.classId.trim(),
+      });
+    }
+  };
+
+  const handleDelete = () => {
+    if (!deleteDialog) return;
+
+    if (deleteDialog.type === 'delete-student') {
+      deleteStudentMutation.mutate(deleteDialog.studentId);
+    } else if (deleteDialog.type === 'delete-device') {
+      deleteDeviceMutation.mutate(deleteDialog.deviceId);
+    }
+  };
+
+  const isPending = createStudentMutation.isPending || updateStudentMutation.isPending || 
+                    updateDeviceMutation.isPending || deleteStudentMutation.isPending || 
+                    deleteDeviceMutation.isPending;
 
   return (
     <div className="min-h-screen bg-background">
@@ -108,7 +314,7 @@ export default function RosterPage() {
               <div>
                 <h1 className="text-2xl font-bold">Device Roster</h1>
                 <p className="text-sm text-muted-foreground">
-                  Manage registered devices and assign student information
+                  Manage devices and assign students to shared Chromebooks
                 </p>
               </div>
             </div>
@@ -120,9 +326,9 @@ export default function RosterPage() {
       <main className="max-w-7xl mx-auto px-6 py-8">
         {isLoading ? (
           <div className="text-center py-12">
-            <p className="text-muted-foreground">Loading devices...</p>
+            <p className="text-muted-foreground">Loading devices and students...</p>
           </div>
-        ) : students.length === 0 ? (
+        ) : devices.length === 0 ? (
           <div className="text-center py-12">
             <Monitor className="h-16 w-16 mx-auto mb-4 text-muted-foreground/50" />
             <h3 className="text-lg font-semibold mb-2">No devices registered</h3>
@@ -132,132 +338,313 @@ export default function RosterPage() {
           </div>
         ) : (
           <div className="space-y-6">
-            {Object.entries(studentsByClassroom).map(([classroom, devices]) => (
-              <Card key={classroom} data-testid={`card-classroom-${classroom}`}>
-                <CardHeader>
-                  <CardTitle className="flex items-center justify-between gap-2">
-                    <span>{classroom}</span>
-                    <span className="text-sm font-normal text-muted-foreground">
-                      {devices.length} {devices.length === 1 ? 'device' : 'devices'}
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Device ID</TableHead>
-                        <TableHead>Device Name</TableHead>
-                        <TableHead>Student Name</TableHead>
-                        <TableHead>Grade Level</TableHead>
-                        <TableHead className="text-right">Actions</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {devices.map((device) => (
-                        <TableRow key={device.deviceId} data-testid={`row-device-${device.deviceId}`}>
-                          <TableCell className="font-mono text-sm">{device.deviceId}</TableCell>
-                          <TableCell>{device.deviceName || '-'}</TableCell>
-                          <TableCell>
-                            {device.studentName ? (
-                              device.studentName
-                            ) : (
-                              <span className="text-muted-foreground italic">Not assigned</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {device.gradeLevel || <span className="text-muted-foreground">-</span>}
-                          </TableCell>
-                          <TableCell className="text-right">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => openEditDialog(device)}
-                              data-testid={`button-edit-${device.deviceId}`}
-                            >
-                              <Edit className="h-4 w-4 mr-2" />
-                              Edit
-                            </Button>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </CardContent>
-              </Card>
-            ))}
+            {Object.entries(devicesByClassroom)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([classroom, classroomDevices]) => (
+                <Card key={classroom} data-testid={`card-classroom-${classroom}`}>
+                  <CardHeader>
+                    <CardTitle className="flex items-center justify-between gap-2">
+                      <span>{classroom}</span>
+                      <span className="text-sm font-normal text-muted-foreground">
+                        {classroomDevices.length} {classroomDevices.length === 1 ? 'device' : 'devices'}
+                      </span>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-6">
+                    {classroomDevices.map((device) => {
+                      const deviceStudents = studentsByDevice[device.deviceId] || [];
+                      
+                      return (
+                        <div 
+                          key={device.deviceId} 
+                          className="border rounded-lg p-4 space-y-4"
+                          data-testid={`device-container-${device.deviceId}`}
+                        >
+                          {/* Device Header */}
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex-1 space-y-2">
+                              <div className="flex items-center gap-2">
+                                <Monitor className="h-5 w-5 text-muted-foreground" />
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-sm font-semibold" data-testid={`text-device-id-${device.deviceId}`}>
+                                      {device.deviceId}
+                                    </span>
+                                    {device.deviceName && (
+                                      <span className="text-sm text-muted-foreground" data-testid={`text-device-name-${device.deviceId}`}>
+                                        ({device.deviceName})
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-sm text-muted-foreground">
+                                    Classroom: {device.classId}
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => openAddStudentDialog(device.deviceId)}
+                                data-testid={`button-add-student-${device.deviceId}`}
+                              >
+                                <UserPlus className="h-4 w-4 mr-2" />
+                                Assign Student
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => openEditDeviceDialog(device)}
+                                data-testid={`button-edit-device-${device.deviceId}`}
+                              >
+                                <Edit className="h-4 w-4 mr-2" />
+                                Edit Device
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setDeleteDialog({ 
+                                  type: 'delete-device', 
+                                  deviceId: device.deviceId, 
+                                  deviceName: device.deviceName || device.deviceId 
+                                })}
+                                data-testid={`button-delete-device-${device.deviceId}`}
+                              >
+                                <Trash2 className="h-4 w-4 mr-2" />
+                                Delete Device
+                              </Button>
+                            </div>
+                          </div>
+
+                          {/* Students Table */}
+                          {deviceStudents.length === 0 ? (
+                            <div className="text-center py-6 text-muted-foreground border-t" data-testid={`text-no-students-${device.deviceId}`}>
+                              <p className="text-sm">No students assigned to this device</p>
+                            </div>
+                          ) : (
+                            <div className="border-t pt-4">
+                              <Table>
+                                <TableHeader>
+                                  <TableRow>
+                                    <TableHead>Student Name</TableHead>
+                                    <TableHead>Grade Level</TableHead>
+                                    <TableHead className="text-right">Actions</TableHead>
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {deviceStudents.map((student) => (
+                                    <TableRow 
+                                      key={student.id} 
+                                      data-testid={`row-student-${student.id}`}
+                                    >
+                                      <TableCell data-testid={`text-student-name-${student.id}`}>
+                                        {student.studentName}
+                                      </TableCell>
+                                      <TableCell data-testid={`text-grade-level-${student.id}`}>
+                                        {student.gradeLevel || <span className="text-muted-foreground">-</span>}
+                                      </TableCell>
+                                      <TableCell className="text-right">
+                                        <div className="flex items-center justify-end gap-2">
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => openEditStudentDialog(student)}
+                                            data-testid={`button-edit-student-${student.id}`}
+                                          >
+                                            <Edit className="h-4 w-4 mr-1" />
+                                            Edit
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => setDeleteDialog({ 
+                                              type: 'delete-student', 
+                                              studentId: student.id, 
+                                              studentName: student.studentName 
+                                            })}
+                                            data-testid={`button-delete-student-${student.id}`}
+                                          >
+                                            <Trash2 className="h-4 w-4 mr-1" />
+                                            Remove
+                                          </Button>
+                                        </div>
+                                      </TableCell>
+                                    </TableRow>
+                                  ))}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </CardContent>
+                </Card>
+              ))}
           </div>
         )}
       </main>
 
-      {/* Edit Device Dialog */}
-      <Dialog open={showEditDialog} onOpenChange={setShowEditDialog}>
-        <DialogContent data-testid="dialog-edit-device">
+      {/* Add/Edit Dialog */}
+      <Dialog open={dialog !== null} onOpenChange={() => setDialog(null)}>
+        <DialogContent data-testid={`dialog-${dialog?.type || 'closed'}`}>
           <DialogHeader>
-            <DialogTitle>Edit Device Information</DialogTitle>
+            <DialogTitle>
+              {dialog?.type === 'add-student' && 'Assign Student to Device'}
+              {dialog?.type === 'edit-student' && 'Edit Student Information'}
+              {dialog?.type === 'edit-device' && 'Edit Device Information'}
+            </DialogTitle>
             <DialogDescription>
-              Assign or update student name and grade level for this device
+              {dialog?.type === 'add-student' && 'Add a student assignment to this shared Chromebook'}
+              {dialog?.type === 'edit-student' && 'Update student name and grade level'}
+              {dialog?.type === 'edit-device' && 'Update device name and classroom assignment'}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="device-id-display">Device ID</Label>
-              <Input
-                id="device-id-display"
-                value={selectedDevice?.deviceId || ''}
-                disabled
-                className="font-mono text-sm"
-                data-testid="input-device-id-display"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="device-name-display">Device Name</Label>
-              <Input
-                id="device-name-display"
-                value={selectedDevice?.deviceName || 'N/A'}
-                disabled
-                data-testid="input-device-name-display"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-student-name">Student Name</Label>
-              <Input
-                id="edit-student-name"
-                placeholder="Enter student name"
-                value={editStudentName}
-                onChange={(e) => setEditStudentName(e.target.value)}
-                data-testid="input-edit-student-name"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-grade-level">Grade Level</Label>
-              <Input
-                id="edit-grade-level"
-                placeholder="e.g., 9 or 10th Grade"
-                value={editGradeLevel}
-                onChange={(e) => setEditGradeLevel(e.target.value)}
-                data-testid="input-edit-grade-level"
-              />
-            </div>
+            {dialog?.type === 'add-student' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="add-student-name">Student Name *</Label>
+                  <Input
+                    id="add-student-name"
+                    placeholder="Enter student name"
+                    value={formData.studentName}
+                    onChange={(e) => setFormData({ ...formData, studentName: e.target.value })}
+                    data-testid="input-student-name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="add-grade-level">Grade Level</Label>
+                  <Input
+                    id="add-grade-level"
+                    placeholder="e.g., 9 or 10th Grade"
+                    value={formData.gradeLevel}
+                    onChange={(e) => setFormData({ ...formData, gradeLevel: e.target.value })}
+                    data-testid="input-grade-level"
+                  />
+                </div>
+              </>
+            )}
+
+            {dialog?.type === 'edit-student' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-student-name">Student Name *</Label>
+                  <Input
+                    id="edit-student-name"
+                    placeholder="Enter student name"
+                    value={formData.studentName}
+                    onChange={(e) => setFormData({ ...formData, studentName: e.target.value })}
+                    data-testid="input-edit-student-name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-grade-level">Grade Level</Label>
+                  <Input
+                    id="edit-grade-level"
+                    placeholder="e.g., 9 or 10th Grade"
+                    value={formData.gradeLevel}
+                    onChange={(e) => setFormData({ ...formData, gradeLevel: e.target.value })}
+                    data-testid="input-edit-grade-level"
+                  />
+                </div>
+              </>
+            )}
+
+            {dialog?.type === 'edit-device' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="device-id-display">Device ID</Label>
+                  <Input
+                    id="device-id-display"
+                    value={dialog.device.deviceId}
+                    disabled
+                    className="font-mono text-sm"
+                    data-testid="input-device-id-display"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-device-name">Device Name</Label>
+                  <Input
+                    id="edit-device-name"
+                    placeholder="Optional friendly name"
+                    value={formData.deviceName}
+                    onChange={(e) => setFormData({ ...formData, deviceName: e.target.value })}
+                    data-testid="input-edit-device-name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-class-id">Classroom *</Label>
+                  <Input
+                    id="edit-class-id"
+                    placeholder="e.g., Room 101 or Math Period 3"
+                    value={formData.classId}
+                    onChange={(e) => setFormData({ ...formData, classId: e.target.value })}
+                    data-testid="input-edit-class-id"
+                  />
+                </div>
+              </>
+            )}
           </div>
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setShowEditDialog(false)}
-              data-testid="button-cancel-edit"
+              onClick={() => setDialog(null)}
+              disabled={isPending}
+              data-testid="button-cancel"
             >
               Cancel
             </Button>
             <Button
-              onClick={handleUpdateDevice}
-              disabled={updateStudentMutation.isPending}
-              data-testid="button-save-edit"
+              onClick={handleSave}
+              disabled={isPending}
+              data-testid="button-save"
             >
-              {updateStudentMutation.isPending ? "Saving..." : "Save Changes"}
+              {isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={deleteDialog !== null} onOpenChange={() => setDeleteDialog(null)}>
+        <AlertDialogContent data-testid="dialog-delete-confirm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {deleteDialog?.type === 'delete-student' && 'Remove Student Assignment?'}
+              {deleteDialog?.type === 'delete-device' && 'Delete Device?'}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteDialog?.type === 'delete-student' && (
+                <>
+                  Are you sure you want to remove <strong>{deleteDialog.studentName}</strong> from this device?
+                  This action cannot be undone.
+                </>
+              )}
+              {deleteDialog?.type === 'delete-device' && (
+                <>
+                  Are you sure you want to delete device <strong>{deleteDialog.deviceName}</strong>?
+                  This will also remove all student assignments for this device. This action cannot be undone.
+                </>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isPending} data-testid="button-cancel-delete">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDelete}
+              disabled={isPending}
+              data-testid="button-confirm-delete"
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isPending ? "Deleting..." : "Delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
