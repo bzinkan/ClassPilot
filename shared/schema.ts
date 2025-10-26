@@ -30,6 +30,7 @@ export const students = pgTable("students", {
   studentName: text("student_name").notNull(),
   schoolId: text("school_id").notNull(),
   classId: text("class_id").notNull(),
+  gradeLevel: text("grade_level"),
   registeredAt: timestamp("registered_at").notNull().default(sql`now()`),
 });
 
@@ -42,6 +43,7 @@ export interface StudentStatus {
   deviceId: string;
   studentName: string;
   classId: string;
+  gradeLevel?: string;
   activeTabTitle: string;
   activeTabUrl: string;
   favicon?: string;
