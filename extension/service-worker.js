@@ -11,8 +11,8 @@ let CONFIG = {
   isSharing: false,
 };
 
-let heartbeatTimer = null;
 let ws = null;
+let backoffMs = 0; // Exponential backoff for heartbeat failures
 
 // Load config from storage on startup
 chrome.storage.local.get(['config'], (result) => {
@@ -22,7 +22,7 @@ chrome.storage.local.get(['config'], (result) => {
   }
   
   // Start heartbeat if configured
-  if (CONFIG.deviceId && CONFIG.studentName) {
+  if (CONFIG.deviceId) {
     startHeartbeat();
     connectWebSocket();
   }
@@ -108,41 +108,71 @@ async function sendHeartbeat() {
       body: JSON.stringify(heartbeatData),
     });
     
-    if (!response.ok) {
-      console.error('Heartbeat failed:', response.status);
+    if (response.status >= 500) {
+      // Server error - use exponential backoff
+      backoffMs = Math.min(60000, (backoffMs || 5000) * 2);
+      console.error('Heartbeat server error:', response.status, 'backing off', backoffMs, 'ms');
+      
+      // Schedule retry with backoff
+      chrome.alarms.create('heartbeat-retry', {
+        when: Date.now() + backoffMs + Math.floor(Math.random() * 1500),
+      });
+      
+      chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+      chrome.action.setBadgeText({ text: '!' });
+    } else if (response.ok) {
+      // Success - reset backoff
+      backoffMs = 0;
+      chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
+      chrome.action.setBadgeText({ text: '●' });
+    } else {
+      // Client error (400s) - log but don't retry
+      console.error('Heartbeat client error:', response.status);
+      chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+      chrome.action.setBadgeText({ text: '!' });
     }
     
-    // Update badge to show online status
-    chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-    chrome.action.setBadgeText({ text: '●' });
-    
   } catch (error) {
-    console.error('Heartbeat error:', error);
+    console.error('Heartbeat network error:', error);
+    // Network error - use backoff
+    backoffMs = Math.min(60000, (backoffMs || 5000) * 2);
+    chrome.alarms.create('heartbeat-retry', {
+      when: Date.now() + backoffMs + Math.floor(Math.random() * 1500),
+    });
     chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
     chrome.action.setBadgeText({ text: '!' });
   }
 }
 
-// Start periodic heartbeat
+// Start periodic heartbeat using chrome.alarms (reliable in MV3 service workers)
 function startHeartbeat() {
-  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  // Clear any existing alarms
+  chrome.alarms.clear('heartbeat');
+  chrome.alarms.clear('heartbeat-retry');
   
   // Send immediate heartbeat
   sendHeartbeat();
   
-  // Then send periodically
-  heartbeatTimer = setInterval(sendHeartbeat, CONFIG.heartbeatInterval);
-  console.log('Heartbeat started');
+  // Create periodic alarm (every 10 seconds)
+  chrome.alarms.create('heartbeat', {
+    periodInMinutes: CONFIG.heartbeatInterval / 60000, // Convert ms to minutes
+  });
+  console.log('Heartbeat started with chrome.alarms');
 }
 
 // Stop heartbeat
 function stopHeartbeat() {
-  if (heartbeatTimer) {
-    clearInterval(heartbeatTimer);
-    heartbeatTimer = null;
-  }
+  chrome.alarms.clear('heartbeat');
+  chrome.alarms.clear('heartbeat-retry');
   console.log('Heartbeat stopped');
 }
+
+// Alarm listener for heartbeat
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'heartbeat' || alarm.name === 'heartbeat-retry') {
+    sendHeartbeat();
+  }
+});
 
 // Connect to WebSocket for signaling
 function connectWebSocket() {
@@ -231,6 +261,54 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (CONFIG.deviceId && tab.active && (changeInfo.url || changeInfo.title)) {
     await sendHeartbeat();
+    
+    // Log URL change event
+    if (changeInfo.url) {
+      try {
+        await fetch(`${CONFIG.serverUrl}/api/event`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId: CONFIG.deviceId,
+            eventType: 'url_change',
+            metadata: { 
+              url: changeInfo.url,
+              title: tab.title || 'No title',
+            },
+          }),
+        });
+      } catch (error) {
+        console.error('Event logging error:', error);
+      }
+    }
+  }
+});
+
+// Web Navigation listener - track all navigation events (including clicks)
+chrome.webNavigation.onCommitted.addListener(async (details) => {
+  if (!CONFIG.deviceId) return;
+  
+  // Only log main frame navigations (not iframes)
+  if (details.frameId !== 0) return;
+  
+  // Log navigation event with transition type
+  try {
+    await fetch(`${CONFIG.serverUrl}/api/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: CONFIG.deviceId,
+        eventType: 'navigation',
+        metadata: { 
+          url: details.url,
+          transitionType: details.transitionType,
+          transitionQualifiers: details.transitionQualifiers,
+          timestamp: details.timeStamp,
+        },
+      }),
+    });
+  } catch (error) {
+    console.error('Navigation event logging error:', error);
   }
 });
 
@@ -238,9 +316,20 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'register') {
     registerDevice(message.deviceId, message.deviceName, message.classId)
-      .then((data) => {
+      .then(async (data) => {
         startHeartbeat();
         connectWebSocket();
+        
+        // Refresh the current page to apply privacy banner
+        try {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabs[0]?.id) {
+            chrome.tabs.reload(tabs[0].id);
+          }
+        } catch (error) {
+          console.error('Failed to refresh tab:', error);
+        }
+        
         sendResponse({ success: true, data });
       })
       .catch((error) => {

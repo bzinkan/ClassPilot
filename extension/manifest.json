@@ -14,7 +14,9 @@
     "storage",
     "notifications",
     "tabCapture",
-    "desktopCapture"
+    "desktopCapture",
+    "alarms",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"

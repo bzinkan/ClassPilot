@@ -391,23 +391,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Heartbeat endpoint (from extension)
+  // Heartbeat endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/heartbeat", heartbeatLimiter, async (req, res) => {
     try {
-      const data = insertHeartbeatSchema.parse(req.body);
+      // Validate input with safe parse
+      const result = insertHeartbeatSchema.safeParse(req.body);
       
-      const heartbeat = await storage.addHeartbeat(data);
+      if (!result.success) {
+        console.warn('Invalid heartbeat data:', result.error.format(), req.body);
+        // Return 204 even on validation failure to prevent extension from retrying
+        return res.sendStatus(204);
+      }
       
-      // Notify teachers of update
-      broadcastToTeachers({
-        type: 'student-update',
-        deviceId: data.deviceId,
-      });
-
-      res.json({ success: true, heartbeat });
+      const data = result.data;
+      
+      // Store heartbeat asynchronously - don't block the response
+      storage.addHeartbeat(data)
+        .then(() => {
+          // Notify teachers of update (non-blocking)
+          broadcastToTeachers({
+            type: 'student-update',
+            deviceId: data.deviceId,
+          });
+        })
+        .catch((error) => {
+          // Log but don't fail - we already responded to client
+          console.error("Heartbeat storage error:", error, "deviceId:", data.deviceId);
+        });
+      
+      // Always return success immediately
+      return res.sendStatus(204);
     } catch (error) {
-      console.error("Heartbeat error:", error);
-      res.status(400).json({ error: "Invalid request" });
+      // Final safety net - never throw
+      console.error("Heartbeat uncaught error:", error, req.body);
+      return res.sendStatus(204);
     }
   });
 
