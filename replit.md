@@ -32,20 +32,32 @@ The system uses a full-stack architecture:
   - **Auto-refresh**: Automatically refreshes student's current page after successful registration to apply privacy banner
 
 ### Feature Specifications
+- **Shared Chromebook Support (NEW)**: Full support for multiple students using the same Chromebook device across different periods.
+  - **Device/Student Separation**: Database schema separates physical devices from student assignments, allowing many-to-one relationships
+  - **Student Self-Selection**: Chrome Extension popup displays dropdown of students assigned to the device; student selects themselves when sitting down
+  - **Active Student Tracking**: System tracks which student is currently using each device via in-memory activeStudents map
+  - **Grade Filtering by Active Student**: Dashboard grade filters show students by their individual grade level, not the device's
+  - **Heartbeats with studentId**: Each heartbeat includes the active studentId to attribute activity to the correct student
+  - **Student-Specific History**: Activity logs and events are tracked per student, enabling accurate monitoring even on shared devices
+  - **Roster Multi-Assignment**: Teachers can assign multiple students to a single device from the Roster page
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
   - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "6, 7, 8" or "9, 10, 11, 12"). Grade tabs are set in Settings and dynamically update the dashboard filtering.
-  - **Delete Devices**: Teachers can delete student devices directly from the dashboard with a confirmation dialog. Deletion removes the device from both the dashboard and roster.
-  - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page.
-  - **Two-Stage Device Registration**: Devices register first with Device ID, Classroom Location, and Device Number via Chrome Extension, then teachers can assign student names and grade levels later from the dashboard or Roster page.
-- **Roster Management Page**: A dedicated page (`/roster`) for comprehensive device roster management, separate from Settings page:
+  - **Delete Students/Devices**: Teachers can delete individual student assignments or entire devices directly from the dashboard with confirmation dialogs
+  - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page
+  - **Student-First Display**: Dashboard tiles show student names prominently with device information as secondary detail
+- **Roster Management Page**: A dedicated page (`/roster`) for comprehensive device and student assignment management:
   - **View All Devices**: Displays all registered devices grouped by classroom location (classId)
-  - **Edit Device Information**: Attach student names and grade levels to devices, update device names and classroom assignments
-  - **Delete Devices**: Remove devices with confirmation dialogs from roster table
-  - **Table View**: Displays all devices with their assigned information organized by classroom
-  - **Grade Level Tracking**: Nullable field to accommodate various school structures and unassigned devices
+  - **Assign Multiple Students**: Each device shows a nested table of all students assigned to it with "Assign Student" button to add more
+  - **Edit Student Information**: Update student name and grade level independently for each student assignment
+  - **Edit Device Information**: Update device name and classroom assignment separately from student data
+  - **Delete Students**: Remove individual student assignments from devices with confirmation dialogs
+  - **Delete Devices**: Remove entire devices (and all student assignments) with warnings about cascading deletion
+  - **Nested Table View**: Devices show their assigned students in a clear hierarchical structure
+  - **Empty State Handling**: Shows "No students assigned" message for devices without student assignments
+  - **Grade Level Tracking**: Each student has their own nullable gradeLevel field
   - **Device Name Support**: Easier Chromebook identification (e.g., "Chromebook 1", "Lab Computer 5")
-  - **Persistent Storage**: Database-backed storage ensures roster data survives server restarts
-  - **Automatic Refresh**: Query cache invalidation ensures roster table updates immediately after edits
+  - **Persistent Storage**: Database-backed storage with separate devices and students tables ensures data integrity
+  - **Automatic Refresh**: Mutations invalidate multiple query keys to keep dashboard and roster synchronized
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
 - **Website Duration Tracking**: 
   - Calculates and displays how long students spend on each website by grouping consecutive heartbeats
@@ -62,8 +74,15 @@ The system uses a full-stack architecture:
 ### System Design Choices
 - **Privacy-First**: All monitoring is transparent to students with visible indicators and explicit consent for screen sharing. No keystrokes, mic, or camera data are collected.
 - **Scalability**: Utilizes PostgreSQL (Neon-backed) with Drizzle ORM for persistent data storage.
+  - **Normalized Schema**: Devices and students stored in separate tables with proper foreign key relationships
+  - **Efficient Querying**: Separate API endpoints for device operations vs student operations prevent identifier confusion
 - **Deployment**: Designed for production readiness, including specific considerations for Google Admin force-install of the Chrome Extension.
 - **IP Allowlist**: Basic IP-based access control is available for securing teacher dashboard access.
+- **API Design**: Clear separation of concerns with distinct endpoints:
+  - `/api/students/:studentId` for student-specific operations (name, grade)
+  - `/api/devices/:deviceId` for device-specific operations (device name, classroom)
+  - `/api/device/:deviceId/students` for fetching students assigned to a device
+  - `/api/device/:deviceId/active-student` for managing active student selection
 
 ## External Dependencies
 - **Database**: PostgreSQL (Neon-backed)
