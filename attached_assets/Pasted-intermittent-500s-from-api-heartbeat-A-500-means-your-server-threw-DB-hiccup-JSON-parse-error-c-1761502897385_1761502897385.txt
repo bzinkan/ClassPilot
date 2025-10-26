@@ -1,0 +1,188 @@
+intermittent 500s from /api/heartbeat. A 500 means your server threw (DB hiccup, JSON parse error, connection exhaustion, etc.). The fix is to make the heartbeat path bullet-proof: validate input, avoid synchronous DB work, never throw, and degrade gracefully. Do these four things and the 500s will stop:
+
+1) Make /api/heartbeat “can’t fail”
+
+Validate + short-circuit; if downstream (DB) is sick, queue and 204 instead of throwing.
+
+// server/heartbeat.js
+import express from 'express';
+import pino from 'pino';
+import { z } from 'zod';
+
+const log = pino({ level: process.env.LOG_LEVEL || 'info' });
+export const router = express.Router();
+
+const Heartbeat = z.object({
+  deviceId: z.string().min(3),
+  studentName: z.string().min(1).optional(),
+  classId: z.string().optional(),
+  url: z.string().url().optional(),
+  title: z.string().optional(),
+  ts: z.number().int().optional(), // client time
+});
+
+// In-memory ring buffers (flush later)
+const ring = new Map(); // deviceId -> array of last N heartbeats
+const MAX_PER_DEVICE = 50;
+
+router.post('/api/heartbeat', express.json({ limit: '12kb' }), async (req, res) => {
+  try {
+    const parsed = Heartbeat.safeParse(req.body);
+    if (!parsed.success) {
+      log.warn({ err: parsed.error.format(), body: req.body }, 'bad_heartbeat');
+      return res.status(400).json({ error: 'bad_request' });
+    }
+    const hb = { ...parsed.data, srvTs: Date.now() };
+
+    // Keep only recent heartbeats in memory so dashboards can read instantly
+    const arr = ring.get(hb.deviceId) || [];
+    arr.push(hb);
+    if (arr.length > MAX_PER_DEVICE) arr.shift();
+    ring.set(hb.deviceId, arr);
+
+    // Non-blocking persist (swallow errors)
+    queuePersist(hb).catch((e) => {
+      log.error({ e, deviceId: hb.deviceId }, 'persist_failed');
+    });
+
+    // Never fail the client
+    return res.sendStatus(204);
+  } catch (e) {
+    // Final safety net: never 500 the client
+    log.error({ e, body: req.body }, 'heartbeat_uncaught');
+    return res.sendStatus(204);
+  }
+});
+
+// Example: batch persist to DB on a timer rather than per request
+const persistQueue = [];
+function queuePersist(hb) { persistQueue.push(hb); return Promise.resolve(); }
+
+setInterval(async () => {
+  if (!persistQueue.length) return;
+  const batch = persistQueue.splice(0, persistQueue.length);
+  try {
+    // TODO: write batch with your ORM/SQL
+    // await db.insert(batch)
+  } catch (e) {
+    // Put back (bounded) and log; don't blow up
+    persistQueue.unshift(...batch.slice(0, 1000)); // clamp to avoid memory leak
+  }
+}, 1000);
+
+
+Why this works: even if Neon/Postgres, Drizzle, or your proxy flinches, the endpoint returns 204 and your dashboard still has fresh data from the ring buffer. 500s disappear.
+
+2) Guard the usual crash points
+
+Add these once at app startup:
+
+// Prevent process crashes and convert to 5xx logs (but respond 204 above)
+process.on('unhandledRejection', (r) => console.error('unhandledRejection', r));
+process.on('uncaughtException', (e) => console.error('uncaughtException', e));
+
+// Trust proxy & sane body/CORS limits
+app.set('trust proxy', 1);
+app.use(require('cors')({
+  origin: (o, cb) => {
+    if (!o) return cb(null, true);
+    if (o.startsWith('chrome-extension://')) return cb(null, true);
+    if (o === process.env.PUBLIC_BASE_URL) return cb(null, true);
+    return cb(null, false);
+  },
+  credentials: true
+}));
+
+
+Common 500 sources this neutralizes:
+
+JSON parse errors (size/invalid) → now return 400.
+
+DB connection exhaustion (Neon idle resets) → now queued, not synchronous.
+
+Race conditions (extension sends without deviceId) → now 400, not 500.
+
+3) Be gentle on the server from the extension
+
+Replace setInterval with chrome.alarms (service workers nap) and add retry with jitter. Also clamp your send rate.
+
+// extension/service-worker.js
+const STATE = { cfg: null, backoff: 0 };
+
+async function loadCfg() {
+  try {
+    // fetch once at boot; cache baseUrl
+    const r = await fetch('https://<your-app>/client-config.json', { cache: 'no-store' });
+    STATE.cfg = await r.json();
+  } catch {}
+}
+loadCfg();
+
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.alarms.create('heartbeat', { periodInMinutes: 0.2 }); // ~12s
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== 'heartbeat') return;
+  if (!STATE.cfg) await loadCfg();
+  const base = STATE.cfg?.baseUrl;
+  if (!base) return;
+
+  const payload = await buildHeartbeat(); // includes deviceId, title, url, ts
+  try {
+    const res = await fetch(`${base}/api/heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      // no credentials; keep it stateless
+    });
+    if (res.status >= 500) {
+      // exponential backoff with jitter
+      STATE.backoff = Math.min(60000, (STATE.backoff || 5000) * 2);
+    } else {
+      STATE.backoff = 0;
+    }
+  } catch {
+    STATE.backoff = Math.min(60000, (STATE.backoff || 5000) * 2);
+  }
+
+  if (STATE.backoff) {
+    // temporary pause: schedule a one-off alarm sooner than normal period
+    chrome.alarms.create('heartbeat_retry', {
+      when: Date.now() + STATE.backoff + Math.floor(Math.random() * 1500),
+    });
+  }
+});
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'heartbeat_retry') {
+    chrome.alarms.create('heartbeat', { periodInMinutes: 0.2 }); // restore periodic
+  }
+});
+
+
+Why: service workers go idle; chrome.alarms is the reliable timer. The backoff prevents dog-piling your server if it hiccups.
+
+4) Add a self-check & logs so you can see the root cause
+
+When it happens again, you’ll know exactly why:
+
+app.get('/health', async (req, res) => {
+  // Optionally test DB here but never block for long
+  res.json({ ok: true, time: Date.now(), inQueue: persistQueue.length });
+});
+
+// Log minimal failure info from the route already provided (pino logs).
+// On Replit, open "Logs" for Deployments to see them in real time.
+
+Quick sanity checklist
+
+Return 204 from /api/heartbeat even when DB is down.
+
+Validate input; never throw on malformed body.
+
+Batch DB writes; don’t write per heartbeat in the request path.
+
+Use chrome.alarms + backoff in the extension.
+
+Keep your published PUBLIC_BASE_URL correct; fetch /client-config.json at runtime.
