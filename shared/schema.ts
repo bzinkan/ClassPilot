@@ -24,26 +24,38 @@ export const createTeacherSchema = z.object({
 });
 export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 
-// Student device registration
-export const students = pgTable("students", {
+// Device registration (Chromebooks)
+export const devices = pgTable("devices", {
   deviceId: varchar("device_id").primaryKey(),
   deviceName: text("device_name"),
-  studentName: text("student_name"), // Nullable - added by teacher later
   schoolId: text("school_id").notNull(),
   classId: text("class_id").notNull(),
-  gradeLevel: text("grade_level"), // Nullable - added by teacher later
   registeredAt: timestamp("registered_at").notNull().default(sql`now()`),
 });
 
-export const insertStudentSchema = createInsertSchema(students).omit({ registeredAt: true });
+export const insertDeviceSchema = createInsertSchema(devices).omit({ registeredAt: true });
+export type InsertDevice = z.infer<typeof insertDeviceSchema>;
+export type Device = typeof devices.$inferSelect;
+
+// Students assigned to devices (multiple students can share one device)
+export const students = pgTable("students", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  deviceId: text("device_id").notNull(), // FK to devices table
+  studentName: text("student_name").notNull(),
+  gradeLevel: text("grade_level"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
 
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
+  studentId: string;
   deviceId: string;
   deviceName?: string;
-  studentName?: string; // Optional - assigned by teacher later
+  studentName: string;
   classId: string;
   gradeLevel?: string;
   activeTabTitle: string;
@@ -58,6 +70,7 @@ export interface StudentStatus {
 export const heartbeats = pgTable("heartbeats", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(),
+  studentId: text("student_id"), // Nullable - which student is currently active
   activeTabTitle: text("active_tab_title").notNull(),
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
@@ -72,7 +85,8 @@ export type Heartbeat = typeof heartbeats.$inferSelect;
 export const events = pgTable("events", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(),
-  eventType: text("event_type").notNull(), // 'tab_change', 'consent_granted', 'consent_revoked', 'blocked_domain'
+  studentId: text("student_id"), // Nullable - which student triggered the event
+  eventType: text("event_type").notNull(), // 'tab_change', 'consent_granted', 'consent_revoked', 'blocked_domain', 'student_switched'
   metadata: jsonb("metadata"),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 });
