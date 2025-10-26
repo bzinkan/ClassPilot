@@ -50,6 +50,7 @@ export function RosterManagement() {
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [formData, setFormData] = useState({
     deviceId: "",
+    deviceName: "",
     studentName: "",
     classId: "",
     gradeLevel: "",
@@ -143,6 +144,7 @@ export function RosterManagement() {
   const resetForm = () => {
     setFormData({
       deviceId: "",
+      deviceName: "",
       studentName: "",
       classId: "",
       gradeLevel: "",
@@ -165,6 +167,7 @@ export function RosterManagement() {
     setSelectedStudent(student);
     setFormData({
       deviceId: student.deviceId,
+      deviceName: student.deviceName || "",
       studentName: student.studentName,
       classId: student.classId,
       gradeLevel: student.gradeLevel || "",
@@ -178,6 +181,9 @@ export function RosterManagement() {
     const updates: Partial<typeof formData> = {};
     if (formData.studentName !== selectedStudent.studentName) {
       updates.studentName = formData.studentName;
+    }
+    if (formData.deviceName !== (selectedStudent.deviceName || "")) {
+      updates.deviceName = formData.deviceName || null;
     }
     if (formData.classId !== selectedStudent.classId) {
       updates.classId = formData.classId;
@@ -247,6 +253,7 @@ export function RosterManagement() {
                 <TableRow>
                   <TableHead>Student Name</TableHead>
                   <TableHead>Device ID</TableHead>
+                  <TableHead>Device Name</TableHead>
                   <TableHead>Class ID</TableHead>
                   <TableHead>Grade Level</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
@@ -257,6 +264,7 @@ export function RosterManagement() {
                   <TableRow key={student.deviceId} data-testid={`row-student-${student.deviceId}`}>
                     <TableCell className="font-medium">{student.studentName}</TableCell>
                     <TableCell className="font-mono text-sm">{student.deviceId}</TableCell>
+                    <TableCell>{student.deviceName || "—"}</TableCell>
                     <TableCell>{student.classId}</TableCell>
                     <TableCell>{student.gradeLevel || "—"}</TableCell>
                     <TableCell className="text-right">
@@ -315,6 +323,16 @@ export function RosterManagement() {
                 value={formData.deviceId}
                 onChange={(e) => setFormData({ ...formData, deviceId: e.target.value })}
                 placeholder="device-001"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="add-device-name">Device Name (Optional)</Label>
+              <Input
+                id="add-device-name"
+                data-testid="input-add-device-name"
+                value={formData.deviceName}
+                onChange={(e) => setFormData({ ...formData, deviceName: e.target.value })}
+                placeholder="6th chromebook 1"
               />
             </div>
             <div className="space-y-2">
@@ -381,11 +399,21 @@ export function RosterManagement() {
               />
             </div>
             <div className="space-y-2">
-              <Label>Device ID</Label>
+              <Label>Device ID (Read-only)</Label>
               <Input
                 value={formData.deviceId}
                 disabled
-                className="bg-muted"
+                className="bg-muted font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-device-name">Device Name (Optional)</Label>
+              <Input
+                id="edit-device-name"
+                data-testid="input-edit-device-name"
+                value={formData.deviceName}
+                onChange={(e) => setFormData({ ...formData, deviceName: e.target.value })}
+                placeholder="6th chromebook 1"
               />
             </div>
             <div className="space-y-2">
