@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { X, ExternalLink, Clock, Monitor, Video, Bell, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,6 +18,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format } from "date-fns";
+import { calculateURLSessions, formatDuration } from "@shared/utils";
 
 interface StudentDetailDrawerProps {
   student: StudentStatus | null;
@@ -37,6 +38,11 @@ export function StudentDetailDrawer({
   const [videoLoaded, setVideoLoaded] = useState(false);
   const [pinging, setPinging] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+
+  // Calculate URL sessions with duration from heartbeats
+  const urlSessions = useMemo(() => {
+    return calculateURLSessions(urlHistory);
+  }, [urlHistory]);
 
   const deleteStudentMutation = useMutation({
     mutationFn: async (deviceId: string) => {
@@ -398,29 +404,30 @@ export function StudentDetailDrawer({
                 </div>
               )}
 
-              {/* URL History */}
+              {/* URL History with Duration */}
               <div>
                 <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground mb-3">
                   Recent Activity
                 </h3>
                 <div className="space-y-2">
-                  {urlHistory.length === 0 ? (
+                  {urlSessions.length === 0 ? (
                     <div className="p-8 text-center">
                       <Clock className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
                       <p className="text-sm text-muted-foreground">No activity history yet</p>
                     </div>
                   ) : (
-                    urlHistory.slice(0, 20).map((item, index) => (
+                    urlSessions.slice(0, 20).map((session, index) => (
                       <div
-                        key={item.id || index}
+                        key={`${session.url}-${session.startTime.getTime()}-${index}`}
                         className="p-3 rounded-md bg-muted/30 border-l-4 border-primary/20"
+                        data-testid={`activity-session-${index}`}
                       >
                         <div className="flex items-start justify-between gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1">
-                              {item.favicon && (
+                              {session.favicon && (
                                 <img
-                                  src={item.favicon}
+                                  src={session.favicon}
                                   alt=""
                                   className="w-3 h-3 flex-shrink-0"
                                   onError={(e) => {
@@ -429,16 +436,23 @@ export function StudentDetailDrawer({
                                 />
                               )}
                               <p className="text-sm font-medium truncate">
-                                {item.activeTabTitle}
+                                {session.title}
                               </p>
                             </div>
-                            <p className="text-xs font-mono text-muted-foreground truncate">
-                              {item.activeTabUrl}
+                            <p className="text-xs font-mono text-muted-foreground truncate mb-1">
+                              {session.url}
                             </p>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <Clock className="h-3 w-3" />
+                              <span className="font-medium text-primary" data-testid={`duration-${index}`}>
+                                {formatDuration(session.durationSeconds)}
+                              </span>
+                              <span className="opacity-60">•</span>
+                              <span>
+                                {format(session.startTime, 'HH:mm')} - {format(session.endTime, 'HH:mm')}
+                              </span>
+                            </div>
                           </div>
-                          <span className="text-xs text-muted-foreground whitespace-nowrap">
-                            {format(new Date(item.timestamp), 'HH:mm')}
-                          </span>
                         </div>
                       </div>
                     ))
