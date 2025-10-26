@@ -45,24 +45,28 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName);
+  const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const { toast } = useToast();
   
-  const updateStudentNameMutation = useMutation({
-    mutationFn: async (data: { deviceId: string; studentName: string }) => {
-      return await apiRequest("PATCH", `/api/students/${data.deviceId}`, { studentName: data.studentName });
+  const updateStudentMutation = useMutation({
+    mutationFn: async (data: { deviceId: string; studentName: string; deviceName: string }) => {
+      return await apiRequest("PATCH", `/api/students/${data.deviceId}`, { 
+        studentName: data.studentName,
+        deviceName: data.deviceName || null
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
-        title: "Student name updated",
-        description: `Successfully updated student name to ${newStudentName}`,
+        title: "Student information updated",
+        description: `Successfully updated student information`,
       });
       setEditDialogOpen(false);
     },
     onError: (error: any) => {
       toast({
         variant: "destructive",
-        title: "Failed to update student name",
+        title: "Failed to update student",
         description: error.message || "An error occurred",
       });
     },
@@ -71,10 +75,11 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setNewStudentName(student.studentName);
+    setNewDeviceName(student.deviceName || '');
     setEditDialogOpen(true);
   };
 
-  const handleSaveStudentName = () => {
+  const handleSaveStudent = () => {
     if (!newStudentName.trim()) {
       toast({
         variant: "destructive",
@@ -83,7 +88,11 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
       });
       return;
     }
-    updateStudentNameMutation.mutate({ deviceId: student.deviceId, studentName: newStudentName });
+    updateStudentMutation.mutate({ 
+      deviceId: student.deviceId, 
+      studentName: newStudentName,
+      deviceName: newDeviceName 
+    });
   };
   
   const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);
@@ -229,23 +238,38 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
         </div>
       </div>
 
-      {/* Edit Student Name Dialog */}
+      {/* Edit Student Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
         <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.deviceId}`}>
           <DialogHeader>
-            <DialogTitle>Edit Student Name</DialogTitle>
+            <DialogTitle>Edit Student Information</DialogTitle>
             <DialogDescription>
-              Assign a student name to this Chromebook device
+              Update student name and device name for this Chromebook
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="device-id">Device</Label>
+              <Label htmlFor="device-id">Device ID (Read-only)</Label>
               <Input
                 id="device-id"
                 value={student.deviceId}
                 disabled
                 className="font-mono text-sm"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="device-name">Device Name (Optional)</Label>
+              <Input
+                id="device-name"
+                data-testid={`input-edit-device-name-${student.deviceId}`}
+                value={newDeviceName}
+                onChange={(e) => setNewDeviceName(e.target.value)}
+                placeholder="e.g., 6th chromebook 1"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSaveStudent();
+                  }
+                }}
               />
             </div>
             <div className="space-y-2">
@@ -255,10 +279,10 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
                 data-testid={`input-edit-student-name-${student.deviceId}`}
                 value={newStudentName}
                 onChange={(e) => setNewStudentName(e.target.value)}
-                placeholder="e.g., Lucy, John Smith"
+                placeholder="e.g., Lucy Garcia"
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    handleSaveStudentName();
+                    handleSaveStudent();
                   }
                 }}
               />
@@ -273,11 +297,11 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
               Cancel
             </Button>
             <Button
-              onClick={handleSaveStudentName}
-              disabled={updateStudentNameMutation.isPending}
+              onClick={handleSaveStudent}
+              disabled={updateStudentMutation.isPending}
               data-testid="button-save-student-name"
             >
-              {updateStudentNameMutation.isPending ? "Saving..." : "Save"}
+              {updateStudentMutation.isPending ? "Saving..." : "Save"}
             </Button>
           </DialogFooter>
         </DialogContent>
