@@ -529,14 +529,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update student information (name, grade level, class)
+  // Update student information (name, device name, grade level, class)
   app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { deviceId } = req.params;
-      const updates: Partial<{studentName: string; classId: string; gradeLevel: string | null}> = {};
+      const updates: Partial<{studentName: string; deviceName: string | null; classId: string; gradeLevel: string | null}> = {};
       
       if (req.body.studentName) {
         updates.studentName = req.body.studentName;
+      }
+      if ('deviceName' in req.body) {
+        updates.deviceName = req.body.deviceName;
       }
       if (req.body.classId) {
         updates.classId = req.body.classId;
