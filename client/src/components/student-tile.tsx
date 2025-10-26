@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2 } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2 } from "lucide-react";
 import type { StudentStatus } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -44,6 +44,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 
 export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName);
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const { toast } = useToast();
@@ -72,11 +73,42 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
     },
   });
 
+  const deleteStudentMutation = useMutation({
+    mutationFn: async (deviceId: string) => {
+      return await apiRequest("DELETE", `/api/students/${deviceId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      toast({
+        title: "Student device deleted",
+        description: `Successfully removed ${student.studentName} from the dashboard`,
+      });
+      setDeleteDialogOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to delete student",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setNewStudentName(student.studentName);
     setNewDeviceName(student.deviceName || '');
     setEditDialogOpen(true);
+  };
+
+  const handleDeleteClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDeleteDialogOpen(true);
+  };
+
+  const handleConfirmDelete = () => {
+    deleteStudentMutation.mutate(student.deviceId);
   };
 
   const handleSaveStudent = () => {
@@ -163,7 +195,7 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1">
               <h3 className="font-medium text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
                 {student.studentName}
               </h3>
@@ -175,6 +207,15 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
                 data-testid={`button-edit-student-${student.deviceId}`}
               >
                 <Edit2 className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6 flex-shrink-0 text-destructive hover:text-destructive"
+                onClick={handleDeleteClick}
+                data-testid={`button-delete-student-${student.deviceId}`}
+              >
+                <Trash2 className="h-3 w-3" />
               </Button>
             </div>
             {student.deviceName && (
@@ -308,6 +349,35 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
               data-testid="button-save-student-name"
             >
               {updateStudentMutation.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-delete-student-${student.deviceId}`}>
+          <DialogHeader>
+            <DialogTitle>Delete Student Device</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to remove {student.studentName} ({student.deviceId}) from the dashboard? This will delete the student from your roster.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              data-testid="button-cancel-delete-student"
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmDelete}
+              disabled={deleteStudentMutation.isPending}
+              data-testid="button-confirm-delete-student"
+            >
+              {deleteStudentMutation.isPending ? "Deleting..." : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>

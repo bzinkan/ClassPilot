@@ -98,12 +98,6 @@ export default function Dashboard() {
     };
   }, [refetch]);
 
-  // Extract grade from deviceId (e.g., "Grade 9 - CB-23" -> "9")
-  const getGradeFromDeviceId = (deviceId: string): string | null => {
-    const match = deviceId.match(/Grade (\d+)/i);
-    return match ? match[1] : null;
-  };
-
   const filteredStudents = students.filter((student) => {
     const matchesSearch = 
       student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -114,8 +108,8 @@ export default function Dashboard() {
     
     if (selectedGrade === "all") return true;
     
-    const studentGrade = getGradeFromDeviceId(student.deviceId);
-    return studentGrade === selectedGrade;
+    // Filter by gradeLevel field
+    return student.gradeLevel === selectedGrade;
   });
 
   const onlineCount = students.filter((s) => s.status === 'online').length;
