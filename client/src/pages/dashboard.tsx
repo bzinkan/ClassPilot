@@ -98,6 +98,28 @@ export default function Dashboard() {
     };
   }, [refetch]);
 
+  // Check if student is off-task (not on allowed domains)
+  const isStudentOffTask = (student: StudentStatus): boolean => {
+    // Only check if allowedDomains is configured and has entries
+    if (!settings?.allowedDomains || settings.allowedDomains.length === 0) return false;
+    if (!student.activeTabUrl) return false;
+    if (student.status !== 'online') return false; // Only check online students
+    
+    try {
+      const hostname = new URL(student.activeTabUrl).hostname.toLowerCase();
+      
+      // Check if student is on any allowed domain
+      const isOnAllowedDomain = settings.allowedDomains.some(allowed => {
+        const allowedLower = allowed.toLowerCase().trim();
+        return hostname === allowedLower || hostname.endsWith('.' + allowedLower);
+      });
+      
+      return !isOnAllowedDomain; // Off-task if NOT on allowed domain
+    } catch {
+      return false;
+    }
+  };
+
   const filteredStudents = students
     .filter((student) => {
       const matchesSearch = 
@@ -125,29 +147,6 @@ export default function Dashboard() {
   const onlineCount = students.filter((s) => s.status === 'online').length;
   const idleCount = students.filter((s) => s.status === 'idle').length;
   const sharingCount = students.filter((s) => s.isSharing).length;
-  
-  // Check if student is off-task (not on allowed domains)
-  const isStudentOffTask = (student: StudentStatus): boolean => {
-    // Only check if allowedDomains is configured and has entries
-    if (!settings?.allowedDomains || settings.allowedDomains.length === 0) return false;
-    if (!student.activeTabUrl) return false;
-    if (student.status !== 'online') return false; // Only check online students
-    
-    try {
-      const hostname = new URL(student.activeTabUrl).hostname.toLowerCase();
-      
-      // Check if student is on any allowed domain
-      const isOnAllowedDomain = settings.allowedDomains.some(allowed => {
-        const allowedLower = allowed.toLowerCase().trim();
-        return hostname === allowedLower || hostname.endsWith('.' + allowedLower);
-      });
-      
-      return !isOnAllowedDomain; // Off-task if NOT on allowed domain
-    } catch {
-      return false;
-    }
-  };
-  
   const offTaskCount = students.filter(isStudentOffTask).length;
 
   // Check for blocked domain violations and show notifications
