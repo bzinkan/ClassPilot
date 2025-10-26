@@ -17,6 +17,7 @@ import {
   createTeacherSchema,
   type StudentStatus,
   type SignalMessage,
+  type InsertRoster,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration } from "@shared/utils";
 
@@ -696,6 +697,44 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Update settings error:", error);
       res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  // Get all rosters/classes
+  app.get("/api/rosters", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const rosters = await storage.getAllRosters();
+      res.json(rosters);
+    } catch (error) {
+      console.error("Get rosters error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Create or update a roster/class
+  app.post("/api/rosters", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { className, classId } = req.body;
+      
+      if (!className || typeof className !== 'string') {
+        return res.status(400).json({ error: "Class name is required" });
+      }
+      
+      if (!classId || typeof classId !== 'string') {
+        return res.status(400).json({ error: "Class ID is required" });
+      }
+      
+      const rosterData: InsertRoster = {
+        classId,
+        className,
+        deviceIds: [],
+      };
+      
+      const roster = await storage.upsertRoster(rosterData);
+      res.json(roster);
+    } catch (error) {
+      console.error("Create roster error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
