@@ -123,7 +123,7 @@ export default function Dashboard() {
   const filteredStudents = students
     .filter((student) => {
       const matchesSearch = 
-        student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        (student.studentName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.classId.toLowerCase().includes(searchQuery.toLowerCase());
       
