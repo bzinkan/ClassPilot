@@ -27,6 +27,7 @@ const settingsSchema = z.object({
   wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
   retentionHours: z.string().min(1, "Retention period is required"),
   blockedDomains: z.string(),
+  allowedDomains: z.string(),
   ipAllowlist: z.string(),
   gradeLevels: z.string().min(1, "At least one grade level is required"),
 });
@@ -52,6 +53,7 @@ export default function Settings() {
       wsSharedKey: settings?.wsSharedKey || "",
       retentionHours: settings?.retentionHours || "24",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
+      allowedDomains: settings?.allowedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
       gradeLevels: settings?.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
     },
@@ -65,6 +67,7 @@ export default function Settings() {
         wsSharedKey: settings.wsSharedKey,
         retentionHours: settings.retentionHours,
         blockedDomains: settings.blockedDomains?.join(", ") || "",
+        allowedDomains: settings.allowedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
         gradeLevels: settings.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
       });
@@ -89,6 +92,10 @@ export default function Settings() {
         schoolId,
         ...data,
         blockedDomains: data.blockedDomains
+          .split(",")
+          .map((d) => d.trim())
+          .filter(Boolean),
+        allowedDomains: data.allowedDomains
           .split(",")
           .map((d) => d.trim())
           .filter(Boolean),
@@ -309,6 +316,19 @@ export default function Settings() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Student tiles will be highlighted if they visit these domains
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="allowedDomains">Allowed Websites (comma-separated)</Label>
+                <Input
+                  id="allowedDomains"
+                  data-testid="input-allowed-domains"
+                  {...form.register("allowedDomains")}
+                  placeholder="classroom.google.com, kahoot.com"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Students navigating away from these websites will be marked as off-task. Leave empty to disable this feature.
                 </p>
               </div>
 
