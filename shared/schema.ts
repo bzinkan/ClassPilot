@@ -27,6 +27,7 @@ export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 // Student device registration
 export const students = pgTable("students", {
   deviceId: varchar("device_id").primaryKey(),
+  deviceName: text("device_name"),
   studentName: text("student_name").notNull(),
   schoolId: text("school_id").notNull(),
   classId: text("class_id").notNull(),
@@ -41,6 +42,7 @@ export type Student = typeof students.$inferSelect;
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
   deviceId: string;
+  deviceName?: string;
   studentName: string;
   classId: string;
   gradeLevel?: string;
