@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient } from "@/lib/queryClient";
-import { ArrowLeft, Plus, Users, Upload } from "lucide-react";
+import { ArrowLeft, Plus, Users } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,16 +18,12 @@ export default function RosterPage() {
   const [newClassName, setNewClassName] = useState("");
   const [selectedClass, setSelectedClass] = useState<Roster | null>(null);
   const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
-  const [showBulkAddDialog, setShowBulkAddDialog] = useState(false);
 
   // Student form state
   const [studentName, setStudentName] = useState("");
   const [deviceId, setDeviceId] = useState("");
   const [deviceName, setDeviceName] = useState("");
   const [gradeLevel, setGradeLevel] = useState("");
-
-  // Bulk add state
-  const [csvFile, setCsvFile] = useState<File | null>(null);
 
   // Fetch all rosters/classes
   const { data: rosters = [], isLoading: rostersLoading } = useQuery<Roster[]>({
@@ -111,55 +107,6 @@ export default function RosterPage() {
     },
   });
 
-  // Bulk upload mutation
-  const uploadRosterMutation = useMutation({
-    mutationFn: async ({ file, classId }: { file: File; classId: string }) => {
-      // Parse CSV file
-      const text = await file.text();
-      const lines = text.split('\n').filter(line => line.trim());
-      
-      // Skip header row and parse student data
-      const students = lines.slice(1).map(line => {
-        const [studentName, deviceId, , gradeLevel, deviceName] = line.split(',').map(s => s.trim());
-        return {
-          studentName,
-          deviceId,
-          classId, // Use the selected class
-          gradeLevel: gradeLevel || undefined,
-          deviceName: deviceName || undefined,
-        };
-      }).filter(s => s.studentName && s.deviceId);
-
-      const response = await fetch("/api/roster/bulk", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ students }),
-      });
-      if (!response.ok) throw new Error("Upload failed");
-      return response.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/rosters'] });
-      toast({
-        title: "Roster uploaded",
-        description: "Class roster has been uploaded successfully",
-      });
-      setShowBulkAddDialog(false);
-      setCsvFile(null);
-      setSelectedClass(null);
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Upload failed",
-        description: error.message,
-      });
-    },
-  });
-
   const handleCreateClass = () => {
     if (!newClassName.trim()) {
       toast({
@@ -194,33 +141,9 @@ export default function RosterPage() {
     });
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type === "text/csv") {
-      setCsvFile(file);
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Invalid file",
-        description: "Please select a CSV file",
-      });
-    }
-  };
-
-  const handleUploadRoster = () => {
-    if (csvFile && selectedClass) {
-      uploadRosterMutation.mutate({ file: csvFile, classId: selectedClass.classId });
-    }
-  };
-
   const openAddStudentDialog = (roster: Roster) => {
     setSelectedClass(roster);
     setShowAddStudentDialog(true);
-  };
-
-  const openBulkAddDialog = (roster: Roster) => {
-    setSelectedClass(roster);
-    setShowBulkAddDialog(true);
   };
 
   const isLoading = rostersLoading || studentsLoading;
@@ -291,7 +214,7 @@ export default function RosterPage() {
                     </div>
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-2">
+                <CardContent>
                   <Button
                     variant="outline"
                     className="w-full"
@@ -300,15 +223,6 @@ export default function RosterPage() {
                   >
                     <Plus className="h-4 w-4 mr-2" />
                     Add Student
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => openBulkAddDialog(roster)}
-                    data-testid={`button-bulk-add-${roster.classId}`}
-                  >
-                    <Upload className="h-4 w-4 mr-2" />
-                    Bulk Add
                   </Button>
                 </CardContent>
               </Card>
@@ -422,66 +336,6 @@ export default function RosterPage() {
               data-testid="button-submit-add-student"
             >
               {addStudentMutation.isPending ? "Adding..." : "Add Student"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Bulk Add Dialog */}
-      <Dialog open={showBulkAddDialog} onOpenChange={setShowBulkAddDialog}>
-        <DialogContent data-testid="dialog-bulk-add">
-          <DialogHeader>
-            <DialogTitle>Bulk Add to {selectedClass?.className}</DialogTitle>
-            <DialogDescription>
-              Upload a CSV file with student information
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="border-2 border-dashed border-border rounded-lg p-8 text-center">
-              <Upload className="h-12 w-12 mx-auto mb-3 text-muted-foreground/50" />
-              <div className="space-y-2">
-                <Label htmlFor="bulk-roster-file" className="cursor-pointer">
-                  <span className="text-primary hover:underline font-medium">
-                    Choose CSV file
-                  </span>{" "}
-                  or drag and drop
-                </Label>
-                <input
-                  id="bulk-roster-file"
-                  type="file"
-                  accept=".csv"
-                  className="hidden"
-                  onChange={handleFileChange}
-                  data-testid="input-bulk-roster-file"
-                />
-                <p className="text-xs text-muted-foreground">
-                  CSV format: studentName, deviceId, classId, gradeLevel (optional), deviceName (optional)
-                </p>
-              </div>
-            </div>
-            {csvFile && (
-              <div className="flex items-center justify-between p-3 bg-muted rounded-lg">
-                <span className="text-sm font-medium">{csvFile.name}</span>
-                <Button
-                  onClick={handleUploadRoster}
-                  disabled={uploadRosterMutation.isPending}
-                  data-testid="button-upload-bulk-roster"
-                >
-                  {uploadRosterMutation.isPending ? "Uploading..." : "Upload"}
-                </Button>
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setShowBulkAddDialog(false);
-                setCsvFile(null);
-              }}
-              data-testid="button-cancel-bulk-add"
-            >
-              Close
             </Button>
           </DialogFooter>
         </DialogContent>
