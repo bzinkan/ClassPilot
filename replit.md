@@ -39,10 +39,17 @@ The system uses a full-stack architecture:
   - Device name support for easier Chromebook identification (e.g., "6th Chromebook 1")
   - Persistent database storage ensuring roster data survives server restarts
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
+- **Website Duration Tracking**: 
+  - Calculates and displays how long students spend on each website by grouping consecutive heartbeats
+  - Student detail drawer shows aggregated sessions with duration (e.g., "5m 30s", "1h 15m") instead of individual heartbeat entries
+  - Each session displays website title, URL, duration with time range, and favicon
+  - Excel export includes duration columns ("Duration" and "Duration (seconds)") for compliance reporting
+  - Uses intelligent session grouping: consecutive heartbeats at the same URL are combined into single sessions
 - **Opt-In Screen Sharing**: Students explicitly consent to screen sharing, with clear visual indicators when active.
 - **Admin System**: Allows IT administrators to manage teacher accounts (create, view, delete).
 - **Data Retention**: Configurable data retention (default 24 hours) with automatic cleanup and Excel export capabilities.
 - **Student Status Logic**: Classifies students as Online, Idle, or Offline based on heartbeat timestamps.
+- **Allowed Websites & Off-Task Alerts**: Teachers can specify allowed domains in settings. Students navigating away trigger red "Off-Task Alert" status with visual highlighting.
 
 ### System Design Choices
 - **Privacy-First**: All monitoring is transparent to students with visible indicators and explicit consent for screen sharing. No keystrokes, mic, or camera data are collected.
