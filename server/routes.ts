@@ -8,6 +8,7 @@ import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import * as XLSX from "xlsx";
 import {
+  insertDeviceSchema,
   insertStudentSchema,
   insertHeartbeatSchema,
   insertEventSchema,
@@ -476,7 +477,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get all students with current status (for dashboard)
+  // Get all student statuses (for dashboard)
   app.get("/api/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const statuses = await storage.getAllStudentStatuses();
@@ -484,6 +485,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Get students error:", error);
       res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get students assigned to a specific device (for extension popup)
+  app.get("/api/device/:deviceId/students", apiLimiter, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const students = await storage.getStudentsByDevice(deviceId);
+      const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+      
+      res.json({ 
+        students,
+        activeStudentId: activeStudent?.id || null
+      });
+    } catch (error) {
+      console.error("Get device students error:", error);
+      res.status(500).json({ error: "Failed to fetch students" });
+    }
+  });
+
+  // Set active student for a device (from extension)
+  app.post("/api/device/:deviceId/active-student", apiLimiter, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const { studentId } = req.body;
+      
+      // Verify student exists and belongs to this device
+      if (studentId) {
+        const student = await storage.getStudent(studentId);
+        if (!student || student.deviceId !== deviceId) {
+          return res.status(400).json({ error: "Invalid student for this device" });
+        }
+      }
+      
+      await storage.setActiveStudentForDevice(deviceId, studentId || null);
+      
+      // Log student switch event
+      if (studentId) {
+        await storage.addEvent({
+          deviceId,
+          studentId,
+          eventType: 'student_switched',
+          metadata: { timestamp: new Date().toISOString() },
+        });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Set active student error:", error);
+      res.status(500).json({ error: "Failed to set active student" });
     }
   });
 

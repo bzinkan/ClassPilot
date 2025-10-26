@@ -227,6 +227,33 @@
     .hidden {
       display: none;
     }
+    
+    .student-select {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 13px;
+      background: white;
+      color: #1e293b;
+      cursor: pointer;
+      transition: border-color 0.2s;
+    }
+    
+    .student-select:hover {
+      border-color: #3b82f6;
+    }
+    
+    .student-select:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+    
+    .student-select:disabled {
+      background: #f1f5f9;
+      cursor: not-allowed;
+    }
   </style>
 </head>
 <body>
@@ -269,6 +296,25 @@
       <div class="banner-content">
         <h3>Monitoring Active</h3>
         <p>Your tab titles and URLs are shared with your teacher as permitted by school policy.</p>
+      </div>
+    </div>
+    
+    <div class="section">
+      <h2>Student Selection</h2>
+      <div id="student-select-container">
+        <p style="font-size: 12px; color: #64748b; margin-bottom: 8px;">
+          Select your name:
+        </p>
+        <select id="student-select" class="student-select" data-testid="select-student">
+          <option value="">Loading students...</option>
+        </select>
+        <div id="current-student-display" class="hidden" style="margin-top: 12px; padding: 12px; background: #f0f9ff; border-left: 4px solid #3b82f6; border-radius: 4px;">
+          <p style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #1e40af; margin-bottom: 4px;">CURRENT STUDENT</p>
+          <p id="current-student-name" style="font-size: 14px; font-weight: 600; color: #1e3a8a;" data-testid="text-current-student"></p>
+        </div>
+        <div id="no-students-message" class="hidden" style="padding: 12px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
+          <p style="font-size: 12px; color: #78350f;">No students have been assigned to this Chromebook yet. Please contact your teacher.</p>
+        </div>
       </div>
     </div>
     

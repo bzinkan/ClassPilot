@@ -2,12 +2,14 @@
 
 let mediaStream = null;
 let peerConnection = null;
+let currentConfig = null;
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
   // Get config from background
   chrome.runtime.sendMessage({ type: 'get-config' }, (response) => {
     const config = response.config;
+    currentConfig = config;
     
     if (config.studentName && config.deviceId) {
       // Already registered, show main view
@@ -32,6 +34,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     e.preventDefault();
     showPrivacyInfo();
   });
+  
+  // Student select change handler
+  document.getElementById('student-select').addEventListener('change', handleStudentSelection);
 });
 
 function showSetupView() {
@@ -47,6 +52,11 @@ function showMainView(config) {
   document.getElementById('school-name').textContent = config.schoolId || 'School';
   document.getElementById('student-name-display').textContent = config.studentName || '-';
   document.getElementById('class-id-display').textContent = config.classId || '-';
+  
+  // Load students for this device
+  if (config.deviceId) {
+    loadStudents(config.deviceId);
+  }
   
   // Update status
   updateStatus();
@@ -113,6 +123,116 @@ function updateStatus() {
   // Update last update time
   const now = new Date();
   document.getElementById('last-update').textContent = now.toLocaleTimeString();
+}
+
+async function loadStudents(deviceId) {
+  try {
+    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
+    const response = await fetch(`${serverUrl}/api/device/${deviceId}/students`);
+    
+    if (!response.ok) {
+      throw new Error('Failed to load students');
+    }
+    
+    const data = await response.json();
+    const { students, activeStudentId } = data;
+    
+    const selectElement = document.getElementById('student-select');
+    const currentStudentDisplay = document.getElementById('current-student-display');
+    const currentStudentName = document.getElementById('current-student-name');
+    const noStudentsMessage = document.getElementById('no-students-message');
+    
+    if (!students || students.length === 0) {
+      selectElement.innerHTML = '<option value="">No students assigned</option>';
+      selectElement.disabled = true;
+      noStudentsMessage.classList.remove('hidden');
+      currentStudentDisplay.classList.add('hidden');
+      return;
+    }
+    
+    // Populate dropdown
+    selectElement.innerHTML = '<option value="">Select your name...</option>';
+    students.forEach(student => {
+      const option = document.createElement('option');
+      option.value = student.id;
+      option.textContent = student.name;
+      selectElement.appendChild(option);
+    });
+    
+    selectElement.disabled = false;
+    noStudentsMessage.classList.add('hidden');
+    
+    // If there's an active student, show it
+    if (activeStudentId) {
+      const activeStudent = students.find(s => s.id === activeStudentId);
+      if (activeStudent) {
+        selectElement.value = activeStudentId;
+        currentStudentName.textContent = activeStudent.name;
+        currentStudentDisplay.classList.remove('hidden');
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error loading students:', error);
+    const selectElement = document.getElementById('student-select');
+    selectElement.innerHTML = '<option value="">Error loading students</option>';
+    selectElement.disabled = true;
+  }
+}
+
+async function setActiveStudent(studentId) {
+  if (!currentConfig || !currentConfig.deviceId) {
+    console.error('No device ID available');
+    return;
+  }
+  
+  try {
+    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
+    const response = await fetch(`${serverUrl}/api/device/${currentConfig.deviceId}/active-student`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studentId }),
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to set active student');
+    }
+    
+    // Save to chrome.storage.local
+    await chrome.storage.local.set({ activeStudentId: studentId });
+    
+    // Notify background to send immediate heartbeat with new studentId
+    chrome.runtime.sendMessage({ 
+      type: 'student-changed',
+      studentId 
+    });
+    
+    console.log('Active student set:', studentId);
+    
+  } catch (error) {
+    console.error('Error setting active student:', error);
+    alert('Failed to set active student. Please try again.');
+  }
+}
+
+async function handleStudentSelection(event) {
+  const studentId = event.target.value;
+  
+  if (!studentId) {
+    document.getElementById('current-student-display').classList.add('hidden');
+    return;
+  }
+  
+  // Get student name from selected option
+  const selectedOption = event.target.options[event.target.selectedIndex];
+  const studentName = selectedOption.textContent;
+  
+  // Update UI immediately
+  document.getElementById('current-student-name').textContent = studentName;
+  document.getElementById('current-student-display').classList.remove('hidden');
+  
+  // Call API to set active student
+  await setActiveStudent(studentId);
 }
 
 async function startScreenShare() {

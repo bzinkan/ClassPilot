@@ -9,16 +9,23 @@ let CONFIG = {
   studentName: null,
   classId: null,
   isSharing: false,
+  activeStudentId: null,
 };
 
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 
 // Load config from storage on startup
-chrome.storage.local.get(['config'], (result) => {
+chrome.storage.local.get(['config', 'activeStudentId'], (result) => {
   if (result.config) {
     CONFIG = { ...CONFIG, ...result.config };
     console.log('Loaded config:', CONFIG);
+  }
+  
+  // Load active student ID
+  if (result.activeStudentId) {
+    CONFIG.activeStudentId = result.activeStudentId;
+    console.log('Loaded active student ID:', CONFIG.activeStudentId);
   }
   
   // Start heartbeat if configured
@@ -101,6 +108,11 @@ async function sendHeartbeat() {
       activeTabUrl: activeTab.url || 'No URL',
       favicon: activeTab.favIconUrl || null,
     };
+    
+    // Include studentId if available
+    if (CONFIG.activeStudentId) {
+      heartbeatData.studentId = CONFIG.activeStudentId;
+    }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
       method: 'POST',
@@ -406,6 +418,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       sendResponse({ success: false, error: 'WebSocket not connected' });
     }
+    return true;
+  }
+  
+  if (message.type === 'student-changed') {
+    // Update active student ID
+    const previousStudentId = CONFIG.activeStudentId;
+    CONFIG.activeStudentId = message.studentId;
+    
+    console.log('Student changed:', previousStudentId, '->', message.studentId);
+    
+    // Send immediate heartbeat with new studentId
+    sendHeartbeat();
+    
+    // Log student_switched event
+    if (CONFIG.deviceId) {
+      fetch(`${CONFIG.serverUrl}/api/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: CONFIG.deviceId,
+          eventType: 'student_switched',
+          metadata: { 
+            previousStudentId,
+            newStudentId: message.studentId,
+            timestamp: new Date().toISOString(),
+          },
+        }),
+      }).catch(error => {
+        console.error('Error logging student_switched event:', error);
+      });
+    }
+    
+    sendResponse({ success: true });
     return true;
   }
 });
