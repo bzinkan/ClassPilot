@@ -41,8 +41,14 @@ async function getOrCreateDeviceId() {
 }
 
 // Register device with server
-async function registerDevice(studentName, classId) {
-  const deviceId = await getOrCreateDeviceId();
+async function registerDevice(deviceId, deviceName, classId) {
+  // Use provided deviceId or generate new one
+  if (!deviceId) {
+    deviceId = await getOrCreateDeviceId();
+  } else {
+    // Save the provided deviceId
+    await chrome.storage.local.set({ deviceId });
+  }
   
   try {
     const response = await fetch(`${CONFIG.serverUrl}/api/register`, {
@@ -50,7 +56,7 @@ async function registerDevice(studentName, classId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         deviceId,
-        studentName,
+        deviceName, // Device name instead of student name
         schoolId: CONFIG.schoolId,
         classId,
       }),
@@ -61,9 +67,9 @@ async function registerDevice(studentName, classId) {
     const data = await response.json();
     console.log('Device registered:', data);
     
-    // Save config
+    // Save config (using deviceName as studentName for now)
     CONFIG.deviceId = deviceId;
-    CONFIG.studentName = studentName;
+    CONFIG.studentName = deviceName; // Display device name until teacher assigns student
     CONFIG.classId = classId;
     
     await chrome.storage.local.set({ 
@@ -231,7 +237,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'register') {
-    registerDevice(message.studentName, message.classId)
+    registerDevice(message.deviceId, message.deviceName, message.classId)
       .then((data) => {
         startHeartbeat();
         connectWebSocket();

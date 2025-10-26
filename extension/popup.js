@@ -56,17 +56,17 @@ function showMainView(config) {
 }
 
 async function handleSetup() {
-  const gradeLevel = document.getElementById('student-name').value.trim();
-  const chromebookNumber = document.getElementById('chromebook-number').value.trim();
-  const classId = document.getElementById('class-id').value.trim();
+  const deviceId = document.getElementById('device-id').value.trim();
+  const deviceNumber = document.getElementById('chromebook-number').value.trim();
+  const classroomLocation = document.getElementById('classroom-location').value.trim();
   
-  if (!gradeLevel || !chromebookNumber || !classId) {
+  if (!deviceId || !deviceNumber || !classroomLocation) {
     alert('Please fill in all fields');
     return;
   }
   
-  // Combine grade + chromebook number into studentName
-  const studentName = `Grade ${gradeLevel} - CB-${chromebookNumber}`;
+  // Create device name from device number and classroom location
+  const deviceName = `${deviceNumber} - ${classroomLocation}`;
   
   const button = document.getElementById('setup-submit');
   button.disabled = true;
@@ -75,14 +75,15 @@ async function handleSetup() {
   // Send registration to background
   chrome.runtime.sendMessage({
     type: 'register',
-    studentName,
-    classId,
+    deviceId,
+    deviceName,
+    classId: classroomLocation, // Use classroom location as classId for now
   }, (response) => {
     if (response.success) {
       showMainView({
-        studentName,
-        classId,
-        deviceId: response.data.student.deviceId,
+        studentName: deviceName, // Display device name until teacher assigns student
+        classId: classroomLocation,
+        deviceId: deviceId,
       });
     } else {
       alert('Registration failed: ' + response.error);
