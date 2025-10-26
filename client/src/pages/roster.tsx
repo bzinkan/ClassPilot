@@ -113,13 +113,28 @@ export default function RosterPage() {
 
   // Bulk upload mutation
   const uploadRosterMutation = useMutation({
-    mutationFn: async (file: File) => {
-      const formData = new FormData();
-      formData.append("roster", file);
-      const response = await fetch("/api/roster/upload", {
+    mutationFn: async ({ file, classId }: { file: File; classId: string }) => {
+      // Parse CSV file
+      const text = await file.text();
+      const lines = text.split('\n').filter(line => line.trim());
+      
+      // Skip header row and parse student data
+      const students = lines.slice(1).map(line => {
+        const [studentName, deviceId, , gradeLevel, deviceName] = line.split(',').map(s => s.trim());
+        return {
+          studentName,
+          deviceId,
+          classId, // Use the selected class
+          gradeLevel: gradeLevel || undefined,
+          deviceName: deviceName || undefined,
+        };
+      }).filter(s => s.studentName && s.deviceId);
+
+      const response = await fetch("/api/roster/bulk", {
         method: "POST",
-        body: formData,
+        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        body: JSON.stringify({ students }),
       });
       if (!response.ok) throw new Error("Upload failed");
       return response.json();
@@ -193,8 +208,8 @@ export default function RosterPage() {
   };
 
   const handleUploadRoster = () => {
-    if (csvFile) {
-      uploadRosterMutation.mutate(csvFile);
+    if (csvFile && selectedClass) {
+      uploadRosterMutation.mutate({ file: csvFile, classId: selectedClass.classId });
     }
   };
 

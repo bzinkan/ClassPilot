@@ -724,6 +724,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Class ID is required" });
       }
       
+      // Check for duplicate classId
+      const existing = await storage.getRoster(classId);
+      if (existing) {
+        return res.status(400).json({ error: "A class with this name already exists" });
+      }
+      
       const rosterData: InsertRoster = {
         classId,
         className,
