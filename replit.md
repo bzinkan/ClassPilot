@@ -27,13 +27,16 @@ The system uses a full-stack architecture:
 
 ### Feature Specifications
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
+  - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "6, 7, 8" or "9, 10, 11, 12"). Grade tabs are set in Settings and dynamically update the dashboard filtering.
+  - **Delete Devices**: Teachers can delete student devices directly from the dashboard with a confirmation dialog. Deletion removes the student from both the dashboard and roster.
 - **Roster Management**: Comprehensive student roster management with:
-  - Manual student creation (individual or bulk) with name, device ID, class ID, and grade level
-  - Edit student information including grade level assignment
-  - Delete students with confirmation dialogs
-  - CSV upload support for bulk roster imports (format: studentName, deviceId, classId, gradeLevel)
+  - Manual student creation (individual or bulk) with name, device ID, device name, class ID, and grade level
+  - Edit student information including grade level assignment and friendly device names
+  - Delete students with confirmation dialogs from both roster table and dashboard tiles
+  - CSV upload support for bulk roster imports (format: studentName, deviceId, classId, gradeLevel, deviceName)
   - Table view displaying all students with their assigned information
   - Grade level tracking (nullable field to accommodate various school structures)
+  - Device name support for easier Chromebook identification (e.g., "6th Chromebook 1")
   - Persistent database storage ensuring roster data survives server restarts
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
 - **Opt-In Screen Sharing**: Students explicitly consent to screen sharing, with clear visual indicators when active.
