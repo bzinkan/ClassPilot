@@ -27,6 +27,7 @@ const settingsSchema = z.object({
   retentionHours: z.string().min(1, "Retention period is required"),
   blockedDomains: z.string(),
   ipAllowlist: z.string(),
+  gradeLevels: z.string(),
 });
 
 type SettingsForm = z.infer<typeof settingsSchema>;
@@ -51,6 +52,7 @@ export default function Settings() {
       retentionHours: settings?.retentionHours || "24",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
+      gradeLevels: settings?.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
     },
   });
 
@@ -63,6 +65,7 @@ export default function Settings() {
         retentionHours: settings.retentionHours,
         blockedDomains: settings.blockedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
+        gradeLevels: settings.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
       });
     }
   }, [settings, form]);
@@ -78,6 +81,10 @@ export default function Settings() {
         ipAllowlist: data.ipAllowlist
           .split(",")
           .map((ip) => ip.trim())
+          .filter(Boolean),
+        gradeLevels: data.gradeLevels
+          .split(",")
+          .map((g) => g.trim())
           .filter(Boolean),
       };
       return await apiRequest("POST", "/api/settings", payload);
@@ -304,6 +311,19 @@ export default function Settings() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Only these IPs can access the teacher dashboard (enforced in production only). Leave empty to allow all IPs.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="gradeLevels">Grade Levels (comma-separated)</Label>
+                <Input
+                  id="gradeLevels"
+                  data-testid="input-grade-levels"
+                  {...form.register("gradeLevels")}
+                  placeholder="6, 7, 8, 9, 10, 11, 12"
+                />
+                <p className="text-xs text-muted-foreground">
+                  These grade levels will appear as filter tabs on the dashboard. Customize based on your school's grade structure.
                 </p>
               </div>
 

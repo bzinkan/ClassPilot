@@ -318,18 +318,22 @@ export default function Dashboard() {
         </div>
 
         {/* Grade Level Tabs */}
-        <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
-          <TabsList className="flex-wrap h-auto">
-            <TabsTrigger value="all" data-testid="tab-grade-all">All Grades</TabsTrigger>
-            <TabsTrigger value="6" data-testid="tab-grade-6">6th</TabsTrigger>
-            <TabsTrigger value="7" data-testid="tab-grade-7">7th</TabsTrigger>
-            <TabsTrigger value="8" data-testid="tab-grade-8">8th</TabsTrigger>
-            <TabsTrigger value="9" data-testid="tab-grade-9">9th</TabsTrigger>
-            <TabsTrigger value="10" data-testid="tab-grade-10">10th</TabsTrigger>
-            <TabsTrigger value="11" data-testid="tab-grade-11">11th</TabsTrigger>
-            <TabsTrigger value="12" data-testid="tab-grade-12">12th</TabsTrigger>
-          </TabsList>
-        </Tabs>
+        {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
+          <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
+            <TabsList className="flex-wrap h-auto">
+              <TabsTrigger value="all" data-testid="tab-grade-all">All Grades</TabsTrigger>
+              {settings.gradeLevels.map((grade) => (
+                <TabsTrigger 
+                  key={grade} 
+                  value={grade} 
+                  data-testid={`tab-grade-${grade}`}
+                >
+                  {grade}th
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        )}
 
         {/* Student Tiles */}
         {filteredStudents.length === 0 ? (
