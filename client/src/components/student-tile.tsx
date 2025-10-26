@@ -53,7 +53,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [newStudentName, setNewStudentName] = useState(student.studentName);
+  const [newStudentName, setNewStudentName] = useState(student.studentName || '');
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const { toast } = useToast();
@@ -96,7 +96,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
       toast({
         title: "Student device deleted",
-        description: `Successfully removed ${student.studentName} from the dashboard`,
+        description: `Successfully removed ${student.studentName || student.deviceName || student.deviceId} from the dashboard`,
       });
       setDeleteDialogOpen(false);
     },
@@ -111,7 +111,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setNewStudentName(student.studentName);
+    setNewStudentName(student.studentName || '');
     setNewDeviceName(student.deviceName || '');
     setNewGradeLevel(student.gradeLevel || '');
     setEditDialogOpen(true);
@@ -127,17 +127,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   };
 
   const handleSaveStudent = () => {
-    if (!newStudentName.trim()) {
-      toast({
-        variant: "destructive",
-        title: "Invalid name",
-        description: "Student name cannot be empty",
-      });
-      return;
-    }
     updateStudentMutation.mutate({ 
       deviceId: student.deviceId, 
-      studentName: newStudentName,
+      studentName: newStudentName.trim() || '',
       deviceName: newDeviceName,
       gradeLevel: newGradeLevel === 'none' ? '' : newGradeLevel
     });
@@ -217,7 +209,11 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-1">
               <h3 className="font-medium text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
-                {student.studentName}
+                {student.studentName || (
+                  <span className="text-muted-foreground italic">
+                    {student.deviceName || student.deviceId}
+                  </span>
+                )}
               </h3>
               <Button
                 variant="ghost"
@@ -238,7 +234,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 <Trash2 className="h-3 w-3" />
               </Button>
             </div>
-            {student.deviceName && (
+            {student.deviceName && student.studentName && (
               <p className="text-sm text-foreground/90 truncate flex items-center gap-1.5" data-testid={`text-device-name-${student.deviceId}`}>
                 <Monitor className="h-3 w-3 flex-shrink-0" />
                 {student.deviceName}
@@ -411,7 +407,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           <DialogHeader>
             <DialogTitle>Delete Student Device</DialogTitle>
             <DialogDescription>
-              Are you sure you want to remove {student.studentName} ({student.deviceId}) from the dashboard? This will delete the student from your roster.
+              Are you sure you want to remove {student.studentName || student.deviceName || student.deviceId} from the dashboard? This will delete the device from your roster.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

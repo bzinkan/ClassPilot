@@ -43,7 +43,7 @@ export type Student = typeof students.$inferSelect;
 export interface StudentStatus {
   deviceId: string;
   deviceName?: string;
-  studentName: string;
+  studentName?: string; // Optional - assigned by teacher later
   classId: string;
   gradeLevel?: string;
   activeTabTitle: string;
