@@ -341,9 +341,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Delete all students and heartbeats
       await storage.deleteAllStudents();
       
-      // Clear in-memory status map
-      studentStatuses.clear();
-      
       // Notify all connected teachers
       broadcastToTeachers({
         type: 'students-cleared',
@@ -435,17 +432,124 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update student name for a device (teacher assignment)
-  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  // Get all persisted students from database (for roster management)
+  app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const { deviceId } = req.params;
-      const { studentName } = req.body;
+      const students = await storage.getAllStudents();
+      res.json(students);
+    } catch (error) {
+      console.error("Get roster students error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Create student manually (for roster management)
+  app.post("/api/roster/student", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { studentName, deviceId, classId, gradeLevel } = req.body;
       
       if (!studentName || typeof studentName !== 'string') {
         return res.status(400).json({ error: "Student name is required" });
       }
       
-      const student = await storage.updateStudentName(deviceId, studentName);
+      if (!deviceId || typeof deviceId !== 'string') {
+        return res.status(400).json({ error: "Device ID is required" });
+      }
+      
+      const studentData = {
+        deviceId,
+        studentName,
+        schoolId: process.env.SCHOOL_ID || "default-school",
+        classId: classId || "general",
+        gradeLevel: gradeLevel || null,
+      };
+      
+      const student = await storage.registerStudent(studentData);
+      
+      // Broadcast update to teachers
+      broadcastToTeachers({
+        type: 'student-update',
+        deviceId: student.deviceId,
+      });
+      
+      res.json({ success: true, student });
+    } catch (error) {
+      console.error("Create student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Bulk create students
+  app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { students: studentsData } = req.body;
+      
+      if (!Array.isArray(studentsData) || studentsData.length === 0) {
+        return res.status(400).json({ error: "Students array is required" });
+      }
+      
+      const createdStudents = [];
+      const errors = [];
+      
+      for (const studentInput of studentsData) {
+        try {
+          const studentData = {
+            deviceId: studentInput.deviceId,
+            studentName: studentInput.studentName,
+            schoolId: process.env.SCHOOL_ID || "default-school",
+            classId: studentInput.classId || "general",
+            gradeLevel: studentInput.gradeLevel || null,
+          };
+          
+          const student = await storage.registerStudent(studentData);
+          createdStudents.push(student);
+        } catch (error) {
+          errors.push({
+            deviceId: studentInput.deviceId,
+            error: error instanceof Error ? error.message : "Failed to create student"
+          });
+        }
+      }
+      
+      // Broadcast update to teachers
+      broadcastToTeachers({
+        type: 'student-update',
+        deviceId: 'bulk-update',
+      });
+      
+      res.json({ 
+        success: true, 
+        created: createdStudents.length, 
+        students: createdStudents,
+        errors: errors.length > 0 ? errors : undefined
+      });
+    } catch (error) {
+      console.error("Bulk create students error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Update student information (name, grade level, class)
+  app.patch("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const updates: Partial<{studentName: string; classId: string; gradeLevel: string | null}> = {};
+      
+      if (req.body.studentName) {
+        updates.studentName = req.body.studentName;
+      }
+      if (req.body.classId) {
+        updates.classId = req.body.classId;
+      }
+      if ('gradeLevel' in req.body) {
+        updates.gradeLevel = req.body.gradeLevel;
+      }
+      
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No fields to update" });
+      }
+      
+      const student = await storage.updateStudent(deviceId, updates);
       
       if (!student) {
         return res.status(404).json({ error: "Device not found" });
@@ -459,7 +563,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({ success: true, student });
     } catch (error) {
-      console.error("Update student name error:", error);
+      console.error("Update student error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -618,10 +722,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return timestamp >= startDate && timestamp <= endDate;
       });
       
+      // Get all students to map deviceId to studentName
+      const students = await storage.getAllStudents();
+      const studentMap = new Map(students.map(s => [s.deviceId, s.studentName]));
+      
       // Prepare data for Excel
       const data = filteredHeartbeats.map(heartbeat => ({
         'Device ID': heartbeat.deviceId,
-        'Student Name': heartbeat.studentName,
+        'Student Name': studentMap.get(heartbeat.deviceId) || heartbeat.deviceId,
         'Timestamp': new Date(heartbeat.timestamp).toISOString(),
         'URL': heartbeat.activeTabUrl || '',
         'Tab Title': heartbeat.activeTabTitle || ''

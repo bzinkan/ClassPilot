@@ -36,6 +36,7 @@ export interface IStorage {
   getAllStudents(): Promise<Student[]>;
   registerStudent(student: InsertStudent): Promise<Student>;
   updateStudentName(deviceId: string, studentName: string): Promise<Student | undefined>;
+  updateStudent(deviceId: string, updates: Partial<Omit<InsertStudent, 'deviceId'>>): Promise<Student | undefined>;
   deleteStudent(deviceId: string): Promise<boolean>;
   deleteAllStudents(): Promise<void>;
 
@@ -135,6 +136,7 @@ export class MemStorage implements IStorage {
       deviceId: student.deviceId,
       studentName: student.studentName,
       classId: student.classId,
+      gradeLevel: student.gradeLevel ?? undefined,
       activeTabTitle: "",
       activeTabUrl: "",
       lastSeenAt: Date.now(),
@@ -157,6 +159,29 @@ export class MemStorage implements IStorage {
     const status = this.studentStatuses.get(deviceId);
     if (status) {
       status.studentName = studentName;
+      this.studentStatuses.set(deviceId, status);
+    }
+    
+    return student;
+  }
+
+  async updateStudent(deviceId: string, updates: Partial<Omit<InsertStudent, 'deviceId'>>): Promise<Student | undefined> {
+    const student = this.students.get(deviceId);
+    if (!student) return undefined;
+    
+    // Apply updates
+    Object.assign(student, updates);
+    this.students.set(deviceId, student);
+    
+    // Update status map if student name or grade level changed
+    const status = this.studentStatuses.get(deviceId);
+    if (status) {
+      if (updates.studentName) {
+        status.studentName = updates.studentName;
+      }
+      if (updates.gradeLevel !== undefined) {
+        status.gradeLevel = updates.gradeLevel ?? undefined;
+      }
       this.studentStatuses.set(deviceId, status);
     }
     
@@ -431,6 +456,7 @@ export class DatabaseStorage implements IStorage {
       deviceId: student.deviceId,
       studentName: student.studentName,
       classId: student.classId,
+      gradeLevel: student.gradeLevel ?? undefined,
       activeTabTitle,
       activeTabUrl,
       favicon,
@@ -456,6 +482,30 @@ export class DatabaseStorage implements IStorage {
     const status = this.studentStatuses.get(deviceId);
     if (status) {
       status.studentName = studentName;
+      this.studentStatuses.set(deviceId, status);
+    }
+    
+    return student;
+  }
+
+  async updateStudent(deviceId: string, updates: Partial<Omit<InsertStudent, 'deviceId'>>): Promise<Student | undefined> {
+    const [student] = await db
+      .update(students)
+      .set(updates)
+      .where(eq(students.deviceId, deviceId))
+      .returning();
+    
+    if (!student) return undefined;
+    
+    // Update status map if student name or grade level changed
+    const status = this.studentStatuses.get(deviceId);
+    if (status) {
+      if (updates.studentName) {
+        status.studentName = updates.studentName;
+      }
+      if (updates.gradeLevel !== undefined) {
+        status.gradeLevel = updates.gradeLevel ?? undefined;
+      }
       this.studentStatuses.set(deviceId, status);
     }
     

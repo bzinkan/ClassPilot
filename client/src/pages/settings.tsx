@@ -20,6 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ArrowLeft, Upload, Download, Shield, Clock, AlertCircle } from "lucide-react";
 import type { Settings as SettingsType } from "@shared/schema";
+import { RosterManagement } from "@/components/roster-management";
 
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
@@ -377,7 +378,7 @@ export default function Settings() {
                   />
                 </Label>
                 <p className="text-xs text-muted-foreground">
-                  CSV format: studentName, deviceId, classId
+                  CSV format: studentName, deviceId, classId, gradeLevel (optional)
                 </p>
               </div>
               {csvFile && (
@@ -396,6 +397,9 @@ export default function Settings() {
             </div>
           </CardContent>
         </Card>
+
+        {/* Roster Management Table */}
+        <RosterManagement />
 
         {/* Data Export */}
         <Card>
