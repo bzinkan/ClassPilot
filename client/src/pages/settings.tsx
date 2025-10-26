@@ -27,7 +27,7 @@ const settingsSchema = z.object({
   retentionHours: z.string().min(1, "Retention period is required"),
   blockedDomains: z.string(),
   ipAllowlist: z.string(),
-  gradeLevels: z.string(),
+  gradeLevels: z.string().min(1, "At least one grade level is required"),
 });
 
 type SettingsForm = z.infer<typeof settingsSchema>;
@@ -72,7 +72,20 @@ export default function Settings() {
 
   const updateSettingsMutation = useMutation({
     mutationFn: async (data: SettingsForm) => {
+      const gradeLevels = data.gradeLevels
+        .split(",")
+        .map((g) => g.trim())
+        .filter(Boolean);
+      
+      if (gradeLevels.length === 0) {
+        throw new Error("At least one grade level is required");
+      }
+      
+      // Use schoolId from loaded settings, or default for initial creation
+      const schoolId = settings?.schoolId || "default-school";
+      
       const payload = {
+        schoolId,
         ...data,
         blockedDomains: data.blockedDomains
           .split(",")
@@ -82,10 +95,7 @@ export default function Settings() {
           .split(",")
           .map((ip) => ip.trim())
           .filter(Boolean),
-        gradeLevels: data.gradeLevels
-          .split(",")
-          .map((g) => g.trim())
-          .filter(Boolean),
+        gradeLevels,
       };
       return await apiRequest("POST", "/api/settings", payload);
     },

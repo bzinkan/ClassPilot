@@ -4,6 +4,16 @@ import { X, ExternalLink, Clock, Monitor, Video, Bell, Trash2 } from "lucide-rea
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat } from "@shared/schema";
@@ -26,6 +36,7 @@ export function StudentDetailDrawer({
   const wsRef = useRef<WebSocket | null>(null);
   const [videoLoaded, setVideoLoaded] = useState(false);
   const [pinging, setPinging] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
   const deleteStudentMutation = useMutation({
     mutationFn: async (deviceId: string) => {
@@ -37,6 +48,7 @@ export function StudentDetailDrawer({
         title: "Device removed",
         description: "Student device has been deleted successfully",
       });
+      setShowDeleteDialog(false);
       onClose();
     },
     onError: (error: any) => {
@@ -45,15 +57,13 @@ export function StudentDetailDrawer({
         title: "Failed to remove device",
         description: error.message || "An error occurred",
       });
+      setShowDeleteDialog(false);
     },
   });
 
-  const handleDelete = () => {
+  const handleDeleteConfirm = () => {
     if (!student) return;
-    
-    if (confirm(`Are you sure you want to remove device "${student.deviceId}"? This will delete all associated activity data.`)) {
-      deleteStudentMutation.mutate(student.deviceId);
-    }
+    deleteStudentMutation.mutate(student.deviceId);
   };
 
   const handlePing = async () => {
@@ -299,12 +309,12 @@ export function StudentDetailDrawer({
                   <Button
                     size="sm"
                     variant="destructive"
-                    onClick={handleDelete}
+                    onClick={() => setShowDeleteDialog(true)}
                     disabled={deleteStudentMutation.isPending}
                     data-testid="button-delete-device"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    {deleteStudentMutation.isPending ? "Deleting..." : "Remove Device"}
+                    Remove Device
                   </Button>
                 </div>
               </div>
@@ -439,6 +449,31 @@ export function StudentDetailDrawer({
           </ScrollArea>
         </div>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove Device</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove device "{student?.deviceId}"? This will permanently delete the device and all associated activity data. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteStudentMutation.isPending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleDeleteConfirm}
+              disabled={deleteStudentMutation.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              data-testid="button-confirm-delete"
+            >
+              {deleteStudentMutation.isPending ? "Deleting..." : "Remove Device"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
