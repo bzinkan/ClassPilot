@@ -21,9 +21,15 @@ The frontend is built with React and TypeScript, using Tailwind CSS for styling 
 The system uses a full-stack architecture:
 - **Frontend**: React, TypeScript, TanStack Query for server state, WebSocket for real-time updates.
 - **Backend**: Express and Node.js, providing RESTful APIs for authentication, student device registration, heartbeat updates, event logging, student data retrieval, WebRTC signaling, and school settings management.
+  - **Bulletproof Endpoints**: Heartbeat and event logging endpoints never return 500 errors, using async storage with non-blocking database writes and comprehensive error handling
+  - **Global Error Handlers**: Process-level handlers for unhandled rejections and uncaught exceptions prevent server crashes
 - **Real-time Communication**: A WebSocket server facilitates live updates for teacher dashboards and WebRTC communication for screen sharing.
-- **Security**: Implements role-based access control (admin/teacher), bcrypt for password hashing, Express session management, rate limiting, and CSRF protection. An admin middleware protects sensitive routes.
-- **Chrome Extension**: A Manifest V3 extension manages automatic tab and URL monitoring, displays privacy disclosure, and facilitates opt-in screen sharing via WebRTC.
+- **Security**: Implements role-based access control (admin/teacher), bcrypt for password hashing, Express session management, rate limiting (12kb payload limits), and CSRF protection. An admin middleware protects sensitive routes.
+- **Chrome Extension**: A Manifest V3 extension with reliable background service worker using chrome.alarms API for persistent heartbeat monitoring
+  - **Reliable Heartbeat**: Uses chrome.alarms with manual rescheduling to maintain 10-second intervals (works around 1-minute periodInMinutes minimum)
+  - **Exponential Backoff**: Automatic retry logic with jitter prevents server overload during failures
+  - **Navigation Tracking**: chrome.webNavigation API captures all URL navigation events including link clicks
+  - **Auto-refresh**: Automatically refreshes student's current page after successful registration to apply privacy banner
 
 ### Feature Specifications
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
