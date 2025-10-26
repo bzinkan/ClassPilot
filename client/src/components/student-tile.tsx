@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -12,9 +12,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2 } from "lucide-react";
-import type { StudentStatus } from "@shared/schema";
+import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -48,13 +55,19 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName);
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
+  const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const { toast } = useToast();
   
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ['/api/settings'],
+  });
+  
   const updateStudentMutation = useMutation({
-    mutationFn: async (data: { deviceId: string; studentName: string; deviceName: string }) => {
+    mutationFn: async (data: { deviceId: string; studentName: string; deviceName: string; gradeLevel: string }) => {
       return await apiRequest("PATCH", `/api/students/${data.deviceId}`, { 
         studentName: data.studentName,
-        deviceName: data.deviceName || null
+        deviceName: data.deviceName || null,
+        gradeLevel: data.gradeLevel || null
       });
     },
     onSuccess: () => {
@@ -100,6 +113,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     e.stopPropagation();
     setNewStudentName(student.studentName);
     setNewDeviceName(student.deviceName || '');
+    setNewGradeLevel(student.gradeLevel || '');
     setEditDialogOpen(true);
   };
 
@@ -124,7 +138,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     updateStudentMutation.mutate({ 
       deviceId: student.deviceId, 
       studentName: newStudentName,
-      deviceName: newDeviceName 
+      deviceName: newDeviceName,
+      gradeLevel: newGradeLevel
     });
   };
   
@@ -344,6 +359,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   }
                 }}
               />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="grade-level">Grade Level (Optional)</Label>
+              <Select
+                value={newGradeLevel}
+                onValueChange={setNewGradeLevel}
+              >
+                <SelectTrigger id="grade-level" data-testid={`select-edit-grade-level-${student.deviceId}`}>
+                  <SelectValue placeholder="Select grade level" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">None</SelectItem>
+                  {settings?.gradeLevels?.map((grade) => (
+                    <SelectItem key={grade} value={grade}>
+                      {grade}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <DialogFooter>
