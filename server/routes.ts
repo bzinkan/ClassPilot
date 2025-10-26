@@ -18,6 +18,7 @@ import {
   type StudentStatus,
   type SignalMessage,
 } from "@shared/schema";
+import { groupSessionsByDevice, formatDuration } from "@shared/utils";
 
 // Rate limiters
 const apiLimiter = rateLimit({
@@ -729,14 +730,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const students = await storage.getAllStudents();
       const studentMap = new Map(students.map(s => [s.deviceId, s.studentName]));
       
-      // Prepare data for Excel
-      const data = filteredHeartbeats.map(heartbeat => ({
-        'Device ID': heartbeat.deviceId,
-        'Student Name': studentMap.get(heartbeat.deviceId) || heartbeat.deviceId,
-        'Timestamp': new Date(heartbeat.timestamp).toISOString(),
-        'URL': heartbeat.activeTabUrl || '',
-        'Tab Title': heartbeat.activeTabTitle || ''
-      }));
+      // Calculate URL sessions with duration for each device
+      const deviceSessions = groupSessionsByDevice(filteredHeartbeats);
+      
+      // Prepare data for Excel with duration information
+      const data: any[] = [];
+      Array.from(deviceSessions.entries()).forEach(([deviceId, sessions]) => {
+        sessions.forEach(session => {
+          data.push({
+            'Device ID': deviceId,
+            'Student Name': studentMap.get(deviceId) || deviceId,
+            'Start Time': session.startTime.toISOString(),
+            'End Time': session.endTime.toISOString(),
+            'Duration': formatDuration(session.durationSeconds),
+            'Duration (seconds)': session.durationSeconds,
+            'URL': session.url,
+            'Tab Title': session.title,
+          });
+        });
+      });
+      
+      // Sort by device ID and start time
+      data.sort((a, b) => {
+        if (a['Device ID'] !== b['Device ID']) {
+          return a['Device ID'].localeCompare(b['Device ID']);
+        }
+        return new Date(a['Start Time']).getTime() - new Date(b['Start Time']).getTime();
+      });
       
       // Create workbook and worksheet
       const worksheet = XLSX.utils.json_to_sheet(data);
@@ -747,7 +767,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       worksheet['!cols'] = [
         { wch: 15 }, // Device ID
         { wch: 20 }, // Student Name
-        { wch: 20 }, // Timestamp
+        { wch: 20 }, // Start Time
+        { wch: 20 }, // End Time
+        { wch: 12 }, // Duration
+        { wch: 12 }, // Duration (seconds)
         { wch: 50 }, // URL
         { wch: 40 }  // Tab Title
       ];
