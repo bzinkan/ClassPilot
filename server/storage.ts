@@ -134,6 +134,7 @@ export class MemStorage implements IStorage {
     // Initialize status
     const status: StudentStatus = {
       deviceId: student.deviceId,
+      deviceName: student.deviceName ?? undefined,
       studentName: student.studentName,
       classId: student.classId,
       gradeLevel: student.gradeLevel ?? undefined,
@@ -173,11 +174,14 @@ export class MemStorage implements IStorage {
     Object.assign(student, updates);
     this.students.set(deviceId, student);
     
-    // Update status map if student name or grade level changed
+    // Update status map if student name, device name, or grade level changed
     const status = this.studentStatuses.get(deviceId);
     if (status) {
       if (updates.studentName) {
         status.studentName = updates.studentName;
+      }
+      if (updates.deviceName !== undefined) {
+        status.deviceName = updates.deviceName ?? undefined;
       }
       if (updates.gradeLevel !== undefined) {
         status.gradeLevel = updates.gradeLevel ?? undefined;
@@ -429,6 +433,7 @@ export class DatabaseStorage implements IStorage {
         target: students.deviceId,
         set: {
           studentName: insertStudent.studentName,
+          deviceName: insertStudent.deviceName,
           classId: insertStudent.classId,
           schoolId: insertStudent.schoolId,
         },
@@ -454,6 +459,7 @@ export class DatabaseStorage implements IStorage {
     // Initialize/update status with real or default data
     const status: StudentStatus = {
       deviceId: student.deviceId,
+      deviceName: student.deviceName ?? undefined,
       studentName: student.studentName,
       classId: student.classId,
       gradeLevel: student.gradeLevel ?? undefined,
@@ -497,11 +503,14 @@ export class DatabaseStorage implements IStorage {
     
     if (!student) return undefined;
     
-    // Update status map if student name or grade level changed
+    // Update status map if student name, device name, or grade level changed
     const status = this.studentStatuses.get(deviceId);
     if (status) {
       if (updates.studentName) {
         status.studentName = updates.studentName;
+      }
+      if (updates.deviceName !== undefined) {
+        status.deviceName = updates.deviceName ?? undefined;
       }
       if (updates.gradeLevel !== undefined) {
         status.gradeLevel = updates.gradeLevel ?? undefined;
