@@ -7,6 +7,17 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
 
+// Global error handlers to prevent process crashes
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Rejection:', reason);
+  // Don't exit - log and continue
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit - log and continue (consider graceful shutdown in production)
+});
+
 const app = express();
 
 // CRITICAL: Trust proxy for Replit Deployments
@@ -81,12 +92,14 @@ declare module 'http' {
     rawBody: unknown
   }
 }
+// Parse JSON with size limit to prevent memory issues
 app.use(express.json({
+  limit: '12kb', // Prevent large payload attacks
   verify: (req, _res, buf) => {
     req.rawBody = buf;
   }
 }));
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: '12kb' }));
 
 // Client runtime config endpoint (for dynamic URLs)
 app.get('/client-config.json', (req, res) => {

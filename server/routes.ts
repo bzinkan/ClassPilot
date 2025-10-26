@@ -428,25 +428,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Event logging endpoint (from extension)
+  // Event logging endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/event", apiLimiter, async (req, res) => {
     try {
-      const data = insertEventSchema.parse(req.body);
+      // Validate input with safe parse
+      const result = insertEventSchema.safeParse(req.body);
       
-      const event = await storage.addEvent(data);
-      
-      // Notify teachers of important events
-      if (['consent_granted', 'consent_revoked', 'blocked_domain'].includes(data.eventType)) {
-        broadcastToTeachers({
-          type: 'student-event',
-          data: event,
-        });
+      if (!result.success) {
+        console.warn('Invalid event data:', result.error.format(), req.body);
+        // Return 204 to prevent extension from retrying
+        return res.sendStatus(204);
       }
+      
+      const data = result.data;
+      
+      // Store event asynchronously - don't block the response
+      storage.addEvent(data)
+        .then((event) => {
+          // Notify teachers of important events (non-blocking)
+          if (['consent_granted', 'consent_revoked', 'blocked_domain', 'navigation', 'url_change'].includes(data.eventType)) {
+            broadcastToTeachers({
+              type: 'student-event',
+              data: event,
+            });
+          }
+        })
+        .catch((error) => {
+          // Log but don't fail - we already responded to client
+          console.error("Event storage error:", error, "deviceId:", data.deviceId);
+        });
 
-      res.json({ success: true, event });
+      // Always return success immediately
+      return res.sendStatus(204);
     } catch (error) {
-      console.error("Event error:", error);
-      res.status(400).json({ error: "Invalid request" });
+      // Final safety net - never throw
+      console.error("Event uncaught error:", error, req.body);
+      return res.sendStatus(204);
     }
   });
 

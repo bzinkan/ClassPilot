@@ -153,11 +153,17 @@ function startHeartbeat() {
   // Send immediate heartbeat
   sendHeartbeat();
   
-  // Create periodic alarm (every 10 seconds)
-  chrome.alarms.create('heartbeat', {
-    periodInMinutes: CONFIG.heartbeatInterval / 60000, // Convert ms to minutes
-  });
+  // Schedule next heartbeat using 'when' (in milliseconds from epoch)
+  // Chrome alarms have a 1-minute minimum for periodInMinutes, so we use 'when' instead
+  scheduleNextHeartbeat();
   console.log('Heartbeat started with chrome.alarms');
+}
+
+// Schedule next heartbeat
+function scheduleNextHeartbeat() {
+  chrome.alarms.create('heartbeat', {
+    when: Date.now() + CONFIG.heartbeatInterval,
+  });
 }
 
 // Stop heartbeat
@@ -169,8 +175,14 @@ function stopHeartbeat() {
 
 // Alarm listener for heartbeat
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'heartbeat' || alarm.name === 'heartbeat-retry') {
+  if (alarm.name === 'heartbeat') {
     sendHeartbeat();
+    // Reschedule next heartbeat (manual periodic behavior)
+    scheduleNextHeartbeat();
+  } else if (alarm.name === 'heartbeat-retry') {
+    // Retry after backoff
+    sendHeartbeat();
+    scheduleNextHeartbeat();
   }
 });
 
