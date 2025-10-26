@@ -358,7 +358,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Student registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
-      const data = insertStudentSchema.parse(req.body);
+      // Parse and set defaults for new registration flow
+      const { deviceId, deviceName, classId, schoolId = 'default-school', studentName, gradeLevel } = req.body;
+      
+      const data = insertStudentSchema.parse({
+        deviceId,
+        deviceName,
+        classId,
+        schoolId,
+        studentName: studentName || null, // Nullable - teacher adds later
+        gradeLevel: gradeLevel || null, // Nullable - teacher adds later
+      });
       
       // Check if student already exists
       const existing = await storage.getStudent(data.deviceId);
