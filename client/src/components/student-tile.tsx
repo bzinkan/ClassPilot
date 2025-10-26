@@ -23,6 +23,7 @@ interface StudentTileProps {
   student: StudentStatus;
   onClick: () => void;
   blockedDomains?: string[];
+  isOffTask?: boolean;
 }
 
 function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
@@ -42,7 +43,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
   }
 }
 
-export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTileProps) {
+export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName);
@@ -156,6 +157,10 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
   };
 
   const getBorderStyle = (status: string) => {
+    if (isOffTask) {
+      return 'border-2 border-red-500';
+    }
+    
     if (isBlocked) {
       return 'border-2 border-destructive';
     }
@@ -229,14 +234,20 @@ export function StudentTile({ student, onClick, blockedDomains = [] }: StudentTi
             </p>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
-            {isBlocked && (
+            {isOffTask && (
+              <Badge className="text-xs px-2 py-0.5 bg-red-500 text-white" data-testid={`badge-offtask-${student.deviceId}`}>
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                Off-Task
+              </Badge>
+            )}
+            {isBlocked && !isOffTask && (
               <Badge variant="destructive" className="text-xs px-2 py-0.5" data-testid={`badge-blocked-${student.deviceId}`}>
                 <AlertTriangle className="h-3 w-3 mr-1" />
                 Blocked
               </Badge>
             )}
             {student.isSharing && (
-              <Badge variant="destructive" className="text-xs px-2 py-0.5 animate-pulse">
+              <Badge className="text-xs px-2 py-0.5 bg-blue-500 text-white animate-pulse">
                 Sharing
               </Badge>
             )}

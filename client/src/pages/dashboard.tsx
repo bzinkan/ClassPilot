@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -98,23 +98,57 @@ export default function Dashboard() {
     };
   }, [refetch]);
 
-  const filteredStudents = students.filter((student) => {
-    const matchesSearch = 
-      student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      student.classId.toLowerCase().includes(searchQuery.toLowerCase());
-    
-    if (!matchesSearch) return false;
-    
-    if (selectedGrade === "all") return true;
-    
-    // Filter by gradeLevel field
-    return student.gradeLevel === selectedGrade;
-  });
+  const filteredStudents = students
+    .filter((student) => {
+      const matchesSearch = 
+        student.studentName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        student.classId.toLowerCase().includes(searchQuery.toLowerCase());
+      
+      if (!matchesSearch) return false;
+      
+      if (selectedGrade === "all") return true;
+      
+      // Filter by gradeLevel field
+      return student.gradeLevel === selectedGrade;
+    })
+    .sort((a, b) => {
+      // Sort off-task students to the top
+      const aOffTask = isStudentOffTask(a);
+      const bOffTask = isStudentOffTask(b);
+      
+      if (aOffTask && !bOffTask) return -1;
+      if (!aOffTask && bOffTask) return 1;
+      return 0; // Keep original order for students with same off-task status
+    });
 
   const onlineCount = students.filter((s) => s.status === 'online').length;
   const idleCount = students.filter((s) => s.status === 'idle').length;
   const sharingCount = students.filter((s) => s.isSharing).length;
+  
+  // Check if student is off-task (not on allowed domains)
+  const isStudentOffTask = (student: StudentStatus): boolean => {
+    // Only check if allowedDomains is configured and has entries
+    if (!settings?.allowedDomains || settings.allowedDomains.length === 0) return false;
+    if (!student.activeTabUrl) return false;
+    if (student.status !== 'online') return false; // Only check online students
+    
+    try {
+      const hostname = new URL(student.activeTabUrl).hostname.toLowerCase();
+      
+      // Check if student is on any allowed domain
+      const isOnAllowedDomain = settings.allowedDomains.some(allowed => {
+        const allowedLower = allowed.toLowerCase().trim();
+        return hostname === allowedLower || hostname.endsWith('.' + allowedLower);
+      });
+      
+      return !isOnAllowedDomain; // Off-task if NOT on allowed domain
+    } catch {
+      return false;
+    }
+  };
+  
+  const offTaskCount = students.filter(isStudentOffTask).length;
 
   // Check for blocked domain violations and show notifications
   useEffect(() => {
@@ -264,7 +298,7 @@ export default function Dashboard() {
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
         {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <div className="p-4 rounded-lg bg-card border border-card-border">
             <div className="flex items-center gap-3">
               <div className="h-10 w-10 rounded-md bg-status-online/10 flex items-center justify-center">
@@ -289,12 +323,23 @@ export default function Dashboard() {
           </div>
           <div className="p-4 rounded-lg bg-card border border-card-border">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-md bg-destructive/10 flex items-center justify-center">
-                <Monitor className="h-5 w-5 text-destructive" />
+              <div className="h-10 w-10 rounded-md bg-blue-500/10 flex items-center justify-center">
+                <Monitor className="h-5 w-5 text-blue-500" />
               </div>
               <div>
                 <p className="text-2xl font-semibold" data-testid="text-sharing-count">{sharingCount}</p>
                 <p className="text-sm text-muted-foreground">Sharing Screen</p>
+              </div>
+            </div>
+          </div>
+          <div className="p-4 rounded-lg bg-card border border-red-500/20">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-md bg-red-500/10 flex items-center justify-center">
+                <AlertTriangle className="h-5 w-5 text-red-500" />
+              </div>
+              <div>
+                <p className="text-2xl font-semibold text-red-500" data-testid="text-offtask-count">{offTaskCount}</p>
+                <p className="text-sm text-muted-foreground">Off-Task Alert</p>
               </div>
             </div>
           </div>
@@ -348,6 +393,7 @@ export default function Dashboard() {
                 student={student}
                 onClick={() => setSelectedStudent(student)}
                 blockedDomains={settings?.blockedDomains || []}
+                isOffTask={isStudentOffTask(student)}
               />
             ))}
           </div>
