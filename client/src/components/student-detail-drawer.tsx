@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { X, ExternalLink, Clock, Monitor, Video, Bell } from "lucide-react";
+import { useMutation } from "@tanstack/react-query";
+import { X, ExternalLink, Clock, Monitor, Video, Bell, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format } from "date-fns";
 
@@ -25,6 +26,35 @@ export function StudentDetailDrawer({
   const wsRef = useRef<WebSocket | null>(null);
   const [videoLoaded, setVideoLoaded] = useState(false);
   const [pinging, setPinging] = useState(false);
+
+  const deleteStudentMutation = useMutation({
+    mutationFn: async (deviceId: string) => {
+      return await apiRequest("DELETE", `/api/students/${deviceId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      toast({
+        title: "Device removed",
+        description: "Student device has been deleted successfully",
+      });
+      onClose();
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to remove device",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const handleDelete = () => {
+    if (!student) return;
+    
+    if (confirm(`Are you sure you want to remove device "${student.deviceId}"? This will delete all associated activity data.`)) {
+      deleteStudentMutation.mutate(student.deviceId);
+    }
+  };
 
   const handlePing = async () => {
     if (!student) return;
@@ -255,7 +285,7 @@ export function StudentDetailDrawer({
                     </Badge>
                   )}
                 </div>
-                <div className="mt-3">
+                <div className="mt-3 flex gap-2">
                   <Button
                     size="sm"
                     variant="outline"
@@ -265,6 +295,16 @@ export function StudentDetailDrawer({
                   >
                     <Bell className="h-4 w-4 mr-2" />
                     {pinging ? "Sending..." : "Ping Student"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={handleDelete}
+                    disabled={deleteStudentMutation.isPending}
+                    data-testid="button-delete-device"
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    {deleteStudentMutation.isPending ? "Deleting..." : "Remove Device"}
                   </Button>
                 </div>
               </div>

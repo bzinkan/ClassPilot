@@ -36,6 +36,7 @@ export interface IStorage {
   getAllStudents(): Promise<Student[]>;
   registerStudent(student: InsertStudent): Promise<Student>;
   updateStudentName(deviceId: string, studentName: string): Promise<Student | undefined>;
+  deleteStudent(deviceId: string): Promise<boolean>;
   deleteAllStudents(): Promise<void>;
 
   // Student Status (in-memory tracking)
@@ -160,6 +161,15 @@ export class MemStorage implements IStorage {
     }
     
     return student;
+  }
+
+  async deleteStudent(deviceId: string): Promise<boolean> {
+    const existed = this.students.has(deviceId);
+    this.students.delete(deviceId);
+    this.studentStatuses.delete(deviceId);
+    this.heartbeats = this.heartbeats.filter((h) => h.deviceId !== deviceId);
+    this.events = this.events.filter((e) => e.deviceId !== deviceId);
+    return existed;
   }
 
   async deleteAllStudents(): Promise<void> {
@@ -450,6 +460,25 @@ export class DatabaseStorage implements IStorage {
     }
     
     return student;
+  }
+
+  async deleteStudent(deviceId: string): Promise<boolean> {
+    // Delete heartbeats first (foreign key constraint)
+    await db.delete(heartbeats).where(eq(heartbeats.deviceId, deviceId));
+    
+    // Delete events
+    await db.delete(events).where(eq(events.deviceId, deviceId));
+    
+    // Delete student
+    const [deletedStudent] = await db
+      .delete(students)
+      .where(eq(students.deviceId, deviceId))
+      .returning();
+    
+    // Remove from in-memory status map
+    this.studentStatuses.delete(deviceId);
+    
+    return !!deletedStudent;
   }
 
   async deleteAllStudents(): Promise<void> {

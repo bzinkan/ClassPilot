@@ -464,6 +464,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Delete student device (cleanup duplicate/old devices)
+  app.delete("/api/students/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      
+      const deleted = await storage.deleteStudent(deviceId);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      
+      // Broadcast update to teachers
+      broadcastToTeachers({
+        type: 'student-update',
+        deviceId,
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Get heartbeat history for a specific device
   app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
