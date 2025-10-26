@@ -26,7 +26,15 @@ The system uses a full-stack architecture:
 - **Chrome Extension**: A Manifest V3 extension manages automatic tab and URL monitoring, displays privacy disclosure, and facilitates opt-in screen sharing via WebRTC.
 
 ### Feature Specifications
-- **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters (CSV upload), and configures data retention.
+- **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
+- **Roster Management**: Comprehensive student roster management with:
+  - Manual student creation (individual or bulk) with name, device ID, class ID, and grade level
+  - Edit student information including grade level assignment
+  - Delete students with confirmation dialogs
+  - CSV upload support for bulk roster imports (format: studentName, deviceId, classId, gradeLevel)
+  - Table view displaying all students with their assigned information
+  - Grade level tracking (nullable field to accommodate various school structures)
+  - Persistent database storage ensuring roster data survives server restarts
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
 - **Opt-In Screen Sharing**: Students explicitly consent to screen sharing, with clear visual indicators when active.
 - **Admin System**: Allows IT administrators to manage teacher accounts (create, view, delete).
