@@ -133,7 +133,7 @@ export default function Dashboard() {
       const violationKey = `${deviceId}-${student.activeTabUrl}`;
       
       // Check if student is on blocked domain
-      const isBlocked = settings.blockedDomains.some(blocked => {
+      const isBlocked = settings.blockedDomains!.some(blocked => {
         try {
           const hostname = new URL(student.activeTabUrl!).hostname.toLowerCase();
           const blockedLower = blocked.toLowerCase().trim();
