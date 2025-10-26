@@ -16,6 +16,11 @@ app.set('trust proxy', 1);
 const allowlist = (process.env.CORS_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean);
 app.use(cors({
   origin(origin, cb) {
+    // In development mode, allow all origins
+    if (process.env.NODE_ENV === 'development') {
+      return cb(null, true);
+    }
+    
     // Allow same-origin requests (no origin header)
     if (!origin) return cb(null, true);
     
