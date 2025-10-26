@@ -102,6 +102,7 @@ export const settings = pgTable("settings", {
   wsSharedKey: text("ws_shared_key").notNull(),
   retentionHours: text("retention_hours").notNull().default("24"),
   blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
+  allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
   ipAllowlist: text("ip_allowlist").array().default(sql`'{}'::text[]`),
   gradeLevels: text("grade_levels").array().default(sql`'{6,7,8,9,10,11,12}'::text[]`),
 });
