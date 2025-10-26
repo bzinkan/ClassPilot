@@ -51,8 +51,8 @@ export function StudentDetailDrawer({
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
-        title: "Device removed",
-        description: "Student device has been deleted successfully",
+        title: "Student deleted",
+        description: "Student has been removed from your roster",
       });
       setShowDeleteDialog(false);
       onClose();
@@ -60,7 +60,7 @@ export function StudentDetailDrawer({
     onError: (error: any) => {
       toast({
         variant: "destructive",
-        title: "Failed to remove device",
+        title: "Failed to delete student",
         description: error.message || "An error occurred",
       });
       setShowDeleteDialog(false);
@@ -79,7 +79,7 @@ export function StudentDetailDrawer({
     try {
       const response = await apiRequest("POST", `/api/ping/${student.deviceId}`, {
         message: "Your teacher is requesting your attention"
-      });
+      }) as { success: boolean };
       
       if (response.success) {
         toast({
@@ -317,10 +317,10 @@ export function StudentDetailDrawer({
                     variant="destructive"
                     onClick={() => setShowDeleteDialog(true)}
                     disabled={deleteStudentMutation.isPending}
-                    data-testid="button-delete-device"
+                    data-testid="button-delete-student"
                   >
                     <Trash2 className="h-4 w-4 mr-2" />
-                    Remove Device
+                    Delete Student
                   </Button>
                 </div>
               </div>
@@ -468,9 +468,9 @@ export function StudentDetailDrawer({
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove Device</AlertDialogTitle>
+            <AlertDialogTitle>Delete Student</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to remove device "{student?.deviceId}"? This will permanently delete the device and all associated activity data. This action cannot be undone.
+              Are you sure you want to delete "{student?.studentName}" ({student?.deviceId})? This will permanently remove the student and all associated activity data from your roster. This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -483,7 +483,7 @@ export function StudentDetailDrawer({
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               data-testid="button-confirm-delete"
             >
-              {deleteStudentMutation.isPending ? "Deleting..." : "Remove Device"}
+              {deleteStudentMutation.isPending ? "Deleting..." : "Delete Student"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
