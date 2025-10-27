@@ -31,7 +31,7 @@ export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedGrade, setSelectedGrade] = useState<string>("all");
+  const [selectedGrade, setSelectedGrade] = useState<string>("");
   const [wsConnected, setWsConnected] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
@@ -98,6 +98,13 @@ export default function Dashboard() {
     };
   }, [refetch]);
 
+  // Set initial grade when settings load
+  useEffect(() => {
+    if (settings?.gradeLevels && settings.gradeLevels.length > 0 && !selectedGrade) {
+      setSelectedGrade(settings.gradeLevels[0]);
+    }
+  }, [settings, selectedGrade]);
+
   // Check if student is off-task (not on allowed domains)
   const isStudentOffTask = (student: StudentStatus): boolean => {
     // Only check if allowedDomains is configured and has entries
@@ -129,9 +136,7 @@ export default function Dashboard() {
       
       if (!matchesSearch) return false;
       
-      if (selectedGrade === "all") return true;
-      
-      // Filter by gradeLevel field
+      // Filter by gradeLevel field (selectedGrade will always have a value from settings)
       return student.gradeLevel === selectedGrade;
     })
     .sort((a, b) => {
@@ -144,10 +149,12 @@ export default function Dashboard() {
       return 0; // Keep original order for students with same off-task status
     });
 
-  const onlineCount = students.filter((s) => s.status === 'online').length;
-  const idleCount = students.filter((s) => s.status === 'idle').length;
-  const sharingCount = students.filter((s) => s.isSharing).length;
-  const offTaskCount = students.filter(isStudentOffTask).length;
+  // Count stats only for students in the currently selected grade
+  const studentsInGrade = students.filter((s) => s.gradeLevel === selectedGrade);
+  const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
+  const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
+  const sharingCount = studentsInGrade.filter((s) => s.isSharing).length;
+  const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
 
   // Check for blocked domain violations and show notifications
   useEffect(() => {
@@ -368,7 +375,6 @@ export default function Dashboard() {
         {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
           <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
             <TabsList className="flex-wrap h-auto">
-              <TabsTrigger value="all" data-testid="tab-grade-all">All Grades</TabsTrigger>
               {settings.gradeLevels.map((grade) => (
                 <TabsTrigger 
                   key={grade} 
