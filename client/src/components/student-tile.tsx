@@ -42,8 +42,16 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
     
     return blockedDomains.some(blocked => {
       const blockedLower = blocked.toLowerCase().trim();
-      // Check exact match or subdomain match
-      return hostname === blockedLower || hostname.endsWith('.' + blockedLower);
+      
+      // Flexible domain matching: check if the blocked domain appears in the hostname
+      // This allows ixl.com to match: ixl.com, www.ixl.com, signin.ixl.com, etc.
+      return (
+        hostname === blockedLower ||                        // Exact match
+        hostname.endsWith('.' + blockedLower) ||            // Subdomain
+        hostname.includes('.' + blockedLower + '.') ||      // Middle segment
+        hostname.startsWith(blockedLower + '.') ||          // Starts with
+        hostname.includes(blockedLower)                     // Contains anywhere (most flexible)
+      );
     });
   } catch {
     return false;

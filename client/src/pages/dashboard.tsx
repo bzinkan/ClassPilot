@@ -115,10 +115,19 @@ export default function Dashboard() {
     try {
       const hostname = new URL(student.activeTabUrl).hostname.toLowerCase();
       
-      // Check if student is on any allowed domain
+      // Check if student is on any allowed domain (flexible matching)
       const isOnAllowedDomain = settings.allowedDomains.some(allowed => {
         const allowedLower = allowed.toLowerCase().trim();
-        return hostname === allowedLower || hostname.endsWith('.' + allowedLower);
+        
+        // Flexible domain matching: check if the allowed domain appears in the hostname
+        // This allows ixl.com to match: ixl.com, www.ixl.com, signin.ixl.com, etc.
+        return (
+          hostname === allowedLower ||                        // Exact match: ixl.com
+          hostname.endsWith('.' + allowedLower) ||            // Subdomain: www.ixl.com
+          hostname.includes('.' + allowedLower + '.') ||      // Middle segment: sub.ixl.com.au
+          hostname.startsWith(allowedLower + '.') ||          // Starts with: ixl.com.au
+          hostname.includes(allowedLower)                     // Contains anywhere (most flexible)
+        );
       });
       
       return !isOnAllowedDomain; // Off-task if NOT on allowed domain
