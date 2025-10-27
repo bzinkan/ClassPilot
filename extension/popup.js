@@ -155,7 +155,7 @@ async function loadStudents(deviceId) {
     students.forEach(student => {
       const option = document.createElement('option');
       option.value = student.id;
-      option.textContent = student.name;
+      option.textContent = student.studentName;
       selectElement.appendChild(option);
     });
     
@@ -167,7 +167,7 @@ async function loadStudents(deviceId) {
       const activeStudent = students.find(s => s.id === activeStudentId);
       if (activeStudent) {
         selectElement.value = activeStudentId;
-        currentStudentName.textContent = activeStudent.name;
+        currentStudentName.textContent = activeStudent.studentName;
         currentStudentDisplay.classList.remove('hidden');
       }
     }
