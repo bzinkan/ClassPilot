@@ -401,6 +401,62 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Student auto-registration with email (from extension using Chrome Identity API)
+  app.post("/api/register-student", apiLimiter, async (req, res) => {
+    try {
+      const { deviceId, deviceName, classId, schoolId = 'default-school', studentEmail, studentName } = req.body;
+      
+      // Validate required fields
+      if (!studentEmail || !studentName) {
+        return res.status(400).json({ error: "studentEmail and studentName are required" });
+      }
+      
+      // Register or update device
+      const deviceData = insertDeviceSchema.parse({
+        deviceId,
+        deviceName: deviceName || `Device for ${studentName}`,
+        classId,
+        schoolId,
+      });
+      
+      let device = await storage.getDevice(deviceData.deviceId);
+      if (!device) {
+        device = await storage.registerDevice(deviceData);
+      }
+      
+      // Check if student with this email already exists on this device
+      const existingStudents = await storage.getStudentsByDevice(deviceData.deviceId);
+      let student = existingStudents.find(s => s.studentEmail === studentEmail);
+      
+      if (student) {
+        // Student already exists for this device
+        console.log('Student already registered:', studentEmail);
+      } else {
+        // Create new student assignment
+        const studentData = insertStudentSchema.parse({
+          deviceId: deviceData.deviceId,
+          studentName,
+          studentEmail,
+          gradeLevel: null, // Teacher can assign grade later
+        });
+        
+        student = await storage.addStudent(studentData);
+        console.log('New student auto-registered:', studentEmail);
+      }
+      
+      // Notify teachers
+      broadcastToTeachers({
+        type: 'student-registered',
+        data: { device, student },
+      });
+
+      res.json({ success: true, device, student });
+    } catch (error) {
+      console.error("Student registration error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/heartbeat", heartbeatLimiter, async (req, res) => {
     try {
