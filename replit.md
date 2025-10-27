@@ -26,15 +26,25 @@ The system uses a full-stack architecture:
 - **Real-time Communication**: A WebSocket server facilitates live updates for teacher dashboards and WebRTC communication for screen sharing.
 - **Security**: Implements role-based access control (admin/teacher), bcrypt for password hashing, Express session management, rate limiting (12kb payload limits), and CSRF protection. An admin middleware protects sensitive routes.
 - **Chrome Extension**: A Manifest V3 extension with reliable background service worker using chrome.alarms API for persistent heartbeat monitoring
+  - **Automatic Student Detection (NEW)**: Uses Chrome Identity API to automatically detect logged-in Chromebook user
+    - Eliminates manual student selection - student is auto-identified by their Google Workspace email
+    - Uses `chrome.identity.getProfileUserInfo()` to get email and name of logged-in student
+    - Auto-registers student on first login with email linked to their profile
+    - Extension popup displays auto-detected email prominently
+    - Teachers no longer need to manually assign students - system uses Chromebook login credentials
   - **Reliable Heartbeat**: Uses chrome.alarms with manual rescheduling to maintain 10-second intervals (works around 1-minute periodInMinutes minimum)
   - **Exponential Backoff**: Automatic retry logic with jitter prevents server overload during failures
   - **Navigation Tracking**: chrome.webNavigation API captures all URL navigation events including link clicks
   - **Auto-refresh**: Automatically refreshes student's current page after successful registration to apply privacy banner
 
 ### Feature Specifications
-- **Shared Chromebook Support (NEW)**: Full support for multiple students using the same Chromebook device across different periods.
+- **Shared Chromebook Support**: Full support for multiple students using the same Chromebook device across different periods.
   - **Device/Student Separation**: Database schema separates physical devices from student assignments, allowing many-to-one relationships
-  - **Student Self-Selection**: Chrome Extension popup displays dropdown of students assigned to the device; student selects themselves when sitting down
+  - **Automatic Student Detection (NEW)**: Chrome Extension automatically detects which student is logged into the Chromebook using Chrome Identity API
+    - No manual selection needed - student email from Google Workspace login is automatically detected
+    - Student email stored in database (`studentEmail` field) for unique identification
+    - Backend `/api/register-student` endpoint handles email-based auto-registration
+    - Seamless workflow: student logs into Chromebook → extension auto-detects → monitoring begins
   - **Active Student Tracking**: System tracks which student is currently using each device via in-memory activeStudents map
   - **Grade Filtering by Active Student**: Dashboard grade filters show students by their individual grade level, not the device's
   - **Heartbeats with studentId**: Each heartbeat includes the active studentId to attribute activity to the correct student

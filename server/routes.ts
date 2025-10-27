@@ -19,6 +19,8 @@ import {
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
+  type InsertStudent,
+  type InsertDevice,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration } from "@shared/utils";
 
@@ -440,7 +442,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           gradeLevel: null, // Teacher can assign grade later
         });
         
-        student = await storage.addStudent(studentData);
+        student = await storage.createStudent(studentData);
         console.log('New student auto-registered:', studentEmail);
       }
       
