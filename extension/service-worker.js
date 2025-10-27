@@ -7,6 +7,7 @@ let CONFIG = {
   schoolId: 'default-school',
   deviceId: null,
   studentName: null,
+  studentEmail: null,
   classId: null,
   isSharing: false,
   activeStudentId: null,
@@ -15,8 +16,61 @@ let CONFIG = {
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 
+// Get logged-in Chromebook user info using Chrome Identity API
+async function getLoggedInUserInfo() {
+  try {
+    const userInfo = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
+    console.log('Logged-in user info:', userInfo);
+    return {
+      email: userInfo.email || null,
+      id: userInfo.id || null,
+    };
+  } catch (error) {
+    console.error('Error getting logged-in user info:', error);
+    return { email: null, id: null };
+  }
+}
+
+// Auto-detect and register student based on Chromebook login
+async function autoDetectAndRegister() {
+  const userInfo = await getLoggedInUserInfo();
+  
+  if (userInfo.email) {
+    console.log('Auto-detected student email:', userInfo.email);
+    
+    // Extract name from email (e.g., john.smith@school.edu -> john.smith)
+    const emailName = userInfo.email.split('@')[0];
+    const displayName = emailName.replace(/\./g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+    
+    CONFIG.studentEmail = userInfo.email;
+    CONFIG.studentName = displayName;
+    
+    await chrome.storage.local.set({ 
+      studentEmail: userInfo.email,
+      studentName: displayName,
+    });
+    
+    // Auto-register if not already registered
+    const stored = await chrome.storage.local.get(['registered']);
+    if (!stored.registered) {
+      try {
+        // Get or create device ID
+        const deviceId = await getOrCreateDeviceId();
+        
+        // Register with auto-detected info
+        await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
+        console.log('Auto-registered student:', userInfo.email);
+      } catch (error) {
+        console.error('Auto-registration failed:', error);
+      }
+    }
+  } else {
+    console.warn('Could not detect logged-in user email - manual registration required');
+  }
+}
+
 // Load config from storage on startup
-chrome.storage.local.get(['config', 'activeStudentId'], (result) => {
+chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (result) => {
   if (result.config) {
     CONFIG = { ...CONFIG, ...result.config };
     console.log('Loaded config:', CONFIG);
@@ -27,6 +81,14 @@ chrome.storage.local.get(['config', 'activeStudentId'], (result) => {
     CONFIG.activeStudentId = result.activeStudentId;
     console.log('Loaded active student ID:', CONFIG.activeStudentId);
   }
+  
+  // Load student email
+  if (result.studentEmail) {
+    CONFIG.studentEmail = result.studentEmail;
+  }
+  
+  // Auto-detect logged-in user and register
+  await autoDetectAndRegister();
   
   // Start heartbeat if configured
   if (CONFIG.deviceId) {
@@ -87,6 +149,62 @@ async function registerDevice(deviceId, deviceName, classId) {
     return data;
   } catch (error) {
     console.error('Registration error:', error);
+    throw error;
+  }
+}
+
+// Register device with student email auto-detection
+async function registerDeviceWithStudent(deviceId, deviceName, classId, studentEmail, studentName) {
+  // Use provided deviceId or generate new one
+  if (!deviceId) {
+    deviceId = await getOrCreateDeviceId();
+  } else {
+    // Save the provided deviceId
+    await chrome.storage.local.set({ deviceId });
+  }
+  
+  try {
+    const response = await fetch(`${CONFIG.serverUrl}/api/register-student`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId,
+        deviceName,
+        schoolId: CONFIG.schoolId,
+        classId,
+        studentEmail,
+        studentName,
+      }),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || 'Student registration failed');
+    }
+    
+    const data = await response.json();
+    console.log('Student auto-registered:', data);
+    
+    // Save config with student info
+    CONFIG.deviceId = deviceId;
+    CONFIG.studentName = studentName;
+    CONFIG.studentEmail = studentEmail;
+    CONFIG.classId = classId;
+    CONFIG.activeStudentId = data.student?.id || null;
+    
+    await chrome.storage.local.set({ 
+      config: CONFIG,
+      registered: true,
+      activeStudentId: data.student?.id || null,
+    });
+    
+    // Start heartbeat and WebSocket
+    startHeartbeat();
+    connectWebSocket();
+    
+    return data;
+  } catch (error) {
+    console.error('Student registration error:', error);
     throw error;
   }
 }
