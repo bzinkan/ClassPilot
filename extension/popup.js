@@ -7,7 +7,7 @@ let currentConfig = null;
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
   // Get config from background
-  chrome.runtime.sendMessage({ type: 'get-config' }, (response) => {
+  chrome.runtime.sendMessage({ type: 'get-config' }, async (response) => {
     const config = response.config;
     currentConfig = config;
     
@@ -15,8 +15,20 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Already registered, show main view
       showMainView(config);
     } else {
-      // Need to register
-      showSetupView();
+      // Check for auto-detected student info
+      const stored = await chrome.storage.local.get(['studentEmail', 'studentName']);
+      if (stored.studentEmail) {
+        // Show main view with auto-detected info
+        showMainView({
+          studentName: stored.studentName || 'Auto-detected Student',
+          studentEmail: stored.studentEmail,
+          classId: config.classId || 'default-class',
+          deviceId: config.deviceId || 'Registering...',
+        });
+      } else {
+        // Need to register
+        showSetupView();
+      }
     }
   });
   
@@ -34,9 +46,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     e.preventDefault();
     showPrivacyInfo();
   });
-  
-  // Student select change handler
-  document.getElementById('student-select').addEventListener('change', handleStudentSelection);
 });
 
 function showSetupView() {
@@ -53,9 +62,14 @@ function showMainView(config) {
   document.getElementById('student-name-display').textContent = config.studentName || '-';
   document.getElementById('class-id-display').textContent = config.classId || '-';
   
-  // Load students for this device
-  if (config.deviceId) {
-    loadStudents(config.deviceId);
+  // Update auto-detected student info
+  if (config.studentEmail) {
+    document.getElementById('detected-student-name').textContent = config.studentName || 'Auto-detected Student';
+    document.getElementById('detected-student-email').textContent = config.studentEmail;
+  } else {
+    // Fallback if no email detected
+    document.getElementById('detected-student-name').textContent = config.studentName || '-';
+    document.getElementById('detected-student-email').textContent = 'No email detected';
   }
   
   // Update status

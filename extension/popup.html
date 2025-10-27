@@ -300,21 +300,16 @@
     </div>
     
     <div class="section">
-      <h2>Student Selection</h2>
-      <div id="student-select-container">
-        <p style="font-size: 12px; color: #64748b; margin-bottom: 8px;">
-          Select your name:
+      <h2>Student Information</h2>
+      <div id="student-info-container">
+        <div id="auto-detected-student" style="padding: 12px; background: #f0f9ff; border-left: 4px solid #3b82f6; border-radius: 4px;">
+          <p style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #1e40af; margin-bottom: 4px;">AUTO-DETECTED STUDENT</p>
+          <p id="detected-student-name" style="font-size: 14px; font-weight: 600; color: #1e3a8a; margin-bottom: 4px;" data-testid="text-detected-student">Loading...</p>
+          <p id="detected-student-email" style="font-size: 12px; color: #3b82f6;" data-testid="text-detected-email">Loading...</p>
+        </div>
+        <p style="font-size: 11px; color: #64748b; margin-top: 8px; font-style: italic;">
+          ✓ Automatically linked to your Chromebook login
         </p>
-        <select id="student-select" class="student-select" data-testid="select-student">
-          <option value="">Loading students...</option>
-        </select>
-        <div id="current-student-display" class="hidden" style="margin-top: 12px; padding: 12px; background: #f0f9ff; border-left: 4px solid #3b82f6; border-radius: 4px;">
-          <p style="font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: #1e40af; margin-bottom: 4px;">CURRENT STUDENT</p>
-          <p id="current-student-name" style="font-size: 14px; font-weight: 600; color: #1e3a8a;" data-testid="text-current-student"></p>
-        </div>
-        <div id="no-students-message" class="hidden" style="padding: 12px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 4px;">
-          <p style="font-size: 12px; color: #78350f;">No students have been assigned to this Chromebook yet. Please contact your teacher.</p>
-        </div>
       </div>
     </div>
     
