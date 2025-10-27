@@ -1,4 +1,4 @@
-# Classroom Screen Awareness - Chrome Extension
+# ClassPilot - Chrome Extension
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 

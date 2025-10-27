@@ -1,4 +1,4 @@
-// Popup script for Classroom Screen Awareness
+// Popup script for ClassPilot
 
 let mediaStream = null;
 let peerConnection = null;

@@ -241,7 +241,7 @@ export default function Dashboard() {
                 <Monitor className="h-6 w-6 text-primary-foreground" />
               </div>
               <div>
-                <h1 className="text-xl font-semibold">Classroom Screen Awareness</h1>
+                <h1 className="text-xl font-semibold">ClassPilot</h1>
                 <p className="text-xs text-muted-foreground">Teacher Dashboard</p>
               </div>
             </div>

@@ -1,4 +1,4 @@
-# Classroom Screen Awareness Design Guidelines
+# ClassPilot Design Guidelines
 
 ## Design Approach
 

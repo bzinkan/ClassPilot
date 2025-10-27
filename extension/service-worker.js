@@ -1,4 +1,4 @@
-// Classroom Screen Awareness - Service Worker
+// ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
 let CONFIG = {
@@ -455,4 +455,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-console.log('Classroom Screen Awareness service worker loaded');
+console.log('ClassPilot service worker loaded');

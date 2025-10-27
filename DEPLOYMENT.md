@@ -1,4 +1,4 @@
-# Deployment Guide - Classroom Screen Awareness
+# Deployment Guide - ClassPilot
 
 Complete guide for deploying the Teacher Dashboard and Chrome Extension to production.
 
@@ -93,14 +93,14 @@ Navigate to the extension directory and create a ZIP file:
 **On Mac/Linux:**
 ```bash
 cd extension
-zip -r ../classroom-screen-awareness.zip . -x "*.DS_Store" -x "README.md"
+zip -r ../classpilot.zip . -x "*.DS_Store" -x "README.md"
 ```
 
 **On Windows:**
 1. Navigate to the `extension` folder
 2. Select all files (manifest.json, service-worker.js, popup.html, popup.js, content.js, icons folder)
 3. Right-click → Send to → Compressed (zipped) folder
-4. Name it `classroom-screen-awareness.zip`
+4. Name it `classpilot.zip`
 
 ## Part 3: Deploy Extension via Google Admin Console
 
@@ -114,9 +114,9 @@ zip -r ../classroom-screen-awareness.zip . -x "*.DS_Store" -x "README.md"
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload your `classroom-screen-awareness.zip` file
+7. Upload your `classpilot.zip` file
 8. Fill in the details:
-   - **Name**: Classroom Screen Awareness
+   - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
    - **Category**: Education
 
@@ -124,7 +124,7 @@ zip -r ../classroom-screen-awareness.zip . -x "*.DS_Store" -x "README.md"
 
 After uploading:
 
-1. Find "Classroom Screen Awareness" in your extensions list
+1. Find "ClassPilot" in your extensions list
 2. Click on it
 3. Set **Installation** to: **Force install**
 4. Set **Permission to run** to: **Allow**
@@ -203,7 +203,7 @@ Before deploying, inform students and parents about the monitoring:
 
 > Dear Students and Parents,
 >
-> To support effective classroom management, our school is implementing a new classroom monitoring system called "Classroom Screen Awareness" on school-managed Chromebooks.
+> To support effective classroom management, our school is implementing a new classroom monitoring system called "ClassPilot" on school-managed Chromebooks.
 >
 > **What is monitored:**
 > - Active browser tab titles and URLs during class time

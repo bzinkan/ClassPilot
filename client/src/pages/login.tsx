@@ -39,7 +39,7 @@ export default function Login() {
     onSuccess: () => {
       toast({
         title: "Login successful",
-        description: "Welcome to Classroom Screen Awareness",
+        description: "Welcome to ClassPilot",
       });
       setLocation("/dashboard");
     },

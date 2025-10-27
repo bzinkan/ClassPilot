@@ -1,7 +1,7 @@
-// Content script for Classroom Screen Awareness
+// Content script for ClassPilot
 // Runs on all pages to monitor tab changes
 
-console.log('Classroom Screen Awareness content script loaded');
+console.log('ClassPilot content script loaded');
 
 // This content script is intentionally minimal
 // Most functionality is handled by the service worker

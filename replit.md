@@ -1,4 +1,4 @@
-# Classroom Screen Awareness - Teacher Dashboard & Chrome Extension
+# ClassPilot - Teacher Dashboard & Chrome Extension
 
 ## Overview
 A privacy-aware classroom monitoring system designed for educational settings. This full-stack web application, comprising a teacher dashboard and a Chrome Extension, enables teachers to transparently monitor student activity on managed Chromebooks. The system prioritizes privacy with clear disclosure banners and opt-in screen sharing, while also providing real-time activity tracking, class roster management, and robust data retention controls. It aims for FERPA/COPPA compliance by collecting minimal, essential data.

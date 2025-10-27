@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Classroom Screen Awareness",
+  "name": "ClassPilot",
   "version": "1.0.0",
   "description": "Privacy-aware classroom monitoring for managed Chromebooks. Displays active tab information to teachers with transparent disclosure.",
   "icons": {
