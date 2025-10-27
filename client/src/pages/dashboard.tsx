@@ -397,7 +397,7 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {filteredStudents.map((student) => (
               <StudentTile
-                key={student.deviceId}
+                key={student.studentId}
                 student={student}
                 onClick={() => setSelectedStudent(student)}
                 blockedDomains={settings?.blockedDomains || []}
