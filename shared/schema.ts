@@ -42,6 +42,7 @@ export const students = pgTable("students", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(), // FK to devices table
   studentName: text("student_name").notNull(),
+  studentEmail: text("student_email"), // Google Workspace email for auto-detection
   gradeLevel: text("grade_level"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
