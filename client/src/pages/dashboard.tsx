@@ -390,7 +390,7 @@ export default function Dashboard() {
                   value={grade} 
                   data-testid={`tab-grade-${grade}`}
                 >
-                  {grade}th
+                  {grade}
                 </TabsTrigger>
               ))}
             </TabsList>
