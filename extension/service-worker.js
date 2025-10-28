@@ -327,42 +327,54 @@ function connectWebSocket() {
   
   ws.onopen = () => {
     console.log('WebSocket connected');
-    // Authenticate as student
-    ws.send(JSON.stringify({
-      type: 'auth',
-      role: 'student',
-      deviceId: CONFIG.deviceId,
-    }));
+    // Authenticate as student with proper state checking
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'auth',
+          role: 'student',
+          deviceId: CONFIG.deviceId,
+        }));
+      } else {
+        console.warn('WebSocket not ready yet, will retry on next connection');
+      }
+    } catch (error) {
+      console.error('Failed to send auth message:', error);
+    }
   };
   
   ws.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    console.log('WebSocket message:', message);
-    
-    // Handle WebRTC signaling
-    if (message.type === 'signal') {
-      chrome.runtime.sendMessage({
-        type: 'webrtc-signal',
-        data: message.data,
-      });
-    }
-    
-    // Handle ping notifications
-    if (message.type === 'ping') {
-      const { message: pingMessage } = message.data;
+    try {
+      const message = JSON.parse(event.data);
+      console.log('WebSocket message:', message);
       
-      // Show browser notification
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icons/icon48.png',
-        title: 'Teacher Notification',
-        message: pingMessage || 'Your teacher is requesting your attention',
-        priority: 2,
-        requireInteraction: true, // Keeps notification visible until user dismisses
-      });
+      // Handle WebRTC signaling
+      if (message.type === 'signal') {
+        chrome.runtime.sendMessage({
+          type: 'webrtc-signal',
+          data: message.data,
+        });
+      }
       
-      // Also play a sound (beep)
-      // Note: Service workers cannot play audio directly, but the notification will make a sound
+      // Handle ping notifications
+      if (message.type === 'ping') {
+        const { message: pingMessage } = message.data;
+        
+        // Show browser notification
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon48.png',
+          title: 'Teacher Notification',
+          message: pingMessage || 'Your teacher is requesting your attention',
+          priority: 2,
+          requireInteraction: true, // Keeps notification visible until user dismisses
+        });
+        
+        // Also play a sound (beep)
+        // Note: Service workers cannot play audio directly, but the notification will make a sound
+      }
+    } catch (error) {
+      console.error('Error processing WebSocket message:', error);
     }
   };
   
@@ -372,6 +384,7 @@ function connectWebSocket() {
   
   ws.onclose = () => {
     console.log('WebSocket disconnected, reconnecting in 5s...');
+    ws = null; // Clear the reference
     setTimeout(connectWebSocket, 5000);
   };
 }
