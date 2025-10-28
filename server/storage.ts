@@ -364,6 +364,9 @@ export class MemStorage implements IStorage {
             status: 'online',
           };
           this.studentStatuses.set(heartbeat.studentId, status);
+          console.log('Created StudentStatus:', { studentId: student.id, studentName: student.studentName, gradeLevel: student.gradeLevel });
+        } else {
+          console.warn('Heartbeat has studentId but student not found in database:', heartbeat.studentId);
         }
       } else {
         // Update existing status
@@ -839,16 +842,20 @@ export class DatabaseStorage implements IStorage {
             studentName: student.studentName,
             classId: device?.classId || '',
             gradeLevel: student.gradeLevel ?? undefined,
-            activeTabTitle: "",
-            activeTabUrl: "",
+            activeTabTitle: heartbeat.activeTabTitle,
+            activeTabUrl: heartbeat.activeTabUrl,
+            favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
             isSharing: false,
             status: 'online',
           };
+          this.studentStatuses.set(heartbeat.studentId, status);
+          console.log('Created StudentStatus from DB:', { studentId: student.id, studentName: student.studentName, gradeLevel: student.gradeLevel });
+        } else {
+          console.warn('Heartbeat has studentId but student not found in DB:', heartbeat.studentId);
         }
-      }
-      
-      if (status) {
+      } else {
+        // Update existing status
         const now = Date.now();
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
