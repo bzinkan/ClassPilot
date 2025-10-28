@@ -65,41 +65,46 @@ export default function Dashboard() {
     // WebSocket connection for real-time updates
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
+    console.log('[Dashboard] Connecting to WebSocket:', wsUrl);
     const socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
-      console.log("WebSocket connected");
+      console.log("[Dashboard] WebSocket connected successfully");
       setWsConnected(true);
       // Authenticate as teacher
       socket.send(JSON.stringify({ type: 'auth', role: 'teacher' }));
+      console.log("[Dashboard] Sent auth message");
     };
 
     socket.onmessage = (event) => {
       try {
         const message = JSON.parse(event.data);
+        console.log("[Dashboard] WebSocket message received:", message);
         if (message.type === 'student-update') {
-          // Refetch students to get latest data
-          refetch();
+          console.log("[Dashboard] Student update detected, invalidating queries...");
+          // Invalidate queries to force refetch (needed because staleTime: Infinity)
+          queryClient.invalidateQueries({ queryKey: ['/api/students'] });
         }
       } catch (error) {
-        console.error("WebSocket message error:", error);
+        console.error("[Dashboard] WebSocket message error:", error);
       }
     };
 
     socket.onclose = () => {
-      console.log("WebSocket disconnected");
+      console.log("[Dashboard] WebSocket disconnected");
       setWsConnected(false);
     };
 
     socket.onerror = (error) => {
-      console.error("WebSocket error:", error);
+      console.error("[Dashboard] WebSocket error:", error);
       setWsConnected(false);
     };
 
     return () => {
+      console.log("[Dashboard] Closing WebSocket connection");
       socket.close();
     };
-  }, [refetch]);
+  }, []); // Empty deps - WebSocket connection should only be created once
 
   // Set initial grade when settings load
   useEffect(() => {
