@@ -2,12 +2,13 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { ArrowLeft, Edit, Monitor, Trash2, UserPlus } from "lucide-react";
+import { ArrowLeft, Edit, Monitor, Trash2, UserPlus, GraduationCap, Plus, X } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
@@ -31,6 +32,8 @@ export default function RosterPage() {
   const [dialog, setDialog] = useState<DialogType>(null);
   const [deleteDialog, setDeleteDialog] = useState<DeleteDialogType>(null);
   const [selectedGrade, setSelectedGrade] = useState<string>("All");
+  const [showGradeDialog, setShowGradeDialog] = useState(false);
+  const [newGrade, setNewGrade] = useState("");
 
   // Form state
   const [formData, setFormData] = useState({
@@ -221,6 +224,81 @@ export default function RosterPage() {
     },
   });
 
+  // Update grades mutation
+  const updateGradesMutation = useMutation({
+    mutationFn: async (gradeLevels: string[]) => {
+      if (!settings) throw new Error("Settings not loaded");
+      
+      const payload = {
+        schoolId: settings.schoolId,
+        schoolName: settings.schoolName,
+        wsSharedKey: settings.wsSharedKey,
+        retentionHours: settings.retentionHours,
+        blockedDomains: settings.blockedDomains || [],
+        allowedDomains: settings.allowedDomains || [],
+        ipAllowlist: settings.ipAllowlist || [],
+        gradeLevels,
+      };
+      
+      const res = await apiRequest('POST', '/api/settings', payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/settings'] });
+      toast({
+        title: "Success",
+        description: "Grade levels updated successfully",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const handleAddGrade = () => {
+    if (!newGrade.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid Grade",
+        description: "Please enter a grade level",
+      });
+      return;
+    }
+
+    const currentGrades = settings?.gradeLevels || [];
+    if (currentGrades.includes(newGrade.trim())) {
+      toast({
+        variant: "destructive",
+        title: "Duplicate Grade",
+        description: "This grade level already exists",
+      });
+      return;
+    }
+
+    const newGrades = [...currentGrades, newGrade.trim()];
+    updateGradesMutation.mutate(newGrades);
+    setNewGrade("");
+  };
+
+  const handleDeleteGrade = (grade: string) => {
+    const currentGrades = settings?.gradeLevels || [];
+    if (currentGrades.length <= 1) {
+      toast({
+        variant: "destructive",
+        title: "Cannot Delete",
+        description: "You must have at least one grade level",
+      });
+      return;
+    }
+
+    const newGrades = currentGrades.filter(g => g !== grade);
+    updateGradesMutation.mutate(newGrades);
+  };
+
   const resetForm = () => {
     setFormData({
       studentName: "",
@@ -342,6 +420,15 @@ export default function RosterPage() {
                 </p>
               </div>
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowGradeDialog(true)}
+              data-testid="button-manage-grades-roster"
+            >
+              <GraduationCap className="h-4 w-4 mr-2" />
+              Manage Grades
+            </Button>
           </div>
         </div>
       </header>
@@ -697,6 +784,77 @@ export default function RosterPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Grade Management Dialog */}
+      <Dialog open={showGradeDialog} onOpenChange={setShowGradeDialog}>
+        <DialogContent data-testid="dialog-manage-grades-roster">
+          <DialogHeader>
+            <DialogTitle>Manage Grade Levels</DialogTitle>
+            <DialogDescription>
+              Add or remove grade levels that appear as filter tabs in the Roster
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {/* Current Grades */}
+            <div className="space-y-2">
+              <Label>Current Grade Levels</Label>
+              <div className="flex flex-wrap gap-2">
+                {settings?.gradeLevels?.map((grade) => (
+                  <Badge key={grade} variant="secondary" className="text-sm px-3 py-1" data-testid={`badge-grade-${grade}`}>
+                    {grade}
+                    <button
+                      onClick={() => handleDeleteGrade(grade)}
+                      className="ml-2 hover:text-destructive"
+                      data-testid={`button-delete-grade-${grade}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            </div>
+
+            {/* Add New Grade */}
+            <div className="space-y-2">
+              <Label htmlFor="new-grade">Add New Grade Level</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="new-grade"
+                  placeholder="e.g., 5th, K, Pre-K"
+                  value={newGrade}
+                  onChange={(e) => setNewGrade(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleAddGrade();
+                    }
+                  }}
+                  data-testid="input-new-grade-roster"
+                />
+                <Button 
+                  onClick={handleAddGrade} 
+                  disabled={updateGradesMutation.isPending}
+                  data-testid="button-add-grade-roster"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setShowGradeDialog(false);
+                setNewGrade("");
+              }}
+              data-testid="button-close-grade-dialog-roster"
+            >
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
