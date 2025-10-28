@@ -432,7 +432,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       if (student) {
         // Student already exists for this device
-        console.log('Student already registered:', studentEmail);
+        console.log('Student already registered:', studentEmail, 'studentId:', student.id);
       } else {
         // Create new student assignment
         const studentData = insertStudentSchema.parse({
@@ -443,8 +443,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         
         student = await storage.createStudent(studentData);
-        console.log('New student auto-registered:', studentEmail);
+        console.log('New student auto-registered:', studentEmail, 'studentId:', student.id);
       }
+      
+      // Set this student as the active student for this device
+      await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
+      console.log('Set active student for device:', deviceData.deviceId, '→', student.id);
       
       // Notify teachers
       broadcastToTeachers({
@@ -472,6 +476,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const data = result.data;
+      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, url: data.activeTabUrl?.substring(0, 50) });
       
       // Store heartbeat asynchronously - don't block the response
       storage.addHeartbeat(data)
