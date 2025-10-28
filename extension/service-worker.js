@@ -211,14 +211,20 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 
 // Send heartbeat with current tab info
 async function sendHeartbeat() {
-  if (!CONFIG.deviceId) return;
+  if (!CONFIG.deviceId) {
+    console.log('Skipping heartbeat - no deviceId');
+    return;
+  }
   
   try {
     // Get active tab
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const activeTab = tabs[0];
     
-    if (!activeTab) return;
+    if (!activeTab) {
+      console.log('Skipping heartbeat - no active tab');
+      return;
+    }
     
     const heartbeatData = {
       deviceId: CONFIG.deviceId,
@@ -230,6 +236,9 @@ async function sendHeartbeat() {
     // Include studentId if available
     if (CONFIG.activeStudentId) {
       heartbeatData.studentId = CONFIG.activeStudentId;
+      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId);
+    } else {
+      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined)');
     }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
