@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { ArrowLeft, Edit, Monitor, Trash2, UserPlus } from "lucide-react";
@@ -11,7 +12,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import type { Device, Student } from "@shared/schema";
+import type { Device, Student, Settings } from "@shared/schema";
 
 type DialogType = 
   | { type: 'add-student'; deviceId: string }
@@ -29,6 +30,7 @@ export default function RosterPage() {
   const { toast } = useToast();
   const [dialog, setDialog] = useState<DialogType>(null);
   const [deleteDialog, setDeleteDialog] = useState<DeleteDialogType>(null);
+  const [selectedGrade, setSelectedGrade] = useState<string>("All");
 
   // Form state
   const [formData, setFormData] = useState({
@@ -38,7 +40,7 @@ export default function RosterPage() {
     classId: "",
   });
 
-  // Fetch devices and students in parallel
+  // Fetch devices, students, and settings in parallel
   const { data: devices = [], isLoading: devicesLoading } = useQuery<Device[]>({
     queryKey: ['/api/roster/devices'],
   });
@@ -47,10 +49,32 @@ export default function RosterPage() {
     queryKey: ['/api/roster/students'],
   });
 
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ['/api/settings'],
+  });
+
   const isLoading = devicesLoading || studentsLoading;
 
+  // Set initial grade when settings load
+  useEffect(() => {
+    if (settings?.gradeLevels && settings.gradeLevels.length > 0 && selectedGrade === "All") {
+      // Keep "All" as default
+    }
+  }, [settings, selectedGrade]);
+
+  // Filter students by selected grade
+  const filteredStudents = selectedGrade === "All" 
+    ? students 
+    : students.filter(s => s.gradeLevel === selectedGrade);
+
+  // Get devices that have students in the selected grade
+  const deviceIdsWithFilteredStudents = new Set(filteredStudents.map(s => s.deviceId));
+  const filteredDevices = selectedGrade === "All"
+    ? devices
+    : devices.filter(d => deviceIdsWithFilteredStudents.has(d.deviceId));
+
   // Group students by deviceId
-  const studentsByDevice = students.reduce((acc, student) => {
+  const studentsByDevice = filteredStudents.reduce((acc, student) => {
     if (!acc[student.deviceId]) {
       acc[student.deviceId] = [];
     }
@@ -59,7 +83,7 @@ export default function RosterPage() {
   }, {} as Record<string, Student[]>);
 
   // Group devices by classroom
-  const devicesByClassroom = devices.reduce((acc, device) => {
+  const devicesByClassroom = filteredDevices.reduce((acc, device) => {
     const classroom = device.classId || "Unassigned";
     if (!acc[classroom]) {
       acc[classroom] = [];
@@ -324,16 +348,44 @@ export default function RosterPage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-8">
+        {/* Grade Level Tabs */}
+        {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
+          <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
+            <TabsList className="flex-wrap h-auto">
+              <TabsTrigger 
+                value="All" 
+                data-testid="tab-grade-all"
+              >
+                All Grades
+              </TabsTrigger>
+              {settings.gradeLevels.map((grade) => (
+                <TabsTrigger 
+                  key={grade} 
+                  value={grade} 
+                  data-testid={`tab-grade-${grade}`}
+                >
+                  {grade}
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
+        )}
+
         {isLoading ? (
           <div className="text-center py-12">
             <p className="text-muted-foreground">Loading devices and students...</p>
           </div>
-        ) : devices.length === 0 ? (
+        ) : filteredDevices.length === 0 ? (
           <div className="text-center py-12">
             <Monitor className="h-16 w-16 mx-auto mb-4 text-muted-foreground/50" />
-            <h3 className="text-lg font-semibold mb-2">No devices registered</h3>
+            <h3 className="text-lg font-semibold mb-2">
+              {selectedGrade === "All" ? "No devices registered" : `No students in ${selectedGrade}`}
+            </h3>
             <p className="text-muted-foreground">
-              Devices will appear here once they register with the Chrome Extension
+              {selectedGrade === "All" 
+                ? "Devices will appear here once they register with the Chrome Extension"
+                : `No students with grade level "${selectedGrade}" have been assigned to any devices`
+              }
             </p>
           </div>
         ) : (

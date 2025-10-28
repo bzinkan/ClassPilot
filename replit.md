@@ -61,6 +61,10 @@ The system uses a full-stack architecture:
   - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page
   - **Student-First Display**: Dashboard tiles show student names prominently with device information as secondary detail
 - **Roster Management Page**: A dedicated page (`/roster`) for comprehensive device and student assignment management:
+  - **Grade-Level Filtering (NEW)**: Filter roster by grade level with tabs (All, 5th, 6th, 7th, 8th, etc.) for easier management of large rosters
+    - "All Grades" tab shows all students across all devices
+    - Individual grade tabs show only students/devices for that specific grade
+    - Helpful for schools with 100+ students across multiple grades
   - **View All Devices**: Displays all registered devices grouped by classroom location (classId)
   - **Assign Multiple Students**: Each device shows a nested table of all students assigned to it with "Assign Student" button to add more
   - **Edit Student Information**: Update student name and grade level independently for each student assignment
