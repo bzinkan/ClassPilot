@@ -544,6 +544,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const statuses = await storage.getAllStudentStatuses();
+      console.log('Dashboard requested students - found:', statuses.length, 'students');
+      statuses.forEach(s => {
+        console.log(`  - ${s.studentName} (grade: ${s.gradeLevel}, status: ${s.status})`);
+      });
       res.json(statuses);
     } catch (error) {
       console.error("Get students error:", error);

@@ -212,6 +212,7 @@ export class MemStorage implements IStorage {
       id,
       deviceId: insertStudent.deviceId,
       studentName: insertStudent.studentName,
+      studentEmail: insertStudent.studentEmail ?? null,
       gradeLevel: insertStudent.gradeLevel ?? null,
       createdAt: new Date(),
     };
