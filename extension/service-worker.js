@@ -76,6 +76,10 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (r
     console.log('Loaded config:', CONFIG);
   }
   
+  // ALWAYS use the correct server URL (override stored config)
+  CONFIG.serverUrl = 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
+  console.log('Using server URL:', CONFIG.serverUrl);
+  
   // Load active student ID
   if (result.activeStudentId) {
     CONFIG.activeStudentId = result.activeStudentId;
