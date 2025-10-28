@@ -53,7 +53,7 @@ export default function Settings() {
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
       allowedDomains: settings?.allowedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
-      gradeLevels: settings?.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
+      gradeLevels: settings?.gradeLevels?.join(", ") || "6th, 7th, 8th, 9th, 10th, 11th, 12th",
     },
   });
 
@@ -67,7 +67,7 @@ export default function Settings() {
         blockedDomains: settings.blockedDomains?.join(", ") || "",
         allowedDomains: settings.allowedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
-        gradeLevels: settings.gradeLevels?.join(", ") || "6, 7, 8, 9, 10, 11, 12",
+        gradeLevels: settings.gradeLevels?.join(", ") || "6th, 7th, 8th, 9th, 10th, 11th, 12th",
       });
     }
   }, [settings, form]);
@@ -302,7 +302,7 @@ export default function Settings() {
                   id="gradeLevels"
                   data-testid="input-grade-levels"
                   {...form.register("gradeLevels")}
-                  placeholder="6, 7, 8, 9, 10, 11, 12"
+                  placeholder="6th, 7th, 8th, 9th, 10th, 11th, 12th"
                 />
                 <p className="text-xs text-muted-foreground">
                   These grade levels will appear as filter tabs on the dashboard. Customize based on your school's grade structure.
