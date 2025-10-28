@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog } from "lucide-react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat, Settings } from "@shared/schema";
 
 interface CurrentUser {
@@ -36,6 +37,8 @@ export default function Dashboard() {
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
+  const [showGradeDialog, setShowGradeDialog] = useState(false);
+  const [newGrade, setNewGrade] = useState("");
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
 
@@ -246,6 +249,80 @@ export default function Dashboard() {
     setShowExportDialog(false);
   };
 
+  const updateGradesMutation = useMutation({
+    mutationFn: async (gradeLevels: string[]) => {
+      if (!settings) throw new Error("Settings not loaded");
+      
+      const payload = {
+        schoolId: settings.schoolId,
+        schoolName: settings.schoolName,
+        wsSharedKey: settings.wsSharedKey,
+        retentionHours: settings.retentionHours,
+        blockedDomains: settings.blockedDomains || [],
+        allowedDomains: settings.allowedDomains || [],
+        ipAllowlist: settings.ipAllowlist || [],
+        gradeLevels,
+      };
+      
+      const res = await apiRequest('POST', '/api/settings', payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/settings'] });
+      toast({
+        title: "Success",
+        description: "Grade levels updated successfully",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const handleAddGrade = () => {
+    if (!newGrade.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid Grade",
+        description: "Please enter a grade level",
+      });
+      return;
+    }
+
+    const currentGrades = settings?.gradeLevels || [];
+    if (currentGrades.includes(newGrade.trim())) {
+      toast({
+        variant: "destructive",
+        title: "Duplicate Grade",
+        description: "This grade level already exists",
+      });
+      return;
+    }
+
+    const newGrades = [...currentGrades, newGrade.trim()];
+    updateGradesMutation.mutate(newGrades);
+    setNewGrade("");
+  };
+
+  const handleDeleteGrade = (grade: string) => {
+    const currentGrades = settings?.gradeLevels || [];
+    if (currentGrades.length <= 1) {
+      toast({
+        variant: "destructive",
+        title: "Cannot Delete",
+        description: "You must have at least one grade level",
+      });
+      return;
+    }
+
+    const newGrades = currentGrades.filter(g => g !== grade);
+    updateGradesMutation.mutate(newGrades);
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -287,6 +364,15 @@ export default function Dashboard() {
               >
                 <UserCog className="h-4 w-4 mr-2" />
                 Roster
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowGradeDialog(true)}
+                data-testid="button-manage-grades"
+              >
+                <GraduationCap className="h-4 w-4 mr-2" />
+                Manage Grades
               </Button>
               {currentUser?.role === 'admin' && (
                 <Button
@@ -470,6 +556,77 @@ export default function Dashboard() {
             <Button onClick={handleExportCSV} data-testid="button-confirm-export">
               <Download className="h-4 w-4 mr-2" />
               Export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Grade Management Dialog */}
+      <Dialog open={showGradeDialog} onOpenChange={setShowGradeDialog}>
+        <DialogContent data-testid="dialog-manage-grades">
+          <DialogHeader>
+            <DialogTitle>Manage Grade Levels</DialogTitle>
+            <DialogDescription>
+              Add or remove grade levels that appear as filter tabs on the dashboard
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {/* Current Grades */}
+            <div className="space-y-2">
+              <Label>Current Grade Levels</Label>
+              <div className="flex flex-wrap gap-2">
+                {settings?.gradeLevels?.map((grade) => (
+                  <Badge key={grade} variant="secondary" className="text-sm px-3 py-1" data-testid={`badge-grade-${grade}`}>
+                    {grade}
+                    <button
+                      onClick={() => handleDeleteGrade(grade)}
+                      className="ml-2 hover:text-destructive"
+                      data-testid={`button-delete-grade-${grade}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            </div>
+
+            {/* Add New Grade */}
+            <div className="space-y-2">
+              <Label htmlFor="new-grade">Add New Grade Level</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="new-grade"
+                  placeholder="e.g., 5th, K, Pre-K"
+                  value={newGrade}
+                  onChange={(e) => setNewGrade(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleAddGrade();
+                    }
+                  }}
+                  data-testid="input-new-grade"
+                />
+                <Button 
+                  onClick={handleAddGrade} 
+                  disabled={updateGradesMutation.isPending}
+                  data-testid="button-add-grade"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add
+                </Button>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => {
+                setShowGradeDialog(false);
+                setNewGrade("");
+              }}
+              data-testid="button-close-grade-dialog"
+            >
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>

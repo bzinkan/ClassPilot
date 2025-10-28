@@ -51,7 +51,12 @@ The system uses a full-stack architecture:
   - **Student-Specific History**: Activity logs and events are tracked per student, enabling accurate monitoring even on shared devices
   - **Roster Multi-Assignment**: Teachers can assign multiple students to a single device from the Roster page
 - **Teacher Dashboard**: Displays live student activity (tab title, URL, status), manages class rosters, and configures data retention.
-  - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "6, 7, 8" or "9, 10, 11, 12"). Grade tabs are set in Settings and dynamically update the dashboard filtering.
+  - **Customizable Grade Tabs**: Teachers can configure which grade levels appear as filter tabs on the dashboard (e.g., "5th, 6th, 7th, 8th" or "9th, 10th, 11th, 12th"). Default includes 5th-12th grades with ordinal suffixes.
+  - **In-Dashboard Grade Management (NEW)**: Teachers and admins can add/delete grade levels directly from the dashboard via "Manage Grades" button
+    - Add new grades with custom labels (e.g., "K", "Pre-K", "5th")
+    - Delete grades with X button (requires at least one grade to remain)
+    - Real-time updates to dashboard tabs without navigating to Settings
+    - Validates against duplicate grades
   - **Delete Students/Devices**: Teachers can delete individual student assignments or entire devices directly from the dashboard with confirmation dialogs
   - **Roster Navigation**: Dedicated "Roster" button in dashboard header provides quick access to roster management page
   - **Student-First Display**: Dashboard tiles show student names prominently with device information as secondary detail
