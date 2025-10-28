@@ -340,10 +340,33 @@ export class MemStorage implements IStorage {
     };
     this.heartbeats.push(heartbeat);
     
-    // Update student status if studentId is provided
+    // Update or create student status if studentId is provided
     if (heartbeat.studentId) {
-      const status = this.studentStatuses.get(heartbeat.studentId);
-      if (status) {
+      let status = this.studentStatuses.get(heartbeat.studentId);
+      
+      // If status doesn't exist, create it from student data
+      if (!status) {
+        const student = this.students.get(heartbeat.studentId);
+        if (student) {
+          const device = this.devices.get(student.deviceId);
+          status = {
+            studentId: student.id,
+            deviceId: student.deviceId,
+            deviceName: device?.deviceName ?? undefined,
+            studentName: student.studentName,
+            classId: device?.classId || '',
+            gradeLevel: student.gradeLevel ?? undefined,
+            activeTabTitle: heartbeat.activeTabTitle,
+            activeTabUrl: heartbeat.activeTabUrl,
+            favicon: heartbeat.favicon ?? undefined,
+            lastSeenAt: Date.now(),
+            isSharing: false,
+            status: 'online',
+          };
+          this.studentStatuses.set(heartbeat.studentId, status);
+        }
+      } else {
+        // Update existing status
         const now = Date.now();
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
