@@ -1254,6 +1254,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/chat/send", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
       const { message, toDeviceId } = req.body;
+      
+      if (!req.session?.userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
       const user = await storage.getUser(req.session.userId);
       
       if (!message) {

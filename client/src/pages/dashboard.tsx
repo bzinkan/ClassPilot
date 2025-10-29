@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { StudentTile } from "@/components/student-tile";
 import { StudentDetailDrawer } from "@/components/student-detail-drawer";
+import { RemoteControlToolbar } from "@/components/remote-control-toolbar";
 import {
   Dialog,
   DialogContent,
@@ -515,6 +516,9 @@ export default function Dashboard() {
           </div>
         </div>
       </header>
+
+      {/* Remote Control Toolbar */}
+      <RemoteControlToolbar />
 
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
