@@ -144,6 +144,21 @@ export default function Dashboard() {
     }
   };
 
+  // Helper function to get last name for sorting
+  const getLastName = (fullName: string | null): string => {
+    if (!fullName) return '';
+    
+    const nameParts = fullName.trim().split(/\s+/);
+    
+    // If there's only one part (no space), use the whole name
+    if (nameParts.length === 1) {
+      return nameParts[0].toLowerCase();
+    }
+    
+    // Otherwise, use the last part as the last name
+    return nameParts[nameParts.length - 1].toLowerCase();
+  };
+
   const filteredStudents = students
     .filter((student) => {
       const matchesSearch = 
@@ -163,7 +178,12 @@ export default function Dashboard() {
       
       if (aOffTask && !bOffTask) return -1;
       if (!aOffTask && bOffTask) return 1;
-      return 0; // Keep original order for students with same off-task status
+      
+      // Within same off-task status, sort alphabetically by last name
+      const aLastName = getLastName(a.studentName);
+      const bLastName = getLastName(b.studentName);
+      
+      return aLastName.localeCompare(bLastName);
     });
 
   // Count stats only for students in the currently selected grade
