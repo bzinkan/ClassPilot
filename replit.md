@@ -24,6 +24,13 @@ The system uses a full-stack architecture:
   - **Bulletproof Endpoints**: Heartbeat and event logging endpoints never return 500 errors, using async storage with non-blocking database writes and comprehensive error handling
   - **Global Error Handlers**: Process-level handlers for unhandled rejections and uncaught exceptions prevent server crashes
 - **Real-time Communication**: A WebSocket server facilitates live updates for teacher dashboards and WebRTC communication for screen sharing.
+  - **Automatic Reconnection (NEW)**: Both dashboard and extension implement robust WebSocket reconnection logic
+    - Dashboard: Exponential backoff reconnection (1s, 2s, 4s, 8s, 16s... capped at 30s max delay)
+    - Extension: Uses chrome.alarms for reconnection (survives service worker termination during idle periods)
+    - Visual connection status indicator in dashboard header (Connected/Disconnected badge with animated dot)
+    - Proper cleanup prevents memory leaks and state updates on unmounted components
+    - React StrictMode compatible with isMountedRef guards
+    - Handles network issues, server restarts, and extended idle periods gracefully
 - **Security**: Implements role-based access control (admin/teacher), bcrypt for password hashing, Express session management, rate limiting (12kb payload limits), and CSRF protection. An admin middleware protects sensitive routes.
 - **Chrome Extension**: A Manifest V3 extension with reliable background service worker using chrome.alarms API for persistent heartbeat monitoring
   - **Production-Ready Configuration (NEW)**: Extension defaults to production server URL (https://classpilot.replit.app) for out-of-the-box deployment
