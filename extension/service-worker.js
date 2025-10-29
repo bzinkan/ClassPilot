@@ -1,8 +1,11 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
+// Default to production URL - can be overridden in extension settings
+const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
+
 let CONFIG = {
-  serverUrl: 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev',
+  serverUrl: DEFAULT_SERVER_URL,
   heartbeatInterval: 10000, // 10 seconds
   schoolId: 'default-school',
   deviceId: null,
@@ -508,6 +511,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === 'get-config') {
     sendResponse({ config: CONFIG });
+    return true;
+  }
+  
+  if (message.type === 'update-server-url') {
+    const newServerUrl = message.serverUrl;
+    if (newServerUrl) {
+      CONFIG.serverUrl = newServerUrl;
+      chrome.storage.local.set({ config: CONFIG }, () => {
+        console.log('Server URL updated to:', newServerUrl);
+        // Restart heartbeat with new server URL
+        stopHeartbeat();
+        startHeartbeat();
+        sendResponse({ success: true });
+      });
+    } else {
+      sendResponse({ success: false, error: 'Invalid server URL' });
+    }
     return true;
   }
   

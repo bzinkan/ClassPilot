@@ -394,3 +394,38 @@ Data Retention:
 
 This monitoring is required by your school for classroom management. All activity is visible and disclosed to you through this extension.`);
 }
+
+// Server URL Settings
+document.addEventListener('DOMContentLoaded', async () => {
+  // Load current server URL
+  const result = await chrome.storage.local.get(['config']);
+  const config = result.config || {};
+  const serverUrlInput = document.getElementById('server-url-input');
+  if (serverUrlInput) {
+    serverUrlInput.value = config.serverUrl || 'https://classpilot.replit.app';
+  }
+  
+  // Save server URL
+  const saveButton = document.getElementById('save-server-url');
+  if (saveButton) {
+    saveButton.addEventListener('click', async () => {
+      const newServerUrl = serverUrlInput.value.trim();
+      if (!newServerUrl) {
+        alert('Please enter a valid server URL');
+        return;
+      }
+      
+      // Update config with new server URL
+      chrome.runtime.sendMessage({
+        type: 'update-server-url',
+        serverUrl: newServerUrl,
+      }, (response) => {
+        if (response && response.success) {
+          alert('Server URL updated successfully! The extension will now send data to: ' + newServerUrl);
+        } else {
+          alert('Failed to update server URL');
+        }
+      });
+    });
+  }
+});
