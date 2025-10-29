@@ -104,7 +104,7 @@ export class MemStorage implements IStorage {
   private calculateStatus(lastSeenAt: number): 'online' | 'idle' | 'offline' {
     const timeSinceLastSeen = Date.now() - lastSeenAt;
     if (timeSinceLastSeen < 30000) return 'online';
-    if (timeSinceLastSeen < 60000) return 'idle';
+    if (timeSinceLastSeen < 120000) return 'idle';
     return 'offline';
   }
 
@@ -498,7 +498,7 @@ export class DatabaseStorage implements IStorage {
   private calculateStatus(lastSeenAt: number): 'online' | 'idle' | 'offline' {
     const timeSinceLastSeen = Date.now() - lastSeenAt;
     if (timeSinceLastSeen < 30000) return 'online';
-    if (timeSinceLastSeen < 60000) return 'idle';
+    if (timeSinceLastSeen < 120000) return 'idle';
     return 'offline';
   }
 
