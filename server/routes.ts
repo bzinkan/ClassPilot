@@ -64,6 +64,26 @@ function broadcastToTeachers(message: any) {
   });
 }
 
+function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean) {
+  const messageStr = JSON.stringify(message);
+  wsClients.forEach((client, ws) => {
+    if (client.role === 'student' && client.authenticated && ws.readyState === WebSocket.OPEN) {
+      if (!filterFn || filterFn(client)) {
+        ws.send(messageStr);
+      }
+    }
+  });
+}
+
+function sendToDevice(deviceId: string, message: any) {
+  const messageStr = JSON.stringify(message);
+  wsClients.forEach((client, ws) => {
+    if (client.deviceId === deviceId && client.authenticated && ws.readyState === WebSocket.OPEN) {
+      ws.send(messageStr);
+    }
+  });
+}
+
 // Session middleware
 function requireAuth(req: any, res: any, next: any) {
   if (req.session?.userId) {
@@ -1097,6 +1117,212 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.send(csv);
     } catch (error) {
       console.error("Export error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Remote Control API Routes (Phase 1: GoGuardian-style features)
+  
+  // Open Tab - Push URL to all students or specific grade/class
+  app.post("/api/remote/open-tab", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { url, targetGrade, targetClass } = req.body;
+      
+      if (!url) {
+        return res.status(400).json({ error: "URL is required" });
+      }
+      
+      // Broadcast to all connected students (or filtered by grade/class)
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'open-tab',
+          data: { url },
+        },
+      });
+      
+      res.json({ success: true, message: `Opened ${url} on all student devices` });
+    } catch (error) {
+      console.error("Open tab error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Close Tabs - Close all or specific tabs
+  app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { closeAll, pattern, allowedDomains } = req.body;
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'close-tab',
+          data: { closeAll, pattern, allowedDomains },
+        },
+      });
+      
+      res.json({ success: true, message: "Closed tabs on all student devices" });
+    } catch (error) {
+      console.error("Close tabs error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Lock Screens - Lock all students to specific URL
+  app.post("/api/remote/lock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { url } = req.body;
+      
+      if (!url) {
+        return res.status(400).json({ error: "URL is required" });
+      }
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'lock-screen',
+          data: { url },
+        },
+      });
+      
+      res.json({ success: true, message: `Locked all screens to ${url}` });
+    } catch (error) {
+      console.error("Lock screen error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Unlock Screens
+  app.post("/api/remote/unlock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'unlock-screen',
+          data: {},
+        },
+      });
+      
+      res.json({ success: true, message: "Unlocked all screens" });
+    } catch (error) {
+      console.error("Unlock screen error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Apply Scene - Set allowed/blocked domains
+  app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { sceneId, allowedDomains, blockedDomains } = req.body;
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'apply-scene',
+          data: { sceneId, allowedDomains, blockedDomains },
+        },
+      });
+      
+      res.json({ success: true, message: `Applied scene ${sceneId}` });
+    } catch (error) {
+      console.error("Apply scene error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Limit Tabs
+  app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { maxTabs } = req.body;
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'limit-tabs',
+          data: { maxTabs },
+        },
+      });
+      
+      res.json({ success: true, message: `Set tab limit to ${maxTabs}` });
+    } catch (error) {
+      console.error("Limit tabs error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Send Chat Message
+  app.post("/api/chat/send", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { message, toDeviceId } = req.body;
+      const user = await storage.getUser(req.session.userId);
+      
+      if (!message) {
+        return res.status(400).json({ error: "Message is required" });
+      }
+      
+      const chatMessage = {
+        type: 'chat',
+        message,
+        fromName: user?.username || 'Teacher',
+        timestamp: Date.now(),
+      };
+      
+      if (toDeviceId) {
+        // Send to specific device
+        sendToDevice(toDeviceId, chatMessage);
+      } else {
+        // Broadcast to all
+        broadcastToStudents(chatMessage);
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Send chat error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Send Announcement
+  app.post("/api/chat/announcement", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { message } = req.body;
+      
+      if (!message) {
+        return res.status(400).json({ error: "Message is required" });
+      }
+      
+      broadcastToStudents({
+        type: 'announcement',
+        message,
+        timestamp: Date.now(),
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Send announcement error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
+  // Send Check-in Request
+  app.post("/api/checkin/request", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { question, options } = req.body;
+      
+      if (!question || !options || !Array.isArray(options)) {
+        return res.status(400).json({ error: "Question and options are required" });
+      }
+      
+      broadcastToStudents({
+        type: 'check-in-request',
+        question,
+        options,
+        timestamp: Date.now(),
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Send check-in error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
