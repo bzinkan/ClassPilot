@@ -44,6 +44,7 @@ export default function Dashboard() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
+  const isMountedRef = useRef(true); // Track if component is mounted
   const maxReconnectDelay = 30000; // 30 seconds max delay
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
@@ -67,6 +68,18 @@ export default function Dashboard() {
 
   // WebSocket connection with automatic reconnection
   useEffect(() => {
+    // Mark component as mounted (important for React StrictMode double-invocation)
+    isMountedRef.current = true;
+    
+    // Clear any stale reconnection timeouts from previous mounts
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    
+    // Reset reconnection attempts counter for fresh mount
+    reconnectAttemptsRef.current = 0;
+    
     const connectWebSocket = () => {
       // Clear any existing reconnection timeout
       if (reconnectTimeoutRef.current) {
@@ -89,6 +102,8 @@ export default function Dashboard() {
         wsRef.current = socket;
 
         socket.onopen = () => {
+          if (!isMountedRef.current) return; // Don't update state if unmounted
+          
           console.log("[Dashboard] WebSocket connected successfully");
           setWsConnected(true);
           reconnectAttemptsRef.current = 0; // Reset reconnection counter on successful connection
@@ -99,6 +114,8 @@ export default function Dashboard() {
         };
 
         socket.onmessage = (event) => {
+          if (!isMountedRef.current) return; // Don't process messages if unmounted
+          
           try {
             const message = JSON.parse(event.data);
             console.log("[Dashboard] WebSocket message received:", message);
@@ -114,6 +131,13 @@ export default function Dashboard() {
 
         socket.onclose = (event) => {
           console.log("[Dashboard] WebSocket disconnected, code:", event.code, "reason:", event.reason);
+          
+          // Only update state and reconnect if component is still mounted
+          if (!isMountedRef.current) {
+            console.log("[Dashboard] Component unmounted, skipping reconnection");
+            return;
+          }
+          
           setWsConnected(false);
           wsRef.current = null;
           
@@ -129,6 +153,8 @@ export default function Dashboard() {
         };
 
         socket.onerror = (error) => {
+          if (!isMountedRef.current) return; // Don't update state if unmounted
+          
           console.error("[Dashboard] WebSocket error:", error);
           setWsConnected(false);
         };
@@ -152,6 +178,8 @@ export default function Dashboard() {
     // Cleanup on unmount
     return () => {
       console.log("[Dashboard] Cleaning up WebSocket connection");
+      isMountedRef.current = false; // Mark as unmounted to prevent reconnection
+      
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;

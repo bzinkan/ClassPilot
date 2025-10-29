@@ -314,14 +314,15 @@ function scheduleNextHeartbeat() {
   });
 }
 
-// Stop heartbeat
+// Stop heartbeat and WebSocket
 function stopHeartbeat() {
   chrome.alarms.clear('heartbeat');
   chrome.alarms.clear('heartbeat-retry');
+  chrome.alarms.clear('ws-reconnect'); // Also clear WebSocket reconnection alarm
   console.log('Heartbeat stopped');
 }
 
-// Alarm listener for heartbeat
+// Alarm listener for heartbeat and WebSocket reconnection
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     sendHeartbeat();
@@ -331,12 +332,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Retry after backoff
     sendHeartbeat();
     scheduleNextHeartbeat();
+  } else if (alarm.name === 'ws-reconnect') {
+    // WebSocket reconnection alarm - reliable even if service worker was terminated
+    console.log('WebSocket reconnection alarm triggered');
+    connectWebSocket();
   }
 });
 
 // Connect to WebSocket for signaling
 function connectWebSocket() {
   if (!CONFIG.deviceId) return;
+  
+  // Clear any pending reconnection alarm since we're connecting now
+  chrome.alarms.clear('ws-reconnect');
   
   const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
   const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
@@ -401,9 +409,14 @@ function connectWebSocket() {
   };
   
   ws.onclose = () => {
-    console.log('WebSocket disconnected, reconnecting in 5s...');
+    console.log('WebSocket disconnected, will reconnect in 5s...');
     ws = null; // Clear the reference
-    setTimeout(connectWebSocket, 5000);
+    
+    // Use chrome.alarms instead of setTimeout to ensure reconnection happens
+    // even if service worker is terminated
+    chrome.alarms.create('ws-reconnect', {
+      when: Date.now() + 5000, // 5 seconds from now
+    });
   };
 }
 
