@@ -1276,17 +1276,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Apply Scene - Set allowed/blocked domains
   app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { sceneId, allowedDomains, blockedDomains } = req.body;
+      const { sceneId } = req.body;
+      
+      if (!sceneId) {
+        return res.status(400).json({ error: "Scene ID is required" });
+      }
+      
+      // Fetch scene from database
+      const scene = await storage.getScene(sceneId);
+      if (!scene) {
+        return res.status(404).json({ error: "Scene not found" });
+      }
       
       broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'apply-scene',
-          data: { sceneId, allowedDomains, blockedDomains },
+          data: { 
+            sceneId: scene.id,
+            sceneName: scene.sceneName,
+            allowedDomains: scene.allowedDomains || [],
+            blockedDomains: scene.blockedDomains || [],
+          },
         },
       });
       
-      res.json({ success: true, message: `Applied scene ${sceneId}` });
+      res.json({ success: true, message: `Applied scene "${scene.sceneName}"` });
     } catch (error) {
       console.error("Apply scene error:", error);
       res.status(500).json({ error: "Internal server error" });
