@@ -258,73 +258,83 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     }
   };
 
+  const getGradientBackground = (status: string) => {
+    if (isOffTask) {
+      return 'bg-gradient-to-br from-red-50/50 via-red-50/20 to-transparent dark:from-red-950/20 dark:via-red-950/10 dark:to-transparent';
+    }
+    
+    if (isBlocked) {
+      return 'bg-gradient-to-br from-destructive/10 via-destructive/5 to-transparent dark:from-destructive/5 dark:via-destructive/3 dark:to-transparent';
+    }
+    
+    switch (status) {
+      case 'online':
+        return 'bg-gradient-to-br from-green-50/50 via-green-50/20 to-transparent dark:from-green-950/20 dark:via-green-950/10 dark:to-transparent';
+      case 'idle':
+        return 'bg-gradient-to-br from-amber-50/50 via-amber-50/20 to-transparent dark:from-amber-950/20 dark:via-amber-950/10 dark:to-transparent';
+      case 'offline':
+        return 'bg-card';
+      default:
+        return 'bg-card';
+    }
+  };
+
   return (
     <Card
       data-testid={`card-student-${student.deviceId}`}
-      className={`${getBorderStyle(student.status)} ${getShadowStyle(student.status)} ${getOpacity(student.status)} hover-elevate cursor-pointer transition-all duration-300 overflow-visible hover:shadow-xl`}
+      className={`${getBorderStyle(student.status)} ${getShadowStyle(student.status)} ${getOpacity(student.status)} ${getGradientBackground(student.status)} hover-elevate cursor-pointer transition-all duration-300 overflow-visible hover:shadow-xl`}
       onClick={onClick}
     >
-      <div className="p-5">
+      <div className="p-3.5">
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-3">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1">
-              <h3 className="font-medium text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
-                {student.studentName || (
-                  <span className="text-muted-foreground italic">
-                    {student.deviceName || student.deviceId}
-                  </span>
-                )}
-              </h3>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 flex-shrink-0"
-                onClick={handleEditClick}
-                data-testid={`button-edit-student-${student.deviceId}`}
-              >
-                <Edit2 className="h-3 w-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6 flex-shrink-0 text-destructive hover:text-destructive"
-                onClick={handleDeleteClick}
-                data-testid={`button-delete-student-${student.deviceId}`}
-              >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </div>
-            {student.deviceName && student.studentName && (
-              <p className="text-sm text-foreground/90 truncate flex items-center gap-1.5" data-testid={`text-device-name-${student.deviceId}`}>
-                <Monitor className="h-3 w-3 flex-shrink-0" />
-                {student.deviceName}
-              </p>
-            )}
-            <p className="text-xs font-mono text-muted-foreground truncate">
-              {student.deviceId}
-            </p>
+        <div className="flex items-start justify-between gap-2 mb-2.5">
+          <div className="flex items-center gap-1 flex-1 min-w-0">
+            <h3 className="font-semibold text-sm truncate" data-testid={`text-student-name-${student.deviceId}`}>
+              {student.studentName || (
+                <span className="text-muted-foreground italic">
+                  {student.deviceName || student.deviceId}
+                </span>
+              )}
+            </h3>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 flex-shrink-0"
+              onClick={handleEditClick}
+              data-testid={`button-edit-student-${student.deviceId}`}
+            >
+              <Edit2 className="h-3 w-3" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-5 w-5 flex-shrink-0 text-destructive hover:text-destructive"
+              onClick={handleDeleteClick}
+              data-testid={`button-delete-student-${student.deviceId}`}
+            >
+              <Trash2 className="h-3 w-3" />
+            </Button>
           </div>
-          <div className="flex items-center gap-2 flex-shrink-0">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             {isOffTask && (
-              <Badge className="text-xs px-2 py-0.5 bg-red-500 text-white" data-testid={`badge-offtask-${student.deviceId}`}>
-                <AlertTriangle className="h-3 w-3 mr-1" />
+              <Badge className="text-xs px-1.5 py-0.5 bg-red-500 text-white" data-testid={`badge-offtask-${student.deviceId}`}>
+                <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
                 Off-Task
               </Badge>
             )}
             {isBlocked && !isOffTask && (
-              <Badge variant="destructive" className="text-xs px-2 py-0.5" data-testid={`badge-blocked-${student.deviceId}`}>
-                <AlertTriangle className="h-3 w-3 mr-1" />
+              <Badge variant="destructive" className="text-xs px-1.5 py-0.5" data-testid={`badge-blocked-${student.deviceId}`}>
+                <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
                 Blocked
               </Badge>
             )}
             {student.isSharing && (
-              <Badge className="text-xs px-2 py-0.5 bg-blue-500 text-white animate-pulse">
+              <Badge className="text-xs px-1.5 py-0.5 bg-blue-500 text-white animate-pulse">
                 Sharing
               </Badge>
             )}
             <div
-              className={`h-3 w-3 rounded-full flex-shrink-0 ${getStatusColor(student.status)} ${
+              className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${getStatusColor(student.status)} ${
                 student.status === 'online' ? 'animate-pulse' : ''
               }`}
               title={getStatusLabel(student.status)}
@@ -333,25 +343,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Active Tab Info */}
-        <div className="space-y-2.5 mb-4">
-          <div className="flex items-start gap-2.5">
+        <div className="space-y-2 mb-2.5">
+          <div className="flex items-start gap-2">
             {student.favicon && (
               <img
                 src={student.favicon}
                 alt=""
-                className="w-5 h-5 flex-shrink-0 mt-0.5 rounded"
+                className="w-4 h-4 flex-shrink-0 mt-0.5 rounded"
                 onError={(e) => {
                   (e.target as HTMLImageElement).style.display = 'none';
                 }}
               />
             )}
-            <p className="text-sm font-medium flex-1 line-clamp-2 leading-relaxed" data-testid={`text-tab-title-${student.deviceId}`}>
+            <p className="text-sm font-medium flex-1 line-clamp-2 leading-snug" data-testid={`text-tab-title-${student.deviceId}`}>
               {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
             </p>
           </div>
           {student.activeTabUrl && (
-            <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground bg-muted/30 rounded-md px-2.5 py-1.5">
-              <ExternalLink className="h-3 w-3 flex-shrink-0" />
+            <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground bg-muted/20 rounded px-2 py-1">
+              <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" />
               <span className="truncate" data-testid={`text-tab-url-${student.deviceId}`}>
                 {student.activeTabUrl}
               </span>
@@ -360,8 +370,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground pt-3 border-t border-border/30">
-          <Clock className="h-3.5 w-3.5" />
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground pt-2 border-t border-border/20">
+          <Clock className="h-3 w-3" />
           <span data-testid={`text-last-seen-${student.deviceId}`}>
             {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
           </span>
