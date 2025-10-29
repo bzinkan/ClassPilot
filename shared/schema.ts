@@ -115,6 +115,70 @@ export const insertRosterSchema = createInsertSchema(rosters).omit({ id: true, u
 export type InsertRoster = z.infer<typeof insertRosterSchema>;
 export type Roster = typeof rosters.$inferSelect;
 
+// Scenes - Activity-based browsing environments
+export const scenes = pgTable("scenes", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  sceneName: text("scene_name").notNull(),
+  description: text("description"),
+  allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
+  blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
+  isDefault: boolean("is_default").default(false),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertSceneSchema = createInsertSchema(scenes).omit({ id: true, createdAt: true });
+export type InsertScene = z.infer<typeof insertSceneSchema>;
+export type Scene = typeof scenes.$inferSelect;
+
+// Student Groups - For differentiated instruction
+export const studentGroups = pgTable("student_groups", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  groupName: text("group_name").notNull(),
+  description: text("description"),
+  studentIds: text("student_ids").array().default(sql`'{}'::text[]`),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertStudentGroupSchema = createInsertSchema(studentGroups).omit({ id: true, createdAt: true });
+export type InsertStudentGroup = z.infer<typeof insertStudentGroupSchema>;
+export type StudentGroup = typeof studentGroups.$inferSelect;
+
+// Messages - For teacher-student chat
+export const messages = pgTable("messages", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  fromUserId: text("from_user_id"), // Teacher user ID
+  toStudentId: text("to_student_id"), // Student ID (nullable for broadcast)
+  message: text("message").notNull(),
+  isAnnouncement: boolean("is_announcement").default(false),
+  timestamp: timestamp("timestamp").notNull().default(sql`now()`),
+});
+
+export const insertMessageSchema = createInsertSchema(messages).omit({ id: true, timestamp: true });
+export type InsertMessage = z.infer<typeof insertMessageSchema>;
+export type Message = typeof messages.$inferSelect;
+
+// Check-ins - For student wellbeing polls
+export const checkIns = pgTable("check_ins", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  studentId: text("student_id").notNull(),
+  mood: text("mood").notNull(), // 'happy', 'neutral', 'sad', 'stressed'
+  message: text("message"), // Optional message from student
+  timestamp: timestamp("timestamp").notNull().default(sql`now()`),
+});
+
+export const insertCheckInSchema = createInsertSchema(checkIns).omit({ id: true, timestamp: true });
+export type InsertCheckIn = z.infer<typeof insertCheckInSchema>;
+export type CheckIn = typeof checkIns.$inferSelect;
+
+// Session table (managed by express-session middleware - don't modify)
+export const session = pgTable("session", {
+  sid: varchar("sid").primaryKey(),
+  sess: jsonb("sess").notNull(),
+  expire: timestamp("expire").notNull(),
+});
+
 // Settings
 export const settings = pgTable("settings", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -126,6 +190,8 @@ export const settings = pgTable("settings", {
   allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
   ipAllowlist: text("ip_allowlist").array().default(sql`'{}'::text[]`),
   gradeLevels: text("grade_levels").array().default(sql`'{6,7,8,9,10,11,12}'::text[]`),
+  maxTabsPerStudent: text("max_tabs_per_student"), // Nullable - null means unlimited
+  activeSceneId: text("active_scene_id"), // Currently active scene for the school
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
@@ -144,4 +210,38 @@ export interface SignalMessage {
   type: 'offer' | 'answer' | 'ice-candidate';
   data: any;
   deviceId: string;
+}
+
+// Remote Control Commands (Phase 1: GoGuardian-style features)
+export interface RemoteControlMessage {
+  type: 'open-tab' | 'close-tab' | 'lock-screen' | 'unlock-screen' | 'apply-scene' | 'limit-tabs';
+  data: {
+    url?: string; // For open-tab, lock-screen
+    pattern?: string; // For close-tab (URL pattern to match)
+    closeAll?: boolean; // For close-tab (close all tabs except allowed)
+    locked?: boolean; // For lock-screen
+    sceneId?: string; // For apply-scene
+    maxTabs?: number; // For limit-tabs
+    allowedDomains?: string[]; // For apply-scene
+    blockedDomains?: string[]; // For apply-scene
+  };
+  targetStudentIds?: string[]; // If specified, only apply to these students. If null, apply to all
+  targetGrade?: string; // If specified, apply to students in this grade
+}
+
+// Chat/Messaging (Phase 2)
+export interface ChatMessage {
+  type: 'chat' | 'announcement';
+  fromUserId?: string;
+  fromName?: string;
+  toStudentId?: string; // For direct messages
+  message: string;
+  timestamp: number;
+}
+
+// Check-in Request (Phase 3)
+export interface CheckInRequest {
+  type: 'check-in-request';
+  question: string;
+  options: string[]; // e.g., ['😊 Happy', '😐 Neutral', '😔 Sad', '😰 Stressed']
 }
