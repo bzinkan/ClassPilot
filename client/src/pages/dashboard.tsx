@@ -609,21 +609,26 @@ export default function Dashboard() {
             </p>
           </div>
         ) : (() => {
-          // Partition students into off-task/on-task groups with single pass
-          // Evaluates isStudentOffTask only once per student
-          const { offTaskStudents, onTaskStudents } = filteredStudents.reduce<{
+          // Partition students into off-task/on-task/idle/offline groups with single pass
+          const { offTaskStudents, onTaskStudents, idleStudents, offlineStudents } = filteredStudents.reduce<{
             offTaskStudents: StudentStatus[];
             onTaskStudents: StudentStatus[];
+            idleStudents: StudentStatus[];
+            offlineStudents: StudentStatus[];
           }>(
             (acc, student) => {
               if (isStudentOffTask(student)) {
                 acc.offTaskStudents.push(student);
-              } else {
+              } else if (student.status === 'online') {
                 acc.onTaskStudents.push(student);
+              } else if (student.status === 'idle') {
+                acc.idleStudents.push(student);
+              } else {
+                acc.offlineStudents.push(student);
               }
               return acc;
             },
-            { offTaskStudents: [], onTaskStudents: [] }
+            { offTaskStudents: [], onTaskStudents: [], idleStudents: [], offlineStudents: [] }
           );
           
           return (
@@ -670,6 +675,60 @@ export default function Dashboard() {
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {onTaskStudents.map((student) => (
+                      <StudentTile
+                        key={student.studentId}
+                        student={student}
+                        onClick={() => setSelectedStudent(student)}
+                        blockedDomains={settings?.blockedDomains || []}
+                        isOffTask={false}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Idle Students Section */}
+              {idleStudents.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Activity className="h-5 w-5 text-amber-500" />
+                    <h2 
+                      className="text-lg font-semibold text-amber-600 dark:text-amber-400"
+                      data-testid="heading-idle-students"
+                    >
+                      Idle Students ({idleStudents.length})
+                    </h2>
+                    <div className="flex-1 h-px bg-amber-200 dark:bg-amber-800/30"></div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {idleStudents.map((student) => (
+                      <StudentTile
+                        key={student.studentId}
+                        student={student}
+                        onClick={() => setSelectedStudent(student)}
+                        blockedDomains={settings?.blockedDomains || []}
+                        isOffTask={false}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Offline Students Section */}
+              {offlineStudents.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Monitor className="h-5 w-5 text-muted-foreground" />
+                    <h2 
+                      className="text-lg font-semibold text-muted-foreground"
+                      data-testid="heading-offline-students"
+                    >
+                      Offline Students ({offlineStudents.length})
+                    </h2>
+                    <div className="flex-1 h-px bg-border"></div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {offlineStudents.map((student) => (
                       <StudentTile
                         key={student.studentId}
                         student={student}
