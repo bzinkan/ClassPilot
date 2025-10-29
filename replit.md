@@ -26,7 +26,12 @@ The system uses a full-stack architecture:
 - **Real-time Communication**: A WebSocket server facilitates live updates for teacher dashboards and WebRTC communication for screen sharing.
 - **Security**: Implements role-based access control (admin/teacher), bcrypt for password hashing, Express session management, rate limiting (12kb payload limits), and CSRF protection. An admin middleware protects sensitive routes.
 - **Chrome Extension**: A Manifest V3 extension with reliable background service worker using chrome.alarms API for persistent heartbeat monitoring
-  - **Automatic Student Detection (NEW)**: Uses Chrome Identity API to automatically detect logged-in Chromebook user
+  - **Production-Ready Configuration (NEW)**: Extension defaults to production server URL (https://classpilot.replit.app) for out-of-the-box deployment
+    - Advanced Settings panel in extension popup allows IT admins to configure custom server URLs
+    - Supports dev/staging/production environments without reinstalling extension
+    - Server URL persists in chrome.storage.local and can be updated dynamically
+    - Fresh installs automatically connect to production; no manual configuration needed
+  - **Automatic Student Detection**: Uses Chrome Identity API to automatically detect logged-in Chromebook user
     - Eliminates manual student selection - student is auto-identified by their Google Workspace email
     - Uses `chrome.identity.getProfileUserInfo()` to get email and name of logged-in student
     - Auto-registers student on first login with email linked to their profile
