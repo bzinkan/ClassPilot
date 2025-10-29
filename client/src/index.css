@@ -14,59 +14,59 @@
   --elevate-1: rgba(0,0,0, .03);
   --elevate-2: rgba(0,0,0, .08);
 
-  --background: 210 4% 98%;
+  --background: 220 15% 97%;
 
-  --foreground: 210 6% 12%;
+  --foreground: 220 10% 10%;
 
-  --border: 210 6% 90%;
+  --border: 220 13% 88%;
 
-  --card: 210 4% 96%;
+  --card: 0 0% 100%;
 
-  --card-foreground: 210 6% 14%;
+  --card-foreground: 220 10% 12%;
 
-  --card-border: 210 5% 88%;
+  --card-border: 220 13% 92%;
 
-  --sidebar: 210 5% 94%;
+  --sidebar: 220 15% 95%;
 
-  --sidebar-foreground: 210 6% 15%;
+  --sidebar-foreground: 220 10% 15%;
 
-  --sidebar-border: 210 5% 86%;
+  --sidebar-border: 220 13% 86%;
 
-  --sidebar-primary: 217 91% 50%;
+  --sidebar-primary: 212 100% 47%;
 
-  --sidebar-primary-foreground: 210 40% 98%;
+  --sidebar-primary-foreground: 0 0% 100%;
 
-  --sidebar-accent: 210 8% 88%;
+  --sidebar-accent: 220 14% 90%;
 
-  --sidebar-accent-foreground: 210 6% 18%;
+  --sidebar-accent-foreground: 220 10% 18%;
 
-  --sidebar-ring: 217 91% 50%;
+  --sidebar-ring: 212 100% 47%;
 
-  --popover: 210 5% 92%;
+  --popover: 0 0% 100%;
 
-  --popover-foreground: 210 6% 16%;
+  --popover-foreground: 220 10% 16%;
 
-  --popover-border: 210 5% 84%;
+  --popover-border: 220 13% 88%;
 
-  --primary: 217 91% 50%;
+  --primary: 212 100% 47%;
 
-  --primary-foreground: 210 40% 98%;
+  --primary-foreground: 0 0% 100%;
 
-  --secondary: 210 6% 86%;
+  --secondary: 220 13% 91%;
 
-  --secondary-foreground: 210 6% 18%;
+  --secondary-foreground: 220 10% 18%;
 
-  --muted: 210 8% 90%;
+  --muted: 220 13% 93%;
 
-  --muted-foreground: 210 5% 38%;
+  --muted-foreground: 220 8% 42%;
 
-  --accent: 210 10% 88%;
+  --accent: 270 75% 60%;
 
-  --accent-foreground: 210 6% 20%;
+  --accent-foreground: 0 0% 100%;
 
-  --destructive: 0 84% 48%;
+  --destructive: 0 72% 51%;
 
-  --destructive-foreground: 0 20% 98%;
+  --destructive-foreground: 0 0% 100%;
 
   --input: 210 8% 72%;
   --ring: 217 91% 50%;
@@ -132,47 +132,47 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  --background: 210 5% 9%;
+  --background: 220 15% 8%;
 
-  --foreground: 210 8% 92%;
+  --foreground: 220 10% 95%;
 
-  --border: 210 6% 18%;
+  --border: 220 10% 20%;
 
-  --card: 210 5% 11%;
+  --card: 220 12% 10%;
 
-  --card-foreground: 210 8% 90%;
+  --card-foreground: 220 10% 92%;
 
-  --card-border: 210 5% 16%;
+  --card-border: 220 10% 18%;
 
-  --sidebar: 210 6% 13%;
+  --sidebar: 220 15% 12%;
 
-  --sidebar-foreground: 210 8% 88%;
+  --sidebar-foreground: 220 10% 90%;
 
-  --sidebar-border: 210 6% 19%;
+  --sidebar-border: 220 10% 22%;
 
-  --sidebar-primary: 217 91% 52%;
+  --sidebar-primary: 212 100% 50%;
 
-  --sidebar-primary-foreground: 210 20% 98%;
+  --sidebar-primary-foreground: 0 0% 100%;
 
-  --sidebar-accent: 210 8% 17%;
+  --sidebar-accent: 220 12% 18%;
 
-  --sidebar-accent-foreground: 210 8% 85%;
+  --sidebar-accent-foreground: 220 10% 88%;
 
-  --sidebar-ring: 217 91% 52%;
+  --sidebar-ring: 212 100% 50%;
 
-  --popover: 210 6% 15%;
+  --popover: 220 12% 12%;
 
-  --popover-foreground: 210 8% 86%;
+  --popover-foreground: 220 10% 88%;
 
-  --popover-border: 210 6% 20%;
+  --popover-border: 220 10% 24%;
 
-  --primary: 217 91% 52%;
+  --primary: 212 100% 50%;
 
-  --primary-foreground: 210 20% 98%;
+  --primary-foreground: 0 0% 100%;
 
-  --secondary: 210 6% 19%;
+  --secondary: 220 10% 20%;
 
-  --secondary-foreground: 210 8% 84%;
+  --secondary-foreground: 220 10% 88%;
 
   --muted: 210 8% 16%;
 
@@ -239,6 +239,43 @@
 
   body {
     @apply font-sans antialiased bg-background text-foreground;
+  }
+
+  /* Custom status colors */
+  .bg-status-online {
+    @apply bg-green-500;
+  }
+
+  .bg-status-away {
+    @apply bg-amber-500;
+  }
+
+  .bg-status-offline {
+    @apply bg-slate-400;
+  }
+
+  .border-status-online {
+    @apply border-green-500;
+  }
+
+  .border-status-away {
+    @apply border-amber-500;
+  }
+
+  .border-status-offline {
+    @apply border-slate-400;
+  }
+
+  .text-status-online {
+    @apply text-green-600 dark:text-green-500;
+  }
+
+  .text-status-away {
+    @apply text-amber-600 dark:text-amber-500;
+  }
+
+  .text-status-offline {
+    @apply text-slate-500 dark:text-slate-400;
   }
 }
 

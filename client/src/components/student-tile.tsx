@@ -214,13 +214,34 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     
     switch (status) {
       case 'online':
-        return 'border-2 border-status-online/30';
+        return 'border-2 border-green-500/30';
       case 'idle':
-        return 'border-2 border-dashed border-status-away/40';
+        return 'border-2 border-amber-500/30';
       case 'offline':
-        return 'border border-border/60';
+        return 'border border-border/40';
       default:
         return 'border border-border';
+    }
+  };
+
+  const getShadowStyle = (status: string) => {
+    if (isOffTask) {
+      return 'shadow-lg shadow-red-100 dark:shadow-red-950/30';
+    }
+    
+    if (isBlocked) {
+      return 'shadow-lg shadow-destructive/10';
+    }
+    
+    switch (status) {
+      case 'online':
+        return 'shadow-lg shadow-green-100 dark:shadow-green-950/30';
+      case 'idle':
+        return 'shadow-lg shadow-amber-100 dark:shadow-amber-950/30';
+      case 'offline':
+        return 'shadow-md';
+      default:
+        return 'shadow-md';
     }
   };
 
@@ -229,21 +250,21 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       case 'online':
         return 'opacity-100';
       case 'idle':
-        return 'opacity-80';
+        return 'opacity-95';
       case 'offline':
-        return 'opacity-60';
+        return 'opacity-75';
       default:
-        return 'opacity-60';
+        return 'opacity-75';
     }
   };
 
   return (
     <Card
       data-testid={`card-student-${student.deviceId}`}
-      className={`${getBorderStyle(student.status)} ${getOpacity(student.status)} hover-elevate cursor-pointer transition-all duration-200 overflow-visible`}
+      className={`${getBorderStyle(student.status)} ${getShadowStyle(student.status)} ${getOpacity(student.status)} hover-elevate cursor-pointer transition-all duration-300 overflow-visible hover:shadow-xl`}
       onClick={onClick}
     >
-      <div className="p-4">
+      <div className="p-5">
         {/* Header */}
         <div className="flex items-start justify-between gap-3 mb-3">
           <div className="flex-1 min-w-0">
@@ -312,24 +333,24 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Active Tab Info */}
-        <div className="space-y-2 mb-3">
-          <div className="flex items-start gap-2">
+        <div className="space-y-2.5 mb-4">
+          <div className="flex items-start gap-2.5">
             {student.favicon && (
               <img
                 src={student.favicon}
                 alt=""
-                className="w-4 h-4 flex-shrink-0 mt-0.5"
+                className="w-5 h-5 flex-shrink-0 mt-0.5 rounded"
                 onError={(e) => {
                   (e.target as HTMLImageElement).style.display = 'none';
                 }}
               />
             )}
-            <p className="text-sm flex-1 line-clamp-2" data-testid={`text-tab-title-${student.deviceId}`}>
-              {student.activeTabTitle || "No active tab"}
+            <p className="text-sm font-medium flex-1 line-clamp-2 leading-relaxed" data-testid={`text-tab-title-${student.deviceId}`}>
+              {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
             </p>
           </div>
           {student.activeTabUrl && (
-            <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
+            <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground bg-muted/30 rounded-md px-2.5 py-1.5">
               <ExternalLink className="h-3 w-3 flex-shrink-0" />
               <span className="truncate" data-testid={`text-tab-url-${student.deviceId}`}>
                 {student.activeTabUrl}
@@ -339,8 +360,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground pt-3 border-t border-border/50">
-          <Clock className="h-3 w-3" />
+        <div className="flex items-center gap-2 text-xs text-muted-foreground pt-3 border-t border-border/30">
+          <Clock className="h-3.5 w-3.5" />
           <span data-testid={`text-last-seen-${student.deviceId}`}>
             {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
           </span>
