@@ -339,6 +339,219 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// Remote Control Handlers (Phase 1: GoGuardian-style features)
+let screenLocked = false;
+let lockedUrl = null;
+let currentMaxTabs = null;
+
+async function handleRemoteControl(command) {
+  console.log('Remote control command received:', command);
+  
+  try {
+    switch (command.type) {
+      case 'open-tab':
+        if (command.data.url) {
+          await chrome.tabs.create({ url: command.data.url, active: true });
+          console.log('Opened tab:', command.data.url);
+        }
+        break;
+        
+      case 'close-tab':
+        if (command.data.closeAll) {
+          // Close all tabs except new tab page and allowed domains
+          const tabs = await chrome.tabs.query({});
+          const allowedDomains = command.data.allowedDomains || [];
+          
+          for (const tab of tabs) {
+            const url = new URL(tab.url || 'about:blank');
+            const domain = url.hostname;
+            
+            // Don't close if it's an allowed domain or new tab page
+            if (!allowedDomains.some(allowed => domain.includes(allowed)) && 
+                !tab.url.startsWith('chrome://')) {
+              await chrome.tabs.remove(tab.id);
+            }
+          }
+          console.log('Closed all non-allowed tabs');
+        } else if (command.data.pattern) {
+          // Close tabs matching pattern
+          const tabs = await chrome.tabs.query({});
+          for (const tab of tabs) {
+            if (tab.url && tab.url.includes(command.data.pattern)) {
+              await chrome.tabs.remove(tab.id);
+              console.log('Closed tab matching pattern:', tab.url);
+            }
+          }
+        }
+        break;
+        
+      case 'lock-screen':
+        screenLocked = true;
+        lockedUrl = command.data.url;
+        
+        if (lockedUrl) {
+          // Open the locked URL in current tab
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabs[0]) {
+            await chrome.tabs.update(tabs[0].id, { url: lockedUrl });
+          } else {
+            await chrome.tabs.create({ url: lockedUrl, active: true });
+          }
+        }
+        
+        // Show notification
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon48.png',
+          title: 'Screen Locked',
+          message: 'Your teacher has locked your screen. You cannot navigate away.',
+          priority: 2,
+        });
+        
+        console.log('Screen locked to:', lockedUrl);
+        break;
+        
+      case 'unlock-screen':
+        screenLocked = false;
+        lockedUrl = null;
+        
+        chrome.notifications.create({
+          type: 'basic',
+          iconUrl: 'icons/icon48.png',
+          title: 'Screen Unlocked',
+          message: 'Your screen has been unlocked. You can now browse freely.',
+          priority: 1,
+        });
+        
+        console.log('Screen unlocked');
+        break;
+        
+      case 'apply-scene':
+        // Store scene settings for blocking logic
+        await chrome.storage.local.set({
+          currentScene: {
+            sceneId: command.data.sceneId,
+            allowedDomains: command.data.allowedDomains || [],
+            blockedDomains: command.data.blockedDomains || [],
+          },
+        });
+        console.log('Applied scene:', command.data.sceneId);
+        break;
+        
+      case 'limit-tabs':
+        currentMaxTabs = command.data.maxTabs;
+        
+        // Close excess tabs if over limit
+        if (currentMaxTabs) {
+          const tabs = await chrome.tabs.query({});
+          if (tabs.length > currentMaxTabs) {
+            // Close oldest tabs first (keep most recent)
+            const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
+            for (const tab of tabsToClose) {
+              if (!tab.url.startsWith('chrome://')) {
+                await chrome.tabs.remove(tab.id);
+              }
+            }
+          }
+        }
+        
+        console.log('Tab limit set to:', currentMaxTabs);
+        break;
+    }
+  } catch (error) {
+    console.error('Error handling remote control command:', error);
+  }
+}
+
+// Chat/Message Handlers (Phase 2)
+async function handleChatMessage(message) {
+  console.log('Chat message received:', message);
+  
+  // Show notification for messages
+  chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon48.png',
+    title: message.type === 'announcement' ? 'Announcement' : `Message from ${message.fromName || 'Teacher'}`,
+    message: message.message,
+    priority: 2,
+    requireInteraction: message.type === 'announcement',
+  });
+  
+  // Store message in local storage for popup to display
+  const stored = await chrome.storage.local.get(['messages']);
+  const messages = stored.messages || [];
+  messages.push({
+    ...message,
+    timestamp: Date.now(),
+    read: false,
+  });
+  
+  // Keep only last 50 messages
+  if (messages.length > 50) {
+    messages.shift();
+  }
+  
+  await chrome.storage.local.set({ messages });
+  
+  // Update badge to show unread count
+  const unreadCount = messages.filter(m => !m.read).length;
+  chrome.action.setBadgeText({ text: unreadCount > 0 ? String(unreadCount) : '' });
+  chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
+}
+
+// Check-in Request Handler (Phase 3)
+async function handleCheckInRequest(request) {
+  console.log('Check-in request received:', request);
+  
+  // Show notification with check-in question
+  chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon48.png',
+    title: 'Teacher Check-in',
+    message: request.question,
+    priority: 2,
+    requireInteraction: true,
+  });
+  
+  // Store check-in request for popup to display
+  await chrome.storage.local.set({
+    pendingCheckIn: {
+      question: request.question,
+      options: request.options,
+      timestamp: Date.now(),
+    },
+  });
+}
+
+// Prevent navigation when screen is locked
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  if (screenLocked && lockedUrl && details.frameId === 0) {
+    // If navigating away from locked URL, redirect back
+    if (details.url !== lockedUrl && !details.url.startsWith('chrome://')) {
+      chrome.tabs.update(details.tabId, { url: lockedUrl });
+    }
+  }
+});
+
+// Enforce tab limit
+chrome.tabs.onCreated.addListener(async (tab) => {
+  if (currentMaxTabs) {
+    const tabs = await chrome.tabs.query({});
+    if (tabs.length > currentMaxTabs) {
+      // Close the newly created tab if over limit
+      chrome.tabs.remove(tab.id);
+      
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'Tab Limit Reached',
+        message: `You can only have ${currentMaxTabs} tabs open at a time.`,
+        priority: 1,
+      });
+    }
+  }
+});
+
 // Connect to WebSocket for signaling
 function connectWebSocket() {
   if (!CONFIG.deviceId) return;
@@ -398,6 +611,21 @@ function connectWebSocket() {
         
         // Also play a sound (beep)
         // Note: Service workers cannot play audio directly, but the notification will make a sound
+      }
+      
+      // Handle remote control commands (Phase 1: GoGuardian-style features)
+      if (message.type === 'remote-control') {
+        handleRemoteControl(message.command);
+      }
+      
+      // Handle chat messages (Phase 2)
+      if (message.type === 'chat' || message.type === 'announcement') {
+        handleChatMessage(message);
+      }
+      
+      // Handle check-in requests (Phase 3)
+      if (message.type === 'check-in-request') {
+        handleCheckInRequest(message);
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);
