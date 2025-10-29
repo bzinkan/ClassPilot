@@ -14,6 +14,14 @@ import {
   type InsertRoster,
   type Settings,
   type InsertSettings,
+  type Scene,
+  type InsertScene,
+  type StudentGroup,
+  type InsertStudentGroup,
+  type Message,
+  type InsertMessage,
+  type CheckIn,
+  type InsertCheckIn,
   users,
   devices,
   students,
@@ -21,6 +29,10 @@ import {
   events,
   rosters,
   settings,
+  scenes,
+  studentGroups,
+  messages,
+  checkIns,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
@@ -76,6 +88,32 @@ export interface IStorage {
   // Settings
   getSettings(): Promise<Settings | undefined>;
   upsertSettings(settings: InsertSettings): Promise<Settings>;
+
+  // Scenes
+  getScene(id: string): Promise<Scene | undefined>;
+  getAllScenes(): Promise<Scene[]>;
+  createScene(scene: InsertScene): Promise<Scene>;
+  updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined>;
+  deleteScene(id: string): Promise<boolean>;
+
+  // Student Groups
+  getStudentGroup(id: string): Promise<StudentGroup | undefined>;
+  getAllStudentGroups(): Promise<StudentGroup[]>;
+  createStudentGroup(group: InsertStudentGroup): Promise<StudentGroup>;
+  updateStudentGroup(id: string, updates: Partial<InsertStudentGroup>): Promise<StudentGroup | undefined>;
+  deleteStudentGroup(id: string): Promise<boolean>;
+
+  // Messages
+  getMessage(id: string): Promise<Message | undefined>;
+  getMessagesByStudent(studentId: string): Promise<Message[]>;
+  getAllMessages(): Promise<Message[]>;
+  createMessage(message: InsertMessage): Promise<Message>;
+
+  // Check-ins
+  getCheckIn(id: string): Promise<CheckIn | undefined>;
+  getCheckInsByStudent(studentId: string): Promise<CheckIn[]>;
+  getAllCheckIns(): Promise<CheckIn[]>;
+  createCheckIn(checkIn: InsertCheckIn): Promise<CheckIn>;
 }
 
 export class MemStorage implements IStorage {
@@ -88,6 +126,10 @@ export class MemStorage implements IStorage {
   private events: Event[];
   private rosters: Map<string, Roster>;
   private settings: Settings | undefined;
+  private scenes: Map<string, Scene>;
+  private studentGroups: Map<string, StudentGroup>;
+  private messages: Message[];
+  private checkIns: CheckIn[];
 
   constructor() {
     this.users = new Map();
@@ -98,6 +140,10 @@ export class MemStorage implements IStorage {
     this.heartbeats = [];
     this.events = [];
     this.rosters = new Map();
+    this.scenes = new Map();
+    this.studentGroups = new Map();
+    this.messages = [];
+    this.checkIns = [];
   }
 
   // Helper to calculate status from lastSeenAt
@@ -478,9 +524,144 @@ export class MemStorage implements IStorage {
       allowedDomains: insertSettings.allowedDomains ?? null,
       ipAllowlist: insertSettings.ipAllowlist ?? null,
       gradeLevels: insertSettings.gradeLevels ?? null,
+      maxTabsPerStudent: insertSettings.maxTabsPerStudent ?? null,
+      activeSceneId: insertSettings.activeSceneId ?? null,
     };
     this.settings = settings;
     return settings;
+  }
+
+  // Scenes
+  async getScene(id: string): Promise<Scene | undefined> {
+    return this.scenes.get(id);
+  }
+
+  async getAllScenes(): Promise<Scene[]> {
+    return Array.from(this.scenes.values());
+  }
+
+  async createScene(insertScene: InsertScene): Promise<Scene> {
+    const id = randomUUID();
+    const scene: Scene = {
+      id,
+      schoolId: insertScene.schoolId,
+      sceneName: insertScene.sceneName,
+      description: insertScene.description ?? null,
+      allowedDomains: insertScene.allowedDomains ?? null,
+      blockedDomains: insertScene.blockedDomains ?? null,
+      isDefault: insertScene.isDefault ?? false,
+      createdAt: new Date(),
+    };
+    this.scenes.set(id, scene);
+    return scene;
+  }
+
+  async updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined> {
+    const existing = this.scenes.get(id);
+    if (!existing) return undefined;
+
+    const updated: Scene = {
+      ...existing,
+      ...updates,
+    };
+    this.scenes.set(id, updated);
+    return updated;
+  }
+
+  async deleteScene(id: string): Promise<boolean> {
+    return this.scenes.delete(id);
+  }
+
+  // Student Groups
+  async getStudentGroup(id: string): Promise<StudentGroup | undefined> {
+    return this.studentGroups.get(id);
+  }
+
+  async getAllStudentGroups(): Promise<StudentGroup[]> {
+    return Array.from(this.studentGroups.values());
+  }
+
+  async createStudentGroup(insertGroup: InsertStudentGroup): Promise<StudentGroup> {
+    const id = randomUUID();
+    const group: StudentGroup = {
+      id,
+      schoolId: insertGroup.schoolId,
+      groupName: insertGroup.groupName,
+      description: insertGroup.description ?? null,
+      studentIds: insertGroup.studentIds ?? null,
+      createdAt: new Date(),
+    };
+    this.studentGroups.set(id, group);
+    return group;
+  }
+
+  async updateStudentGroup(id: string, updates: Partial<InsertStudentGroup>): Promise<StudentGroup | undefined> {
+    const existing = this.studentGroups.get(id);
+    if (!existing) return undefined;
+
+    const updated: StudentGroup = {
+      ...existing,
+      ...updates,
+    };
+    this.studentGroups.set(id, updated);
+    return updated;
+  }
+
+  async deleteStudentGroup(id: string): Promise<boolean> {
+    return this.studentGroups.delete(id);
+  }
+
+  // Messages
+  async getMessage(id: string): Promise<Message | undefined> {
+    return this.messages.find(m => m.id === id);
+  }
+
+  async getMessagesByStudent(studentId: string): Promise<Message[]> {
+    return this.messages.filter(m => m.toStudentId === studentId || m.toStudentId === null);
+  }
+
+  async getAllMessages(): Promise<Message[]> {
+    return this.messages;
+  }
+
+  async createMessage(insertMessage: InsertMessage): Promise<Message> {
+    const id = randomUUID();
+    const message: Message = {
+      id,
+      fromUserId: insertMessage.fromUserId ?? null,
+      toStudentId: insertMessage.toStudentId ?? null,
+      message: insertMessage.message,
+      isAnnouncement: insertMessage.isAnnouncement ?? false,
+      timestamp: new Date(),
+    };
+    this.messages.push(message);
+    return message;
+  }
+
+  // Check-ins
+  async getCheckIn(id: string): Promise<CheckIn | undefined> {
+    return this.checkIns.find(c => c.id === id);
+  }
+
+  async getCheckInsByStudent(studentId: string): Promise<CheckIn[]> {
+    return this.checkIns.filter(c => c.studentId === studentId);
+  }
+
+  async getAllCheckIns(): Promise<CheckIn[]> {
+    return this.checkIns;
+  }
+
+  async createCheckIn(insertCheckIn: InsertCheckIn): Promise<CheckIn> {
+    const id = randomUUID();
+    const checkIn: CheckIn = {
+      id,
+      studentId: insertCheckIn.studentId,
+      mood: insertCheckIn.mood,
+      message: insertCheckIn.message ?? null,
+      timestamp: new Date(),
+    };
+    this.checkIns.push(checkIn);
+    return checkIn;
   }
 }
 
@@ -983,6 +1164,122 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return created;
     }
+  }
+
+  // Scenes
+  async getScene(id: string): Promise<Scene | undefined> {
+    const [scene] = await db.select().from(scenes).where(eq(scenes.id, id));
+    return scene || undefined;
+  }
+
+  async getAllScenes(): Promise<Scene[]> {
+    return await db.select().from(scenes);
+  }
+
+  async createScene(insertScene: InsertScene): Promise<Scene> {
+    const [created] = await db
+      .insert(scenes)
+      .values(insertScene)
+      .returning();
+    return created;
+  }
+
+  async updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined> {
+    const [updated] = await db
+      .update(scenes)
+      .set(updates)
+      .where(eq(scenes.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async deleteScene(id: string): Promise<boolean> {
+    const result = await db.delete(scenes).where(eq(scenes.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  // Student Groups
+  async getStudentGroup(id: string): Promise<StudentGroup | undefined> {
+    const [group] = await db.select().from(studentGroups).where(eq(studentGroups.id, id));
+    return group || undefined;
+  }
+
+  async getAllStudentGroups(): Promise<StudentGroup[]> {
+    return await db.select().from(studentGroups);
+  }
+
+  async createStudentGroup(insertGroup: InsertStudentGroup): Promise<StudentGroup> {
+    const [created] = await db
+      .insert(studentGroups)
+      .values(insertGroup)
+      .returning();
+    return created;
+  }
+
+  async updateStudentGroup(id: string, updates: Partial<InsertStudentGroup>): Promise<StudentGroup | undefined> {
+    const [updated] = await db
+      .update(studentGroups)
+      .set(updates)
+      .where(eq(studentGroups.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async deleteStudentGroup(id: string): Promise<boolean> {
+    const result = await db.delete(studentGroups).where(eq(studentGroups.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  // Messages
+  async getMessage(id: string): Promise<Message | undefined> {
+    const [message] = await db.select().from(messages).where(eq(messages.id, id));
+    return message || undefined;
+  }
+
+  async getMessagesByStudent(studentId: string): Promise<Message[]> {
+    return await db
+      .select()
+      .from(messages)
+      .where(drizzleSql`${messages.toStudentId} = ${studentId} OR ${messages.toStudentId} IS NULL`)
+      .orderBy(desc(messages.timestamp));
+  }
+
+  async getAllMessages(): Promise<Message[]> {
+    return await db.select().from(messages).orderBy(desc(messages.timestamp));
+  }
+
+  async createMessage(insertMessage: InsertMessage): Promise<Message> {
+    const [created] = await db
+      .insert(messages)
+      .values(insertMessage)
+      .returning();
+    return created;
+  }
+
+  // Check-ins
+  async getCheckIn(id: string): Promise<CheckIn | undefined> {
+    const [checkIn] = await db.select().from(checkIns).where(eq(checkIns.id, id));
+    return checkIn || undefined;
+  }
+
+  async getCheckInsByStudent(studentId: string): Promise<CheckIn[]> {
+    return await db
+      .select()
+      .from(checkIns)
+      .where(eq(checkIns.studentId, studentId))
+      .orderBy(desc(checkIns.timestamp));
+  }
+
+  async getAllCheckIns(): Promise<CheckIn[]> {
+    return await db.select().from(checkIns).orderBy(desc(checkIns.timestamp));
+  }
+
+  async createCheckIn(insertCheckIn: InsertCheckIn): Promise<CheckIn> {
+    const [created] = await db
+      .insert(checkIns)
+      .values(insertCheckIn)
+      .returning();
+    return created;
   }
 }
 
