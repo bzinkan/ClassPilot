@@ -25,6 +25,7 @@ const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
   wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
   retentionHours: z.string().min(1, "Retention period is required"),
+  maxTabsPerStudent: z.string().optional(),
   blockedDomains: z.string(),
   allowedDomains: z.string(),
   ipAllowlist: z.string(),
@@ -74,6 +75,7 @@ export default function Settings() {
       schoolName: settings?.schoolName || "",
       wsSharedKey: settings?.wsSharedKey || "",
       retentionHours: settings?.retentionHours || "24",
+      maxTabsPerStudent: settings?.maxTabsPerStudent || "",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
       allowedDomains: settings?.allowedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
@@ -88,6 +90,7 @@ export default function Settings() {
         schoolName: settings.schoolName,
         wsSharedKey: settings.wsSharedKey,
         retentionHours: settings.retentionHours,
+        maxTabsPerStudent: settings.maxTabsPerStudent || "",
         blockedDomains: settings.blockedDomains?.join(", ") || "",
         allowedDomains: settings.allowedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
@@ -113,6 +116,7 @@ export default function Settings() {
       const payload = {
         schoolId,
         ...data,
+        maxTabsPerStudent: data.maxTabsPerStudent || null,
         blockedDomains: data.blockedDomains
           .split(",")
           .map((d) => d.trim())
@@ -475,6 +479,25 @@ export default function Settings() {
                 )}
                 <p className="text-xs text-muted-foreground">
                   Student activity data will be automatically deleted after this period
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="maxTabsPerStudent">Maximum Tabs Per Student</Label>
+                <Input
+                  id="maxTabsPerStudent"
+                  data-testid="input-max-tabs"
+                  type="number"
+                  {...form.register("maxTabsPerStudent")}
+                  placeholder="Leave empty for unlimited"
+                />
+                {form.formState.errors.maxTabsPerStudent && (
+                  <p className="text-sm text-destructive">
+                    {form.formState.errors.maxTabsPerStudent.message}
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  Limit the number of tabs students can have open. Leave empty for unlimited tabs.
                 </p>
               </div>
 

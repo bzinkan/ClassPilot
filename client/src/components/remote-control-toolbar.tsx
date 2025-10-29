@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, MessageSquare, Megaphone } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, MessageSquare, Megaphone, ListChecks } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,10 +28,12 @@ export function RemoteControlToolbar() {
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showAnnouncement, setShowAnnouncement] = useState(false);
   const [showApplyScene, setShowApplyScene] = useState(false);
+  const [showTabLimit, setShowTabLimit] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
   const [lockUrl, setLockUrl] = useState("");
   const [announcement, setAnnouncement] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string>("");
+  const [tabLimit, setTabLimit] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
@@ -201,6 +203,40 @@ export function RemoteControlToolbar() {
     }
   };
 
+  const handleApplyTabLimit = async () => {
+    const maxTabs = tabLimit ? parseInt(tabLimit, 10) : null;
+    
+    if (maxTabs !== null && (isNaN(maxTabs) || maxTabs < 1)) {
+      toast({
+        title: "Error",
+        description: "Please enter a valid number of tabs (minimum 1)",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await apiRequest("/api/remote/limit-tabs", "POST", { maxTabs });
+      toast({
+        title: "Success",
+        description: maxTabs 
+          ? `Set tab limit to ${maxTabs} for all students`
+          : "Removed tab limit for all students",
+      });
+      setTabLimit("");
+      setShowTabLimit(false);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to apply tab limit",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4">
@@ -266,6 +302,16 @@ export function RemoteControlToolbar() {
             >
               <Layers className="h-4 w-4 mr-2" />
               Apply Scene
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowTabLimit(true)}
+              data-testid="button-limit-tabs"
+            >
+              <ListChecks className="h-4 w-4 mr-2" />
+              Limit Tabs
             </Button>
           </div>
         </div>
@@ -423,6 +469,43 @@ export function RemoteControlToolbar() {
             </Button>
             <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-scene">
               Apply Scene
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Limit Tabs Dialog */}
+      <Dialog open={showTabLimit} onOpenChange={setShowTabLimit}>
+        <DialogContent data-testid="dialog-limit-tabs">
+          <DialogHeader>
+            <DialogTitle>Limit Student Tabs</DialogTitle>
+            <DialogDescription>
+              Set the maximum number of tabs students can have open. Leave empty to remove the limit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="tab-limit">Maximum Tabs (leave empty for unlimited)</Label>
+              <Input
+                id="tab-limit"
+                type="number"
+                min="1"
+                placeholder="e.g., 5"
+                value={tabLimit}
+                onChange={(e) => setTabLimit(e.target.value)}
+                data-testid="input-tab-limit"
+              />
+              <p className="text-xs text-muted-foreground">
+                When a limit is set, the oldest tabs will be automatically closed if students exceed this number.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTabLimit(false)} data-testid="button-cancel-limit-tabs">
+              Cancel
+            </Button>
+            <Button onClick={handleApplyTabLimit} disabled={isLoading} data-testid="button-submit-limit-tabs">
+              Apply Tab Limit
             </Button>
           </DialogFooter>
         </DialogContent>
