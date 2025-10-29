@@ -522,19 +522,82 @@ export default function Dashboard() {
                 : "No student devices are currently registered. Students will appear here when they connect with the Chrome extension."}
             </p>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-            {filteredStudents.map((student) => (
-              <StudentTile
-                key={student.studentId}
-                student={student}
-                onClick={() => setSelectedStudent(student)}
-                blockedDomains={settings?.blockedDomains || []}
-                isOffTask={isStudentOffTask(student)}
-              />
-            ))}
-          </div>
-        )}
+        ) : (() => {
+          // Partition students into off-task/on-task groups with single pass
+          // Evaluates isStudentOffTask only once per student
+          const { offTaskStudents, onTaskStudents } = filteredStudents.reduce<{
+            offTaskStudents: StudentStatus[];
+            onTaskStudents: StudentStatus[];
+          }>(
+            (acc, student) => {
+              if (isStudentOffTask(student)) {
+                acc.offTaskStudents.push(student);
+              } else {
+                acc.onTaskStudents.push(student);
+              }
+              return acc;
+            },
+            { offTaskStudents: [], onTaskStudents: [] }
+          );
+          
+          return (
+            <div className="space-y-8">
+              {/* Off-Task Students Section */}
+              {offTaskStudents.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <AlertTriangle className="h-5 w-5 text-red-500" />
+                    <h2 
+                      className="text-lg font-semibold text-red-600 dark:text-red-400"
+                      data-testid="heading-offtask-students"
+                    >
+                      Off-Task Students ({offTaskStudents.length})
+                    </h2>
+                    <div className="flex-1 h-px bg-red-200 dark:bg-red-800/30"></div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {offTaskStudents.map((student) => (
+                      <StudentTile
+                        key={student.studentId}
+                        student={student}
+                        onClick={() => setSelectedStudent(student)}
+                        blockedDomains={settings?.blockedDomains || []}
+                        isOffTask={true}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* On-Task Students Section */}
+              {onTaskStudents.length > 0 && (
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <Monitor className="h-5 w-5 text-green-500" />
+                    <h2 
+                      className="text-lg font-semibold text-green-600 dark:text-green-400"
+                      data-testid="heading-ontask-students"
+                    >
+                      On-Task Students ({onTaskStudents.length})
+                    </h2>
+                    <div className="flex-1 h-px bg-green-200 dark:bg-green-800/30"></div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {onTaskStudents.map((student) => (
+                      <StudentTile
+                        key={student.studentId}
+                        student={student}
+                        onClick={() => setSelectedStudent(student)}
+                        blockedDomains={settings?.blockedDomains || []}
+                        isOffTask={false}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
       </main>
 
       {/* Student Detail Drawer */}
