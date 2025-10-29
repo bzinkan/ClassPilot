@@ -90,6 +90,11 @@ The system uses a full-stack architecture:
   - **Persistent Storage**: Database-backed storage with separate devices and students tables ensures data integrity
   - **Automatic Refresh**: Mutations invalidate multiple query keys to keep dashboard and roster synchronized
 - **Student Monitoring**: Automatically collects tab titles, URLs, timestamps, and favicons every 10 seconds. Provides real-time alerts for domain blocklist violations.
+  - **Status Timing**: Student tiles show status based on heartbeat activity
+    - **Online (Green)**: Last heartbeat within 30 seconds
+    - **Idle (Yellow)**: No heartbeat for 30-60 seconds
+    - **Offline (Grey)**: No heartbeat for 60+ seconds
+  - **Auto-refresh**: Dashboard polls every 5 seconds to update status changes
 - **Website Duration Tracking**: 
   - Calculates and displays how long students spend on each website by grouping consecutive heartbeats
   - Student detail drawer shows aggregated sessions with duration (e.g., "5m 30s", "1h 15m") instead of individual heartbeat entries
