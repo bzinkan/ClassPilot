@@ -15,7 +15,7 @@ I like functional programming.
 ## System Architecture
 
 ### UI/UX Decisions
-The frontend is built with React and TypeScript, using Tailwind CSS for styling with custom design tokens tailored for an educational UI. It supports dark/light mode and features a grid-based dashboard with student tiles for real-time activity display. Detailed student information is accessible via a drawer, and admin functionalities are available through a dedicated interface. The Roster page provides a dedicated view for managing student rosters, separated from system settings for improved UX and organization.
+The frontend is built with React and TypeScript, using Tailwind CSS for styling with custom design tokens tailored for an educational UI. It supports dark/light mode and features a grid-based dashboard with student tiles for real-time activity display. Students are organized into four distinct sections for easy monitoring: Off-Task (top), On-Task, Idle, and Offline (bottom). Detailed student information is accessible via a drawer, and admin functionalities are available through a dedicated interface. The Roster page provides a dedicated view for managing student rosters, separated from system settings for improved UX and organization.
 
 ### Technical Implementations
 The system uses a full-stack architecture:
