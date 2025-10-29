@@ -41,6 +41,10 @@ export default function Dashboard() {
   const [newGrade, setNewGrade] = useState("");
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const maxReconnectDelay = 30000; // 30 seconds max delay
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
     queryKey: ['/api/students'],
@@ -61,48 +65,101 @@ export default function Dashboard() {
 
   const currentUser = currentUserData?.user;
 
+  // WebSocket connection with automatic reconnection
   useEffect(() => {
-    // WebSocket connection for real-time updates
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    console.log('[Dashboard] Connecting to WebSocket:', wsUrl);
-    const socket = new WebSocket(wsUrl);
+    const connectWebSocket = () => {
+      // Clear any existing reconnection timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
 
-    socket.onopen = () => {
-      console.log("[Dashboard] WebSocket connected successfully");
-      setWsConnected(true);
-      // Authenticate as teacher
-      socket.send(JSON.stringify({ type: 'auth', role: 'teacher' }));
-      console.log("[Dashboard] Sent auth message");
-    };
+      // Close existing connection if any
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
 
-    socket.onmessage = (event) => {
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      console.log('[Dashboard] Connecting to WebSocket (attempt', reconnectAttemptsRef.current + 1, '):', wsUrl);
+      
       try {
-        const message = JSON.parse(event.data);
-        console.log("[Dashboard] WebSocket message received:", message);
-        if (message.type === 'student-update') {
-          console.log("[Dashboard] Student update detected, invalidating queries...");
-          // Invalidate queries to force refetch (needed because staleTime: Infinity)
-          queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-        }
+        const socket = new WebSocket(wsUrl);
+        wsRef.current = socket;
+
+        socket.onopen = () => {
+          console.log("[Dashboard] WebSocket connected successfully");
+          setWsConnected(true);
+          reconnectAttemptsRef.current = 0; // Reset reconnection counter on successful connection
+          
+          // Authenticate as teacher
+          socket.send(JSON.stringify({ type: 'auth', role: 'teacher' }));
+          console.log("[Dashboard] Sent auth message");
+        };
+
+        socket.onmessage = (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            console.log("[Dashboard] WebSocket message received:", message);
+            if (message.type === 'student-update') {
+              console.log("[Dashboard] Student update detected, invalidating queries...");
+              // Invalidate queries to force refetch (needed because staleTime: Infinity)
+              queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+            }
+          } catch (error) {
+            console.error("[Dashboard] WebSocket message error:", error);
+          }
+        };
+
+        socket.onclose = (event) => {
+          console.log("[Dashboard] WebSocket disconnected, code:", event.code, "reason:", event.reason);
+          setWsConnected(false);
+          wsRef.current = null;
+          
+          // Attempt to reconnect with exponential backoff
+          reconnectAttemptsRef.current++;
+          const delay = Math.min(
+            1000 * Math.pow(2, reconnectAttemptsRef.current - 1), // Exponential: 1s, 2s, 4s, 8s, 16s...
+            maxReconnectDelay // Cap at 30 seconds
+          );
+          
+          console.log(`[Dashboard] Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current})...`);
+          reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
+        };
+
+        socket.onerror = (error) => {
+          console.error("[Dashboard] WebSocket error:", error);
+          setWsConnected(false);
+        };
       } catch (error) {
-        console.error("[Dashboard] WebSocket message error:", error);
+        console.error("[Dashboard] Failed to create WebSocket:", error);
+        setWsConnected(false);
+        
+        // Attempt to reconnect
+        reconnectAttemptsRef.current++;
+        const delay = Math.min(
+          1000 * Math.pow(2, reconnectAttemptsRef.current - 1),
+          maxReconnectDelay
+        );
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
       }
     };
 
-    socket.onclose = () => {
-      console.log("[Dashboard] WebSocket disconnected");
-      setWsConnected(false);
-    };
+    // Initial connection
+    connectWebSocket();
 
-    socket.onerror = (error) => {
-      console.error("[Dashboard] WebSocket error:", error);
-      setWsConnected(false);
-    };
-
+    // Cleanup on unmount
     return () => {
-      console.log("[Dashboard] Closing WebSocket connection");
-      socket.close();
+      console.log("[Dashboard] Cleaning up WebSocket connection");
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
   }, []); // Empty deps - WebSocket connection should only be created once
 
