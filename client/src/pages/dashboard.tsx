@@ -49,6 +49,7 @@ export default function Dashboard() {
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
     queryKey: ['/api/students'],
+    refetchInterval: 5000, // Poll every 5 seconds to update idle/offline status
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
