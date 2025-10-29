@@ -103,7 +103,7 @@ The system uses a full-stack architecture:
   - Uses intelligent session grouping: consecutive heartbeats at the same URL are combined into single sessions
 - **Opt-In Screen Sharing**: Students explicitly consent to screen sharing, with clear visual indicators when active.
 - **Admin System**: Allows IT administrators to manage teacher accounts (create, view, delete).
-- **Data Retention**: Configurable data retention (default 24 hours) with automatic cleanup and Excel export capabilities.
+- **Data Retention**: Configurable data retention (default 30 days) with automatic cleanup and Excel export capabilities. Database indexes ensure fast queries even with 30 days of historical data.
 - **Student Status Logic**: Classifies students as Online, Idle, or Offline based on heartbeat timestamps.
 - **Allowed Websites & Off-Task Alerts**: Teachers can specify allowed domains in settings. Students navigating away trigger red "Off-Task Alert" status with visual highlighting.
 
