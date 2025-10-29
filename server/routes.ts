@@ -14,6 +14,7 @@ import {
   insertEventSchema,
   insertRosterSchema,
   insertSettingsSchema,
+  insertSceneSchema,
   loginSchema,
   createTeacherSchema,
   type StudentStatus,
@@ -961,6 +962,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Update settings error:", error);
       res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  // Scenes CRUD endpoints
+  app.get("/api/scenes", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const scenes = await storage.getAllScenes();
+      res.json(scenes);
+    } catch (error) {
+      console.error("Get scenes error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/scenes/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const scene = await storage.getScene(req.params.id);
+      if (!scene) {
+        return res.status(404).json({ error: "Scene not found" });
+      }
+      res.json(scene);
+    } catch (error) {
+      console.error("Get scene error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/scenes", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const data = insertSceneSchema.parse(req.body);
+      const scene = await storage.createScene(data);
+      res.json(scene);
+    } catch (error) {
+      console.error("Create scene error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.patch("/api/scenes/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const updates = insertSceneSchema.partial().parse(req.body);
+      const scene = await storage.updateScene(req.params.id, updates);
+      if (!scene) {
+        return res.status(404).json({ error: "Scene not found" });
+      }
+      res.json(scene);
+    } catch (error) {
+      console.error("Update scene error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.delete("/api/scenes/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const success = await storage.deleteScene(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Scene not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete scene error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 

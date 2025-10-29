@@ -18,8 +18,8 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { ArrowLeft, Download, Shield, Clock, AlertCircle } from "lucide-react";
-import type { Settings as SettingsType } from "@shared/schema";
+import { ArrowLeft, Download, Shield, Clock, AlertCircle, Layers, Plus, Pencil, Trash2, Star } from "lucide-react";
+import type { Settings as SettingsType, Scene } from "@shared/schema";
 
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
@@ -39,9 +39,22 @@ export default function Settings() {
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
+  
+  // Scenes management state
+  const [showSceneDialog, setShowSceneDialog] = useState(false);
+  const [editingScene, setEditingScene] = useState<Scene | null>(null);
+  const [sceneName, setSceneName] = useState("");
+  const [sceneDescription, setSceneDescription] = useState("");
+  const [sceneAllowedDomains, setSceneAllowedDomains] = useState("");
+  const [sceneBlockedDomains, setSceneBlockedDomains] = useState("");
+  const [deleteSceneId, setDeleteSceneId] = useState<string | null>(null);
 
   const { data: settings, isLoading } = useQuery<SettingsType>({
     queryKey: ['/api/settings'],
+  });
+
+  const { data: scenes = [], isLoading: scenesLoading } = useQuery<Scene[]>({
+    queryKey: ['/api/scenes'],
   });
 
   const form = useForm<SettingsForm>({
@@ -120,6 +133,108 @@ export default function Settings() {
       });
     },
   });
+
+  // Scenes mutations
+  const createSceneMutation = useMutation({
+    mutationFn: async () => {
+      const schoolId = settings?.schoolId || "default-school";
+      return await apiRequest("POST", "/api/scenes", {
+        schoolId,
+        sceneName,
+        description: sceneDescription || undefined,
+        allowedDomains: sceneAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
+        blockedDomains: sceneBlockedDomains.split(",").map(d => d.trim()).filter(Boolean),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
+      toast({ title: "Scene created", description: `"${sceneName}" has been created successfully` });
+      setShowSceneDialog(false);
+      resetSceneForm();
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to create scene", description: error.message });
+    },
+  });
+
+  const updateSceneMutation = useMutation({
+    mutationFn: async () => {
+      if (!editingScene) throw new Error("No scene to update");
+      return await apiRequest("PATCH", `/api/scenes/${editingScene.id}`, {
+        sceneName,
+        description: sceneDescription || undefined,
+        allowedDomains: sceneAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
+        blockedDomains: sceneBlockedDomains.split(",").map(d => d.trim()).filter(Boolean),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
+      toast({ title: "Scene updated", description: `"${sceneName}" has been updated successfully` });
+      setShowSceneDialog(false);
+      resetSceneForm();
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to update scene", description: error.message });
+    },
+  });
+
+  const deleteSceneMutation = useMutation({
+    mutationFn: async (sceneId: string) => {
+      return await apiRequest("DELETE", `/api/scenes/${sceneId}`);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
+      toast({ title: "Scene deleted", description: "The scene has been deleted successfully" });
+      setDeleteSceneId(null);
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to delete scene", description: error.message });
+    },
+  });
+
+  const resetSceneForm = () => {
+    setSceneName("");
+    setSceneDescription("");
+    setSceneAllowedDomains("");
+    setSceneBlockedDomains("");
+    setEditingScene(null);
+  };
+
+  const handleCreateScene = () => {
+    resetSceneForm();
+    setShowSceneDialog(true);
+  };
+
+  const handleEditScene = (scene: Scene) => {
+    setEditingScene(scene);
+    setSceneName(scene.sceneName);
+    setSceneDescription(scene.description || "");
+    setSceneAllowedDomains(scene.allowedDomains?.join(", ") || "");
+    setSceneBlockedDomains(scene.blockedDomains?.join(", ") || "");
+    setShowSceneDialog(true);
+  };
+
+  const handleSaveScene = () => {
+    if (!sceneName.trim()) {
+      toast({ variant: "destructive", title: "Scene name required", description: "Please enter a name for the scene" });
+      return;
+    }
+    if (editingScene) {
+      updateSceneMutation.mutate();
+    } else {
+      createSceneMutation.mutate();
+    }
+  };
+
+  const handleDeleteScene = (sceneId: string) => {
+    setDeleteSceneId(sceneId);
+  };
+
+  const confirmDeleteScene = () => {
+    if (deleteSceneId) {
+      deleteSceneMutation.mutate(deleteSceneId);
+    }
+  };
 
   const handleOpenExportDialog = () => {
     // Set default dates: last 7 days
@@ -343,6 +458,102 @@ export default function Settings() {
           </CardContent>
         </Card>
 
+        {/* Scenes Management */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Layers className="h-5 w-5" />
+                Scenes Management
+              </div>
+              <Button
+                size="sm"
+                onClick={handleCreateScene}
+                data-testid="button-create-scene"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create Scene
+              </Button>
+            </CardTitle>
+            <CardDescription>
+              Create browsing environments with allowed/blocked websites for different activities
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {scenesLoading ? (
+              <div className="text-center py-8">
+                <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
+                <p className="text-sm text-muted-foreground">Loading scenes...</p>
+              </div>
+            ) : scenes.length === 0 ? (
+              <div className="text-center py-8 text-muted-foreground">
+                <Layers className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                <p className="text-sm">No scenes created yet</p>
+                <p className="text-xs mt-1">Create a scene to get started</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {scenes.map((scene) => (
+                  <div
+                    key={scene.id}
+                    className="border rounded-lg p-4 space-y-2 hover-elevate"
+                    data-testid={`scene-card-${scene.id}`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-medium">{scene.sceneName}</h4>
+                          {scene.isDefault && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-primary/10 text-primary">
+                              <Star className="h-3 w-3 mr-1" />
+                              Default
+                            </span>
+                          )}
+                        </div>
+                        {scene.description && (
+                          <p className="text-sm text-muted-foreground mt-1">{scene.description}</p>
+                        )}
+                        <div className="mt-2 space-y-1 text-xs">
+                          {scene.allowedDomains && scene.allowedDomains.length > 0 && (
+                            <div className="flex items-start gap-2">
+                              <span className="text-green-600 dark:text-green-400 font-medium shrink-0">Allowed:</span>
+                              <span className="text-muted-foreground">{scene.allowedDomains.join(", ")}</span>
+                            </div>
+                          )}
+                          {scene.blockedDomains && scene.blockedDomains.length > 0 && (
+                            <div className="flex items-start gap-2">
+                              <span className="text-red-600 dark:text-red-400 font-medium shrink-0">Blocked:</span>
+                              <span className="text-muted-foreground">{scene.blockedDomains.join(", ")}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 ml-4">
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => handleEditScene(scene)}
+                          data-testid={`button-edit-scene-${scene.id}`}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => handleDeleteScene(scene.id)}
+                          data-testid={`button-delete-scene-${scene.id}`}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         {/* Privacy Notice */}
         <Card className="border-primary/20 bg-primary/5">
           <CardHeader>
@@ -403,6 +614,111 @@ export default function Settings() {
             <Button onClick={handleExportData} data-testid="button-confirm-export">
               <Download className="h-4 w-4 mr-2" />
               Export
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Scene Create/Edit Dialog */}
+      <Dialog open={showSceneDialog} onOpenChange={setShowSceneDialog}>
+        <DialogContent data-testid="dialog-scene-form">
+          <DialogHeader>
+            <DialogTitle>{editingScene ? "Edit Scene" : "Create New Scene"}</DialogTitle>
+            <DialogDescription>
+              {editingScene ? "Update the scene configuration" : "Create a browsing environment with allowed or blocked websites"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="scene-name">Scene Name *</Label>
+              <Input
+                id="scene-name"
+                value={sceneName}
+                onChange={(e) => setSceneName(e.target.value)}
+                placeholder="e.g., Research Time, Math Practice, Reading"
+                data-testid="input-scene-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="scene-description">Description</Label>
+              <Input
+                id="scene-description"
+                value={sceneDescription}
+                onChange={(e) => setSceneDescription(e.target.value)}
+                placeholder="Optional description of this scene"
+                data-testid="input-scene-description"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="scene-allowed">Allowed Domains</Label>
+              <Input
+                id="scene-allowed"
+                value={sceneAllowedDomains}
+                onChange={(e) => setSceneAllowedDomains(e.target.value)}
+                placeholder="example.com, google.com, wikipedia.org"
+                data-testid="input-scene-allowed-domains"
+              />
+              <p className="text-xs text-muted-foreground">
+                Comma-separated list of allowed domains. Students can only visit these sites.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="scene-blocked">Blocked Domains</Label>
+              <Input
+                id="scene-blocked"
+                value={sceneBlockedDomains}
+                onChange={(e) => setSceneBlockedDomains(e.target.value)}
+                placeholder="facebook.com, youtube.com, games.com"
+                data-testid="input-scene-blocked-domains"
+              />
+              <p className="text-xs text-muted-foreground">
+                Comma-separated list of blocked domains. Students cannot visit these sites.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => setShowSceneDialog(false)}
+              data-testid="button-cancel-scene"
+            >
+              Cancel
+            </Button>
+            <Button 
+              onClick={handleSaveScene}
+              disabled={createSceneMutation.isPending || updateSceneMutation.isPending}
+              data-testid="button-save-scene"
+            >
+              {createSceneMutation.isPending || updateSceneMutation.isPending ? "Saving..." : (editingScene ? "Update Scene" : "Create Scene")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Scene Confirmation Dialog */}
+      <Dialog open={deleteSceneId !== null} onOpenChange={(open) => !open && setDeleteSceneId(null)}>
+        <DialogContent data-testid="dialog-delete-scene">
+          <DialogHeader>
+            <DialogTitle>Delete Scene</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete this scene? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button 
+              variant="outline" 
+              onClick={() => setDeleteSceneId(null)}
+              data-testid="button-cancel-delete-scene"
+            >
+              Cancel
+            </Button>
+            <Button 
+              variant="destructive" 
+              onClick={confirmDeleteScene}
+              disabled={deleteSceneMutation.isPending}
+              data-testid="button-confirm-delete-scene"
+            >
+              {deleteSceneMutation.isPending ? "Deleting..." : "Delete Scene"}
             </Button>
           </DialogFooter>
         </DialogContent>
