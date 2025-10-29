@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -76,7 +76,13 @@ export const heartbeats = pgTable("heartbeats", {
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
-});
+}, (table) => ({
+  // Indexes for performance with 30-day retention
+  timestampIdx: index("heartbeats_timestamp_idx").on(table.timestamp),
+  studentIdIdx: index("heartbeats_student_id_idx").on(table.studentId),
+  deviceIdIdx: index("heartbeats_device_id_idx").on(table.deviceId),
+  studentTimestampIdx: index("heartbeats_student_timestamp_idx").on(table.studentId, table.timestamp),
+}));
 
 export const insertHeartbeatSchema = createInsertSchema(heartbeats).omit({ id: true, timestamp: true });
 export type InsertHeartbeat = z.infer<typeof insertHeartbeatSchema>;
@@ -115,7 +121,7 @@ export const settings = pgTable("settings", {
   schoolId: text("school_id").notNull().unique(),
   schoolName: text("school_name").notNull(),
   wsSharedKey: text("ws_shared_key").notNull(),
-  retentionHours: text("retention_hours").notNull().default("24"),
+  retentionHours: text("retention_hours").notNull().default("720"), // 30 days default
   blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
   allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
   ipAllowlist: text("ip_allowlist").array().default(sql`'{}'::text[]`),
