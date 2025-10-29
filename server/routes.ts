@@ -15,6 +15,7 @@ import {
   insertRosterSchema,
   insertSettingsSchema,
   insertSceneSchema,
+  insertStudentGroupSchema,
   loginSchema,
   createTeacherSchema,
   type StudentStatus,
@@ -1023,6 +1024,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ success: true });
     } catch (error) {
       console.error("Delete scene error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Student Groups CRUD endpoints
+  app.get("/api/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const groups = await storage.getAllStudentGroups();
+      res.json(groups);
+    } catch (error) {
+      console.error("Get groups error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const group = await storage.getStudentGroup(req.params.id);
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      res.json(group);
+    } catch (error) {
+      console.error("Get group error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/groups", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const data = insertStudentGroupSchema.parse(req.body);
+      const group = await storage.createStudentGroup(data);
+      res.json(group);
+    } catch (error) {
+      console.error("Create group error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const updates = insertStudentGroupSchema.partial().parse(req.body);
+      const group = await storage.updateStudentGroup(req.params.id, updates);
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      res.json(group);
+    } catch (error) {
+      console.error("Update group error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const success = await storage.deleteStudentGroup(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete group error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
