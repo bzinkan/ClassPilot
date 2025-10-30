@@ -131,17 +131,19 @@ async function startShare(ids) {
   try {
     console.log('[Offscreen] Starting screen share with IDs:', ids);
     
-    // Validate IDs were passed from service worker
-    if (!ids || !ids.studentId || !ids.teacherId) {
-      console.error('[Offscreen] Missing IDs from service worker');
-      return { success: false, error: 'Missing student or teacher ID' };
+    // Validate studentId (teacherId can be "broadcast")
+    if (!ids || !ids.studentId) {
+      console.error('[Offscreen] Missing studentId from service worker');
+      return { success: false, error: 'Missing student ID' };
     }
     
-    // Store IDs in module scope
+    // Store IDs in module scope (allow "broadcast" for teacherId)
     studentId = ids.studentId;
-    teacherId = ids.teacherId;
-    classId = ids.classId;
-    deviceId = ids.deviceId;
+    teacherId = ids.teacherId || 'broadcast';
+    classId = ids.classId || 'default-class';
+    deviceId = ids.deviceId || ids.studentId;
+    
+    console.log('[Offscreen] Using IDs:', { studentId, teacherId, classId, deviceId });
     
     // Load configuration
     const cfg = await getConfig();

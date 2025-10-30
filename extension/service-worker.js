@@ -19,6 +19,93 @@ let CONFIG = {
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 
+// Storage helpers
+const kv = {
+  get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
+  set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
+};
+
+// Auto-registration: ensures extension always has IDs before sharing
+async function ensureRegistered() {
+  console.log('[Service Worker] Ensuring registration...');
+  
+  try {
+    // Load config from server
+    const configUrl = `${DEFAULT_SERVER_URL}/api/client-config`;
+    const serverConfig = await fetch(configUrl, { cache: 'no-store' })
+      .then(r => r.json())
+      .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
+    
+    // Get or create IDs
+    let stored = await kv.get(['studentId', 'classId', 'deviceId', 'studentEmail', 'teacherId']);
+    
+    // Generate IDs if missing (don't require teacherId at startup)
+    if (!stored.studentId) {
+      stored.studentId = 'student-' + crypto.randomUUID().slice(0, 8);
+    }
+    if (!stored.deviceId) {
+      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 8);
+    }
+    if (!stored.classId) {
+      stored.classId = 'default-class';
+    }
+    
+    // Try to detect student email (optional, non-blocking)
+    if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
+      try {
+        const profile = await new Promise(resolve => 
+          chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+        );
+        if (profile?.email) {
+          stored.studentEmail = profile.email;
+        }
+      } catch (err) {
+        console.log('[Service Worker] Could not get profile info:', err);
+      }
+    }
+    
+    // Save IDs to storage
+    await kv.set(stored);
+    
+    // Update CONFIG
+    CONFIG.deviceId = stored.deviceId;
+    CONFIG.studentName = stored.studentEmail || stored.studentId;
+    CONFIG.studentEmail = stored.studentEmail;
+    CONFIG.classId = stored.classId;
+    
+    console.log('[Service Worker] Registration complete:', {
+      studentId: stored.studentId,
+      deviceId: stored.deviceId,
+      classId: stored.classId,
+      hasEmail: !!stored.studentEmail
+    });
+    
+    return stored;
+  } catch (error) {
+    console.error('[Service Worker] Registration failed:', error);
+    // Don't throw - extension can still work with defaults
+    return {};
+  }
+}
+
+// Run auto-registration on install and startup
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[Service Worker] Extension installed/updated');
+  ensureRegistered();
+});
+
+if (chrome.runtime.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    console.log('[Service Worker] Browser started');
+    ensureRegistered();
+  });
+}
+
+// Run immediately on service worker load
+(async () => {
+  await ensureRegistered();
+})();
+
 // Offscreen document management for WebRTC
 async function ensureOffscreenDocument() {
   const path = 'offscreen.html';
@@ -955,10 +1042,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_SHARE') {
     // Load IDs from storage and pass them to offscreen document
     chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId'], async (storage) => {
-      if (!storage.studentId || !storage.teacherId) {
-        sendResponse({ success: false, error: 'Missing student or teacher ID. Please ensure the extension is registered.' });
+      // Only require studentId - teacherId can be "broadcast" if not set
+      if (!storage.studentId) {
+        sendResponse({ success: false, error: 'Missing student ID. Extension may not be fully initialized. Please wait a moment and try again.' });
         return;
       }
+      
+      // Allow sharing without teacherId (broadcast mode)
+      const teacherId = storage.teacherId || 'broadcast';
+      
+      console.log('[Service Worker] Starting share with:', {
+        studentId: storage.studentId,
+        teacherId,
+        classId: storage.classId
+      });
       
       // Ensure offscreen document exists, then delegate with IDs
       ensureOffscreenDocument()
@@ -968,8 +1065,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             type: 'START_SHARE',
             ids: {
               studentId: storage.studentId,
-              teacherId: storage.teacherId,
-              classId: storage.classId,
+              teacherId: teacherId,
+              classId: storage.classId || 'default-class',
               deviceId: storage.deviceId
             }
           });

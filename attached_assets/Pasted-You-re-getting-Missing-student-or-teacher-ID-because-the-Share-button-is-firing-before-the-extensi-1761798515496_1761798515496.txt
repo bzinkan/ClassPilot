@@ -1,0 +1,169 @@
+You’re getting “Missing student or teacher ID” because the Share button is firing before the extension has IDs in storage (or teacherId isn’t set yet). Fix it in 3 parts:
+
+1) Make registration run on install/boot (seeds studentId, classId)
+
+Put this in your service-worker.js so the device always self-registers and saves IDs before anything else:
+
+// ----- storage helpers
+const kv = {
+  get: (k) => new Promise(r => chrome.storage.local.get(k, r)),
+  set: (o) => new Promise(r => chrome.storage.local.set(o, r)),
+};
+
+// ----- load runtime config
+async function loadCfg() {
+  const url = 'https://classpilot.replit.app/client-config.json';
+  return fetch(url, { cache: 'no-store' }).then(r => r.json());
+}
+
+// ----- ensure student identity exists and is registered on the server
+async function ensureRegistered() {
+  const cfg = await loadCfg();
+
+  let { studentId, classId, studentEmail } = await kv.get(['studentId','classId','studentEmail']);
+
+  // seed IDs if missing
+  if (!studentId) studentId = 'device-' + crypto.randomUUID().slice(0,8);
+  if (!classId)   classId   = 'default-class';
+
+  // try to detect email (optional; safe fallback if not available)
+  if (!studentEmail && chrome.identity?.getProfileUserInfo) {
+    try { studentEmail = (await new Promise(r => chrome.identity.getProfileUserInfo(r)))?.email; } catch {}
+  }
+
+  await kv.set({ studentId, classId, studentEmail });
+
+  // register with server (idempotent)
+  await fetch(`${cfg.baseUrl}/api/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      deviceId: studentId,
+      classId,
+      studentEmail: studentEmail || null
+    })
+  }).catch(()=>{ /* never throw */ });
+
+  return { cfg, studentId, classId };
+}
+
+// run at startup
+chrome.runtime.onInstalled.addListener(ensureRegistered);
+chrome.runtime.onStartup?.addListener(ensureRegistered);
+(async()=>{ try { await ensureRegistered(); } catch {} })();
+
+2) Don’t require teacherId to start; allow “broadcast” offer
+
+Sometimes the teacher hasn’t “claimed” the viewer yet. Let sharing start with a broadcast target and bind to a teacher when one opens the drawer.
+
+popup.js (Share button):
+
+chrome.runtime.sendMessage({ type: 'START_SHARE' }, (res) => {
+  if (!res?.success) {
+    alert('Failed to start screen sharing: ' + (res?.error || 'Unknown error'));
+  }
+});
+
+
+service-worker.js (handle START_SHARE):
+
+import { createPeer } from './rtc.js'; // your ICE-queue helper
+
+let peer, stream;
+
+chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
+  if (msg.type !== 'START_SHARE') return;
+
+  try {
+    const { cfg, studentId, classId } = await ensureRegistered();
+    let { teacherId } = await kv.get(['teacherId']);
+
+    // allow starting without a teacher; server will route to whoever opens the viewer
+    const target = teacherId || 'broadcast';
+
+    // start share in an offscreen doc OR keep peer here if you prefer
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+
+    peer = createPeer(cfg.iceServers || []);
+    stream.getTracks().forEach(t => peer.pc.addTrack(t, stream));
+
+    // send signals via your server
+    peer.setOnEmit((m) => {
+      fetch(`${cfg.baseUrl}/api/signal`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...m, from: studentId, to: target })
+      }).catch(()=>{});
+    });
+
+    // create offer explicitly
+    await peer.pc.setLocalDescription(await peer.pc.createOffer());
+    await fetch(`${cfg.baseUrl}/api/signal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type:'offer', from: studentId, to: target, sdp: peer.pc.localDescription })
+    });
+
+    // tell server we’re sharing (so dashboard shows the blue chip)
+    fetch(`${cfg.baseUrl}/api/event`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ type:'share_status', deviceId: studentId, classId, isSharing:true, ts:Date.now() })
+    });
+
+    sendResponse({ success: true });
+  } catch (e) {
+    sendResponse({ success: false, error: e?.message || String(e) });
+  }
+
+  // keep the message channel open for async
+  return true;
+});
+
+
+When the teacher opens a viewer, have your server send back either:
+
+{ type: 'assign_viewer', teacherId } to the extension (store it into chrome.storage.local), or
+
+simply route any broadcast offer to that viewer and reply to the same device; the helper already queues ICE until setRemoteDescription so ordering won’t break it.
+
+3) Add a friendly guard so the popup never throws
+
+If something’s still missing, show a clear message instead of Chrome’s cryptic one:
+
+async function checkReadyForShare() {
+  const { studentId, classId } = await kv.get(['studentId','classId']);
+  if (!studentId || !classId) {
+    throw new Error('not_registered'); // caught in START_SHARE handler above
+  }
+}
+
+Quick debugging (do this once)
+
+Inspect extension storage
+In the extension’s service worker console:
+
+chrome.storage.local.get(null, console.log)
+
+
+You should see at least:
+
+{ studentId: "device-xxxxxx", classId: "default-class", teacherId?: "...", studentEmail?: "..." }
+
+
+If storage got corrupted, reset it:
+
+await chrome.storage.local.clear();
+
+
+Then click the extension once to re-run registration.
+
+Verify server sees you
+Your device should show up on Device Roster with that deviceId. If not, /api/register isn’t being called—recheck step 1.
+
+Why this solves your popup error
+
+The error dialog you showed comes from starting share before registration completed; now ensureRegistered() runs at install/start and before any share, so studentId/classId always exist.
+
+You no longer require teacherId to begin. The server can route a “broadcast” offer to whichever teacher opens the viewer, or you can set teacherId as soon as the teacher initiates view.
+
+No more undefined chrome.storage.local calls; everything goes through guarded helpers.
