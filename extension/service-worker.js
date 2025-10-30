@@ -343,7 +343,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Remote Control Handlers (Phase 1: GoGuardian-style features)
 let screenLocked = false;
 let lockedUrl = null;
-let lockedDomain = null; // Domain to lock to (e.g., "ixl.com")
+let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
+let allowedDomains = []; // Multiple domains for apply-scene (e.g., ["ixl.com", "khanacademy.org"])
 let currentMaxTabs = null;
 
 // Helper function to extract domain from URL
@@ -410,6 +411,7 @@ async function handleRemoteControl(command) {
         screenLocked = true;
         lockedUrl = command.data.url;
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
+        allowedDomains = []; // Clear scene domains when locking to single domain
         
         if (lockedUrl) {
           // Open the locked URL in current tab
@@ -437,6 +439,7 @@ async function handleRemoteControl(command) {
         screenLocked = false;
         lockedUrl = null;
         lockedDomain = null;
+        allowedDomains = []; // Clear all lock state
         
         chrome.notifications.create({
           type: 'basic',
@@ -452,14 +455,11 @@ async function handleRemoteControl(command) {
       case 'apply-scene':
         screenLocked = true;
         lockedUrl = null; // Scene uses multiple domains, not a single URL
+        lockedDomain = null; // Clear single domain when applying scene
         
         // Store allowed domains from the scene
-        const allowedDomains = command.data.allowedDomains || [];
+        allowedDomains = command.data.allowedDomains || [];
         if (allowedDomains.length > 0) {
-          // For compatibility with the existing lock system, we'll use lockedDomain
-          // to store all allowed domains (as a comma-separated string)
-          lockedDomain = allowedDomains.join(',');
-          
           chrome.notifications.create({
             type: 'basic',
             iconUrl: 'icons/icon48.png',
