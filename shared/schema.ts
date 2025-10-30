@@ -64,6 +64,7 @@ export interface StudentStatus {
   favicon?: string;
   lastSeenAt: number;
   isSharing: boolean;
+  screenLocked: boolean;
   status: 'online' | 'idle' | 'offline';
 }
 
@@ -75,6 +76,7 @@ export const heartbeats = pgTable("heartbeats", {
   activeTabTitle: text("active_tab_title").notNull(),
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
+  screenLocked: boolean("screen_locked").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 }, (table) => ({
   // Indexes for performance with 30-day retention
