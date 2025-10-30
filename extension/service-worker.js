@@ -569,28 +569,45 @@ async function handleRemoteControl(command) {
         
       case 'close-tab':
         if (command.data.closeAll) {
-          // Close all tabs except new tab page and allowed domains
+          // Close all tabs except chrome:// system tabs and optionally allowed domains
           const tabs = await chrome.tabs.query({});
           const allowedDomains = command.data.allowedDomains || [];
           
+          let closedCount = 0;
           for (const tab of tabs) {
-            const url = new URL(tab.url || 'about:blank');
-            const domain = url.hostname;
-            
-            // Don't close if it's an allowed domain or new tab page
-            if (!allowedDomains.some(allowed => domain.includes(allowed)) && 
-                !tab.url.startsWith('chrome://')) {
+            try {
+              // Skip chrome:// system pages
+              if (tab.url?.startsWith('chrome://')) {
+                continue;
+              }
+              
+              // If there are allowed domains, check if tab is on an allowed domain
+              if (allowedDomains.length > 0) {
+                const tabDomain = extractDomain(tab.url);
+                if (tabDomain && allowedDomains.some(allowed => tabDomain.includes(allowed) || allowed.includes(tabDomain))) {
+                  continue; // Don't close tabs on allowed domains
+                }
+              }
+              
+              // Close the tab
               await chrome.tabs.remove(tab.id);
+              closedCount++;
+            } catch (error) {
+              console.warn('Could not close tab:', tab.id, error);
             }
           }
-          console.log('Closed all non-allowed tabs');
+          console.log(`Closed ${closedCount} tabs (allowed domains: ${allowedDomains.length > 0 ? allowedDomains.join(', ') : 'none'})`);
         } else if (command.data.pattern) {
           // Close tabs matching pattern
           const tabs = await chrome.tabs.query({});
           for (const tab of tabs) {
             if (tab.url && tab.url.includes(command.data.pattern)) {
-              await chrome.tabs.remove(tab.id);
-              console.log('Closed tab matching pattern:', tab.url);
+              try {
+                await chrome.tabs.remove(tab.id);
+                console.log('Closed tab matching pattern:', tab.url);
+              } catch (error) {
+                console.warn('Could not close tab:', tab.id, error);
+              }
             }
           }
         }
