@@ -80,8 +80,8 @@ function sendSignal(message) {
 
 // Handle incoming WebRTC signals
 async function handleSignal(message) {
-  if (message.type === 'webrtc-signal') {
-    const { signal } = message;
+  if (message.type === 'signal') {
+    const signal = message.data;
     
     if (signal.to !== studentId) {
       return; // Not for us
@@ -189,12 +189,13 @@ async function startShare(ids) {
       if (event.candidate) {
         console.log('[Offscreen] Sending ICE candidate to teacher');
         sendSignal({
-          type: 'webrtc-signal',
-          signal: {
+          type: 'signal',
+          data: {
             type: 'ice',
             candidate: event.candidate,
             from: studentId,
-            to: teacherId
+            to: teacherId,
+            deviceId: deviceId
           }
         });
       }
@@ -218,12 +219,13 @@ async function startShare(ids) {
     console.log('[Offscreen] Created offer, sending to teacher');
     
     sendSignal({
-      type: 'webrtc-signal',
-      signal: {
+      type: 'signal',
+      data: {
         type: 'offer',
         sdp: peerConnection.localDescription,
         from: studentId,
-        to: teacherId
+        to: teacherId,
+        deviceId: deviceId
       }
     });
     

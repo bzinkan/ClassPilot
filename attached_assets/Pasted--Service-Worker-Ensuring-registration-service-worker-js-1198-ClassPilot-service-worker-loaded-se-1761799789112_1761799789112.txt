@@ -1,0 +1,99 @@
+[Service Worker] Ensuring registration...
+service-worker.js:1198 ClassPilot service worker loaded
+service-worker.js:93 [Service Worker] Extension installed/updated
+service-worker.js:30 [Service Worker] Ensuring registration...
+service-worker.js:243 Using server URL: https://classpilot.replit.app
+service-worker.js:183 Logged-in user info: Object
+service-worker.js:199 Auto-detected student email: passpilotapp@gmail.com
+service-worker.js:76 [Service Worker] Registration complete: Object
+service-worker.js:76 [Service Worker] Registration complete: Object
+service-worker.js:352 Student auto-registered: Object
+service-worker.js:466 Heartbeat started with chrome.alarms
+service-worker.js:222 Auto-registered student: passpilotapp@gmail.com
+service-worker.js:466 Heartbeat started with chrome.alarms
+2service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:835 WebSocket connected
+service-worker.js:845 WebSocket not ready yet, will retry on next connection
+(anonymous) @ service-worker.js:845Understand this warning
+service-worker.js:835 WebSocket connected
+service-worker.js:855 WebSocket message: Object
+3service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+offscreen.js:342 [Offscreen] Script loaded and ready
+service-worker.js:132 Created offscreen document
+offscreen.js:320 [Offscreen] Received message: START_SHARE
+offscreen.js:132 [Offscreen] Starting screen share with IDs: Object
+offscreen.js:146 [Offscreen] Using IDs: Object
+offscreen.js:46 [Offscreen] WebSocket connected
+service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+offscreen.js:163 [Offscreen] Got display media stream
+offscreen.js:206 [Offscreen] Added track: video
+offscreen.js:184 [Offscreen] Signaling state: have-local-offer
+offscreen.js:218 [Offscreen] Created offer, sending to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:244 [Offscreen] Notified server: sharing=true
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+2service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+service-worker.js:121 Offscreen document already exists
+offscreen.js:320 [Offscreen] Received message: START_SHARE
+offscreen.js:132 [Offscreen] Starting screen share with IDs: Object
+offscreen.js:146 [Offscreen] Using IDs: Object
+offscreen.js:163 [Offscreen] Got display media stream
+offscreen.js:206 [Offscreen] Added track: video
+offscreen.js:184 [Offscreen] Signaling state: have-local-offer
+offscreen.js:218 [Offscreen] Created offer, sending to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:244 [Offscreen] Notified server: sharing=true
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+5service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+offscreen.js:211 [Offscreen] User stopped sharing via browser UI
+offscreen.js:260 [Offscreen] Stopping screen share...
+offscreen.js:65 [Offscreen] WebSocket closed, will reconnect on next share
+offscreen.js:299 [Offscreen] Notified server: sharing=false
+service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+offscreen.js:211 [Offscreen] User stopped sharing via browser UI
+offscreen.js:260 [Offscreen] Stopping screen share...
+offscreen.js:299 [Offscreen] Notified server: sharing=false
+offscreen.js:320 [Offscreen] Received message: STOP_SHARE
+offscreen.js:260 [Offscreen] Stopping screen share...
+offscreen.js:299 [Offscreen] Notified server: sharing=false
+7service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+service-worker.js:121 Offscreen document already exists
+offscreen.js:320 [Offscreen] Received message: START_SHARE
+offscreen.js:132 [Offscreen] Starting screen share with IDs: Object
+offscreen.js:146 [Offscreen] Using IDs: Object
+offscreen.js:46 [Offscreen] WebSocket connected
+offscreen.js:163 [Offscreen] Got display media stream
+offscreen.js:206 [Offscreen] Added track: video
+offscreen.js:184 [Offscreen] Signaling state: have-local-offer
+offscreen.js:218 [Offscreen] Created offer, sending to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+offscreen.js:244 [Offscreen] Notified server: sharing=true
+offscreen.js:190 [Offscreen] Sending ICE candidate to teacher
+offscreen.js:75 [Offscreen] Sent signal: webrtc-signal
+11service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+2service-worker.js:905 WebSocket disconnected, will reconnect in 5s...
+service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:496 WebSocket reconnection alarm triggered
+service-worker.js:835 WebSocket connected
+service-worker.js:855 WebSocket message: Object
+7service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+5service-worker.js:391 Skipping heartbeat - no active tab
+6service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:391 Skipping heartbeat - no active tab

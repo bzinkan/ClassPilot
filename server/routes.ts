@@ -205,11 +205,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Handle WebRTC signaling
         if (message.type === 'signal' && client.authenticated) {
-          const signal: SignalMessage = message.data;
-          // Forward signal to appropriate recipient
+          const signal = message.data;
+          console.log('[WebSocket] Received WebRTC signal:', signal.type, 'from:', signal.from, 'to:', signal.to);
+          
+          // Forward signal to teacher (broadcast or specific teacher)
           wsClients.forEach((otherClient, otherWs) => {
-            if (otherClient.deviceId === signal.deviceId && otherWs !== ws && otherWs.readyState === WebSocket.OPEN) {
-              otherWs.send(JSON.stringify({ type: 'signal', data: signal }));
+            // Send to all teachers, or to specific teacher if not broadcast
+            if (otherClient.role === 'teacher' && otherWs !== ws && otherWs.readyState === WebSocket.OPEN) {
+              if (signal.to === 'broadcast' || !signal.to) {
+                // Broadcast to all teachers
+                console.log('[WebSocket] Broadcasting signal to teacher');
+                otherWs.send(JSON.stringify({ type: 'signal', data: signal }));
+              }
             }
           });
         }
