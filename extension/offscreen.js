@@ -127,34 +127,24 @@ async function handleSignal(message) {
 }
 
 // Start screen sharing
-async function startShare() {
+async function startShare(ids) {
   try {
-    console.log('[Offscreen] Starting screen share...');
+    console.log('[Offscreen] Starting screen share with IDs:', ids);
     
-    // Load configuration and IDs
-    const cfg = await getConfig();
-    
-    // Try to load student IDs from storage, or use defaults
-    try {
-      if (chrome && chrome.storage && chrome.storage.local) {
-        const storage = await chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId']);
-        studentId = storage.studentId;
-        teacherId = storage.teacherId;
-        classId = storage.classId;
-        deviceId = storage.deviceId;
-      } else {
-        console.warn('[Offscreen] chrome.storage.local not available, cannot load IDs');
-        return { success: false, error: 'Chrome storage API not available' };
-      }
-    } catch (storageError) {
-      console.error('[Offscreen] Failed to read from storage:', storageError);
-      return { success: false, error: 'Failed to load student information: ' + storageError.message };
-    }
-    
-    if (!studentId || !teacherId) {
-      console.error('[Offscreen] Missing studentId or teacherId');
+    // Validate IDs were passed from service worker
+    if (!ids || !ids.studentId || !ids.teacherId) {
+      console.error('[Offscreen] Missing IDs from service worker');
       return { success: false, error: 'Missing student or teacher ID' };
     }
+    
+    // Store IDs in module scope
+    studentId = ids.studentId;
+    teacherId = ids.teacherId;
+    classId = ids.classId;
+    deviceId = ids.deviceId;
+    
+    // Load configuration
+    const cfg = await getConfig();
     
     // Initialize WebSocket
     await initWebSocket();
@@ -254,15 +244,7 @@ async function startShare() {
       console.warn('[Offscreen] Failed to notify server:', error);
     }
     
-    // Update storage (optional, don't fail if unavailable)
-    try {
-      if (chrome && chrome.storage && chrome.storage.local) {
-        await chrome.storage.local.set({ isSharing: true });
-      }
-    } catch (storageError) {
-      console.warn('[Offscreen] Could not update storage:', storageError);
-    }
-    
+    // No need to update storage - service worker handles this
     return { success: true };
   } catch (error) {
     console.error('[Offscreen] Error starting share:', error);
@@ -318,15 +300,7 @@ async function stopShare() {
       }
     }
     
-    // Update storage (optional, don't fail if unavailable)
-    try {
-      if (chrome && chrome.storage && chrome.storage.local) {
-        await chrome.storage.local.set({ isSharing: false });
-      }
-    } catch (storageError) {
-      console.warn('[Offscreen] Could not update storage:', storageError);
-    }
-    
+    // No need to update storage - service worker handles this
     return { success: true };
   } catch (error) {
     console.error('[Offscreen] Error stopping share:', error);
@@ -344,7 +318,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[Offscreen] Received message:', message.type);
   
   if (message.type === 'START_SHARE') {
-    startShare()
+    // IDs are passed from service worker to avoid storage access issues
+    startShare(message.ids)
       .then(sendResponse)
       .catch(error => {
         console.error('[Offscreen] Error in startShare:', error);

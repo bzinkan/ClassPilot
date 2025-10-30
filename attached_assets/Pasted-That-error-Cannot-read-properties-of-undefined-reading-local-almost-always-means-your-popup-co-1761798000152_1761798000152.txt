@@ -1,0 +1,122 @@
+That error—“Cannot read properties of undefined (reading ‘local’)”—almost always means your popup code tried to use chrome.storage.local when chrome.storage was undefined (missing permission / wrong context / not initialized yet). It can also happen if you wrote something.local where something is undefined, but in screen-share flows it’s nearly always chrome.storage.local.
+
+Fix it in three parts:
+
+1) Manifest: make sure storage is allowed (and declare offscreen if you use it)
+{
+  "manifest_version": 3,
+  "name": "ClassPilot",
+  "version": "0.8.0",
+  "permissions": [
+    "storage",         // ← REQUIRED for chrome.storage.local
+    "tabs",
+    "alarms",
+    "notifications"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "service-worker.js" },
+  "action": { "default_popup": "popup.html" },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+
+  // If you moved WebRTC to an offscreen page:
+  "offscreen_documents": [{
+    "matches": ["*://*/*"],
+    "reason": "USER_MEDIA",
+    "justification": "Keep screen share alive when popup closes."
+  }]
+}
+
+
+After editing the manifest, go to chrome://extensions → Update.
+
+2) Guard every access to chrome.storage.local and provide a tiny promise wrapper
+
+storage.js
+
+export const hasStorage = !!(chrome && chrome.storage && chrome.storage.local);
+
+export const kv = {
+  get(objOrKeys) {
+    if (!hasStorage) throw new Error('storage_unavailable');
+    return new Promise((resolve) => chrome.storage.local.get(objOrKeys, resolve));
+  },
+  set(obj) {
+    if (!hasStorage) throw new Error('storage_unavailable');
+    return new Promise((resolve) => chrome.storage.local.set(obj, resolve));
+  }
+};
+
+3) Make start-share resilient (initialize IDs, bail gracefully if storage is missing)
+
+popup.js (or wherever the Share button runs)
+
+import { kv, hasStorage } from './storage.js';
+
+async function ensureIdentity() {
+  // Safe defaults if storage missing or values unset
+  const defaults = { classId: 'default-class' };
+
+  if (!hasStorage) {
+    // Fall back to memory IDs; at least don’t crash
+    window.__ids = window.__ids || {
+      studentId: 'student-' + Math.random().toString(36).slice(2, 8),
+      teacherId: 'teacher-default',
+      classId: defaults.classId
+    };
+    return window.__ids;
+  }
+
+  const got = await kv.get(['studentId', 'teacherId', 'classId']);
+  if (!got.studentId) { got.studentId = 'student-' + crypto.randomUUID().slice(0, 8); }
+  if (!got.teacherId) { got.teacherId = 'teacher-default'; }
+  if (!got.classId)   { got.classId   = defaults.classId; }
+  await kv.set(got);
+  return got;
+}
+
+async function startShareClicked() {
+  try {
+    const ids = await ensureIdentity();             // ← never undefined
+    const cfg = await fetch(`${SERVER}/client-config.json`, { cache:'no-store' }).then(r=>r.json());
+
+    // hand off to service worker/offscreen to keep the peer alive
+    await chrome.runtime.sendMessage({ type: 'START_SHARE', ids, cfg });
+  } catch (e) {
+    // This is the dialog you’re seeing—make it explicit and helpful
+    const msg = e?.message === 'storage_unavailable'
+      ? 'Storage permission missing. Please enable it in the extension manifest.'
+      : (e?.message || String(e));
+    alert(`Failed to start screen sharing: ${msg}`);
+  }
+}
+
+document.getElementById('startShare').addEventListener('click', startShareClicked);
+
+
+service-worker.js / offscreen.js (receiving side)
+
+chrome.runtime.onMessage.addListener(async (msg) => {
+  if (msg.type !== 'START_SHARE') return;
+  const { ids, cfg } = msg;  // ← guaranteed defined now
+  // start WebRTC using ids.studentId / ids.teacherId and cfg.iceServers/baseUrl
+});
+
+Why this fixes your exact popup error
+
+If "storage" wasn’t in your manifest or Chrome hadn’t finished wiring the background context, chrome.storage was undefined. Now you check for it and either:
+
+Use it safely, or
+
+Fall back to in-memory IDs and display a clear message instead of Chrome’s cryptic “reading ‘local’”.
+
+Even if storage is there but your IDs weren’t initialized yet, ensureIdentity() creates and persists them before sharing.
+
+Quick sanity checklist
+
+ Manifest includes "storage" and (if used) offscreen_documents.
+
+ No direct chrome.storage.local... calls—everything goes through kv.get/kv.set.
+
+ START_SHARE always receives a defined { ids, cfg }.
+
+ If storage is unavailable, you see a friendly message, not a red error.

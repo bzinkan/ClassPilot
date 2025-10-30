@@ -953,25 +953,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'START_SHARE') {
-    // Ensure offscreen document exists, then delegate
-    ensureOffscreenDocument()
-      .then(async () => {
-        const response = await chrome.runtime.sendMessage({ 
-          to: 'offscreen', 
-          type: 'START_SHARE' 
+    // Load IDs from storage and pass them to offscreen document
+    chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId'], async (storage) => {
+      if (!storage.studentId || !storage.teacherId) {
+        sendResponse({ success: false, error: 'Missing student or teacher ID. Please ensure the extension is registered.' });
+        return;
+      }
+      
+      // Ensure offscreen document exists, then delegate with IDs
+      ensureOffscreenDocument()
+        .then(async () => {
+          const response = await chrome.runtime.sendMessage({ 
+            to: 'offscreen', 
+            type: 'START_SHARE',
+            ids: {
+              studentId: storage.studentId,
+              teacherId: storage.teacherId,
+              classId: storage.classId,
+              deviceId: storage.deviceId
+            }
+          });
+          
+          if (response?.success) {
+            CONFIG.isSharing = true;
+            chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+            chrome.action.setBadgeText({ text: '◉' });
+          }
+          
+          sendResponse(response);
+        })
+        .catch((error) => {
+          sendResponse({ success: false, error: error.message });
         });
-        
-        if (response?.success) {
-          CONFIG.isSharing = true;
-          chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
-          chrome.action.setBadgeText({ text: '◉' });
-        }
-        
-        sendResponse(response);
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
+    });
     return true;
   }
   
