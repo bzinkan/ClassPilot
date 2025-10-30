@@ -37,10 +37,8 @@ The system employs a full-stack architecture:
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:
     -   **Remote Tab Control**: Open tabs, close tabs, lock/unlock screens.
-    -   **Scenes Management**: Create and apply predefined browsing environments with allowed/blocked domains.
     -   **Student Groups**: Organize students for targeted instruction.
     -   **Tab Limiting**: Configure maximum tabs per student.
-    -   **Announcements**: Broadcast messages to students.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, no collection of sensitive personal input data.
