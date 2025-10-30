@@ -23,6 +23,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function showAnnouncementModal(data) {
   const { message, timestamp } = data;
   
+  // Remove any existing announcement modal first
+  const existingModal = document.getElementById('classpilot-announcement-modal');
+  if (existingModal) {
+    existingModal.remove();
+  }
+  
   // Create modal overlay
   const modal = document.createElement('div');
   modal.id = 'classpilot-announcement-modal';
@@ -51,15 +57,24 @@ function showAnnouncementModal(data) {
   // Add to page
   document.body.appendChild(modal);
   
-  // Add event listener to close button
-  document.getElementById('classpilot-acknowledge-btn').addEventListener('click', () => {
-    modal.remove();
-  });
+  // Add event listener to close button - use querySelector on modal element
+  const acknowledgeBtn = modal.querySelector('#classpilot-acknowledge-btn');
+  if (acknowledgeBtn) {
+    acknowledgeBtn.addEventListener('click', () => {
+      modal.remove();
+    });
+  }
 }
 
 // Show regular message as modal
 function showMessageModal(data) {
   const { message, fromName, timestamp } = data;
+  
+  // Remove any existing message modal first
+  const existingModal = document.getElementById('classpilot-message-modal');
+  if (existingModal) {
+    existingModal.remove();
+  }
   
   // Create modal overlay
   const modal = document.createElement('div');
@@ -89,10 +104,13 @@ function showMessageModal(data) {
   // Add to page
   document.body.appendChild(modal);
   
-  // Add event listener to close button
-  document.getElementById('classpilot-close-msg-btn').addEventListener('click', () => {
-    modal.remove();
-  });
+  // Add event listener to close button - use querySelector on modal element
+  const closeBtn = modal.querySelector('#classpilot-close-msg-btn');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      modal.remove();
+    });
+  }
 }
 
 // Add modal styles to page (only once)
