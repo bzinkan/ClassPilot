@@ -263,11 +263,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/client-config", async (req, res) => {
     try {
       // Return configuration for WebRTC including TURN servers
-      // Note: In production, you would configure real TURN servers here
+      // Always use production URL for Chrome Extension compatibility
       const config = {
-        baseUrl: process.env.REPLIT_DEV_DOMAIN 
-          ? `https://${process.env.REPLIT_DEV_DOMAIN}` 
-          : 'https://classpilot.replit.app',
+        baseUrl: 'https://classpilot.replit.app',
         iceServers: [
           { urls: 'stun:stun.l.google.com:19302' },
           { urls: 'stun:stun1.l.google.com:19302' },
