@@ -412,6 +412,7 @@ export class MemStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
+            cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
           this.studentStatuses.set(heartbeat.studentId, status);
@@ -433,6 +434,7 @@ export class MemStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
+        status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);
@@ -1044,6 +1046,7 @@ export class DatabaseStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
+            cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
           this.studentStatuses.set(heartbeat.studentId, status);
@@ -1065,6 +1068,7 @@ export class DatabaseStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
+        status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);

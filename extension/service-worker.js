@@ -18,6 +18,7 @@ let CONFIG = {
 
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
+let cameraActive = false; // Track camera usage across all tabs
 
 // Storage helpers
 const kv = {
@@ -359,6 +360,7 @@ async function sendHeartbeat() {
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
       isSharing: false,
+      cameraActive: cameraActive,
     };
     
     // Include studentId if available
@@ -1027,6 +1029,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.error('Error logging student_switched event:', error);
       });
     }
+    
+    sendResponse({ success: true });
+    return true;
+  }
+  
+  if (message.type === 'camera-status-changed') {
+    // Update camera status from content script
+    cameraActive = message.cameraActive;
+    console.log('[Service Worker] Camera status updated:', cameraActive);
+    
+    // Send immediate heartbeat with camera status
+    sendHeartbeat();
     
     sendResponse({ success: true });
     return true;

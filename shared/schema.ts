@@ -66,6 +66,7 @@ export interface StudentStatus {
   isSharing: boolean;
   screenLocked: boolean;
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
+  cameraActive: boolean;
   status: 'online' | 'idle' | 'offline';
 }
 
@@ -79,6 +80,7 @@ export const heartbeats = pgTable("heartbeats", {
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
   isSharing: boolean("is_sharing").default(false),
+  cameraActive: boolean("camera_active").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 }, (table) => ({
   // Indexes for performance with 30-day retention
