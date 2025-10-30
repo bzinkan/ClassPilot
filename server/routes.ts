@@ -912,10 +912,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const { deviceId } = req.params;
       const { message } = req.body;
       
+      console.log(`[Ping] Attempting to ping deviceId: ${deviceId}`);
+      console.log(`[Ping] Currently connected WebSocket clients: ${wsClients.size}`);
+      
+      // Log all connected clients for debugging
+      let clientIndex = 0;
+      wsClients.forEach((client, ws) => {
+        console.log(`[Ping] Client ${clientIndex++}: deviceId=${client.deviceId}, role=${client.role}, authenticated=${client.authenticated}, readyState=${ws.readyState}`);
+      });
+      
       // Forward ping message via WebSocket to the target device
       let sent = false;
       wsClients.forEach((client, ws) => {
         if (client.deviceId === deviceId && ws.readyState === WebSocket.OPEN) {
+          console.log(`[Ping] Found matching client! Sending ping to deviceId: ${deviceId}`);
           ws.send(JSON.stringify({ 
             type: 'ping', 
             data: { 
@@ -928,8 +938,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
 
       if (sent) {
+        console.log(`[Ping] Successfully sent ping to deviceId: ${deviceId}`);
         res.json({ success: true, message: "Ping sent successfully" });
       } else {
+        console.log(`[Ping] No matching WebSocket client found for deviceId: ${deviceId}`);
         res.json({ success: false, message: "Student is offline" });
       }
     } catch (error) {
