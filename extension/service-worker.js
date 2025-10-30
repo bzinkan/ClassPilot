@@ -426,7 +426,7 @@ async function handleRemoteControl(command) {
         // Show notification with domain
         chrome.notifications.create({
           type: 'basic',
-          iconUrl: 'icons/icon48.png',
+          iconUrl: chrome.runtime.getURL('icons/icon48.png'),
           title: 'Screen Locked',
           message: `Your teacher has locked your browsing to ${lockedDomain}. You can navigate within this site but cannot leave it.`,
           priority: 2,
@@ -443,7 +443,7 @@ async function handleRemoteControl(command) {
         
         chrome.notifications.create({
           type: 'basic',
-          iconUrl: 'icons/icon48.png',
+          iconUrl: chrome.runtime.getURL('icons/icon48.png'),
           title: 'Screen Unlocked',
           message: 'Your screen has been unlocked. You can now browse freely.',
           priority: 1,
@@ -462,7 +462,7 @@ async function handleRemoteControl(command) {
         if (allowedDomains.length > 0) {
           chrome.notifications.create({
             type: 'basic',
-            iconUrl: 'icons/icon48.png',
+            iconUrl: chrome.runtime.getURL('icons/icon48.png'),
             title: 'Scene Applied',
             message: `Your teacher has applied a scene. You can only access: ${allowedDomains.join(', ')}`,
             priority: 2,
@@ -725,7 +725,7 @@ function connectWebSocket() {
         // Show browser notification
         chrome.notifications.create({
           type: 'basic',
-          iconUrl: 'icons/icon48.png',
+          iconUrl: chrome.runtime.getURL('icons/icon48.png'),
           title: 'Teacher Notification',
           message: pingMessage || 'Your teacher is requesting your attention',
           priority: 2,
