@@ -13,14 +13,11 @@
     "activeTab",
     "storage",
     "notifications",
-    "tabCapture",
-    "desktopCapture",
     "alarms",
     "webNavigation",
     "identity",
     "identity.email",
-    "scripting",
-    "offscreen"
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"

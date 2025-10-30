@@ -340,23 +340,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 Blocked
               </Badge>
             )}
-            {student.isSharing && (
-              <Badge className="text-xs px-1.5 py-0.5 bg-blue-500 text-white animate-pulse">
-                Sharing
+            {student.status === 'offline' && (
+              <Badge variant="outline" className="text-xs px-1.5 py-0.5 bg-muted text-muted-foreground">
+                Offline
               </Badge>
             )}
             {student.screenLocked ? (
-              <Lock 
-                className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 
-                title="Screen locked"
-                data-testid={`icon-locked-${student.deviceId}`}
-              />
+              <div title="Screen locked">
+                <Lock 
+                  className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 
+                  data-testid={`icon-locked-${student.deviceId}`}
+                />
+              </div>
             ) : (
-              <Unlock 
-                className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/40" 
-                title="Screen unlocked"
-                data-testid={`icon-unlocked-${student.deviceId}`}
-              />
+              <div title="Screen unlocked">
+                <Unlock 
+                  className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/40" 
+                  data-testid={`icon-unlocked-${student.deviceId}`}
+                />
+              </div>
             )}
             <div
               className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${getStatusColor(student.status)} ${

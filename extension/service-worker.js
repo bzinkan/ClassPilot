@@ -106,46 +106,6 @@ if (chrome.runtime.onStartup) {
   await ensureRegistered();
 })();
 
-// Offscreen document management for WebRTC
-async function ensureOffscreenDocument() {
-  const path = 'offscreen.html';
-  
-  try {
-    // Check if offscreen document already exists
-    const existingContexts = await chrome.runtime.getContexts({
-      contextTypes: ['OFFSCREEN_DOCUMENT'],
-      documentUrls: [chrome.runtime.getURL(path)]
-    });
-    
-    if (existingContexts.length > 0) {
-      console.log('Offscreen document already exists');
-      return true;
-    }
-    
-    // Create offscreen document
-    await chrome.offscreen.createDocument({
-      url: path,
-      reasons: ['USER_MEDIA'],
-      justification: 'Keep screen share WebRTC connection alive'
-    });
-    
-    console.log('Created offscreen document');
-    return true;
-  } catch (error) {
-    console.error('Failed to create offscreen document:', error);
-    return false;
-  }
-}
-
-async function closeOffscreenDocument() {
-  try {
-    await chrome.offscreen.closeDocument();
-    console.log('Closed offscreen document');
-  } catch (error) {
-    console.warn('Failed to close offscreen document:', error);
-  }
-}
-
 // Centralized, safe notifications (never throw, never produce red errors)
 async function safeNotify(opts) {
   // If notifications permission is missing or blocked, silently skip
@@ -398,7 +358,7 @@ async function sendHeartbeat() {
       activeTabUrl: activeTab.url || 'No URL',
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
-      isSharing: CONFIG.isSharing,
+      isSharing: false,
     };
     
     // Include studentId if available
@@ -1035,128 +995,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     } else {
       sendResponse({ success: false, error: 'Invalid server URL' });
-    }
-    return true;
-  }
-  
-  if (message.type === 'START_SHARE') {
-    // Load IDs from storage and pass them to offscreen document
-    chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId'], async (storage) => {
-      // Only require studentId - teacherId can be "broadcast" if not set
-      if (!storage.studentId) {
-        sendResponse({ success: false, error: 'Missing student ID. Extension may not be fully initialized. Please wait a moment and try again.' });
-        return;
-      }
-      
-      // Allow sharing without teacherId (broadcast mode)
-      const teacherId = storage.teacherId || 'broadcast';
-      
-      console.log('[Service Worker] Starting share with:', {
-        studentId: storage.studentId,
-        teacherId,
-        classId: storage.classId
-      });
-      
-      // Ensure offscreen document exists, then delegate with IDs
-      ensureOffscreenDocument()
-        .then(async () => {
-          const response = await chrome.runtime.sendMessage({ 
-            to: 'offscreen', 
-            type: 'START_SHARE',
-            ids: {
-              studentId: storage.studentId,
-              teacherId: teacherId,
-              classId: storage.classId || 'default-class',
-              deviceId: storage.deviceId
-            }
-          });
-          
-          if (response?.success) {
-            CONFIG.isSharing = true;
-            chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
-            chrome.action.setBadgeText({ text: '◉' });
-          }
-          
-          sendResponse(response);
-        })
-        .catch((error) => {
-          sendResponse({ success: false, error: error.message });
-        });
-    });
-    return true;
-  }
-  
-  if (message.type === 'STOP_SHARE') {
-    // Delegate to offscreen document
-    chrome.runtime.sendMessage({ 
-      to: 'offscreen', 
-      type: 'STOP_SHARE' 
-    })
-      .then((response) => {
-        if (response?.success) {
-          CONFIG.isSharing = false;
-          chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' });
-          chrome.action.setBadgeText({ text: '' });
-        }
-        sendResponse(response);
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
-    return true;
-  }
-  
-  // Legacy message for backward compatibility
-  if (message.type === 'sharing-started') {
-    CONFIG.isSharing = true;
-    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
-    chrome.action.setBadgeText({ text: '◉' });
-    
-    // Log consent granted event
-    fetch(`${CONFIG.serverUrl}/api/event`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
-        eventType: 'consent_granted',
-        metadata: { timestamp: new Date().toISOString() },
-      }),
-    });
-    
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  if (message.type === 'sharing-stopped') {
-    CONFIG.isSharing = false;
-    chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-    chrome.action.setBadgeText({ text: '●' });
-    
-    // Log consent revoked event
-    fetch(`${CONFIG.serverUrl}/api/event`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
-        eventType: 'consent_revoked',
-        metadata: { timestamp: new Date().toISOString() },
-      }),
-    });
-    
-    sendResponse({ success: true });
-    return true;
-  }
-  
-  if (message.type === 'webrtc-send-signal') {
-    // Send WebRTC signal via WebSocket
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'signal',
-        data: message.signal,
-      }));
-      sendResponse({ success: true });
-    } else {
-      sendResponse({ success: false, error: 'WebSocket not connected' });
     }
     return true;
   }

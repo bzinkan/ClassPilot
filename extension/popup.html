@@ -123,65 +123,6 @@
       50% { opacity: 0.5; }
     }
     
-    .share-button {
-      width: 100%;
-      padding: 12px;
-      background: #3b82f6;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      transition: background 0.2s;
-    }
-    
-    .share-button:hover {
-      background: #2563eb;
-    }
-    
-    .share-button:disabled {
-      background: #cbd5e1;
-      cursor: not-allowed;
-    }
-    
-    .stop-button {
-      background: #ef4444;
-    }
-    
-    .stop-button:hover {
-      background: #dc2626;
-    }
-    
-    .sharing-indicator {
-      background: #fee2e2;
-      border: 2px solid #ef4444;
-      border-radius: 6px;
-      padding: 12px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .sharing-indicator .pulse-dot {
-      width: 12px;
-      height: 12px;
-      background: #ef4444;
-      border-radius: 50%;
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-    
-    .sharing-indicator span {
-      flex: 1;
-      font-size: 13px;
-      font-weight: 600;
-      color: #991b1b;
-    }
-    
     .link {
       color: #3b82f6;
       text-decoration: none;
@@ -405,30 +346,6 @@
       <div class="status-row">
         <span class="status-label">Last Update</span>
         <span class="status-value" id="last-update">-</span>
-      </div>
-    </div>
-    
-    <div class="section">
-      <h2>Screen Sharing (Optional)</h2>
-      <div id="share-section">
-        <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">
-          Your teacher may request you share your screen for additional classroom support.
-        </p>
-        <button class="share-button" id="share-button">
-          <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
-          </svg>
-          Share My Screen
-        </button>
-      </div>
-      <div id="sharing-section" class="hidden">
-        <div class="sharing-indicator">
-          <div class="pulse-dot"></div>
-          <span>Screen Sharing Active</span>
-        </div>
-        <button class="share-button stop-button" id="stop-button">
-          Stop Sharing
-        </button>
       </div>
     </div>
     

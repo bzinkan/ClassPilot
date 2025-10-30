@@ -1,7 +1,5 @@
 // Popup script for ClassPilot
 
-let mediaStream = null;
-let peerConnection = null;
 let currentConfig = null;
 
 // Initialize popup
@@ -34,12 +32,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   
   // Setup form submission
   document.getElementById('setup-submit').addEventListener('click', handleSetup);
-  
-  // Share button
-  document.getElementById('share-button').addEventListener('click', startScreenShare);
-  
-  // Stop button
-  document.getElementById('stop-button').addEventListener('click', stopScreenShare);
   
   // Load and display messages
   loadMessages();
@@ -129,9 +121,6 @@ function updateStatus() {
     if (text === '●') {
       statusDot.className = 'status-dot online';
       statusText.textContent = 'Connected';
-    } else if (text === '◉') {
-      statusDot.className = 'status-dot online';
-      statusText.textContent = 'Connected & Sharing';
     } else {
       statusDot.className = 'status-dot offline';
       statusText.textContent = 'Disconnected';
@@ -252,152 +241,6 @@ async function handleStudentSelection(event) {
   // Call API to set active student
   await setActiveStudent(studentId);
 }
-
-async function startScreenShare() {
-  try {
-    console.log('[Popup] Starting screen share (delegating to offscreen)...');
-    
-    // Update UI immediately
-    document.getElementById('share-section').classList.add('hidden');
-    document.getElementById('sharing-section').classList.remove('hidden');
-    
-    // Delegate to service worker -> offscreen document
-    chrome.runtime.sendMessage({ type: 'START_SHARE' }, (response) => {
-      if (response?.success) {
-        console.log('[Popup] Screen share started successfully');
-      } else {
-        console.error('[Popup] Failed to start share:', response?.error);
-        alert('Failed to start screen sharing: ' + (response?.error || 'Unknown error'));
-        // Revert UI
-        document.getElementById('share-section').classList.remove('hidden');
-        document.getElementById('sharing-section').classList.add('hidden');
-      }
-    });
-    
-  } catch (error) {
-    console.error('[Popup] Screen sharing error:', error);
-    alert('Failed to start screen sharing: ' + error.message);
-    // Revert UI
-    document.getElementById('share-section').classList.remove('hidden');
-    document.getElementById('sharing-section').classList.add('hidden');
-  }
-}
-
-function stopScreenShare() {
-  console.log('[Popup] Stopping screen share (delegating to offscreen)...');
-  
-  // Update UI
-  document.getElementById('share-section').classList.remove('hidden');
-  document.getElementById('sharing-section').classList.add('hidden');
-  
-  // Delegate to service worker -> offscreen document
-  chrome.runtime.sendMessage({ type: 'STOP_SHARE' }, (response) => {
-    if (response?.success) {
-      console.log('[Popup] Screen share stopped successfully');
-    } else {
-      console.error('[Popup] Failed to stop share:', response?.error);
-    }
-  });
-  
-  console.log('[Popup] Screen sharing stopped');
-}
-
-// Queue for ICE candidates received before remote description is set
-let pendingIceCandidates = [];
-let remoteDescriptionSet = false;
-
-function setupWebRTC(stream) {
-  // Reset state
-  pendingIceCandidates = [];
-  remoteDescriptionSet = false;
-  
-  // Create peer connection
-  peerConnection = new RTCPeerConnection({
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-    ],
-  });
-  
-  // Add stream tracks
-  stream.getTracks().forEach(track => {
-    peerConnection.addTrack(track, stream);
-  });
-  
-  // Handle ICE candidates
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate) {
-      // Send ICE candidate to teacher via WebSocket
-      chrome.runtime.sendMessage({
-        type: 'webrtc-send-signal',
-        signal: {
-          type: 'ice-candidate',
-          data: event.candidate,
-        },
-      });
-    }
-  };
-  
-  // Create and send offer
-  peerConnection.createOffer().then(offer => {
-    peerConnection.setLocalDescription(offer);
-    
-    // Send offer to teacher
-    chrome.runtime.sendMessage({
-      type: 'webrtc-send-signal',
-      signal: {
-        type: 'offer',
-        data: offer,
-      },
-    });
-  }).catch(err => {
-    console.warn('WebRTC offer creation failed:', err);
-  });
-  
-  console.log('WebRTC setup complete');
-}
-
-// Listen for WebRTC signals from background
-chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
-  if (message.type === 'webrtc-signal') {
-    const signal = message.data;
-    
-    if (signal.type === 'answer' && peerConnection) {
-      try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data));
-        remoteDescriptionSet = true;
-        
-        // Drain queued ICE candidates
-        while (pendingIceCandidates.length > 0) {
-          const candidate = pendingIceCandidates.shift();
-          try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-            console.log('Added queued ICE candidate');
-          } catch (err) {
-            console.warn('Failed to add queued ICE candidate:', err);
-          }
-        }
-      } catch (err) {
-        console.warn('Failed to set remote description:', err);
-      }
-    } else if (signal.type === 'ice-candidate' && peerConnection) {
-      // Queue ICE candidates until remote description is set
-      if (!remoteDescriptionSet) {
-        pendingIceCandidates.push(signal.data);
-        console.log('Queued ICE candidate (waiting for remote description)');
-      } else {
-        try {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(signal.data));
-          console.log('Added ICE candidate');
-        } catch (err) {
-          console.warn('Failed to add ICE candidate:', err);
-        }
-      }
-    }
-    
-    sendResponse({ success: true });
-  }
-  return true;
-});
 
 async function loadMessages() {
   const stored = await chrome.storage.local.get(['messages']);

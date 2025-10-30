@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { X, ExternalLink, Clock, Monitor, Video, Trash2 } from "lucide-react";
+import { X, ExternalLink, Clock, Monitor, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -32,10 +32,6 @@ export function StudentDetailDrawer({
   onClose,
 }: StudentDetailDrawerProps) {
   const { toast } = useToast();
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [videoLoaded, setVideoLoaded] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
   // Calculate URL sessions with duration from heartbeats
@@ -70,191 +66,6 @@ export function StudentDetailDrawer({
     if (!student) return;
     deleteStudentMutation.mutate(student.deviceId);
   };
-
-  useEffect(() => {
-    if (!student || !student.isSharing) {
-      // Cleanup if student stops sharing
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      setVideoLoaded(false);
-      return;
-    }
-
-    // Queue for ICE candidates received before remote description is set
-    let pendingIceCandidates: RTCIceCandidateInit[] = [];
-    let remoteDescriptionSet = false;
-
-    // Setup WebSocket for signaling
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log('WebSocket connected for WebRTC signaling');
-      // Authenticate as teacher
-      ws.send(JSON.stringify({ type: 'auth', role: 'teacher' }));
-    };
-
-    ws.onmessage = async (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        
-        if (message.type === 'signal' && message.data.deviceId === student.deviceId) {
-          const signal = message.data;
-          
-          if (signal.type === 'offer') {
-            // Student is offering to share screen
-            console.log('Received WebRTC offer from student');
-            
-            // Create peer connection if not exists
-            if (!peerConnectionRef.current) {
-              const pc = new RTCPeerConnection({
-                iceServers: [
-                  { urls: 'stun:stun.l.google.com:19302' },
-                ],
-              });
-              peerConnectionRef.current = pc;
-
-              // Handle incoming stream
-              pc.ontrack = (event) => {
-                console.log('[Teacher] Received video track from student');
-                if (videoRef.current && event.streams[0]) {
-                  console.log('[Teacher] Setting video srcObject');
-                  videoRef.current.srcObject = event.streams[0];
-                  setVideoLoaded(true);
-                  
-                  // Handle autoplay - critical for actually displaying the video
-                  videoRef.current.muted = true; // Required for autoplay
-                  videoRef.current.playsInline = true; // Required for mobile
-                  videoRef.current.play().catch((e) => {
-                    console.warn('[Teacher] Autoplay prevented:', e);
-                  });
-                }
-              };
-
-              // Handle ICE candidates - reuse the same WebSocket
-              pc.onicecandidate = (event) => {
-                if (event.candidate && ws.readyState === WebSocket.OPEN) {
-                  console.log('[Teacher] Sending ICE candidate to student');
-                  ws.send(JSON.stringify({
-                    type: 'signal',
-                    data: {
-                      type: 'ice-candidate',
-                      data: event.candidate,
-                      deviceId: student.deviceId,
-                    },
-                  }));
-                }
-              };
-
-              // Debugging: log all state changes
-              pc.oniceconnectionstatechange = () => {
-                console.log('[Teacher] ICE connection state:', pc.iceConnectionState);
-              };
-
-              pc.onsignalingstatechange = () => {
-                console.log('[Teacher] Signaling state:', pc.signalingState);
-              };
-
-              pc.onconnectionstatechange = () => {
-                console.log('[Teacher] Connection state:', pc.connectionState);
-                if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                  setVideoLoaded(false);
-                } else if (pc.connectionState === 'connected') {
-                  console.log('[Teacher] WebRTC connection established!');
-                }
-              };
-            }
-
-            // Handle the offer
-            try {
-              await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal.data));
-              remoteDescriptionSet = true;
-              
-              const answer = await peerConnectionRef.current.createAnswer();
-              await peerConnectionRef.current.setLocalDescription(answer);
-              
-              // Send answer back to student
-              ws.send(JSON.stringify({
-                type: 'signal',
-                data: {
-                  type: 'answer',
-                  data: answer,
-                  deviceId: student.deviceId,
-                },
-              }));
-              
-              console.log('Sent WebRTC answer to student');
-              
-              // Drain queued ICE candidates
-              while (pendingIceCandidates.length > 0) {
-                const candidate = pendingIceCandidates.shift();
-                if (candidate) {
-                  try {
-                    await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
-                    console.log('Added queued ICE candidate');
-                  } catch (err) {
-                    console.warn('Failed to add queued ICE candidate:', err);
-                  }
-                }
-              }
-            } catch (err) {
-              console.warn('Failed to handle WebRTC offer:', err);
-            }
-            
-          } else if (signal.type === 'ice-candidate' && peerConnectionRef.current) {
-            // Queue ICE candidates until remote description is set
-            if (!remoteDescriptionSet) {
-              pendingIceCandidates.push(signal.data);
-              console.log('Queued ICE candidate (waiting for remote description)');
-            } else {
-              try {
-                await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal.data));
-                console.log('Added ICE candidate from student');
-              } catch (err) {
-                console.warn('Failed to add ICE candidate:', err);
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.warn('WebRTC signaling error:', error);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-    };
-
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-    };
-
-    // Cleanup on unmount or student change
-    return () => {
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close();
-        peerConnectionRef.current = null;
-      }
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close();
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      setVideoLoaded(false);
-    };
-  }, [student]);
 
   if (!student) return null;
 
@@ -313,12 +124,6 @@ export function StudentDetailDrawer({
                   <Badge variant="outline" className="text-xs">
                     {getStatusLabel(student.status)}
                   </Badge>
-                  {student.isSharing && (
-                    <Badge variant="destructive" className="text-xs animate-pulse">
-                      <Video className="h-3 w-3 mr-1" />
-                      Sharing
-                    </Badge>
-                  )}
                 </div>
                 <div className="mt-3">
                   <Button
@@ -384,34 +189,6 @@ export function StudentDetailDrawer({
                   </div>
                 </div>
               </div>
-
-              {/* Screen Share Viewer */}
-              {student.isSharing && (
-                <div>
-                  <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground mb-3">
-                    Screen Share
-                  </h3>
-                  <div className="relative aspect-video rounded-lg overflow-hidden bg-black border border-border">
-                    <video
-                      ref={videoRef}
-                      autoPlay
-                      playsInline
-                      muted
-                      className="w-full h-full object-contain"
-                      data-testid="video-screen-share"
-                    />
-                    {!videoLoaded && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/90">
-                        <div className="text-center text-white/80">
-                          <Monitor className="h-12 w-12 mx-auto mb-3 opacity-50 animate-pulse" />
-                          <p className="text-sm font-medium mb-1">Connecting to student...</p>
-                          <p className="text-xs opacity-70">WebRTC stream will appear here</p>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
 
               {/* URL History with Duration */}
               <div>

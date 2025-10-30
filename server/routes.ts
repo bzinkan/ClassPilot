@@ -203,23 +203,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
-        // Handle WebRTC signaling
-        if (message.type === 'signal' && client.authenticated) {
-          const signal = message.data;
-          console.log('[WebSocket] Received WebRTC signal:', signal.type, 'from:', signal.from, 'to:', signal.to);
-          
-          // Forward signal to teacher (broadcast or specific teacher)
-          wsClients.forEach((otherClient, otherWs) => {
-            // Send to all teachers, or to specific teacher if not broadcast
-            if (otherClient.role === 'teacher' && otherWs !== ws && otherWs.readyState === WebSocket.OPEN) {
-              if (signal.to === 'broadcast' || !signal.to) {
-                // Broadcast to all teachers
-                console.log('[WebSocket] Broadcasting signal to teacher');
-                otherWs.send(JSON.stringify({ type: 'signal', data: signal }));
-              }
-            }
-          });
-        }
       } catch (error) {
         console.error('WebSocket message error:', error);
       }
@@ -265,20 +248,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
 
-  // Get current user info
   // Client configuration endpoint (no auth required for Chrome Extension)
   app.get("/api/client-config", async (req, res) => {
     try {
-      // Return configuration for WebRTC including TURN servers
       // Always use production URL for Chrome Extension compatibility
       const config = {
         baseUrl: 'https://classpilot.replit.app',
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' },
-          // Add TURN servers here for production
-          // { urls: 'turn:turn.yourdomain.com:3478', username: 'user', credential: 'pass' }
-        ]
       };
       res.json(config);
     } catch (error) {
@@ -908,28 +883,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json(heartbeats);
     } catch (error) {
       console.error("Get heartbeats error:", error);
-      res.status(500).json({ error: "Internal server error" });
-    }
-  });
-
-  // WebRTC signaling endpoint
-  app.post("/api/signal/:deviceId", apiLimiter, async (req, res) => {
-    try {
-      const { deviceId } = req.params;
-      const signal: SignalMessage = req.body;
-      
-      // Forward signal via WebSocket to the target device
-      let sent = false;
-      wsClients.forEach((client, ws) => {
-        if (client.deviceId === deviceId && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'signal', data: signal }));
-          sent = true;
-        }
-      });
-
-      res.json({ success: sent });
-    } catch (error) {
-      console.error("Signal error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
