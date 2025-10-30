@@ -1,5 +1,10 @@
 // ClassPilot - Content Script
 // Displays messages as full-screen modals on student screens
+// Monitors camera usage
+
+// Track active camera streams
+let activeCameraStreams = new Set();
+let cameraActive = false;
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -12,8 +17,69 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ domain: currentDomain });
   }
   
+  if (message.type === 'get-camera-status') {
+    sendResponse({ cameraActive: cameraActive });
+  }
+  
   return true;
 });
+
+// Monitor camera usage by wrapping getUserMedia
+(function() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return; // Browser doesn't support getUserMedia
+  }
+  
+  const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  
+  navigator.mediaDevices.getUserMedia = async function(constraints) {
+    const stream = await originalGetUserMedia(constraints);
+    
+    // Check if video (camera) was requested
+    if (constraints && constraints.video) {
+      console.log('[ClassPilot] Camera access granted');
+      activeCameraStreams.add(stream);
+      updateCameraStatus(true);
+      
+      // Monitor when stream ends
+      const videoTracks = stream.getVideoTracks();
+      videoTracks.forEach(track => {
+        track.addEventListener('ended', () => {
+          console.log('[ClassPilot] Camera track ended');
+          activeCameraStreams.delete(stream);
+          
+          // Check if any other streams are still active
+          const stillActive = Array.from(activeCameraStreams).some(s => {
+            return s.getVideoTracks().some(t => t.readyState === 'live');
+          });
+          
+          if (!stillActive) {
+            updateCameraStatus(false);
+          }
+        });
+      });
+    }
+    
+    return stream;
+  };
+})();
+
+// Update camera status and notify service worker
+function updateCameraStatus(isActive) {
+  if (cameraActive !== isActive) {
+    cameraActive = isActive;
+    console.log('[ClassPilot] Camera status changed:', isActive);
+    
+    // Notify service worker
+    chrome.runtime.sendMessage({
+      type: 'camera-status-changed',
+      cameraActive: isActive
+    }).catch(err => {
+      // Ignore errors if extension context is invalidated
+      console.log('[ClassPilot] Could not notify service worker:', err);
+    });
+  }
+}
 
 // Show regular message as modal
 function showMessageModal(data) {
