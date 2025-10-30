@@ -614,22 +614,30 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   if (!targetDomain) return;
   
   // Check screen lock
-  if (screenLocked && lockedDomain) {
-    // Handle multiple domains (scene) or single domain (lock)
-    const allowedDomains = lockedDomain.split(',').map(d => d.trim());
-    const isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
+  if (screenLocked) {
+    let isAllowed = false;
+    let blockedMessage = '';
+    
+    // Check if navigation is allowed based on lock type
+    if (allowedDomains.length > 0) {
+      // Scene mode: check against multiple allowed domains
+      isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
+      blockedMessage = `You can only access: ${allowedDomains.join(', ')}`;
+    } else if (lockedDomain) {
+      // Lock mode: check against single domain
+      isAllowed = isOnSameDomain(details.url, lockedDomain);
+      blockedMessage = `You can only browse within ${lockedDomain}`;
+    }
     
     if (!isAllowed) {
-      // Redirect back to locked URL or stay on current page
-      console.log('Blocked navigation to:', details.url, '- allowed domains:', allowedDomains);
+      // Redirect back to locked URL or prevent navigation
+      console.log('Blocked navigation to:', details.url);
       
       // If we have a single locked URL, redirect to it
-      // Otherwise, just prevent the navigation by redirecting to current page
       if (lockedUrl) {
         chrome.tabs.update(details.tabId, { url: lockedUrl });
       } else {
         // For scenes without a specific locked URL, just prevent navigation
-        // Chrome will stay on the current page
         chrome.tabs.goBack(details.tabId).catch(() => {
           // If can't go back, stay where we are
         });
@@ -640,7 +648,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
         type: 'basic',
         iconUrl: 'icons/icon48.png',
         title: 'Navigation Blocked',
-        message: `You can only access: ${allowedDomains.join(', ')}`,
+        message: blockedMessage,
         priority: 1,
       });
       return;
