@@ -79,9 +79,9 @@ export function StudentDetailDrawer({
     try {
       const response = await apiRequest("POST", `/api/ping/${student.deviceId}`, {
         message: "Your teacher is requesting your attention"
-      }) as { success: boolean };
+      });
       
-      if (response.success) {
+      if (response && (response as any).success) {
         toast({
           title: "Ping sent",
           description: `Notification sent to ${student.studentName}`,

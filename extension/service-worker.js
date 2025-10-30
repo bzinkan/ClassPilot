@@ -506,6 +506,26 @@ async function handleRemoteControl(command) {
   }
 }
 
+// Helper function to ensure content script is injected
+async function ensureContentScriptInjected(tabId) {
+  try {
+    // Try to ping the content script
+    await chrome.tabs.sendMessage(tabId, { type: 'ping-test' });
+  } catch (error) {
+    // Content script not loaded, inject it
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        files: ['content.js']
+      });
+      console.log('Content script injected into tab:', tabId);
+    } catch (injectError) {
+      console.log('Could not inject content script into tab:', tabId, injectError);
+      throw injectError;
+    }
+  }
+}
+
 // Chat/Message Handlers (Phase 2)
 async function handleChatMessage(message) {
   console.log('Chat message received:', message);
@@ -516,8 +536,11 @@ async function handleChatMessage(message) {
     // Skip chrome:// URLs and extension pages
     if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
       try {
+        // Ensure content script is injected before sending message
+        await ensureContentScriptInjected(tab.id);
+        
         if (message.type === 'announcement') {
-          chrome.tabs.sendMessage(tab.id, {
+          await chrome.tabs.sendMessage(tab.id, {
             type: 'show-announcement',
             data: {
               message: message.message,
@@ -525,7 +548,7 @@ async function handleChatMessage(message) {
             },
           });
         } else {
-          chrome.tabs.sendMessage(tab.id, {
+          await chrome.tabs.sendMessage(tab.id, {
             type: 'show-message',
             data: {
               message: message.message,

@@ -18,7 +18,8 @@
     "alarms",
     "webNavigation",
     "identity",
-    "identity.email"
+    "identity.email",
+    "scripting"
   ],
   "host_permissions": [
     "<all_urls>"
