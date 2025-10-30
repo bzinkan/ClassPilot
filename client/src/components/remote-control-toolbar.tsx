@@ -316,15 +316,6 @@ export function RemoteControlToolbar() {
               Apply Scene
             </Button>
 
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowTabLimit(true)}
-              data-testid="button-limit-tabs"
-            >
-              <ListChecks className="h-4 w-4 mr-2" />
-              Limit Tabs
-            </Button>
           </div>
         </div>
       </div>
