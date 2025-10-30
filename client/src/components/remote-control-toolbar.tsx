@@ -21,6 +21,8 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { useQuery } from "@tanstack/react-query";
+import type { Scene } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
   selectedDeviceIds: Set<string>;
@@ -32,11 +34,18 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
+  const [showApplyScene, setShowApplyScene] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
   const [lockUrl, setLockUrl] = useState("");
   const [tabLimit, setTabLimit] = useState("");
+  const [selectedSceneId, setSelectedSceneId] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
+
+  // Fetch scenes
+  const { data: scenes = [] } = useQuery<Scene[]>({
+    queryKey: ['/api/scenes'],
+  });
 
   const handleOpenTab = async () => {
     if (!targetUrl) {
@@ -211,6 +220,53 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     }
   };
 
+  const handleApplyScene = async () => {
+    if (!selectedSceneId) {
+      toast({
+        title: "Error",
+        description: "Please select a scene",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const scene = scenes.find(s => s.id === selectedSceneId);
+    if (!scene) {
+      toast({
+        title: "Error",
+        description: "Scene not found",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await apiRequest("POST", "/api/remote/apply-scene", { 
+        sceneId: selectedSceneId,
+        allowedDomains: scene.allowedDomains,
+        targetDeviceIds: targetDeviceIdsArray
+      });
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
+      toast({
+        title: "Success",
+        description: `Applied "${scene.sceneName}" to ${target}`,
+      });
+      setSelectedSceneId("");
+      setShowApplyScene(false);
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to apply scene",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Convert Set to Array for API calls - Sets serialize to {} in JSON
   const targetDeviceIdsArray = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
   const selectionText = selectedDeviceIds.size > 0 
@@ -288,6 +344,16 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             >
               <Unlock className="h-4 w-4 mr-2" />
               Unlock Screen
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowApplyScene(true)}
+              data-testid="button-apply-scene"
+            >
+              <Layers className="h-4 w-4 mr-2" />
+              Apply Scene
             </Button>
 
           </div>
@@ -393,6 +459,57 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             </Button>
             <Button onClick={handleApplyTabLimit} disabled={isLoading} data-testid="button-submit-limit-tabs">
               Apply Tab Limit
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Apply Scene Dialog */}
+      <Dialog open={showApplyScene} onOpenChange={setShowApplyScene}>
+        <DialogContent data-testid="dialog-apply-scene">
+          <DialogHeader>
+            <DialogTitle>Apply Scene</DialogTitle>
+            <DialogDescription>
+              Select a scene to apply. Students will only be able to access the allowed domains defined in the scene.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="scene-select">Scene</Label>
+              <Select value={selectedSceneId} onValueChange={setSelectedSceneId}>
+                <SelectTrigger id="scene-select" data-testid="select-scene">
+                  <SelectValue placeholder="Select a scene" />
+                </SelectTrigger>
+                <SelectContent>
+                  {scenes.length === 0 ? (
+                    <div className="p-2 text-sm text-muted-foreground">No scenes available</div>
+                  ) : (
+                    scenes.map((scene) => (
+                      <SelectItem key={scene.id} value={scene.id} data-testid={`select-scene-${scene.id}`}>
+                        {scene.sceneName}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
+              {selectedSceneId && scenes.find(s => s.id === selectedSceneId) && (
+                <div className="mt-2 p-3 bg-muted rounded-md">
+                  <p className="text-sm font-medium mb-1">Allowed Domains:</p>
+                  <ul className="text-sm text-muted-foreground list-disc list-inside">
+                    {scenes.find(s => s.id === selectedSceneId)?.allowedDomains.map((domain, index) => (
+                      <li key={index}>{domain}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowApplyScene(false)} data-testid="button-cancel-apply-scene">
+              Cancel
+            </Button>
+            <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-scene">
+              Apply Scene
             </Button>
           </DialogFooter>
         </DialogContent>
