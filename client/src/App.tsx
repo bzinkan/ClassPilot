@@ -10,6 +10,7 @@ import Dashboard from "@/pages/dashboard";
 import Settings from "@/pages/settings";
 import Admin from "@/pages/admin";
 import Roster from "@/pages/roster";
+import ExtensionSetup from "@/pages/extension-setup";
 
 function Router() {
   return (
@@ -19,6 +20,7 @@ function Router() {
       <Route path="/roster" component={Roster} />
       <Route path="/settings" component={Settings} />
       <Route path="/admin" component={Admin} />
+      <Route path="/extension-setup" component={ExtensionSetup} />
       <Route path="/class/:classId">
         {(params) => <Dashboard />}
       </Route>

@@ -570,6 +570,34 @@ export default function Dashboard() {
           </div>
         </div>
 
+        {/* Extension Setup Banner - Show when all students are offline */}
+        {students.length > 0 && onlineCount === 0 && (
+          <div className="mb-8 p-6 bg-amber-50 dark:bg-amber-950/30 border-l-4 border-amber-500 rounded-lg shadow-md">
+            <div className="flex items-start gap-4">
+              <div className="h-10 w-10 rounded-lg bg-amber-500 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="h-5 w-5 text-white" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-amber-900 dark:text-amber-100 mb-1">
+                  No Students Connected
+                </h3>
+                <p className="text-sm text-amber-800 dark:text-amber-200 mb-3">
+                  All student devices are showing as offline. This usually means the Chrome Extension needs to be configured with your development server URL.
+                </p>
+                <Button
+                  variant="default"
+                  size="sm"
+                  onClick={() => setLocation('/extension-setup')}
+                  data-testid="button-setup-extension"
+                  className="bg-amber-600 hover:bg-amber-700 text-white"
+                >
+                  Configure Extension
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Search */}
         <div className="mb-8">
           <Input
