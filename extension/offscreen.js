@@ -133,11 +133,23 @@ async function startShare() {
     
     // Load configuration and IDs
     const cfg = await getConfig();
-    const storage = await chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId']);
-    studentId = storage.studentId;
-    teacherId = storage.teacherId;
-    classId = storage.classId;
-    deviceId = storage.deviceId;
+    
+    // Try to load student IDs from storage, or use defaults
+    try {
+      if (chrome && chrome.storage && chrome.storage.local) {
+        const storage = await chrome.storage.local.get(['studentId', 'teacherId', 'classId', 'deviceId']);
+        studentId = storage.studentId;
+        teacherId = storage.teacherId;
+        classId = storage.classId;
+        deviceId = storage.deviceId;
+      } else {
+        console.warn('[Offscreen] chrome.storage.local not available, cannot load IDs');
+        return { success: false, error: 'Chrome storage API not available' };
+      }
+    } catch (storageError) {
+      console.error('[Offscreen] Failed to read from storage:', storageError);
+      return { success: false, error: 'Failed to load student information: ' + storageError.message };
+    }
     
     if (!studentId || !teacherId) {
       console.error('[Offscreen] Missing studentId or teacherId');
@@ -242,8 +254,14 @@ async function startShare() {
       console.warn('[Offscreen] Failed to notify server:', error);
     }
     
-    // Update storage
-    await chrome.storage.local.set({ isSharing: true });
+    // Update storage (optional, don't fail if unavailable)
+    try {
+      if (chrome && chrome.storage && chrome.storage.local) {
+        await chrome.storage.local.set({ isSharing: true });
+      }
+    } catch (storageError) {
+      console.warn('[Offscreen] Could not update storage:', storageError);
+    }
     
     return { success: true };
   } catch (error) {
@@ -300,8 +318,14 @@ async function stopShare() {
       }
     }
     
-    // Update storage
-    await chrome.storage.local.set({ isSharing: false });
+    // Update storage (optional, don't fail if unavailable)
+    try {
+      if (chrome && chrome.storage && chrome.storage.local) {
+        await chrome.storage.local.set({ isSharing: false });
+      }
+    } catch (storageError) {
+      console.warn('[Offscreen] Could not update storage:', storageError);
+    }
     
     return { success: true };
   } catch (error) {
@@ -320,10 +344,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[Offscreen] Received message:', message.type);
   
   if (message.type === 'START_SHARE') {
-    startShare().then(sendResponse);
+    startShare()
+      .then(sendResponse)
+      .catch(error => {
+        console.error('[Offscreen] Error in startShare:', error);
+        sendResponse({ success: false, error: error.message });
+      });
     return true; // Keep channel open for async response
   } else if (message.type === 'STOP_SHARE') {
-    stopShare().then(sendResponse);
+    stopShare()
+      .then(sendResponse)
+      .catch(error => {
+        console.error('[Offscreen] Error in stopShare:', error);
+        sendResponse({ success: false, error: error.message });
+      });
     return true;
   }
 });
