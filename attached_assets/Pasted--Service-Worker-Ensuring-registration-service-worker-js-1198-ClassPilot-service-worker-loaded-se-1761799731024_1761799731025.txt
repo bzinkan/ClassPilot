@@ -1,0 +1,36 @@
+[Service Worker] Ensuring registration...
+service-worker.js:1198 ClassPilot service worker loaded
+service-worker.js:93 [Service Worker] Extension installed/updated
+service-worker.js:30 [Service Worker] Ensuring registration...
+service-worker.js:243 Using server URL: https://classpilot.replit.app
+service-worker.js:183 Logged-in user info: Object
+service-worker.js:199 Auto-detected student email: passpilotapp@gmail.com
+service-worker.js:76 [Service Worker] Registration complete: Object
+service-worker.js:76 [Service Worker] Registration complete: Object
+service-worker.js:352 Student auto-registered: Object
+service-worker.js:466 Heartbeat started with chrome.alarms
+service-worker.js:222 Auto-registered student: passpilotapp@gmail.com
+service-worker.js:466 Heartbeat started with chrome.alarms
+2service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:835 WebSocket connected
+service-worker.js:845 WebSocket not ready yet, will retry on next connection
+(anonymous) @ service-worker.js:845Understand this warning
+service-worker.js:835 WebSocket connected
+service-worker.js:855 WebSocket message: Object
+3service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+service-worker.js:132 Created offscreen document
+3service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+service-worker.js:121 Offscreen document already exists
+13service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:1054 [Service Worker] Starting share with: Object
+service-worker.js:121 Offscreen document already exists
+11service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+2service-worker.js:905 WebSocket disconnected, will reconnect in 5s...
+service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+service-worker.js:496 WebSocket reconnection alarm triggered
+service-worker.js:835 WebSocket connected
+service-worker.js:855 WebSocket message: Object
+7service-worker.js:407 Sending heartbeat with studentId: c8267841-e9af-4cd9-ad52-741d1ae878fb | screenLocked: false
+4service-worker.js:391 Skipping heartbeat - no active tab
