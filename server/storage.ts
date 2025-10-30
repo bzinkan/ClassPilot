@@ -278,6 +278,7 @@ export class MemStorage implements IStorage {
       lastSeenAt: 0,
       isSharing: false,
       screenLocked: false,
+      cameraActive: false,
       status: 'offline',
     };
     this.studentStatuses.set(student.id, status);
@@ -386,6 +387,7 @@ export class MemStorage implements IStorage {
       favicon: insertHeartbeat.favicon ?? null,
       screenLocked: insertHeartbeat.screenLocked ?? false,
       isSharing: insertHeartbeat.isSharing ?? false,
+      cameraActive: insertHeartbeat.cameraActive ?? false,
       timestamp: new Date(),
     };
     this.heartbeats.push(heartbeat);
@@ -736,6 +738,7 @@ export class DatabaseStorage implements IStorage {
         lastSeenAt,
         isSharing: false,
         screenLocked: false,
+        cameraActive: false,
         status: this.calculateStatus(lastSeenAt),
       };
       this.studentStatuses.set(student.id, status);
@@ -911,6 +914,7 @@ export class DatabaseStorage implements IStorage {
       lastSeenAt,
       isSharing: false,
       screenLocked: false,
+      cameraActive: false,
       status: this.calculateStatus(lastSeenAt),
     };
     this.studentStatuses.set(student.id, status);

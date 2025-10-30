@@ -31,8 +31,8 @@ The system employs a full-stack architecture:
 -   **Teacher Dashboard**: Displays live student activity, manages class rosters, and configures data retention. Features customizable grade tabs, in-dashboard grade management, and options to delete students/devices.
 -   **Roster Management Page**: A dedicated page for comprehensive device and student assignment management, including grade-level filtering, assigning multiple students per device, editing student and device information, and managing deletions.
 -   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Classifies students as Online, Idle, or Offline based on heartbeat. Displays lock status icon on student tiles.
+-   **Camera Usage Monitoring**: Detects when students activate their cameras via the Chrome extension content script. Teachers receive real-time notifications and can see which students have active cameras through visual indicators (purple camera icon) on student tiles and a dedicated "Camera Active" stat card. Camera detection uses a non-intrusive approach by wrapping the MediaDevices getUserMedia API.
 -   **Website Duration Tracking**: Calculates and displays time spent on websites by grouping consecutive heartbeats into sessions.
--   **Opt-In Screen Sharing**: Students explicitly consent to screen sharing with clear visual indicators.
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:

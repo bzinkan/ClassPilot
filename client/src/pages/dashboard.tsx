@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -301,6 +301,7 @@ export default function Dashboard() {
   const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
   const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
   const offlineCount = studentsInGrade.filter((s) => s.status === 'offline').length;
+  const cameraActiveCount = studentsInGrade.filter((s) => s.cameraActive).length;
   const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
 
   // Check for blocked domain violations and show notifications
@@ -347,6 +348,31 @@ export default function Dashboard() {
       }
     });
   }, [students, settings, toast]);
+
+  // Track camera usage notifications
+  const notifiedCameraUsage = useRef<Set<string>>(new Set());
+  
+  // Check for camera usage and show notifications
+  useEffect(() => {
+    students.forEach((student) => {
+      const cameraKey = `${student.deviceId}-camera`;
+      
+      if (student.cameraActive) {
+        // Only notify if this is new camera usage (not previously notified)
+        if (!notifiedCameraUsage.current.has(cameraKey)) {
+          toast({
+            title: "Camera Active",
+            description: `${student.studentName} has activated their camera`,
+            duration: 5000,
+          });
+          notifiedCameraUsage.current.add(cameraKey);
+        }
+      } else {
+        // Clear notification if student turned off camera
+        notifiedCameraUsage.current.delete(cameraKey);
+      }
+    });
+  }, [students, toast]);
 
   const handleLogout = () => {
     // Clear auth and redirect to login
@@ -550,7 +576,7 @@ export default function Dashboard() {
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
         {/* Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
               <div className="h-14 w-14 rounded-xl bg-green-500 flex items-center justify-center shadow-md">
@@ -581,6 +607,17 @@ export default function Dashboard() {
               <div>
                 <p className="text-3xl font-bold text-gray-700 dark:text-gray-400" data-testid="text-offline-count">{offlineCount}</p>
                 <p className="text-sm text-gray-600 dark:text-gray-500 font-medium">Offline</p>
+              </div>
+            </div>
+          </div>
+          <div className="p-5 rounded-xl bg-gradient-to-br from-purple-50 to-violet-50 dark:from-purple-950/30 dark:to-violet-950/30 border border-purple-200 dark:border-purple-800/50 shadow-lg hover-elevate transition-all duration-300">
+            <div className="flex items-center gap-4">
+              <div className="h-14 w-14 rounded-xl bg-purple-500 flex items-center justify-center shadow-md">
+                <Video className="h-7 w-7 text-white" />
+              </div>
+              <div>
+                <p className="text-3xl font-bold text-purple-700 dark:text-purple-400" data-testid="text-camera-count">{cameraActiveCount}</p>
+                <p className="text-sm text-purple-600 dark:text-purple-500 font-medium">Camera Active</p>
               </div>
             </div>
           </div>
