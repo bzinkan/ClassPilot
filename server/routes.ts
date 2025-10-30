@@ -66,10 +66,17 @@ function broadcastToTeachers(message: any) {
   });
 }
 
-function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean) {
+function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]) {
   const messageStr = JSON.stringify(message);
   wsClients.forEach((client, ws) => {
     if (client.role === 'student' && client.authenticated && ws.readyState === WebSocket.OPEN) {
+      // If targetDeviceIds is specified, only send to those devices
+      if (targetDeviceIds && targetDeviceIds.length > 0) {
+        if (!targetDeviceIds.includes(client.deviceId || '')) {
+          return;
+        }
+      }
+      // Apply additional filter function if provided
       if (!filterFn || filterFn(client)) {
         ws.send(messageStr);
       }
@@ -1249,25 +1256,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Remote Control API Routes (Phase 1: GoGuardian-style features)
   
-  // Open Tab - Push URL to all students or specific grade/class
+  // Open Tab - Push URL to all students or specific students
   app.post("/api/remote/open-tab", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { url, targetGrade, targetClass } = req.body;
+      const { url, targetDeviceIds } = req.body;
       
       if (!url) {
         return res.status(400).json({ error: "URL is required" });
       }
       
-      // Broadcast to all connected students (or filtered by grade/class)
+      // Broadcast to targeted students or all students
       broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'open-tab',
           data: { url },
         },
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true, message: `Opened ${url} on all student devices` });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Opened ${url} on ${target}` });
     } catch (error) {
       console.error("Open tab error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1277,7 +1287,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Close Tabs - Close all or specific tabs
   app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { closeAll, pattern, allowedDomains } = req.body;
+      const { closeAll, pattern, allowedDomains, targetDeviceIds } = req.body;
       
       broadcastToStudents({
         type: 'remote-control',
@@ -1285,19 +1295,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
           type: 'close-tab',
           data: { closeAll, pattern, allowedDomains },
         },
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true, message: "Closed tabs on all student devices" });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Closed tabs on ${target}` });
     } catch (error) {
       console.error("Close tabs error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
   
-  // Lock Screens - Lock all students to specific URL
+  // Lock Screens - Lock students to specific URL
   app.post("/api/remote/lock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { url } = req.body;
+      const { url, targetDeviceIds } = req.body;
       
       if (!url) {
         return res.status(400).json({ error: "URL is required" });
@@ -1309,9 +1322,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           type: 'lock-screen',
           data: { url },
         },
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true, message: `Locked all screens to ${url}` });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Locked ${target} to ${url}` });
     } catch (error) {
       console.error("Lock screen error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1321,15 +1337,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Unlock Screens
   app.post("/api/remote/unlock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
+      const { targetDeviceIds } = req.body;
+      
       broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'unlock-screen',
           data: {},
         },
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true, message: "Unlocked all screens" });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Unlocked ${target}` });
     } catch (error) {
       console.error("Unlock screen error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1339,7 +1360,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Apply Scene - Set allowed/blocked domains
   app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { sceneId } = req.body;
+      const { sceneId, targetDeviceIds } = req.body;
       
       if (!sceneId) {
         return res.status(400).json({ error: "Scene ID is required" });
@@ -1362,9 +1383,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             blockedDomains: scene.blockedDomains || [],
           },
         },
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true, message: `Applied scene "${scene.sceneName}"` });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Applied scene "${scene.sceneName}" to ${target}` });
     } catch (error) {
       console.error("Apply scene error:", error);
       res.status(500).json({ error: "Internal server error" });
