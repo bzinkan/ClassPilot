@@ -52,12 +52,18 @@ export function RemoteControlToolbar() {
       return;
     }
 
+    // Normalize URL - add https:// if no protocol specified
+    let normalizedUrl = targetUrl.trim();
+    if (!normalizedUrl.match(/^https?:\/\//i)) {
+      normalizedUrl = 'https://' + normalizedUrl;
+    }
+
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/open-tab", { url: targetUrl });
+      await apiRequest("POST", "/api/remote/open-tab", { url: normalizedUrl });
       toast({
         title: "Success",
-        description: `Opened ${targetUrl} on all student devices`,
+        description: `Opened ${normalizedUrl} on all student devices`,
       });
       setTargetUrl("");
       setShowOpenTab(false);
@@ -101,12 +107,18 @@ export function RemoteControlToolbar() {
       return;
     }
 
+    // Normalize URL - add https:// if no protocol specified
+    let normalizedLockUrl = lockUrl.trim();
+    if (!normalizedLockUrl.match(/^https?:\/\//i)) {
+      normalizedLockUrl = 'https://' + normalizedLockUrl;
+    }
+
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/lock-screen", { url: lockUrl });
+      await apiRequest("POST", "/api/remote/lock-screen", { url: normalizedLockUrl });
       toast({
         title: "Success",
-        description: `Locked all screens to ${lockUrl}`,
+        description: `Locked all screens to ${normalizedLockUrl}`,
       });
       setLockUrl("");
       setShowLockScreen(false);
