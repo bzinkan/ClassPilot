@@ -1421,43 +1421,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Send Announcement
-  app.post("/api/chat/announcement", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
-    try {
-      const { message, targetDeviceIds } = req.body;
-      
-      if (!message) {
-        return res.status(400).json({ error: "Message is required" });
-      }
-      
-      console.log(`[Announcement] Sending announcement: "${message}"`);
-      console.log(`[Announcement] Target deviceIds:`, targetDeviceIds);
-      console.log(`[Announcement] Currently connected WebSocket clients: ${wsClients.size}`);
-      
-      // Log all student clients
-      let studentCount = 0;
-      wsClients.forEach((client, ws) => {
-        if (client.role === 'student' && client.authenticated) {
-          console.log(`[Announcement] Student ${studentCount++}: deviceId=${client.deviceId}, readyState=${ws.readyState}`);
-        }
-      });
-      
-      broadcastToStudents({
-        type: 'announcement',
-        message,
-        timestamp: Date.now(),
-      }, undefined, targetDeviceIds);
-      
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
-        : "all students";
-      console.log(`[Announcement] Sent to ${target}`);
-      res.json({ success: true, message: `Sent to ${target}` });
-    } catch (error) {
-      console.error("Send announcement error:", error);
-      res.status(500).json({ error: "Internal server error" });
-    }
-  });
   
   // Send Check-in Request
   app.post("/api/checkin/request", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
