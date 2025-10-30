@@ -240,14 +240,15 @@ async function sendHeartbeat() {
       activeTabTitle: activeTab.title || 'No title',
       activeTabUrl: activeTab.url || 'No URL',
       favicon: activeTab.favIconUrl || null,
+      screenLocked: screenLocked,
     };
     
     // Include studentId if available
     if (CONFIG.activeStudentId) {
       heartbeatData.studentId = CONFIG.activeStudentId;
-      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId);
+      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId, '| screenLocked:', screenLocked);
     } else {
-      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined)');
+      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined) | screenLocked:', screenLocked);
     }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
