@@ -1455,7 +1455,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Send Announcement
   app.post("/api/chat/announcement", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { message } = req.body;
+      const { message, targetDeviceIds } = req.body;
       
       if (!message) {
         return res.status(400).json({ error: "Message is required" });
@@ -1465,9 +1465,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         type: 'announcement',
         message,
         timestamp: Date.now(),
-      });
+      }, undefined, targetDeviceIds);
       
-      res.json({ success: true });
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Sent to ${target}` });
     } catch (error) {
       console.error("Send announcement error:", error);
       res.status(500).json({ error: "Internal server error" });

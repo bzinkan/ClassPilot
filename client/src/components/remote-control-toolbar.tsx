@@ -69,9 +69,11 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     try {
       await apiRequest("POST", "/api/remote/open-tab", { 
         url: normalizedUrl,
-        targetDeviceIds 
+        targetDeviceIds: targetDeviceIdsArray
       });
-      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
         description: `Opened ${normalizedUrl} on ${target}`,
@@ -94,9 +96,11 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     try {
       await apiRequest("POST", "/api/remote/close-tabs", { 
         closeAll: true,
-        targetDeviceIds 
+        targetDeviceIds: targetDeviceIdsArray
       });
-      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
         description: `Closed tabs on ${target}`,
@@ -132,9 +136,11 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     try {
       await apiRequest("POST", "/api/remote/lock-screen", { 
         url: normalizedLockUrl,
-        targetDeviceIds 
+        targetDeviceIds: targetDeviceIdsArray
       });
-      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
         description: `Locked ${target} to ${normalizedLockUrl}`,
@@ -155,8 +161,12 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
   const handleUnlockScreen = async () => {
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/unlock-screen", { targetDeviceIds });
-      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
+      await apiRequest("POST", "/api/remote/unlock-screen", { 
+        targetDeviceIds: targetDeviceIdsArray 
+      });
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
         description: `Unlocked ${target}`,
@@ -184,10 +194,16 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
 
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/chat/announcement", { message: announcement });
+      await apiRequest("POST", "/api/chat/announcement", { 
+        message: announcement,
+        targetDeviceIds: targetDeviceIdsArray
+      });
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
-        description: "Sent announcement to all students",
+        description: `Sent announcement to ${target}`,
       });
       setAnnouncement("");
       setShowAnnouncement(false);
@@ -219,9 +235,11 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     try {
       await apiRequest("POST", "/api/remote/apply-scene", { 
         sceneId: selectedSceneId,
-        targetDeviceIds 
+        targetDeviceIds: targetDeviceIdsArray
       });
-      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
+      const target = selectedDeviceIds.size > 0 
+        ? `${selectedDeviceIds.size} student(s)` 
+        : "all students";
       toast({
         title: "Success",
         description: `Applied scene "${scene.sceneName}" to ${target}`,
@@ -273,7 +291,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     }
   };
 
-  const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+  // Convert Set to Array for API calls - Sets serialize to {} in JSON
+  const targetDeviceIdsArray = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
   const selectionText = selectedDeviceIds.size > 0 
     ? `${selectedDeviceIds.size} selected`
     : "All students";
