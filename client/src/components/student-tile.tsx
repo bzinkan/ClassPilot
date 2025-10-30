@@ -295,10 +295,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             {onToggleSelect && (
               <Checkbox
                 checked={isSelected}
-                onCheckedChange={(e) => {
-                  e.stopPropagation?.();
-                  onToggleSelect();
-                }}
+                onCheckedChange={onToggleSelect}
                 onClick={(e) => e.stopPropagation()}
                 className="mr-1"
                 data-testid={`checkbox-select-student-${student.deviceId}`}

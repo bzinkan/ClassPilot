@@ -541,7 +541,11 @@ export default function Dashboard() {
       </header>
 
       {/* Remote Control Toolbar */}
-      <RemoteControlToolbar />
+      <RemoteControlToolbar 
+        selectedDeviceIds={selectedDeviceIds}
+        onSelectAll={selectAll}
+        onClearSelection={clearSelection}
+      />
 
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">

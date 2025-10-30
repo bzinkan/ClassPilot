@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, MessageSquare, Megaphone, ListChecks } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, MessageSquare, Megaphone, ListChecks, CheckSquare, XSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -23,7 +24,13 @@ import { apiRequest } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
 import type { Scene } from "@shared/schema";
 
-export function RemoteControlToolbar() {
+interface RemoteControlToolbarProps {
+  selectedDeviceIds: Set<string>;
+  onSelectAll: () => void;
+  onClearSelection: () => void;
+}
+
+export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSelection }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showAnnouncement, setShowAnnouncement] = useState(false);
@@ -60,10 +67,14 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/open-tab", { url: normalizedUrl });
+      await apiRequest("POST", "/api/remote/open-tab", { 
+        url: normalizedUrl,
+        targetDeviceIds 
+      });
+      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
       toast({
         title: "Success",
-        description: `Opened ${normalizedUrl} on all student devices`,
+        description: `Opened ${normalizedUrl} on ${target}`,
       });
       setTargetUrl("");
       setShowOpenTab(false);
@@ -81,10 +92,14 @@ export function RemoteControlToolbar() {
   const handleCloseTabs = async () => {
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/close-tabs", { closeAll: true });
+      await apiRequest("POST", "/api/remote/close-tabs", { 
+        closeAll: true,
+        targetDeviceIds 
+      });
+      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
       toast({
         title: "Success",
-        description: "Closed all non-essential tabs",
+        description: `Closed tabs on ${target}`,
       });
     } catch (error) {
       toast({
@@ -115,10 +130,14 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/lock-screen", { url: normalizedLockUrl });
+      await apiRequest("POST", "/api/remote/lock-screen", { 
+        url: normalizedLockUrl,
+        targetDeviceIds 
+      });
+      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
       toast({
         title: "Success",
-        description: `Locked all screens to ${normalizedLockUrl}`,
+        description: `Locked ${target} to ${normalizedLockUrl}`,
       });
       setLockUrl("");
       setShowLockScreen(false);
@@ -136,10 +155,11 @@ export function RemoteControlToolbar() {
   const handleUnlockScreen = async () => {
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/unlock-screen", {});
+      await apiRequest("POST", "/api/remote/unlock-screen", { targetDeviceIds });
+      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
       toast({
         title: "Success",
-        description: "Unlocked all screens",
+        description: `Unlocked ${target}`,
       });
     } catch (error) {
       toast({
@@ -197,10 +217,14 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/apply-scene", { sceneId: selectedSceneId });
+      await apiRequest("POST", "/api/remote/apply-scene", { 
+        sceneId: selectedSceneId,
+        targetDeviceIds 
+      });
+      const target = targetDeviceIds ? `${targetDeviceIds.length} student(s)` : "all students";
       toast({
         title: "Success",
-        description: `Applied scene "${scene.sceneName}" to all students`,
+        description: `Applied scene "${scene.sceneName}" to ${target}`,
       });
       setSelectedSceneId("");
       setShowApplyScene(false);
@@ -249,10 +273,41 @@ export function RemoteControlToolbar() {
     }
   };
 
+  const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+  const selectionText = selectedDeviceIds.size > 0 
+    ? `${selectedDeviceIds.size} selected`
+    : "All students";
+
   return (
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4">
         <div className="max-w-screen-2xl mx-auto">
+          <div className="flex items-center gap-2 flex-wrap mb-3">
+            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
+              Target: {selectionText}
+            </Badge>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onSelectAll}
+              data-testid="button-select-all"
+            >
+              <CheckSquare className="h-4 w-4 mr-1" />
+              Select All
+            </Button>
+            {selectedDeviceIds.size > 0 && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={onClearSelection}
+                data-testid="button-clear-selection"
+              >
+                <XSquare className="h-4 w-4 mr-1" />
+                Clear
+              </Button>
+            )}
+          </div>
+
           <div className="flex items-center gap-2 flex-wrap">
             <Button
               size="sm"
