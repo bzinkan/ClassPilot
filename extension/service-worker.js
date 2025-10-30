@@ -602,20 +602,39 @@ async function handleRemoteControl(command) {
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
         allowedDomains = []; // Clear scene domains when locking to single domain
         
+        let lockedTabId = null;
+        
         if (lockedUrl) {
-          // Open the locked URL in current tab
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tabs[0]) {
-            await chrome.tabs.update(tabs[0].id, { url: lockedUrl });
+          // Get all tabs and close all except the one we'll lock
+          const allTabs = await chrome.tabs.query({});
+          const activeTab = allTabs.find(t => t.active) || allTabs[0];
+          
+          if (activeTab) {
+            // Update the active tab to the locked URL
+            await chrome.tabs.update(activeTab.id, { url: lockedUrl });
+            lockedTabId = activeTab.id;
           } else {
-            await chrome.tabs.create({ url: lockedUrl, active: true });
+            // No tabs exist, create one
+            const newTab = await chrome.tabs.create({ url: lockedUrl, active: true });
+            lockedTabId = newTab.id;
+          }
+          
+          // Close all other tabs
+          for (const tab of allTabs) {
+            if (tab.id !== lockedTabId && tab.id && !tab.url?.startsWith('chrome://')) {
+              try {
+                await chrome.tabs.remove(tab.id);
+              } catch (error) {
+                console.warn('Could not close tab:', tab.id, error);
+              }
+            }
           }
         }
         
         // Show notification with domain
         safeNotify({
           title: 'Screen Locked',
-          message: `Your teacher has locked your browsing to ${lockedDomain}. You can navigate within this site but cannot leave it.`,
+          message: `Your teacher has locked your screen to ${lockedDomain}. You cannot open new tabs or leave this website.`,
           priority: 2,
         });
         
@@ -833,8 +852,35 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   }
 });
 
-// Enforce tab limit
+// Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
+  // First check: if screen is locked, prevent opening new tabs entirely
+  if (screenLocked) {
+    // Close the new tab immediately
+    if (tab.id) {
+      chrome.tabs.remove(tab.id);
+      
+      let message = '';
+      if (allowedDomains.length > 0) {
+        // Scene mode
+        message = `Your teacher has locked your screen to specific websites. You cannot open new tabs.`;
+      } else if (lockedDomain) {
+        // Single domain lock
+        message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
+      } else {
+        message = 'Your screen is locked. You cannot open new tabs.';
+      }
+      
+      safeNotify({
+        title: 'Screen Locked',
+        message: message,
+        priority: 2,
+      });
+    }
+    return; // Don't check tab limit if screen is locked
+  }
+  
+  // Second check: enforce tab limit (only if screen is not locked)
   if (currentMaxTabs) {
     const tabs = await chrome.tabs.query({});
     if (tabs.length > currentMaxTabs) {
