@@ -449,6 +449,29 @@ async function handleRemoteControl(command) {
         console.log('Screen unlocked');
         break;
         
+      case 'apply-scene':
+        screenLocked = true;
+        lockedUrl = null; // Scene uses multiple domains, not a single URL
+        
+        // Store allowed domains from the scene
+        const allowedDomains = command.data.allowedDomains || [];
+        if (allowedDomains.length > 0) {
+          // For compatibility with the existing lock system, we'll use lockedDomain
+          // to store all allowed domains (as a comma-separated string)
+          lockedDomain = allowedDomains.join(',');
+          
+          chrome.notifications.create({
+            type: 'basic',
+            iconUrl: 'icons/icon48.png',
+            title: 'Scene Applied',
+            message: `Your teacher has applied a scene. You can only access: ${allowedDomains.join(', ')}`,
+            priority: 2,
+          });
+        }
+        
+        console.log('Scene applied with allowed domains:', allowedDomains);
+        break;
+        
       case 'limit-tabs':
         currentMaxTabs = command.data.maxTabs;
         
@@ -592,18 +615,32 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   
   // Check screen lock
   if (screenLocked && lockedDomain) {
-    // Check if navigating to a different domain
-    if (!isOnSameDomain(details.url, lockedDomain)) {
-      // Redirect back to locked URL (students trying to leave the domain)
-      console.log('Blocked navigation to:', details.url, '- locked to domain:', lockedDomain);
-      chrome.tabs.update(details.tabId, { url: lockedUrl });
+    // Handle multiple domains (scene) or single domain (lock)
+    const allowedDomains = lockedDomain.split(',').map(d => d.trim());
+    const isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
+    
+    if (!isAllowed) {
+      // Redirect back to locked URL or stay on current page
+      console.log('Blocked navigation to:', details.url, '- allowed domains:', allowedDomains);
+      
+      // If we have a single locked URL, redirect to it
+      // Otherwise, just prevent the navigation by redirecting to current page
+      if (lockedUrl) {
+        chrome.tabs.update(details.tabId, { url: lockedUrl });
+      } else {
+        // For scenes without a specific locked URL, just prevent navigation
+        // Chrome will stay on the current page
+        chrome.tabs.goBack(details.tabId).catch(() => {
+          // If can't go back, stay where we are
+        });
+      }
       
       // Show warning notification
       chrome.notifications.create({
         type: 'basic',
         iconUrl: 'icons/icon48.png',
         title: 'Navigation Blocked',
-        message: `You can only browse within ${lockedDomain}`,
+        message: `You can only access: ${allowedDomains.join(', ')}`,
         priority: 1,
       });
       return;
