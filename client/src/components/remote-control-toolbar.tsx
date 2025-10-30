@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, MessageSquare, Megaphone, ListChecks, CheckSquare, XSquare } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -33,12 +33,10 @@ interface RemoteControlToolbarProps {
 export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSelection }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
-  const [showAnnouncement, setShowAnnouncement] = useState(false);
   const [showApplyScene, setShowApplyScene] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
   const [lockUrl, setLockUrl] = useState("");
-  const [announcement, setAnnouncement] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState<string>("");
   const [tabLimit, setTabLimit] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -186,41 +184,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     }
   };
 
-  const handleSendAnnouncement = async () => {
-    if (!announcement) {
-      toast({
-        title: "Error",
-        description: "Please enter an announcement",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    setIsLoading(true);
-    try {
-      await apiRequest("POST", "/api/chat/announcement", { 
-        message: announcement,
-        targetDeviceIds: targetDeviceIdsArray
-      });
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
-        : "all students";
-      toast({
-        title: "Success",
-        description: `Sent announcement to ${target}`,
-      });
-      setAnnouncement("");
-      setShowAnnouncement(false);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to send announcement",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleApplyScene = async () => {
     if (!selectedSceneId) {
@@ -377,16 +340,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setShowAnnouncement(true)}
-              data-testid="button-announcement"
-            >
-              <Megaphone className="h-4 w-4 mr-2" />
-              Announcement
-            </Button>
-
-            <Button
-              size="sm"
-              variant="outline"
               onClick={() => setShowApplyScene(true)}
               data-testid="button-apply-scene"
             >
@@ -460,38 +413,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             </Button>
             <Button onClick={handleLockScreen} disabled={isLoading} data-testid="button-submit-lock">
               Lock Screens
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Announcement Dialog */}
-      <Dialog open={showAnnouncement} onOpenChange={setShowAnnouncement}>
-        <DialogContent data-testid="dialog-announcement">
-          <DialogHeader>
-            <DialogTitle>Send Announcement</DialogTitle>
-            <DialogDescription>
-              Broadcast an important message to all students. They'll receive a notification.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="announcement">Message</Label>
-              <Input
-                id="announcement"
-                placeholder="Class will end in 5 minutes..."
-                value={announcement}
-                onChange={(e) => setAnnouncement(e.target.value)}
-                data-testid="input-announcement"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowAnnouncement(false)} data-testid="button-cancel-announcement">
-              Cancel
-            </Button>
-            <Button onClick={handleSendAnnouncement} disabled={isLoading} data-testid="button-submit-announcement">
-              Send Announcement
             </Button>
           </DialogFooter>
         </DialogContent>
