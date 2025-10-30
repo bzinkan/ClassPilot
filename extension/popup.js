@@ -393,9 +393,7 @@ async function loadMessages() {
   // Build HTML for all messages
   let html = '';
   sortedMessages.forEach((msg, index) => {
-    const isAnnouncement = msg.type === 'announcement';
     const unreadClass = msg.read ? '' : 'unread';
-    const messageClass = isAnnouncement ? 'announcement' : '';
     
     const time = new Date(msg.timestamp).toLocaleString('en-US', {
       month: 'short',
@@ -405,9 +403,9 @@ async function loadMessages() {
     });
     
     html += `
-      <div class="message-item ${messageClass} ${unreadClass}">
+      <div class="message-item ${unreadClass}">
         <div class="message-header">
-          <span class="message-title">${isAnnouncement ? '📢 ANNOUNCEMENT' : '💬 MESSAGE'}</span>
+          <span class="message-title">💬 MESSAGE</span>
           <span class="message-time">${time}</span>
         </div>
         <div class="message-content">${msg.message}</div>

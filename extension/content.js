@@ -1,12 +1,8 @@
 // ClassPilot - Content Script
-// Displays announcements and messages as full-screen modals on student screens
+// Displays messages as full-screen modals on student screens
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'show-announcement') {
-    showAnnouncementModal(message.data);
-  }
-  
   if (message.type === 'show-message') {
     showMessageModal(message.data);
   }
@@ -18,53 +14,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   return true;
 });
-
-// Show announcement as full-screen modal
-function showAnnouncementModal(data) {
-  const { message, timestamp } = data;
-  
-  // Remove any existing announcement modal first
-  const existingModal = document.getElementById('classpilot-announcement-modal');
-  if (existingModal) {
-    existingModal.remove();
-  }
-  
-  // Create modal overlay
-  const modal = document.createElement('div');
-  modal.id = 'classpilot-announcement-modal';
-  modal.innerHTML = `
-    <div class="classpilot-modal-overlay">
-      <div class="classpilot-modal-content classpilot-announcement">
-        <div class="classpilot-modal-header">
-          <div class="classpilot-modal-icon">📢</div>
-          <h2>Teacher Announcement</h2>
-        </div>
-        <div class="classpilot-modal-body">
-          <p>${escapeHtml(message)}</p>
-        </div>
-        <div class="classpilot-modal-footer">
-          <button class="classpilot-modal-button" id="classpilot-acknowledge-btn">
-            I Understand
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-  
-  // Add styles
-  addModalStyles();
-  
-  // Add to page
-  document.body.appendChild(modal);
-  
-  // Add event listener to close button - use querySelector on modal element
-  const acknowledgeBtn = modal.querySelector('#classpilot-acknowledge-btn');
-  if (acknowledgeBtn) {
-    acknowledgeBtn.addEventListener('click', () => {
-      modal.remove();
-    });
-  }
-}
 
 // Show regular message as modal
 function showMessageModal(data) {

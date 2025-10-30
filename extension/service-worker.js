@@ -539,24 +539,14 @@ async function handleChatMessage(message) {
         // Ensure content script is injected before sending message
         await ensureContentScriptInjected(tab.id);
         
-        if (message.type === 'announcement') {
-          await chrome.tabs.sendMessage(tab.id, {
-            type: 'show-announcement',
-            data: {
-              message: message.message,
-              timestamp: message.timestamp || Date.now(),
-            },
-          });
-        } else {
-          await chrome.tabs.sendMessage(tab.id, {
-            type: 'show-message',
-            data: {
-              message: message.message,
-              fromName: message.fromName || 'Teacher',
-              timestamp: message.timestamp || Date.now(),
-            },
-          });
-        }
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'show-message',
+          data: {
+            message: message.message,
+            fromName: message.fromName || 'Teacher',
+            timestamp: message.timestamp || Date.now(),
+          },
+        });
       } catch (error) {
         console.log('Could not send message to tab:', tab.id, error);
       }
@@ -567,10 +557,10 @@ async function handleChatMessage(message) {
   chrome.notifications.create({
     type: 'basic',
     iconUrl: 'icons/icon48.png',
-    title: message.type === 'announcement' ? 'Announcement' : `Message from ${message.fromName || 'Teacher'}`,
+    title: `Message from ${message.fromName || 'Teacher'}`,
     message: message.message,
     priority: 2,
-    requireInteraction: message.type === 'announcement',
+    requireInteraction: false,
   });
   
   // Store message in local storage for popup to display
@@ -791,7 +781,7 @@ function connectWebSocket() {
       }
       
       // Handle chat messages (Phase 2)
-      if (message.type === 'chat' || message.type === 'announcement') {
+      if (message.type === 'chat') {
         handleChatMessage(message);
       }
       
