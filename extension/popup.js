@@ -46,6 +46,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     e.preventDefault();
     showPrivacyInfo();
   });
+  
+  // Load and display messages
+  loadMessages();
+  
+  // Listen for storage changes to update messages in real-time
+  chrome.storage.onChanged.addListener((changes, namespace) => {
+    if (namespace === 'local' && changes.messages) {
+      loadMessages();
+    }
+  });
 });
 
 function showSetupView() {
@@ -361,6 +371,85 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return true;
 });
+
+async function loadMessages() {
+  const stored = await chrome.storage.local.get(['messages']);
+  const messages = stored.messages || [];
+  
+  const container = document.getElementById('messages-container');
+  
+  if (messages.length === 0) {
+    container.innerHTML = `
+      <p style="font-size: 12px; color: #94a3b8; text-align: center; padding: 20px;">
+        No messages yet
+      </p>
+    `;
+    return;
+  }
+  
+  // Sort messages by timestamp (newest first)
+  const sortedMessages = messages.sort((a, b) => b.timestamp - a.timestamp);
+  
+  // Build HTML for all messages
+  let html = '';
+  sortedMessages.forEach((msg, index) => {
+    const isAnnouncement = msg.type === 'announcement';
+    const unreadClass = msg.read ? '' : 'unread';
+    const messageClass = isAnnouncement ? 'announcement' : '';
+    
+    const time = new Date(msg.timestamp).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    
+    html += `
+      <div class="message-item ${messageClass} ${unreadClass}">
+        <div class="message-header">
+          <span class="message-title">${isAnnouncement ? '📢 ANNOUNCEMENT' : '💬 MESSAGE'}</span>
+          <span class="message-time">${time}</span>
+        </div>
+        <div class="message-content">${msg.message}</div>
+      </div>
+    `;
+  });
+  
+  // Add clear button
+  html += `
+    <button class="clear-messages" id="clear-messages-btn">
+      Clear All Messages
+    </button>
+  `;
+  
+  container.innerHTML = html;
+  
+  // Add event listener to clear button
+  document.getElementById('clear-messages-btn')?.addEventListener('click', clearMessages);
+  
+  // Mark all messages as read
+  markMessagesAsRead();
+}
+
+async function markMessagesAsRead() {
+  const stored = await chrome.storage.local.get(['messages']);
+  const messages = stored.messages || [];
+  
+  // Mark all as read
+  const updatedMessages = messages.map(msg => ({ ...msg, read: true }));
+  
+  await chrome.storage.local.set({ messages: updatedMessages });
+  
+  // Clear badge
+  chrome.action.setBadgeText({ text: '' });
+}
+
+async function clearMessages() {
+  if (confirm('Are you sure you want to clear all messages?')) {
+    await chrome.storage.local.set({ messages: [] });
+    loadMessages();
+  }
+}
 
 function showPrivacyInfo() {
   alert(`What's Being Collected?
