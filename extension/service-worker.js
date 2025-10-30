@@ -1,10 +1,8 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
-// ⚠️ DEVELOPMENT MODE: Using current Replit dev URL
-// 🔴 BEFORE PRODUCTION: Change this back to 'https://classpilot.replit.app'
-// This can also be overridden in extension settings (Advanced Settings in popup)
-const DEFAULT_SERVER_URL = 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
+// Production server URL - can be overridden in extension settings
+const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
 
 let CONFIG = {
   serverUrl: DEFAULT_SERVER_URL,

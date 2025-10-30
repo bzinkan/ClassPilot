@@ -141,7 +141,7 @@ function updateStatus() {
 
 async function loadStudents(deviceId) {
   try {
-    const serverUrl = currentConfig.serverUrl || 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
+    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
     const response = await fetch(`${serverUrl}/api/device/${deviceId}/students`);
     
     if (!response.ok) {
@@ -201,7 +201,7 @@ async function setActiveStudent(studentId) {
   }
   
   try {
-    const serverUrl = currentConfig.serverUrl || 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
+    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
     const response = await fetch(`${serverUrl}/api/device/${currentConfig.deviceId}/active-student`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
