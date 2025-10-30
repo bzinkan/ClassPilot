@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { X, ExternalLink, Clock, Monitor, Video, Bell, Trash2 } from "lucide-react";
+import { X, ExternalLink, Clock, Monitor, Video, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -36,7 +36,6 @@ export function StudentDetailDrawer({
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const [videoLoaded, setVideoLoaded] = useState(false);
-  const [pinging, setPinging] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
   // Calculate URL sessions with duration from heartbeats
@@ -70,38 +69,6 @@ export function StudentDetailDrawer({
   const handleDeleteConfirm = () => {
     if (!student) return;
     deleteStudentMutation.mutate(student.deviceId);
-  };
-
-  const handlePing = async () => {
-    if (!student) return;
-    
-    setPinging(true);
-    try {
-      const response = await apiRequest("POST", `/api/ping/${student.deviceId}`, {
-        message: "Your teacher is requesting your attention"
-      });
-      
-      if (response && (response as any).success) {
-        toast({
-          title: "Ping sent",
-          description: `Notification sent to ${student.studentName}`,
-        });
-      } else {
-        toast({
-          variant: "destructive",
-          title: "Student offline",
-          description: "Unable to send notification - student is not connected",
-        });
-      }
-    } catch (error) {
-      toast({
-        variant: "destructive",
-        title: "Failed to ping",
-        description: "An error occurred while sending the notification",
-      });
-    } finally {
-      setPinging(false);
-    }
   };
 
   useEffect(() => {
@@ -301,17 +268,7 @@ export function StudentDetailDrawer({
                     </Badge>
                   )}
                 </div>
-                <div className="mt-3 flex gap-2">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handlePing}
-                    disabled={pinging || student.status === 'offline'}
-                    data-testid="button-ping-student"
-                  >
-                    <Bell className="h-4 w-4 mr-2" />
-                    {pinging ? "Sending..." : "Ping Student"}
-                  </Button>
+                <div className="mt-3">
                   <Button
                     size="sm"
                     variant="destructive"

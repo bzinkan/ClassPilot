@@ -906,49 +906,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Ping student endpoint - sends notification to student device
-  app.post("/api/ping/:deviceId", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
-    try {
-      const { deviceId } = req.params;
-      const { message } = req.body;
-      
-      console.log(`[Ping] Attempting to ping deviceId: ${deviceId}`);
-      console.log(`[Ping] Currently connected WebSocket clients: ${wsClients.size}`);
-      
-      // Log all connected clients for debugging
-      let clientIndex = 0;
-      wsClients.forEach((client, ws) => {
-        console.log(`[Ping] Client ${clientIndex++}: deviceId=${client.deviceId}, role=${client.role}, authenticated=${client.authenticated}, readyState=${ws.readyState}`);
-      });
-      
-      // Forward ping message via WebSocket to the target device
-      let sent = false;
-      wsClients.forEach((client, ws) => {
-        if (client.deviceId === deviceId && ws.readyState === WebSocket.OPEN) {
-          console.log(`[Ping] Found matching client! Sending ping to deviceId: ${deviceId}`);
-          ws.send(JSON.stringify({ 
-            type: 'ping', 
-            data: { 
-              message: message || 'Your teacher is requesting your attention',
-              timestamp: Date.now()
-            } 
-          }));
-          sent = true;
-        }
-      });
-
-      if (sent) {
-        console.log(`[Ping] Successfully sent ping to deviceId: ${deviceId}`);
-        res.json({ success: true, message: "Ping sent successfully" });
-      } else {
-        console.log(`[Ping] No matching WebSocket client found for deviceId: ${deviceId}`);
-        res.json({ success: false, message: "Student is offline" });
-      }
-    } catch (error) {
-      console.error("Ping error:", error);
-      res.status(500).json({ error: "Internal server error" });
-    }
-  });
 
   // Settings endpoints
   app.get("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
@@ -1473,6 +1430,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Message is required" });
       }
       
+      console.log(`[Announcement] Sending announcement: "${message}"`);
+      console.log(`[Announcement] Target deviceIds:`, targetDeviceIds);
+      console.log(`[Announcement] Currently connected WebSocket clients: ${wsClients.size}`);
+      
+      // Log all student clients
+      let studentCount = 0;
+      wsClients.forEach((client, ws) => {
+        if (client.role === 'student' && client.authenticated) {
+          console.log(`[Announcement] Student ${studentCount++}: deviceId=${client.deviceId}, readyState=${ws.readyState}`);
+        }
+      });
+      
       broadcastToStudents({
         type: 'announcement',
         message,
@@ -1482,6 +1451,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
         : "all students";
+      console.log(`[Announcement] Sent to ${target}`);
       res.json({ success: true, message: `Sent to ${target}` });
     } catch (error) {
       console.error("Send announcement error:", error);
