@@ -494,7 +494,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
               </Select>
               {selectedSceneId && (() => {
                 const selectedScene = scenes.find(s => s.id === selectedSceneId);
-                return selectedScene ? (
+                return selectedScene && selectedScene.allowedDomains ? (
                   <div className="mt-2 p-3 bg-muted rounded-md">
                     <p className="text-sm font-medium mb-1">Allowed Domains:</p>
                     <ul className="text-sm text-muted-foreground list-disc list-inside">
