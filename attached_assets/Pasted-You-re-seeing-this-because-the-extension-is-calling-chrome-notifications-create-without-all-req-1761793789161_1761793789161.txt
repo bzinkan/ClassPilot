@@ -1,0 +1,127 @@
+You’re seeing this because the extension is calling chrome.notifications.create(...) without all required fields. In MV3, a notification must include type, iconUrl, title, and message and you need the "notifications" permission. When any of those are missing (or the permission isn’t present), Chrome throws:
+
+Unchecked runtime.lastError: Some of the required properties are missing: type, iconUrl, title and message.
+
+That error gets surfaced in chrome://extensions → “Errors,” which is what you want to avoid before handing to IT.
+
+Here’s a clean, drop-in fix.
+
+1) Add the permission + icons in manifest.json
+{
+  "manifest_version": 3,
+  "name": "ChromePilot",
+  "version": "0.5.0",
+  "permissions": ["tabs", "storage", "alarms", "notifications"],
+  "host_permissions": ["<all_urls>"],
+  "action": { "default_icon": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" } },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "background": { "service_worker": "service-worker.js" }
+}
+
+
+Ensure icons/16.png, icons/48.png, icons/128.png exist in your extension.
+
+2) Wrap all notifications with a safe helper (prevents runtime.lastError)
+
+In service-worker.js, create and use this one function for every notification:
+
+// Centralized, safe notifications (never throw, never produce red errors)
+async function safeNotify(opts) {
+  // If notifications permission is missing or blocked, silently skip
+  if (!chrome?.notifications) return;
+
+  // Required defaults
+  const options = {
+    type: 'basic',
+    iconUrl: 'icons/128.png',
+    title: 'ChromePilot',
+    message: '',
+    priority: 0,
+    ...opts, // allow caller to override title/message/iconUrl if needed
+  };
+
+  try {
+    // In MV3, callbacks can surface runtime.lastError; prefer Promises
+    await new Promise((resolve) => {
+      chrome.notifications.create('', options, () => {
+        // swallow runtime.lastError quietly
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+  } catch (e) {
+    // Never use console.error for expected conditions; keep the Errors panel clean
+    console.warn('notify skipped:', e?.message || e);
+  }
+}
+
+
+Replace every direct chrome.notifications.create(...) call with:
+
+safeNotify({ title: 'Scene Applied', message: 'Math Test mode is now active.' });
+
+3) Downgrade noisy logs so they don’t appear as “Errors”
+
+Anything printed with console.error shows up in the “Errors” list. Use a tiny logger:
+
+const LOG_LEVEL = 'warn'; // 'debug'|'info'|'warn'|'error'
+const log = {
+  debug: (...a) => (LOG_LEVEL === 'debug' ? console.log('[D]', ...a) : undefined),
+  info:  (...a) => (['debug','info'].includes(LOG_LEVEL) ? console.log('[I]', ...a) : undefined),
+  warn:  (...a) => console.warn('[W]', ...a),
+  error: (...a) => console.warn('[W*]', ...a) // downgrade to warn to avoid the Errors badge
+};
+
+// Example: was `console.error('Heartbeat failed:', status)`
+log.warn('Heartbeat failed:', status);
+
+
+You still get visibility in DevTools, but the Extensions → Errors panel won’t fill up with red entries.
+
+4) Guard WebSocket + heartbeat recoveries (avoid “not ready yet” warnings)
+
+These warnings are harmless but noisy. Make connect/retry explicit:
+
+let ws;
+function connectWS(url) {
+  try {
+    ws = new WebSocket(url);
+  } catch { return scheduleReconnect(); }
+
+  ws.onopen = () => log.info('WS connected');
+  ws.onclose = () => { log.warn('WS closed'); scheduleReconnect(); };
+  ws.onerror = () => { log.warn('WS error'); /* onclose will fire */ };
+  ws.onmessage = (evt) => handleWSMessage(evt.data);
+}
+
+let wsRetry = 2000;
+function scheduleReconnect() {
+  setTimeout(() => { wsRetry = Math.min(wsRetry * 2, 30000); connectWS(WS_URL); }, wsRetry);
+}
+
+
+Only send WS messages when ws?.readyState === WebSocket.OPEN; otherwise buffer or drop silently.
+
+5) (Optional) Replace notifications with a badge + popup toast
+
+If you want zero notification permission issues, you can skip notifications entirely and show state using the badge:
+
+chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
+chrome.action.setBadgeText({ text: 'ON' }); // or '', kept minimal
+
+
+…and, if you have a popup.html, send it a one-time message to show a small in-popup toast (no permissions required).
+
+Quick checklist to eliminate the red “Errors” banner
+
+ "notifications" in manifest.json
+
+ Icons exist; references point to actual files
+
+ All notifications go through safeNotify(...) (never direct API)
+
+ Replace console.error with log.warn for expected events
+
+ WS/heartbeat retries don’t log as errors
+
+Apply those and reload the extension (Developer mode → Update). The functionality stays the same, teachers still get the cues they need, and IT won’t see scary red errors in the Extensions page.

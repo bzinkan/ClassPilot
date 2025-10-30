@@ -19,6 +19,36 @@ let CONFIG = {
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 
+// Centralized, safe notifications (never throw, never produce red errors)
+async function safeNotify(opts) {
+  // If notifications permission is missing or blocked, silently skip
+  if (!chrome?.notifications) return;
+
+  // Required defaults
+  const options = {
+    type: 'basic',
+    iconUrl: 'icons/icon48.png',
+    title: 'ClassPilot',
+    message: '',
+    priority: 0,
+    ...opts, // allow caller to override title/message/iconUrl if needed
+  };
+
+  try {
+    // In MV3, callbacks can surface runtime.lastError; prefer Promises
+    await new Promise((resolve) => {
+      chrome.notifications.create('', options, () => {
+        // swallow runtime.lastError quietly
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+  } catch (e) {
+    // Never use console.error for expected conditions; keep the Errors panel clean
+    console.warn('notify skipped:', e?.message || e);
+  }
+}
+
 // Get logged-in Chromebook user info using Chrome Identity API
 async function getLoggedInUserInfo() {
   try {
@@ -424,9 +454,7 @@ async function handleRemoteControl(command) {
         }
         
         // Show notification with domain
-        chrome.notifications.create({
-          type: 'basic',
-          iconUrl: '/icons/icon48.png',
+        safeNotify({
           title: 'Screen Locked',
           message: `Your teacher has locked your browsing to ${lockedDomain}. You can navigate within this site but cannot leave it.`,
           priority: 2,
@@ -441,9 +469,7 @@ async function handleRemoteControl(command) {
         lockedDomain = null;
         allowedDomains = []; // Clear all lock state
         
-        chrome.notifications.create({
-          type: 'basic',
-          iconUrl: '/icons/icon48.png',
+        safeNotify({
           title: 'Screen Unlocked',
           message: 'Your screen has been unlocked. You can now browse freely.',
           priority: 1,
@@ -460,9 +486,7 @@ async function handleRemoteControl(command) {
         // Store allowed domains from the scene
         allowedDomains = command.data.allowedDomains || [];
         if (allowedDomains.length > 0) {
-          chrome.notifications.create({
-            type: 'basic',
-            iconUrl: '/icons/icon48.png',
+          safeNotify({
             title: 'Scene Applied',
             message: `Your teacher has applied a scene. You can only access: ${allowedDomains.join(', ')}`,
             priority: 2,
@@ -545,9 +569,7 @@ async function handleChatMessage(message) {
   }
   
   // Also show browser notification as backup
-  chrome.notifications.create({
-    type: 'basic',
-    iconUrl: '/icons/icon48.png',
+  safeNotify({
     title: `Message from ${message.fromName || 'Teacher'}`,
     message: message.message,
     priority: 2,
@@ -581,9 +603,7 @@ async function handleCheckInRequest(request) {
   console.log('Check-in request received:', request);
   
   // Show notification with check-in question
-  chrome.notifications.create({
-    type: 'basic',
-    iconUrl: '/icons/icon48.png',
+  safeNotify({
     title: 'Teacher Check-in',
     message: request.question,
     priority: 2,
@@ -644,9 +664,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       }
       
       // Show warning notification
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: '/icons/icon48.png',
+      safeNotify({
         title: 'Navigation Blocked',
         message: blockedMessage,
         priority: 1,
@@ -664,9 +682,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       // Close the newly created tab if over limit
       chrome.tabs.remove(tab.id);
       
-      chrome.notifications.create({
-        type: 'basic',
-        iconUrl: '/icons/icon48.png',
+      safeNotify({
         title: 'Tab Limit Reached',
         message: `You can only have ${currentMaxTabs} tabs open at a time.`,
         priority: 1,
@@ -723,9 +739,7 @@ function connectWebSocket() {
         const { message: pingMessage } = message.data;
         
         // Show browser notification
-        chrome.notifications.create({
-          type: 'basic',
-          iconUrl: '/icons/icon48.png',
+        safeNotify({
           title: 'Teacher Notification',
           message: pingMessage || 'Your teacher is requesting your attention',
           priority: 2,
