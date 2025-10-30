@@ -342,7 +342,27 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Remote Control Handlers (Phase 1: GoGuardian-style features)
 let screenLocked = false;
 let lockedUrl = null;
+let lockedDomain = null; // Domain to lock to (e.g., "ixl.com")
 let currentMaxTabs = null;
+
+// Helper function to extract domain from URL
+function extractDomain(url) {
+  try {
+    const urlObj = new URL(url);
+    // Remove 'www.' prefix for consistent matching
+    return urlObj.hostname.replace(/^www\./, '');
+  } catch (error) {
+    console.error('Invalid URL:', url, error);
+    return null;
+  }
+}
+
+// Helper function to check if URL is on the same domain
+function isOnSameDomain(url, domain) {
+  if (!url || !domain) return false;
+  const urlDomain = extractDomain(url);
+  return urlDomain === domain;
+}
 
 async function handleRemoteControl(command) {
   console.log('Remote control command received:', command);
@@ -388,6 +408,7 @@ async function handleRemoteControl(command) {
       case 'lock-screen':
         screenLocked = true;
         lockedUrl = command.data.url;
+        lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
         
         if (lockedUrl) {
           // Open the locked URL in current tab
@@ -399,21 +420,22 @@ async function handleRemoteControl(command) {
           }
         }
         
-        // Show notification
+        // Show notification with domain
         chrome.notifications.create({
           type: 'basic',
           iconUrl: 'icons/icon48.png',
           title: 'Screen Locked',
-          message: 'Your teacher has locked your screen. You cannot navigate away.',
+          message: `Your teacher has locked your browsing to ${lockedDomain}. You can navigate within this site but cannot leave it.`,
           priority: 2,
         });
         
-        console.log('Screen locked to:', lockedUrl);
+        console.log('Screen locked to domain:', lockedDomain, '(from URL:', lockedUrl + ')');
         break;
         
       case 'unlock-screen':
         screenLocked = false;
         lockedUrl = null;
+        lockedDomain = null;
         
         chrome.notifications.create({
           type: 'basic',
@@ -523,13 +545,30 @@ async function handleCheckInRequest(request) {
   });
 }
 
-// Prevent navigation when screen is locked
+// Prevent navigation when screen is locked (domain-based blocking)
 chrome.webNavigation.onBeforeNavigate.addListener((details) => {
-  if (screenLocked && lockedUrl && details.frameId === 0) {
-    // If navigating away from locked URL, redirect back
-    if (details.url !== lockedUrl && !details.url.startsWith('chrome://')) {
-      chrome.tabs.update(details.tabId, { url: lockedUrl });
+  if (screenLocked && lockedDomain && details.frameId === 0) {
+    // Allow chrome:// URLs and navigation within the locked domain
+    if (details.url.startsWith('chrome://')) {
+      return; // Allow chrome internal pages
     }
+    
+    // Check if navigating to a different domain
+    if (!isOnSameDomain(details.url, lockedDomain)) {
+      // Redirect back to locked URL (students trying to leave the domain)
+      console.log('Blocked navigation to:', details.url, '- locked to domain:', lockedDomain);
+      chrome.tabs.update(details.tabId, { url: lockedUrl });
+      
+      // Show warning notification
+      chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icons/icon48.png',
+        title: 'Navigation Blocked',
+        message: `You can only browse within ${lockedDomain}`,
+        priority: 1,
+      });
+    }
+    // Otherwise, allow navigation within the same domain
   }
 });
 

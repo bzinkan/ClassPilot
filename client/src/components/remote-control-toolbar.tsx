@@ -141,9 +141,13 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
       const target = selectedDeviceIds.size > 0 
         ? `${selectedDeviceIds.size} student(s)` 
         : "all students";
+      
+      // Extract domain for display
+      const domain = normalizedLockUrl.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+      
       toast({
-        title: "Success",
-        description: `Locked ${target} to ${normalizedLockUrl}`,
+        title: "Screen Locked",
+        description: `${target} locked to ${domain} - they can browse within this site`,
       });
       setLockUrl("");
       setShowLockScreen(false);
@@ -430,21 +434,24 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
       <Dialog open={showLockScreen} onOpenChange={setShowLockScreen}>
         <DialogContent data-testid="dialog-lock-screen">
           <DialogHeader>
-            <DialogTitle>Lock Screens to URL</DialogTitle>
+            <DialogTitle>Lock Screens to Website</DialogTitle>
             <DialogDescription>
-              Lock all student screens to a specific URL. Students won't be able to navigate away until unlocked.
+              Lock student screens to a specific website domain. Students can navigate freely within that site (e.g., ixl.com/math, ixl.com/science) but cannot leave the domain until unlocked.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="lock-url">URL</Label>
+              <Label htmlFor="lock-url">Website URL</Label>
               <Input
                 id="lock-url"
-                placeholder="https://example.com"
+                placeholder="https://ixl.com or khanacademy.org"
                 value={lockUrl}
                 onChange={(e) => setLockUrl(e.target.value)}
                 data-testid="input-lock-url"
               />
+              <p className="text-xs text-muted-foreground">
+                Students will be locked to this domain and can browse within it freely.
+              </p>
             </div>
           </div>
           <DialogFooter>
