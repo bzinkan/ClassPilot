@@ -681,6 +681,8 @@ export default function Dashboard() {
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
                         isOffTask={true}
+                        isSelected={selectedDeviceIds.has(student.deviceId)}
+                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -708,6 +710,8 @@ export default function Dashboard() {
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
                         isOffTask={false}
+                        isSelected={selectedDeviceIds.has(student.deviceId)}
+                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -735,6 +739,8 @@ export default function Dashboard() {
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
                         isOffTask={false}
+                        isSelected={selectedDeviceIds.has(student.deviceId)}
+                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -762,6 +768,8 @@ export default function Dashboard() {
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
                         isOffTask={false}
+                        isSelected={selectedDeviceIds.has(student.deviceId)}
+                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
                       />
                     ))}
                   </div>

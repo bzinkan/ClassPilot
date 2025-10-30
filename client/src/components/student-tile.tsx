@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 import { useToast } from "@/hooks/use-toast";
@@ -31,6 +32,8 @@ interface StudentTileProps {
   onClick: () => void;
   blockedDomains?: string[];
   isOffTask?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
 }
 
 function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
@@ -58,7 +61,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
   }
 }
 
-export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false }: StudentTileProps) {
+export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
@@ -289,6 +292,18 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         {/* Header */}
         <div className="flex items-start justify-between gap-2 mb-2.5">
           <div className="flex items-center gap-1 flex-1 min-w-0">
+            {onToggleSelect && (
+              <Checkbox
+                checked={isSelected}
+                onCheckedChange={(e) => {
+                  e.stopPropagation?.();
+                  onToggleSelect();
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="mr-1"
+                data-testid={`checkbox-select-student-${student.deviceId}`}
+              />
+            )}
             <h3 className="font-semibold text-sm truncate" data-testid={`text-student-name-${student.deviceId}`}>
               {student.studentName || (
                 <span className="text-muted-foreground italic">
