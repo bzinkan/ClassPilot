@@ -32,6 +32,7 @@ interface CurrentUser {
 export default function Dashboard() {
   const [, setLocation] = useLocation();
   const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
+  const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedGrade, setSelectedGrade] = useState<string>("");
   const [wsConnected, setWsConnected] = useState(false);
@@ -244,6 +245,28 @@ export default function Dashboard() {
     
     // Otherwise, use the last part as the last name
     return nameParts[nameParts.length - 1].toLowerCase();
+  };
+
+  // Selection handlers
+  const toggleStudentSelection = (deviceId: string) => {
+    setSelectedDeviceIds((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(deviceId)) {
+        newSet.delete(deviceId);
+      } else {
+        newSet.add(deviceId);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAll = () => {
+    const allDeviceIds = filteredStudents.map((s) => s.deviceId);
+    setSelectedDeviceIds(new Set(allDeviceIds));
+  };
+
+  const clearSelection = () => {
+    setSelectedDeviceIds(new Set());
   };
 
   const filteredStudents = students
