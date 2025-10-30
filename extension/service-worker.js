@@ -19,6 +19,46 @@ let CONFIG = {
 let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 
+// Offscreen document management for WebRTC
+async function ensureOffscreenDocument() {
+  const path = 'offscreen.html';
+  
+  try {
+    // Check if offscreen document already exists
+    const existingContexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [chrome.runtime.getURL(path)]
+    });
+    
+    if (existingContexts.length > 0) {
+      console.log('Offscreen document already exists');
+      return true;
+    }
+    
+    // Create offscreen document
+    await chrome.offscreen.createDocument({
+      url: path,
+      reasons: ['USER_MEDIA'],
+      justification: 'Keep screen share WebRTC connection alive'
+    });
+    
+    console.log('Created offscreen document');
+    return true;
+  } catch (error) {
+    console.error('Failed to create offscreen document:', error);
+    return false;
+  }
+}
+
+async function closeOffscreenDocument() {
+  try {
+    await chrome.offscreen.closeDocument();
+    console.log('Closed offscreen document');
+  } catch (error) {
+    console.warn('Failed to close offscreen document:', error);
+  }
+}
+
 // Centralized, safe notifications (never throw, never produce red errors)
 async function safeNotify(opts) {
   // If notifications permission is missing or blocked, silently skip
@@ -912,6 +952,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   
+  if (message.type === 'START_SHARE') {
+    // Ensure offscreen document exists, then delegate
+    ensureOffscreenDocument()
+      .then(async () => {
+        const response = await chrome.runtime.sendMessage({ 
+          to: 'offscreen', 
+          type: 'START_SHARE' 
+        });
+        
+        if (response?.success) {
+          CONFIG.isSharing = true;
+          chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
+          chrome.action.setBadgeText({ text: '◉' });
+        }
+        
+        sendResponse(response);
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+  
+  if (message.type === 'STOP_SHARE') {
+    // Delegate to offscreen document
+    chrome.runtime.sendMessage({ 
+      to: 'offscreen', 
+      type: 'STOP_SHARE' 
+    })
+      .then((response) => {
+        if (response?.success) {
+          CONFIG.isSharing = false;
+          chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' });
+          chrome.action.setBadgeText({ text: '' });
+        }
+        sendResponse(response);
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+  
+  // Legacy message for backward compatibility
   if (message.type === 'sharing-started') {
     CONFIG.isSharing = true;
     chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });

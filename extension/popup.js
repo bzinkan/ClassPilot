@@ -261,55 +261,51 @@ async function handleStudentSelection(event) {
 
 async function startScreenShare() {
   try {
-    mediaStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        cursor: 'always',
-      },
-      audio: false,
-    });
+    console.log('[Popup] Starting screen share (delegating to offscreen)...');
     
-    console.log('Screen sharing started');
-    
-    // Update UI
+    // Update UI immediately
     document.getElementById('share-section').classList.add('hidden');
     document.getElementById('sharing-section').classList.remove('hidden');
     
-    // Notify background
-    chrome.runtime.sendMessage({ type: 'sharing-started' });
-    
-    // Setup WebRTC (simplified - full implementation would need signaling)
-    setupWebRTC(mediaStream);
-    
-    // Handle stream end
-    mediaStream.getVideoTracks()[0].addEventListener('ended', () => {
-      stopScreenShare();
+    // Delegate to service worker -> offscreen document
+    chrome.runtime.sendMessage({ type: 'START_SHARE' }, (response) => {
+      if (response?.success) {
+        console.log('[Popup] Screen share started successfully');
+      } else {
+        console.error('[Popup] Failed to start share:', response?.error);
+        alert('Failed to start screen sharing: ' + (response?.error || 'Unknown error'));
+        // Revert UI
+        document.getElementById('share-section').classList.remove('hidden');
+        document.getElementById('sharing-section').classList.add('hidden');
+      }
     });
     
   } catch (error) {
-    console.error('Screen sharing error:', error);
-    alert('Failed to start screen sharing. Permission may have been denied.');
+    console.error('[Popup] Screen sharing error:', error);
+    alert('Failed to start screen sharing: ' + error.message);
+    // Revert UI
+    document.getElementById('share-section').classList.remove('hidden');
+    document.getElementById('sharing-section').classList.add('hidden');
   }
 }
 
 function stopScreenShare() {
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => track.stop());
-    mediaStream = null;
-  }
-  
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
+  console.log('[Popup] Stopping screen share (delegating to offscreen)...');
   
   // Update UI
   document.getElementById('share-section').classList.remove('hidden');
   document.getElementById('sharing-section').classList.add('hidden');
   
-  // Notify background
-  chrome.runtime.sendMessage({ type: 'sharing-stopped' });
+  // Delegate to service worker -> offscreen document
+  chrome.runtime.sendMessage({ type: 'STOP_SHARE' }, (response) => {
+    if (response?.success) {
+      console.log('[Popup] Screen share stopped successfully');
+    } else {
+      console.error('[Popup] Failed to stop share:', response?.error);
+    }
+  });
   
-  console.log('Screen sharing stopped');
+  console.log('[Popup] Screen sharing stopped');
 }
 
 // Queue for ICE candidates received before remote description is set

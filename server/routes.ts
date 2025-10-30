@@ -259,6 +259,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get current user info
+  // Client configuration endpoint (no auth required for Chrome Extension)
+  app.get("/api/client-config", async (req, res) => {
+    try {
+      // Return configuration for WebRTC including TURN servers
+      // Note: In production, you would configure real TURN servers here
+      const config = {
+        baseUrl: process.env.REPLIT_DEV_DOMAIN 
+          ? `https://${process.env.REPLIT_DEV_DOMAIN}` 
+          : 'https://classpilot.replit.app',
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' },
+          // Add TURN servers here for production
+          // { urls: 'turn:turn.yourdomain.com:3478', username: 'user', credential: 'pass' }
+        ]
+      };
+      res.json(config);
+    } catch (error) {
+      console.error('Client config error:', error);
+      res.status(500).json({ error: 'Failed to get client configuration' });
+    }
+  });
+
   app.get("/api/me", requireAuth, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);

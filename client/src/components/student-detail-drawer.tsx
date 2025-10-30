@@ -127,16 +127,25 @@ export function StudentDetailDrawer({
 
               // Handle incoming stream
               pc.ontrack = (event) => {
-                console.log('Received video track from student');
+                console.log('[Teacher] Received video track from student');
                 if (videoRef.current && event.streams[0]) {
+                  console.log('[Teacher] Setting video srcObject');
                   videoRef.current.srcObject = event.streams[0];
                   setVideoLoaded(true);
+                  
+                  // Handle autoplay - critical for actually displaying the video
+                  videoRef.current.muted = true; // Required for autoplay
+                  videoRef.current.playsInline = true; // Required for mobile
+                  videoRef.current.play().catch((e) => {
+                    console.warn('[Teacher] Autoplay prevented:', e);
+                  });
                 }
               };
 
               // Handle ICE candidates - reuse the same WebSocket
               pc.onicecandidate = (event) => {
                 if (event.candidate && ws.readyState === WebSocket.OPEN) {
+                  console.log('[Teacher] Sending ICE candidate to student');
                   ws.send(JSON.stringify({
                     type: 'signal',
                     data: {
@@ -148,10 +157,21 @@ export function StudentDetailDrawer({
                 }
               };
 
+              // Debugging: log all state changes
+              pc.oniceconnectionstatechange = () => {
+                console.log('[Teacher] ICE connection state:', pc.iceConnectionState);
+              };
+
+              pc.onsignalingstatechange = () => {
+                console.log('[Teacher] Signaling state:', pc.signalingState);
+              };
+
               pc.onconnectionstatechange = () => {
-                console.log('WebRTC connection state:', pc.connectionState);
+                console.log('[Teacher] Connection state:', pc.connectionState);
                 if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
                   setVideoLoaded(false);
+                } else if (pc.connectionState === 'connected') {
+                  console.log('[Teacher] WebRTC connection established!');
                 }
               };
             }

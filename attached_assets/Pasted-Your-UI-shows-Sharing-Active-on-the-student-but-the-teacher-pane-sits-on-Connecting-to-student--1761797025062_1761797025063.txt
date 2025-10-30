@@ -1,0 +1,207 @@
+Your UI shows “Sharing Active” on the student, but the teacher pane sits on “Connecting to student…”. That means signaling happened (the server knows sharing = true) but the media never reaches the teacher. In MV3 this is almost always one of these:
+
+Peer lives in the popup → when the popup closes, the RTCPeerConnection is GC’d and the stream never completes (or dies a moment later).
+
+Autoplay guard on the teacher video element (stream attached but never plays).
+
+ICE/SDP ordering (candidate arrives before setRemoteDescription) or no TURN, so connection can’t form on some networks.
+
+Below is a compact, copy-paste fix that addresses all four.
+
+A) Keep WebRTC alive (move it out of the popup)
+
+Do not create the RTCPeerConnection in the popup. Put it in the service worker (or an offscreen document) so it survives UI closing.
+
+1) Request an offscreen doc (MV3-safe)
+
+service-worker.js
+
+async function ensureOffscreen() {
+  const req = { reasons: ['USER_MEDIA'], justification: 'Keep screen share alive' };
+  const existing = await chrome.offscreen.hasDocument?.();
+  if (!existing) {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: req.reasons,
+      justification: req.justification
+    });
+  }
+}
+
+2) Start share from popup, but hand off to offscreen
+
+popup.js
+
+document.getElementById('startShare').onclick = async () => {
+  await chrome.runtime.sendMessage({ type: 'START_SHARE' });
+};
+document.getElementById('stopShare').onclick = async () => {
+  await chrome.runtime.sendMessage({ type: 'STOP_SHARE' });
+};
+
+
+service-worker.js
+
+chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
+  if (msg.type === 'START_SHARE') {
+    await ensureOffscreen();
+    await chrome.runtime.sendMessage({ to: 'offscreen', type: 'START_SHARE' });
+    sendResponse(true);
+  }
+  if (msg.type === 'STOP_SHARE') {
+    await chrome.runtime.sendMessage({ to: 'offscreen', type: 'STOP_SHARE' });
+    sendResponse(true);
+  }
+});
+
+3) Own the RTCPeerConnection in offscreen
+
+Add offscreen.html with a script offscreen.js. This context stays alive even after the popup closes.
+
+offscreen.js (core bits)
+
+import { createPeer } from './rtc.js'; // the ICE-queue helper we discussed
+
+let peer, stream, cfg, ids;
+
+async function getCfg() {
+  if (cfg) return cfg;
+  cfg = await fetch('https://classpilot.replit.app/client-config.json', { cache:'no-store' }).then(r=>r.json());
+  return cfg;
+}
+
+chrome.runtime.onMessage.addListener(async (msg) => {
+  if (msg?.to !== 'offscreen') return;
+  if (msg.type === 'START_SHARE') return startShare();
+  if (msg.type === 'STOP_SHARE') return stopShare();
+  if (msg.type === 'SIGNAL')      return onSignal(msg.payload);
+});
+
+async function startShare() {
+  const { baseUrl, iceServers } = await getCfg();
+  ids = await chrome.storage.local.get(['studentId','teacherId','classId']); // set these earlier
+  peer = createPeer(iceServers);
+  peer.setOnEmit((m) => sendSignal({ ...m, from: ids.studentId, to: ids.teacherId }));
+
+  // Sender doesn’t render remote
+  stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  stream.getTracks().forEach(t => peer.pc.addTrack(t, stream));
+
+  // Create the offer explicitly (don’t rely only on negotiationneeded)
+  try {
+    await peer.pc.setLocalDescription(await peer.pc.createOffer());
+    await sendSignal({ type: 'offer', sdp: peer.pc.localDescription, from: ids.studentId, to: ids.teacherId });
+  } catch (e) { console.warn('offer failed', e); }
+
+  // Tell server “sharing on” so dashboard shows the blue chip
+  fetch(`${baseUrl}/api/event`, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ type:'share_status', deviceId: ids.studentId, classId: ids.classId, isSharing:true, ts:Date.now() })
+  }).catch(()=>{});
+}
+
+async function stopShare() {
+  try { stream?.getTracks()?.forEach(t=>t.stop()); } catch {}
+  try { peer?.pc?.close(); } catch {}
+  stream = null; peer = null;
+}
+
+async function onSignal(msg) {
+  if (!peer) return;
+  if (msg.type === 'answer') {
+    await peer.setRemote(msg.sdp);
+  } else if (msg.type === 'ice') {
+    await peer.addRemoteIce(msg.candidate);
+  }
+}
+
+async function sendSignal(payload) {
+  // your existing signaling via WebSocket or fetch to server:
+  // e.g., post to /api/signal; server relays to teacher which then postMessage back with type 'SIGNAL'
+}
+
+
+This solves the “works until the popup closes” problem.
+
+B) Teacher viewer: beat autoplay + drain ICE safely
+
+Make sure you play the video after attaching the stream, and you queue ICE (from the helper).
+
+student-detail-drawer.tsx (viewer bits)
+
+import { createPeer } from '../rtc';
+
+let peer: ReturnType<typeof createPeer>;
+
+async function initViewer(videoEl: HTMLVideoElement, teacherId: string, studentId: string, sendSignal: (m:any)=>void, iceServers:any[]) {
+  peer = createPeer(iceServers);
+  peer.setOnEmit(m => sendSignal({ ...m, from: teacherId, to: studentId }));
+  peer.setOnTrack((stream: MediaStream) => {
+    videoEl.srcObject = stream;
+    // autoplay guards
+    videoEl.muted = true;
+    (videoEl as any).playsInline = true;
+    videoEl.play().catch(()=>{}); // don’t error if prevented
+  });
+}
+
+// when a signal arrives from server:
+async function onSignalFromServer(msg:any) {
+  if (msg.type === 'offer') {
+    await peer.setRemote(msg.sdp);
+    await peer.pc.setLocalDescription(await peer.pc.createAnswer());
+    sendSignal({ type:'answer', from: teacherId, to: studentId, sdp: peer.pc.localDescription });
+  } else if (msg.type === 'ice') {
+    await peer.addRemoteIce(msg.candidate);
+  }
+}
+
+
+This handles the “video is black forever” case where the element never calls play().
+
+C) Add TURN (otherwise WebRTC will “sometimes” fail)
+
+School networks + NATs = you need a TURN relay. Put ICE_SERVERS in your /client-config.json and feed both ends, e.g.:
+
+[
+  { "urls": "stun:stun.l.google.com:19302" },
+  { "urls": "turn:turn.yourdomain.com:3478", "username": "pilot", "credential": "supersecret" }
+]
+
+
+Without TURN, you’ll see exactly what you’re seeing: offer/answer succeeds, sharing flag true, but stream never arrives on some networks.
+
+D) Quick “is it signaling or media?” test
+
+In the teacher console, log these:
+
+When offer arrives
+
+When answer is sent
+
+Count of ICE received from student
+
+pc.connectionState / iceConnectionState changes
+
+If you see: connected → problem is autoplay or video element.
+If you never get to connected → problem is ICE/TURN (network path).
+
+peer.pc.oniceconnectionstatechange = () => console.log('ice:', peer.pc.iceConnectionState);
+peer.pc.onconnectionstatechange   = () => console.log('conn:', peer.pc.connectionState);
+
+E) Two tiny UI gotchas to check
+
+The student is sharing a window; if they minimize it, Chrome blanks the track. Prefer “Share This Tab” or tell them to keep the window visible.
+
+If your viewer canvas overlays the video element, you’ll see “Connecting…” forever. Ensure the <video> is on top (z-index) and visible.
+
+Apply these in this order
+
+Move the peer to offscreen/service worker (not popup).
+
+Add the autoplay play() call on the teacher video.
+
+Ensure ICE queue helper is used both sides.
+
+Provide TURN servers via /client-config.json.
+
+Do those four and your “Sharing” chip will consistently correspond to a live stream in the drawer instead of a stuck “Connecting…” state.
