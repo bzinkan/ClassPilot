@@ -271,6 +271,7 @@ async function sendHeartbeat() {
       activeTabUrl: activeTab.url || 'No URL',
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
+      isSharing: CONFIG.isSharing,
     };
     
     // Include studentId if available
