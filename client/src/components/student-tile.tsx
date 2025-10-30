@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2 } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
@@ -344,6 +344,19 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Badge className="text-xs px-1.5 py-0.5 bg-blue-500 text-white animate-pulse">
                 Sharing
               </Badge>
+            )}
+            {student.screenLocked ? (
+              <Lock 
+                className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 
+                title="Screen locked"
+                data-testid={`icon-locked-${student.deviceId}`}
+              />
+            ) : (
+              <Unlock 
+                className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/40" 
+                title="Screen unlocked"
+                data-testid={`icon-unlocked-${student.deviceId}`}
+              />
             )}
             <div
               className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${getStatusColor(student.status)} ${
