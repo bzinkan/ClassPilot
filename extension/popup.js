@@ -41,12 +41,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Stop button
   document.getElementById('stop-button').addEventListener('click', stopScreenShare);
   
-  // Privacy link
-  document.getElementById('privacy-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    showPrivacyInfo();
-  });
-  
   // Load and display messages
   loadMessages();
   
@@ -514,38 +508,3 @@ Data Retention:
 
 This monitoring is required by your school for classroom management. All activity is visible and disclosed to you through this extension.`);
 }
-
-// Server URL Settings
-document.addEventListener('DOMContentLoaded', async () => {
-  // Load current server URL
-  const result = await chrome.storage.local.get(['config']);
-  const config = result.config || {};
-  const serverUrlInput = document.getElementById('server-url-input');
-  if (serverUrlInput) {
-    serverUrlInput.value = config.serverUrl || 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
-  }
-  
-  // Save server URL
-  const saveButton = document.getElementById('save-server-url');
-  if (saveButton) {
-    saveButton.addEventListener('click', async () => {
-      const newServerUrl = serverUrlInput.value.trim();
-      if (!newServerUrl) {
-        alert('Please enter a valid server URL');
-        return;
-      }
-      
-      // Update config with new server URL
-      chrome.runtime.sendMessage({
-        type: 'update-server-url',
-        serverUrl: newServerUrl,
-      }, (response) => {
-        if (response && response.success) {
-          alert('Server URL updated successfully! The extension will now send data to: ' + newServerUrl);
-        } else {
-          alert('Failed to update server URL');
-        }
-      });
-    });
-  }
-});
