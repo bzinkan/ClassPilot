@@ -277,6 +277,7 @@ export class MemStorage implements IStorage {
       activeTabUrl: "",
       lastSeenAt: 0,
       isSharing: false,
+      screenLocked: false,
       status: 'offline',
     };
     this.studentStatuses.set(student.id, status);
@@ -384,6 +385,7 @@ export class MemStorage implements IStorage {
       activeTabUrl: insertHeartbeat.activeTabUrl,
       favicon: insertHeartbeat.favicon ?? null,
       screenLocked: insertHeartbeat.screenLocked ?? false,
+      isSharing: insertHeartbeat.isSharing ?? false,
       timestamp: new Date(),
     };
     this.heartbeats.push(heartbeat);
@@ -408,7 +410,7 @@ export class MemStorage implements IStorage {
             activeTabUrl: heartbeat.activeTabUrl,
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
-            isSharing: false,
+            isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
             status: 'online',
           };
@@ -424,6 +426,7 @@ export class MemStorage implements IStorage {
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
         status.screenLocked = heartbeat.screenLocked ?? false;
+        status.isSharing = heartbeat.isSharing ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);
@@ -724,6 +727,7 @@ export class DatabaseStorage implements IStorage {
         favicon,
         lastSeenAt,
         isSharing: false,
+        screenLocked: false,
         status: this.calculateStatus(lastSeenAt),
       };
       this.studentStatuses.set(student.id, status);
@@ -898,6 +902,7 @@ export class DatabaseStorage implements IStorage {
       favicon,
       lastSeenAt,
       isSharing: false,
+      screenLocked: false,
       status: this.calculateStatus(lastSeenAt),
     };
     this.studentStatuses.set(student.id, status);
@@ -1031,7 +1036,7 @@ export class DatabaseStorage implements IStorage {
             activeTabUrl: heartbeat.activeTabUrl,
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
-            isSharing: false,
+            isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
             status: 'online',
           };
@@ -1047,6 +1052,7 @@ export class DatabaseStorage implements IStorage {
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
         status.screenLocked = heartbeat.screenLocked ?? false;
+        status.isSharing = heartbeat.isSharing ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);

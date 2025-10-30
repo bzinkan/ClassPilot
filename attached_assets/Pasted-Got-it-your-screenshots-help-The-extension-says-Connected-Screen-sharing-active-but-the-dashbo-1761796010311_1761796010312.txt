@@ -1,0 +1,149 @@
+Got it—your screenshots help. The extension says “Connected / Screen sharing active,” but the dashboard doesn’t show the student or ‘Sharing Screen’. That almost always means one of these is true:
+
+Heartbeats are not landing in the same school/class the dashboard is filtering.
+
+The dashboard WebSocket isn’t subscribed to the same channel (so tiles never update).
+
+You’re not sending a share-status event to the server, so the “Sharing Screen” counter stays 0 even if WebRTC is live.
+
+Here’s a fast, surgical checklist + tiny patches to make it bullet-proof.
+
+60-second checks
+
+Confirm runtime config is the same on both sides
+
+Open in the browser:
+https://classpilot.replit.app/client-config.json
+Note baseUrl, schoolId.
+
+In the extension service worker console, run:
+
+(await fetch('https://classpilot.replit.app/client-config.json')).json()
+
+
+They must match.
+
+Verify heartbeats are landing
+
+In the extension SW console (Ctrl+Shift+J on service worker):
+
+await fetch('https://classpilot.replit.app/api/heartbeat', {
+  method:'POST', headers:{'Content-Type':'application/json'},
+  body: JSON.stringify({
+    deviceId:'test-device', studentName:'Test Student',
+    classId:'8th', url:'https://www.ixl.com', title:'IXL', ts:Date.now()
+  })
+}).then(r=>r.status)
+
+
+You should get 204. If not, the server is rejecting.
+
+Make sure the dashboard isn’t filtering the student away
+
+In your screenshot the “8th” chip is selected. Ensure the extension is sending classId: '8th' (not default-class, 8, or empty). Try clicking “All students” or the correct grade chip.
+
+WebSocket is really connected
+
+In the dashboard, open DevTools → Console and check there’s no WS error.
+If you see a WS error, ensure your client builds the URL like:
+
+const wsURL = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/ws?schoolId=YOUR_SCHOOL&key=' + encodeURIComponent(WS_SHARED_KEY);
+
+Two tiny code patches that usually fix this for good
+A) Always tell the server when sharing starts/stops
+
+Your WebRTC stream goes peer-to-peer, so the server can’t “know” you’re sharing unless the extension posts a status event.
+
+Extension (when user starts/stops share):
+
+async function postShareStatus(isSharing) {
+  try {
+    await fetch(`${cfg.baseUrl}/api/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'share_status',
+        deviceId: STATE.deviceId,
+        classId: STATE.classId,
+        isSharing,
+        ts: Date.now()
+      })
+    });
+  } catch {}
+}
+
+// after getDisplayMedia succeeds:
+await postShareStatus(true);
+// when user stops:
+await postShareStatus(false);
+
+
+Server:
+
+app.post('/api/event', express.json(), (req,res)=>{
+  const { type, deviceId, classId, isSharing } = req.body || {};
+  if (type === 'share_status' && deviceId) {
+    memory.status[deviceId] = { ...(memory.status[deviceId]||{}), isSharing: !!isSharing };
+    // push live update to dashboards
+    broadcast({ event:'student_update', deviceId, patch:{ isSharing: !!isSharing, classId } });
+    return res.sendStatus(204);
+  }
+  res.sendStatus(204);
+});
+
+
+Now the “Sharing Screen” card and the blue counter will reflect reality.
+
+B) Fall back to polling so tiles can’t go blank
+
+If a WS drops (Replit proxy hiccup), your tiles can freeze. Add a light poll fallback.
+
+Dashboard:
+
+let wsOk = false;
+function connectWS() {
+  const ws = new WebSocket(wsURL);
+  ws.onopen = () => { wsOk = true; };
+  ws.onclose = () => { wsOk = false; setTimeout(connectWS, 2000); };
+  ws.onmessage = (e) => handleUpdate(JSON.parse(e.data));
+}
+connectWS();
+
+// Poll fallback every 10s if WS is down
+setInterval(async ()=>{
+  if (wsOk) return;
+  try {
+    const list = await (await fetch('/api/students')).json();
+    renderStudentGrid(list);
+  } catch {}
+}, 10000);
+
+
+This prevents “nothing shows” when WS momentarily fails.
+
+Common mismatch that causes exactly your screenshot
+
+Extension shows “default-class” in its UI, but the dashboard grade filter is set to “8th” → the tile won’t appear.
+Fix by:
+
+Setting classId: '8th' inside the extension registration/heartbeat, or
+
+Clicking All students in the dashboard, or
+
+Editing the student tile (pencil icon) to set the correct class once, then persist server-side.
+
+Quick sanity path
+
+Set the extension’s classId to exactly the chip label (e.g., '8th').
+
+Add the share_status POST in the extension and the server handler above.
+
+Add WS URL builder and 10-second poll fallback.
+
+Reload extension → start share → open dashboard (All students) → you should see:
+
+Tile appears within seconds,
+
+“Sharing Screen” counter goes to 1,
+
+Tile shows a blue indicator.

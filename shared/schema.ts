@@ -77,6 +77,7 @@ export const heartbeats = pgTable("heartbeats", {
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
+  isSharing: boolean("is_sharing").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
 }, (table) => ({
   // Indexes for performance with 30-day retention
