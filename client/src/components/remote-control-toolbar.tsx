@@ -21,8 +21,6 @@ import {
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { useQuery } from "@tanstack/react-query";
-import type { Scene } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
   selectedDeviceIds: Set<string>;
@@ -33,19 +31,12 @@ interface RemoteControlToolbarProps {
 export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSelection }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
-  const [showApplyScene, setShowApplyScene] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
   const [lockUrl, setLockUrl] = useState("");
-  const [selectedSceneId, setSelectedSceneId] = useState<string>("");
   const [tabLimit, setTabLimit] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
-
-  // Fetch scenes
-  const { data: scenes = [] } = useQuery<Scene[]>({
-    queryKey: ['/api/scenes'],
-  });
 
   const handleOpenTab = async () => {
     if (!targetUrl) {
@@ -185,44 +176,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
   };
 
 
-  const handleApplyScene = async () => {
-    if (!selectedSceneId) {
-      toast({
-        title: "Error",
-        description: "Please select a scene",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    const scene = scenes.find(s => s.id === selectedSceneId);
-    if (!scene) return;
-
-    setIsLoading(true);
-    try {
-      await apiRequest("POST", "/api/remote/apply-scene", { 
-        sceneId: selectedSceneId,
-        targetDeviceIds: targetDeviceIdsArray
-      });
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
-        : "all students";
-      toast({
-        title: "Success",
-        description: `Applied scene "${scene.sceneName}" to ${target}`,
-      });
-      setSelectedSceneId("");
-      setShowApplyScene(false);
-    } catch (error) {
-      toast({
-        title: "Error",
-        description: "Failed to apply scene",
-        variant: "destructive",
-      });
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   const handleApplyTabLimit = async () => {
     const maxTabs = tabLimit ? parseInt(tabLimit, 10) : null;
@@ -337,16 +290,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
               Unlock Screen
             </Button>
 
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowApplyScene(true)}
-              data-testid="button-apply-scene"
-            >
-              <Layers className="h-4 w-4 mr-2" />
-              Apply Scene
-            </Button>
-
           </div>
         </div>
       </div>
@@ -413,67 +356,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             </Button>
             <Button onClick={handleLockScreen} disabled={isLoading} data-testid="button-submit-lock">
               Lock Screens
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Apply Scene Dialog */}
-      <Dialog open={showApplyScene} onOpenChange={setShowApplyScene}>
-        <DialogContent data-testid="dialog-apply-scene">
-          <DialogHeader>
-            <DialogTitle>Apply Scene to Students</DialogTitle>
-            <DialogDescription>
-              Select a browsing environment to apply. Students can navigate freely within allowed domains (e.g., all pages on ixl.com). Scenes use domain-based matching.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="scene-select">Scene</Label>
-              <Select value={selectedSceneId} onValueChange={setSelectedSceneId}>
-                <SelectTrigger id="scene-select" data-testid="select-scene">
-                  <SelectValue placeholder="Select a scene..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {scenes.length === 0 ? (
-                    <div className="p-2 text-sm text-muted-foreground">
-                      No scenes available. Create scenes in Settings.
-                    </div>
-                  ) : (
-                    scenes.map((scene) => (
-                      <SelectItem key={scene.id} value={scene.id} data-testid={`option-scene-${scene.id}`}>
-                        {scene.sceneName}
-                        {scene.description && (
-                          <span className="text-xs text-muted-foreground ml-2">- {scene.description}</span>
-                        )}
-                      </SelectItem>
-                    ))
-                  )}
-                </SelectContent>
-              </Select>
-              {selectedSceneId && scenes.find(s => s.id === selectedSceneId) && (
-                <div className="mt-2 p-3 rounded-md bg-muted/50 text-sm">
-                  <p className="font-medium mb-1">Scene Details:</p>
-                  {scenes.find(s => s.id === selectedSceneId)?.allowedDomains && scenes.find(s => s.id === selectedSceneId)!.allowedDomains!.length > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      <span className="font-medium">Allowed:</span> {scenes.find(s => s.id === selectedSceneId)!.allowedDomains!.join(", ")}
-                    </p>
-                  )}
-                  {scenes.find(s => s.id === selectedSceneId)?.blockedDomains && scenes.find(s => s.id === selectedSceneId)!.blockedDomains!.length > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      <span className="font-medium">Blocked:</span> {scenes.find(s => s.id === selectedSceneId)!.blockedDomains!.join(", ")}
-                    </p>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowApplyScene(false)} data-testid="button-cancel-apply-scene">
-              Cancel
-            </Button>
-            <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-scene">
-              Apply Scene
             </Button>
           </DialogFooter>
         </DialogContent>

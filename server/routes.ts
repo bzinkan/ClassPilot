@@ -1326,44 +1326,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Apply Scene - Set allowed/blocked domains
-  app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
-    try {
-      const { sceneId, targetDeviceIds } = req.body;
-      
-      if (!sceneId) {
-        return res.status(400).json({ error: "Scene ID is required" });
-      }
-      
-      // Fetch scene from database
-      const scene = await storage.getScene(sceneId);
-      if (!scene) {
-        return res.status(404).json({ error: "Scene not found" });
-      }
-      
-      broadcastToStudents({
-        type: 'remote-control',
-        command: {
-          type: 'apply-scene',
-          data: { 
-            sceneId: scene.id,
-            sceneName: scene.sceneName,
-            allowedDomains: scene.allowedDomains || [],
-            blockedDomains: scene.blockedDomains || [],
-          },
-        },
-      }, undefined, targetDeviceIds);
-      
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
-        : "all students";
-      res.json({ success: true, message: `Applied scene "${scene.sceneName}" to ${target}` });
-    } catch (error) {
-      console.error("Apply scene error:", error);
-      res.status(500).json({ error: "Internal server error" });
-    }
-  });
-  
   // Limit Tabs
   app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
