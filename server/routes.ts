@@ -1274,6 +1274,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
       }, undefined, targetDeviceIds);
       
+      // Immediately update StudentStatus for instant UI feedback
+      const deviceIdsToUpdate = targetDeviceIds && targetDeviceIds.length > 0 
+        ? targetDeviceIds 
+        : (await storage.getAllDevices()).map(d => d.deviceId);
+      
+      for (const deviceId of deviceIdsToUpdate) {
+        const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+        if (activeStudent) {
+          const status = await storage.getStudentStatus(activeStudent.id);
+          if (status) {
+            status.screenLocked = true;
+            await storage.updateStudentStatus(status);
+          }
+        }
+      }
+      
+      // Notify teachers to update UI immediately
+      broadcastToTeachers({
+        type: 'student-update',
+      });
+      
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
         : "all students";
@@ -1296,6 +1317,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           data: {},
         },
       }, undefined, targetDeviceIds);
+      
+      // Immediately update StudentStatus for instant UI feedback
+      const deviceIdsToUpdate = targetDeviceIds && targetDeviceIds.length > 0 
+        ? targetDeviceIds 
+        : (await storage.getAllDevices()).map(d => d.deviceId);
+      
+      for (const deviceId of deviceIdsToUpdate) {
+        const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+        if (activeStudent) {
+          const status = await storage.getStudentStatus(activeStudent.id);
+          if (status) {
+            status.screenLocked = false;
+            await storage.updateStudentStatus(status);
+          }
+        }
+      }
+      
+      // Notify teachers to update UI immediately
+      broadcastToTeachers({
+        type: 'student-update',
+      });
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
