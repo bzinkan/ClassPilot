@@ -199,7 +199,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
             client.role = 'student';
             client.deviceId = message.deviceId;
             client.authenticated = true;
-            ws.send(JSON.stringify({ type: 'auth-success', role: 'student' }));
+            
+            // Get school settings and send maxTabsPerStudent to extension
+            try {
+              const settings = await storage.getSettings();
+              // Always send maxTabsPerStudent (including null for unlimited)
+              // Parse the value if it exists, otherwise use null
+              let maxTabs: number | null = null;
+              if (settings?.maxTabsPerStudent !== null && settings?.maxTabsPerStudent !== undefined) {
+                const parsed = parseInt(settings.maxTabsPerStudent, 10);
+                // Only use parsed value if it's a valid positive integer
+                // Treat 0, negative, or invalid as unlimited (null)
+                maxTabs = (!isNaN(parsed) && parsed > 0) ? parsed : null;
+              }
+              
+              ws.send(JSON.stringify({ 
+                type: 'auth-success', 
+                role: 'student',
+                settings: {
+                  maxTabsPerStudent: maxTabs
+                }
+              }));
+            } catch (error) {
+              console.error('Error fetching settings for student auth:', error);
+              // Even on error, send null to indicate no limit
+              ws.send(JSON.stringify({ 
+                type: 'auth-success', 
+                role: 'student',
+                settings: {
+                  maxTabsPerStudent: null
+                }
+              }));
+            }
           }
         }
 

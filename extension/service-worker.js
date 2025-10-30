@@ -816,6 +816,53 @@ function connectWebSocket() {
       const message = JSON.parse(event.data);
       console.log('WebSocket message:', message);
       
+      // Handle authentication success with settings
+      if (message.type === 'auth-success') {
+        console.log('WebSocket authenticated successfully');
+        
+        // Always update maxTabsPerStudent setting (including null for unlimited)
+        if (message.settings && message.settings.hasOwnProperty('maxTabsPerStudent')) {
+          const newLimit = message.settings.maxTabsPerStudent;
+          
+          // Update currentMaxTabs (null or non-positive means unlimited)
+          // Treat 0 and negative as unlimited by converting to null
+          currentMaxTabs = (newLimit !== null && newLimit > 0) ? newLimit : null;
+          console.log('Applied tab limit from settings:', currentMaxTabs === null ? 'unlimited' : currentMaxTabs);
+          
+          // Immediately enforce the limit if set (null or non-positive means no limit)
+          if (currentMaxTabs !== null && currentMaxTabs > 0) {
+            (async () => {
+              try {
+                const tabs = await chrome.tabs.query({});
+                if (tabs.length > currentMaxTabs) {
+                  // Close oldest tabs first (keep most recent)
+                  const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
+                  for (const tab of tabsToClose) {
+                    try {
+                      // Only close if it's not a protected chrome:// URL and has a valid id
+                      if (tab.id && !tab.url?.startsWith('chrome://')) {
+                        await chrome.tabs.remove(tab.id);
+                      }
+                    } catch (tabError) {
+                      console.warn('Failed to close tab:', tab.id, tabError);
+                      // Continue closing other tabs even if one fails
+                    }
+                  }
+                  
+                  safeNotify({
+                    title: 'Tab Limit Enforced',
+                    message: `Your teacher has set a limit of ${currentMaxTabs} tab${currentMaxTabs === 1 ? '' : 's'}. Extra tabs have been closed.`,
+                    priority: 1,
+                  });
+                }
+              } catch (error) {
+                console.error('Error enforcing tab limit:', error);
+              }
+            })();
+          }
+        }
+      }
+      
       // Handle WebRTC signaling
       if (message.type === 'signal') {
         chrome.runtime.sendMessage({
