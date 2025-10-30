@@ -547,7 +547,7 @@ async function handleChatMessage(message) {
   // Also show browser notification as backup
   chrome.notifications.create({
     type: 'basic',
-    iconUrl: 'icons/icon48.png',
+    iconUrl: chrome.runtime.getURL('icons/icon48.png'),
     title: `Message from ${message.fromName || 'Teacher'}`,
     message: message.message,
     priority: 2,
@@ -583,7 +583,7 @@ async function handleCheckInRequest(request) {
   // Show notification with check-in question
   chrome.notifications.create({
     type: 'basic',
-    iconUrl: 'icons/icon48.png',
+    iconUrl: chrome.runtime.getURL('icons/icon48.png'),
     title: 'Teacher Check-in',
     message: request.question,
     priority: 2,
@@ -646,7 +646,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       // Show warning notification
       chrome.notifications.create({
         type: 'basic',
-        iconUrl: 'icons/icon48.png',
+        iconUrl: chrome.runtime.getURL('icons/icon48.png'),
         title: 'Navigation Blocked',
         message: blockedMessage,
         priority: 1,
@@ -666,7 +666,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       
       chrome.notifications.create({
         type: 'basic',
-        iconUrl: 'icons/icon48.png',
+        iconUrl: chrome.runtime.getURL('icons/icon48.png'),
         title: 'Tab Limit Reached',
         message: `You can only have ${currentMaxTabs} tabs open at a time.`,
         priority: 1,
