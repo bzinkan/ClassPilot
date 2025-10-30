@@ -21,6 +21,25 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ArrowLeft, Download, Shield, Clock, AlertCircle, Layers, Plus, Pencil, Trash2, Star, Users } from "lucide-react";
 import type { Settings as SettingsType, Scene, StudentGroup } from "@shared/schema";
 
+// Helper function to normalize domain names
+function normalizeDomain(domain: string): string {
+  let normalized = domain.trim().toLowerCase();
+  
+  // Remove protocol if present
+  normalized = normalized.replace(/^https?:\/\//i, '');
+  
+  // Remove www. prefix
+  normalized = normalized.replace(/^www\./i, '');
+  
+  // Remove paths, query params, and hash
+  normalized = normalized.split('/')[0].split('?')[0].split('#')[0];
+  
+  // Remove port if present
+  normalized = normalized.split(':')[0];
+  
+  return normalized;
+}
+
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
   wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
@@ -119,11 +138,11 @@ export default function Settings() {
         maxTabsPerStudent: data.maxTabsPerStudent || null,
         blockedDomains: data.blockedDomains
           .split(",")
-          .map((d) => d.trim())
+          .map((d) => normalizeDomain(d))
           .filter(Boolean),
         allowedDomains: data.allowedDomains
           .split(",")
-          .map((d) => d.trim())
+          .map((d) => normalizeDomain(d))
           .filter(Boolean),
         ipAllowlist: data.ipAllowlist
           .split(",")
@@ -157,8 +176,8 @@ export default function Settings() {
         schoolId,
         sceneName,
         description: sceneDescription || undefined,
-        allowedDomains: sceneAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
-        blockedDomains: sceneBlockedDomains.split(",").map(d => d.trim()).filter(Boolean),
+        allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+        blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -178,8 +197,8 @@ export default function Settings() {
       return await apiRequest("PATCH", `/api/scenes/${editingScene.id}`, {
         sceneName,
         description: sceneDescription || undefined,
-        allowedDomains: sceneAllowedDomains.split(",").map(d => d.trim()).filter(Boolean),
-        blockedDomains: sceneBlockedDomains.split(",").map(d => d.trim()).filter(Boolean),
+        allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+        blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
