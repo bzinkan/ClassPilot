@@ -17,6 +17,8 @@ I like functional programming.
 ### UI/UX Decisions
 The frontend uses React and TypeScript with Tailwind CSS for styling, supporting dark/light modes. The dashboard features a grid-based layout displaying student activity in real-time, categorized into Off-Task, On-Task, Idle, and Offline sections. Detailed student information is available via a drawer, and admin functionalities are in a dedicated interface. Roster management is a separate page for improved UX.
 
+**Per-Student Targeting (Completed)**: All remote control commands now support targeting specific students via checkbox selection. Student tiles include checkboxes, and the toolbar displays selection count with "Select All" and "Clear Selection" buttons. When students are selected, commands apply only to those students; otherwise, they broadcast to all students. The UI clearly indicates targeting scope with "Target: X selected" or "Target: All students" badges.
+
 ### Technical Implementations
 The system employs a full-stack architecture:
 -   **Frontend**: React, TypeScript, TanStack Query for server state management, and WebSockets for real-time updates.
