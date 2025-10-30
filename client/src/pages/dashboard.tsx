@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -300,7 +300,7 @@ export default function Dashboard() {
   const studentsInGrade = students.filter((s) => s.gradeLevel === selectedGrade);
   const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
   const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
-  const sharingCount = studentsInGrade.filter((s) => s.isSharing).length;
+  const offlineCount = studentsInGrade.filter((s) => s.status === 'offline').length;
   const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
 
   // Check for blocked domain violations and show notifications
@@ -573,14 +573,14 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
-          <div className="p-5 rounded-xl bg-gradient-to-br from-blue-50 to-cyan-50 dark:from-blue-950/30 dark:to-cyan-950/30 border border-blue-200 dark:border-blue-800/50 shadow-lg hover-elevate transition-all duration-300">
+          <div className="p-5 rounded-xl bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-950/30 dark:to-slate-950/30 border border-gray-200 dark:border-gray-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-blue-500 flex items-center justify-center shadow-md">
-                <Monitor className="h-7 w-7 text-white" />
+              <div className="h-14 w-14 rounded-xl bg-gray-500 flex items-center justify-center shadow-md">
+                <WifiOff className="h-7 w-7 text-white" />
               </div>
               <div>
-                <p className="text-3xl font-bold text-blue-700 dark:text-blue-400" data-testid="text-sharing-count">{sharingCount}</p>
-                <p className="text-sm text-blue-600 dark:text-blue-500 font-medium">Sharing Screen</p>
+                <p className="text-3xl font-bold text-gray-700 dark:text-gray-400" data-testid="text-offline-count">{offlineCount}</p>
+                <p className="text-sm text-gray-600 dark:text-gray-500 font-medium">Offline</p>
               </div>
             </div>
           </div>
