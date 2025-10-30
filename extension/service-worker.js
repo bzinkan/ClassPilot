@@ -510,7 +510,37 @@ async function handleRemoteControl(command) {
 async function handleChatMessage(message) {
   console.log('Chat message received:', message);
   
-  // Show notification for messages
+  // Show full-screen modal on all active tabs
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    // Skip chrome:// URLs and extension pages
+    if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+      try {
+        if (message.type === 'announcement') {
+          chrome.tabs.sendMessage(tab.id, {
+            type: 'show-announcement',
+            data: {
+              message: message.message,
+              timestamp: message.timestamp || Date.now(),
+            },
+          });
+        } else {
+          chrome.tabs.sendMessage(tab.id, {
+            type: 'show-message',
+            data: {
+              message: message.message,
+              fromName: message.fromName || 'Teacher',
+              timestamp: message.timestamp || Date.now(),
+            },
+          });
+        }
+      } catch (error) {
+        console.log('Could not send message to tab:', tab.id, error);
+      }
+    }
+  }
+  
+  // Also show browser notification as backup
   chrome.notifications.create({
     type: 'basic',
     iconUrl: 'icons/icon48.png',
