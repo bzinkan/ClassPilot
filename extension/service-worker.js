@@ -448,39 +448,6 @@ async function handleRemoteControl(command) {
         console.log('Screen unlocked');
         break;
         
-      case 'apply-scene':
-        // Store scene settings for blocking logic
-        const sceneData = {
-          sceneId: command.data.sceneId,
-          sceneName: command.data.sceneName,
-          allowedDomains: command.data.allowedDomains || [],
-          blockedDomains: command.data.blockedDomains || [],
-        };
-        
-        await chrome.storage.local.set({
-          currentScene: sceneData,
-        });
-        
-        // Build notification message
-        let message = `Scene "${sceneData.sceneName}" applied. `;
-        if (sceneData.allowedDomains.length > 0) {
-          message += `You can only browse: ${sceneData.allowedDomains.join(', ')}`;
-        } else if (sceneData.blockedDomains.length > 0) {
-          message += `Blocked sites: ${sceneData.blockedDomains.join(', ')}`;
-        }
-        
-        // Show notification
-        chrome.notifications.create({
-          type: 'basic',
-          iconUrl: 'icons/icon48.png',
-          title: 'Browsing Environment Applied',
-          message: message,
-          priority: 1,
-        });
-        
-        console.log('Applied scene:', sceneData.sceneName, sceneData);
-        break;
-        
       case 'limit-tabs':
         currentMaxTabs = command.data.maxTabs;
         
@@ -622,7 +589,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   const targetDomain = extractDomain(details.url);
   if (!targetDomain) return;
   
-  // 1. Check screen lock (highest priority)
+  // Check screen lock
   if (screenLocked && lockedDomain) {
     // Check if navigating to a different domain
     if (!isOnSameDomain(details.url, lockedDomain)) {
@@ -638,59 +605,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
         message: `You can only browse within ${lockedDomain}`,
         priority: 1,
       });
-      return; // Stop further checks
-    }
-  }
-  
-  // 2. Check scene restrictions (if no screen lock active)
-  if (!screenLocked) {
-    const stored = await chrome.storage.local.get(['currentScene']);
-    const currentScene = stored.currentScene;
-    
-    if (currentScene) {
-      const { allowedDomains = [], blockedDomains = [] } = currentScene;
-      
-      // Check blocked domains first (takes precedence)
-      if (blockedDomains.length > 0) {
-        const isBlocked = blockedDomains.some(blockedDomain => {
-          return isOnSameDomain(details.url, blockedDomain);
-        });
-        
-        if (isBlocked) {
-          console.log('Blocked navigation to:', details.url, '- domain is blocked by scene');
-          chrome.tabs.update(details.tabId, { url: 'about:blank' });
-          
-          chrome.notifications.create({
-            type: 'basic',
-            iconUrl: 'icons/icon48.png',
-            title: 'Website Blocked',
-            message: `${targetDomain} is blocked by your teacher`,
-            priority: 1,
-          });
-          return;
-        }
-      }
-      
-      // Check allowed domains (if specified)
-      if (allowedDomains.length > 0) {
-        const isAllowed = allowedDomains.some(allowedDomain => {
-          return isOnSameDomain(details.url, allowedDomain);
-        });
-        
-        if (!isAllowed) {
-          console.log('Blocked navigation to:', details.url, '- not in allowed domains');
-          chrome.tabs.update(details.tabId, { url: 'about:blank' });
-          
-          chrome.notifications.create({
-            type: 'basic',
-            iconUrl: 'icons/icon48.png',
-            title: 'Website Not Allowed',
-            message: `${targetDomain} is not in the allowed list`,
-            priority: 1,
-          });
-          return;
-        }
-      }
+      return;
     }
   }
 });
