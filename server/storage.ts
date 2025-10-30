@@ -425,7 +425,13 @@ export class MemStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
-        status.screenLocked = heartbeat.screenLocked ?? false;
+        
+        // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
+        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
+        if (!serverSetRecently) {
+          status.screenLocked = heartbeat.screenLocked ?? false;
+        }
+        
         status.isSharing = heartbeat.isSharing ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
@@ -1051,7 +1057,13 @@ export class DatabaseStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
-        status.screenLocked = heartbeat.screenLocked ?? false;
+        
+        // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
+        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
+        if (!serverSetRecently) {
+          status.screenLocked = heartbeat.screenLocked ?? false;
+        }
+        
         status.isSharing = heartbeat.isSharing ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);

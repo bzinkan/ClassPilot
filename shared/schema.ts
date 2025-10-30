@@ -65,6 +65,7 @@ export interface StudentStatus {
   lastSeenAt: number;
   isSharing: boolean;
   screenLocked: boolean;
+  screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   status: 'online' | 'idle' | 'offline';
 }
 

@@ -1279,12 +1279,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? targetDeviceIds 
         : (await storage.getAllDevices()).map(d => d.deviceId);
       
+      const now = Date.now();
       for (const deviceId of deviceIdsToUpdate) {
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
           const status = await storage.getStudentStatus(activeStudent.id);
           if (status) {
             status.screenLocked = true;
+            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
             await storage.updateStudentStatus(status);
           }
         }
@@ -1323,12 +1325,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         ? targetDeviceIds 
         : (await storage.getAllDevices()).map(d => d.deviceId);
       
+      const now = Date.now();
       for (const deviceId of deviceIdsToUpdate) {
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
           const status = await storage.getStudentStatus(activeStudent.id);
           if (status) {
             status.screenLocked = false;
+            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
             await storage.updateStudentStatus(status);
           }
         }
