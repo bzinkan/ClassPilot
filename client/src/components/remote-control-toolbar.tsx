@@ -503,7 +503,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
           <DialogHeader>
             <DialogTitle>Apply Scene to Students</DialogTitle>
             <DialogDescription>
-              Select a browsing environment to apply to all students. This will control which websites they can access.
+              Select a browsing environment to apply. Students can navigate freely within allowed domains (e.g., all pages on ixl.com). Scenes use domain-based matching.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">

@@ -886,7 +886,7 @@ export default function Settings() {
                 data-testid="input-scene-allowed-domains"
               />
               <p className="text-xs text-muted-foreground">
-                Comma-separated list of allowed domains. Students can only visit these sites.
+                Comma-separated domains. Students can browse all pages within these domains (e.g., ixl.com allows ixl.com/math, ixl.com/science).
               </p>
             </div>
             <div className="space-y-2">
@@ -899,7 +899,7 @@ export default function Settings() {
                 data-testid="input-scene-blocked-domains"
               />
               <p className="text-xs text-muted-foreground">
-                Comma-separated list of blocked domains. Students cannot visit these sites.
+                Comma-separated domains. Students cannot access any page on these domains (blocks entire site).
               </p>
             </div>
           </div>
