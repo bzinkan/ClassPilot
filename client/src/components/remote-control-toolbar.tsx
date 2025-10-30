@@ -54,7 +54,7 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/open-tab", "POST", { url: targetUrl });
+      await apiRequest("POST", "/api/remote/open-tab", { url: targetUrl });
       toast({
         title: "Success",
         description: `Opened ${targetUrl} on all student devices`,
@@ -75,7 +75,7 @@ export function RemoteControlToolbar() {
   const handleCloseTabs = async () => {
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/close-tabs", "POST", { closeAll: true });
+      await apiRequest("POST", "/api/remote/close-tabs", { closeAll: true });
       toast({
         title: "Success",
         description: "Closed all non-essential tabs",
@@ -103,7 +103,7 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/lock-screen", "POST", { url: lockUrl });
+      await apiRequest("POST", "/api/remote/lock-screen", { url: lockUrl });
       toast({
         title: "Success",
         description: `Locked all screens to ${lockUrl}`,
@@ -124,7 +124,7 @@ export function RemoteControlToolbar() {
   const handleUnlockScreen = async () => {
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/unlock-screen", "POST", {});
+      await apiRequest("POST", "/api/remote/unlock-screen", {});
       toast({
         title: "Success",
         description: "Unlocked all screens",
@@ -152,7 +152,7 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("/api/chat/announcement", "POST", { message: announcement });
+      await apiRequest("POST", "/api/chat/announcement", { message: announcement });
       toast({
         title: "Success",
         description: "Sent announcement to all students",
@@ -185,7 +185,7 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/apply-scene", "POST", { sceneId: selectedSceneId });
+      await apiRequest("POST", "/api/remote/apply-scene", { sceneId: selectedSceneId });
       toast({
         title: "Success",
         description: `Applied scene "${scene.sceneName}" to all students`,
@@ -217,7 +217,7 @@ export function RemoteControlToolbar() {
 
     setIsLoading(true);
     try {
-      await apiRequest("/api/remote/limit-tabs", "POST", { maxTabs });
+      await apiRequest("POST", "/api/remote/limit-tabs", { maxTabs });
       toast({
         title: "Success",
         description: maxTabs 
