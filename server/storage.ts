@@ -383,6 +383,7 @@ export class MemStorage implements IStorage {
       activeTabTitle: insertHeartbeat.activeTabTitle,
       activeTabUrl: insertHeartbeat.activeTabUrl,
       favicon: insertHeartbeat.favicon ?? null,
+      screenLocked: insertHeartbeat.screenLocked ?? false,
       timestamp: new Date(),
     };
     this.heartbeats.push(heartbeat);
@@ -408,6 +409,7 @@ export class MemStorage implements IStorage {
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
             isSharing: false,
+            screenLocked: heartbeat.screenLocked ?? false,
             status: 'online',
           };
           this.studentStatuses.set(heartbeat.studentId, status);
@@ -421,6 +423,7 @@ export class MemStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
+        status.screenLocked = heartbeat.screenLocked ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);
@@ -1029,6 +1032,7 @@ export class DatabaseStorage implements IStorage {
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
             isSharing: false,
+            screenLocked: heartbeat.screenLocked ?? false,
             status: 'online',
           };
           this.studentStatuses.set(heartbeat.studentId, status);
@@ -1042,6 +1046,7 @@ export class DatabaseStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle;
         status.activeTabUrl = heartbeat.activeTabUrl;
         status.favicon = heartbeat.favicon ?? undefined;
+        status.screenLocked = heartbeat.screenLocked ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         this.studentStatuses.set(heartbeat.studentId, status);
