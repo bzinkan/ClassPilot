@@ -93,18 +93,24 @@ async function ensureRegistered() {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
   ensureRegistered();
+  // Run health check immediately to ensure everything starts
+  setTimeout(() => healthCheck(), 2000);
 });
 
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
     ensureRegistered();
+    // Run health check immediately to ensure everything starts
+    setTimeout(() => healthCheck(), 2000);
   });
 }
 
 // Run immediately on service worker load
 (async () => {
   await ensureRegistered();
+  // Run initial health check after a short delay to ensure storage is loaded
+  setTimeout(() => healthCheck(), 2000);
 })();
 
 // Centralized, safe notifications (never throw, never produce red errors)
@@ -222,6 +228,13 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (r
     startHeartbeat();
     connectWebSocket();
   }
+  
+  // Start health check alarm (runs every 60 seconds to ensure extension stays alive)
+  // This recovers from service worker restarts without manual reload
+  chrome.alarms.create('health-check', {
+    periodInMinutes: 1, // 60 seconds (Chrome minimum)
+  });
+  console.log('[Init] Health check alarm started');
 });
 
 // Generate unique device ID if not exists
@@ -440,7 +453,59 @@ function stopHeartbeat() {
   chrome.alarms.clear('heartbeat');
   chrome.alarms.clear('heartbeat-retry');
   chrome.alarms.clear('ws-reconnect'); // Also clear WebSocket reconnection alarm
+  chrome.alarms.clear('health-check');
   console.log('Heartbeat stopped');
+}
+
+// Health check: ensures extension stays alive after service worker restarts
+async function healthCheck() {
+  console.log('[Health Check] Running...');
+  
+  try {
+    // Check if we have a deviceId - if not, try to initialize
+    if (!CONFIG.deviceId) {
+      console.log('[Health Check] No deviceId found, loading from storage...');
+      const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail']);
+      
+      if (stored.config) {
+        CONFIG = { ...CONFIG, ...stored.config };
+      }
+      if (stored.deviceId) {
+        CONFIG.deviceId = stored.deviceId;
+      }
+      if (stored.activeStudentId) {
+        CONFIG.activeStudentId = stored.activeStudentId;
+      }
+      if (stored.studentEmail) {
+        CONFIG.studentEmail = stored.studentEmail;
+      }
+      
+      console.log('[Health Check] Loaded config:', CONFIG);
+    }
+    
+    // Only proceed if we have a deviceId
+    if (!CONFIG.deviceId) {
+      console.log('[Health Check] No deviceId - extension not yet configured');
+      return;
+    }
+    
+    // Check if heartbeat alarm is scheduled
+    const heartbeatAlarm = await chrome.alarms.get('heartbeat');
+    if (!heartbeatAlarm) {
+      console.log('[Health Check] Heartbeat not running, restarting...');
+      startHeartbeat();
+    }
+    
+    // Check WebSocket connection
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      console.log('[Health Check] WebSocket not connected, reconnecting...');
+      connectWebSocket();
+    }
+    
+    console.log('[Health Check] Complete - extension healthy');
+  } catch (error) {
+    console.error('[Health Check] Error:', error);
+  }
 }
 
 // Alarm listener for heartbeat and WebSocket reconnection
@@ -457,6 +522,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
     console.log('WebSocket reconnection alarm triggered');
     connectWebSocket();
+  } else if (alarm.name === 'health-check') {
+    // Periodic health check to ensure heartbeat and WebSocket are running
+    // This recovers from service worker restarts without needing manual reload
+    healthCheck();
   }
 });
 
