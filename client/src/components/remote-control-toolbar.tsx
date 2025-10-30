@@ -492,16 +492,19 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
                   )}
                 </SelectContent>
               </Select>
-              {selectedSceneId && scenes.find(s => s.id === selectedSceneId) && (
-                <div className="mt-2 p-3 bg-muted rounded-md">
-                  <p className="text-sm font-medium mb-1">Allowed Domains:</p>
-                  <ul className="text-sm text-muted-foreground list-disc list-inside">
-                    {scenes.find(s => s.id === selectedSceneId)?.allowedDomains.map((domain, index) => (
-                      <li key={index}>{domain}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+              {selectedSceneId && (() => {
+                const selectedScene = scenes.find(s => s.id === selectedSceneId);
+                return selectedScene ? (
+                  <div className="mt-2 p-3 bg-muted rounded-md">
+                    <p className="text-sm font-medium mb-1">Allowed Domains:</p>
+                    <ul className="text-sm text-muted-foreground list-disc list-inside">
+                      {selectedScene.allowedDomains.map((domain, index) => (
+                        <li key={index}>{domain}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null;
+              })()}
             </div>
           </div>
           <DialogFooter>

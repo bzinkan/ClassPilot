@@ -30,15 +30,17 @@ The system employs a full-stack architecture:
 -   **Shared Chromebook Support**: Full support for multiple students on the same device, with automatic student detection using Google Workspace email and student-specific activity tracking.
 -   **Teacher Dashboard**: Displays live student activity, manages class rosters, and configures data retention. Features customizable grade tabs, in-dashboard grade management, and options to delete students/devices.
 -   **Roster Management Page**: A dedicated page for comprehensive device and student assignment management, including grade-level filtering, assigning multiple students per device, editing student and device information, and managing deletions.
--   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Classifies students as Online, Idle, or Offline based on heartbeat.
+-   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Classifies students as Online, Idle, or Offline based on heartbeat. Displays lock status icon on student tiles.
 -   **Website Duration Tracking**: Calculates and displays time spent on websites by grouping consecutive heartbeats into sessions.
 -   **Opt-In Screen Sharing**: Students explicitly consent to screen sharing with clear visual indicators.
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:
     -   **Remote Tab Control**: Open tabs, close tabs, lock/unlock screens.
+    -   **Apply Scenes**: Apply predefined scenes with multiple allowed domains to restrict student browsing to specific educational websites.
     -   **Student Groups**: Organize students for targeted instruction.
     -   **Tab Limiting**: Configure maximum tabs per student.
+    -   **Per-Student Targeting**: All remote commands support targeting specific students via checkbox selection.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, no collection of sensitive personal input data.
