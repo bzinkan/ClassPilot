@@ -89,6 +89,10 @@ export function StudentDetailDrawer({
       return;
     }
 
+    // Queue for ICE candidates received before remote description is set
+    let pendingIceCandidates: RTCIceCandidateInit[] = [];
+    let remoteDescriptionSet = false;
+
     // Setup WebSocket for signaling
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
@@ -153,30 +157,58 @@ export function StudentDetailDrawer({
             }
 
             // Handle the offer
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal.data));
-            const answer = await peerConnectionRef.current.createAnswer();
-            await peerConnectionRef.current.setLocalDescription(answer);
-            
-            // Send answer back to student
-            ws.send(JSON.stringify({
-              type: 'signal',
-              data: {
-                type: 'answer',
-                data: answer,
-                deviceId: student.deviceId,
-              },
-            }));
-            
-            console.log('Sent WebRTC answer to student');
+            try {
+              await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal.data));
+              remoteDescriptionSet = true;
+              
+              const answer = await peerConnectionRef.current.createAnswer();
+              await peerConnectionRef.current.setLocalDescription(answer);
+              
+              // Send answer back to student
+              ws.send(JSON.stringify({
+                type: 'signal',
+                data: {
+                  type: 'answer',
+                  data: answer,
+                  deviceId: student.deviceId,
+                },
+              }));
+              
+              console.log('Sent WebRTC answer to student');
+              
+              // Drain queued ICE candidates
+              while (pendingIceCandidates.length > 0) {
+                const candidate = pendingIceCandidates.shift();
+                if (candidate) {
+                  try {
+                    await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+                    console.log('Added queued ICE candidate');
+                  } catch (err) {
+                    console.warn('Failed to add queued ICE candidate:', err);
+                  }
+                }
+              }
+            } catch (err) {
+              console.warn('Failed to handle WebRTC offer:', err);
+            }
             
           } else if (signal.type === 'ice-candidate' && peerConnectionRef.current) {
-            // Add ICE candidate
-            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal.data));
-            console.log('Added ICE candidate from student');
+            // Queue ICE candidates until remote description is set
+            if (!remoteDescriptionSet) {
+              pendingIceCandidates.push(signal.data);
+              console.log('Queued ICE candidate (waiting for remote description)');
+            } else {
+              try {
+                await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal.data));
+                console.log('Added ICE candidate from student');
+              } catch (err) {
+                console.warn('Failed to add ICE candidate:', err);
+              }
+            }
           }
         }
       } catch (error) {
-        console.error('WebRTC signaling error:', error);
+        console.warn('WebRTC signaling error:', error);
       }
     };
 

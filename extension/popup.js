@@ -312,7 +312,15 @@ function stopScreenShare() {
   console.log('Screen sharing stopped');
 }
 
+// Queue for ICE candidates received before remote description is set
+let pendingIceCandidates = [];
+let remoteDescriptionSet = false;
+
 function setupWebRTC(stream) {
+  // Reset state
+  pendingIceCandidates = [];
+  remoteDescriptionSet = false;
+  
   // Create peer connection
   peerConnection = new RTCPeerConnection({
     iceServers: [
@@ -351,20 +359,49 @@ function setupWebRTC(stream) {
         data: offer,
       },
     });
+  }).catch(err => {
+    console.warn('WebRTC offer creation failed:', err);
   });
   
   console.log('WebRTC setup complete');
 }
 
 // Listen for WebRTC signals from background
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener(async (message, sender, sendResponse) => {
   if (message.type === 'webrtc-signal') {
     const signal = message.data;
     
     if (signal.type === 'answer' && peerConnection) {
-      peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data));
+      try {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.data));
+        remoteDescriptionSet = true;
+        
+        // Drain queued ICE candidates
+        while (pendingIceCandidates.length > 0) {
+          const candidate = pendingIceCandidates.shift();
+          try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+            console.log('Added queued ICE candidate');
+          } catch (err) {
+            console.warn('Failed to add queued ICE candidate:', err);
+          }
+        }
+      } catch (err) {
+        console.warn('Failed to set remote description:', err);
+      }
     } else if (signal.type === 'ice-candidate' && peerConnection) {
-      peerConnection.addIceCandidate(new RTCIceCandidate(signal.data));
+      // Queue ICE candidates until remote description is set
+      if (!remoteDescriptionSet) {
+        pendingIceCandidates.push(signal.data);
+        console.log('Queued ICE candidate (waiting for remote description)');
+      } else {
+        try {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(signal.data));
+          console.log('Added ICE candidate');
+        } catch (err) {
+          console.warn('Failed to add ICE candidate:', err);
+        }
+      }
     }
     
     sendResponse({ success: true });

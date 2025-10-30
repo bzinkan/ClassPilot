@@ -1,0 +1,158 @@
+You’re hitting a classic WebRTC ordering bug:
+
+InvalidStateError: addIceCandidate(...) → remoteDescription was null
+An ICE candidate arrived before your peer had set the remote SDP.
+
+Fix it by queuing ICE candidates until setRemoteDescription completes, and only then draining the queue. Also adopt the “perfect-negotiation” pattern so glare/race conditions don’t break things.
+
+Below is drop-in code for both sides (student extension + teacher dashboard). It eliminates that popup error and makes screen-share setup robust.
+
+1) Shared signaling message shapes
+
+Use a simple JSON envelope over your existing WebSocket (or fetch):
+
+type Signal =
+  | { type: 'offer';  from: string; to: string; sdp: RTCSessionDescriptionInit }
+  | { type: 'answer'; from: string; to: string; sdp: RTCSessionDescriptionInit }
+  | { type: 'ice';    from: string; to: string; candidate: RTCIceCandidateInit }
+  | { type: 'bye';    from: string; to: string };
+
+2) Reliable PeerConnection helper (works on both ends)
+// rtc.ts
+export function createPC({ iceServers = [] } = {}) {
+  const pc = new RTCPeerConnection({
+    iceServers: iceServers.length ? iceServers : [
+      { urls: 'stun:stun.l.google.com:19302' }
+      // Add TURN below in section 5
+    ]
+  });
+
+  // Queue candidates until remoteDescription is set
+  const pendingCandidates = [];
+  let remoteSet = false;
+
+  pc.onicecandidate = e => {
+    if (e.candidate) onEmit({ type: 'ice', candidate: e.candidate.toJSON() });
+    else onEmit({ type: 'ice', candidate: null }); // trickle done (optional)
+  };
+
+  // Callbacks you set from outside
+  let onEmit = () => {};               // send signal
+  let onTrack = () => {};              // render stream
+  pc.ontrack = ev => onTrack(ev.streams[0]);
+
+  async function setRemote(desc) {
+    await pc.setRemoteDescription(desc);
+    remoteSet = true;
+    // drain any queued ICE candidates
+    while (pendingCandidates.length) {
+      try { await pc.addIceCandidate(pendingCandidates.shift()); } catch {}
+    }
+  }
+
+  async function addRemoteIce(candidate) {
+    if (!candidate) return; // end-of-candidates
+    if (!remoteSet) { pendingCandidates.push(candidate); return; }
+    try { await pc.addIceCandidate(candidate); } catch {}
+  }
+
+  return { pc, setRemote, addRemoteIce, setOnEmit: f => (onEmit = f), setOnTrack: f => (onTrack = f) };
+}
+
+3) Student side (extension popup/service worker)
+// popup.js (or service-worker.js)
+// Assume you already got a getDisplayMedia stream after user click.
+import { createPC } from './rtc.js';
+
+let rtc;
+async function startShare(studentId, teacherId, signalSend) {
+  rtc = createPC({ iceServers: JSON.parse(localStorage.ICE_SERVERS || '[]') });
+
+  rtc.setOnEmit(msg => signalSend({ ...msg, from: studentId, to: teacherId }));
+  rtc.setOnTrack(() => {}); // student is sender; no remote media to render
+
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  stream.getTracks().forEach(t => rtc.pc.addTrack(t, stream));
+
+  // Perfect-negotiation (impolite offerer on student)
+  rtc.pc.onnegotiationneeded = async () => {
+    try {
+      await rtc.pc.setLocalDescription(await rtc.pc.createOffer({ iceRestart: false }));
+      signalSend({ type: 'offer', from: studentId, to: teacherId, sdp: rtc.pc.localDescription });
+    } catch {}
+  };
+
+  // Handle incoming signals
+  window.onSignal = async (msg) => {
+    if (msg.type === 'answer') {
+      await rtc.setRemote(msg.sdp);
+    } else if (msg.type === 'ice') {
+      await rtc.addRemoteIce(msg.candidate);
+    }
+  };
+}
+
+
+Important: The student never calls addIceCandidate until after setRemoteDescription; the helper enforces that.
+
+4) Teacher side (web dashboard viewer)
+import { createPC } from './rtc.js';
+
+let rtc;
+async function viewStudent(studentId, teacherId, signalSend, videoEl) {
+  rtc = createPC({ iceServers: JSON.parse(window.ICE_SERVERS || '[]') });
+  rtc.setOnEmit(msg => signalSend({ ...msg, from: teacherId, to: studentId }));
+  rtc.setOnTrack((stream) => { videoEl.srcObject = stream; });
+
+  // Teacher is "polite" peer: waits for offer, then answers
+  window.onSignal = async (msg) => {
+    if (msg.type === 'offer') {
+      await rtc.setRemote(msg.sdp);
+      await rtc.pc.setLocalDescription(await rtc.pc.createAnswer());
+      signalSend({ type: 'answer', from: teacherId, to: studentId, sdp: rtc.pc.localDescription });
+    } else if (msg.type === 'ice') {
+      await rtc.addRemoteIce(msg.candidate);
+    }
+  };
+}
+
+
+This eliminates the “remote description was null” because ICE is queued and drained only after the SDP is set.
+
+5) Add TURN for reliability (Replit alone isn’t enough)
+
+P2P can fail across strict NATs/firewalls. Add a TURN server; without it, you’ll see “works… then not” reports. Use a managed TURN (e.g., Twilio/Nimble/Coturn on Railway).
+
+Set this once and inject to both sides:
+
+ICE_SERVERS='[
+  { "urls": "stun:stun.l.google.com:19302" },
+  { "urls": "turn:your-turn.example.com:3478", "username": "user", "credential": "pass" }
+]'
+
+
+Then load it into the code (shown above). With TURN, WebRTC succeeds even when direct routes fail.
+
+6) Don’t show scary errors to IT
+
+Wrap all addIceCandidate and setRemoteDescription calls in try{ }catch{ } (already done).
+
+Replace console.error with console.warn for expected retries.
+
+In popup/service-worker, guard against running logic when the popup closes:
+
+if (document.visibilityState === 'hidden') return;
+
+7) Quick checklist
+
+ Use the queueing helper for ICE until remote SDP is set.
+
+ Teacher = polite (answers offers); Student = impolite (initiates on negotiationneeded).
+
+ Add a TURN server via iceServers.
+
+ Wrap logging to avoid red “Errors” panel entries.
+
+ Only create offers/answers inside try/catch; ignore duplicates.
+
+Apply those and that “addIceCandidate… remote description was null” error disappears, and screen sharing becomes stable across classrooms—even on strict networks.
