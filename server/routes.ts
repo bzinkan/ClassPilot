@@ -1326,6 +1326,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // Apply Scene
+  app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { sceneId, allowedDomains, targetDeviceIds } = req.body;
+      
+      if (!sceneId || !allowedDomains || !Array.isArray(allowedDomains)) {
+        return res.status(400).json({ error: "Scene ID and allowed domains are required" });
+      }
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'apply-scene',
+          data: { 
+            sceneId,
+            allowedDomains 
+          },
+        },
+      }, undefined, targetDeviceIds);
+      
+      const target = targetDeviceIds && targetDeviceIds.length > 0 
+        ? `${targetDeviceIds.length} student(s)` 
+        : "all students";
+      res.json({ success: true, message: `Applied scene to ${target}` });
+    } catch (error) {
+      console.error("Apply scene error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
   // Limit Tabs
   app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
