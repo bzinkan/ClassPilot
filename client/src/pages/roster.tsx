@@ -8,9 +8,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { ArrowLeft, Edit, Monitor, Trash2, UserPlus, GraduationCap, Plus, X } from "lucide-react";
+import { ArrowLeft, Edit, Monitor, Trash2, UserPlus, GraduationCap, Plus, X, Info } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { Device, Student, Settings } from "@shared/schema";
@@ -435,6 +436,18 @@ export default function RosterPage() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-6 py-8">
+        {/* Info Alert */}
+        <Alert className="mb-6" data-testid="alert-shared-devices-info">
+          <Info className="h-4 w-4" />
+          <AlertTitle>Shared Chromebook System</AlertTitle>
+          <AlertDescription>
+            Students are <strong>NOT locked to specific devices</strong>. Device assignments here are for organization only.
+            When a student signs into Google on any Chromebook with the extension installed, the system automatically detects
+            their email and tracks their activity. Students can freely switch between devices throughout the day 
+            (e.g., Math class Chromebook, then ELA class Chromebook, etc.).
+          </AlertDescription>
+        </Alert>
+
         {/* Grade Level Tabs */}
         {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
           <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-6">
