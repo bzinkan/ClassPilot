@@ -34,7 +34,15 @@ export default function Dashboard() {
   const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
   const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedGrade, setSelectedGrade] = useState<string>("");
+  const [selectedGrade, setSelectedGrade] = useState<string>(() => {
+    // Initialize from localStorage if available
+    try {
+      const saved = localStorage.getItem('classpilot-selected-grade');
+      return saved || "";
+    } catch {
+      return "";
+    }
+  });
   const [wsConnected, setWsConnected] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
@@ -194,12 +202,26 @@ export default function Dashboard() {
     };
   }, []); // Empty deps - WebSocket connection should only be created once
 
-  // Set initial grade when settings load
+  // Set initial grade when settings load and validate saved grade
   useEffect(() => {
-    if (settings?.gradeLevels && settings.gradeLevels.length > 0 && !selectedGrade) {
-      setSelectedGrade(settings.gradeLevels[0]);
+    if (settings?.gradeLevels && settings.gradeLevels.length > 0) {
+      // If no grade selected or saved grade is not in current grade levels, set to first grade
+      if (!selectedGrade || !settings.gradeLevels.includes(selectedGrade)) {
+        setSelectedGrade(settings.gradeLevels[0]);
+      }
     }
   }, [settings, selectedGrade]);
+
+  // Save selected grade to localStorage whenever it changes
+  useEffect(() => {
+    if (selectedGrade) {
+      try {
+        localStorage.setItem('classpilot-selected-grade', selectedGrade);
+      } catch (error) {
+        console.warn('Failed to save selected grade to localStorage:', error);
+      }
+    }
+  }, [selectedGrade]);
 
   // Check if student is off-task (not on allowed domains)
   const isStudentOffTask = (student: StudentStatus): boolean => {
