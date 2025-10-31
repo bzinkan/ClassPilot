@@ -882,12 +882,22 @@ export default function Settings() {
                 id="scene-allowed"
                 value={sceneAllowedDomains}
                 onChange={(e) => setSceneAllowedDomains(e.target.value)}
-                placeholder="example.com, google.com, wikipedia.org"
+                placeholder="classroom.google.com, docs.google.com, khanacademy.org"
                 data-testid="input-scene-allowed-domains"
               />
-              <p className="text-xs text-muted-foreground">
-                Comma-separated domains. Students can browse all pages within these domains (e.g., ixl.com allows ixl.com/math, ixl.com/science).
-              </p>
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>Comma-separated domains. Use specific subdomains for best control.</p>
+                <p className="font-medium text-primary">Google Services Examples:</p>
+                <ul className="ml-3 space-y-0.5">
+                  <li>• <code className="text-xs bg-muted px-1 rounded">classroom.google.com</code> - Google Classroom only</li>
+                  <li>• <code className="text-xs bg-muted px-1 rounded">docs.google.com</code> - Forms, Docs, Sheets, Slides</li>
+                  <li>• <code className="text-xs bg-muted px-1 rounded">drive.google.com</code> - Google Drive only</li>
+                </ul>
+                <p className="text-amber-600 dark:text-amber-500 pt-1 flex items-start gap-1">
+                  <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                  <span>Using just <code className="text-xs bg-muted px-1 rounded">google.com</code> allows ALL Google services (YouTube, Gmail, etc.)</span>
+                </p>
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="scene-blocked">Blocked Domains</Label>

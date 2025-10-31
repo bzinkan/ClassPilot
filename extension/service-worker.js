@@ -871,22 +871,14 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
-  // First check: if screen is locked, prevent opening new tabs entirely
-  if (screenLocked) {
-    // Close the new tab immediately
+  // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
+  // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
+  if (screenLocked && lockedDomain && allowedDomains.length === 0) {
+    // Single domain lock mode - block all new tabs
     if (tab.id) {
       chrome.tabs.remove(tab.id);
       
-      let message = '';
-      if (allowedDomains.length > 0) {
-        // Scene mode
-        message = `Your teacher has locked your screen to specific websites. You cannot open new tabs.`;
-      } else if (lockedDomain) {
-        // Single domain lock
-        message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
-      } else {
-        message = 'Your screen is locked. You cannot open new tabs.';
-      }
+      let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
       
       safeNotify({
         title: 'Screen Locked',
@@ -896,6 +888,9 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     }
     return; // Don't check tab limit if screen is locked
   }
+  
+  // For scene mode (allowedDomains.length > 0), allow new tabs
+  // Navigation restrictions will be enforced by onBeforeNavigate listener
   
   // Second check: enforce tab limit (only if screen is not locked)
   if (currentMaxTabs) {
