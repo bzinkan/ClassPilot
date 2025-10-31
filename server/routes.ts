@@ -479,7 +479,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Register or update device
       const deviceData = insertDeviceSchema.parse({
         deviceId,
-        deviceName: deviceName || `Device for ${studentName}`,
+        deviceName: deviceName || null,
         classId,
         schoolId,
       });
