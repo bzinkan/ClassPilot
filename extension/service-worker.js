@@ -22,7 +22,8 @@ let cameraActive = false; // Track camera usage across all tabs
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
-let offscreenDocumentCreated = false;
+let creatingOffscreen = null;
+let offscreenReady = false;
 
 // Storage helpers
 const kv = {
@@ -1021,34 +1022,51 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 // All WebRTC logic moved to offscreen.js which runs in a page context
 
 async function ensureOffscreenDocument() {
-  // Check if offscreen document already exists
-  if (offscreenDocumentCreated) {
-    return true;
+  // Check if document already exists
+  if (await chrome.offscreen.hasDocument?.()) {
+    return;
   }
   
-  try {
-    // Check if document is already created (in case flag is wrong)
-    if (chrome.offscreen && chrome.offscreen.hasDocument) {
-      const hasDoc = await chrome.offscreen.hasDocument();
-      if (hasDoc) {
-        offscreenDocumentCreated = true;
-        return true;
-      }
-    }
-    
-    // Create offscreen document
-    await chrome.offscreen.createDocument({
+  // Prevent multiple creation attempts
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: ['USER_MEDIA'],
       justification: 'Screen capture and WebRTC must run in page context for MV3 compatibility'
+    }).then(() => {
+      console.log('[Service Worker] Offscreen document created');
+    }).catch(error => {
+      console.error('[Service Worker] Error creating offscreen document:', error);
+      creatingOffscreen = null;
+      throw error;
     });
-    
-    offscreenDocumentCreated = true;
-    console.log('[Service Worker] Offscreen document created');
-    return true;
+  }
+  
+  await creatingOffscreen;
+}
+
+async function closeOffscreenDocument() {
+  if (await chrome.offscreen.hasDocument?.()) {
+    await chrome.offscreen.closeDocument();
+  }
+  creatingOffscreen = null;
+  offscreenReady = false;
+}
+
+// Send message to offscreen with retry if not ready
+async function sendToOffscreen(message) {
+  await ensureOffscreenDocument();
+  
+  // Wait for offscreen to be ready if not yet
+  if (!offscreenReady) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  
+  try {
+    return await chrome.runtime.sendMessage(message);
   } catch (error) {
-    console.error('[Service Worker] Error creating offscreen document:', error);
-    return false;
+    console.error('[Service Worker] Error sending to offscreen:', error);
+    throw error;
   }
 }
 
@@ -1058,42 +1076,17 @@ async function handleScreenShareRequest() {
     console.log('[WebRTC] Teacher requested screen share');
     
     // Ensure offscreen document exists
-    const offscreenReady = await ensureOffscreenDocument();
-    if (!offscreenReady) {
-      throw new Error('Failed to create offscreen document');
-    }
+    await ensureOffscreenDocument();
     
-    // Get active tab to capture
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tabs[0]?.id) {
-      console.error('[WebRTC] No active tab found');
-      safeNotify({
-        title: 'Screen Sharing Error',
-        message: 'No active tab to share',
-      });
-      return;
-    }
-    
-    // Get streamId using tabCapture (works in service worker)
-    const streamId = await chrome.tabCapture.getMediaStreamId({
-      targetTabId: tabs[0].id
-    });
-    
-    console.log('[WebRTC] Got streamId:', streamId);
-    
-    // Create peer connection in offscreen document
-    const wsUrl = ws ? `${CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws'}://${new URL(CONFIG.serverUrl).host}/ws` : null;
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_CREATE_PEER',
-      wsUrl: wsUrl,
+    // Tell offscreen to start capture (it will use getDisplayMedia)
+    const result = await sendToOffscreen({
+      type: 'START_SHARE',
       deviceId: CONFIG.deviceId
     });
     
-    // Start capture in offscreen document
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_START_CAPTURE',
-      streamId: streamId
-    });
+    if (!result?.success) {
+      throw new Error(result?.error || 'Failed to start screen share');
+    }
     
     console.log('[WebRTC] Screen capture initiated in offscreen document');
     
@@ -1111,15 +1104,13 @@ async function handleOffer(sdp, from) {
   try {
     console.log('[WebRTC] Forwarding offer to offscreen document');
     
-    await ensureOffscreenDocument();
-    
-    const response = await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_HANDLE_OFFER',
-      sdp: sdp
+    const response = await sendToOffscreen({
+      type: 'SIGNAL',
+      payload: { type: 'offer', sdp: sdp, from: from }
     });
     
-    if (!response.success) {
-      throw new Error(response.error || 'Failed to handle offer');
+    if (!response?.success) {
+      throw new Error(response?.error || 'Failed to handle offer');
     }
     
     console.log('[WebRTC] Offer handled in offscreen document');
@@ -1131,9 +1122,9 @@ async function handleOffer(sdp, from) {
 // WebRTC: Handle ICE candidate from teacher (forward to offscreen)
 async function handleIceCandidate(candidate) {
   try {
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_HANDLE_ICE',
-      candidate: candidate
+    await sendToOffscreen({
+      type: 'SIGNAL',
+      payload: { type: 'ice', candidate: candidate }
     });
   } catch (error) {
     console.error('[WebRTC] Error handling ICE candidate:', error);
@@ -1144,9 +1135,10 @@ async function handleIceCandidate(candidate) {
 async function stopScreenShare() {
   try {
     console.log('[WebRTC] Stopping screen share');
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_STOP'
+    await sendToOffscreen({
+      type: 'STOP_SHARE'
     });
+    await closeOffscreenDocument();
   } catch (error) {
     console.error('[WebRTC] Error stopping screen share:', error);
   }
@@ -1154,7 +1146,15 @@ async function stopScreenShare() {
 
 // Listen for messages FROM offscreen document
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Only handle messages from offscreen document
+  // Handle OFFSCREEN_READY from offscreen document
+  if (message.type === 'OFFSCREEN_READY') {
+    console.log('[Service Worker] Offscreen document is ready');
+    offscreenReady = true;
+    sendResponse({ success: true });
+    return true;
+  }
+  
+  // Only handle other messages from offscreen document
   if (!sender.url?.includes('offscreen.html')) {
     return;
   }
@@ -1162,7 +1162,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[Service Worker] Message from offscreen:', message.type);
   
   // Forward ICE candidates to teacher
-  if (message.type === 'OFFSCREEN_ICE_CANDIDATE') {
+  if (message.type === 'ICE_CANDIDATE') {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'ice',
@@ -1170,10 +1170,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         candidate: message.candidate,
       }));
     }
+    sendResponse({ success: true });
   }
   
   // Forward answer to teacher
-  if (message.type === 'OFFSCREEN_ANSWER') {
+  if (message.type === 'ANSWER') {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: 'answer',
@@ -1181,20 +1182,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sdp: message.sdp,
       }));
     }
+    sendResponse({ success: true });
   }
   
   // Handle connection failures
-  if (message.type === 'OFFSCREEN_CONNECTION_FAILED') {
+  if (message.type === 'CONNECTION_FAILED') {
     console.log('[WebRTC] Connection failed, cleaning up');
+    closeOffscreenDocument();
+    sendResponse({ success: true });
   }
   
   // Handle capture errors
-  if (message.type === 'OFFSCREEN_CAPTURE_ERROR') {
+  if (message.type === 'CAPTURE_ERROR') {
     safeNotify({
       title: 'Screen Sharing Error',
       message: message.error || 'Failed to capture screen',
     });
+    sendResponse({ success: true });
   }
+  
+  return true;
 });
 
 // Connect to WebSocket for signaling
