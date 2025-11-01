@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -35,6 +35,9 @@ interface StudentTileProps {
   isOffTask?: boolean;
   isSelected?: boolean;
   onToggleSelect?: () => void;
+  liveStream?: MediaStream | null;
+  onStartLiveView?: () => void;
+  onStopLiveView?: () => void;
 }
 
 function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
@@ -62,13 +65,21 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
   }
 }
 
-export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect }: StudentTileProps) {
+export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const { toast } = useToast();
+  const videoRef = useRef<HTMLVideoElement>(null);
+  
+  // Attach live stream to video element when available
+  useEffect(() => {
+    if (videoRef.current && liveStream) {
+      videoRef.current.srcObject = liveStream;
+    }
+  }, [liveStream]);
   
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
@@ -352,6 +363,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 Offline
               </Badge>
             )}
+            {onStartLiveView && onStopLiveView && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 flex-shrink-0"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (liveStream) {
+                    onStopLiveView();
+                  } else {
+                    onStartLiveView();
+                  }
+                }}
+                title={liveStream ? "Stop live view" : "Start live view"}
+                data-testid={`button-live-view-${student.deviceId}`}
+              >
+                <Monitor className={`h-3 w-3 ${liveStream ? 'text-blue-600 dark:text-blue-400' : ''}`} />
+              </Button>
+            )}
             {student.cameraActive && (
               <div title="Camera active">
                 <Video 
@@ -384,32 +414,45 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         </div>
 
-        {/* Active Tab Info */}
-        <div className="space-y-2 mb-2.5">
-          <div className="flex items-start gap-2">
-            {student.favicon && (
-              <img
-                src={student.favicon}
-                alt=""
-                className="w-4 h-4 flex-shrink-0 mt-0.5 rounded"
-                onError={(e) => {
-                  (e.target as HTMLImageElement).style.display = 'none';
-                }}
-              />
-            )}
-            <p className="text-sm font-medium flex-1 line-clamp-2 leading-snug" data-testid={`text-tab-title-${student.deviceId}`}>
-              {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
-            </p>
+        {/* Active Tab Info or Live Video */}
+        {liveStream ? (
+          <div className="mb-2.5 rounded-md overflow-hidden bg-black">
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="w-full h-auto"
+              data-testid={`video-live-${student.deviceId}`}
+            />
           </div>
-          {student.activeTabUrl && (
-            <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground bg-muted/20 rounded px-2 py-1">
-              <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" />
-              <span className="truncate" data-testid={`text-tab-url-${student.deviceId}`}>
-                {student.activeTabUrl}
-              </span>
+        ) : (
+          <div className="space-y-2 mb-2.5">
+            <div className="flex items-start gap-2">
+              {student.favicon && (
+                <img
+                  src={student.favicon}
+                  alt=""
+                  className="w-4 h-4 flex-shrink-0 mt-0.5 rounded"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+              )}
+              <p className="text-sm font-medium flex-1 line-clamp-2 leading-snug" data-testid={`text-tab-title-${student.deviceId}`}>
+                {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
+              </p>
             </div>
-          )}
-        </div>
+            {student.activeTabUrl && (
+              <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground bg-muted/20 rounded px-2 py-1">
+                <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" />
+                <span className="truncate" data-testid={`text-tab-url-${student.deviceId}`}>
+                  {student.activeTabUrl}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground pt-2 border-t border-border/20">

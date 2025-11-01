@@ -310,6 +310,27 @@ export default function Dashboard() {
     setSelectedDeviceIds(new Set());
   };
 
+  // Live view handlers
+  const handleStartLiveView = async (deviceId: string) => {
+    await webrtc.startLiveView(deviceId, (stream) => {
+      console.log(`[Dashboard] Received stream for ${deviceId}`);
+      setLiveStreams((prev) => {
+        const newMap = new Map(prev);
+        newMap.set(deviceId, stream);
+        return newMap;
+      });
+    });
+  };
+
+  const handleStopLiveView = (deviceId: string) => {
+    webrtc.stopLiveView(deviceId);
+    setLiveStreams((prev) => {
+      const newMap = new Map(prev);
+      newMap.delete(deviceId);
+      return newMap;
+    });
+  };
+
   const filteredStudents = students
     .filter((student) => {
       const matchesSearch = 
@@ -765,6 +786,9 @@ export default function Dashboard() {
                         isOffTask={true}
                         isSelected={selectedDeviceIds.has(student.deviceId)}
                         onToggleSelect={() => toggleStudentSelection(student.deviceId)}
+                        liveStream={liveStreams.get(student.deviceId) || null}
+                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
+                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -794,6 +818,9 @@ export default function Dashboard() {
                         isOffTask={false}
                         isSelected={selectedDeviceIds.has(student.deviceId)}
                         onToggleSelect={() => toggleStudentSelection(student.deviceId)}
+                        liveStream={liveStreams.get(student.deviceId) || null}
+                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
+                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -823,6 +850,9 @@ export default function Dashboard() {
                         isOffTask={false}
                         isSelected={selectedDeviceIds.has(student.deviceId)}
                         onToggleSelect={() => toggleStudentSelection(student.deviceId)}
+                        liveStream={liveStreams.get(student.deviceId) || null}
+                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
+                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -852,6 +882,9 @@ export default function Dashboard() {
                         isOffTask={false}
                         isSelected={selectedDeviceIds.has(student.deviceId)}
                         onToggleSelect={() => toggleStudentSelection(student.deviceId)}
+                        liveStream={liveStreams.get(student.deviceId) || null}
+                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
+                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
                       />
                     ))}
                   </div>
