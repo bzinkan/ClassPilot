@@ -20,6 +20,14 @@ let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 let cameraActive = false; // Track camera usage across all tabs
 
+// WebRTC variables
+let peerConnection = null;
+let localStream = null;
+const ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' }
+];
+
 // Storage helpers
 const kv = {
   get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
@@ -1010,6 +1018,126 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }
 });
 
+// WebRTC: Create peer connection
+async function createPeerConnection() {
+  if (peerConnection) {
+    peerConnection.close();
+  }
+  
+  peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  
+  // Handle ICE candidates
+  peerConnection.onicecandidate = (event) => {
+    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'ice',
+        to: 'teacher',
+        candidate: event.candidate.toJSON(),
+      }));
+    }
+  };
+  
+  // Handle connection state changes
+  peerConnection.onconnectionstatechange = () => {
+    console.log('[WebRTC] Connection state:', peerConnection.connectionState);
+    if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected') {
+      stopScreenShare();
+    }
+  };
+  
+  return peerConnection;
+}
+
+// WebRTC: Handle screen share request from teacher
+async function handleScreenShareRequest() {
+  try {
+    console.log('[WebRTC] Starting screen capture...');
+    
+    // Get screen capture using offscreen document (MV3 compatible)
+    // We'll use tabCapture as a simpler approach for now
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs[0]?.id) {
+      console.error('[WebRTC] No active tab found');
+      return;
+    }
+    
+    // Use tabCapture API (requires user gesture via extension icon click)
+    const streamId = await chrome.tabCapture.getMediaStreamId({
+      targetTabId: tabs[0].id
+    });
+    
+    // Create peer connection
+    await createPeerConnection();
+    
+    // Get media stream using streamId
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        mandatory: {
+          chromeMediaSource: 'tab',
+          chromeMediaSourceId: streamId
+        }
+      }
+    });
+    
+    // Add tracks to peer connection
+    localStream.getTracks().forEach(track => {
+      peerConnection.addTrack(track, localStream);
+    });
+    
+    console.log('[WebRTC] Screen capture started, waiting for offer from teacher');
+    
+  } catch (error) {
+    console.error('[WebRTC] Screen capture error:', error);
+    safeNotify({
+      title: 'Screen Sharing Error',
+      message: 'Unable to share screen. Please ensure permissions are granted.',
+    });
+  }
+}
+
+// WebRTC: Handle offer from teacher
+async function handleOffer(sdp, from) {
+  try {
+    if (!peerConnection) {
+      await createPeerConnection();
+    }
+    
+    await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+    
+    const answer = await peerConnection.createAnswer();
+    await peerConnection.setLocalDescription(answer);
+    
+    // Send answer back to teacher
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'answer',
+        to: 'teacher',
+        sdp: peerConnection.localDescription.toJSON(),
+      }));
+    }
+    
+    console.log('[WebRTC] Sent answer to teacher');
+  } catch (error) {
+    console.error('[WebRTC] Error handling offer:', error);
+  }
+}
+
+// WebRTC: Stop screen sharing and cleanup
+function stopScreenShare() {
+  console.log('[WebRTC] Stopping screen share');
+  
+  if (localStream) {
+    localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
+  }
+  
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+}
+
 // Connect to WebSocket for signaling
 function connectWebSocket() {
   if (!CONFIG.deviceId) return;
@@ -1092,12 +1220,28 @@ function connectWebSocket() {
         }
       }
       
-      // Handle WebRTC signaling
-      if (message.type === 'signal') {
-        chrome.runtime.sendMessage({
-          type: 'webrtc-signal',
-          data: message.data,
-        });
+      // Handle WebRTC signaling - teacher requesting to view screen
+      if (message.type === 'request-stream') {
+        console.log('[WebRTC] Teacher requested screen share');
+        handleScreenShareRequest();
+      }
+      
+      // Handle WebRTC offer from teacher
+      if (message.type === 'offer') {
+        console.log('[WebRTC] Received offer from teacher');
+        handleOffer(message.sdp, message.from);
+      }
+      
+      // Handle WebRTC ICE candidate from teacher
+      if (message.type === 'ice') {
+        console.log('[WebRTC] Received ICE candidate from teacher');
+        if (peerConnection && message.candidate) {
+          try {
+            await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+          } catch (error) {
+            console.error('[WebRTC] Error adding ICE candidate:', error);
+          }
+        }
       }
       
       // Handle ping notifications

@@ -243,7 +243,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!targetDeviceId) return;
 
           // Find the target client (student or teacher)
-          for (const [targetWs, targetClient] of wsClients.entries()) {
+          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
                 type: message.type,
@@ -267,7 +267,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const targetDeviceId = message.deviceId;
           if (!targetDeviceId) return;
 
-          for (const [targetWs, targetClient] of wsClients.entries()) {
+          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
                 type: 'request-stream',
