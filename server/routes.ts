@@ -234,6 +234,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
+        // Handle WebRTC signaling messages
+        if (!client.authenticated) return;
+
+        // Route WebRTC signaling messages between teacher and students
+        if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice') {
+          const targetDeviceId = message.to;
+          if (!targetDeviceId) return;
+
+          // Find the target client (student or teacher)
+          for (const [targetWs, targetClient] of wsClients.entries()) {
+            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
+              targetWs.send(JSON.stringify({
+                type: message.type,
+                from: client.role === 'teacher' ? 'teacher' : client.deviceId,
+                ...message
+              }));
+              break;
+            } else if (targetClient.role === 'teacher' && message.to === 'teacher') {
+              targetWs.send(JSON.stringify({
+                type: message.type,
+                from: client.deviceId,
+                ...message
+              }));
+              break;
+            }
+          }
+        }
+
+        // Handle request to start screen sharing from teacher to student
+        if (message.type === 'request-stream' && client.role === 'teacher') {
+          const targetDeviceId = message.deviceId;
+          if (!targetDeviceId) return;
+
+          for (const [targetWs, targetClient] of wsClients.entries()) {
+            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
+              targetWs.send(JSON.stringify({
+                type: 'request-stream',
+                from: 'teacher'
+              }));
+              break;
+            }
+          }
+        }
+
       } catch (error) {
         console.error('WebSocket message error:', error);
       }

@@ -70,6 +70,7 @@ export interface StudentStatus {
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   cameraActive: boolean;
   currentUrlDuration?: number; // Duration in seconds spent on current URL
+  viewMode?: 'url' | 'thumb' | 'live'; // Display mode for the student tile
   status: 'online' | 'idle' | 'offline';
 }
 
