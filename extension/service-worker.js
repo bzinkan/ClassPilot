@@ -1231,6 +1231,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ws.send(JSON.stringify({
         type: 'peer-ready',
         to: 'teacher',
+        from: CONFIG.deviceId, // Include deviceId so dashboard knows which device is ready
       }));
     }
     sendResponse({ success: true });

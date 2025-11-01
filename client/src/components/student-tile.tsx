@@ -77,9 +77,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const tileVideoSlotRef = useRef<HTMLDivElement>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   
-  // Debug logging
-  console.log(`[StudentTile ${student.deviceId}] liveStream:`, !!liveStream, 'stream:', liveStream);
-  
   // Create and manage video element
   useEffect(() => {
     if (!videoElementRef.current) {
@@ -103,8 +100,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       }
     } else {
       // Stream stopped - cleanup
-      console.log(`[StudentTile ${student.deviceId}] Stream stopped, cleaning up video element`);
-      
       if (expanded) {
         setExpanded(false);
       }
@@ -114,14 +109,12 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         
         // Remove video element from tile slot
         if (tileVideoSlotRef.current?.contains(videoElementRef.current)) {
-          console.log(`[StudentTile ${student.deviceId}] Removing video from tile slot`);
           tileVideoSlotRef.current.removeChild(videoElementRef.current);
         }
         
         // Remove video element from portal if it's there
         const portalSlot = document.querySelector('#portal-video-slot');
         if (portalSlot?.contains(videoElementRef.current)) {
-          console.log(`[StudentTile ${student.deviceId}] Removing video from portal slot`);
           portalSlot.removeChild(videoElementRef.current);
         }
       }
