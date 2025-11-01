@@ -220,8 +220,10 @@ async function handleSignal(signal) {
       teacherId = signal.from;
       
       if (!peerConnection) {
-        console.warn('[Offscreen] Peer connection not initialized, cannot handle offer');
-        return { success: false, error: 'Peer connection not initialized' };
+        // This is EXPECTED - offer arrived before student started sharing or after they denied
+        // Silently ignore - this is normal operation, not an error
+        console.info('[Offscreen] Offer received before screen share started (expected - ignoring)');
+        return { success: true, status: 'no-peer-yet' };
       }
       
       await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));

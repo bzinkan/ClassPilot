@@ -1133,12 +1133,12 @@ async function handleOffer(sdp, from) {
     });
     
     if (!response?.success) {
-      // Expected: peer connection not ready yet (user denied capture, etc.)
-      if (response?.error?.includes('not initialized')) {
-        console.info('[WebRTC] Peer connection not ready (expected during capture failures)');
+      // Expected: peer connection not ready yet (normal when student hasn't started sharing)
+      if (response?.status === 'no-peer-yet') {
+        console.info('[WebRTC] Offer received before peer ready (expected - ignoring)');
         return;
       }
-      // Unexpected error
+      // Unexpected error only
       console.error('[WebRTC] Unexpected offer handling error:', response?.error);
       return;
     }
