@@ -360,14 +360,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 />
               </div>
             )}
-            {student.sceneActive ? (
-              <div title="Scene active">
-                <Layers 
-                  className="h-3.5 w-3.5 flex-shrink-0 text-blue-600 dark:text-blue-400" 
-                  data-testid={`icon-scene-active-${student.deviceId}`}
-                />
-              </div>
-            ) : student.screenLocked ? (
+            {student.screenLocked ? (
               <div title="Screen locked">
                 <Lock 
                   className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 
