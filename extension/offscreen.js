@@ -31,7 +31,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       if (message.type === 'START_SHARE') {
-        await startScreenCapture(message.deviceId);
+        await startScreenCapture(message.deviceId, message.mode);
         sendResponse({ success: true });
         return;
       }
@@ -61,23 +61,62 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-// Start screen capture using getDisplayMedia
-async function startScreenCapture(deviceId) {
+// Start screen capture - try silent tab capture first, fallback to picker
+async function startScreenCapture(deviceId, mode = 'auto') {
   try {
-    console.log('[Offscreen] Starting screen capture with getDisplayMedia');
+    console.log('[Offscreen] Starting screen capture, mode:', mode);
     
-    // Use getDisplayMedia - shows user picker for screen/window/tab
-    // This is more robust than tabCapture and works on all pages
-    localStream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        frameRate: 15,  // Reasonable framerate for classroom monitoring
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    });
-    
-    console.log('[Offscreen] Got media stream, creating peer connection');
+    // Try silent tab capture first (works on managed Chromebooks with policy)
+    if (mode === 'auto' || mode === 'tab') {
+      try {
+        console.log('[Offscreen] Attempting silent tab capture...');
+        localStream = await new Promise((resolve, reject) => {
+          chrome.tabCapture.capture(
+            { video: true, audio: false },
+            stream => {
+              if (stream) {
+                console.log('[Offscreen] ✅ Silent tab capture succeeded!');
+                resolve(stream);
+              } else {
+                const error = chrome.runtime.lastError;
+                console.log('[Offscreen] Silent tab capture failed:', error?.message);
+                reject(error);
+              }
+            }
+          );
+        });
+        
+        console.log('[Offscreen] Got media stream from tab capture, creating peer connection');
+      } catch (tabCaptureError) {
+        // Tab capture failed - fall back to picker only if mode is 'auto'
+        if (mode === 'auto') {
+          console.log('[Offscreen] Tab capture not available, falling back to screen picker...');
+          localStream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              frameRate: 15,
+              width: { ideal: 1280 },
+              height: { ideal: 720 }
+            },
+            audio: false
+          });
+          console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+        } else {
+          throw new Error('Silent tab capture failed and fallback not allowed');
+        }
+      }
+    } else if (mode === 'screen') {
+      // Explicitly requested screen/window picker
+      console.log('[Offscreen] Using screen picker (explicit request)...');
+      localStream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          frameRate: 15,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
+      });
+      console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+    }
     
     // Create peer connection
     peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
