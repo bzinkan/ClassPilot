@@ -1,0 +1,138 @@
+Goal
+
+✅ No prompt for tab capture (silent on managed Chromebooks)
+✅ Optional fallback (full-screen/window) only when teacher explicitly requests it
+✅ Keep everything else (live tile view, WebRTC, offscreen doc) working the same
+
+1️⃣ Chrome Extension Changes
+🔹 A. Update your manifest.json
+
+Add or confirm these lines:
+
+{
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabCapture",
+    "offscreen",
+    "notifications"
+  ],
+  "optional_permissions": ["desktopCapture"],
+  "host_permissions": [
+    "https://classpilot.replit.app/*"
+  ],
+  "offscreen_documents": [
+    {
+      "matches": ["*://*/*"],
+      "reason": "USER_MEDIA",
+      "justification": "Capture student tab and send via WebRTC"
+    }
+  ]
+}
+
+
+Note: If your dashboard uses a custom port or domain in the future, you’ll need to update this origin list.
+
+🔹 B. Modify your capture logic
+
+In your offscreen.js (the one that actually captures the screen):
+
+Replace your existing startCapture() (or equivalent) with this silent-first version:
+
+// Try silent tab capture first, then fallback to user-picker
+async function startCapture(mode = "auto") {
+  try {
+    // First try silent tab capture (if policy allows)
+    const tabStream = await new Promise((resolve, reject) => {
+      chrome.tabCapture.capture(
+        { video: true, audio: false },
+        stream => stream ? resolve(stream) : reject(chrome.runtime.lastError)
+      );
+    }).catch(() => null);
+
+    if (tabStream) {
+      console.log("[Offscreen] Tab capture started silently");
+      return tabStream;
+    }
+
+    // Fallback: show picker (for non-managed devices or window capture)
+    console.log("[Offscreen] Tab capture failed, showing picker...");
+    const fullStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: 15 },
+      audio: false
+    });
+    return fullStream;
+
+  } catch (err) {
+    console.error("[Offscreen] startCapture error:", err);
+    throw err;
+  }
+}
+
+🔹 C. Optional — Add an explicit “Full Screen” command
+
+In your service worker, you can expose a second command if a teacher intentionally wants the full screen/window (and accepts the picker):
+
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === "START_SHARE_TAB") {
+    startCapture("tab").then(() => sendResponse({ok:true}));
+    return true;
+  }
+  if (msg.type === "START_SHARE_SCREEN") {
+    navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+      .then(stream => sendResponse({ok:true, stream}))
+      .catch(err => sendResponse({ok:false, error: String(err)}));
+    return true;
+  }
+});
+
+
+Then on the teacher dashboard, you could label the button “Go Live (Tab)” vs. “Go Live (Screen)”.
+
+2️⃣ App (Teacher Dashboard) Changes
+
+Only one small change is needed in your signaling logic:
+
+When you send the request-share WebSocket message to the student extension, include a field like mode: "tab" | "screen" — so the extension knows which type of capture to start.
+
+// teacher side
+socket.send(JSON.stringify({
+  type: "request-share",
+  to: studentId,
+  mode: "tab"   // silent by default
+}));
+
+
+Then in your service worker on the student side, read that:
+
+if (msg.type === "request-share") {
+  const mode = msg.mode || "auto";
+  chrome.runtime.sendMessage({ type: "START_SHARE_TAB", mode });
+}
+
+3️⃣ Admin Console Configuration (One-time setup)
+
+In Google Admin → Devices → Chrome → Settings → Users & browsers → select your student OU.
+
+Search for and set these (each new line is one entry):
+
+Setting name	Value
+Screen capture allowed by URLs	https://classpilot.replit.app
+Tab capture allowed by URLs	https://classpilot.replit.app
+Same-origin tab capture allowed by URLs	https://classpilot.replit.app
+
+(Optional) Add your extension origin too:
+
+chrome-extension://<YOUR_EXTENSION_ID>
+
+
+Force-install your extension to the same OU.
+
+On a student Chromebook, go to chrome://policy and click Reload policies to confirm.
+
+4️⃣ How It Works After This
+Scenario	What happens
+Teacher clicks “Go Live”	Student’s extension silently starts tab capture (no picker).
+Teacher clicks “Go Live (Screen)”	Student gets a picker to choose screen/window (only for special cases).
+Non-managed / test Chromebooks	Falls back to picker automatically (graceful degradation).
+Managed OUs	No student interaction needed at all — instant live tile feed.

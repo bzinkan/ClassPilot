@@ -22,6 +22,9 @@
     "tabCapture",
     "offscreen"
   ],
+  "optional_permissions": [
+    "desktopCapture"
+  ],
   "host_permissions": [
     "<all_urls>"
   ],
