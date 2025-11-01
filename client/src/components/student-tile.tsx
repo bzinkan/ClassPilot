@@ -95,10 +95,15 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       videoElementRef.current.srcObject = liveStream || null;
     }
     
-    // Mount video into tile slot on first render or when collapsing
+    // Mount video into tile slot when stream exists, remove when it doesn't
     if (liveStream && tileVideoSlotRef.current && videoElementRef.current) {
       if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.appendChild(videoElementRef.current);
+      }
+    } else if (!liveStream && videoElementRef.current && tileVideoSlotRef.current) {
+      // Remove video element from DOM when stream stops
+      if (tileVideoSlotRef.current.contains(videoElementRef.current)) {
+        tileVideoSlotRef.current.removeChild(videoElementRef.current);
       }
     }
   }, [liveStream]);
