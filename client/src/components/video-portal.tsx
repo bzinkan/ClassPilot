@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Maximize, Minimize, X, ZoomIn, ZoomOut, RotateCcw, Camera, Circle, Square } from "lucide-react";
+import { X, Camera, Circle, Square } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 
 interface VideoPortalProps {
@@ -12,7 +12,6 @@ interface VideoPortalProps {
 
 export function VideoPortal({ studentName, onClose }: VideoPortalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const [zoom, setZoom] = useState(1);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -52,51 +51,6 @@ export function VideoPortal({ studentName, onClose }: VideoPortalProps) {
       }
     };
   }, []);
-
-  const handleFullscreen = async () => {
-    const videoSlot = document.querySelector("#portal-video-slot");
-    if (!videoSlot) return;
-    
-    try {
-      if (!document.fullscreenElement) {
-        await videoSlot.requestFullscreen();
-      } else {
-        await document.exitFullscreen();
-      }
-    } catch (error) {
-      console.error('Fullscreen error:', error);
-    }
-  };
-
-  const handlePictureInPicture = async () => {
-    const video = document.querySelector("#portal-video-slot video") as HTMLVideoElement;
-    if (!video) return;
-    
-    try {
-      // @ts-ignore - PiP API not fully typed
-      if (document.pictureInPictureEnabled && !document.pictureInPictureElement) {
-        // @ts-ignore
-        await video.requestPictureInPicture();
-      } else if (document.pictureInPictureElement) {
-        // @ts-ignore
-        await document.exitPictureInPicture();
-      }
-    } catch (error) {
-      console.error('Picture-in-Picture error:', error);
-    }
-  };
-
-  const handleZoomIn = () => {
-    setZoom(prev => Math.min(prev + 0.25, 3)); // Max 3x zoom
-  };
-
-  const handleZoomOut = () => {
-    setZoom(prev => Math.max(prev - 0.25, 0.5)); // Min 0.5x zoom
-  };
-
-  const handleResetZoom = () => {
-    setZoom(1);
-  };
 
   const handleScreenshot = () => {
     const video = document.querySelector("#portal-video-slot video") as HTMLVideoElement;
@@ -306,55 +260,13 @@ export function VideoPortal({ studentName, onClose }: VideoPortalProps) {
       <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-black">
         <div
           id="portal-video-slot"
-          className="absolute inset-0 [&>video]:h-full [&>video]:w-full [&>video]:object-contain transition-transform duration-200"
-          style={{ transform: `scale(${zoom})` }}
+          className="absolute inset-0 [&>video]:h-full [&>video]:w-full [&>video]:object-contain"
           data-testid="portal-video-slot"
         />
-        
-        {/* Zoom indicator */}
-        {zoom !== 1 && (
-          <div className="absolute top-2 left-2 bg-black/70 text-white px-2 py-1 rounded text-sm">
-            {Math.round(zoom * 100)}%
-          </div>
-        )}
       </div>
 
       {/* Controls */}
       <div className="mt-3 flex flex-wrap gap-2 justify-center">
-        {/* Zoom Controls */}
-        <div className="flex gap-1">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleZoomOut}
-            disabled={zoom <= 0.5}
-            className="text-white hover:bg-white/10"
-            data-testid="button-zoom-out"
-          >
-            <ZoomOut className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleResetZoom}
-            disabled={zoom === 1}
-            className="text-white hover:bg-white/10"
-            data-testid="button-zoom-reset"
-          >
-            <RotateCcw className="h-4 w-4" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleZoomIn}
-            disabled={zoom >= 3}
-            className="text-white hover:bg-white/10"
-            data-testid="button-zoom-in"
-          >
-            <ZoomIn className="h-4 w-4" />
-          </Button>
-        </div>
-
         {/* Screenshot */}
         <Button
           variant="ghost"
@@ -386,28 +298,6 @@ export function VideoPortal({ studentName, onClose }: VideoPortalProps) {
               Record
             </>
           )}
-        </Button>
-
-        {/* Fullscreen & PiP */}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleFullscreen}
-          className="text-white hover:bg-white/10"
-          data-testid="button-fullscreen"
-        >
-          <Maximize className="h-4 w-4 mr-2" />
-          Fullscreen
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handlePictureInPicture}
-          className="text-white hover:bg-white/10"
-          data-testid="button-pip"
-        >
-          <Minimize className="h-4 w-4 mr-2" />
-          PiP
         </Button>
 
         {/* Back to Grid */}
