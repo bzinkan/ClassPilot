@@ -1,0 +1,152 @@
+You’re hitting two MV3-specific issues—not just the “same-device” test quirk.
+
+From your screenshot:
+
+TypeError: Cannot read properties of undefined (reading 'getMediaStreamId')
+
+ReferenceError: RTCPeerConnection is not defined (inside service-worker.js)
+
+What’s going on
+
+MV3 service workers don’t have a window/DOM context, and several real-time APIs (WebRTC objects, getDisplayMedia) aren’t usable directly there. That’s why RTCPeerConnection is undefined in the service worker.
+
+chrome.tabCapture.getMediaStreamId (and even chrome.tabCapture.capture) must be called from a page/tab context, not the service worker. In SW scope chrome.tabCapture often appears but the capture path fails (or the API is undefined if permissions/context aren’t right), hence the undefined error.
+
+The fix (standard MV3 pattern)
+
+Move all capture + WebRTC code out of the service worker and into an Offscreen Document (or a pinned extension page). Use the SW only for control + messaging.
+
+1) Manifest additions
+{
+  "manifest_version": 3,
+  "name": "ClassPilot Student",
+  "version": "1.3.1",
+  "permissions": ["storage", "scripting", "tabCapture", "notifications", "offscreen"],
+  "optional_permissions": ["desktopCapture"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": { "default_popup": "popup.html" },
+  "host_permissions": ["https://YOUR-SIGNALING-ORIGIN/*", "https://YOUR-DASHBOARD-ORIGIN/*"],
+  "offscreen_documents": [
+    { "matches": ["*://*/*"], "reason": "USER_MEDIA", "justification": "Run WebRTC and screen capture while extension has no visible window." }
+  ]
+}
+
+2) Create an offscreen page
+
+offscreen.html (simple shell) loads offscreen.js.
+
+offscreen.js (runs in a page context, so WebRTC and getDisplayMedia work here):
+
+// offscreen.js
+let pc, dc, stream, ws, teacherId;
+const ICE = [{urls:"stun:stun.l.google.com:19302"}, {urls:"turn:turn.yourturn.com:3478", username:"u", credential:"p"}];
+
+chrome.runtime.onMessage.addListener(async (msg, _sender, sendResponse) => {
+  try {
+    if (msg.type === 'OFFSCREEN_START') {
+      await ensureWS(msg.signalUrl, msg.meta);
+      await startCapture(msg.mode); // "desktop" | "tab"
+      sendResponse({ok:true});
+      return true;
+    }
+    if (msg.type === 'OFFSCREEN_STOP') {
+      stopAll();
+      sendResponse({ok:true});
+      return true;
+    }
+    if (msg.type === 'SIGNAL') {
+      handleSignal(msg.payload);
+      sendResponse({ok:true});
+      return true;
+    }
+  } catch (e) {
+    console.error('[Offscreen] error', e);
+    sendResponse({ok:false, error: String(e)});
+  }
+});
+
+async function ensureWS(url, meta){
+  if (ws) return;
+  ws = new WebSocket(url);
+  ws.onopen = () => ws.send(JSON.stringify({type:'hello', role:'student', meta}));
+  ws.onmessage = ({data}) => chrome.runtime.sendMessage({type:'FROM_OFFSCREEN_SIGNAL', payload: JSON.parse(data)});
+}
+
+async function startCapture(mode){
+  // Prefer getDisplayMedia in offscreen page
+  if (!stream) {
+    if (mode === 'tab') {
+      stream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:false}); // or use chrome.tabCapture from a tab context you control
+    } else {
+      stream = await navigator.mediaDevices.getDisplayMedia({video:true, audio:false});
+    }
+  }
+  pc = new RTCPeerConnection({iceServers: ICE});
+  dc = pc.createDataChannel('chat');
+  pc.onicecandidate = e => e.candidate && ws?.send(JSON.stringify({type:'ice', candidate:e.candidate, to: teacherId}));
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+}
+
+async function handleSignal(msg){
+  if (msg.type === 'offer') {
+    teacherId = msg.from;
+    await pc.setRemoteDescription(msg.sdp);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws?.send(JSON.stringify({type:'answer', sdp: pc.localDescription, to: teacherId}));
+  } else if (msg.type === 'ice') {
+    await pc?.addIceCandidate(msg.candidate);
+  }
+}
+
+function stopAll(){
+  stream?.getTracks().forEach(t=>t.stop());
+  stream = null;
+  pc?.close(); pc=null;
+  ws?.close(); ws=null;
+}
+
+3) Service worker only orchestrates
+
+service-worker.js:
+
+async function ensureOffscreen(){
+  const has = await chrome.offscreen.hasDocument?.();
+  if (!has) {
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['USER_MEDIA'],
+      justification: 'Screen capture + WebRTC must run in page context'
+    });
+  }
+}
+
+// Called when teacher requests live view
+async function startShare(meta){
+  await ensureOffscreen();
+  return chrome.runtime.sendMessage({
+    type: 'OFFSCREEN_START',
+    signalUrl: 'wss://YOUR-SIGNALING/ws',
+    meta,
+    mode: 'desktop' // or 'tab'
+  });
+}
+
+// Route incoming WS (from your SW’s socket) to offscreen:
+function onSignalFromServer(payload){
+  chrome.runtime.sendMessage({ type:'SIGNAL', payload });
+}
+
+// Optionally listen for messages coming back from offscreen:
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'FROM_OFFSCREEN_SIGNAL') {
+    // forward to your server socket if needed
+  }
+});
+
+
+If you previously tried to do new RTCPeerConnection() or navigator.mediaDevices.getDisplayMedia() in the service worker, move those calls into offscreen.js. That will eliminate both errors you posted.
+
+Also double-check
+
+Permissions: Ensure tabCapture (and desktopCapture if you use it) are in permissions, not just optional_permissions, or request them before capture.

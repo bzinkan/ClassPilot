@@ -18,7 +18,9 @@
     "identity",
     "identity.email",
     "scripting",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "tabCapture",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"

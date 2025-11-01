@@ -20,13 +20,9 @@ let ws = null;
 let backoffMs = 0; // Exponential backoff for heartbeat failures
 let cameraActive = false; // Track camera usage across all tabs
 
-// WebRTC variables
-let peerConnection = null;
-let localStream = null;
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
-];
+// WebRTC: Offscreen document handles all WebRTC in MV3
+// Service worker only orchestrates via messaging
+let offscreenDocumentCreated = false;
 
 // Storage helpers
 const kv = {
@@ -1018,125 +1014,188 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }
 });
 
-// WebRTC: Create peer connection
-async function createPeerConnection() {
-  if (peerConnection) {
-    peerConnection.close();
+// ============================================================================
+// OFFSCREEN DOCUMENT MANAGEMENT (MV3 WebRTC)
+// ============================================================================
+// In MV3, service workers don't have access to WebRTC/Media APIs
+// All WebRTC logic moved to offscreen.js which runs in a page context
+
+async function ensureOffscreenDocument() {
+  // Check if offscreen document already exists
+  if (offscreenDocumentCreated) {
+    return true;
   }
   
-  peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-  
-  // Handle ICE candidates
-  peerConnection.onicecandidate = (event) => {
-    if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'ice',
-        to: 'teacher',
-        candidate: event.candidate.toJSON(),
-      }));
+  try {
+    // Check if document is already created (in case flag is wrong)
+    if (chrome.offscreen && chrome.offscreen.hasDocument) {
+      const hasDoc = await chrome.offscreen.hasDocument();
+      if (hasDoc) {
+        offscreenDocumentCreated = true;
+        return true;
+      }
     }
-  };
-  
-  // Handle connection state changes
-  peerConnection.onconnectionstatechange = () => {
-    console.log('[WebRTC] Connection state:', peerConnection.connectionState);
-    if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'disconnected') {
-      stopScreenShare();
-    }
-  };
-  
-  return peerConnection;
+    
+    // Create offscreen document
+    await chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['USER_MEDIA'],
+      justification: 'Screen capture and WebRTC must run in page context for MV3 compatibility'
+    });
+    
+    offscreenDocumentCreated = true;
+    console.log('[Service Worker] Offscreen document created');
+    return true;
+  } catch (error) {
+    console.error('[Service Worker] Error creating offscreen document:', error);
+    return false;
+  }
 }
 
-// WebRTC: Handle screen share request from teacher
+// WebRTC: Handle screen share request from teacher (orchestrate via offscreen)
 async function handleScreenShareRequest() {
   try {
-    console.log('[WebRTC] Starting screen capture...');
+    console.log('[WebRTC] Teacher requested screen share');
     
-    // Get screen capture using offscreen document (MV3 compatible)
-    // We'll use tabCapture as a simpler approach for now
+    // Ensure offscreen document exists
+    const offscreenReady = await ensureOffscreenDocument();
+    if (!offscreenReady) {
+      throw new Error('Failed to create offscreen document');
+    }
+    
+    // Get active tab to capture
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs[0]?.id) {
       console.error('[WebRTC] No active tab found');
+      safeNotify({
+        title: 'Screen Sharing Error',
+        message: 'No active tab to share',
+      });
       return;
     }
     
-    // Use tabCapture API (requires user gesture via extension icon click)
+    // Get streamId using tabCapture (works in service worker)
     const streamId = await chrome.tabCapture.getMediaStreamId({
       targetTabId: tabs[0].id
     });
     
-    // Create peer connection
-    await createPeerConnection();
+    console.log('[WebRTC] Got streamId:', streamId);
     
-    // Get media stream using streamId
-    localStream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        mandatory: {
-          chromeMediaSource: 'tab',
-          chromeMediaSourceId: streamId
-        }
-      }
+    // Create peer connection in offscreen document
+    const wsUrl = ws ? `${CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws'}://${new URL(CONFIG.serverUrl).host}/ws` : null;
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_CREATE_PEER',
+      wsUrl: wsUrl,
+      deviceId: CONFIG.deviceId
     });
     
-    // Add tracks to peer connection
-    localStream.getTracks().forEach(track => {
-      peerConnection.addTrack(track, localStream);
+    // Start capture in offscreen document
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_START_CAPTURE',
+      streamId: streamId
     });
     
-    console.log('[WebRTC] Screen capture started, waiting for offer from teacher');
+    console.log('[WebRTC] Screen capture initiated in offscreen document');
     
   } catch (error) {
-    console.error('[WebRTC] Screen capture error:', error);
+    console.error('[WebRTC] Screen share request error:', error);
     safeNotify({
       title: 'Screen Sharing Error',
-      message: 'Unable to share screen. Please ensure permissions are granted.',
+      message: 'Unable to share screen: ' + error.message,
     });
   }
 }
 
-// WebRTC: Handle offer from teacher
+// WebRTC: Handle offer from teacher (forward to offscreen)
 async function handleOffer(sdp, from) {
   try {
-    if (!peerConnection) {
-      await createPeerConnection();
+    console.log('[WebRTC] Forwarding offer to offscreen document');
+    
+    await ensureOffscreenDocument();
+    
+    const response = await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_HANDLE_OFFER',
+      sdp: sdp
+    });
+    
+    if (!response.success) {
+      throw new Error(response.error || 'Failed to handle offer');
     }
     
-    await peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-    
-    const answer = await peerConnection.createAnswer();
-    await peerConnection.setLocalDescription(answer);
-    
-    // Send answer back to teacher
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'answer',
-        to: 'teacher',
-        sdp: peerConnection.localDescription.toJSON(),
-      }));
-    }
-    
-    console.log('[WebRTC] Sent answer to teacher');
+    console.log('[WebRTC] Offer handled in offscreen document');
   } catch (error) {
     console.error('[WebRTC] Error handling offer:', error);
   }
 }
 
-// WebRTC: Stop screen sharing and cleanup
-function stopScreenShare() {
-  console.log('[WebRTC] Stopping screen share');
-  
-  if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
-    localStream = null;
-  }
-  
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
+// WebRTC: Handle ICE candidate from teacher (forward to offscreen)
+async function handleIceCandidate(candidate) {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_HANDLE_ICE',
+      candidate: candidate
+    });
+  } catch (error) {
+    console.error('[WebRTC] Error handling ICE candidate:', error);
   }
 }
+
+// WebRTC: Stop screen sharing (cleanup in offscreen)
+async function stopScreenShare() {
+  try {
+    console.log('[WebRTC] Stopping screen share');
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_STOP'
+    });
+  } catch (error) {
+    console.error('[WebRTC] Error stopping screen share:', error);
+  }
+}
+
+// Listen for messages FROM offscreen document
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Only handle messages from offscreen document
+  if (!sender.url?.includes('offscreen.html')) {
+    return;
+  }
+  
+  console.log('[Service Worker] Message from offscreen:', message.type);
+  
+  // Forward ICE candidates to teacher
+  if (message.type === 'OFFSCREEN_ICE_CANDIDATE') {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'ice',
+        to: 'teacher',
+        candidate: message.candidate,
+      }));
+    }
+  }
+  
+  // Forward answer to teacher
+  if (message.type === 'OFFSCREEN_ANSWER') {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'answer',
+        to: 'teacher',
+        sdp: message.sdp,
+      }));
+    }
+  }
+  
+  // Handle connection failures
+  if (message.type === 'OFFSCREEN_CONNECTION_FAILED') {
+    console.log('[WebRTC] Connection failed, cleaning up');
+  }
+  
+  // Handle capture errors
+  if (message.type === 'OFFSCREEN_CAPTURE_ERROR') {
+    safeNotify({
+      title: 'Screen Sharing Error',
+      message: message.error || 'Failed to capture screen',
+    });
+  }
+});
 
 // Connect to WebSocket for signaling
 function connectWebSocket() {
@@ -1235,9 +1294,8 @@ function connectWebSocket() {
       // Handle WebRTC ICE candidate from teacher
       if (message.type === 'ice') {
         console.log('[WebRTC] Received ICE candidate from teacher');
-        if (peerConnection && message.candidate) {
-          peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate))
-            .catch(error => console.error('[WebRTC] Error adding ICE candidate:', error));
+        if (message.candidate) {
+          handleIceCandidate(message.candidate);
         }
       }
       
