@@ -143,6 +143,66 @@ async function safeNotify(opts) {
   }
 }
 
+// Declarative Net Request - Block unauthorized domains
+const BLOCK_RULE_ID = 1;
+
+async function updateBlockingRules(allowedDomains) {
+  try {
+    // Remove existing rules
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const ruleIdsToRemove = existingRules.map(rule => rule.id);
+    
+    if (ruleIdsToRemove.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: ruleIdsToRemove
+      });
+    }
+    
+    // If no allowed domains, we're done (unlocked state)
+    if (!allowedDomains || allowedDomains.length === 0) {
+      console.log('Blocking rules cleared - navigation is unrestricted');
+      return;
+    }
+    
+    // Create allow conditions for each domain
+    const allowConditions = allowedDomains.map(domain => {
+      // Handle domains with or without protocol
+      const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      return {
+        requestDomains: [cleanDomain]
+      };
+    });
+    
+    // Create a blocking rule for everything EXCEPT allowed domains
+    // We'll use multiple allow rules and one block rule
+    const rules = [
+      {
+        id: BLOCK_RULE_ID,
+        priority: 1,
+        action: {
+          type: "block"
+        },
+        condition: {
+          resourceTypes: ["main_frame"],
+          excludedRequestDomains: allowedDomains.map(d => d.replace(/^https?:\/\//, '').replace(/\/$/, ''))
+        }
+      }
+    ];
+    
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: rules
+    });
+    
+    console.log('Blocking rules updated. Allowed domains:', allowedDomains);
+  } catch (error) {
+    console.error('Error updating blocking rules:', error);
+  }
+}
+
+async function clearBlockingRules() {
+  await updateBlockingRules([]);
+}
+
 // Get logged-in Chromebook user info using Chrome Identity API
 async function getLoggedInUserInfo() {
   try {
@@ -624,6 +684,9 @@ async function handleRemoteControl(command) {
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
         allowedDomains = []; // Clear scene domains when locking to single domain
         
+        // Apply network-level blocking rules for single domain
+        await updateBlockingRules([lockedDomain]);
+        
         let lockedTabId = null;
         
         if (lockedUrl) {
@@ -669,6 +732,9 @@ async function handleRemoteControl(command) {
         lockedDomain = null;
         allowedDomains = []; // Clear all lock state
         
+        // Clear network-level blocking rules
+        await clearBlockingRules();
+        
         safeNotify({
           title: 'Screen Unlocked',
           message: 'Your screen has been unlocked. You can now browse freely.',
@@ -685,6 +751,9 @@ async function handleRemoteControl(command) {
         
         // Store allowed domains from the scene
         allowedDomains = command.data.allowedDomains || [];
+        
+        // Apply network-level blocking rules
+        await updateBlockingRules(allowedDomains);
         
         // Close all tabs except one and navigate to the first allowed domain
         if (allowedDomains.length > 0) {
