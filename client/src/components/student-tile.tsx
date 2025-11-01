@@ -20,7 +20,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
@@ -353,7 +353,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 />
               </div>
             )}
-            {student.screenLocked ? (
+            {student.sceneActive ? (
+              <div title="Scene active">
+                <Layers 
+                  className="h-3.5 w-3.5 flex-shrink-0 text-blue-600 dark:text-blue-400" 
+                  data-testid={`icon-scene-active-${student.deviceId}`}
+                />
+              </div>
+            ) : student.screenLocked ? (
               <div title="Screen locked">
                 <Lock 
                   className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 

@@ -372,6 +372,7 @@ async function sendHeartbeat() {
       activeTabUrl: activeTab.url || 'No URL',
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
+      sceneActive: screenLocked && allowedDomains.length > 0, // True if scene is active
       isSharing: false,
       cameraActive: cameraActive,
     };
@@ -548,10 +549,14 @@ function extractDomain(url) {
   }
 }
 
-// Helper function to check if URL is on the same domain
+// Helper function to check if URL is on the same domain (exact match only)
 function isOnSameDomain(url, domain) {
   if (!url || !domain) return false;
   const urlDomain = extractDomain(url);
+  if (!urlDomain) return false;
+  
+  // Use exact domain matching for precise control
+  // e.g., "classroom.google.com" only matches "classroom.google.com"
   return urlDomain === domain;
 }
 

@@ -278,6 +278,7 @@ export class MemStorage implements IStorage {
       lastSeenAt: 0,
       isSharing: false,
       screenLocked: false,
+      sceneActive: false,
       cameraActive: false,
       status: 'offline',
     };
@@ -386,6 +387,7 @@ export class MemStorage implements IStorage {
       activeTabUrl: insertHeartbeat.activeTabUrl,
       favicon: insertHeartbeat.favicon ?? null,
       screenLocked: insertHeartbeat.screenLocked ?? false,
+      sceneActive: insertHeartbeat.sceneActive ?? false,
       isSharing: insertHeartbeat.isSharing ?? false,
       cameraActive: insertHeartbeat.cameraActive ?? false,
       timestamp: new Date(),
@@ -414,6 +416,7 @@ export class MemStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
+            sceneActive: heartbeat.sceneActive ?? false,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
@@ -436,6 +439,7 @@ export class MemStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
+        status.sceneActive = heartbeat.sceneActive ?? false;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
@@ -738,6 +742,7 @@ export class DatabaseStorage implements IStorage {
         lastSeenAt,
         isSharing: false,
         screenLocked: false,
+        sceneActive: false,
         cameraActive: false,
         status: this.calculateStatus(lastSeenAt),
       };
@@ -914,6 +919,7 @@ export class DatabaseStorage implements IStorage {
       lastSeenAt,
       isSharing: false,
       screenLocked: false,
+      sceneActive: false,
       cameraActive: false,
       status: this.calculateStatus(lastSeenAt),
     };
@@ -1050,6 +1056,7 @@ export class DatabaseStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
+            sceneActive: heartbeat.sceneActive ?? false,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
@@ -1072,6 +1079,7 @@ export class DatabaseStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
+        status.sceneActive = heartbeat.sceneActive ?? false;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);

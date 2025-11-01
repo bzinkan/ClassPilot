@@ -65,6 +65,7 @@ export interface StudentStatus {
   lastSeenAt: number;
   isSharing: boolean;
   screenLocked: boolean;
+  sceneActive: boolean; // True if a scene is applied (vs single-domain lock)
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   cameraActive: boolean;
   status: 'online' | 'idle' | 'offline';
@@ -79,6 +80,7 @@ export const heartbeats = pgTable("heartbeats", {
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
+  sceneActive: boolean("scene_active").default(false), // True if scene is active (vs single-domain lock)
   isSharing: boolean("is_sharing").default(false),
   cameraActive: boolean("camera_active").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
