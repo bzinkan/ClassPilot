@@ -1,0 +1,190 @@
+Yep—totally doable, and you don’t need to renegotiate WebRTC. Just re-mount the same <video> element into an overlay (modal) and then drop it back into the tile. That way the MediaStream never changes and the tile view stays “live” when you collapse.
+
+Here’s a clean React pattern:
+
+Keep a single HTMLVideoElement per student and attach the MediaStream once.
+
+When you “expand,” render that same video node in a portal overlay.
+
+On “collapse,” render it back into the grid tile container.
+
+Minimal example (React + TypeScript)
+// VideoPortal.tsx
+import { useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+
+type Props = {
+  videoEl: HTMLVideoElement | null;
+  onClose: () => void;
+};
+
+export default function VideoPortal({ videoEl, onClose }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  if (!containerRef.current) {
+    const el = document.createElement("div");
+    el.className =
+      "fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4";
+    document.body.appendChild(el);
+    containerRef.current = el;
+  }
+
+  useEffect(() => {
+    return () => {
+      // Clean up DOM on unmount
+      if (containerRef.current) {
+        document.body.removeChild(containerRef.current);
+      }
+    };
+  }, []);
+
+  return createPortal(
+    <div
+      className="relative w-full max-w-6xl rounded-2xl bg-neutral-900 p-3 shadow-2xl"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <div className="relative aspect-video w-full overflow-hidden rounded-xl bg-black">
+        {/* We *move* the same video node into this container */}
+        <div
+          id="portal-video-slot"
+          className="absolute inset-0 [&>video]:h-full [&>video]:w-full [&>video]:object-contain"
+        />
+      </div>
+
+      <div className="mt-3 flex gap-2">
+        <button
+          className="rounded-xl bg-white/10 px-3 py-2"
+          onClick={async () => {
+            // Optional: Fullscreen
+            const el = containerRef.current?.firstElementChild as HTMLElement;
+            if (!document.fullscreenElement) await el?.requestFullscreen();
+            else await document.exitFullscreen();
+          }}
+        >
+          Fullscreen
+        </button>
+        <button
+          className="rounded-xl bg-white/10 px-3 py-2"
+          onClick={onClose}
+        >
+          Back to Grid
+        </button>
+        <button
+          className="rounded-xl bg-white/10 px-3 py-2"
+          onClick={async () => {
+            // Optional: Picture-in-Picture (Chrome)
+            // @ts-ignore
+            if (document.pictureInPictureEnabled && videoEl)
+              // @ts-ignore
+              await videoEl.requestPictureInPicture();
+          }}
+        >
+          Pop-out (PiP)
+        </button>
+      </div>
+    </div>,
+    containerRef.current
+  );
+}
+
+// StudentTile.tsx
+import { useEffect, useRef, useState } from "react";
+import VideoPortal from "./VideoPortal";
+
+type Props = {
+  studentId: string;
+  stream: MediaStream; // from your peer connection
+  name: string;
+};
+
+export default function StudentTile({ studentId, stream, name }: Props) {
+  const tileRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+
+  // Attach the stream only once
+  useEffect(() => {
+    if (!videoRef.current) {
+      videoRef.current = document.createElement("video");
+      videoRef.current.autoplay = true;
+      videoRef.current.muted = true; // teacher shouldn’t hear their mic echo
+      videoRef.current.playsInline = true;
+      videoRef.current.srcObject = stream;
+      videoRef.current.style.width = "100%";
+      videoRef.current.style.height = "100%";
+      videoRef.current.style.objectFit = "cover";
+    }
+    // Mount into the tile slot on first render
+    const slot = tileRef.current?.querySelector("#tile-video-slot");
+    if (slot && videoRef.current && !slot.contains(videoRef.current)) {
+      slot.appendChild(videoRef.current);
+    }
+  }, [stream]);
+
+  // When collapsing from portal, move video back into the tile
+  const moveVideoBackToTile = () => {
+    const slot = tileRef.current?.querySelector("#tile-video-slot");
+    if (slot && videoRef.current && !slot.contains(videoRef.current)) {
+      slot.appendChild(videoRef.current);
+    }
+    setExpanded(false);
+  };
+
+  // When expanding, move the video into the portal’s slot after mount
+  const handleExpand = () => {
+    setExpanded(true);
+    // next microtask ensures portal is mounted
+    queueMicrotask(() => {
+      const portalSlot = document.querySelector("#portal-video-slot");
+      if (portalSlot && videoRef.current && !portalSlot.contains(videoRef.current)) {
+        portalSlot.appendChild(videoRef.current);
+      }
+    });
+  };
+
+  return (
+    <div
+      ref={tileRef}
+      className="group relative aspect-video w-full overflow-hidden rounded-2xl bg-neutral-900"
+    >
+      <div id="tile-video-slot" className="h-full w-full" />
+      <div className="pointer-events-none absolute inset-0 bg-black/0 transition group-hover:bg-black/10" />
+      <div className="absolute right-2 top-2 flex gap-2">
+        <button
+          className="rounded-xl bg-black/50 px-2 py-1 text-xs text-white"
+          onClick={handleExpand}
+        >
+          Enlarge
+        </button>
+      </div>
+      <div className="absolute bottom-2 left-2 rounded-lg bg-black/50 px-2 py-1 text-xs text-white">
+        {name}
+      </div>
+
+      {expanded && (
+        <VideoPortal videoEl={videoRef.current} onClose={moveVideoBackToTile} />
+      )}
+    </div>
+  );
+}
+
+// Grid example
+export function StudentGrid({ students }: { students: Array<{id:string; name:string; stream:MediaStream}> }) {
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+      {students.map(s => (
+        <StudentTile key={s.id} studentId={s.id} name={s.name} stream={s.stream} />
+      ))}
+    </div>
+  );
+}
+
+Notes & options
+
+This approach moves the same DOM node (the <video>) so the decoder keeps running; no flicker, no renegotiation.
+
+Add a hover toolbar on each tile for Enlarge / Pop-out / Fullscreen / Mute.
+
+If you prefer “zoom in place,” you can also animate with CSS (scale up to a centered overlay) but portals are simpler and more performant.
+
+For stats (bitrate/packet loss), keep them tied to the peer connection; UI state doesn’t affect them.
