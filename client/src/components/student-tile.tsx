@@ -100,13 +100,22 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.appendChild(videoElementRef.current);
       }
-    } else if (!liveStream && videoElementRef.current && tileVideoSlotRef.current) {
-      // Remove video element from DOM when stream stops
-      if (tileVideoSlotRef.current.contains(videoElementRef.current)) {
+    } else if (!liveStream && videoElementRef.current) {
+      // Close portal if expanded
+      if (expanded) {
+        setExpanded(false);
+      }
+      
+      // Remove video element from DOM when stream stops (check both locations)
+      const portalSlot = document.querySelector('#portal-video-slot');
+      if (portalSlot && portalSlot.contains(videoElementRef.current)) {
+        portalSlot.removeChild(videoElementRef.current);
+      }
+      if (tileVideoSlotRef.current && tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.removeChild(videoElementRef.current);
       }
     }
-  }, [liveStream]);
+  }, [liveStream, expanded]);
   
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
