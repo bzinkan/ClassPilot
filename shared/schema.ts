@@ -66,6 +66,7 @@ export interface StudentStatus {
   isSharing: boolean;
   screenLocked: boolean;
   sceneActive: boolean; // True if a scene is applied (vs single-domain lock)
+  activeSceneName?: string; // Name of the currently active scene
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   cameraActive: boolean;
   status: 'online' | 'idle' | 'offline';
@@ -81,6 +82,7 @@ export const heartbeats = pgTable("heartbeats", {
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
   sceneActive: boolean("scene_active").default(false), // True if scene is active (vs single-domain lock)
+  activeSceneName: text("active_scene_name"), // Name of the currently active scene
   isSharing: boolean("is_sharing").default(false),
   cameraActive: boolean("camera_active").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
@@ -229,6 +231,7 @@ export interface RemoteControlMessage {
     closeAll?: boolean; // For close-tab (close all tabs except allowed)
     locked?: boolean; // For lock-screen
     sceneId?: string; // For apply-scene
+    sceneName?: string; // For apply-scene - display name of the scene
     maxTabs?: number; // For limit-tabs
     allowedDomains?: string[]; // For apply-scene
     blockedDomains?: string[]; // For apply-scene

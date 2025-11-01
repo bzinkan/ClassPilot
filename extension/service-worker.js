@@ -433,6 +433,7 @@ async function sendHeartbeat() {
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
       sceneActive: screenLocked && allowedDomains.length > 0, // True if scene is active
+      activeSceneName: activeSceneName, // Name of the currently active scene
       isSharing: false,
       cameraActive: cameraActive,
     };
@@ -595,6 +596,7 @@ let screenLocked = false;
 let lockedUrl = null;
 let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
 let allowedDomains = []; // Multiple domains for apply-scene (e.g., ["ixl.com", "khanacademy.org"])
+let activeSceneName = null; // Name of the currently active scene
 let currentMaxTabs = null;
 
 // Helper function to extract domain from URL
@@ -731,6 +733,7 @@ async function handleRemoteControl(command) {
         lockedUrl = null;
         lockedDomain = null;
         allowedDomains = []; // Clear all lock state
+        activeSceneName = null; // Clear scene name
         
         // Clear network-level blocking rules
         await clearBlockingRules();
@@ -749,8 +752,9 @@ async function handleRemoteControl(command) {
         lockedUrl = null; // Scene uses multiple domains, not a single URL
         lockedDomain = null; // Clear single domain when applying scene
         
-        // Store allowed domains from the scene
+        // Store allowed domains and scene name from the scene
         allowedDomains = command.data.allowedDomains || [];
+        activeSceneName = command.data.sceneName || null;
         
         // Apply network-level blocking rules
         await updateBlockingRules(allowedDomains);

@@ -1393,12 +1393,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Scene ID and allowed domains are required" });
       }
       
+      // Fetch scene details to get the scene name
+      const scene = await storage.getScene(sceneId);
+      const sceneName = scene?.sceneName || 'Unknown Scene';
+      
       broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'apply-scene',
           data: { 
             sceneId,
+            sceneName,
             allowedDomains 
           },
         },
@@ -1407,7 +1412,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
         : "all students";
-      res.json({ success: true, message: `Applied scene to ${target}` });
+      res.json({ success: true, message: `Applied scene "${sceneName}" to ${target}` });
     } catch (error) {
       console.error("Apply scene error:", error);
       res.status(500).json({ error: "Internal server error" });
