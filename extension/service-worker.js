@@ -1065,8 +1065,9 @@ async function sendToOffscreen(message) {
   try {
     return await chrome.runtime.sendMessage(message);
   } catch (error) {
-    console.error('[Service Worker] Error sending to offscreen:', error);
-    throw error;
+    // Expected: offscreen might not be ready yet or connection lost
+    console.info('[Service Worker] Offscreen communication deferred (expected during initialization):', error.message);
+    return { success: false, error: error.message };
   }
 }
 
@@ -1089,13 +1090,31 @@ async function handleScreenShareRequest(mode = 'auto') {
     });
     
     if (!result?.success) {
-      throw new Error(result?.error || 'Failed to start screen share');
+      // Check if this is an expected failure (user denied, etc.)
+      if (result?.status === 'user-denied') {
+        console.info('[WebRTC] User denied screen share (expected behavior)');
+        // Don't notify - this is normal
+        return;
+      } else if (result?.status === 'tab-capture-unavailable') {
+        console.info('[WebRTC] Silent tab capture not available (expected on unmanaged devices)');
+        // This is expected, just log it
+        return;
+      } else {
+        // Unexpected error
+        console.error('[WebRTC] Unexpected screen share error:', result?.error);
+        safeNotify({
+          title: 'Screen Sharing Error',
+          message: 'Unable to share screen: ' + (result?.error || 'Unknown error'),
+        });
+        return;
+      }
     }
     
     console.log('[WebRTC] Screen capture initiated in offscreen document');
     
   } catch (error) {
-    console.error('[WebRTC] Screen share request error:', error);
+    // Only unexpected errors reach here
+    console.error('[WebRTC] Unexpected screen share request error:', error);
     safeNotify({
       title: 'Screen Sharing Error',
       message: 'Unable to share screen: ' + error.message,
@@ -1114,24 +1133,40 @@ async function handleOffer(sdp, from) {
     });
     
     if (!response?.success) {
-      throw new Error(response?.error || 'Failed to handle offer');
+      // Expected: peer connection not ready yet (user denied capture, etc.)
+      if (response?.error?.includes('not initialized')) {
+        console.info('[WebRTC] Peer connection not ready (expected during capture failures)');
+        return;
+      }
+      // Unexpected error
+      console.error('[WebRTC] Unexpected offer handling error:', response?.error);
+      return;
     }
     
     console.log('[WebRTC] Offer handled in offscreen document');
   } catch (error) {
-    console.error('[WebRTC] Error handling offer:', error);
+    // Only unexpected errors reach here
+    console.error('[WebRTC] Unexpected error handling offer:', error);
   }
 }
 
 // WebRTC: Handle ICE candidate from teacher (forward to offscreen)
 async function handleIceCandidate(candidate) {
   try {
-    await sendToOffscreen({
+    const response = await sendToOffscreen({
       type: 'SIGNAL',
       payload: { type: 'ice', candidate: candidate }
     });
+    
+    // Expected: ICE candidates can arrive before peer is ready or be queued
+    if (response?.status === 'queued' || response?.status === 'late-candidate') {
+      console.info('[WebRTC] ICE candidate queued/late (expected)');
+      return;
+    }
+    
   } catch (error) {
-    console.error('[WebRTC] Error handling ICE candidate:', error);
+    // Expected: ICE candidates can arrive when offscreen isn't ready
+    console.info('[WebRTC] ICE candidate handling deferred (expected during initialization)');
   }
 }
 
