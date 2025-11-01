@@ -1071,17 +1071,21 @@ async function sendToOffscreen(message) {
 }
 
 // WebRTC: Handle screen share request from teacher (orchestrate via offscreen)
-async function handleScreenShareRequest() {
+async function handleScreenShareRequest(mode = 'auto') {
   try {
-    console.log('[WebRTC] Teacher requested screen share');
+    console.log('[WebRTC] Teacher requested screen share, mode:', mode);
     
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
     
-    // Tell offscreen to start capture (it will use getDisplayMedia)
+    // Tell offscreen to start capture
+    // mode: 'auto' = try silent tab capture, fallback to picker
+    // mode: 'tab' = only silent tab capture
+    // mode: 'screen' = only picker
     const result = await sendToOffscreen({
       type: 'START_SHARE',
-      deviceId: CONFIG.deviceId
+      deviceId: CONFIG.deviceId,
+      mode: mode
     });
     
     if (!result?.success) {
@@ -1289,7 +1293,11 @@ function connectWebSocket() {
       // Handle WebRTC signaling - teacher requesting to view screen
       if (message.type === 'request-stream') {
         console.log('[WebRTC] Teacher requested screen share');
-        handleScreenShareRequest();
+        // mode: 'auto' (default) = try silent tab capture, fallback to picker
+        // mode: 'tab' = only silent tab capture
+        // mode: 'screen' = only picker
+        const mode = message.mode || 'auto';
+        handleScreenShareRequest(mode);
       }
       
       // Handle WebRTC offer from teacher
