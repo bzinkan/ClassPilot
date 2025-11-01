@@ -20,13 +20,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers, Maximize2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 import { formatDuration } from "@shared/utils";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { VideoPortal } from "@/components/video-portal";
 
 interface StudentTileProps {
   student: StudentStatus;
@@ -71,13 +72,34 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
+  const [expanded, setExpanded] = useState(false);
   const { toast } = useToast();
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const tileVideoSlotRef = useRef<HTMLDivElement>(null);
+  const videoElementRef = useRef<HTMLVideoElement | null>(null);
   
-  // Attach live stream to video element when available
+  // Create video element once and attach stream
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.srcObject = liveStream || null;
+    if (!videoElementRef.current) {
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.style.width = '100%';
+      video.style.height = 'auto';
+      video.className = 'rounded-md';
+      videoElementRef.current = video;
+    }
+    
+    // Attach stream to video element
+    if (videoElementRef.current) {
+      videoElementRef.current.srcObject = liveStream || null;
+    }
+    
+    // Mount video into tile slot on first render or when collapsing
+    if (liveStream && tileVideoSlotRef.current && videoElementRef.current) {
+      if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
+        tileVideoSlotRef.current.appendChild(videoElementRef.current);
+      }
     }
   }, [liveStream]);
   
@@ -188,6 +210,28 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         deviceName: newDeviceName
       });
     }
+  };
+  
+  // Expand video to portal
+  const handleExpand = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded(true);
+    // Move video to portal after next render
+    queueMicrotask(() => {
+      const portalSlot = document.querySelector('#portal-video-slot');
+      if (portalSlot && videoElementRef.current && !portalSlot.contains(videoElementRef.current)) {
+        portalSlot.appendChild(videoElementRef.current);
+      }
+    });
+  };
+  
+  // Collapse video back to tile
+  const handleCollapse = () => {
+    const tileSlot = tileVideoSlotRef.current;
+    if (tileSlot && videoElementRef.current && !tileSlot.contains(videoElementRef.current)) {
+      tileSlot.appendChild(videoElementRef.current);
+    }
+    setExpanded(false);
   };
   
   const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);
@@ -416,15 +460,24 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
         {/* Active Tab Info or Live Video */}
         {liveStream ? (
-          <div className="mb-2.5 rounded-md overflow-hidden bg-black">
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="w-full h-auto"
+          <div className="mb-2.5 rounded-md overflow-hidden bg-black relative group">
+            <div 
+              ref={tileVideoSlotRef}
+              id={`tile-video-slot-${student.deviceId}`}
+              className="w-full"
               data-testid={`video-live-${student.deviceId}`}
             />
+            {/* Enlarge button overlay */}
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors pointer-events-none" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute top-2 right-2 h-7 w-7 bg-black/50 hover:bg-black/70 text-white opacity-0 group-hover:opacity-100 transition-opacity pointer-events-auto"
+              onClick={handleExpand}
+              data-testid={`button-enlarge-${student.deviceId}`}
+            >
+              <Maximize2 className="h-4 w-4" />
+            </Button>
           </div>
         ) : (
           <div className="space-y-2 mb-2.5">
@@ -591,6 +644,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      
+      {/* Video Portal for enlarged view */}
+      {expanded && liveStream && (
+        <VideoPortal
+          studentName={student.studentName || student.deviceName || student.deviceId}
+          onClose={handleCollapse}
+        />
+      )}
     </Card>
   );
 }
