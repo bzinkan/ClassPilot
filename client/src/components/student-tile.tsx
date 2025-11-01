@@ -76,8 +76,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   
   // Attach live stream to video element when available
   useEffect(() => {
-    if (videoRef.current && liveStream) {
-      videoRef.current.srcObject = liveStream;
+    if (videoRef.current) {
+      videoRef.current.srcObject = liveStream || null;
     }
   }, [liveStream]);
   
