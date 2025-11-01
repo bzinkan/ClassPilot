@@ -103,20 +103,30 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       }
     } else {
       // Stream stopped - cleanup
+      console.log(`[StudentTile ${student.deviceId}] Stream stopped, cleaning up video element`);
+      
       if (expanded) {
         setExpanded(false);
       }
+      
       if (videoElementRef.current) {
         videoElementRef.current.srcObject = null;
+        
+        // Remove video element from tile slot
+        if (tileVideoSlotRef.current?.contains(videoElementRef.current)) {
+          console.log(`[StudentTile ${student.deviceId}] Removing video from tile slot`);
+          tileVideoSlotRef.current.removeChild(videoElementRef.current);
+        }
         
         // Remove video element from portal if it's there
         const portalSlot = document.querySelector('#portal-video-slot');
         if (portalSlot?.contains(videoElementRef.current)) {
+          console.log(`[StudentTile ${student.deviceId}] Removing video from portal slot`);
           portalSlot.removeChild(videoElementRef.current);
         }
       }
     }
-  }, [liveStream, expanded]);
+  }, [liveStream, expanded, student.deviceId]);
   
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
