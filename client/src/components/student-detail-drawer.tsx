@@ -39,6 +39,23 @@ export function StudentDetailDrawer({
     return calculateURLSessions(urlHistory);
   }, [urlHistory]);
 
+  // Calculate current URL duration by finding the most recent session for the current URL
+  const currentUrlDuration = useMemo(() => {
+    if (!student || !student.activeTabUrl || urlSessions.length === 0) {
+      return null;
+    }
+
+    // Find the most recent session (last in array since they're sorted by time)
+    const mostRecentSession = urlSessions[urlSessions.length - 1];
+    
+    // If the most recent session matches the current URL, use its duration
+    if (mostRecentSession && mostRecentSession.url === student.activeTabUrl) {
+      return mostRecentSession.durationSeconds;
+    }
+
+    return null;
+  }, [student, urlSessions]);
+
   const deleteStudentMutation = useMutation({
     mutationFn: async (deviceId: string) => {
       return await apiRequest("DELETE", `/api/students/${deviceId}`);
@@ -182,9 +199,15 @@ export function StudentDetailDrawer({
                     )}
                     <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-2 pt-2 border-t border-border/50">
                       <Clock className="h-3 w-3" />
-                      <span>
-                        {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
-                      </span>
+                      {currentUrlDuration !== null ? (
+                        <span className="font-medium text-primary" data-testid="current-url-duration">
+                          {formatDuration(currentUrlDuration)}
+                        </span>
+                      ) : (
+                        <span>
+                          {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>

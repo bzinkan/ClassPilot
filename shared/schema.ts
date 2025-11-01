@@ -69,6 +69,7 @@ export interface StudentStatus {
   activeSceneName?: string; // Name of the currently active scene
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   cameraActive: boolean;
+  currentUrlDuration?: number; // Duration in seconds spent on current URL
   status: 'online' | 'idle' | 'offline';
 }
 

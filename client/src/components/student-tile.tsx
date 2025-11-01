@@ -24,6 +24,7 @@ import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unloc
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
+import { formatDuration } from "@shared/utils";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 
@@ -420,9 +421,15 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         {/* Footer */}
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground pt-2 border-t border-border/20">
           <Clock className="h-3 w-3" />
-          <span data-testid={`text-last-seen-${student.deviceId}`}>
-            {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
-          </span>
+          {student.currentUrlDuration !== undefined ? (
+            <span className="font-medium text-primary" data-testid={`current-url-duration-${student.deviceId}`}>
+              {formatDuration(student.currentUrlDuration)}
+            </span>
+          ) : (
+            <span data-testid={`text-last-seen-${student.deviceId}`}>
+              {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
+            </span>
+          )}
         </div>
       </div>
 

@@ -447,11 +447,51 @@ export class MemStorage implements IStorage {
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
+        
+        // Calculate current URL duration
+        status.currentUrlDuration = this.calculateCurrentUrlDurationMem(heartbeat.studentId, heartbeat.activeTabUrl);
+        
         this.studentStatuses.set(heartbeat.studentId, status);
       }
     }
     
     return heartbeat;
+  }
+
+  // Helper function to calculate duration on current URL (MemStorage)
+  private calculateCurrentUrlDurationMem(studentId: string, currentUrl: string): number {
+    // Get recent heartbeats for this student
+    const studentHeartbeats = this.heartbeats
+      .filter(h => h.studentId === studentId)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    
+    if (studentHeartbeats.length === 0) {
+      return 10; // First heartbeat, default to 10 seconds
+    }
+    
+    // Find consecutive heartbeats with the same URL (going backwards from most recent)
+    let consecutiveCount = 0;
+    let startTime: Date | null = null;
+    let endTime: Date | null = null;
+    
+    for (let i = studentHeartbeats.length - 1; i >= 0; i--) {
+      const hb = studentHeartbeats[i];
+      if (hb.activeTabUrl === currentUrl) {
+        consecutiveCount++;
+        endTime = endTime || new Date(hb.timestamp);
+        startTime = new Date(hb.timestamp);
+      } else {
+        break; // Stop when URL changes
+      }
+    }
+    
+    if (consecutiveCount === 0 || !startTime || !endTime) {
+      return 10; // Default to 10 seconds
+    }
+    
+    // Calculate duration: time span + one heartbeat interval (10s)
+    const timeSpanSeconds = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+    return timeSpanSeconds + 10;
   }
 
   async getHeartbeatsByDevice(deviceId: string, limit: number = 20): Promise<Heartbeat[]> {
@@ -1090,11 +1130,53 @@ export class DatabaseStorage implements IStorage {
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
+        
+        // Calculate current URL duration
+        status.currentUrlDuration = await this.calculateCurrentUrlDurationDb(heartbeat.studentId, heartbeat.activeTabUrl);
+        
         this.studentStatuses.set(heartbeat.studentId, status);
       }
     }
     
     return heartbeat;
+  }
+
+  // Helper function to calculate duration on current URL (DatabaseStorage)
+  private async calculateCurrentUrlDurationDb(studentId: string, currentUrl: string): Promise<number> {
+    // Get recent heartbeats for this student
+    const studentHeartbeats = await db
+      .select()
+      .from(heartbeats)
+      .where(eq(heartbeats.studentId, studentId))
+      .orderBy(heartbeats.timestamp);
+    
+    if (studentHeartbeats.length === 0) {
+      return 10; // First heartbeat, default to 10 seconds
+    }
+    
+    // Find consecutive heartbeats with the same URL (going backwards from most recent)
+    let consecutiveCount = 0;
+    let startTime: Date | null = null;
+    let endTime: Date | null = null;
+    
+    for (let i = studentHeartbeats.length - 1; i >= 0; i--) {
+      const hb = studentHeartbeats[i];
+      if (hb.activeTabUrl === currentUrl) {
+        consecutiveCount++;
+        endTime = endTime || new Date(hb.timestamp);
+        startTime = new Date(hb.timestamp);
+      } else {
+        break; // Stop when URL changes
+      }
+    }
+    
+    if (consecutiveCount === 0 || !startTime || !endTime) {
+      return 10; // Default to 10 seconds
+    }
+    
+    // Calculate duration: time span + one heartbeat interval (10s)
+    const timeSpanSeconds = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+    return timeSpanSeconds + 10;
   }
 
   async getHeartbeatsByDevice(deviceId: string, limit: number = 20): Promise<Heartbeat[]> {
