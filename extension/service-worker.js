@@ -685,7 +685,31 @@ async function handleRemoteControl(command) {
         
         // Store allowed domains from the scene
         allowedDomains = command.data.allowedDomains || [];
+        
+        // Close all tabs except one and navigate to the first allowed domain
         if (allowedDomains.length > 0) {
+          const allTabs = await chrome.tabs.query({});
+          const activeTab = allTabs.find(t => t.active) || allTabs[0];
+          
+          // Navigate the first tab to the first allowed domain (prepend https:// if needed)
+          const firstDomain = allowedDomains[0];
+          const firstUrl = firstDomain.startsWith('http') ? firstDomain : `https://${firstDomain}`;
+          
+          if (activeTab) {
+            // Update the active tab to the first domain
+            await chrome.tabs.update(activeTab.id, { url: firstUrl });
+            
+            // Close all other tabs
+            for (const tab of allTabs) {
+              if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')) {
+                await chrome.tabs.remove(tab.id);
+              }
+            }
+          } else {
+            // No tabs exist, create one
+            await chrome.tabs.create({ url: firstUrl, active: true });
+          }
+          
           safeNotify({
             title: 'Scene Applied',
             message: `Your teacher has applied a scene. You can only access: ${allowedDomains.join(', ')}`,
