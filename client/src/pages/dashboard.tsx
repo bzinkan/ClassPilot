@@ -142,6 +142,11 @@ export default function Dashboard() {
             }
             
             // Handle WebRTC signaling messages
+            if (message.type === 'peer-ready') {
+              console.log("[Dashboard] Student peer connection ready:", message.from);
+              webrtc.handlePeerReady(message.from);
+            }
+            
             if (message.type === 'answer') {
               console.log("[Dashboard] Received WebRTC answer from", message.from);
               webrtc.handleAnswer(message.from, message.sdp);

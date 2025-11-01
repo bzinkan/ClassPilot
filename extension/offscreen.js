@@ -197,7 +197,13 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       peerConnection.addTrack(track, localStream);
     });
     
-    console.log('[Offscreen] Tracks added to peer connection, ready for offer');
+    console.log('[Offscreen] Tracks added to peer connection, notifying teacher peer is ready');
+    
+    // Notify teacher that peer is ready to receive offer
+    chrome.runtime.sendMessage({
+      type: 'PEER_READY',
+    });
+    
     return { success: true };
     
   } catch (error) {
