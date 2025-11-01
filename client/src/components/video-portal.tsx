@@ -24,7 +24,12 @@ export function VideoPortal({ studentName, onClose }: VideoPortalProps) {
   if (!containerRef.current) {
     const el = document.createElement("div");
     el.className = "fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm";
-    el.onclick = onClose; // Click outside to close
+    // Only close when clicking the overlay background, not child elements
+    el.onclick = (e) => {
+      if (e.target === el) {
+        onClose();
+      }
+    };
     document.body.appendChild(el);
     containerRef.current = el;
   }
