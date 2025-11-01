@@ -19,6 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
+import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat, Settings } from "@shared/schema";
 
@@ -44,6 +45,7 @@ export default function Dashboard() {
     }
   });
   const [wsConnected, setWsConnected] = useState(false);
+  const [liveStreams, setLiveStreams] = useState<Map<string, MediaStream>>(new Map());
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
@@ -56,6 +58,9 @@ export default function Dashboard() {
   const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true); // Track if component is mounted
   const maxReconnectDelay = 30000; // 30 seconds max delay
+  
+  // WebRTC hook for live video streaming
+  const webrtc = useWebRTC(wsRef.current);
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
     queryKey: ['/api/students'],
@@ -135,6 +140,17 @@ export default function Dashboard() {
               // Invalidate queries to force refetch (needed because staleTime: Infinity)
               queryClient.invalidateQueries({ queryKey: ['/api/students'] });
             }
+            
+            // Handle WebRTC signaling messages
+            if (message.type === 'answer') {
+              console.log("[Dashboard] Received WebRTC answer from", message.from);
+              webrtc.handleAnswer(message.from, message.sdp);
+            }
+            
+            if (message.type === 'ice') {
+              console.log("[Dashboard] Received ICE candidate from", message.from);
+              webrtc.handleIceCandidate(message.from, message.candidate);
+            }
           } catch (error) {
             console.error("[Dashboard] WebSocket message error:", error);
           }
@@ -199,6 +215,9 @@ export default function Dashboard() {
         wsRef.current.close();
         wsRef.current = null;
       }
+      
+      // Clean up WebRTC connections
+      webrtc.cleanup();
     };
   }, []); // Empty deps - WebSocket connection should only be created once
 

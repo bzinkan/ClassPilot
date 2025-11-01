@@ -1236,11 +1236,8 @@ function connectWebSocket() {
       if (message.type === 'ice') {
         console.log('[WebRTC] Received ICE candidate from teacher');
         if (peerConnection && message.candidate) {
-          try {
-            await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-          } catch (error) {
-            console.error('[WebRTC] Error adding ICE candidate:', error);
-          }
+          peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate))
+            .catch(error => console.error('[WebRTC] Error adding ICE candidate:', error));
         }
       }
       
