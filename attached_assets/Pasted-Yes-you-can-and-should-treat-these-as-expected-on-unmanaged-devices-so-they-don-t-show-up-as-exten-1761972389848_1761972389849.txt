@@ -1,0 +1,168 @@
+Yes—you can (and should) treat these as expected on unmanaged devices so they don’t show up as extension “errors.” Two parts:
+
+1) Don’t throw → handle gracefully
+
+Those Extension-UI red errors are from unhandled exceptions/rejections. In your offscreen/service-worker code you currently do:
+
+console.error('[Offscreen] Error handling signal:', error);
+throw error; // <-- this makes Chrome mark it as an error
+
+
+Change to:
+
+console.warn('[Offscreen] Expected denial or unavailable feature:', {
+  name: error?.name,
+  message: error?.message,
+  code: error?.code
+});
+// IMPORTANT: do not throw; resolve to a safe state
+return { status: 'expected-denial' };
+
+
+And make every capture path catch & resolve:
+
+async function startCapture() {
+  try {
+    // try chrome.tabCapture first (if you use it)
+    const stream = await tryTabCapture();
+    if (stream) return onGotStream(stream);
+
+    // fallback to getDisplayMedia (requires consent)
+    const gdm = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    return onGotStream(gdm);
+  } catch (err) {
+    if (err?.name === 'NotAllowedError' || err?.name === 'AbortError') {
+      logExpected('User denied / picker closed');
+      notifyTeacher({ type: 'STUDENT_DENIED' });
+      // don’t throw
+      return { status: 'user-denied' };
+    }
+    logUnexpected(err);
+    // still don’t throw; just surface to UI
+    notifyTeacher({ type: 'CAPTURE_FAILED', reason: err?.name || 'unknown' });
+    return { status: 'failed' };
+  }
+}
+
+
+Also, for chrome.tabCapture (callback style):
+
+chrome.tabCapture.capture(captureOptions, (stream) => {
+  if (chrome.runtime.lastError || !stream) {
+    console.warn('[Offscreen] tabCapture unavailable:', chrome.runtime.lastError?.message);
+    // fall back to getDisplayMedia without throwing
+    return fallbackToGDM();
+  }
+  onGotStream(stream);
+});
+
+
+Result: no unhandled throws → the Extensions page stops listing them as “Error: …”.
+
+2) Classify unmanaged vs. managed and downgrade logs
+
+You can’t perfectly “detect management,” but a pragmatic signal is whether managed storage has any policy keys. On unmanaged profiles it’s empty.
+
+function isLikelyManaged() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.managed.get(null, (items) => {
+        // If there are any keys, the profile likely has policies
+        resolve(items && Object.keys(items).length > 0);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+let MANAGED = false;
+(async () => { MANAGED = await isLikelyManaged(); })();
+
+
+Then log at different levels & choose the copy you show to the UI:
+
+function logExpected(msg, extra) {
+  if (MANAGED) console.warn(`[Offscreen][Managed] ${msg}`, extra || '');
+  else console.info(`[Offscreen][Unmanaged] ${msg}`, extra || '');
+}
+
+function logUnexpected(err) {
+  console.error('[Offscreen] Unexpected error:', err);
+}
+
+
+And label your state machine:
+
+idle → awaiting-consent (when GDM will show a picker)
+
+streaming
+
+user-denied (NotAllowed/Abort)
+
+failed (anything else)
+
+Report these to the dashboard so teacher sees a clean status instead of “error.”
+
+3) Prevent “Peer not initialized / ignoring ICE”
+
+Those appear because candidates arrive before pc is ready. Simple queue:
+
+const iceQueue = [];
+let pc;
+
+function ensurePeer() {
+  if (!pc) {
+    pc = new RTCPeerConnection(rtcConfig);
+    pc.onicecandidate = (e) => e.candidate && sendToTeacher({ type: 'ICE', candidate: e.candidate });
+  }
+}
+
+function onRemoteIce(candidate) {
+  if (!pc || pc.remoteDescription == null) {
+    iceQueue.push(candidate);
+    return;
+  }
+  pc.addIceCandidate(candidate).catch((e) => logExpected('ICE add late', e));
+}
+
+async function onRemoteAnswer(desc) {
+  ensurePeer();
+  await pc.setRemoteDescription(desc);
+  // flush queued ICE
+  while (iceQueue.length) {
+    const c = iceQueue.shift();
+    await pc.addIceCandidate(c).catch(() => {});
+  }
+}
+
+
+This turns those messages into warnings (or nothing) instead of fatal errors.
+
+4) Teacher-facing copy
+
+When unmanaged:
+
+Tile badge: “Waiting for student consent”
+
+If denied: “Student dismissed screen-share prompt”
+
+Provide a “Re-request Share” button (sends a message that triggers a new getDisplayMedia call on the student’s page).
+
+5) Optional: feature flag
+
+Add an env/policy toggle to skip tabCapture entirely on unmanaged profiles (avoids the “tab capture not available” message):
+
+if (!MANAGED) {
+  return fallbackToGDM(); // go straight to picker path
+}
+
+TL;DR
+
+Stop throwing after logging; handle NotAllowedError as expected.
+
+Detect likely unmanaged via chrome.storage.managed.get(null) and downgrade logs to info/warn.
+
+Queue ICE until pc & remoteDescription are ready.
+
+Surface clean statuses to the UI instead of raw errors.

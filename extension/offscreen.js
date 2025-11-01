@@ -5,6 +5,7 @@
 let peerConnection = null;
 let localStream = null;
 let teacherId = null;
+let iceQueue = []; // Queue ICE candidates until peer is ready
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -31,14 +32,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       if (message.type === 'START_SHARE') {
-        await startScreenCapture(message.deviceId, message.mode);
-        sendResponse({ success: true });
+        const result = await startScreenCapture(message.deviceId, message.mode);
+        sendResponse(result);
         return;
       }
       
       if (message.type === 'SIGNAL') {
-        await handleSignal(message.payload);
-        sendResponse({ success: true });
+        const result = await handleSignal(message.payload);
+        sendResponse(result);
         return;
       }
       
@@ -52,7 +53,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: 'Unknown message type' });
       
     } catch (error) {
-      console.error('[Offscreen] Error handling message:', error);
+      // Unexpected errors only (expected ones are handled in functions)
+      console.error('[Offscreen] Unexpected error handling message:', error);
       sendResponse({ success: false, error: error.message });
     }
   })();
@@ -63,9 +65,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Start screen capture - try silent tab capture first, fallback to picker
 async function startScreenCapture(deviceId, mode = 'auto') {
+  console.log('[Offscreen] Starting screen capture, mode:', mode);
+  
   try {
-    console.log('[Offscreen] Starting screen capture, mode:', mode);
-    
     // Try silent tab capture first (works on managed Chromebooks with policy)
     if (mode === 'auto' || mode === 'tab') {
       try {
@@ -79,7 +81,8 @@ async function startScreenCapture(deviceId, mode = 'auto') {
                 resolve(stream);
               } else {
                 const error = chrome.runtime.lastError;
-                console.log('[Offscreen] Silent tab capture failed:', error?.message);
+                // Expected on unmanaged devices - not a real error
+                console.info('[Offscreen] Silent tab capture not available (expected on unmanaged devices):', error?.message);
                 reject(error);
               }
             }
@@ -90,32 +93,78 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       } catch (tabCaptureError) {
         // Tab capture failed - fall back to picker only if mode is 'auto'
         if (mode === 'auto') {
-          console.log('[Offscreen] Tab capture not available, falling back to screen picker...');
-          localStream = await navigator.mediaDevices.getDisplayMedia({
-            video: {
-              frameRate: 15,
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            },
-            audio: false
-          });
-          console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+          console.info('[Offscreen] Falling back to screen picker (expected on unmanaged devices)...');
+          
+          try {
+            localStream = await navigator.mediaDevices.getDisplayMedia({
+              video: {
+                frameRate: 15,
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
+              },
+              audio: false
+            });
+            console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+          } catch (pickerError) {
+            // User denied or closed picker - expected behavior
+            if (pickerError.name === 'NotAllowedError' || pickerError.name === 'AbortError') {
+              console.info('[Offscreen] User denied screen share or closed picker (expected)');
+              chrome.runtime.sendMessage({
+                type: 'CAPTURE_ERROR',
+                error: 'Student denied screen share request'
+              });
+              return { success: false, status: 'user-denied' };
+            }
+            // Unexpected error
+            console.error('[Offscreen] Unexpected screen picker error:', pickerError);
+            chrome.runtime.sendMessage({
+              type: 'CAPTURE_ERROR',
+              error: pickerError.message
+            });
+            return { success: false, status: 'failed', error: pickerError.message };
+          }
         } else {
-          throw new Error('Silent tab capture failed and fallback not allowed');
+          // Mode is 'tab' only, no fallback allowed
+          console.warn('[Offscreen] Silent tab capture failed and fallback not allowed in mode:', mode);
+          chrome.runtime.sendMessage({
+            type: 'CAPTURE_ERROR',
+            error: 'Silent tab capture not available on this device'
+          });
+          return { success: false, status: 'tab-capture-unavailable' };
         }
       }
     } else if (mode === 'screen') {
       // Explicitly requested screen/window picker
       console.log('[Offscreen] Using screen picker (explicit request)...');
-      localStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: 15,
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
-      console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+      
+      try {
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: 15,
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+        console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
+      } catch (pickerError) {
+        // User denied or closed picker - expected behavior
+        if (pickerError.name === 'NotAllowedError' || pickerError.name === 'AbortError') {
+          console.info('[Offscreen] User denied screen share or closed picker (expected)');
+          chrome.runtime.sendMessage({
+            type: 'CAPTURE_ERROR',
+            error: 'Student denied screen share request'
+          });
+          return { success: false, status: 'user-denied' };
+        }
+        // Unexpected error
+        console.error('[Offscreen] Unexpected screen picker error:', pickerError);
+        chrome.runtime.sendMessage({
+          type: 'CAPTURE_ERROR',
+          error: pickerError.message
+        });
+        return { success: false, status: 'failed', error: pickerError.message };
+      }
     }
     
     // Create peer connection
@@ -149,14 +198,16 @@ async function startScreenCapture(deviceId, mode = 'auto') {
     });
     
     console.log('[Offscreen] Tracks added to peer connection, ready for offer');
+    return { success: true };
     
   } catch (error) {
-    console.error('[Offscreen] Screen capture error:', error);
+    // Only unexpected errors reach here (expected ones are handled above)
+    console.error('[Offscreen] Unexpected screen capture error:', error);
     chrome.runtime.sendMessage({
       type: 'CAPTURE_ERROR',
       error: error.message
     });
-    throw error;
+    return { success: false, status: 'failed', error: error.message };
   }
 }
 
@@ -169,7 +220,8 @@ async function handleSignal(signal) {
       teacherId = signal.from;
       
       if (!peerConnection) {
-        throw new Error('Peer connection not initialized');
+        console.warn('[Offscreen] Peer connection not initialized, cannot handle offer');
+        return { success: false, error: 'Peer connection not initialized' };
       }
       
       await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
@@ -185,20 +237,61 @@ async function handleSignal(signal) {
         sdp: peerConnection.localDescription.toJSON(),
       });
       
+      // Flush queued ICE candidates now that remote description is set
+      await flushIceQueue();
+      
+      return { success: true };
+      
     } else if (signal.type === 'ice') {
       if (!peerConnection) {
-        console.warn('[Offscreen] No peer connection, ignoring ICE candidate');
-        return;
+        console.info('[Offscreen] No peer connection yet, queueing ICE candidate');
+        iceQueue.push(signal.candidate);
+        return { success: true, status: 'queued' };
       }
       
-      await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
-      console.log('[Offscreen] Added ICE candidate');
+      if (!peerConnection.remoteDescription) {
+        console.info('[Offscreen] Remote description not set yet, queueing ICE candidate');
+        iceQueue.push(signal.candidate);
+        return { success: true, status: 'queued' };
+      }
+      
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        console.log('[Offscreen] Added ICE candidate');
+        return { success: true };
+      } catch (iceError) {
+        // Late ICE candidates are expected and safe to ignore
+        console.info('[Offscreen] ICE candidate add failed (expected for late candidates):', iceError.message);
+        return { success: true, status: 'late-candidate' };
+      }
     }
     
+    return { success: true };
+    
   } catch (error) {
-    console.error('[Offscreen] Error handling signal:', error);
-    throw error;
+    // Only log unexpected signaling errors
+    console.error('[Offscreen] Unexpected signaling error:', error);
+    return { success: false, error: error.message };
   }
+}
+
+// Flush queued ICE candidates after remote description is set
+async function flushIceQueue() {
+  if (iceQueue.length === 0) return;
+  
+  console.log(`[Offscreen] Flushing ${iceQueue.length} queued ICE candidates`);
+  
+  while (iceQueue.length > 0) {
+    const candidate = iceQueue.shift();
+    try {
+      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (error) {
+      // Late candidates are safe to ignore
+      console.info('[Offscreen] Queued ICE candidate add failed (safe to ignore):', error.message);
+    }
+  }
+  
+  console.log('[Offscreen] ICE queue flushed');
 }
 
 // Stop screen sharing and cleanup
@@ -215,6 +308,7 @@ function stopScreenShare() {
     peerConnection = null;
   }
   
+  iceQueue = [];
   teacherId = null;
   
   console.log('[Offscreen] Cleanup complete');
