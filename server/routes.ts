@@ -240,7 +240,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Route WebRTC signaling messages between teacher and students
         if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice' || message.type === 'peer-ready') {
           const targetDeviceId = message.to;
-          if (!targetDeviceId) return;
+          if (!targetDeviceId) {
+            console.log(`[WebSocket] Dropping ${message.type} - missing 'to' field`);
+            return;
+          }
+
+          console.log(`[WebSocket] Routing ${message.type} from ${client.deviceId} to ${targetDeviceId}`);
 
           // Find the target client (student or teacher)
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
@@ -250,13 +255,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 from: client.role === 'teacher' ? 'teacher' : client.deviceId,
                 ...message
               }));
+              console.log(`[WebSocket] Sent ${message.type} to student ${targetDeviceId}`);
               break;
             } else if (targetClient.role === 'teacher' && message.to === 'teacher') {
-              targetWs.send(JSON.stringify({
+              const payload = {
                 type: message.type,
                 from: client.deviceId,
                 ...message
-              }));
+              };
+              targetWs.send(JSON.stringify(payload));
+              console.log(`[WebSocket] Sent ${message.type} to teacher with from=${client.deviceId}`);
               break;
             }
           }
