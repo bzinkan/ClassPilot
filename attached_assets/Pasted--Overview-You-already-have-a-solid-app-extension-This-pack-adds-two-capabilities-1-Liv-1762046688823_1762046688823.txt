@@ -1,0 +1,323 @@
+# Overview
+
+You already have a solid app + extension. This pack adds two capabilities:
+
+1. **Live screen viewing** for teachers/admin (grid + zoom view)
+2. **Two‑way messaging** (teacher ↔ student), delivered over **WebRTC DataChannels** (preferred) with **WebSocket** fallback
+
+Architecture stays lightweight: Chrome Extension (student) ↔ Replit Signaling Server (WS) ↔ Teacher Dashboard (web). Media flows P2P via WebRTC; TURN relays when needed.
+
+---
+
+## 1) Student Chrome Extension (MV3)
+
+### 1.1 Manifest (snippet)
+
+```json
+{
+  "manifest_version": 3,
+  "name": "ClassPilot Student",
+  "version": "1.3.0",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "storage", "scripting", "activeTab", "tabCapture"
+  ],
+  "optional_permissions": ["desktopCapture"],
+  "host_permissions": [
+    "https://your-replit-app.repl.co/*",
+    "https://your-dashboard.school.edu/*"
+  ],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html"}
+}
+```
+
+> Notes
+>
+> * Use `desktopCapture` **or** `getDisplayMedia()` from a page your extension controls. `tabCapture` works well for single‑tab supervision. Keep both; choose at runtime based on policy/UX.
+
+### 1.2 Popup UI (start/stop)
+
+`popup.html` exposes big **Start Sharing** / **Stop** buttons. The click is the required **user gesture** to initiate capture on unmanaged devices.
+
+### 1.3 Background service worker (core logic)
+
+`background.js` (essentials, concise for clarity)
+
+```js
+/* globals chrome */
+let pc, ws, dc, mediaStream, sessionId, teacherId;
+const SIGNAL_URL = "wss://your-replit-app.repl.co/signal";
+const ICE_SERVERS = [{ urls: ["stun:stun.l.google.com:19302"] }, { urls: "turn:turn.yourdomain.com:3478", username: "user", credential: "pass" }];
+
+async function initWS(studentMeta){
+  ws = new WebSocket(SIGNAL_URL);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'hello', role: 'student', meta: studentMeta }));
+  ws.onmessage = async ({data}) => {
+    const msg = JSON.parse(data);
+    if(msg.type === 'offer'){
+      teacherId = msg.from;
+      await ensurePC();
+      await pc.setRemoteDescription(msg.sdp);
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      ws.send(JSON.stringify({ type:'answer', to: teacherId, sdp: pc.localDescription }));
+    } else if(msg.type === 'ice'){
+      await pc?.addIceCandidate(msg.candidate);
+    } else if(msg.type === 'request-share'){
+      startCapture();
+    } else if(msg.type === 'chat'){ // WS fallback
+      // display to user (badge or notification)
+      chrome.action.setBadgeText({text:'!'});
+      chrome.notifications?.create({title:'Message from teacher', message: msg.text, type:'basic', iconUrl:'icon48.png'});
+    }
+  };
+}
+
+async function ensurePC(){
+  if (pc) return pc;
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc.onicecandidate = e => e.candidate && ws?.send(JSON.stringify({ type:'ice', to: teacherId, candidate: e.candidate }));
+  pc.onconnectionstatechange = () => console.log('pc state', pc.connectionState);
+  dc = pc.createDataChannel('chat');
+  dc.onmessage = (e)=> handleIncomingChat(e.data);
+  return pc;
+}
+
+function handleIncomingChat(text){
+  // show unobtrusive notification
+  chrome.action.setBadgeText({text:'✉'});
+  chrome.notifications?.create({title:'Teacher', message:text, type:'basic', iconUrl:'icon48.png'});
+}
+
+async function startCapture(){
+  if (mediaStream) return;
+  // Prefer desktop capture if allowed, else fallback to tabCapture or getDisplayMedia
+  try{
+    mediaStream = await navigator.mediaDevices.getDisplayMedia({ video:true, audio:false });
+  }catch(err){
+    // fallback to current tab
+    mediaStream = await new Promise((resolve, reject)=>{
+      chrome.tabCapture.capture({ audio: false, video: true }, stream => stream ? resolve(stream) : reject(chrome.runtime.lastError));
+    });
+  }
+  await ensurePC();
+  mediaStream.getTracks().forEach(t => pc.addTrack(t, mediaStream));
+}
+
+function stopCapture(){
+  mediaStream?.getTracks().forEach(t=>t.stop());
+  mediaStream = null;
+}
+
+// Popup hooks
+chrome.runtime.onMessage.addListener((msg)=>{
+  if(msg.cmd === 'start'){ startCapture(); }
+  if(msg.cmd === 'stop'){ stopCapture(); }
+  if(msg.cmd === 'send'){ dc?.readyState === 'open' ? dc.send(msg.text) : ws?.send(JSON.stringify({type:'chat', to: teacherId, text: msg.text})); }
+});
+
+// Boot WS with lightweight device identity
+chrome.storage.local.get(['studentId','studentName','classId'], vals => {
+  const meta = { studentId: vals.studentId || crypto.randomUUID(), studentName: vals.studentName||'Student', classId: vals.classId||'A' };
+  chrome.storage.local.set(meta);
+  initWS(meta);
+});
+```
+
+### 1.4 Content script (optional)
+
+Inject a subtle **“Sharing is ON”** ribbon and a small in‑page messenger widget so students can reply quickly (accessibility + transparency).
+
+---
+
+## 2) Teacher Dashboard (web)
+
+### 2.1 Grid + viewer
+
+* Grid shows all students in a class with **live thumbnails**.
+* Clicking a card opens a **focused viewer**.
+* Each student card has: current URL/title (optional), status (online/sharing), **Send Message** button.
+
+### 2.2 WebRTC client (per student)
+
+Pseudo‑implementation (React-ish):
+
+```js
+const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+const dc = pc.createDataChannel('chat');
+
+pc.ontrack = (e)=> videoEl.srcObject = e.streams[0];
+pc.onicecandidate = (e)=> e.candidate && ws.send(JSON.stringify({type:'ice', to: studentId, candidate: e.candidate}));
+
+async function connectTo(studentId){
+  ws.send(JSON.stringify({ type:'knock', to: studentId })); // ask extension to prepare
+  const offer = await pc.createOffer({ offerToReceiveVideo: true });
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type:'offer', to: studentId, sdp: pc.localDescription }));
+}
+
+ws.onmessage = async ({data})=>{
+  const msg = JSON.parse(data);
+  if(msg.type==='answer' && msg.from===studentId){ await pc.setRemoteDescription(msg.sdp); }
+  else if(msg.type==='ice' && msg.from===studentId){ await pc.addIceCandidate(msg.candidate); }
+};
+
+function sendChat(text){
+  if (dc.readyState === 'open') dc.send(text); else ws.send(JSON.stringify({type:'chat', to: studentId, text}));
+}
+```
+
+### 2.3 UI/UX details
+
+* **Autoplay policy**: set `video.muted = true; playsInline` so thumbnails auto‑play.
+* **Quality**: request 720p for focused viewer; keep thumbnails to ~240p using `RTCRtpSender.setParameters({encodings:[{scaleResolutionDownBy:3, maxBitrate: 200_000}]})`.
+* **Simulcast** (optional): for SFU later.
+
+---
+
+## 3) Replit Signaling Server (Express + ws)
+
+### 3.1 Data model (minimal)
+
+* **users**: `id, role {teacher|admin|student}, name, class_id`
+* **sessions**: transient map of socketId → user
+* **messages**: (optional store) `{id, from, to, text, ts}` if you need audit/history
+
+### 3.2 Server (skeleton)
+
+```js
+import express from 'express';
+import { WebSocketServer } from 'ws';
+import http from 'http';
+
+const app = express();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+const peers = new Map(); // socket -> {id, role, classId}
+
+function sendTo(targetId, payload){
+  for (const [sock, meta] of peers.entries()){
+    if (meta.id === targetId) { sock.send(JSON.stringify({ ...payload, from: payload.from || 'server'})); }
+  }
+}
+
+wss.on('connection', (ws) => {
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(raw);
+    if (msg.type==='hello'){
+      peers.set(ws, { id: msg.meta.studentId || msg.meta.userId, role: msg.role, classId: msg.meta.classId });
+      ws.send(JSON.stringify({ type:'ack' }));
+    }
+    if (msg.type==='offer' || msg.type==='answer' || msg.type==='ice' || msg.type==='chat' || msg.type==='request-share'){
+      // route to specific peer id
+      sendTo(msg.to, msg);
+    }
+  });
+  ws.on('close', ()=> peers.delete(ws));
+});
+
+server.listen(process.env.PORT || 3000);
+```
+
+> Add JWT auth for teachers/admin routes; keep WS open auth lightweight but tied to a short‑lived signed token handed to students via the extension settings page your IT controls.
+
+---
+
+## 4) Messaging Feature
+
+### 4.1 DataChannel first, WebSocket fallback
+
+* **Primary path**: use the existing WebRTC peer’s **`RTCDataChannel`** named `chat`.
+* **Fallback**: if the peer isn’t connected yet or datachannel not open, send via **WS** to the signaling server → forwarded to the target. The extension shows a notification; the teacher sees delivery status from server ACK.
+
+### 4.2 UI affordances
+
+* **Teacher**: quick‑reply presets ("Wrap up in 2 minutes", "Open IXL now", "I’m here if you need help"), plus free‑text.
+* **Student**: small docked messenger (
+
+  * unread badge on browser action;
+  * `Esc` to dismiss;
+  * keyboard‑only accessible).
+
+### 4.3 Audit log (optional)
+
+* Store `{from, to, text, ts}` with 30‑day retention; export per class.
+
+---
+
+## 5) Enterprise/Policy Hooks (ChromeOS managed)
+
+* **Force‑install** the student extension to the student OU.
+* Optionally allow capture **from your dashboard origin** to reduce prompts (`ScreenCaptureAllowedByOrigins` style policies where available) and pin the extension icon.
+* Consider device or user attributes to auto‑fill `studentName`, `classId` (e.g., email prefix or OU path) via a setup page your IT visits once.
+
+---
+
+## 6) Scalability & Media Topology
+
+* **MVP**: teacher ↔ one student P2P; dashboard grid shows **on‑demand** connections (connect when card is opened/hovered) to keep concurrent peers low.
+* **For many simultaneous streams**: add an **SFU (Selective Forwarding Unit)** (e.g., mediasoup, LiveKit) later. Your extension still publishes a single upstream; the SFU fans out to multiple teachers/admin viewers.
+
+---
+
+## 7) Recording (optional)
+
+* Teacher side: `MediaRecorder` on the received `MediaStream` to WebM chunks; upload to your server/S3 with per‑class buckets. Display the red "REC" indicator in the student ribbon.
+
+---
+
+## 8) Security, Privacy, Compliance
+
+* Display a persistent **“Sharing ON”** indicator; allow immediate **Stop**.
+* Encrypt in transit (WebRTC DTLS‑SRTP). TLS on WS.
+* Role‑based access: only assigned teacher/admin can request/view.
+* Retention: configurable; default off for recording and message logs.
+* FERPA/COPPA language in your AUP; staff training one‑pager.
+
+---
+
+## 9) Failure Modes & Fixes
+
+* **Black video** in grid → Missing autoplay mute or device denied capture; ensure `muted` and show permission helper.
+* **Never connects** → Add **TURN**; corporate NATs often block P2P.
+* **Frequent prompts** → Leverage managed policies; keep a user‑gesture start.
+* **High CPU on student** → Lower frame rate (15fps), reduce resolution for thumbnails.
+
+---
+
+## 10) Quick Task List
+
+1. Add popup start/stop; persist minimal student identity.
+2. Implement DataChannel chat in extension + dashboard; WS fallback.
+3. Add WS routing for `offer/answer/ice/chat/request-share`.
+4. Build dashboard grid (muted autoplay) + focus viewer.
+5. Add TURN credentials; test behind school NAT.
+6. Prepare Admin guide (force‑install, origin allow‑list, pin icon).
+7. Ship audit controls + clear on‑screen indicators.
+
+---
+
+## 11) Environment & Config
+
+* `SIGNAL_URL` → your Replit WS endpoint
+* `ICE_SERVERS` → STUN + TURN (Coturn on Railway, or provider)
+* `JWT_SECRET` → sign short‑lived viewer tokens
+* `ALLOWED_ORIGINS` → dashboard + extension pages
+
+---
+
+## 12) What to integrate into your current app
+
+* Keep your existing sign‑in, roster, and admin pages.
+* Drop in the WS routes and the dashboard grid.
+* Wire your extension to your existing class metadata (school ID, class ID, student ID) so teachers only see their students.
+
+---
+
+### Done. Duplicate this pack into your repo and implement in three focused PRs:
+
+* PR1: **Signaling + TURN + grid UI**
+* PR2: **Extension capture + connect**
+* PR3: **Messaging + audit + indicators**
