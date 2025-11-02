@@ -1138,6 +1138,11 @@ async function handleOffer(sdp, from) {
         console.info('[WebRTC] Offer received before peer ready (expected - ignoring)');
         return;
       }
+      // Expected: queued for later processing
+      if (response?.status === 'queued') {
+        console.info('[WebRTC] Offer queued until peer connection ready (expected)');
+        return;
+      }
       // Unexpected error only
       console.error('[WebRTC] Unexpected offer handling error:', response?.error);
       return;

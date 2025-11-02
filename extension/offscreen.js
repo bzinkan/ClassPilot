@@ -219,10 +219,10 @@ async function handleSignal(signal) {
     
     if (signal.type === 'offer') {
       if (!peerConnection) {
-        console.warn('[Offscreen] Received offer before peer connection ready, queueing...');
+        console.log('[Offscreen] Received offer before peer connection ready, queueing (expected)...');
         // Queue the offer and wait for peer connection
         setTimeout(() => handleSignal(signal), 100);
-        return { success: false, status: 'queued' };
+        return { success: true, status: 'queued' };
       }
       
       teacherId = signal.from;
