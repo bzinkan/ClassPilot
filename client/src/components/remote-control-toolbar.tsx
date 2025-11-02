@@ -22,7 +22,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
-import type { Scene } from "@shared/schema";
+import type { FlightPath } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
   selectedDeviceIds: Set<string>;
@@ -42,8 +42,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
-  // Fetch scenes
-  const { data: scenes = [] } = useQuery<Scene[]>({
+  // Fetch flight paths
+  const { data: scenes = [] } = useQuery<FlightPath[]>({
     queryKey: ['/api/flight-paths'],
   });
 
@@ -498,7 +498,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
                   <div className="mt-2 p-3 bg-muted rounded-md">
                     <p className="text-sm font-medium mb-1">Allowed Domains:</p>
                     <ul className="text-sm text-muted-foreground list-disc list-inside">
-                      {selectedScene.allowedDomains.map((domain, index) => (
+                      {selectedScene.allowedDomains.map((domain: string, index: number) => (
                         <li key={index}>{domain}</li>
                       ))}
                     </ul>

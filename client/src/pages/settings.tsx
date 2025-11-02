@@ -606,13 +606,13 @@ export default function Settings() {
           </CardContent>
         </Card>
 
-        {/* Scenes Management */}
+        {/* Flight Path Management */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Layers className="h-5 w-5" />
-                Scenes Management
+                Flight Path Management
               </div>
               <Button
                 size="sm"
@@ -620,7 +620,7 @@ export default function Settings() {
                 data-testid="button-create-scene"
               >
                 <Plus className="h-4 w-4 mr-2" />
-                Create Scene
+                Create Flight Path
               </Button>
             </CardTitle>
             <CardDescription>
@@ -631,13 +631,13 @@ export default function Settings() {
             {scenesLoading ? (
               <div className="text-center py-8">
                 <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                <p className="text-sm text-muted-foreground">Loading scenes...</p>
+                <p className="text-sm text-muted-foreground">Loading flight paths...</p>
               </div>
             ) : scenes.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
                 <Layers className="h-12 w-12 mx-auto mb-3 opacity-20" />
-                <p className="text-sm">No scenes created yet</p>
-                <p className="text-xs mt-1">Create a scene to get started</p>
+                <p className="text-sm">No flight paths created yet</p>
+                <p className="text-xs mt-1">Create a flight path to get started</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -926,7 +926,7 @@ export default function Settings() {
               disabled={createSceneMutation.isPending || updateSceneMutation.isPending}
               data-testid="button-save-scene"
             >
-              {createSceneMutation.isPending || updateSceneMutation.isPending ? "Saving..." : (editingScene ? "Update Scene" : "Create Scene")}
+              {createSceneMutation.isPending || updateSceneMutation.isPending ? "Saving..." : (editingScene ? "Update Flight Path" : "Create Flight Path")}
             </Button>
           </DialogFooter>
         </DialogContent>
