@@ -716,7 +716,7 @@ export default function Dashboard() {
         {/* Search */}
         <div className="mb-8">
           <Input
-            placeholder="🔍 Search by student name, device ID, or class..."
+            placeholder="Search student"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             data-testid="input-search-students"
