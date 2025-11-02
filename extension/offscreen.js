@@ -115,16 +115,11 @@ async function startScreenCapture(deviceId, mode = 'auto') {
           try {
             localStream = await navigator.mediaDevices.getDisplayMedia({
               video: {
-                cursor: 'always',
-                displaySurface: 'browser',
-                frameRate: { ideal: 30, max: 30 },
-                width: { max: 1920 },
-                height: { max: 1080 }
+                width: { ideal: 1920, max: 1920 },
+                height: { ideal: 1080, max: 1080 },
+                frameRate: { ideal: 30, max: 30 }
               },
-              audio: false,
-              preferCurrentTab: true,
-              surfaceSwitching: 'include',
-              selfBrowserSurface: 'exclude'
+              audio: false
             });
             
             // Tighten constraints after capture (Chrome honors this)
@@ -175,16 +170,11 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       try {
         localStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
-            cursor: 'always',
-            displaySurface: 'browser',
-            frameRate: { ideal: 30, max: 30 },
-            width: { max: 1920 },
-            height: { max: 1080 }
+            width: { ideal: 1920, max: 1920 },
+            height: { ideal: 1080, max: 1080 },
+            frameRate: { ideal: 30, max: 30 }
           },
-          audio: false,
-          preferCurrentTab: true,
-          surfaceSwitching: 'include',
-          selfBrowserSurface: 'exclude'
+          audio: false
         });
         
         // Tighten constraints after capture (Chrome honors this)

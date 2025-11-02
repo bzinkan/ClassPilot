@@ -1,0 +1,78 @@
+Good catch—the new error is on me. We passed contradictory hints to getDisplayMedia:
+
+preferCurrentTab: true says “prefer capturing THIS tab.”
+
+selfBrowserSurface: "exclude" says “but don’t allow capturing this tab.”
+
+Chrome throws: Self-contradictory configuration.
+
+Quick hot-fix (works now)
+
+Use a minimal, non-contradictory constraint block, then tighten on the track:
+
+async function captureDisplay() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      width:  { ideal: 1920, max: 1920 },
+      height: { ideal: 1080, max: 1080 },
+      frameRate: { ideal: 30, max: 30 },
+      // leave these OUT to avoid conflicts:
+      // displaySurface, preferCurrentTab, selfBrowserSurface, surfaceSwitching
+    },
+    audio: false,
+  });
+
+  const v = stream.getVideoTracks()[0];
+  await v.applyConstraints({ width: 1920, height: 1080, frameRate: 30 });
+  // Sharper text/UI
+  // @ts-ignore
+  v.contentHint = "detail";
+  return stream;
+}
+
+
+If you do want to bias to the current tab later, set only one of these, not both:
+
+preferCurrentTab: true OR
+
+selfBrowserSurface: "include"
+Never combine preferCurrentTab: true with selfBrowserSurface: "exclude".
+
+Why you’re seeing the “offers queueing” spam
+
+Your log (Received offer before peer connection ready, queueing (expected)…) shows the teacher is sending multiple offers while the student is still setting up (or retry logic is firing). It’s harmless but noisy and can snowball.
+
+Simple debounce on the teacher
+
+Only send a new offer if you’re not already offering:
+
+let makingOffer = false;
+
+async function renegotiateIfNeeded(pc: RTCPeerConnection) {
+  if (makingOffer) return;             // debounce
+  makingOffer = true;
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    sendSignal({ type: "offer", sdp: pc.localDescription });
+  } finally {
+    makingOffer = false;
+  }
+}
+
+
+And only call that when a real change happens (track added, encodings changed), not on a timer.
+
+Optional (tabCapture path)
+
+Keep your chrome.tabCapture.capture path as-is. If it fails, fall back to the captureDisplay() above—without the conflicting hints.
+
+const stream = (await tryTabCapture()) ?? (await captureDisplay());
+
+TL;DR
+
+Remove the conflicting preferCurrentTab + selfBrowserSurface:"exclude" flags.
+
+Use the minimal getDisplayMedia config above, then apply constraints and contentHint.
+
+Debounce offer creation on the teacher so you don’t spam renegotiations.
