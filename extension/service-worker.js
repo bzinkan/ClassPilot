@@ -1195,7 +1195,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // Only handle other messages from offscreen document
   if (!sender.url?.includes('offscreen.html')) {
-    return false;
+    return;
   }
   
   console.log('[Service Worker] Message from offscreen:', message.type);
@@ -1210,7 +1210,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }));
     }
     sendResponse({ success: true });
-    return true;
   }
   
   // Forward answer to teacher
@@ -1223,7 +1222,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }));
     }
     sendResponse({ success: true });
-    return true;
   }
   
   // Forward peer-ready signal to teacher
@@ -1233,11 +1231,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ws.send(JSON.stringify({
         type: 'peer-ready',
         to: 'teacher',
-        from: CONFIG.deviceId, // Include deviceId so dashboard knows which device is ready
       }));
     }
     sendResponse({ success: true });
-    return true;
   }
   
   // Handle connection failures
@@ -1245,7 +1241,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[WebRTC] Connection failed, cleaning up');
     closeOffscreenDocument();
     sendResponse({ success: true });
-    return true;
   }
   
   // Handle capture errors
@@ -1255,10 +1250,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message: message.error || 'Failed to capture screen',
     });
     sendResponse({ success: true });
-    return true;
   }
   
-  return false;
+  return true;
 });
 
 // Connect to WebSocket for signaling

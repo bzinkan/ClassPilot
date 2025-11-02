@@ -77,7 +77,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const tileVideoSlotRef = useRef<HTMLDivElement>(null);
   const videoElementRef = useRef<HTMLVideoElement | null>(null);
   
-  // Create and manage video element
+  // Create video element once and attach stream
   useEffect(() => {
     if (!videoElementRef.current) {
       const video = document.createElement('video');
@@ -90,36 +90,32 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       videoElementRef.current = video;
     }
     
-    // When stream exists, attach and mount
-    if (liveStream) {
-      videoElementRef.current.srcObject = liveStream;
-      
-      // Mount video element to tile slot
-      if (tileVideoSlotRef.current && !tileVideoSlotRef.current.contains(videoElementRef.current)) {
+    // Attach stream to video element
+    if (videoElementRef.current) {
+      videoElementRef.current.srcObject = liveStream || null;
+    }
+    
+    // Mount video into tile slot when stream exists, remove when it doesn't
+    if (liveStream && tileVideoSlotRef.current && videoElementRef.current) {
+      if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.appendChild(videoElementRef.current);
       }
-    } else {
-      // Stream stopped - cleanup
+    } else if (!liveStream && videoElementRef.current) {
+      // Close portal if expanded
       if (expanded) {
         setExpanded(false);
       }
       
-      if (videoElementRef.current) {
-        videoElementRef.current.srcObject = null;
-        
-        // Remove video element from tile slot
-        if (tileVideoSlotRef.current?.contains(videoElementRef.current)) {
-          tileVideoSlotRef.current.removeChild(videoElementRef.current);
-        }
-        
-        // Remove video element from portal if it's there
-        const portalSlot = document.querySelector('#portal-video-slot');
-        if (portalSlot?.contains(videoElementRef.current)) {
-          portalSlot.removeChild(videoElementRef.current);
-        }
+      // Remove video element from DOM when stream stops (check both locations)
+      const portalSlot = document.querySelector('#portal-video-slot');
+      if (portalSlot && portalSlot.contains(videoElementRef.current)) {
+        portalSlot.removeChild(videoElementRef.current);
+      }
+      if (tileVideoSlotRef.current && tileVideoSlotRef.current.contains(videoElementRef.current)) {
+        tileVideoSlotRef.current.removeChild(videoElementRef.current);
       }
     }
-  }, [liveStream, expanded, student.deviceId]);
+  }, [liveStream, expanded]);
   
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
