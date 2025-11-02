@@ -233,7 +233,7 @@ export default function Settings() {
   const resetSceneForm = () => {
     setSceneName("");
     setSceneDescription("");
-    setSceneAllowedDomains("clever.com");
+    setSceneAllowedDomains("");
     setSceneBlockedDomains("");
     setEditingScene(null);
   };
