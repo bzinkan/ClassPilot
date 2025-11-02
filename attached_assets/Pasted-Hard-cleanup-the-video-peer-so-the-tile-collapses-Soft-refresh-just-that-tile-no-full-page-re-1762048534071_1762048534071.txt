@@ -1,0 +1,93 @@
+Hard-cleanup the video & peer (so the tile collapses).
+
+Soft-refresh just that tile (no full page reload).
+
+Here’s a drop-in pattern.
+
+1) Tile cleanup (no leftover space)
+function endLive(studentId: string) {
+  // 1) stop peer on teacher
+  stopPeerForStudent(studentId); // closes RTCPeerConnection
+
+  // 2) tell student to stop tracks
+  ws.send(JSON.stringify({ type: "stop-share", to: studentId }));
+
+  // 3) detach media so the box collapses
+  const v = videoRef.current;
+  if (v) {
+    try { v.pause(); } catch {}
+    // @ts-ignore
+    v.srcObject = null;
+    v.removeAttribute("src");
+    v.load();
+  }
+
+  // 4) flip mode back to URL
+  setMode("url");
+
+  // 5) (optional) nudge layout engines
+  requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+}
+
+
+Render conditionally so no wrapper reserves height:
+
+<div key={mode /* forces remount */}>
+  {mode === "url"  && <UrlBody {...} />}
+  {mode === "thumb" && <ThumbBody {...} />}
+  {mode === "live" && (
+    <div className="live-wrap">
+      <video ref={videoRef} autoPlay muted playsInline className="w-full h-auto" />
+    </div>
+  )}
+</div>
+
+2) Auto-refresh JUST the tile
+Option A — Tiny “revision” bump (fastest)
+
+Keep a per-tile revision and bump it on end; use it as a key so React remounts the tile cleanly.
+
+// parent grid
+const [revs, setRevs] = useState<Record<string, number>>({});
+const refreshTile = (id: string) =>
+  setRevs(r => ({ ...r, [id]: (r[id] ?? 0) + 1 }));
+
+<StudentTile key={`${s.id}-${revs[s.id] ?? 0}`} student={s} onEnd={() => refreshTile(s.id)} />
+
+
+In the tile call props.onEnd() at the end of endLive().
+
+Option B — React Query invalidate (if you use it)
+
+After endLive, invalidate the student list so the tile repulls its data:
+
+import { useQueryClient } from "@tanstack/react-query";
+const qc = useQueryClient();
+
+async function endLive(studentId: string) {
+  // …cleanup from step 1…
+  setMode("url");
+  await qc.invalidateQueries({ queryKey: ["students"] }); // or ["student", studentId]
+}
+
+Option C — Event bus
+
+Emit a tile:refresh event and let the parent re-render that one tile:
+
+window.dispatchEvent(new CustomEvent("tile:refresh", { detail: { id: studentId } }));
+
+3) Wire the icon
+// in tile header controls
+{mode === "live" ? (
+  <button onClick={() => endLive(student.id)} title="End Live View">⏹️</button>
+) : (
+  <button onClick={() => goLive(student.id)} title="Go Live">▶️</button>
+)}
+
+TL;DR
+
+Detach video.srcObject, load(), close peers, set mode='url'.
+
+Force a small remount of the tile (revision key or invalidateQueries).
+
+Optionally dispatch a resize to nudge your grid.
