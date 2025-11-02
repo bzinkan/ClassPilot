@@ -43,7 +43,7 @@ function normalizeDomain(domain: string): string {
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
   wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
-  retentionHours: z.string().min(1, "Retention period is required"),
+  retentionDays: z.string().min(1, "Retention period is required"),
   maxTabsPerStudent: z.string().optional(),
   blockedDomains: z.string(),
   allowedDomains: z.string(),
@@ -93,7 +93,7 @@ export default function Settings() {
     defaultValues: {
       schoolName: settings?.schoolName || "",
       wsSharedKey: settings?.wsSharedKey || "",
-      retentionHours: settings?.retentionHours || "24",
+      retentionDays: settings?.retentionHours ? String(Math.round(parseInt(settings.retentionHours) / 24)) : "30",
       maxTabsPerStudent: settings?.maxTabsPerStudent || "",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
       allowedDomains: settings?.allowedDomains?.join(", ") || "",
@@ -108,7 +108,7 @@ export default function Settings() {
       form.reset({
         schoolName: settings.schoolName,
         wsSharedKey: settings.wsSharedKey,
-        retentionHours: settings.retentionHours,
+        retentionDays: String(Math.round(parseInt(settings.retentionHours) / 24)),
         maxTabsPerStudent: settings.maxTabsPerStudent || "",
         blockedDomains: settings.blockedDomains?.join(", ") || "",
         allowedDomains: settings.allowedDomains?.join(", ") || "",
@@ -132,9 +132,13 @@ export default function Settings() {
       // Use schoolId from loaded settings, or default for initial creation
       const schoolId = settings?.schoolId || "default-school";
       
+      // Convert days to hours for storage
+      const retentionHours = String(parseInt(data.retentionDays) * 24);
+      
       const payload = {
         schoolId,
         ...data,
+        retentionHours,
         maxTabsPerStudent: data.maxTabsPerStudent || null,
         blockedDomains: data.blockedDomains
           .split(",")
@@ -483,17 +487,17 @@ export default function Settings() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="retentionHours">Data Retention (hours)</Label>
+                <Label htmlFor="retentionDays">Data Retention (days)</Label>
                 <Input
-                  id="retentionHours"
-                  data-testid="input-retention-hours"
+                  id="retentionDays"
+                  data-testid="input-retention-days"
                   type="number"
-                  {...form.register("retentionHours")}
-                  placeholder="24"
+                  {...form.register("retentionDays")}
+                  placeholder="30"
                 />
-                {form.formState.errors.retentionHours && (
+                {form.formState.errors.retentionDays && (
                   <p className="text-sm text-destructive">
-                    {form.formState.errors.retentionHours.message}
+                    {form.formState.errors.retentionDays.message}
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
