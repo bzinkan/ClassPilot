@@ -1,0 +1,136 @@
+I see it: your teacher is the one sharing. The green strip in your screenshot (“Sharing replit.com to ClassPilot”) appears on the teacher browser, which means getDisplayMedia() is being called from the dashboard, not from the student extension. That’s why the tile never gets a stream.
+
+Here’s the precise fix.
+
+What should happen
+
+Teacher: creates a peer connection that is receive-only (no capture).
+
+Student extension (offscreen page): starts capture and sends the video.
+
+Fix checklist (code-level)
+1) Dashboard (teacher) must be receive-only
+
+Make sure you do not call getDisplayMedia() or getUserMedia() anywhere in the dashboard.
+
+Before creating the offer, add a recvonly transceiver:
+
+// teacher dashboard
+const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+// receive-only
+pc.addTransceiver('video', { direction: 'recvonly' });
+
+pc.ontrack = (e) => {
+  const stream = e.streams[0];
+  const video = document.getElementById(`video-${studentId}`) as HTMLVideoElement;
+  if (video) {
+    video.srcObject = stream;
+    video.muted = true;
+    video.playsInline = true;
+    video.play().catch(()=>{});
+  }
+};
+
+// 1) ask student to start sharing
+ws.send(JSON.stringify({ type: 'request-share', to: studentId, mode: 'tab' }));
+
+// 2) create offer for receiving video
+const offer = await pc.createOffer();
+await pc.setLocalDescription(offer);
+
+// 3) send offer to student
+ws.send(JSON.stringify({ type: 'offer', to: studentId, sdp: pc.localDescription }));
+
+
+If you see any navigator.mediaDevices.getDisplayMedia in the dashboard code, remove/guard it.
+
+2) Student extension (offscreen.js) must capture + send
+
+Student side should start capture and addTrack to its RTCPeerConnection, then wait for the teacher’s offer, create an answer, and send it back.
+
+// offscreen.js (student)
+let pc, stream, teacherId;
+
+async function startCapture(mode = 'auto') {
+  // try silent tab capture first (on managed devices)
+  const tab = await new Promise((resolve, reject) => {
+    chrome.tabCapture.capture({ video: true, audio: false }, s => s ? resolve(s) : reject(chrome.runtime.lastError));
+  }).catch(() => null);
+
+  if (tab) return tab;
+  // fallback with picker
+  return navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+}
+
+async function preparePeer() {
+  if (pc) return pc;
+  pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  pc.onicecandidate = (e) => {
+    if (e.candidate) ws.send(JSON.stringify({ type: 'ice', to: teacherId, candidate: e.candidate }));
+  };
+  return pc;
+}
+
+async function beginShare(mode) {
+  stream = await startCapture(mode);
+  await preparePeer();
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+}
+
+// handle signaling from service worker / server
+async function onSignal(msg) {
+  if (msg.type === 'offer') {
+    teacherId = msg.from;
+    await preparePeer();
+    await pc.setRemoteDescription(msg.sdp);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws.send(JSON.stringify({ type: 'answer', to: teacherId, sdp: pc.localDescription }));
+  } else if (msg.type === 'ice') {
+    await pc?.addIceCandidate(msg.candidate);
+  }
+}
+
+
+Service worker should:
+
+receive request-share from server,
+
+ensure offscreen is ready,
+
+call OFFSCREEN_START (which calls beginShare(mode)),
+
+forward offer/ice messages to offscreen.
+
+3) Message routing sanity
+
+Double-check your WebSocket routing:
+
+Teacher → server → to studentId: request-share, offer, ice
+
+Student → server → to teacherId: answer, ice
+
+Each message should include to and (on server re-emit) a from field. Ensure the student’s answer is routed back to the same teacher socket that made the offer.
+
+4) ICE servers and autoplay
+
+Use STUN (and TURN in school networks). Even for same-LAN testing, include TURN.
+
+On the teacher tile <video>, set muted and playsInline before calling play().
+
+5) Quick diagnostics
+
+If you still see the green “sharing this tab” banner on the teacher, you still have capture happening in the dashboard—remove it.
+
+In the teacher browser, open chrome://webrtc-internals, select your peer connection:
+
+You should see recvonly transceiver on teacher.
+
+ICE state should move to connected.
+
+Console markers to add:
+
+Teacher: log when offer is created, answer received, ontrack fired.
+
+Student: log when capture started, tracks added, answer sent.
