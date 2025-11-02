@@ -39,6 +39,7 @@ interface StudentTileProps {
   liveStream?: MediaStream | null;
   onStartLiveView?: () => void;
   onStopLiveView?: () => void;
+  onEndLiveRefresh?: () => void;
 }
 
 function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
@@ -66,7 +67,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
   }
 }
 
-export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView }: StudentTileProps) {
+export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');

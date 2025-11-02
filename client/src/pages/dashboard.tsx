@@ -46,6 +46,7 @@ export default function Dashboard() {
   });
   const [wsConnected, setWsConnected] = useState(false);
   const [liveStreams, setLiveStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [tileRevisions, setTileRevisions] = useState<Record<string, number>>({});
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
@@ -322,23 +323,29 @@ export default function Dashboard() {
     });
   };
 
+  // Refresh a single tile by bumping its revision
+  const refreshTile = (deviceId: string) => {
+    setTileRevisions((prev) => ({ 
+      ...prev, 
+      [deviceId]: (prev[deviceId] ?? 0) + 1 
+    }));
+  };
+
   const handleStopLiveView = (deviceId: string) => {
     console.log(`[Dashboard] Stopping live view for ${deviceId}`);
     
     // Stop WebRTC connection and notify student
     webrtc.stopLiveView(deviceId, wsRef.current);
     
-    // Clear stream from state to trigger tile re-render
+    // Clear stream from state
     setLiveStreams((prev) => {
       const newMap = new Map(prev);
       newMap.delete(deviceId);
       return newMap;
     });
     
-    // Nudge layout engine to ensure proper tile collapse
-    requestAnimationFrame(() => {
-      window.dispatchEvent(new Event('resize'));
-    });
+    // Force tile remount to ensure clean UI
+    refreshTile(deviceId);
   };
 
   const filteredStudents = students
@@ -789,7 +796,7 @@ export default function Dashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {offTaskStudents.map((student) => (
                       <StudentTile
-                        key={student.studentId}
+                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
                         student={student}
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
@@ -799,6 +806,7 @@ export default function Dashboard() {
                         liveStream={liveStreams.get(student.deviceId) || null}
                         onStartLiveView={() => handleStartLiveView(student.deviceId)}
                         onStopLiveView={() => handleStopLiveView(student.deviceId)}
+                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -821,7 +829,7 @@ export default function Dashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {onTaskStudents.map((student) => (
                       <StudentTile
-                        key={student.studentId}
+                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
                         student={student}
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
@@ -831,6 +839,7 @@ export default function Dashboard() {
                         liveStream={liveStreams.get(student.deviceId) || null}
                         onStartLiveView={() => handleStartLiveView(student.deviceId)}
                         onStopLiveView={() => handleStopLiveView(student.deviceId)}
+                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -853,7 +862,7 @@ export default function Dashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {idleStudents.map((student) => (
                       <StudentTile
-                        key={student.studentId}
+                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
                         student={student}
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
@@ -863,6 +872,7 @@ export default function Dashboard() {
                         liveStream={liveStreams.get(student.deviceId) || null}
                         onStartLiveView={() => handleStartLiveView(student.deviceId)}
                         onStopLiveView={() => handleStopLiveView(student.deviceId)}
+                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
                       />
                     ))}
                   </div>
@@ -885,7 +895,7 @@ export default function Dashboard() {
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                     {offlineStudents.map((student) => (
                       <StudentTile
-                        key={student.studentId}
+                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
                         student={student}
                         onClick={() => setSelectedStudent(student)}
                         blockedDomains={settings?.blockedDomains || []}
@@ -895,6 +905,7 @@ export default function Dashboard() {
                         liveStream={liveStreams.get(student.deviceId) || null}
                         onStartLiveView={() => handleStartLiveView(student.deviceId)}
                         onStopLiveView={() => handleStopLiveView(student.deviceId)}
+                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
                       />
                     ))}
                   </div>

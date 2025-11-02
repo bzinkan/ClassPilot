@@ -1,0 +1,84 @@
+1) Parent grid – add a per-tile revision and pass a refresh callback
+// Parent component that renders StudentTile cards
+const [rev, setRev] = useState<Record<string, number>>({});
+
+function refreshTile(id: string) {
+  setRev(r => ({ ...r, [id]: (r[id] ?? 0) + 1 }));   // bump = remount
+}
+
+{students.map(s => (
+  <StudentTile
+    key={`${s.id}-${rev[s.id] ?? 0}`}   // ← forces a fresh mount after End Live
+    student={s}
+    onEndLiveRefresh={() => refreshTile(s.id)}
+  />
+))}
+
+2) StudentTile – clean up stream, switch mode, ask parent to refresh
+function StudentTile({ student, onEndLiveRefresh }) {
+  const [mode, setMode] = useState<"url"|"thumb"|"live">("url");
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  function endLive() {
+    // stop teacher peer
+    stopPeerForStudent(student.id);
+    // tell student to stop
+    ws.send(JSON.stringify({ type: "stop-share", to: student.id }));
+
+    // fully detach media so no space remains
+    const v = videoRef.current;
+    if (v) {
+      try { v.pause(); } catch {}
+      // @ts-ignore
+      v.srcObject = null;
+      v.removeAttribute("src");
+      v.load();
+    }
+
+    setMode("url");
+    onEndLiveRefresh?.();                     // ← triggers remount of this tile only
+  }
+
+  // …your goLive() unchanged…
+
+  return (
+    <div className="tile">
+      {/* header with Go Live / End Live buttons */}
+      {mode === "url"  && <UrlBody student={student} />}
+      {mode === "thumb"&& <ThumbBody student={student} />}
+      {mode === "live" && (
+        <div className="live-wrap">
+          <video ref={videoRef} autoPlay muted playsInline className="w-full h-auto" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+3) Make sure no wrapper keeps height
+
+Only render the live wrapper when mode === "live". Don’t leave aspect-*, min-h-*, or padding-ratio classes mounted in URL mode.
+
+Why this works
+
+Bumping the key (${id}-${rev}) makes React remount just that tile, which is exactly what a full page refresh does—but scoped to one card.
+
+The media detach (srcObject = null; load()) prevents a “ghost” height from the <video> element.
+
+If you can’t touch the parent (quick fallback)
+
+Add a local nonce in StudentTile and bump it in endLive():
+
+const [nonce, setNonce] = useState(0);
+function endLive() { /* cleanup… */ setMode("url"); setNonce(n => n+1); }
+return <div key={nonce}>{/* bodies as above */}</div>;
+
+Test checklist (takes 30 seconds)
+
+Click Go Live → video shows in the tile.
+
+Click End Live → tile instantly returns to normal URL layout, no blank space.
+
+No page reload required.
+
+This is the most straightforward, robust fix.
