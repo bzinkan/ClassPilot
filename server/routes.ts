@@ -286,6 +286,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
 
+        // Handle request to stop screen sharing from teacher to student
+        if (message.type === 'stop-share' && client.role === 'teacher') {
+          const targetDeviceId = message.deviceId;
+          if (!targetDeviceId) return;
+
+          console.log(`[WebSocket] Sending stop-share to ${targetDeviceId}`);
+          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
+            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
+              targetWs.send(JSON.stringify({
+                type: 'stop-share',
+                from: 'teacher'
+              }));
+              console.log(`[WebSocket] Sent stop-share to ${targetDeviceId}`);
+              break;
+            }
+          }
+        }
+
       } catch (error) {
         console.error('WebSocket message error:', error);
       }

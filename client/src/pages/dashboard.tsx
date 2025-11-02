@@ -323,11 +323,21 @@ export default function Dashboard() {
   };
 
   const handleStopLiveView = (deviceId: string) => {
-    webrtc.stopLiveView(deviceId);
+    console.log(`[Dashboard] Stopping live view for ${deviceId}`);
+    
+    // Stop WebRTC connection and notify student
+    webrtc.stopLiveView(deviceId, wsRef.current);
+    
+    // Clear stream from state to trigger tile re-render
     setLiveStreams((prev) => {
       const newMap = new Map(prev);
       newMap.delete(deviceId);
       return newMap;
+    });
+    
+    // Nudge layout engine to ensure proper tile collapse
+    requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'));
     });
   };
 

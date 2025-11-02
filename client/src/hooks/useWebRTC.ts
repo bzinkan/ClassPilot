@@ -128,7 +128,7 @@ export function useWebRTC(ws: WebSocket | null) {
 
 
   // Stop live view for a student
-  const stopLiveView = useCallback((deviceId: string) => {
+  const stopLiveView = useCallback((deviceId: string, ws?: WebSocket | null) => {
     const connection = connectionsRef.current.get(deviceId);
     if (!connection) return;
 
@@ -141,6 +141,15 @@ export function useWebRTC(ws: WebSocket | null) {
 
     // Close peer connection
     connection.peerConnection.close();
+
+    // Tell student to stop sharing
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'stop-share',
+        deviceId: deviceId,
+      }));
+      console.log(`[WebRTC] Sent stop-share to ${deviceId}`);
+    }
 
     // Remove from map
     connectionsRef.current.delete(deviceId);

@@ -1122,6 +1122,27 @@ async function handleScreenShareRequest(mode = 'auto') {
   }
 }
 
+// WebRTC: Handle stop screen share request from teacher
+async function handleStopScreenShare() {
+  try {
+    console.log('[WebRTC] Teacher requested to stop screen share');
+    
+    // Tell offscreen to stop sharing and clean up
+    const result = await sendToOffscreen({
+      type: 'STOP_SHARE'
+    });
+    
+    if (result?.success) {
+      console.log('[WebRTC] Screen share stopped successfully');
+    } else {
+      console.info('[WebRTC] Stop share completed with status:', result?.status);
+    }
+    
+  } catch (error) {
+    console.error('[WebRTC] Error stopping screen share:', error);
+  }
+}
+
 // WebRTC: Handle offer from teacher (forward to offscreen)
 async function handleOffer(sdp, from) {
   try {
@@ -1338,6 +1359,12 @@ function connectWebSocket() {
         // mode: 'screen' = only picker
         const mode = message.mode || 'auto';
         handleScreenShareRequest(mode);
+      }
+      
+      // Handle stop-share request from teacher
+      if (message.type === 'stop-share') {
+        console.log('[WebRTC] Teacher requested to stop screen share');
+        handleStopScreenShare();
       }
       
       // Handle WebRTC offer from teacher
