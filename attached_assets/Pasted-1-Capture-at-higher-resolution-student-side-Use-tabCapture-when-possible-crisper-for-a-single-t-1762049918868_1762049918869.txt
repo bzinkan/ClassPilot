@@ -1,0 +1,119 @@
+1) Capture at higher resolution (student side)
+
+Use tabCapture when possible (crisper for a single-tab classroom app). Otherwise use getDisplayMedia with constraints and then tighten them on the track.
+
+// Prefer tabCapture on Chrome
+function captureTab() {
+  return new Promise<MediaStream | null>((resolve) => {
+    try {
+      // Requires "tabCapture" permission and active tab
+      chrome.tabCapture.capture(
+        {
+          audio: false,
+          video: true,
+          videoConstraints: {
+            mandatory: {
+              maxWidth: 1920,    // bump to 2560 if Chromebooks handle it
+              maxHeight: 1080,
+              maxFrameRate: 30
+            }
+          }
+        },
+        (stream) => resolve(stream || null)
+      );
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function captureDisplay() {
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: {
+      cursor: "always",
+      displaySurface: "monitor",        // or "browser" if you only want tabs
+      frameRate: { ideal: 30, max: 30 },
+      width:  { max: 1920 },
+      height: { max: 1080 },
+    },
+    audio: false,
+    // @ts-ignore (Chrome)
+    preferCurrentTab: true,
+    surfaceSwitching: "include",
+    selfBrowserSurface: "exclude",
+  });
+
+  // Tighten after the fact (Chrome honors applyConstraints on display tracks)
+  const v = stream.getVideoTracks()[0];
+  await v.applyConstraints({ width: 1920, height: 1080, frameRate: 30 });
+
+  // Help Chrome choose text-friendly encoding
+  // (Sharper for UIs / docs)
+  // @ts-ignore
+  v.contentHint = "detail";
+  return stream;
+}
+
+
+Tip: If students use 1366×768 Chromebooks, set maxWidth/maxHeight to exactly that (or 1600×900). Asking for 1080p on a 768p device won’t add detail and can burn CPU.
+
+2) Encode with enough bitrate and keep resolution (student → teacher)
+
+Set sender parameters before creating the offer (or right after adding the track).
+
+const pc = new RTCPeerConnection(rtcConfig);
+const stream = (await captureTab()) ?? (await captureDisplay());
+const track = stream.getVideoTracks()[0];
+
+// If you use transceivers, do this:
+const tx = pc.addTransceiver(track, {
+  direction: "sendonly",
+  // Simulcast: one low-res layer for the grid + one full-res for Live View
+  sendEncodings: [
+    { rid: "q", scaleResolutionDownBy: 2.0, maxBitrate: 200_000, maxFramerate: 15 }, // grid
+    { rid: "h", scaleResolutionDownBy: 1.0, maxBitrate: 3_000_000, maxFramerate: 30, scalabilityMode: "L1T3" } // live view
+  ],
+});
+
+// Keep crispness under bandwidth pressure
+const params = tx.sender.getParameters();
+params.degradationPreference = "maintain-resolution";
+await tx.sender.setParameters(params);
+
+
+If you don’t use transceivers, you can still bump a single layer:
+
+const sender = pc.addTrack(track, stream);
+const p = sender.getParameters();
+p.encodings = [{ maxBitrate: 3_000_000, maxFramerate: 30, scaleResolutionDownBy: 1.0 }];
+p.degradationPreference = "maintain-resolution";
+await sender.setParameters(p);
+
+
+Simulcast is ideal here: your tile grid subscribes to the low layer (rid: "q") and the Live View modal switches to the high layer. On Chrome this “just works” with the settings above; on the receive side you don’t have to code anything special.
+
+3) Render without blurring (teacher side)
+
+Don’t scale the video with CSS transforms; size the container to the stream’s actual resolution when in Live View.
+
+Use object-fit: contain so pixels aren’t distorted.
+
+Read the real capture size for layout:
+
+const vTrack = remoteStream.getVideoTracks()[0];
+const { width, height, frameRate } = vTrack.getSettings(); // use to size your modal
+videoEl.style.width = "100%";
+videoEl.style.height = "100%";
+videoEl.style.objectFit = "contain";
+
+Quick checklist
+
+ Prefer chrome.tabCapture for a single-tab monitor; fall back to getDisplayMedia.
+
+ Apply width/height/frameRate and track.contentHint = "detail".
+
+ Use simulcast (two encodings) and set degradationPreference = "maintain-resolution".
+
+ Set maxBitrate ~2–4 Mbps for the high layer; 150–250 kbps for the grid layer.
+
+ In Live View, render the high layer at native aspect; avoid CSS scaling that blurs.
