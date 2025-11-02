@@ -74,20 +74,10 @@ async function startScreenCapture(deviceId, mode = 'auto') {
         console.log('[Offscreen] Attempting silent tab capture...');
         localStream = await new Promise((resolve, reject) => {
           chrome.tabCapture.capture(
-            {
-              audio: false,
-              video: true,
-              videoConstraints: {
-                mandatory: {
-                  maxWidth: 1920,
-                  maxHeight: 1080,
-                  maxFrameRate: 30
-                }
-              }
-            },
+            { video: true, audio: false },
             stream => {
               if (stream) {
-                console.log('[Offscreen] ✅ Silent tab capture succeeded at 1080p!');
+                console.log('[Offscreen] ✅ Silent tab capture succeeded!');
                 resolve(stream);
               } else {
                 const error = chrome.runtime.lastError;
@@ -99,13 +89,6 @@ async function startScreenCapture(deviceId, mode = 'auto') {
           );
         });
         
-        // Enhance video track for text clarity
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-          videoTrack.contentHint = 'detail'; // Prioritize sharpness for UI/text
-          console.log('[Offscreen] Set contentHint=detail for crisp rendering');
-        }
-        
         console.log('[Offscreen] Got media stream from tab capture, creating peer connection');
       } catch (tabCaptureError) {
         // Tab capture failed - fall back to picker only if mode is 'auto'
@@ -115,25 +98,12 @@ async function startScreenCapture(deviceId, mode = 'auto') {
           try {
             localStream = await navigator.mediaDevices.getDisplayMedia({
               video: {
-                width: { ideal: 1920, max: 1920 },
-                height: { ideal: 1080, max: 1080 },
-                frameRate: { ideal: 30, max: 30 }
+                frameRate: 15,
+                width: { ideal: 1280 },
+                height: { ideal: 720 }
               },
               audio: false
             });
-            
-            // Tighten constraints after capture (Chrome honors this)
-            const videoTrack = localStream.getVideoTracks()[0];
-            if (videoTrack) {
-              await videoTrack.applyConstraints({ 
-                width: 1920, 
-                height: 1080, 
-                frameRate: 30 
-              });
-              videoTrack.contentHint = 'detail'; // Sharper for UI/text
-              console.log('[Offscreen] Applied 1080p constraints with contentHint=detail');
-            }
-            
             console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
           } catch (pickerError) {
             // User denied or closed picker - expected behavior
@@ -170,25 +140,12 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       try {
         localStream = await navigator.mediaDevices.getDisplayMedia({
           video: {
-            width: { ideal: 1920, max: 1920 },
-            height: { ideal: 1080, max: 1080 },
-            frameRate: { ideal: 30, max: 30 }
+            frameRate: 15,
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
           },
           audio: false
         });
-        
-        // Tighten constraints after capture (Chrome honors this)
-        const videoTrack = localStream.getVideoTracks()[0];
-        if (videoTrack) {
-          await videoTrack.applyConstraints({ 
-            width: 1920, 
-            height: 1080, 
-            frameRate: 30 
-          });
-          videoTrack.contentHint = 'detail'; // Sharper for UI/text
-          console.log('[Offscreen] Applied 1080p constraints with contentHint=detail');
-        }
-        
         console.log('[Offscreen] Got media stream from screen picker, creating peer connection');
       } catch (pickerError) {
         // User denied or closed picker - expected behavior
@@ -235,44 +192,12 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       }
     };
     
-    // Add tracks to peer connection with simulcast for high quality
+    // Add tracks to peer connection
     localStream.getTracks().forEach(track => {
-      if (track.kind === 'video') {
-        // Use transceiver for advanced encoding control
-        const transceiver = peerConnection.addTransceiver(track, {
-          direction: 'sendonly',
-          streams: [localStream],
-          // Simulcast: low-res for grid thumbnails + high-res for live view
-          sendEncodings: [
-            { 
-              rid: 'q', 
-              scaleResolutionDownBy: 2.0, 
-              maxBitrate: 200_000,      // 200 kbps for grid
-              maxFramerate: 15 
-            },
-            { 
-              rid: 'h', 
-              scaleResolutionDownBy: 1.0, 
-              maxBitrate: 3_000_000,    // 3 Mbps for live view
-              maxFramerate: 30,
-              scalabilityMode: 'L1T3'   // Temporal scalability
-            }
-          ]
-        });
-        
-        // Maintain resolution under bandwidth pressure (prioritize sharpness)
-        const params = transceiver.sender.getParameters();
-        params.degradationPreference = 'maintain-resolution';
-        transceiver.sender.setParameters(params);
-        
-        console.log('[Offscreen] Added video track with simulcast (200kbps grid + 3Mbps live view)');
-      } else {
-        // Non-video tracks (if any)
-        peerConnection.addTrack(track, localStream);
-      }
+      peerConnection.addTrack(track, localStream);
     });
     
-    console.log('[Offscreen] Tracks added to peer connection with high-quality encoding, ready to receive offer');
+    console.log('[Offscreen] Tracks added to peer connection, ready to receive offer');
     
     return { success: true };
     
