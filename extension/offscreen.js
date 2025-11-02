@@ -197,12 +197,7 @@ async function startScreenCapture(deviceId, mode = 'auto') {
       peerConnection.addTrack(track, localStream);
     });
     
-    console.log('[Offscreen] Tracks added to peer connection, notifying teacher peer is ready');
-    
-    // Notify teacher that peer is ready to receive offer
-    chrome.runtime.sendMessage({
-      type: 'PEER_READY',
-    });
+    console.log('[Offscreen] Tracks added to peer connection, ready to receive offer');
     
     return { success: true };
     
@@ -223,15 +218,14 @@ async function handleSignal(signal) {
     console.log('[Offscreen] Handling signal:', signal.type);
     
     if (signal.type === 'offer') {
-      teacherId = signal.from;
-      
       if (!peerConnection) {
-        // This is EXPECTED - offer arrived before student started sharing or after they denied
-        // Silently ignore - this is normal operation, not an error
-        console.info('[Offscreen] Offer received before screen share started (expected - ignoring)');
-        return { success: true, status: 'no-peer-yet' };
+        console.warn('[Offscreen] Received offer before peer connection ready, queueing...');
+        // Queue the offer and wait for peer connection
+        setTimeout(() => handleSignal(signal), 100);
+        return { success: false, status: 'queued' };
       }
       
+      teacherId = signal.from;
       await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
       console.log('[Offscreen] Set remote description (offer)');
       

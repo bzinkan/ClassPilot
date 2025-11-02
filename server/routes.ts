@@ -238,7 +238,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (!client.authenticated) return;
 
         // Route WebRTC signaling messages between teacher and students
-        if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice' || message.type === 'peer-ready') {
+        if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice') {
           const targetDeviceId = message.to;
           if (!targetDeviceId) {
             console.log(`[WebSocket] Dropping ${message.type} - missing 'to' field`);

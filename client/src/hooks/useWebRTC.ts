@@ -64,14 +64,32 @@ export function useWebRTC(ws: WebSocket | null) {
       }
     };
 
-    // Request screen share from student (but don't send offer yet)
-    // The offer will be sent when we receive 'peer-ready' signal
+    // Request screen share from student
     ws.send(JSON.stringify({
       type: 'request-stream',
       deviceId: deviceId,
     }));
 
-    console.log(`[WebRTC] Requested stream from ${deviceId}, waiting for peer-ready signal...`);
+    console.log(`[WebRTC] Requested stream from ${deviceId}`);
+
+    // Send offer immediately (student will queue it if not ready yet)
+    try {
+      const offer = await pc.createOffer({
+        offerToReceiveVideo: true,
+        offerToReceiveAudio: false,
+      });
+      await pc.setLocalDescription(offer);
+
+      ws.send(JSON.stringify({
+        type: 'offer',
+        to: deviceId,
+        sdp: pc.localDescription?.toJSON(),
+      }));
+
+      console.log(`[WebRTC] Sent offer to ${deviceId}`);
+    } catch (error) {
+      console.error(`[WebRTC] Error creating/sending offer for ${deviceId}:`, error);
+    }
 
     return connection;
   }, [ws]);
@@ -108,41 +126,6 @@ export function useWebRTC(ws: WebSocket | null) {
     }
   }, []);
 
-  // Handle peer-ready signal from student (student's peer connection is ready)
-  const handlePeerReady = useCallback(async (deviceId: string) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.error('[WebRTC] WebSocket not connected');
-      return;
-    }
-
-    const connection = connectionsRef.current.get(deviceId);
-    if (!connection) {
-      console.error(`[WebRTC] No connection found for ${deviceId}`);
-      return;
-    }
-
-    console.log(`[WebRTC] Peer ready for ${deviceId}, creating and sending offer`);
-
-    try {
-      // Create offer
-      const offer = await connection.peerConnection.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: false,
-      });
-      await connection.peerConnection.setLocalDescription(offer);
-
-      // Send offer to student
-      ws.send(JSON.stringify({
-        type: 'offer',
-        to: deviceId,
-        sdp: connection.peerConnection.localDescription?.toJSON(),
-      }));
-
-      console.log(`[WebRTC] Sent offer to ${deviceId}`);
-    } catch (error) {
-      console.error(`[WebRTC] Error creating/sending offer for ${deviceId}:`, error);
-    }
-  }, [ws]);
 
   // Stop live view for a student
   const stopLiveView = useCallback((deviceId: string) => {
@@ -177,7 +160,6 @@ export function useWebRTC(ws: WebSocket | null) {
     stopLiveView,
     handleAnswer,
     handleIceCandidate,
-    handlePeerReady,
     cleanup,
   };
 }

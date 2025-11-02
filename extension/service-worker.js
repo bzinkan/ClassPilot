@@ -1224,18 +1224,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
   }
   
-  // Forward peer-ready signal to teacher
-  if (message.type === 'PEER_READY') {
-    console.log('[SW] Peer connection ready, notifying teacher');
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'peer-ready',
-        to: 'teacher',
-      }));
-    }
-    sendResponse({ success: true });
-  }
-  
   // Handle connection failures
   if (message.type === 'CONNECTION_FAILED') {
     console.log('[WebRTC] Connection failed, cleaning up');
