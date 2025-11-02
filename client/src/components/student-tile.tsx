@@ -399,10 +399,10 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             </Button>
           </div>
           <div className="flex items-center gap-1.5 flex-shrink-0">
-            {student.sceneActive && student.activeSceneName && (
+            {student.flightPathActive && student.activeFlightPathName && (
               <Badge className="text-xs px-1.5 py-0.5 bg-blue-500 text-white" data-testid={`badge-scene-${student.deviceId}`}>
                 <Layers className="h-2.5 w-2.5 mr-0.5" />
-                {student.activeSceneName}
+                {student.activeFlightPathName}
               </Badge>
             )}
             {isOffTask && (

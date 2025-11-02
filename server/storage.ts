@@ -14,8 +14,8 @@ import {
   type InsertRoster,
   type Settings,
   type InsertSettings,
-  type Scene,
-  type InsertScene,
+  type FlightPath,
+  type InsertFlightPath,
   type StudentGroup,
   type InsertStudentGroup,
   type Message,
@@ -29,7 +29,7 @@ import {
   events,
   rosters,
   settings,
-  scenes,
+  flightPaths,
   studentGroups,
   messages,
   checkIns,
@@ -89,12 +89,12 @@ export interface IStorage {
   getSettings(): Promise<Settings | undefined>;
   upsertSettings(settings: InsertSettings): Promise<Settings>;
 
-  // Scenes
-  getScene(id: string): Promise<Scene | undefined>;
-  getAllScenes(): Promise<Scene[]>;
-  createScene(scene: InsertScene): Promise<Scene>;
-  updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined>;
-  deleteScene(id: string): Promise<boolean>;
+  // Flight Paths
+  getFlightPath(id: string): Promise<FlightPath | undefined>;
+  getAllFlightPaths(): Promise<FlightPath[]>;
+  createFlightPath(flightPath: InsertFlightPath): Promise<FlightPath>;
+  updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined>;
+  deleteFlightPath(id: string): Promise<boolean>;
 
   // Student Groups
   getStudentGroup(id: string): Promise<StudentGroup | undefined>;
@@ -126,7 +126,7 @@ export class MemStorage implements IStorage {
   private events: Event[];
   private rosters: Map<string, Roster>;
   private settings: Settings | undefined;
-  private scenes: Map<string, Scene>;
+  private flightPaths: Map<string, FlightPath>;
   private studentGroups: Map<string, StudentGroup>;
   private messages: Message[];
   private checkIns: CheckIn[];
@@ -140,7 +140,7 @@ export class MemStorage implements IStorage {
     this.heartbeats = [];
     this.events = [];
     this.rosters = new Map();
-    this.scenes = new Map();
+    this.flightPaths = new Map();
     this.studentGroups = new Map();
     this.messages = [];
     this.checkIns = [];
@@ -278,8 +278,8 @@ export class MemStorage implements IStorage {
       lastSeenAt: 0,
       isSharing: false,
       screenLocked: false,
-      sceneActive: false,
-      activeSceneName: undefined,
+      flightPathActive: false,
+      activeFlightPathName: undefined,
       cameraActive: false,
       status: 'offline',
     };
@@ -388,8 +388,8 @@ export class MemStorage implements IStorage {
       activeTabUrl: insertHeartbeat.activeTabUrl,
       favicon: insertHeartbeat.favicon ?? null,
       screenLocked: insertHeartbeat.screenLocked ?? false,
-      sceneActive: insertHeartbeat.sceneActive ?? false,
-      activeSceneName: insertHeartbeat.activeSceneName ?? null,
+      flightPathActive: insertHeartbeat.flightPathActive ?? false,
+      activeFlightPathName: insertHeartbeat.activeFlightPathName ?? null,
       isSharing: insertHeartbeat.isSharing ?? false,
       cameraActive: insertHeartbeat.cameraActive ?? false,
       timestamp: new Date(),
@@ -418,8 +418,8 @@ export class MemStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
-            sceneActive: heartbeat.sceneActive ?? false,
-            activeSceneName: heartbeat.activeSceneName || undefined,
+            flightPathActive: heartbeat.flightPathActive ?? false,
+            activeFlightPathName: heartbeat.activeFlightPathName || undefined,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
@@ -442,8 +442,8 @@ export class MemStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
-        status.sceneActive = heartbeat.sceneActive ?? false;
-        status.activeSceneName = heartbeat.activeSceneName || undefined;
+        status.flightPathActive = heartbeat.flightPathActive ?? false;
+        status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
@@ -589,51 +589,51 @@ export class MemStorage implements IStorage {
       ipAllowlist: insertSettings.ipAllowlist ?? null,
       gradeLevels: insertSettings.gradeLevels ?? null,
       maxTabsPerStudent: insertSettings.maxTabsPerStudent ?? null,
-      activeSceneId: insertSettings.activeSceneId ?? null,
+      activeFlightPathId: insertSettings.activeFlightPathId ?? null,
     };
     this.settings = settings;
     return settings;
   }
 
-  // Scenes
-  async getScene(id: string): Promise<Scene | undefined> {
-    return this.scenes.get(id);
+  // Flight Paths
+  async getFlightPath(id: string): Promise<FlightPath | undefined> {
+    return this.flightPaths.get(id);
   }
 
-  async getAllScenes(): Promise<Scene[]> {
-    return Array.from(this.scenes.values());
+  async getAllFlightPaths(): Promise<FlightPath[]> {
+    return Array.from(this.flightPaths.values());
   }
 
-  async createScene(insertScene: InsertScene): Promise<Scene> {
+  async createFlightPath(insertFlightPath: InsertFlightPath): Promise<FlightPath> {
     const id = randomUUID();
-    const scene: Scene = {
+    const flightPath: FlightPath = {
       id,
-      schoolId: insertScene.schoolId,
-      sceneName: insertScene.sceneName,
-      description: insertScene.description ?? null,
-      allowedDomains: insertScene.allowedDomains ?? null,
-      blockedDomains: insertScene.blockedDomains ?? null,
-      isDefault: insertScene.isDefault ?? false,
+      schoolId: insertFlightPath.schoolId,
+      flightPathName: insertFlightPath.flightPathName,
+      description: insertFlightPath.description ?? null,
+      allowedDomains: insertFlightPath.allowedDomains ?? null,
+      blockedDomains: insertFlightPath.blockedDomains ?? null,
+      isDefault: insertFlightPath.isDefault ?? false,
       createdAt: new Date(),
     };
-    this.scenes.set(id, scene);
-    return scene;
+    this.flightPaths.set(id, flightPath);
+    return flightPath;
   }
 
-  async updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined> {
-    const existing = this.scenes.get(id);
+  async updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined> {
+    const existing = this.flightPaths.get(id);
     if (!existing) return undefined;
 
-    const updated: Scene = {
+    const updated: FlightPath = {
       ...existing,
       ...updates,
     };
-    this.scenes.set(id, updated);
+    this.flightPaths.set(id, updated);
     return updated;
   }
 
-  async deleteScene(id: string): Promise<boolean> {
-    return this.scenes.delete(id);
+  async deleteFlightPath(id: string): Promise<boolean> {
+    return this.flightPaths.delete(id);
   }
 
   // Student Groups
@@ -786,8 +786,8 @@ export class DatabaseStorage implements IStorage {
         lastSeenAt,
         isSharing: false,
         screenLocked: false,
-        sceneActive: false,
-        activeSceneName: undefined,
+        flightPathActive: false,
+        activeFlightPathName: undefined,
         cameraActive: false,
         status: this.calculateStatus(lastSeenAt),
       };
@@ -964,7 +964,8 @@ export class DatabaseStorage implements IStorage {
       lastSeenAt,
       isSharing: false,
       screenLocked: false,
-      sceneActive: false,
+      flightPathActive: false,
+      activeFlightPathName: undefined,
       cameraActive: false,
       status: this.calculateStatus(lastSeenAt),
     };
@@ -1101,8 +1102,8 @@ export class DatabaseStorage implements IStorage {
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
-            sceneActive: heartbeat.sceneActive ?? false,
-            activeSceneName: heartbeat.activeSceneName || undefined,
+            flightPathActive: heartbeat.flightPathActive ?? false,
+            activeFlightPathName: heartbeat.activeFlightPathName || undefined,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
@@ -1125,8 +1126,8 @@ export class DatabaseStorage implements IStorage {
         }
         
         status.isSharing = heartbeat.isSharing ?? false;
-        status.sceneActive = heartbeat.sceneActive ?? false;
-        status.activeSceneName = heartbeat.activeSceneName || undefined;
+        status.flightPathActive = heartbeat.flightPathActive ?? false;
+        status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
@@ -1294,35 +1295,35 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
-  // Scenes
-  async getScene(id: string): Promise<Scene | undefined> {
-    const [scene] = await db.select().from(scenes).where(eq(scenes.id, id));
-    return scene || undefined;
+  // Flight Paths
+  async getFlightPath(id: string): Promise<FlightPath | undefined> {
+    const [flightPath] = await db.select().from(flightPaths).where(eq(flightPaths.id, id));
+    return flightPath || undefined;
   }
 
-  async getAllScenes(): Promise<Scene[]> {
-    return await db.select().from(scenes);
+  async getAllFlightPaths(): Promise<FlightPath[]> {
+    return await db.select().from(flightPaths);
   }
 
-  async createScene(insertScene: InsertScene): Promise<Scene> {
+  async createFlightPath(insertFlightPath: InsertFlightPath): Promise<FlightPath> {
     const [created] = await db
-      .insert(scenes)
-      .values(insertScene)
+      .insert(flightPaths)
+      .values(insertFlightPath)
       .returning();
     return created;
   }
 
-  async updateScene(id: string, updates: Partial<InsertScene>): Promise<Scene | undefined> {
+  async updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined> {
     const [updated] = await db
-      .update(scenes)
+      .update(flightPaths)
       .set(updates)
-      .where(eq(scenes.id, id))
+      .where(eq(flightPaths.id, id))
       .returning();
     return updated || undefined;
   }
 
-  async deleteScene(id: string): Promise<boolean> {
-    const result = await db.delete(scenes).where(eq(scenes.id, id));
+  async deleteFlightPath(id: string): Promise<boolean> {
+    const result = await db.delete(flightPaths).where(eq(flightPaths.id, id));
     return result.rowCount !== null && result.rowCount > 0;
   }
 

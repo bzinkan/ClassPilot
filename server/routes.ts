@@ -14,7 +14,7 @@ import {
   insertEventSchema,
   insertRosterSchema,
   insertSettingsSchema,
-  insertSceneSchema,
+  insertFlightPathSchema,
   insertStudentGroupSchema,
   loginSchema,
   createTeacherSchema,
@@ -1024,64 +1024,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Scenes CRUD endpoints
-  app.get("/api/scenes", checkIPAllowlist, requireAuth, async (req, res) => {
+  // Flight Paths CRUD endpoints
+  app.get("/api/flight-paths", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const scenes = await storage.getAllScenes();
-      res.json(scenes);
+      const flightPaths = await storage.getAllFlightPaths();
+      res.json(flightPaths);
     } catch (error) {
-      console.error("Get scenes error:", error);
+      console.error("Get flight paths error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.get("/api/scenes/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/flight-paths/:id", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const scene = await storage.getScene(req.params.id);
-      if (!scene) {
-        return res.status(404).json({ error: "Scene not found" });
+      const flightPath = await storage.getFlightPath(req.params.id);
+      if (!flightPath) {
+        return res.status(404).json({ error: "Flight Path not found" });
       }
-      res.json(scene);
+      res.json(flightPath);
     } catch (error) {
-      console.error("Get scene error:", error);
+      console.error("Get flight path error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post("/api/scenes", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/flight-paths", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const data = insertSceneSchema.parse(req.body);
-      const scene = await storage.createScene(data);
-      res.json(scene);
+      const data = insertFlightPathSchema.parse(req.body);
+      const flightPath = await storage.createFlightPath(data);
+      res.json(flightPath);
     } catch (error) {
-      console.error("Create scene error:", error);
+      console.error("Create flight path error:", error);
       res.status(400).json({ error: "Invalid request" });
     }
   });
 
-  app.patch("/api/scenes/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const updates = insertSceneSchema.partial().parse(req.body);
-      const scene = await storage.updateScene(req.params.id, updates);
-      if (!scene) {
-        return res.status(404).json({ error: "Scene not found" });
+      const updates = insertFlightPathSchema.partial().parse(req.body);
+      const flightPath = await storage.updateFlightPath(req.params.id, updates);
+      if (!flightPath) {
+        return res.status(404).json({ error: "Flight Path not found" });
       }
-      res.json(scene);
+      res.json(flightPath);
     } catch (error) {
-      console.error("Update scene error:", error);
+      console.error("Update flight path error:", error);
       res.status(400).json({ error: "Invalid request" });
     }
   });
 
-  app.delete("/api/scenes/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/flight-paths/:id", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const success = await storage.deleteScene(req.params.id);
+      const success = await storage.deleteFlightPath(req.params.id);
       if (!success) {
-        return res.status(404).json({ error: "Scene not found" });
+        return res.status(404).json({ error: "Flight Path not found" });
       }
       res.json({ success: true });
     } catch (error) {
-      console.error("Delete scene error:", error);
+      console.error("Delete flight path error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -1454,26 +1454,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Apply Scene
-  app.post("/api/remote/apply-scene", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  // Apply Flight Path
+  app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { sceneId, allowedDomains, targetDeviceIds } = req.body;
+      const { flightPathId, allowedDomains, targetDeviceIds } = req.body;
       
-      if (!sceneId || !allowedDomains || !Array.isArray(allowedDomains)) {
-        return res.status(400).json({ error: "Scene ID and allowed domains are required" });
+      if (!flightPathId || !allowedDomains || !Array.isArray(allowedDomains)) {
+        return res.status(400).json({ error: "Flight Path ID and allowed domains are required" });
       }
       
-      // Fetch scene details to get the scene name
-      const scene = await storage.getScene(sceneId);
-      const sceneName = scene?.sceneName || 'Unknown Scene';
+      // Fetch flight path details to get the flight path name
+      const flightPath = await storage.getFlightPath(flightPathId);
+      const flightPathName = flightPath?.flightPathName || 'Unknown Flight Path';
       
       broadcastToStudents({
         type: 'remote-control',
         command: {
-          type: 'apply-scene',
+          type: 'apply-flight-path',
           data: { 
-            sceneId,
-            sceneName,
+            flightPathId,
+            flightPathName,
             allowedDomains 
           },
         },
@@ -1482,9 +1482,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
         : "all students";
-      res.json({ success: true, message: `Applied scene "${sceneName}" to ${target}` });
+      res.json({ success: true, message: `Applied flight path "${flightPathName}" to ${target}` });
     } catch (error) {
-      console.error("Apply scene error:", error);
+      console.error("Apply flight path error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

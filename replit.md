@@ -40,7 +40,7 @@ The system employs a full-stack architecture:
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:
     -   **Remote Tab Control**: Open tabs, close tabs, lock/unlock screens. When screen is locked, students are restricted to a single tab and cannot create new tabs.
-    -   **Apply Scenes**: Apply predefined scenes with multiple allowed domains to restrict student browsing to specific educational websites.
+    -   **Apply Flight Paths**: Apply predefined flight paths with multiple allowed domains to restrict student browsing to specific educational websites.
     -   **Student Groups**: Organize students for targeted instruction.
     -   **Tab Limiting**: Configure maximum tabs per student.
     -   **Per-Student Targeting**: All remote commands support targeting specific students via checkbox selection.

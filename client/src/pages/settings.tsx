@@ -63,7 +63,7 @@ export default function Settings() {
   // Scenes management state
   const [showSceneDialog, setShowSceneDialog] = useState(false);
   const [editingScene, setEditingScene] = useState<Scene | null>(null);
-  const [sceneName, setSceneName] = useState("");
+  const [flightPathName, setSceneName] = useState("");
   const [sceneDescription, setSceneDescription] = useState("");
   const [sceneAllowedDomains, setSceneAllowedDomains] = useState("");
   const [sceneBlockedDomains, setSceneBlockedDomains] = useState("");
@@ -81,7 +81,7 @@ export default function Settings() {
   });
 
   const { data: scenes = [], isLoading: scenesLoading } = useQuery<Scene[]>({
-    queryKey: ['/api/scenes'],
+    queryKey: ['/api/flight-paths'],
   });
 
   const { data: groups = [], isLoading: groupsLoading } = useQuery<StudentGroup[]>({
@@ -172,17 +172,17 @@ export default function Settings() {
   const createSceneMutation = useMutation({
     mutationFn: async () => {
       const schoolId = settings?.schoolId || "default-school";
-      return await apiRequest("POST", "/api/scenes", {
+      return await apiRequest("POST", "/api/flight-paths", {
         schoolId,
-        sceneName,
+        flightPathName,
         description: sceneDescription || undefined,
         allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
         blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
-      toast({ title: "Scene created", description: `"${sceneName}" has been created successfully` });
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
+      toast({ title: "Scene created", description: `"${flightPathName}" has been created successfully` });
       setShowSceneDialog(false);
       resetSceneForm();
     },
@@ -194,16 +194,16 @@ export default function Settings() {
   const updateSceneMutation = useMutation({
     mutationFn: async () => {
       if (!editingScene) throw new Error("No scene to update");
-      return await apiRequest("PATCH", `/api/scenes/${editingScene.id}`, {
-        sceneName,
+      return await apiRequest("PATCH", `/api/flight-paths/${editingScene.id}`, {
+        flightPathName,
         description: sceneDescription || undefined,
         allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
         blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
-      toast({ title: "Scene updated", description: `"${sceneName}" has been updated successfully` });
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
+      toast({ title: "Scene updated", description: `"${flightPathName}" has been updated successfully` });
       setShowSceneDialog(false);
       resetSceneForm();
     },
@@ -213,11 +213,11 @@ export default function Settings() {
   });
 
   const deleteSceneMutation = useMutation({
-    mutationFn: async (sceneId: string) => {
-      return await apiRequest("DELETE", `/api/scenes/${sceneId}`);
+    mutationFn: async (flightPathId: string) => {
+      return await apiRequest("DELETE", `/api/flight-paths/${flightPathId}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/scenes'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
       toast({ title: "Scene deleted", description: "The scene has been deleted successfully" });
       setDeleteSceneId(null);
     },
@@ -241,7 +241,7 @@ export default function Settings() {
 
   const handleEditScene = (scene: Scene) => {
     setEditingScene(scene);
-    setSceneName(scene.sceneName);
+    setSceneName(scene.flightPathName);
     setSceneDescription(scene.description || "");
     setSceneAllowedDomains(scene.allowedDomains?.join(", ") || "");
     setSceneBlockedDomains(scene.blockedDomains?.join(", ") || "");
@@ -249,7 +249,7 @@ export default function Settings() {
   };
 
   const handleSaveScene = () => {
-    if (!sceneName.trim()) {
+    if (!flightPathName.trim()) {
       toast({ variant: "destructive", title: "Scene name required", description: "Please enter a name for the scene" });
       return;
     }
@@ -260,8 +260,8 @@ export default function Settings() {
     }
   };
 
-  const handleDeleteScene = (sceneId: string) => {
-    setDeleteSceneId(sceneId);
+  const handleDeleteScene = (flightPathId: string) => {
+    setDeleteSceneId(flightPathId);
   };
 
   const confirmDeleteScene = () => {
@@ -650,7 +650,7 @@ export default function Settings() {
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
                         <div className="flex items-center gap-2">
-                          <h4 className="font-medium">{scene.sceneName}</h4>
+                          <h4 className="font-medium">{scene.flightPathName}</h4>
                           {scene.isDefault && (
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-primary/10 text-primary">
                               <Star className="h-3 w-3 mr-1" />
@@ -860,7 +860,7 @@ export default function Settings() {
               <Label htmlFor="scene-name">Scene Name *</Label>
               <Input
                 id="scene-name"
-                value={sceneName}
+                value={flightPathName}
                 onChange={(e) => setSceneName(e.target.value)}
                 placeholder="e.g., Research Time, Math Practice, Reading"
                 data-testid="input-scene-name"

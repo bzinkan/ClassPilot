@@ -65,8 +65,8 @@ export interface StudentStatus {
   lastSeenAt: number;
   isSharing: boolean;
   screenLocked: boolean;
-  sceneActive: boolean; // True if a scene is applied (vs single-domain lock)
-  activeSceneName?: string; // Name of the currently active scene
+  flightPathActive: boolean; // True if a flight path is applied (vs single-domain lock)
+  activeFlightPathName?: string; // Name of the currently active flight path
   screenLockedSetAt?: number; // Timestamp when server set screenLocked (prevents heartbeat overwrite)
   cameraActive: boolean;
   currentUrlDuration?: number; // Duration in seconds spent on current URL
@@ -83,8 +83,8 @@ export const heartbeats = pgTable("heartbeats", {
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
-  sceneActive: boolean("scene_active").default(false), // True if scene is active (vs single-domain lock)
-  activeSceneName: text("active_scene_name"), // Name of the currently active scene
+  flightPathActive: boolean("flight_path_active").default(false), // True if flight path is active (vs single-domain lock)
+  activeFlightPathName: text("active_flight_path_name"), // Name of the currently active flight path
   isSharing: boolean("is_sharing").default(false),
   cameraActive: boolean("camera_active").default(false),
   timestamp: timestamp("timestamp").notNull().default(sql`now()`),
@@ -127,11 +127,11 @@ export const insertRosterSchema = createInsertSchema(rosters).omit({ id: true, u
 export type InsertRoster = z.infer<typeof insertRosterSchema>;
 export type Roster = typeof rosters.$inferSelect;
 
-// Scenes - Activity-based browsing environments
-export const scenes = pgTable("scenes", {
+// Flight Paths - Activity-based browsing environments
+export const flightPaths = pgTable("flight_paths", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   schoolId: text("school_id").notNull(),
-  sceneName: text("scene_name").notNull(),
+  flightPathName: text("flight_path_name").notNull(),
   description: text("description"),
   allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
   blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
@@ -139,9 +139,9 @@ export const scenes = pgTable("scenes", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
-export const insertSceneSchema = createInsertSchema(scenes).omit({ id: true, createdAt: true });
-export type InsertScene = z.infer<typeof insertSceneSchema>;
-export type Scene = typeof scenes.$inferSelect;
+export const insertFlightPathSchema = createInsertSchema(flightPaths).omit({ id: true, createdAt: true });
+export type InsertFlightPath = z.infer<typeof insertFlightPathSchema>;
+export type FlightPath = typeof flightPaths.$inferSelect;
 
 // Student Groups - For differentiated instruction
 export const studentGroups = pgTable("student_groups", {
@@ -203,7 +203,7 @@ export const settings = pgTable("settings", {
   ipAllowlist: text("ip_allowlist").array().default(sql`'{}'::text[]`),
   gradeLevels: text("grade_levels").array().default(sql`'{6,7,8,9,10,11,12}'::text[]`),
   maxTabsPerStudent: text("max_tabs_per_student"), // Nullable - null means unlimited
-  activeSceneId: text("active_scene_id"), // Currently active scene for the school
+  activeFlightPathId: text("active_flight_path_id"), // Currently active flight path for the school
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
@@ -224,19 +224,19 @@ export interface SignalMessage {
   deviceId: string;
 }
 
-// Remote Control Commands (Phase 1: GoGuardian-style features)
+// Remote Control Commands (Phase 1: Classroom control features)
 export interface RemoteControlMessage {
-  type: 'open-tab' | 'close-tab' | 'lock-screen' | 'unlock-screen' | 'apply-scene' | 'limit-tabs';
+  type: 'open-tab' | 'close-tab' | 'lock-screen' | 'unlock-screen' | 'apply-flight-path' | 'limit-tabs';
   data: {
     url?: string; // For open-tab, lock-screen
     pattern?: string; // For close-tab (URL pattern to match)
     closeAll?: boolean; // For close-tab (close all tabs except allowed)
     locked?: boolean; // For lock-screen
-    sceneId?: string; // For apply-scene
-    sceneName?: string; // For apply-scene - display name of the scene
+    flightPathId?: string; // For apply-flight-path
+    flightPathName?: string; // For apply-flight-path - display name of the flight path
     maxTabs?: number; // For limit-tabs
-    allowedDomains?: string[]; // For apply-scene
-    blockedDomains?: string[]; // For apply-scene
+    allowedDomains?: string[]; // For apply-flight-path
+    blockedDomains?: string[]; // For apply-flight-path
   };
   targetStudentIds?: string[]; // If specified, only apply to these students. If null, apply to all
   targetGrade?: string; // If specified, apply to students in this grade

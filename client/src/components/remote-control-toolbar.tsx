@@ -44,7 +44,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
 
   // Fetch scenes
   const { data: scenes = [] } = useQuery<Scene[]>({
-    queryKey: ['/api/scenes'],
+    queryKey: ['/api/flight-paths'],
   });
 
   const handleOpenTab = async () => {
@@ -242,8 +242,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
 
     setIsLoading(true);
     try {
-      await apiRequest("POST", "/api/remote/apply-scene", { 
-        sceneId: selectedSceneId,
+      await apiRequest("POST", "/api/remote/apply-flight-path", { 
+        flightPathId: selectedSceneId,
         allowedDomains: scene.allowedDomains,
         targetDeviceIds: targetDeviceIdsArray
       });
@@ -252,7 +252,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
         : "all students";
       toast({
         title: "Success",
-        description: `Applied "${scene.sceneName}" to ${target}`,
+        description: `Applied "${scene.flightPathName}" to ${target}`,
       });
       setSelectedSceneId("");
       setShowApplyScene(false);
@@ -350,7 +350,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
               size="sm"
               variant="outline"
               onClick={() => setShowApplyScene(true)}
-              data-testid="button-apply-scene"
+              data-testid="button-apply-flight-path"
             >
               <Layers className="h-4 w-4 mr-2" />
               Apply Scene
@@ -466,7 +466,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
 
       {/* Apply Scene Dialog */}
       <Dialog open={showApplyScene} onOpenChange={setShowApplyScene}>
-        <DialogContent data-testid="dialog-apply-scene">
+        <DialogContent data-testid="dialog-apply-flight-path">
           <DialogHeader>
             <DialogTitle>Apply Scene</DialogTitle>
             <DialogDescription>
@@ -486,7 +486,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
                   ) : (
                     scenes.map((scene) => (
                       <SelectItem key={scene.id} value={scene.id} data-testid={`select-scene-${scene.id}`}>
-                        {scene.sceneName}
+                        {scene.flightPathName}
                       </SelectItem>
                     ))
                   )}
@@ -508,10 +508,10 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowApplyScene(false)} data-testid="button-cancel-apply-scene">
+            <Button variant="outline" onClick={() => setShowApplyScene(false)} data-testid="button-cancel-apply-flight-path">
               Cancel
             </Button>
-            <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-scene">
+            <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-flight-path">
               Apply Scene
             </Button>
           </DialogFooter>
