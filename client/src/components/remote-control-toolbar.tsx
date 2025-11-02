@@ -224,7 +224,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     if (!selectedSceneId) {
       toast({
         title: "Error",
-        description: "Please select a scene",
+        description: "Please select a flight path",
         variant: "destructive",
       });
       return;
@@ -234,7 +234,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     if (!scene) {
       toast({
         title: "Error",
-        description: "Scene not found",
+        description: "Flight path not found",
         variant: "destructive",
       });
       return;
@@ -259,7 +259,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to apply scene",
+        description: "Failed to apply flight path",
         variant: "destructive",
       });
     } finally {
@@ -353,7 +353,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
               data-testid="button-apply-flight-path"
             >
               <Layers className="h-4 w-4 mr-2" />
-              Apply Scene
+              Apply Flight Path
             </Button>
 
           </div>
@@ -464,25 +464,25 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
         </DialogContent>
       </Dialog>
 
-      {/* Apply Scene Dialog */}
+      {/* Apply Flight Path Dialog */}
       <Dialog open={showApplyScene} onOpenChange={setShowApplyScene}>
         <DialogContent data-testid="dialog-apply-flight-path">
           <DialogHeader>
-            <DialogTitle>Apply Scene</DialogTitle>
+            <DialogTitle>Apply Flight Path</DialogTitle>
             <DialogDescription>
-              Select a scene to apply. Students will only be able to access the allowed domains defined in the scene.
+              Select a flight path to apply. Students will only be able to access the allowed domains defined in the flight path.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="scene-select">Scene</Label>
+              <Label htmlFor="scene-select">Flight Path</Label>
               <Select value={selectedSceneId} onValueChange={setSelectedSceneId}>
                 <SelectTrigger id="scene-select" data-testid="select-scene">
-                  <SelectValue placeholder="Select a scene" />
+                  <SelectValue placeholder="Select a flight path" />
                 </SelectTrigger>
                 <SelectContent>
                   {scenes.length === 0 ? (
-                    <div className="p-2 text-sm text-muted-foreground">No scenes available</div>
+                    <div className="p-2 text-sm text-muted-foreground">No flight paths available</div>
                   ) : (
                     scenes.map((scene) => (
                       <SelectItem key={scene.id} value={scene.id} data-testid={`select-scene-${scene.id}`}>
@@ -512,7 +512,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
               Cancel
             </Button>
             <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-flight-path">
-              Apply Scene
+              Apply Flight Path
             </Button>
           </DialogFooter>
         </DialogContent>
