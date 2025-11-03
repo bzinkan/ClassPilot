@@ -1,0 +1,64 @@
+🧩 Updated manifest.json (Option 1 – “activeTab-only” version)
+{
+  "manifest_version": 3,
+  "name": "ClassPilot",
+  "version": "1.0.0",
+  "description": "Privacy-aware classroom tool that lets teachers view student screens and active tabs on managed Chromebooks.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "desktopCapture",
+    "storage",
+    "scripting",
+    "alarms",
+    "offscreen",
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://classpilot.replit.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icons/icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "options_page": "options.html"
+}
+
+⚙️ What Changed (and Why)
+Change	Purpose
+Removed "host_permissions": ["<all_urls>"]	Avoids “broad host” flag that delays approval.
+Added "activeTab"	Gives temporary access to whichever tab the user/teacher interacts with.
+Kept "desktopCapture" and "tabs"	Required for Live View and tab tracking.
+Kept "https://classpilot.replit.app/*" in host_permissions	Lets your extension communicate with your own Replit backend.
+🧠 How to Update in Replit
+
+In your Replit workspace, open the extension’s project folder.
+
+Find manifest.json in the root of the extension directory.
+
+Replace its existing permissions and host_permissions sections with the version above.
+
+Save the file.
+
+Re-zip the extension folder (so you have a clean .zip to upload to the Chrome Web Store).
+
+In the Developer Dashboard, click Edit Item → Upload New Package → Save Draft → Publish for Review.
+
+✅ Expected Result
+
+Google will not flag it for “Broad Host Permissions.”
+
+You’ll likely get approval within 24 hours.
+
+All key ClassPilot features (Live View, tab tracking, lock/unlock, open/close tabs) will continue to function exactly as before.
