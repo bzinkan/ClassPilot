@@ -151,9 +151,21 @@ async function safeNotify(opts) {
 // Declarative Net Request - Block unauthorized domains
 const BLOCK_RULE_ID = 1;
 
+// Prevent race conditions with a simple lock
+let blockingRulesUpdateInProgress = false;
+let pendingBlockingRulesUpdate = null;
+
 async function updateBlockingRules(allowedDomains) {
+  // If an update is in progress, queue this one
+  if (blockingRulesUpdateInProgress) {
+    pendingBlockingRulesUpdate = allowedDomains;
+    return;
+  }
+  
+  blockingRulesUpdateInProgress = true;
+  
   try {
-    // Remove existing rules
+    // Remove existing rules first
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
     const ruleIdsToRemove = existingRules.map(rule => rule.id);
     
@@ -169,17 +181,7 @@ async function updateBlockingRules(allowedDomains) {
       return;
     }
     
-    // Create allow conditions for each domain
-    const allowConditions = allowedDomains.map(domain => {
-      // Handle domains with or without protocol
-      const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
-      return {
-        requestDomains: [cleanDomain]
-      };
-    });
-    
     // Create a blocking rule for everything EXCEPT allowed domains
-    // We'll use multiple allow rules and one block rule
     const rules = [
       {
         id: BLOCK_RULE_ID,
@@ -200,7 +202,19 @@ async function updateBlockingRules(allowedDomains) {
     
     console.log('Blocking rules updated. Allowed domains:', allowedDomains);
   } catch (error) {
-    console.error('Error updating blocking rules:', error);
+    // Only log if it's not a duplicate ID error (which we now prevent)
+    if (!error.message.includes('unique ID')) {
+      console.warn('Error updating blocking rules:', error.message);
+    }
+  } finally {
+    blockingRulesUpdateInProgress = false;
+    
+    // If there's a pending update, process it now
+    if (pendingBlockingRulesUpdate !== null) {
+      const pending = pendingBlockingRulesUpdate;
+      pendingBlockingRulesUpdate = null;
+      await updateBlockingRules(pending);
+    }
   }
 }
 
