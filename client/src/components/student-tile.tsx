@@ -13,6 +13,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -20,7 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers, Maximize2 } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers, Maximize2, MoreVertical } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
@@ -356,77 +362,179 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   return (
     <Card
       data-testid={`card-student-${student.deviceId}`}
-      className={`${getBorderStyle(student.status)} ${getShadowStyle(student.status)} ${getOpacity(student.status)} ${getGradientBackground(student.status)} hover-elevate cursor-pointer transition-all duration-300 overflow-visible hover:shadow-xl`}
+      className={`${isOffTask || isBlocked ? 'border-2 border-red-500 shadow-lg shadow-red-100 dark:shadow-red-950/30' : 'border shadow-md'} ${getOpacity(student.status)} hover-elevate cursor-pointer transition-all duration-200 overflow-hidden`}
       onClick={onClick}
     >
-      <div className="p-3.5">
-        {/* Header */}
-        <div className="flex items-start justify-between gap-2 mb-2.5">
-          <div className="flex items-center gap-1 flex-1 min-w-0">
+      <div className="p-4 space-y-3">
+        {/* Header Zone - Student Name + Status */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
             {onToggleSelect && (
               <Checkbox
                 checked={isSelected}
                 onCheckedChange={onToggleSelect}
                 onClick={(e) => e.stopPropagation()}
-                className="mr-1"
                 data-testid={`checkbox-select-student-${student.deviceId}`}
               />
             )}
-            <h3 className="font-semibold text-sm truncate" data-testid={`text-student-name-${student.deviceId}`}>
-              {student.studentName || (
-                <span className="text-muted-foreground italic">
-                  {student.deviceName || student.deviceId}
+            <div className="flex-1 min-w-0">
+              <h3 className="font-semibold text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
+                {student.studentName || (
+                  <span className="text-muted-foreground italic text-sm">
+                    {student.deviceName || student.deviceId}
+                  </span>
+                )}
+              </h3>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <div
+                  className={`h-2 w-2 rounded-full ${getStatusColor(student.status)} ${
+                    student.status === 'online' ? 'animate-pulse' : ''
+                  }`}
+                  title={getStatusLabel(student.status)}
+                />
+                <span className="text-xs text-muted-foreground">
+                  {getStatusLabel(student.status)}
                 </span>
-              )}
-            </h3>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-5 w-5 flex-shrink-0"
-              onClick={handleEditClick}
-              data-testid={`button-edit-student-${student.deviceId}`}
-            >
-              <Edit2 className="h-3 w-3" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-5 w-5 flex-shrink-0 text-destructive hover:text-destructive"
-              onClick={handleDeleteClick}
-              data-testid={`button-delete-student-${student.deviceId}`}
-            >
-              <Trash2 className="h-3 w-3" />
-            </Button>
+              </div>
+            </div>
           </div>
-          <div className="flex items-center gap-1.5 flex-shrink-0">
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {student.cameraActive && (
+              <div title="Camera active" className="flex-shrink-0">
+                <Video 
+                  className="h-4 w-4 text-purple-600 dark:text-purple-400" 
+                  data-testid={`icon-camera-${student.deviceId}`}
+                />
+              </div>
+            )}
+            {student.screenLocked && (
+              <div title="Screen locked" className="flex-shrink-0">
+                <Lock 
+                  className="h-4 w-4 text-amber-600 dark:text-amber-400" 
+                  data-testid={`icon-locked-${student.deviceId}`}
+                />
+              </div>
+            )}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-7 w-7"
+                  onClick={(e) => e.stopPropagation()}
+                  data-testid={`button-menu-${student.deviceId}`}
+                >
+                  <MoreVertical className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.deviceId}`}>
+                  <Edit2 className="h-4 w-4 mr-2" />
+                  Edit Info
+                </DropdownMenuItem>
+                <DropdownMenuItem 
+                  onClick={handleDeleteClick} 
+                  className="text-destructive focus:text-destructive"
+                  data-testid={`button-delete-student-${student.deviceId}`}
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+
+        {/* Alert Badges */}
+        {(isOffTask || isBlocked || student.flightPathActive) && (
+          <div className="flex flex-wrap gap-1.5">
             {student.flightPathActive && student.activeFlightPathName && (
-              <Badge className="text-xs px-1.5 py-0.5 bg-blue-500 text-white" data-testid={`badge-scene-${student.deviceId}`}>
-                <Layers className="h-2.5 w-2.5 mr-0.5" />
+              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.deviceId}`}>
+                <Layers className="h-3 w-3 mr-1" />
                 {student.activeFlightPathName}
               </Badge>
             )}
             {isOffTask && (
-              <Badge className="text-xs px-1.5 py-0.5 bg-red-500 text-white" data-testid={`badge-offtask-${student.deviceId}`}>
-                <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
+              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-offtask-${student.deviceId}`}>
+                <AlertTriangle className="h-3 w-3 mr-1" />
                 Off-Task
               </Badge>
             )}
             {isBlocked && !isOffTask && (
-              <Badge variant="destructive" className="text-xs px-1.5 py-0.5" data-testid={`badge-blocked-${student.deviceId}`}>
-                <AlertTriangle className="h-2.5 w-2.5 mr-0.5" />
-                Blocked
+              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-${student.deviceId}`}>
+                <AlertTriangle className="h-3 w-3 mr-1" />
+                Blocked Domain
               </Badge>
             )}
-            {student.status === 'offline' && (
-              <Badge variant="outline" className="text-xs px-1.5 py-0.5 bg-muted text-muted-foreground">
-                Offline
-              </Badge>
+          </div>
+        )}
+
+        {/* Preview Zone - Large Live View or Tab Info */}
+        {liveStream ? (
+          <div className="aspect-video rounded-md overflow-hidden bg-black relative group">
+            <div 
+              ref={tileVideoSlotRef}
+              id={`tile-video-slot-${student.deviceId}`}
+              className="w-full h-full"
+              data-testid={`video-live-${student.deviceId}`}
+            />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none" />
+            <Button
+              variant="ghost"
+              size="icon"
+              className="absolute top-2 right-2 h-8 w-8 bg-black/70 hover:bg-black/90 text-white opacity-0 group-hover:opacity-100 transition-all pointer-events-auto"
+              onClick={handleExpand}
+              data-testid={`button-enlarge-${student.deviceId}`}
+              title="Expand - Zoom, screenshot, record"
+            >
+              <Maximize2 className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : (
+          <div className="aspect-video rounded-md bg-muted/30 border border-border/40 p-4 flex flex-col justify-center gap-2">
+            <div className="flex items-start gap-2">
+              {student.favicon && (
+                <img
+                  src={student.favicon}
+                  alt=""
+                  className="w-4 h-4 flex-shrink-0 mt-1 rounded"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.display = 'none';
+                  }}
+                />
+              )}
+              <p className="font-medium text-sm leading-tight line-clamp-3" data-testid={`text-tab-title-${student.deviceId}`}>
+                {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
+              </p>
+            </div>
+            {student.activeTabUrl && (
+              <p className="text-xs font-mono text-muted-foreground truncate" data-testid={`text-tab-url-${student.deviceId}`}>
+                {student.activeTabUrl}
+              </p>
             )}
+          </div>
+        )}
+
+        {/* Footer Zone - Time Info + Actions */}
+        <div className="flex items-center justify-between gap-2 text-xs pt-2 border-t border-border/20">
+          <div className="flex items-center gap-1.5 text-muted-foreground">
+            <span className="uppercase tracking-wide text-[10px] font-medium">
+              {student.currentUrlDuration !== undefined ? 'DURATION' : 'LAST SEEN'}
+            </span>
+            <span className="text-foreground font-medium" data-testid={student.currentUrlDuration !== undefined ? `current-url-duration-${student.deviceId}` : `text-last-seen-${student.deviceId}`}>
+              {student.currentUrlDuration !== undefined ? (
+                formatDuration(student.currentUrlDuration)
+              ) : (
+                formatDistanceToNow(student.lastSeenAt, { addSuffix: true })
+              )}
+            </span>
+          </div>
+          <div className="flex items-center gap-1">
             {onStartLiveView && onStopLiveView && (
               <Button
-                variant="ghost"
-                size="icon"
-                className="h-5 w-5 flex-shrink-0"
+                variant={liveStream ? "default" : "outline"}
+                size="sm"
+                className="h-7 px-2 text-xs"
                 onClick={(e) => {
                   e.stopPropagation();
                   if (liveStream) {
@@ -438,103 +546,11 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 title={liveStream ? "Stop live view" : "Start live view"}
                 data-testid={`button-live-view-${student.deviceId}`}
               >
-                <Monitor className={`h-3 w-3 ${liveStream ? 'text-blue-600 dark:text-blue-400' : ''}`} />
+                <Monitor className="h-3.5 w-3.5 mr-1" />
+                {liveStream ? "Stop" : "View"}
               </Button>
             )}
-            {student.cameraActive && (
-              <div title="Camera active">
-                <Video 
-                  className="h-3.5 w-3.5 flex-shrink-0 text-purple-600 dark:text-purple-400" 
-                  data-testid={`icon-camera-${student.deviceId}`}
-                />
-              </div>
-            )}
-            {student.screenLocked ? (
-              <div title="Screen locked">
-                <Lock 
-                  className="h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" 
-                  data-testid={`icon-locked-${student.deviceId}`}
-                />
-              </div>
-            ) : (
-              <div title="Screen unlocked">
-                <Unlock 
-                  className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/40" 
-                  data-testid={`icon-unlocked-${student.deviceId}`}
-                />
-              </div>
-            )}
-            <div
-              className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${getStatusColor(student.status)} ${
-                student.status === 'online' ? 'animate-pulse' : ''
-              }`}
-              title={getStatusLabel(student.status)}
-            />
           </div>
-        </div>
-
-        {/* Active Tab Info or Live Video */}
-        {liveStream ? (
-          <div className="mb-2.5 rounded-md overflow-hidden bg-black relative group">
-            <div 
-              ref={tileVideoSlotRef}
-              id={`tile-video-slot-${student.deviceId}`}
-              className="w-full"
-              data-testid={`video-live-${student.deviceId}`}
-            />
-            {/* Enlarge button overlay */}
-            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors pointer-events-none" />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="absolute top-2 right-2 h-8 w-8 bg-black/60 hover:bg-black/80 text-white opacity-80 group-hover:opacity-100 transition-all shadow-lg pointer-events-auto"
-              onClick={handleExpand}
-              data-testid={`button-enlarge-${student.deviceId}`}
-              title="Expand video - Access zoom, screenshot, and recording controls"
-            >
-              <Maximize2 className="h-4 w-4" />
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-2 mb-2.5">
-            <div className="flex items-start gap-2">
-              {student.favicon && (
-                <img
-                  src={student.favicon}
-                  alt=""
-                  className="w-4 h-4 flex-shrink-0 mt-0.5 rounded"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = 'none';
-                  }}
-                />
-              )}
-              <p className="text-sm font-medium flex-1 line-clamp-2 leading-snug" data-testid={`text-tab-title-${student.deviceId}`}>
-                {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
-              </p>
-            </div>
-            {student.activeTabUrl && (
-              <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground bg-muted/20 rounded px-2 py-1">
-                <ExternalLink className="h-2.5 w-2.5 flex-shrink-0" />
-                <span className="truncate" data-testid={`text-tab-url-${student.deviceId}`}>
-                  {student.activeTabUrl}
-                </span>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Footer */}
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground pt-2 border-t border-border/20">
-          <Clock className="h-3 w-3" />
-          {student.currentUrlDuration !== undefined ? (
-            <span className="font-medium text-primary" data-testid={`current-url-duration-${student.deviceId}`}>
-              {formatDuration(student.currentUrlDuration)}
-            </span>
-          ) : (
-            <span data-testid={`text-last-seen-${student.deviceId}`}>
-              {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
-            </span>
-          )}
         </div>
       </div>
 
