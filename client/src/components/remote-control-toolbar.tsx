@@ -643,8 +643,40 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
               </h3>
               
               {studentDataStats.length > 0 ? (
-                <>
-                  <div className="flex items-center justify-center">
+                <div className="flex gap-6 items-start">
+                  {/* Website Duration List - Left Side */}
+                  <div className="w-80 flex-shrink-0">
+                    <div className="space-y-2 max-h-96 overflow-y-auto pr-2">
+                      {studentDataStats.map((stat, index) => {
+                        const minutes = Math.floor(stat.value / 60);
+                        const seconds = stat.value % 60;
+                        const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                        
+                        return (
+                          <div key={stat.name} className="flex items-center gap-3 p-2 rounded-md hover-elevate">
+                            <div className="flex items-center gap-3 flex-1 min-w-0">
+                              <div className="flex-shrink-0 text-muted-foreground font-mono text-xs w-5">
+                                {index + 1}.
+                              </div>
+                              <div 
+                                className="flex-shrink-0 w-3 h-3 rounded-full" 
+                                style={{ backgroundColor: stat.color }}
+                              />
+                              <div className="text-sm font-medium truncate flex-1 min-w-0" title={stat.name}>
+                                {stat.name}
+                              </div>
+                            </div>
+                            <div className="flex-shrink-0 text-sm font-semibold text-muted-foreground">
+                              {timeStr}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  
+                  {/* Pie Chart - Right Side */}
+                  <div className="flex-1 flex items-center justify-center">
                     <ResponsiveContainer width="100%" height={350}>
                       <PieChart>
                         <Pie
@@ -675,36 +707,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
-                  
-                  {/* Website Duration List */}
-                  <div className="space-y-2 mt-6 max-h-60 overflow-y-auto pr-2">
-                    {studentDataStats.map((stat, index) => {
-                      const minutes = Math.floor(stat.value / 60);
-                      const seconds = stat.value % 60;
-                      const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
-                      
-                      return (
-                        <div key={stat.name} className="flex items-center gap-3 p-2 rounded-md hover-elevate">
-                          <div className="flex items-center gap-3 flex-1 min-w-0">
-                            <div className="flex-shrink-0 text-muted-foreground font-mono text-xs w-5">
-                              {index + 1}.
-                            </div>
-                            <div 
-                              className="flex-shrink-0 w-3 h-3 rounded-full" 
-                              style={{ backgroundColor: stat.color }}
-                            />
-                            <div className="text-sm font-medium truncate flex-1 min-w-0" title={stat.name}>
-                              {stat.name}
-                            </div>
-                          </div>
-                          <div className="flex-shrink-0 text-sm font-semibold text-muted-foreground">
-                            {timeStr}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </>
+                </div>
               ) : (
                 <div className="p-8 text-center text-muted-foreground border rounded-lg">
                   No browsing data available for the last 24 hours
