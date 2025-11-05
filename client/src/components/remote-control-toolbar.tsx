@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route, Activity, WifiOff, Video, AlertTriangle } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,11 +42,16 @@ interface RemoteControlToolbarProps {
   selectedGrade: string;
   onGradeChange: (grade: string) => void;
   onShowFlightPathDialog?: () => void;
+  onlineCount: number;
+  idleCount: number;
+  offlineCount: number;
+  cameraActiveCount: number;
+  offTaskCount: number;
 }
 
 export { type RemoteControlToolbarProps };
 
-export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange, onlineCount, idleCount, offlineCount, cameraActiveCount, offTaskCount }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
