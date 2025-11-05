@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -30,18 +31,22 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
-import type { FlightPath, StudentStatus } from "@shared/schema";
+import type { FlightPath, StudentStatus, Settings } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
   selectedDeviceIds: Set<string>;
   students: StudentStatus[];
   onToggleStudent: (deviceId: string) => void;
   onClearSelection: () => void;
+  selectedGrade: string;
+  onGradeChange: (grade: string) => void;
 }
 
-export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
+  const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
+  const [showStudentDataDialog, setShowStudentDataDialog] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
   const [showApplyScene, setShowApplyScene] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
@@ -54,6 +59,11 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
   // Fetch flight paths
   const { data: scenes = [] } = useQuery<FlightPath[]>({
     queryKey: ['/api/flight-paths'],
+  });
+  
+  // Fetch settings for grade levels
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ['/api/settings'],
   });
 
   const handleOpenTab = async () => {
@@ -291,9 +301,34 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
 
   return (
     <>
-      <div className="border-b border-border bg-muted/30 px-6 py-4">
+      <div className="border-b border-border bg-muted/30 px-6 py-4 mb-8">
         <div className="max-w-screen-2xl mx-auto">
+          {/* Top Row: New Tabs, Target Badge, Select Dropdown */}
           <div className="flex items-center gap-2 flex-wrap mb-3">
+            {/* Left Side: Flight Path and Student Data Tabs */}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowFlightPathDialog(true)}
+              data-testid="button-flight-path-tab"
+            >
+              <Route className="h-4 w-4 mr-2" />
+              Flight Path
+            </Button>
+
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowStudentDataDialog(true)}
+              data-testid="button-student-data-tab"
+            >
+              <BarChart3 className="h-4 w-4 mr-2" />
+              Student Data
+            </Button>
+
+            <div className="h-6 w-px bg-border mx-1" />
+            
+            {/* Target Badge and Select */}
             <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
               Target: {selectionText}
             </Badge>
@@ -344,60 +379,23 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
             </Button>
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowOpenTab(true)}
-              data-testid="button-open-tab"
-            >
-              <MonitorPlay className="h-4 w-4 mr-2" />
-              Open Tab
-            </Button>
-
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleCloseTabs}
-              disabled={isLoading}
-              data-testid="button-close-tabs"
-            >
-              <TabletSmartphone className="h-4 w-4 mr-2" />
-              Close Tabs
-            </Button>
-
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowLockScreen(true)}
-              data-testid="button-lock-screen"
-            >
-              <Lock className="h-4 w-4 mr-2" />
-              Lock Screen
-            </Button>
-
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={handleUnlockScreen}
-              disabled={isLoading}
-              data-testid="button-unlock-screen"
-            >
-              <Unlock className="h-4 w-4 mr-2" />
-              Unlock Screen
-            </Button>
-
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowApplyScene(true)}
-              data-testid="button-apply-flight-path"
-            >
-              <Layers className="h-4 w-4 mr-2" />
-              Apply Flight Path
-            </Button>
-
-          </div>
+          {/* Bottom Row: Grade Tabs (replacing control buttons) */}
+          {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
+            <Tabs value={selectedGrade} onValueChange={onGradeChange}>
+              <TabsList className="flex-wrap h-auto gap-2 p-1.5 bg-muted/50 rounded-xl">
+                {settings.gradeLevels.map((grade) => (
+                  <TabsTrigger 
+                    key={grade} 
+                    value={grade} 
+                    data-testid={`tab-grade-${grade}`}
+                    className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-lg px-5 py-2.5 font-medium transition-all duration-200 data-[state=active]:shadow-md"
+                  >
+                    {grade}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+          )}
         </div>
       </div>
 

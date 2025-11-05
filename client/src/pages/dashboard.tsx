@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -645,16 +645,18 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Remote Control Toolbar */}
-      <RemoteControlToolbar 
-        selectedDeviceIds={selectedDeviceIds}
-        students={filteredStudents}
-        onToggleStudent={toggleStudentSelection}
-        onClearSelection={clearSelection}
-      />
-
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
+        {/* Remote Control Toolbar - now inside main */}
+        <RemoteControlToolbar 
+          selectedDeviceIds={selectedDeviceIds}
+          students={filteredStudents}
+          onToggleStudent={toggleStudentSelection}
+          onClearSelection={clearSelection}
+          selectedGrade={selectedGrade}
+          onGradeChange={setSelectedGrade}
+        />
+        
         {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
@@ -725,23 +727,58 @@ export default function Dashboard() {
           />
         </div>
 
-        {/* Grade Level Tabs */}
-        {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
-          <Tabs value={selectedGrade} onValueChange={setSelectedGrade} className="mb-8">
-            <TabsList className="flex-wrap h-auto gap-2 p-1.5 bg-muted/50 rounded-xl">
-              {settings.gradeLevels.map((grade) => (
-                <TabsTrigger 
-                  key={grade} 
-                  value={grade} 
-                  data-testid={`tab-grade-${grade}`}
-                  className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-lg px-5 py-2.5 font-medium transition-all duration-200 data-[state=active]:shadow-md"
-                >
-                  {grade}
-                </TabsTrigger>
-              ))}
-            </TabsList>
-          </Tabs>
-        )}
+        {/* Control Buttons - moved from toolbar */}
+        <div className="flex items-center gap-2 flex-wrap mb-8">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-open-tab-main"
+          >
+            <MonitorPlay className="h-4 w-4 mr-2" />
+            Open Tab
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-close-tabs-main"
+          >
+            <TabletSmartphone className="h-4 w-4 mr-2" />
+            Close Tabs
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-lock-screen-main"
+          >
+            <Lock className="h-4 w-4 mr-2" />
+            Lock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-unlock-screen-main"
+          >
+            <Unlock className="h-4 w-4 mr-2" />
+            Unlock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-apply-flight-path-main"
+          >
+            <Layers className="h-4 w-4 mr-2" />
+            Apply Flight Path
+          </Button>
+        </div>
 
         {/* Student Tiles */}
         {filteredStudents.length === 0 ? (
