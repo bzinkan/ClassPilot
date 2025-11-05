@@ -66,6 +66,7 @@ export default function Dashboard() {
   const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
   const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
+  const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
   const [showLockScreenDialog, setShowLockScreenDialog] = useState(false);
   const [lockScreenUrl, setLockScreenUrl] = useState("");
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
@@ -406,6 +407,27 @@ export default function Dashboard() {
   const cameraActiveCount = studentsInGrade.filter((s) => s.cameraActive).length;
   const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
 
+  // Get unique open tabs from selected students (or all if none selected)
+  const relevantStudents = selectedDeviceIds.size > 0 
+    ? students.filter(s => selectedDeviceIds.has(s.deviceId))
+    : students;
+  
+  const openTabs = relevantStudents
+    .filter(s => s.activeTabUrl && s.activeTabUrl.trim() && !s.activeTabUrl.startsWith('chrome://'))
+    .map(s => ({
+      url: s.activeTabUrl!,
+      title: s.activeTabTitle || 'Untitled',
+      studentName: s.studentName,
+    }))
+    .reduce((acc, tab) => {
+      // Deduplicate by URL
+      if (!acc.find(t => t.url === tab.url)) {
+        acc.push(tab);
+      }
+      return acc;
+    }, [] as Array<{ url: string; title: string; studentName: string }>)
+    .sort((a, b) => a.title.localeCompare(b.title));
+
   // Check for blocked domain violations and show notifications
   useEffect(() => {
     if (!settings?.blockedDomains || settings.blockedDomains.length === 0) return;
@@ -610,8 +632,8 @@ export default function Dashboard() {
   });
 
   const closeTabsMutation = useMutation({
-    mutationFn: async ({ closeAll, pattern, targetDeviceIds }: { closeAll?: boolean; pattern?: string; targetDeviceIds?: string[] }) => {
-      const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, targetDeviceIds });
+    mutationFn: async ({ closeAll, pattern, specificUrls, targetDeviceIds }: { closeAll?: boolean; pattern?: string; specificUrls?: string[]; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, specificUrls, targetDeviceIds });
       return res.json();
     },
     onSuccess: (data) => {
@@ -621,6 +643,7 @@ export default function Dashboard() {
       });
       setShowCloseTabsDialog(false);
       setCloseTabsPattern("");
+      setSelectedTabsToClose(new Set());
     },
     onError: (error: Error) => {
       toast({
@@ -696,15 +719,16 @@ export default function Dashboard() {
     if (closeTabsMode === "all") {
       closeTabsMutation.mutate({ closeAll: true, targetDeviceIds });
     } else {
-      if (!closeTabsPattern.trim()) {
+      // Close specific selected tabs
+      if (selectedTabsToClose.size === 0) {
         toast({
           variant: "destructive",
-          title: "Invalid Pattern",
-          description: "Please enter a URL pattern",
+          title: "No Tabs Selected",
+          description: "Please select at least one tab to close",
         });
         return;
       }
-      closeTabsMutation.mutate({ pattern: closeTabsPattern, targetDeviceIds });
+      closeTabsMutation.mutate({ specificUrls: Array.from(selectedTabsToClose), targetDeviceIds });
     }
   };
 
@@ -1455,23 +1479,71 @@ export default function Dashboard() {
                 </p>
               </TabsContent>
               <TabsContent value="pattern" className="space-y-2">
-                <Label htmlFor="close-tabs-pattern">URL Pattern</Label>
-                <Input
-                  id="close-tabs-pattern"
-                  type="text"
-                  placeholder="youtube.com"
-                  value={closeTabsPattern}
-                  onChange={(e) => setCloseTabsPattern(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !closeTabsMutation.isPending) {
-                      handleCloseTabs();
-                    }
-                  }}
-                  data-testid="input-close-tabs-pattern"
-                />
-                <p className="text-xs text-muted-foreground">
-                  Enter a domain or URL pattern to match (e.g., "youtube.com" or "social")
-                </p>
+                <Label>Select Tabs to Close</Label>
+                {openTabs.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-4">
+                    No tabs are currently open on {selectedDeviceIds.size > 0 ? 'selected students' : 'any student devices'}
+                  </p>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 mb-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedTabsToClose(new Set(openTabs.map(t => t.url)))}
+                        data-testid="button-select-all-tabs"
+                        className="h-8"
+                      >
+                        <CheckSquare className="h-3 w-3 mr-1" />
+                        Select All
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSelectedTabsToClose(new Set())}
+                        data-testid="button-clear-tabs"
+                        className="h-8"
+                      >
+                        <XSquare className="h-3 w-3 mr-1" />
+                        Clear
+                      </Button>
+                      <span className="text-xs text-muted-foreground ml-auto">
+                        {selectedTabsToClose.size} of {openTabs.length} selected
+                      </span>
+                    </div>
+                    <div className="border rounded-md max-h-60 overflow-y-auto">
+                      {openTabs.map((tab) => (
+                        <label
+                          key={tab.url}
+                          className="flex items-start gap-3 p-3 hover:bg-muted/50 cursor-pointer border-b last:border-b-0"
+                          data-testid={`tab-option-${tab.url}`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="mt-1 h-4 w-4"
+                            checked={selectedTabsToClose.has(tab.url)}
+                            onChange={(e) => {
+                              const newSet = new Set(selectedTabsToClose);
+                              if (e.target.checked) {
+                                newSet.add(tab.url);
+                              } else {
+                                newSet.delete(tab.url);
+                              }
+                              setSelectedTabsToClose(newSet);
+                            }}
+                            data-testid={`checkbox-tab-${tab.url}`}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate">{tab.title}</div>
+                            <div className="text-xs text-muted-foreground truncate">{tab.url}</div>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </>
+                )}
               </TabsContent>
             </Tabs>
           </div>

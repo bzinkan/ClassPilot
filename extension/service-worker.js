@@ -683,6 +683,28 @@ async function handleRemoteControl(command) {
             }
           }
           console.log(`Closed ${closedCount} tabs (allowed domains: ${allowedDomains.length > 0 ? allowedDomains.join(', ') : 'none'})`);
+        } else if (command.data.specificUrls && Array.isArray(command.data.specificUrls)) {
+          // Close tabs matching specific URLs
+          const tabs = await chrome.tabs.query({});
+          let closedCount = 0;
+          for (const tab of tabs) {
+            // Skip chrome:// system pages
+            if (tab.url?.startsWith('chrome://')) {
+              continue;
+            }
+            
+            // Check if this tab's URL matches any of the specificUrls
+            if (command.data.specificUrls.includes(tab.url)) {
+              try {
+                await chrome.tabs.remove(tab.id);
+                closedCount++;
+                console.log('Closed specific tab:', tab.url);
+              } catch (error) {
+                console.warn('Could not close tab:', tab.id, error);
+              }
+            }
+          }
+          console.log(`Closed ${closedCount} specific tabs`);
         } else if (command.data.pattern) {
           // Close tabs matching pattern
           const tabs = await chrome.tabs.query({});

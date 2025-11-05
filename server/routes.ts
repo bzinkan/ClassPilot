@@ -1426,20 +1426,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Close Tabs - Close all or specific tabs
   app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { closeAll, pattern, allowedDomains, targetDeviceIds } = req.body;
+      const { closeAll, pattern, specificUrls, allowedDomains, targetDeviceIds } = req.body;
       
       broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'close-tab',
-          data: { closeAll, pattern, allowedDomains },
+          data: { closeAll, pattern, specificUrls, allowedDomains },
         },
       }, undefined, targetDeviceIds);
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
         ? `${targetDeviceIds.length} student(s)` 
         : "all students";
-      res.json({ success: true, message: `Closed tabs on ${target}` });
+      
+      const message = specificUrls && specificUrls.length > 0
+        ? `Closed ${specificUrls.length} selected tab(s) on ${target}`
+        : `Closed tabs on ${target}`;
+      
+      res.json({ success: true, message });
     } catch (error) {
       console.error("Close tabs error:", error);
       res.status(500).json({ error: "Internal server error" });
