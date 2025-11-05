@@ -1594,6 +1594,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
       }, undefined, targetDeviceIds);
       
+      // Immediately update StudentStatus for instant UI feedback
+      const now = Date.now();
+      for (const deviceId of targetDeviceIds) {
+        const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+        if (activeStudent) {
+          const status = await storage.getStudentStatus(activeStudent.id);
+          if (status) {
+            status.flightPathActive = false;
+            status.activeFlightPathName = undefined;
+            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+            await storage.updateStudentStatus(status);
+          }
+        }
+      }
+      
+      // Notify teachers to update UI immediately
+      broadcastToTeachers({
+        type: 'student-update',
+      });
+      
       const target = `${targetDeviceIds.length} student(s)`;
       res.json({ success: true, message: `Removed flight path from ${target}` });
     } catch (error) {
