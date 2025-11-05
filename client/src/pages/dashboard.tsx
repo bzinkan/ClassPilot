@@ -648,7 +648,8 @@ export default function Dashboard() {
       {/* Remote Control Toolbar */}
       <RemoteControlToolbar 
         selectedDeviceIds={selectedDeviceIds}
-        onSelectAll={selectAll}
+        students={filteredStudents}
+        onToggleStudent={toggleStudentSelection}
         onClearSelection={clearSelection}
       />
 

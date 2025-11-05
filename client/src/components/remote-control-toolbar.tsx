@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +13,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -22,15 +30,16 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
-import type { FlightPath } from "@shared/schema";
+import type { FlightPath, StudentStatus } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
   selectedDeviceIds: Set<string>;
-  onSelectAll: () => void;
+  students: StudentStatus[];
+  onToggleStudent: (deviceId: string) => void;
   onClearSelection: () => void;
 }
 
-export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSelection }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
@@ -273,6 +282,13 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
     ? `${selectedDeviceIds.size} selected`
     : "All students";
 
+  // Sort students alphabetically by name
+  const sortedStudents = [...students].sort((a, b) => {
+    const nameA = a.studentName || '';
+    const nameB = b.studentName || '';
+    return nameA.localeCompare(nameB);
+  });
+
   return (
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4">
@@ -281,26 +297,50 @@ export function RemoteControlToolbar({ selectedDeviceIds, onSelectAll, onClearSe
             <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
               Target: {selectionText}
             </Badge>
+            
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="button-select-students"
+                >
+                  <Users className="h-4 w-4 mr-1" />
+                  Select
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
+                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {sortedStudents.length === 0 ? (
+                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                    No students available
+                  </div>
+                ) : (
+                  sortedStudents.map((student) => (
+                    <DropdownMenuCheckboxItem
+                      key={student.deviceId}
+                      checked={selectedDeviceIds.has(student.deviceId)}
+                      onCheckedChange={() => onToggleStudent(student.deviceId)}
+                      data-testid={`dropdown-item-student-${student.deviceId}`}
+                    >
+                      {student.studentName || 'Unnamed Student'}
+                    </DropdownMenuCheckboxItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
             <Button
               size="sm"
               variant="ghost"
-              onClick={onSelectAll}
-              data-testid="button-select-all"
+              onClick={onClearSelection}
+              disabled={selectedDeviceIds.size === 0}
+              data-testid="button-clear-selection"
             >
-              <CheckSquare className="h-4 w-4 mr-1" />
-              Select All
+              <XSquare className="h-4 w-4 mr-1" />
+              Clear Selection
             </Button>
-            {selectedDeviceIds.size > 0 && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={onClearSelection}
-                data-testid="button-clear-selection"
-              >
-                <XSquare className="h-4 w-4 mr-1" />
-                Clear
-              </Button>
-            )}
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
