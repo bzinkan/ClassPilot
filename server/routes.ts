@@ -1470,14 +1470,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const now = Date.now();
       for (const deviceId of deviceIdsToUpdate) {
+        // Try to get active student, fall back to all students for this device
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
-        if (activeStudent) {
-          const status = await storage.getStudentStatus(activeStudent.id);
-          if (status) {
-            status.screenLocked = true;
-            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+        const studentsToUpdate = activeStudent 
+          ? [activeStudent]
+          : await storage.getStudentsByDevice(deviceId);
+        
+        for (const student of studentsToUpdate) {
+          let status = await storage.getStudentStatus(student.id);
+          
+          // Create status if it doesn't exist (e.g., student is offline)
+          if (!status) {
+            const device = await storage.getDevice(deviceId);
+            status = {
+              studentId: student.id,
+              deviceId: deviceId,
+              deviceName: device?.deviceName ?? undefined,
+              studentName: student.studentName,
+              classId: device?.classId ?? '',
+              gradeLevel: student.gradeLevel ?? undefined,
+              activeTabTitle: '',
+              activeTabUrl: '',
+              lastSeenAt: 0, // Will mark as offline
+              screenLocked: false,
+              isSharing: false,
+              flightPathActive: false,
+              cameraActive: false,
+              status: 'offline',
+            };
             await storage.updateStudentStatus(status);
           }
+          
+          status.screenLocked = true;
+          status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+          await storage.updateStudentStatus(status);
         }
       }
       
@@ -1516,14 +1542,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const now = Date.now();
       for (const deviceId of deviceIdsToUpdate) {
+        // Try to get active student, fall back to all students for this device
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
-        if (activeStudent) {
-          const status = await storage.getStudentStatus(activeStudent.id);
-          if (status) {
-            status.screenLocked = false;
-            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+        const studentsToUpdate = activeStudent 
+          ? [activeStudent]
+          : await storage.getStudentsByDevice(deviceId);
+        
+        for (const student of studentsToUpdate) {
+          let status = await storage.getStudentStatus(student.id);
+          
+          // Create status if it doesn't exist (e.g., student is offline)
+          if (!status) {
+            const device = await storage.getDevice(deviceId);
+            status = {
+              studentId: student.id,
+              deviceId: deviceId,
+              deviceName: device?.deviceName ?? undefined,
+              studentName: student.studentName,
+              classId: device?.classId ?? '',
+              gradeLevel: student.gradeLevel ?? undefined,
+              activeTabTitle: '',
+              activeTabUrl: '',
+              lastSeenAt: 0, // Will mark as offline
+              screenLocked: false,
+              isSharing: false,
+              flightPathActive: false,
+              cameraActive: false,
+              status: 'offline',
+            };
             await storage.updateStudentStatus(status);
           }
+          
+          status.screenLocked = false;
+          status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+          await storage.updateStudentStatus(status);
         }
       }
       
