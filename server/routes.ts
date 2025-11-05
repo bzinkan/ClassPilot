@@ -1577,6 +1577,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
+  // Remove Flight Path
+  app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    try {
+      const { targetDeviceIds } = req.body;
+      
+      if (!targetDeviceIds || !Array.isArray(targetDeviceIds) || targetDeviceIds.length === 0) {
+        return res.status(400).json({ error: "Target device IDs are required" });
+      }
+      
+      broadcastToStudents({
+        type: 'remote-control',
+        command: {
+          type: 'remove-flight-path',
+          data: {},
+        },
+      }, undefined, targetDeviceIds);
+      
+      const target = `${targetDeviceIds.length} student(s)`;
+      res.json({ success: true, message: `Removed flight path from ${target}` });
+    } catch (error) {
+      console.error("Remove flight path error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+  
   // Limit Tabs
   app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
