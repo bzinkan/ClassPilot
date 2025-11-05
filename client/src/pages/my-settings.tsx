@@ -11,9 +11,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { ArrowLeft, User, Settings as SettingsIcon, Save } from "lucide-react";
+import { ArrowLeft, User, Settings as SettingsIcon, Save, Plus, Edit, Trash2, Plane } from "lucide-react";
 import type { TeacherSettings, FlightPath } from "@shared/schema";
 
 const teacherSettingsSchema = z.object({
@@ -28,6 +30,13 @@ type TeacherSettingsForm = z.infer<typeof teacherSettingsSchema>;
 export default function MySettings() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  
+  const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
+  const [editingFlightPath, setEditingFlightPath] = useState<FlightPath | null>(null);
+  const [flightPathName, setFlightPathName] = useState("");
+  const [flightPathDescription, setFlightPathDescription] = useState("");
+  const [flightPathAllowedDomains, setFlightPathAllowedDomains] = useState("");
+  const [deleteFlightPathId, setDeleteFlightPathId] = useState<string | null>(null);
 
   const { data: teacherSettings, isLoading } = useQuery<TeacherSettings | null>({
     queryKey: ['/api/teacher/settings'],
@@ -57,6 +66,70 @@ export default function MySettings() {
       });
     }
   }, [teacherSettings, form]);
+
+  const normalizeDomain = (domain: string): string => {
+    return domain.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, '');
+  };
+
+  const resetFlightPathForm = () => {
+    setFlightPathName("");
+    setFlightPathDescription("");
+    setFlightPathAllowedDomains("");
+    setEditingFlightPath(null);
+  };
+
+  const createFlightPathMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", "/api/flight-paths", {
+        flightPathName,
+        description: flightPathDescription || undefined,
+        allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
+      toast({ title: "Flight Path created", description: `"${flightPathName}" has been created successfully` });
+      setShowFlightPathDialog(false);
+      resetFlightPathForm();
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to create Flight Path", description: error.message });
+    },
+  });
+
+  const updateFlightPathMutation = useMutation({
+    mutationFn: async () => {
+      if (!editingFlightPath) throw new Error("No Flight Path to update");
+      return await apiRequest("PATCH", `/api/flight-paths/${editingFlightPath.id}`, {
+        flightPathName,
+        description: flightPathDescription || undefined,
+        allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
+      toast({ title: "Flight Path updated", description: `"${flightPathName}" has been updated successfully` });
+      setShowFlightPathDialog(false);
+      resetFlightPathForm();
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to update Flight Path", description: error.message });
+    },
+  });
+
+  const deleteFlightPathMutation = useMutation({
+    mutationFn: async (id: string) => {
+      return await apiRequest("DELETE", `/api/flight-paths/${id}`, {});
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
+      toast({ title: "Flight Path deleted", description: "Flight Path has been deleted successfully" });
+      setDeleteFlightPathId(null);
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to delete Flight Path", description: error.message });
+    },
+  });
 
   const updateSettingsMutation = useMutation({
     mutationFn: async (data: TeacherSettingsForm) => {
@@ -98,6 +171,22 @@ export default function MySettings() {
       });
     },
   });
+
+  const handleEditFlightPath = (flightPath: FlightPath) => {
+    setEditingFlightPath(flightPath);
+    setFlightPathName(flightPath.flightPathName);
+    setFlightPathDescription(flightPath.description || "");
+    setFlightPathAllowedDomains(flightPath.allowedDomains?.join(", ") || "");
+    setShowFlightPathDialog(true);
+  };
+
+  const handleSaveFlightPath = () => {
+    if (editingFlightPath) {
+      updateFlightPathMutation.mutate();
+    } else {
+      createFlightPathMutation.mutate();
+    }
+  };
 
   const onSubmit = (data: TeacherSettingsForm) => {
     updateSettingsMutation.mutate(data);
@@ -145,6 +234,95 @@ export default function MySettings() {
       <div className="max-w-5xl mx-auto px-6 py-8">
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+            {/* Flight Paths Section */}
+            <Card data-testid="card-flight-paths">
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Plane className="h-5 w-5 text-primary" />
+                    <CardTitle>My Flight Paths</CardTitle>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      resetFlightPathForm();
+                      setShowFlightPathDialog(true);
+                    }}
+                    data-testid="button-create-flight-path"
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create Flight Path
+                  </Button>
+                </div>
+                <CardDescription>
+                  Create and manage domain restriction sets for focused learning. Flight Paths limit student browsing to specific educational websites.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {flightPaths.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    <Plane className="h-12 w-12 mx-auto mb-3 opacity-20" />
+                    <p>No Flight Paths created yet</p>
+                    <p className="text-sm mt-1">Create your first Flight Path to get started</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {flightPaths.map((fp) => (
+                      <div
+                        key={fp.id}
+                        className="flex items-center justify-between p-4 rounded-lg border bg-card hover-elevate"
+                        data-testid={`flight-path-${fp.id}`}
+                      >
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-semibold">{fp.flightPathName}</h3>
+                            {fp.teacherId && (
+                              <Badge variant="secondary" className="text-xs">Personal</Badge>
+                            )}
+                          </div>
+                          {fp.description && (
+                            <p className="text-sm text-muted-foreground mb-2">{fp.description}</p>
+                          )}
+                          <div className="flex flex-wrap gap-1">
+                            {fp.allowedDomains && fp.allowedDomains.length > 0 ? (
+                              fp.allowedDomains.map((domain, idx) => (
+                                <Badge key={idx} variant="outline" className="text-xs">
+                                  {domain}
+                                </Badge>
+                              ))
+                            ) : (
+                              <span className="text-xs text-muted-foreground">No domains configured</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 ml-4">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => handleEditFlightPath(fp)}
+                            data-testid={`button-edit-flight-path-${fp.id}`}
+                          >
+                            <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={() => setDeleteFlightPathId(fp.id)}
+                            data-testid={`button-delete-flight-path-${fp.id}`}
+                          >
+                            <Trash2 className="h-4 w-4 text-destructive" />
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
             <Card data-testid="card-classroom-controls">
               <CardHeader>
                 <div className="flex items-center gap-2">
@@ -277,6 +455,111 @@ export default function MySettings() {
           </form>
         </Form>
       </div>
+
+      {/* Flight Path Create/Edit Dialog */}
+      <Dialog open={showFlightPathDialog} onOpenChange={setShowFlightPathDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>
+              {editingFlightPath ? "Edit Flight Path" : "Create Flight Path"}
+            </DialogTitle>
+            <DialogDescription>
+              {editingFlightPath 
+                ? "Update the Flight Path configuration below."
+                : "Define a set of allowed domains for focused student browsing."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="flight-path-name">Flight Path Name *</Label>
+              <Input
+                id="flight-path-name"
+                data-testid="input-flight-path-name"
+                value={flightPathName}
+                onChange={(e) => setFlightPathName(e.target.value)}
+                placeholder="e.g., Math Research, Reading Time"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="flight-path-description">Description (optional)</Label>
+              <Textarea
+                id="flight-path-description"
+                data-testid="textarea-flight-path-description"
+                value={flightPathDescription}
+                onChange={(e) => setFlightPathDescription(e.target.value)}
+                placeholder="Describe the purpose of this Flight Path"
+                className="min-h-[80px]"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="flight-path-domains">Allowed Domains *</Label>
+              <Textarea
+                id="flight-path-domains"
+                data-testid="textarea-flight-path-domains"
+                value={flightPathAllowedDomains}
+                onChange={(e) => setFlightPathAllowedDomains(e.target.value)}
+                placeholder="google.com, khanacademy.org, wikipedia.org"
+                className="min-h-[120px] font-mono text-sm"
+              />
+              <p className="text-xs text-muted-foreground">
+                Comma-separated list of domains students can visit when this Flight Path is active.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setShowFlightPathDialog(false)}
+              data-testid="button-cancel-flight-path"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={handleSaveFlightPath}
+              disabled={!flightPathName.trim() || !flightPathAllowedDomains.trim() || 
+                       createFlightPathMutation.isPending || updateFlightPathMutation.isPending}
+              data-testid="button-save-flight-path"
+            >
+              <Save className="h-4 w-4 mr-2" />
+              {editingFlightPath ? "Update Flight Path" : "Create Flight Path"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Flight Path Confirmation Dialog */}
+      <Dialog open={!!deleteFlightPathId} onOpenChange={() => setDeleteFlightPathId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Flight Path?</DialogTitle>
+            <DialogDescription>
+              This action cannot be undone. Students currently assigned to this Flight Path will no longer have domain restrictions from it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteFlightPathId(null)}
+              data-testid="button-cancel-delete-flight-path"
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => deleteFlightPathId && deleteFlightPathMutation.mutate(deleteFlightPathId)}
+              disabled={deleteFlightPathMutation.isPending}
+              data-testid="button-confirm-delete-flight-path"
+            >
+              <Trash2 className="h-4 w-4 mr-2" />
+              Delete Flight Path
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

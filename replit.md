@@ -73,6 +73,12 @@ The system employs a full-stack architecture:
     -   **API Filtering**: All endpoints (`/api/students`, `/api/flight-paths`, `/api/groups`) automatically filter by logged-in teacher ID. School-wide resources (teacherId = null) are visible to all teachers
     -   **Automatic Migration**: On startup, existing students are automatically assigned to the default teacher account, and orphaned flight paths/groups are migrated
     -   **New Endpoints**: Added `/api/teacher/settings`, `/api/teacher/students`, and student assignment endpoints for managing teacher-student relationships
+    -   **My Settings Page**: Teachers access their personal settings via a User icon button in the dashboard header. This dedicated page allows teachers to:
+        -   Create, edit, and delete their personal Flight Paths with allowed domains
+        -   Configure maximum tabs per student
+        -   Set a default Flight Path for new students
+        -   Define teacher-specific allowed and blocked domains
+        -   All settings are teacher-scoped and don't affect other teachers
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, no collection of sensitive personal input data.

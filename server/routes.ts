@@ -1270,9 +1270,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
-      const data = insertFlightPathSchema.parse(req.body);
+      // Make schoolId optional for teacher-scoped Flight Paths
+      const flightPathSchema = insertFlightPathSchema.extend({
+        schoolId: z.string().optional(),
+      });
+      const data = flightPathSchema.parse(req.body);
+      
+      // Get the default school ID from settings if not provided
+      const settings = await storage.getSettings();
+      const schoolId = data.schoolId || settings?.schoolId || 'default-school';
+      
       const flightPath = await storage.createFlightPath({
         ...data,
+        schoolId,
         teacherId: data.teacherId ?? teacherId
       });
       res.json(flightPath);
