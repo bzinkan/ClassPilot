@@ -751,6 +751,28 @@ export default function Dashboard() {
     },
   });
 
+  // Remove Flight Path mutation
+  const removeFlightPathMutation = useMutation({
+    mutationFn: async (targetDeviceIds: string[]) => {
+      const res = await apiRequest('POST', '/api/remote/remove-flight-path', { targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
   // Flight Path handlers
   const handleApplyFlightPath = () => {
     if (!selectedFlightPathId) {
@@ -778,6 +800,10 @@ export default function Dashboard() {
       allowedDomains: flightPath.allowedDomains || [],
       targetDeviceIds 
     });
+  };
+
+  const handleRemoveFlightPath = (deviceId: string) => {
+    removeFlightPathMutation.mutate([deviceId]);
   };
 
   return (
@@ -1587,6 +1613,7 @@ export default function Dashboard() {
                   <th className="text-left p-2 text-sm font-medium">Student</th>
                   <th className="text-left p-2 text-sm font-medium">Flight Path</th>
                   <th className="text-left p-2 text-sm font-medium">Status</th>
+                  <th className="text-left p-2 text-sm font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -1611,11 +1638,28 @@ export default function Dashboard() {
                         {student.status}
                       </Badge>
                     </td>
+                    <td className="p-2">
+                      {student.flightPathActive && student.deviceId ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleRemoveFlightPath(student.deviceId)}
+                          disabled={removeFlightPathMutation.isPending}
+                          data-testid={`button-remove-flight-path-${student.studentId}`}
+                          className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                        >
+                          <X className="h-3 w-3 mr-1" />
+                          Remove
+                        </Button>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
                 {students.length === 0 && (
                   <tr>
-                    <td colSpan={3} className="p-4 text-center text-sm text-muted-foreground">
+                    <td colSpan={4} className="p-4 text-center text-sm text-muted-foreground">
                       No students found
                     </td>
                   </tr>
