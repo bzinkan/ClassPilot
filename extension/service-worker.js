@@ -834,6 +834,25 @@ async function handleRemoteControl(command) {
         console.log('Flight Path applied with allowed domains:', allowedDomains, 'Name:', activeFlightPathName);
         break;
         
+      case 'remove-flight-path':
+        screenLocked = false;
+        lockedUrl = null;
+        lockedDomain = null;
+        allowedDomains = []; // Clear all flight path domains
+        activeFlightPathName = null; // Clear Flight Path name
+        
+        // Clear network-level blocking rules
+        await clearBlockingRules();
+        
+        safeNotify({
+          title: 'Flight Path Removed',
+          message: 'Your teacher has removed the flight path. You can now browse freely.',
+          priority: 1,
+        });
+        
+        console.log('Flight Path removed - all restrictions cleared');
+        break;
+        
       case 'limit-tabs':
         currentMaxTabs = command.data.maxTabs;
         
