@@ -111,11 +111,66 @@ if (chrome.runtime.onStartup) {
   });
 }
 
-// Run immediately on service worker load
+// Run immediately on service worker load/wake-up
+// This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
+  console.log('[Service Worker] Waking up...');
   await ensureRegistered();
-  // Run initial health check after a short delay to ensure storage is loaded
-  setTimeout(() => healthCheck(), 2000);
+  
+  // Restore state from storage immediately
+  const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail', 'flightPathState', 'lockScreenState']);
+  if (stored.config) {
+    CONFIG = { ...CONFIG, ...stored.config };
+  }
+  if (stored.deviceId) {
+    CONFIG.deviceId = stored.deviceId;
+  }
+  if (stored.activeStudentId) {
+    CONFIG.activeStudentId = stored.activeStudentId;
+  }
+  if (stored.studentEmail) {
+    CONFIG.studentEmail = stored.studentEmail;
+  }
+  
+  // Restore Flight Path state if it was active
+  if (stored.flightPathState) {
+    console.log('[Service Worker] Restoring Flight Path state:', stored.flightPathState);
+    screenLocked = stored.flightPathState.screenLocked;
+    allowedDomains = stored.flightPathState.allowedDomains || [];
+    activeFlightPathName = stored.flightPathState.activeFlightPathName;
+    
+    // Re-apply blocking rules if Flight Path was active
+    if (allowedDomains.length > 0) {
+      await updateBlockingRules(allowedDomains);
+      console.log('[Service Worker] Flight Path blocking rules re-applied');
+    }
+  }
+  // Restore Lock Screen state if it was active
+  else if (stored.lockScreenState) {
+    console.log('[Service Worker] Restoring Lock Screen state:', stored.lockScreenState);
+    screenLocked = stored.lockScreenState.screenLocked;
+    lockedUrl = stored.lockScreenState.lockedUrl;
+    lockedDomain = stored.lockScreenState.lockedDomain;
+    
+    // Re-apply blocking rules if screen was locked
+    if (lockedDomain) {
+      await updateBlockingRules([lockedDomain]);
+      console.log('[Service Worker] Lock Screen blocking rules re-applied');
+    }
+  }
+  
+  console.log('[Service Worker] State restored:', { 
+    deviceId: CONFIG.deviceId, 
+    studentEmail: CONFIG.studentEmail,
+    flightPathActive: allowedDomains.length > 0,
+    screenLocked: screenLocked
+  });
+  
+  // Run initial health check after a short delay to ensure everything starts
+  setTimeout(() => {
+    console.log('[Service Worker] Running initial health check...');
+    healthCheck();
+  }, 2000);
 })();
 
 // Centralized, safe notifications (never throw, never produce red errors)
@@ -314,6 +369,14 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (r
     periodInMinutes: 1, // 60 seconds (Chrome minimum)
   });
   console.log('[Init] Health check alarm started');
+  
+  // Keep-alive alarm to prevent service worker termination
+  // Chrome terminates service workers after 30 seconds of inactivity
+  // This alarm pings every 25 seconds to keep it alive
+  chrome.alarms.create('keep-alive', {
+    periodInMinutes: 0.416666667, // 25 seconds (just under 30 second timeout)
+  });
+  console.log('[Init] Keep-alive alarm started');
 });
 
 // Generate unique device ID if not exists
@@ -607,6 +670,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
     healthCheck();
+  } else if (alarm.name === 'keep-alive') {
+    // Keep-alive ping to prevent service worker termination
+    // Just log to keep the service worker active
+    console.log('[Keep-Alive] Service worker alive at', new Date().toISOString());
   }
 });
 
@@ -727,6 +794,19 @@ async function handleRemoteControl(command) {
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
         allowedDomains = []; // Clear scene domains when locking to single domain
         
+        // Persist lock-screen state to survive service worker restarts
+        await chrome.storage.local.set({
+          lockScreenState: {
+            screenLocked: true,
+            lockedUrl,
+            lockedDomain,
+            timestamp: Date.now()
+          }
+        });
+        // Clear Flight Path state when locking screen
+        await chrome.storage.local.remove('flightPathState');
+        console.log('[Lock Screen] State persisted to storage');
+        
         // Apply network-level blocking rules for single domain
         await updateBlockingRules([lockedDomain]);
         
@@ -776,6 +856,10 @@ async function handleRemoteControl(command) {
         allowedDomains = []; // Clear all lock state
         activeFlightPathName = null; // Clear Flight Path name
         
+        // Clear persisted lock-screen and Flight Path state
+        await chrome.storage.local.remove(['lockScreenState', 'flightPathState']);
+        console.log('[Unlock Screen] State cleared from storage');
+        
         // Clear network-level blocking rules
         await clearBlockingRules();
         
@@ -796,6 +880,17 @@ async function handleRemoteControl(command) {
         // Store allowed domains and Flight Path name
         allowedDomains = command.data.allowedDomains || [];
         activeFlightPathName = command.data.flightPathName || null;
+        
+        // Persist Flight Path state to survive service worker restarts
+        await chrome.storage.local.set({
+          flightPathState: {
+            screenLocked: true,
+            allowedDomains,
+            activeFlightPathName,
+            timestamp: Date.now()
+          }
+        });
+        console.log('[Flight Path] State persisted to storage');
         
         // Apply network-level blocking rules
         await updateBlockingRules(allowedDomains);
@@ -840,6 +935,10 @@ async function handleRemoteControl(command) {
         lockedDomain = null;
         allowedDomains = []; // Clear all flight path domains
         activeFlightPathName = null; // Clear Flight Path name
+        
+        // Clear persisted Flight Path state
+        await chrome.storage.local.remove('flightPathState');
+        console.log('[Flight Path] State cleared from storage');
         
         // Clear network-level blocking rules
         await clearBlockingRules();
