@@ -26,7 +26,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Trash2, Lock, Unlock, Video, Layers, Maximize2, MoreVertical } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Lock, Unlock, Video, Layers, Maximize2, MoreVertical } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
@@ -75,7 +75,6 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 
 export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
   const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
@@ -211,43 +210,12 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     },
   });
 
-  const deleteStudentMutation = useMutation({
-    mutationFn: async (studentId: string) => {
-      return await apiRequest("DELETE", `/api/students/${studentId}`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      toast({
-        title: "Student assignment deleted",
-        description: `Successfully removed ${student.studentName} from the dashboard`,
-      });
-      setDeleteDialogOpen(false);
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to delete student",
-        description: error.message || "An error occurred",
-      });
-    },
-  });
-
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setNewStudentName(student.studentName || '');
     setNewDeviceName(student.deviceName || '');
     setNewGradeLevel(student.gradeLevel || '');
     setEditDialogOpen(true);
-  };
-
-  const handleDeleteClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setDeleteDialogOpen(true);
-  };
-
-  const handleConfirmDelete = () => {
-    deleteStudentMutation.mutate(student.studentId);
   };
 
   const handleSaveStudent = () => {
@@ -543,7 +511,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                     data-testid={`menu-unlock-screen-${student.deviceId}`}
                   >
                     <Unlock className="h-4 w-4 mr-2" />
-                    Unlock Screen
+                    Unlock Current Screen
                   </DropdownMenuItem>
                 ) : (
                   <DropdownMenuItem 
@@ -561,14 +529,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.deviceId}`}>
                   <Edit2 className="h-4 w-4 mr-2" />
                   Edit Info
-                </DropdownMenuItem>
-                <DropdownMenuItem 
-                  onClick={handleDeleteClick} 
-                  className="text-destructive focus:text-destructive"
-                  data-testid={`button-delete-student-${student.deviceId}`}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -829,35 +789,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               data-testid="button-save-student-name"
             >
               {updateStudentMutation.isPending ? "Saving..." : "Save"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
-        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-delete-student-${student.deviceId}`}>
-          <DialogHeader>
-            <DialogTitle>Delete Student Device</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to remove {student.studentName || student.deviceName || student.deviceId} from the dashboard? This will delete the device from your roster.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setDeleteDialogOpen(false)}
-              data-testid="button-cancel-delete-student"
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleConfirmDelete}
-              disabled={deleteStudentMutation.isPending}
-              data-testid="button-confirm-delete-student"
-            >
-              {deleteStudentMutation.isPending ? "Deleting..." : "Delete"}
             </Button>
           </DialogFooter>
         </DialogContent>
