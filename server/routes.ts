@@ -676,12 +676,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all student statuses (for dashboard)
   app.get("/api/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const statuses = await storage.getAllStudentStatuses();
-      console.log('Dashboard requested students - found:', statuses.length, 'students');
-      statuses.forEach(s => {
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const allStatuses = await storage.getAllStudentStatuses();
+      
+      // Admins see all students; teachers see only their assigned students
+      let filteredStatuses: typeof allStatuses;
+      if (user.role === 'admin') {
+        filteredStatuses = allStatuses;
+        console.log('Dashboard requested students (admin) - found:', filteredStatuses.length, 'students');
+      } else {
+        const teacherStudentIds = await storage.getTeacherStudents(userId);
+        filteredStatuses = allStatuses.filter(s => 
+          teacherStudentIds.includes(s.studentId)
+        );
+        console.log('Dashboard requested students (teacher) - found:', filteredStatuses.length, 'students for teacher', userId);
+      }
+      
+      filteredStatuses.forEach(s => {
         console.log(`  - ${s.studentName} (grade: ${s.gradeLevel}, status: ${s.status}, screenLocked: ${s.screenLocked})`);
       });
-      res.json(statuses);
+      res.json(filteredStatuses);
     } catch (error) {
       console.error("Get students error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1112,11 +1135,115 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Teacher Settings endpoints
+  app.get("/api/teacher/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const teacherSettings = await storage.getTeacherSettings(teacherId);
+      res.json(teacherSettings || null);
+    } catch (error) {
+      console.error("Get teacher settings error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/teacher/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const data = { ...req.body, teacherId };
+      const teacherSettings = await storage.upsertTeacherSettings(data);
+      res.json(teacherSettings);
+    } catch (error) {
+      console.error("Update teacher settings error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  // Teacher-Student assignment endpoints
+  app.get("/api/teacher/students", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const studentIds = await storage.getTeacherStudents(teacherId);
+      const students = await Promise.all(
+        studentIds.map(id => storage.getStudent(id))
+      );
+      res.json(students.filter(s => s !== undefined));
+    } catch (error) {
+      console.error("Get teacher students error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/teacher/students/:studentId/assign", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { studentId } = req.params;
+      const assignment = await storage.assignStudentToTeacher(teacherId, studentId);
+      res.json(assignment);
+    } catch (error) {
+      console.error("Assign student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/teacher/students/:studentId/unassign", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { studentId } = req.params;
+      const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
+      
+      if (success) {
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: "Assignment not found" });
+      }
+    } catch (error) {
+      console.error("Unassign student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Flight Paths CRUD endpoints
   app.get("/api/flight-paths", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const flightPaths = await storage.getAllFlightPaths();
-      res.json(flightPaths);
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const allFlightPaths = await storage.getAllFlightPaths();
+      
+      // Admins see all flight paths; teachers see only their own + school-wide defaults
+      const filteredFlightPaths = user.role === 'admin'
+        ? allFlightPaths
+        : allFlightPaths.filter(fp => fp.teacherId === userId || fp.teacherId === null);
+      
+      res.json(filteredFlightPaths);
     } catch (error) {
       console.error("Get flight paths error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1138,8 +1265,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/flight-paths", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
       const data = insertFlightPathSchema.parse(req.body);
-      const flightPath = await storage.createFlightPath(data);
+      const flightPath = await storage.createFlightPath({
+        ...data,
+        teacherId: data.teacherId ?? teacherId
+      });
       res.json(flightPath);
     } catch (error) {
       console.error("Create flight path error:", error);
@@ -1177,8 +1312,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Student Groups CRUD endpoints
   app.get("/api/groups", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const groups = await storage.getAllStudentGroups();
-      res.json(groups);
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const allGroups = await storage.getAllStudentGroups();
+      
+      // Admins see all groups; teachers see only their own + school-wide defaults
+      const filteredGroups = user.role === 'admin'
+        ? allGroups
+        : allGroups.filter(group => group.teacherId === userId || group.teacherId === null);
+      
+      res.json(filteredGroups);
     } catch (error) {
       console.error("Get groups error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1200,8 +1351,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/groups", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
       const data = insertStudentGroupSchema.parse(req.body);
-      const group = await storage.createStudentGroup(data);
+      const group = await storage.createStudentGroup({
+        ...data,
+        teacherId: data.teacherId ?? teacherId
+      });
       res.json(group);
     } catch (error) {
       console.error("Create group error:", error);

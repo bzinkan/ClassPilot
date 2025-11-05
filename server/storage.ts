@@ -14,6 +14,10 @@ import {
   type InsertRoster,
   type Settings,
   type InsertSettings,
+  type TeacherSettings,
+  type InsertTeacherSettings,
+  type TeacherStudent,
+  type InsertTeacherStudent,
   type FlightPath,
   type InsertFlightPath,
   type StudentGroup,
@@ -29,6 +33,8 @@ import {
   events,
   rosters,
   settings,
+  teacherSettings,
+  teacherStudents,
   flightPaths,
   studentGroups,
   messages,
@@ -89,16 +95,28 @@ export interface IStorage {
   getSettings(): Promise<Settings | undefined>;
   upsertSettings(settings: InsertSettings): Promise<Settings>;
 
-  // Flight Paths
+  // Teacher Settings
+  getTeacherSettings(teacherId: string): Promise<TeacherSettings | undefined>;
+  upsertTeacherSettings(settings: InsertTeacherSettings): Promise<TeacherSettings>;
+  
+  // Teacher-Student Relationships
+  assignStudentToTeacher(teacherId: string, studentId: string): Promise<TeacherStudent>;
+  unassignStudentFromTeacher(teacherId: string, studentId: string): Promise<boolean>;
+  getTeacherStudents(teacherId: string): Promise<string[]>; // Returns student IDs
+  getStudentTeachers(studentId: string): Promise<string[]>; // Returns teacher IDs
+
+  // Flight Paths (teacher-scoped)
   getFlightPath(id: string): Promise<FlightPath | undefined>;
   getAllFlightPaths(): Promise<FlightPath[]>;
+  getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]>; // Teacher-specific flight paths
   createFlightPath(flightPath: InsertFlightPath): Promise<FlightPath>;
   updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined>;
   deleteFlightPath(id: string): Promise<boolean>;
 
-  // Student Groups
+  // Student Groups (teacher-scoped)
   getStudentGroup(id: string): Promise<StudentGroup | undefined>;
   getAllStudentGroups(): Promise<StudentGroup[]>;
+  getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]>; // Teacher-specific groups
   createStudentGroup(group: InsertStudentGroup): Promise<StudentGroup>;
   updateStudentGroup(id: string, updates: Partial<InsertStudentGroup>): Promise<StudentGroup | undefined>;
   deleteStudentGroup(id: string): Promise<boolean>;
@@ -126,6 +144,8 @@ export class MemStorage implements IStorage {
   private events: Event[];
   private rosters: Map<string, Roster>;
   private settings: Settings | undefined;
+  private teacherSettings: Map<string, TeacherSettings>;
+  private teacherStudents: TeacherStudent[];
   private flightPaths: Map<string, FlightPath>;
   private studentGroups: Map<string, StudentGroup>;
   private messages: Message[];
@@ -140,6 +160,8 @@ export class MemStorage implements IStorage {
     this.heartbeats = [];
     this.events = [];
     this.rosters = new Map();
+    this.teacherSettings = new Map();
+    this.teacherStudents = [];
     this.flightPaths = new Map();
     this.studentGroups = new Map();
     this.messages = [];
@@ -595,6 +617,62 @@ export class MemStorage implements IStorage {
     return settings;
   }
 
+  // Teacher Settings
+  async getTeacherSettings(teacherId: string): Promise<TeacherSettings | undefined> {
+    return this.teacherSettings.get(teacherId);
+  }
+
+  async upsertTeacherSettings(insertSettings: InsertTeacherSettings): Promise<TeacherSettings> {
+    const existing = this.teacherSettings.get(insertSettings.teacherId);
+    const teacherSettings: TeacherSettings = {
+      id: existing?.id || randomUUID(),
+      teacherId: insertSettings.teacherId,
+      maxTabsPerStudent: insertSettings.maxTabsPerStudent ?? null,
+      allowedDomains: insertSettings.allowedDomains ?? null,
+      blockedDomains: insertSettings.blockedDomains ?? null,
+      defaultFlightPathId: insertSettings.defaultFlightPathId ?? null,
+      createdAt: existing?.createdAt || new Date(),
+      updatedAt: new Date(),
+    };
+    this.teacherSettings.set(insertSettings.teacherId, teacherSettings);
+    return teacherSettings;
+  }
+
+  // Teacher-Student Relationships
+  async assignStudentToTeacher(teacherId: string, studentId: string): Promise<TeacherStudent> {
+    const assignment: TeacherStudent = {
+      id: randomUUID(),
+      teacherId,
+      studentId,
+      assignedAt: new Date(),
+    };
+    this.teacherStudents.push(assignment);
+    return assignment;
+  }
+
+  async unassignStudentFromTeacher(teacherId: string, studentId: string): Promise<boolean> {
+    const index = this.teacherStudents.findIndex(
+      (ts) => ts.teacherId === teacherId && ts.studentId === studentId
+    );
+    if (index >= 0) {
+      this.teacherStudents.splice(index, 1);
+      return true;
+    }
+    return false;
+  }
+
+  async getTeacherStudents(teacherId: string): Promise<string[]> {
+    return this.teacherStudents
+      .filter((ts) => ts.teacherId === teacherId)
+      .map((ts) => ts.studentId);
+  }
+
+  async getStudentTeachers(studentId: string): Promise<string[]> {
+    return this.teacherStudents
+      .filter((ts) => ts.studentId === studentId)
+      .map((ts) => ts.teacherId);
+  }
+
   // Flight Paths
   async getFlightPath(id: string): Promise<FlightPath | undefined> {
     return this.flightPaths.get(id);
@@ -602,6 +680,12 @@ export class MemStorage implements IStorage {
 
   async getAllFlightPaths(): Promise<FlightPath[]> {
     return Array.from(this.flightPaths.values());
+  }
+
+  async getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]> {
+    return Array.from(this.flightPaths.values()).filter(
+      (fp) => fp.teacherId === teacherId
+    );
   }
 
   async createFlightPath(insertFlightPath: InsertFlightPath): Promise<FlightPath> {
@@ -644,6 +728,12 @@ export class MemStorage implements IStorage {
 
   async getAllStudentGroups(): Promise<StudentGroup[]> {
     return Array.from(this.studentGroups.values());
+  }
+
+  async getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]> {
+    return Array.from(this.studentGroups.values()).filter(
+      (sg) => sg.teacherId === teacherId
+    );
   }
 
   async createStudentGroup(insertGroup: InsertStudentGroup): Promise<StudentGroup> {
@@ -1297,6 +1387,82 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  // Teacher Settings
+  async getTeacherSettings(teacherId: string): Promise<TeacherSettings | undefined> {
+    const [result] = await db
+      .select()
+      .from(teacherSettings)
+      .where(eq(teacherSettings.teacherId, teacherId))
+      .limit(1);
+    return result || undefined;
+  }
+
+  async upsertTeacherSettings(insertSettings: InsertTeacherSettings): Promise<TeacherSettings> {
+    const existing = await this.getTeacherSettings(insertSettings.teacherId);
+    
+    if (existing) {
+      const [updated] = await db
+        .update(teacherSettings)
+        .set({ ...insertSettings, updatedAt: new Date() })
+        .where(eq(teacherSettings.teacherId, insertSettings.teacherId))
+        .returning();
+      return updated;
+    } else {
+      const [created] = await db
+        .insert(teacherSettings)
+        .values(insertSettings)
+        .returning();
+      return created;
+    }
+  }
+
+  // Teacher-Student Relationships
+  async assignStudentToTeacher(teacherId: string, studentId: string): Promise<TeacherStudent> {
+    const [result] = await db
+      .insert(teacherStudents)
+      .values({ teacherId, studentId })
+      .onConflictDoNothing()
+      .returning();
+    
+    if (result) {
+      return result;
+    }
+    
+    const [existing] = await db
+      .select()
+      .from(teacherStudents)
+      .where(
+        drizzleSql`${teacherStudents.teacherId} = ${teacherId} AND ${teacherStudents.studentId} = ${studentId}`
+      )
+      .limit(1);
+    return existing!;
+  }
+
+  async unassignStudentFromTeacher(teacherId: string, studentId: string): Promise<boolean> {
+    const result = await db
+      .delete(teacherStudents)
+      .where(
+        drizzleSql`${teacherStudents.teacherId} = ${teacherId} AND ${teacherStudents.studentId} = ${studentId}`
+      );
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async getTeacherStudents(teacherId: string): Promise<string[]> {
+    const results = await db
+      .select({ studentId: teacherStudents.studentId })
+      .from(teacherStudents)
+      .where(eq(teacherStudents.teacherId, teacherId));
+    return results.map((r) => r.studentId);
+  }
+
+  async getStudentTeachers(studentId: string): Promise<string[]> {
+    const results = await db
+      .select({ teacherId: teacherStudents.teacherId })
+      .from(teacherStudents)
+      .where(eq(teacherStudents.studentId, studentId));
+    return results.map((r) => r.teacherId);
+  }
+
   // Flight Paths
   async getFlightPath(id: string): Promise<FlightPath | undefined> {
     const [flightPath] = await db.select().from(flightPaths).where(eq(flightPaths.id, id));
@@ -1305,6 +1471,13 @@ export class DatabaseStorage implements IStorage {
 
   async getAllFlightPaths(): Promise<FlightPath[]> {
     return await db.select().from(flightPaths);
+  }
+
+  async getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]> {
+    return await db
+      .select()
+      .from(flightPaths)
+      .where(eq(flightPaths.teacherId, teacherId));
   }
 
   async createFlightPath(insertFlightPath: InsertFlightPath): Promise<FlightPath> {
@@ -1337,6 +1510,13 @@ export class DatabaseStorage implements IStorage {
 
   async getAllStudentGroups(): Promise<StudentGroup[]> {
     return await db.select().from(studentGroups);
+  }
+
+  async getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]> {
+    return await db
+      .select()
+      .from(studentGroups)
+      .where(eq(studentGroups.teacherId, teacherId));
   }
 
   async createStudentGroup(insertGroup: InsertStudentGroup): Promise<StudentGroup> {

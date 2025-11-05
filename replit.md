@@ -66,6 +66,13 @@ The system employs a full-stack architecture:
     -   **Student Groups**: Organize students for targeted instruction.
     -   **Tab Limiting**: Configure maximum tabs per student.
     -   **Per-Student Targeting**: All remote commands support targeting specific students via checkbox selection. Dialogs dynamically display whether commands will affect selected students or all students.
+-   **Teacher-Specific Settings (Multi-Tenancy)**: Full multi-teacher support with isolated resources and student assignments:
+    -   **Teacher-Scoped Resources**: Each teacher has their own Flight Paths, Student Groups, and custom settings (tab limits, allowed/blocked domains)
+    -   **Student Assignments**: Students are assigned to specific teachers via the `teacher_students` join table. Teachers only see their assigned students on the dashboard
+    -   **Database Schema**: Added `teacherId` columns to `flightPaths` and `studentGroups` tables (nullable for backward compatibility and school-wide defaults). Created `teacher_settings` table for per-teacher configuration and `teacher_students` table for student-teacher relationships
+    -   **API Filtering**: All endpoints (`/api/students`, `/api/flight-paths`, `/api/groups`) automatically filter by logged-in teacher ID. School-wide resources (teacherId = null) are visible to all teachers
+    -   **Automatic Migration**: On startup, existing students are automatically assigned to the default teacher account, and orphaned flight paths/groups are migrated
+    -   **New Endpoints**: Added `/api/teacher/settings`, `/api/teacher/students`, and student assignment endpoints for managing teacher-student relationships
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, no collection of sensitive personal input data.
