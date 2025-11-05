@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +15,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { useLocation } from "wouter";
@@ -52,6 +60,7 @@ export default function Dashboard() {
   const [exportEndDate, setExportEndDate] = useState("");
   const [showGradeDialog, setShowGradeDialog] = useState(false);
   const [newGrade, setNewGrade] = useState("");
+  const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -716,8 +725,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Search */}
-        <div className="mb-8">
+        {/* Search Bar + Selection Controls */}
+        <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
           <Input
             placeholder="Search student"
             value={searchQuery}
@@ -725,15 +734,70 @@ export default function Dashboard() {
             data-testid="input-search-students"
             className="max-w-md h-12 text-base shadow-sm"
           />
+          
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
+              Target: {selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} selected` : "All students"}
+            </Badge>
+            
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="button-select-students"
+                >
+                  <Users className="h-4 w-4 mr-1" />
+                  Select
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
+                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {filteredStudents.length === 0 ? (
+                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                    No students available
+                  </div>
+                ) : (
+                  filteredStudents
+                    .slice()
+                    .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
+                    .map((student) => (
+                      <DropdownMenuCheckboxItem
+                        key={student.deviceId}
+                        checked={selectedDeviceIds.has(student.deviceId)}
+                        onCheckedChange={() => toggleStudentSelection(student.deviceId)}
+                        onSelect={(e) => e.preventDefault()}
+                        data-testid={`dropdown-item-student-${student.deviceId}`}
+                      >
+                        {student.studentName || 'Unnamed Student'}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearSelection}
+              disabled={selectedDeviceIds.size === 0}
+              data-testid="button-clear-selection"
+            >
+              <XSquare className="h-4 w-4 mr-1" />
+              Clear Selection
+            </Button>
+          </div>
         </div>
 
-        {/* Control Buttons - moved from toolbar */}
+        {/* Control Buttons */}
         <div className="flex items-center gap-2 flex-wrap mb-8">
           <Button
             size="sm"
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-open-tab-main"
+            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
             <MonitorPlay className="h-4 w-4 mr-2" />
             Open Tab
@@ -744,6 +808,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-close-tabs-main"
+            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
             <TabletSmartphone className="h-4 w-4 mr-2" />
             Close Tabs
@@ -754,6 +819,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-lock-screen-main"
+            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
             <Lock className="h-4 w-4 mr-2" />
             Lock Screen
@@ -764,6 +830,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-unlock-screen-main"
+            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
             <Unlock className="h-4 w-4 mr-2" />
             Unlock Screen
@@ -774,9 +841,21 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-apply-flight-path-main"
+            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
           >
             <Layers className="h-4 w-4 mr-2" />
             Apply Flight Path
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowFlightPathDialog(true)}
+            data-testid="button-flight-path-main"
+            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+          >
+            <Route className="h-4 w-4 mr-2" />
+            Flight Path
           </Button>
         </div>
 
@@ -1072,6 +1151,80 @@ export default function Dashboard() {
               data-testid="button-close-grade-dialog"
             >
               Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Flight Path View Dialog */}
+      <Dialog open={showFlightPathDialog} onOpenChange={setShowFlightPathDialog}>
+        <DialogContent className="max-w-2xl max-h-[80vh]" data-testid="dialog-flight-path-view">
+          <DialogHeader>
+            <DialogTitle>Student Flight Paths</DialogTitle>
+            <DialogDescription>
+              View which flight path each student is currently on
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <div className="border rounded-lg overflow-hidden">
+              <div className="max-h-96 overflow-y-auto">
+                <table className="w-full">
+                  <thead className="bg-muted sticky top-0 z-10">
+                    <tr>
+                      <th className="text-left p-3 text-sm font-semibold">Student</th>
+                      <th className="text-left p-3 text-sm font-semibold">Flight Path</th>
+                      <th className="text-left p-3 text-sm font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {filteredStudents.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="p-8 text-center text-muted-foreground">
+                          No students found
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredStudents
+                        .slice()
+                        .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
+                        .map((student) => (
+                          <tr key={student.deviceId} className="hover-elevate" data-testid={`row-student-flight-path-${student.deviceId}`}>
+                            <td className="p-3 text-sm font-medium">{student.studentName || 'Unnamed Student'}</td>
+                            <td className="p-3 text-sm">
+                              {student.flightPathActive && student.activeFlightPathName ? (
+                                <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800">
+                                  <Layers className="h-3 w-3 mr-1" />
+                                  {student.activeFlightPathName}
+                                </Badge>
+                              ) : (
+                                <span className="text-muted-foreground italic">None</span>
+                              )}
+                            </td>
+                            <td className="p-3 text-sm">
+                              <Badge 
+                                variant="outline" 
+                                className={
+                                  student.status === 'online' 
+                                    ? 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950 dark:text-green-400 dark:border-green-800'
+                                    : student.status === 'idle'
+                                    ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800'
+                                    : 'bg-gray-50 text-gray-700 border-gray-200 dark:bg-gray-950 dark:text-gray-400 dark:border-gray-800'
+                                }
+                              >
+                                {student.status.charAt(0).toUpperCase() + student.status.slice(1)}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowFlightPathDialog(false)} data-testid="button-close-flight-path-view">
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>

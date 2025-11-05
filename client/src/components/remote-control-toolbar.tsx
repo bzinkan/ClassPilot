@@ -41,7 +41,10 @@ interface RemoteControlToolbarProps {
   onClearSelection: () => void;
   selectedGrade: string;
   onGradeChange: (grade: string) => void;
+  onShowFlightPathDialog?: () => void;
 }
+
+export { type RemoteControlToolbarProps };
 
 export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
@@ -332,19 +335,27 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4 mb-8">
         <div className="max-w-screen-2xl mx-auto">
-          {/* Top Row: New Tabs, Target Badge, Select Dropdown */}
-          <div className="flex items-center gap-2 flex-wrap mb-3">
-            {/* Left Side: Flight Path and Student Data Tabs */}
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setShowFlightPathDialog(true)}
-              data-testid="button-flight-path-tab"
-            >
-              <Route className="h-4 w-4 mr-2" />
-              Flight Path
-            </Button>
+          {/* Top Row: Grade Tabs + Student Data Button */}
+          <div className="flex items-center justify-between gap-4 flex-wrap">
+            {/* Left Side: Grade Tabs */}
+            {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
+              <Tabs value={selectedGrade} onValueChange={onGradeChange}>
+                <TabsList className="flex-wrap h-auto gap-2 p-1.5 bg-muted/50 rounded-xl">
+                  {settings.gradeLevels.map((grade) => (
+                    <TabsTrigger 
+                      key={grade} 
+                      value={grade} 
+                      data-testid={`tab-grade-${grade}`}
+                      className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-lg px-5 py-2.5 font-medium transition-all duration-200 data-[state=active]:shadow-md"
+                    >
+                      {grade}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+            )}
 
+            {/* Right Side: Student Data Button */}
             <Button
               size="sm"
               variant="outline"
@@ -354,77 +365,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
               <BarChart3 className="h-4 w-4 mr-2" />
               Student Data
             </Button>
-
-            <div className="h-6 w-px bg-border mx-1" />
-            
-            {/* Target Badge and Select */}
-            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
-              Target: {selectionText}
-            </Badge>
-            
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  data-testid="button-select-students"
-                >
-                  <Users className="h-4 w-4 mr-1" />
-                  Select
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
-                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {sortedStudents.length === 0 ? (
-                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
-                    No students available
-                  </div>
-                ) : (
-                  sortedStudents.map((student) => (
-                    <DropdownMenuCheckboxItem
-                      key={student.deviceId}
-                      checked={selectedDeviceIds.has(student.deviceId)}
-                      onCheckedChange={() => onToggleStudent(student.deviceId)}
-                      onSelect={(e) => e.preventDefault()}
-                      data-testid={`dropdown-item-student-${student.deviceId}`}
-                    >
-                      {student.studentName || 'Unnamed Student'}
-                    </DropdownMenuCheckboxItem>
-                  ))
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onClearSelection}
-              disabled={selectedDeviceIds.size === 0}
-              data-testid="button-clear-selection"
-            >
-              <XSquare className="h-4 w-4 mr-1" />
-              Clear Selection
-            </Button>
           </div>
-
-          {/* Bottom Row: Grade Tabs (replacing control buttons) */}
-          {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
-            <Tabs value={selectedGrade} onValueChange={onGradeChange}>
-              <TabsList className="flex-wrap h-auto gap-2 p-1.5 bg-muted/50 rounded-xl">
-                {settings.gradeLevels.map((grade) => (
-                  <TabsTrigger 
-                    key={grade} 
-                    value={grade} 
-                    data-testid={`tab-grade-${grade}`}
-                    className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground rounded-lg px-5 py-2.5 font-medium transition-all duration-200 data-[state=active]:shadow-md"
-                  >
-                    {grade}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-          )}
         </div>
       </div>
 
