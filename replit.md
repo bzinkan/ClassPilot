@@ -17,6 +17,8 @@ I like functional programming.
 ### UI/UX Decisions
 The frontend uses React and TypeScript with Tailwind CSS for styling, supporting dark/light modes. The dashboard features a grid-based layout displaying student activity in real-time, categorized into Off-Task, On-Task, Idle, and Offline sections. Detailed student information is available via a drawer, and admin functionalities are in a dedicated interface. Roster management is a separate page for improved UX.
 
+**Dashboard Toolbar Layout**: Control buttons (Open Tab, Close Tabs, Lock/Unlock Screen, Apply Flight Path) are positioned below the search bar. Grade filtering tabs are located in the toolbar area. Two analytics tabs (Flight Path and Student Data) are positioned on the left side for quick access to monitoring insights.
+
 **Per-Student Targeting (Completed)**: All remote control commands now support targeting specific students via checkbox selection. Student tiles include checkboxes, and the toolbar displays selection count with "Select All" and "Clear Selection" buttons. When students are selected, commands apply only to those students; otherwise, they broadcast to all students. The UI clearly indicates targeting scope with "Target: X selected" or "Target: All students" badges.
 
 ### Technical Implementations
@@ -36,6 +38,12 @@ The system employs a full-stack architecture:
 -   **Live Screen Viewing**: Real-time screen capture using WebRTC with MV3-compliant offscreen document pattern. Features silent tab capture on managed Chromebooks (no student prompts when Google Admin policies configured), automatic fallback to user picker on non-managed devices, and expandable video view with professional monitoring controls.
 -   **Advanced Video Controls**: Expandable live view with zoom controls (0.5x to 3x), screenshot capture (PNG downloads), screen recording (WebM format with duration counter), fullscreen mode, and picture-in-picture support. All captures auto-download to teacher's Downloads folder.
 -   **Website Duration Tracking**: Calculates and displays time spent on websites by grouping consecutive heartbeats into sessions.
+-   **Flight Path Analytics**: View which Flight Path each student is currently on through a dedicated popup dialog with sortable table showing student names, active Flight Paths (with visual badges), and online/idle/offline status.
+-   **Student Data Analytics**: Interactive pie chart visualization showing website visit durations for the past 24 hours. Features include:
+    -   Whole class view or individual student drill-down via dropdown selector
+    -   Top 10 websites by time spent with color-coded segments
+    -   Detailed breakdown list showing exact time (minutes and seconds) spent on each website
+    -   Data is calculated from heartbeat intervals, accounting for gaps and session continuity
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:

@@ -301,37 +301,32 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
     return nameA.localeCompare(nameB);
   });
   
-  // Calculate student data statistics
+  // Fetch website duration analytics
+  const { data: websiteDataRaw = [] } = useQuery<Array<{ name: string; value: number }>>({
+    queryKey: ['/api/student-analytics', selectedStudentForData],
+    enabled: showStudentDataDialog,
+  });
+  
+  // Add colors to website data
+  const CHART_COLORS = [
+    '#3b82f6', // blue
+    '#10b981', // green
+    '#f59e0b', // amber
+    '#ef4444', // red
+    '#8b5cf6', // purple
+    '#ec4899', // pink
+    '#14b8a6', // teal
+    '#f97316', // orange
+    '#6366f1', // indigo
+    '#84cc16', // lime
+  ];
+  
   const studentDataStats = useMemo(() => {
-    let studentsToAnalyze = students;
-    
-    // Filter to selected student if not "all"
-    if (selectedStudentForData !== "all") {
-      studentsToAnalyze = students.filter(s => s.deviceId === selectedStudentForData);
-    }
-    
-    if (studentsToAnalyze.length === 0) {
-      return [];
-    }
-    
-    // Count students by status
-    const onlineCount = studentsToAnalyze.filter(s => s.status === 'online').length;
-    const idleCount = studentsToAnalyze.filter(s => s.status === 'idle').length;
-    const offlineCount = studentsToAnalyze.filter(s => s.status === 'offline').length;
-    
-    const data = [];
-    if (onlineCount > 0) {
-      data.push({ name: 'Online', value: onlineCount, color: '#22c55e' });
-    }
-    if (idleCount > 0) {
-      data.push({ name: 'Idle', value: idleCount, color: '#f59e0b' });
-    }
-    if (offlineCount > 0) {
-      data.push({ name: 'Offline', value: offlineCount, color: '#6b7280' });
-    }
-    
-    return data;
-  }, [students, selectedStudentForData]);
+    return websiteDataRaw.map((item, index) => ({
+      ...item,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }));
+  }, [websiteDataRaw]);
 
   return (
     <>
@@ -702,51 +697,71 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
             <div className="space-y-4">
               <h3 className="text-lg font-semibold">
                 {selectedStudentForData === "all" 
-                  ? "Class Status Distribution" 
-                  : `${sortedStudents.find(s => s.deviceId === selectedStudentForData)?.studentName || 'Student'} Status`}
+                  ? "Top Websites Visited (Last 24 Hours)" 
+                  : `${sortedStudents.find(s => s.deviceId === selectedStudentForData)?.studentName || 'Student'}'s Top Websites`}
               </h3>
               
               {studentDataStats.length > 0 ? (
-                <div className="flex items-center justify-center">
-                  <ResponsiveContainer width="100%" height={300}>
-                    <PieChart>
-                      <Pie
-                        data={studentDataStats}
-                        cx="50%"
-                        cy="50%"
-                        labelLine={false}
-                        label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
-                        outerRadius={100}
-                        fill="#8884d8"
-                        dataKey="value"
-                      >
-                        {studentDataStats.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
+                <>
+                  <div className="flex items-center justify-center">
+                    <ResponsiveContainer width="100%" height={300}>
+                      <PieChart>
+                        <Pie
+                          data={studentDataStats}
+                          cx="50%"
+                          cy="50%"
+                          labelLine={false}
+                          label={({ name, percent }) => {
+                            // Truncate long domain names
+                            const shortName = name.length > 20 ? name.substring(0, 17) + '...' : name;
+                            return `${shortName}: ${(percent * 100).toFixed(0)}%`;
+                          }}
+                          outerRadius={100}
+                          fill="#8884d8"
+                          dataKey="value"
+                        >
+                          {studentDataStats.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          formatter={(value: number) => {
+                            const minutes = Math.floor(value / 60);
+                            const seconds = value % 60;
+                            if (minutes > 0) {
+                              return `${minutes}m ${seconds}s`;
+                            }
+                            return `${seconds}s`;
+                          }}
+                        />
+                        <Legend />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  
+                  {/* Summary Stats */}
+                  <div className="space-y-2 mt-6 max-h-48 overflow-y-auto">
+                    {studentDataStats.map((stat) => {
+                      const minutes = Math.floor(stat.value / 60);
+                      const seconds = stat.value % 60;
+                      const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                      
+                      return (
+                        <div key={stat.name} className="flex items-center justify-between p-3 rounded-lg border hover-elevate" style={{ borderLeftWidth: '4px', borderLeftColor: stat.color }}>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate" title={stat.name}>{stat.name}</div>
+                          </div>
+                          <div className="flex items-center gap-2 ml-4">
+                            <div className="text-lg font-bold" style={{ color: stat.color }}>{timeStr}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
               ) : (
                 <div className="p-8 text-center text-muted-foreground border rounded-lg">
-                  No data available
-                </div>
-              )}
-              
-              {/* Summary Stats */}
-              {studentDataStats.length > 0 && (
-                <div className="grid grid-cols-3 gap-4 mt-6">
-                  {studentDataStats.map((stat) => (
-                    <div key={stat.name} className="p-4 rounded-lg border" style={{ borderColor: stat.color }}>
-                      <div className="text-sm text-muted-foreground mb-1">{stat.name}</div>
-                      <div className="text-2xl font-bold" style={{ color: stat.color }}>{stat.value}</div>
-                      <div className="text-xs text-muted-foreground mt-1">
-                        {selectedStudentForData === "all" ? "students" : "status"}
-                      </div>
-                    </div>
-                  ))}
+                  No browsing data available for the last 24 hours
                 </div>
               )}
             </div>

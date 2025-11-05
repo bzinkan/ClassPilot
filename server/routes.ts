@@ -988,6 +988,75 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Get website duration analytics for a student or all students
+  app.get("/api/student-analytics/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const { studentId } = req.params;
+      const isAllStudents = studentId === "all";
+      
+      // Get heartbeats for the last 24 hours (or custom range)
+      const allHeartbeats = await storage.getAllHeartbeats();
+      const cutoffTime = Date.now() - (24 * 60 * 60 * 1000); // 24 hours ago
+      
+      // Filter heartbeats by student and time range
+      let filteredHeartbeats = allHeartbeats.filter(hb => {
+        const timestamp = new Date(hb.timestamp).getTime();
+        if (timestamp < cutoffTime) return false;
+        
+        if (isAllStudents) return true;
+        return hb.deviceId === studentId;
+      });
+      
+      // Group by URL domain and calculate total duration
+      const urlDurations = new Map<string, number>();
+      
+      // Sort by timestamp
+      filteredHeartbeats.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      
+      // Calculate duration for each URL
+      for (let i = 0; i < filteredHeartbeats.length; i++) {
+        const current = filteredHeartbeats[i];
+        let duration = 10; // Default 10 seconds per heartbeat
+        
+        // If there's a next heartbeat from the same device with the same URL, calculate exact duration
+        if (i < filteredHeartbeats.length - 1) {
+          const next = filteredHeartbeats[i + 1];
+          if (current.deviceId === next.deviceId && current.activeTabUrl === next.activeTabUrl) {
+            const timeDiff = (new Date(next.timestamp).getTime() - new Date(current.timestamp).getTime()) / 1000;
+            // Cap at 60 seconds to avoid inflated durations from gaps
+            duration = Math.min(timeDiff, 60);
+          }
+        }
+        
+        // Extract domain from URL
+        let domain = current.activeTabUrl;
+        try {
+          const url = new URL(current.activeTabUrl);
+          domain = url.hostname;
+        } catch {
+          // If URL parsing fails, use the full URL
+        }
+        
+        const currentDuration = urlDurations.get(domain) || 0;
+        urlDurations.set(domain, currentDuration + duration);
+      }
+      
+      // Convert to array and sort by duration
+      const websiteData = Array.from(urlDurations.entries())
+        .map(([domain, duration]) => ({
+          name: domain,
+          value: Math.round(duration),
+        }))
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 10); // Top 10 websites
+      
+      res.json(websiteData);
+    } catch (error) {
+      console.error("Get student analytics error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
 
   // Settings endpoints
   app.get("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
