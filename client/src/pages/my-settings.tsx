@@ -185,8 +185,8 @@ export default function MySettings() {
                     <FormItem>
                       <FormLabel>Default Flight Path</FormLabel>
                       <Select
-                        value={field.value || ""}
-                        onValueChange={field.onChange}
+                        value={field.value || "none"}
+                        onValueChange={(value) => field.onChange(value === "none" ? "" : value)}
                       >
                         <FormControl>
                           <SelectTrigger data-testid="select-default-flight-path">
@@ -194,7 +194,7 @@ export default function MySettings() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="">No default Flight Path</SelectItem>
+                          <SelectItem value="none">No default Flight Path</SelectItem>
                           {flightPaths.map((fp) => (
                             <SelectItem key={fp.id} value={fp.id}>
                               {fp.flightPathName}
