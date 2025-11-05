@@ -322,6 +322,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                       key={student.deviceId}
                       checked={selectedDeviceIds.has(student.deviceId)}
                       onCheckedChange={() => onToggleStudent(student.deviceId)}
+                      onSelect={(e) => e.preventDefault()}
                       data-testid={`dropdown-item-student-${student.deviceId}`}
                     >
                       {student.studentName || 'Unnamed Student'}
