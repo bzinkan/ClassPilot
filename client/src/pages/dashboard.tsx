@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -881,6 +881,17 @@ export default function Dashboard() {
                 <GraduationCap className="h-4 w-4 mr-2" />
                 Manage Grades
               </Button>
+              {currentUser?.role === 'teacher' && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setLocation("/my-settings")}
+                  data-testid="button-my-settings"
+                  title="My Settings"
+                >
+                  <User className="h-5 w-5" />
+                </Button>
+              )}
               {currentUser?.role === 'admin' && (
                 <Button
                   variant="ghost"
