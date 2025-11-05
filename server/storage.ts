@@ -609,6 +609,7 @@ export class MemStorage implements IStorage {
     const flightPath: FlightPath = {
       id,
       schoolId: insertFlightPath.schoolId,
+      teacherId: insertFlightPath.teacherId ?? null,
       flightPathName: insertFlightPath.flightPathName,
       description: insertFlightPath.description ?? null,
       allowedDomains: insertFlightPath.allowedDomains ?? null,
@@ -650,6 +651,7 @@ export class MemStorage implements IStorage {
     const group: StudentGroup = {
       id,
       schoolId: insertGroup.schoolId,
+      teacherId: insertGroup.teacherId ?? null,
       groupName: insertGroup.groupName,
       description: insertGroup.description ?? null,
       studentIds: insertGroup.studentIds ?? null,

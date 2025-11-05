@@ -127,10 +127,11 @@ export const insertRosterSchema = createInsertSchema(rosters).omit({ id: true, u
 export type InsertRoster = z.infer<typeof insertRosterSchema>;
 export type Roster = typeof rosters.$inferSelect;
 
-// Flight Paths - Activity-based browsing environments
+// Flight Paths - Activity-based browsing environments (teacher-scoped)
 export const flightPaths = pgTable("flight_paths", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   schoolId: text("school_id").notNull(),
+  teacherId: text("teacher_id"), // FK to users table - nullable for backward compatibility, will be NOT NULL after migration
   flightPathName: text("flight_path_name").notNull(),
   description: text("description"),
   allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`),
@@ -143,10 +144,11 @@ export const insertFlightPathSchema = createInsertSchema(flightPaths).omit({ id:
 export type InsertFlightPath = z.infer<typeof insertFlightPathSchema>;
 export type FlightPath = typeof flightPaths.$inferSelect;
 
-// Student Groups - For differentiated instruction
+// Student Groups - For differentiated instruction (teacher-scoped)
 export const studentGroups = pgTable("student_groups", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   schoolId: text("school_id").notNull(),
+  teacherId: text("teacher_id"), // FK to users table - nullable for backward compatibility, will be NOT NULL after migration
   groupName: text("group_name").notNull(),
   description: text("description"),
   studentIds: text("student_ids").array().default(sql`'{}'::text[]`),
@@ -209,6 +211,34 @@ export const settings = pgTable("settings", {
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 export type Settings = typeof settings.$inferSelect;
+
+// Teacher-specific settings (overrides school-wide defaults)
+export const teacherSettings = pgTable("teacher_settings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teacherId: text("teacher_id").notNull().unique(), // FK to users table
+  maxTabsPerStudent: text("max_tabs_per_student"), // Nullable - null means unlimited (inherits from school settings)
+  allowedDomains: text("allowed_domains").array().default(sql`'{}'::text[]`), // Teacher-specific allowed domains
+  blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`), // Teacher-specific blocked domains
+  defaultFlightPathId: text("default_flight_path_id"), // Default flight path for this teacher's students
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+});
+
+export const insertTeacherSettingsSchema = createInsertSchema(teacherSettings).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTeacherSettings = z.infer<typeof insertTeacherSettingsSchema>;
+export type TeacherSettings = typeof teacherSettings.$inferSelect;
+
+// Teacher-Student join table (supports co-teaching - multiple teachers per student)
+export const teacherStudents = pgTable("teacher_students", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teacherId: text("teacher_id").notNull(), // FK to users table
+  studentId: text("student_id").notNull(), // FK to students table
+  assignedAt: timestamp("assigned_at").notNull().default(sql`now()`),
+});
+
+export const insertTeacherStudentSchema = createInsertSchema(teacherStudents).omit({ id: true, assignedAt: true });
+export type InsertTeacherStudent = z.infer<typeof insertTeacherStudentSchema>;
+export type TeacherStudent = typeof teacherStudents.$inferSelect;
 
 // Login request schema
 export const loginSchema = z.object({
