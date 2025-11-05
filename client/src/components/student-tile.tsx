@@ -289,6 +289,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       });
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Screen locked",
         description: `${student.studentName} is now locked to their current screen`,
@@ -311,6 +312,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       });
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Screen unlocked",
         description: `${student.studentName} can now browse freely`,

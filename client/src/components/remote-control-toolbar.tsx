@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
 import type { FlightPath, StudentStatus, Settings } from "@shared/schema";
 
@@ -160,6 +160,10 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         url: normalizedLockUrl,
         targetDeviceIds: targetDeviceIdsArray
       });
+      
+      // Invalidate cache to update lock icon immediately
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      
       const target = selectedDeviceIds.size > 0 
         ? `${selectedDeviceIds.size} student(s)` 
         : "all students";
@@ -190,6 +194,10 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
       await apiRequest("POST", "/api/remote/unlock-screen", { 
         targetDeviceIds: targetDeviceIdsArray 
       });
+      
+      // Invalidate cache to update lock icon immediately
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      
       const target = selectedDeviceIds.size > 0 
         ? `${selectedDeviceIds.size} student(s)` 
         : "all students";
