@@ -796,6 +796,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-open-tab"
+            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
             <MonitorPlay className="h-4 w-4 mr-2" />
             Open Tab
@@ -806,6 +807,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-close-tabs"
+            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
             <TabletSmartphone className="h-4 w-4 mr-2" />
             Close Tabs
@@ -816,6 +818,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-lock-screen"
+            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
             <Lock className="h-4 w-4 mr-2" />
             Lock Screen
@@ -826,6 +829,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-unlock-screen"
+            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
             <Unlock className="h-4 w-4 mr-2" />
             Unlock Screen
@@ -836,6 +840,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-apply-flight-path"
+            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
           >
             <Layers className="h-4 w-4 mr-2" />
             Apply Flight Path
@@ -846,6 +851,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => {/* TODO: Add handler */}}
             data-testid="button-flight-path"
+            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
           >
             <Route className="h-4 w-4 mr-2" />
             Flight Path
