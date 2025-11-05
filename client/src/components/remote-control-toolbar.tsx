@@ -645,19 +645,18 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
               {studentDataStats.length > 0 ? (
                 <>
                   <div className="flex items-center justify-center">
-                    <ResponsiveContainer width="100%" height={300}>
+                    <ResponsiveContainer width="100%" height={350}>
                       <PieChart>
                         <Pie
                           data={studentDataStats}
                           cx="50%"
                           cy="50%"
-                          labelLine={false}
-                          label={({ name, percent }) => {
-                            // Truncate long domain names
-                            const shortName = name.length > 20 ? name.substring(0, 17) + '...' : name;
-                            return `${shortName}: ${(percent * 100).toFixed(0)}%`;
+                          labelLine={true}
+                          label={({ percent }) => {
+                            // Only show percentage on the slice itself
+                            return percent > 0.05 ? `${(percent * 100).toFixed(0)}%` : '';
                           }}
-                          outerRadius={100}
+                          outerRadius={120}
                           fill="#8884d8"
                           dataKey="value"
                         >
@@ -666,16 +665,13 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                           ))}
                         </Pie>
                         <Tooltip 
-                          formatter={(value: number) => {
+                          formatter={(value: number, name: string) => {
                             const minutes = Math.floor(value / 60);
                             const seconds = value % 60;
-                            if (minutes > 0) {
-                              return `${minutes}m ${seconds}s`;
-                            }
-                            return `${seconds}s`;
+                            const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+                            return [timeStr, name];
                           }}
                         />
-                        <Legend />
                       </PieChart>
                     </ResponsiveContainer>
                   </div>

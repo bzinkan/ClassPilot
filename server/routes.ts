@@ -1028,13 +1028,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         }
         
-        // Extract domain from URL
+        // Extract and clean domain from URL
         let domain = current.activeTabUrl;
         try {
           const url = new URL(current.activeTabUrl);
-          domain = url.hostname;
+          let hostname = url.hostname;
+          
+          // Clean up common domain patterns
+          if (hostname.includes('.replit.dev')) {
+            // Shorten Replit dev URLs to just "replit.dev"
+            domain = 'replit.dev';
+          } else if (hostname.includes('.riker.replit.dev')) {
+            domain = 'replit.dev';
+          } else if (hostname.startsWith('www.')) {
+            domain = hostname.substring(4);
+          } else if (hostname.includes('chrome://')) {
+            domain = url.protocol.replace(':', '');
+          } else {
+            domain = hostname;
+          }
         } catch {
-          // If URL parsing fails, use the full URL
+          // If URL parsing fails, clean up common patterns
+          if (domain.includes('chrome://')) {
+            domain = 'chrome (extensions)';
+          } else if (domain.includes('replit')) {
+            domain = 'replit.dev';
+          }
         }
         
         const currentDuration = urlDurations.get(domain) || 0;
