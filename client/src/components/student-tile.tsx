@@ -265,11 +265,12 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unblock mutation for flight path
   const unblockForClassMutation = useMutation({
     mutationFn: async () => {
-      return await apiRequest("POST", "/api/control/unlock-screen", {
-        deviceIds: [student.deviceId]
+      return await apiRequest("POST", "/api/remote/unlock-screen", {
+        targetDeviceIds: [student.deviceId]
       });
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Unblocked for class",
         description: `${student.studentName} can now access this website`,
@@ -307,8 +308,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unlock screen mutation
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
-      return await apiRequest("POST", "/api/control/unlock-screen", {
-        deviceIds: [student.deviceId]
+      return await apiRequest("POST", "/api/remote/unlock-screen", {
+        targetDeviceIds: [student.deviceId]
       });
     },
     onSuccess: () => {
