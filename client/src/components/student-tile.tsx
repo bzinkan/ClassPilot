@@ -471,14 +471,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
         {/* Preview Zone - Large Live View or Tab Info */}
         {liveStream ? (
-          <div className="aspect-video rounded-md overflow-hidden bg-black relative group">
+          <div className="aspect-video rounded-md bg-black relative group">
             <div 
               ref={tileVideoSlotRef}
               id={`tile-video-slot-${student.deviceId}`}
-              className="w-full h-full"
+              className="w-full h-full rounded-md overflow-hidden"
               data-testid={`video-live-${student.deviceId}`}
             />
-            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none" />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none rounded-md" />
             <Button
               variant="ghost"
               size="icon"
