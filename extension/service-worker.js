@@ -752,7 +752,7 @@ async function handleRemoteControl(command) {
         lockedUrl = null;
         lockedDomain = null;
         allowedDomains = []; // Clear all lock state
-        activeFlightPathName = null; // Clear scene name
+        activeFlightPathName = null; // Clear Flight Path name
         
         // Clear network-level blocking rules
         await clearBlockingRules();
@@ -768,12 +768,12 @@ async function handleRemoteControl(command) {
         
       case 'apply-flight-path':
         screenLocked = true;
-        lockedUrl = null; // Scene uses multiple domains, not a single URL
-        lockedDomain = null; // Clear single domain when applying scene
+        lockedUrl = null; // Flight Path uses multiple domains, not a single URL
+        lockedDomain = null; // Clear single domain when applying Flight Path
         
-        // Store allowed domains and scene name from the scene
+        // Store allowed domains and Flight Path name
         allowedDomains = command.data.allowedDomains || [];
-        activeFlightPathName = command.data.sceneName || null;
+        activeFlightPathName = command.data.flightPathName || null;
         
         // Apply network-level blocking rules
         await updateBlockingRules(allowedDomains);
@@ -803,13 +803,13 @@ async function handleRemoteControl(command) {
           }
           
           safeNotify({
-            title: 'Scene Applied',
-            message: `Your teacher has applied a scene. You can only access: ${allowedDomains.join(', ')}`,
+            title: 'Flight Path Applied',
+            message: `Your teacher has applied a flight path. You can only access: ${allowedDomains.join(', ')}`,
             priority: 2,
           });
         }
         
-        console.log('Scene applied with allowed domains:', allowedDomains);
+        console.log('Flight Path applied with allowed domains:', allowedDomains, 'Name:', activeFlightPathName);
         break;
         
       case 'limit-tabs':
