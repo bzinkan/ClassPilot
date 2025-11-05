@@ -339,7 +339,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
   return (
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4 mb-8">
-        <div className="max-w-screen-2xl mx-auto">
+        <div className="max-w-screen-2xl mx-auto space-y-4">
           {/* Top Row: Grade Tabs + Student Data Button */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
             {/* Left Side: Grade Tabs */}
@@ -369,6 +369,61 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
             >
               <BarChart3 className="h-4 w-4 mr-2" />
               Student Data
+            </Button>
+          </div>
+
+          {/* Selection Controls Row */}
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
+              Target: {selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} selected` : "All students"}
+            </Badge>
+            
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="button-select-students"
+                >
+                  <Users className="h-4 w-4 mr-1" />
+                  Select
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
+                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {students.length === 0 ? (
+                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                    No students available
+                  </div>
+                ) : (
+                  students
+                    .slice()
+                    .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
+                    .map((student) => (
+                      <DropdownMenuCheckboxItem
+                        key={student.deviceId}
+                        checked={selectedDeviceIds.has(student.deviceId)}
+                        onCheckedChange={() => onToggleStudent(student.deviceId)}
+                        onSelect={(e) => e.preventDefault()}
+                        data-testid={`dropdown-item-student-${student.deviceId}`}
+                      >
+                        {student.studentName || 'Unnamed Student'}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onClearSelection}
+              disabled={selectedDeviceIds.size === 0}
+              data-testid="button-clear-selection"
+            >
+              <XSquare className="h-4 w-4 mr-1" />
+              Clear Selection
             </Button>
           </div>
         </div>
