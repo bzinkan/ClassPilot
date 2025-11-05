@@ -663,14 +663,9 @@ export default function Dashboard() {
           onClearSelection={clearSelection}
           selectedGrade={selectedGrade}
           onGradeChange={setSelectedGrade}
-          onlineCount={onlineCount}
-          idleCount={idleCount}
-          offlineCount={offlineCount}
-          cameraActiveCount={cameraActiveCount}
-          offTaskCount={offTaskCount}
         />
         
-        {/* Stats */}
+        {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
@@ -729,8 +724,8 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Search */}
-        <div className="mb-8">
+        {/* Search Bar + Selection Controls */}
+        <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
           <Input
             placeholder="Search student"
             value={searchQuery}
@@ -738,6 +733,123 @@ export default function Dashboard() {
             data-testid="input-search-students"
             className="max-w-md h-12 text-base shadow-sm"
           />
+          
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
+              Target: {selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} selected` : "All students"}
+            </Badge>
+            
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  data-testid="button-select-students"
+                >
+                  <Users className="h-4 w-4 mr-1" />
+                  Select
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
+                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {filteredStudents.length === 0 ? (
+                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                    No students available
+                  </div>
+                ) : (
+                  filteredStudents
+                    .slice()
+                    .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
+                    .map((student) => (
+                      <DropdownMenuCheckboxItem
+                        key={student.deviceId}
+                        checked={selectedDeviceIds.has(student.deviceId)}
+                        onCheckedChange={() => toggleStudentSelection(student.deviceId)}
+                        onSelect={(e) => e.preventDefault()}
+                        data-testid={`dropdown-item-student-${student.deviceId}`}
+                      >
+                        {student.studentName || 'Unnamed Student'}
+                      </DropdownMenuCheckboxItem>
+                    ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearSelection}
+              disabled={selectedDeviceIds.size === 0}
+              data-testid="button-clear-selection"
+            >
+              <XSquare className="h-4 w-4 mr-1" />
+              Clear Selection
+            </Button>
+          </div>
+        </div>
+
+        {/* Control Buttons */}
+        <div className="flex items-center gap-2 flex-wrap mb-8">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-open-tab"
+          >
+            <MonitorPlay className="h-4 w-4 mr-2" />
+            Open Tab
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-close-tabs"
+          >
+            <TabletSmartphone className="h-4 w-4 mr-2" />
+            Close Tabs
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-lock-screen"
+          >
+            <Lock className="h-4 w-4 mr-2" />
+            Lock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-unlock-screen"
+          >
+            <Unlock className="h-4 w-4 mr-2" />
+            Unlock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-apply-flight-path"
+          >
+            <Layers className="h-4 w-4 mr-2" />
+            Apply Flight Path
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {/* TODO: Add handler */}}
+            data-testid="button-flight-path"
+          >
+            <Route className="h-4 w-4 mr-2" />
+            Flight Path
+          </Button>
         </div>
 
         {/* Student Tiles */}

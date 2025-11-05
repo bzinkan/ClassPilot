@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route, Activity, WifiOff, Video, AlertTriangle } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,16 +42,11 @@ interface RemoteControlToolbarProps {
   selectedGrade: string;
   onGradeChange: (grade: string) => void;
   onShowFlightPathDialog?: () => void;
-  onlineCount: number;
-  idleCount: number;
-  offlineCount: number;
-  cameraActiveCount: number;
-  offTaskCount: number;
 }
 
 export { type RemoteControlToolbarProps };
 
-export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange, onlineCount, idleCount, offlineCount, cameraActiveCount, offTaskCount }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
@@ -339,7 +334,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
   return (
     <>
       <div className="border-b border-border bg-muted/30 px-6 py-4 mb-8">
-        <div className="max-w-screen-2xl mx-auto space-y-4">
+        <div className="max-w-screen-2xl mx-auto">
           {/* Top Row: Grade Tabs + Student Data Button */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
             {/* Left Side: Grade Tabs */}
@@ -371,128 +366,6 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
               Student Data
             </Button>
           </div>
-
-          {/* Selection Controls Row */}
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
-              Target: {selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} selected` : "All students"}
-            </Badge>
-            
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  data-testid="button-select-students"
-                >
-                  <Users className="h-4 w-4 mr-1" />
-                  Select
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
-                <DropdownMenuLabel>Select Students</DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {students.length === 0 ? (
-                  <div className="px-2 py-6 text-center text-sm text-muted-foreground">
-                    No students available
-                  </div>
-                ) : (
-                  students
-                    .slice()
-                    .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
-                    .map((student) => (
-                      <DropdownMenuCheckboxItem
-                        key={student.deviceId}
-                        checked={selectedDeviceIds.has(student.deviceId)}
-                        onCheckedChange={() => onToggleStudent(student.deviceId)}
-                        onSelect={(e) => e.preventDefault()}
-                        data-testid={`dropdown-item-student-${student.deviceId}`}
-                      >
-                        {student.studentName || 'Unnamed Student'}
-                      </DropdownMenuCheckboxItem>
-                    ))
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onClearSelection}
-              disabled={selectedDeviceIds.size === 0}
-              data-testid="button-clear-selection"
-            >
-              <XSquare className="h-4 w-4 mr-1" />
-              Clear Selection
-            </Button>
-          </div>
-        </div>
-      </div>
-
-      {/* Control Buttons Row */}
-      <div className="max-w-screen-2xl mx-auto px-6 mb-8">
-        <div className="flex items-center gap-2 flex-wrap">
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowOpenTab(true)}
-            data-testid="button-open-tab"
-          >
-            <MonitorPlay className="h-4 w-4 mr-2" />
-            Open Tab
-          </Button>
-
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleCloseTabs}
-            disabled={isLoading}
-            data-testid="button-close-tabs"
-          >
-            <TabletSmartphone className="h-4 w-4 mr-2" />
-            Close Tabs
-          </Button>
-
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowLockScreen(true)}
-            data-testid="button-lock-screen"
-          >
-            <Lock className="h-4 w-4 mr-2" />
-            Lock Screen
-          </Button>
-
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={handleUnlockScreen}
-            disabled={isLoading}
-            data-testid="button-unlock-screen"
-          >
-            <Unlock className="h-4 w-4 mr-2" />
-            Unlock Screen
-          </Button>
-
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowApplyScene(true)}
-            data-testid="button-apply-flight-path"
-          >
-            <Layers className="h-4 w-4 mr-2" />
-            Apply Flight Path
-          </Button>
-
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => setShowFlightPathDialog(true)}
-            data-testid="button-flight-path"
-          >
-            <Route className="h-4 w-4 mr-2" />
-            Flight Path
-          </Button>
         </div>
       </div>
 
