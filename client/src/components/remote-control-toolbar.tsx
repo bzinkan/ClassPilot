@@ -676,20 +676,29 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                     </ResponsiveContainer>
                   </div>
                   
-                  {/* Summary Stats */}
-                  <div className="space-y-2 mt-6 max-h-48 overflow-y-auto">
-                    {studentDataStats.map((stat) => {
+                  {/* Website Duration List */}
+                  <div className="space-y-2 mt-6 max-h-60 overflow-y-auto pr-2">
+                    {studentDataStats.map((stat, index) => {
                       const minutes = Math.floor(stat.value / 60);
                       const seconds = stat.value % 60;
                       const timeStr = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
                       
                       return (
-                        <div key={stat.name} className="flex items-center justify-between p-3 rounded-lg border hover-elevate" style={{ borderLeftWidth: '4px', borderLeftColor: stat.color }}>
-                          <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium truncate" title={stat.name}>{stat.name}</div>
+                        <div key={stat.name} className="flex items-center gap-3 p-2 rounded-md hover-elevate">
+                          <div className="flex items-center gap-3 flex-1 min-w-0">
+                            <div className="flex-shrink-0 text-muted-foreground font-mono text-xs w-5">
+                              {index + 1}.
+                            </div>
+                            <div 
+                              className="flex-shrink-0 w-3 h-3 rounded-full" 
+                              style={{ backgroundColor: stat.color }}
+                            />
+                            <div className="text-sm font-medium truncate flex-1 min-w-0" title={stat.name}>
+                              {stat.name}
+                            </div>
                           </div>
-                          <div className="flex items-center gap-2 ml-4">
-                            <div className="text-lg font-bold" style={{ color: stat.color }}>{timeStr}</div>
+                          <div className="flex-shrink-0 text-sm font-semibold text-muted-foreground">
+                            {timeStr}
                           </div>
                         </div>
                       );
