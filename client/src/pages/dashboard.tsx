@@ -1724,35 +1724,30 @@ export default function Dashboard() {
                       </Badge>
                     </td>
                     <td className="p-2">
-                      {student.deviceId && (student.flightPathActive || student.screenLocked) ? (
-                        <div className="flex gap-1">
-                          {student.flightPathActive && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => handleRemoveFlightPath(student.deviceId)}
-                              disabled={removeFlightPathMutation.isPending}
-                              data-testid={`button-remove-flight-path-${student.studentId}`}
-                              className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                            >
-                              <X className="h-3 w-3 mr-1" />
-                              Remove
-                            </Button>
-                          )}
-                          {student.screenLocked && (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => unlockScreenMutation.mutate([student.deviceId])}
-                              disabled={unlockScreenMutation.isPending}
-                              data-testid={`button-unlock-screen-${student.studentId}`}
-                              className="h-7 px-2 text-xs"
-                            >
-                              <Unlock className="h-3 w-3 mr-1" />
-                              Unlock
-                            </Button>
-                          )}
-                        </div>
+                      {student.flightPathActive && student.deviceId ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleRemoveFlightPath(student.deviceId)}
+                          disabled={removeFlightPathMutation.isPending}
+                          data-testid={`button-remove-flight-path-${student.studentId}`}
+                          className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                        >
+                          <X className="h-3 w-3 mr-1" />
+                          Remove
+                        </Button>
+                      ) : student.screenLocked && student.deviceId ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => unlockScreenMutation.mutate([student.deviceId])}
+                          disabled={unlockScreenMutation.isPending}
+                          data-testid={`button-unlock-screen-${student.studentId}`}
+                          className="h-7 px-2 text-xs"
+                        >
+                          <Unlock className="h-3 w-3 mr-1" />
+                          Unlock
+                        </Button>
                       ) : (
                         <span className="text-xs text-muted-foreground">—</span>
                       )}
