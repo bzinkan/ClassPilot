@@ -482,7 +482,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             <Button
               variant="ghost"
               size="icon"
-              className="absolute top-2 right-2 h-8 w-8 bg-black/60 hover:bg-black/80 text-white opacity-90 hover:opacity-100 transition-all shadow-lg pointer-events-auto"
+              className="absolute top-2 right-2 h-8 w-8 bg-black/60 hover:bg-black/80 text-white opacity-90 hover:opacity-100 transition-all shadow-lg pointer-events-auto z-10"
               onClick={handleExpand}
               data-testid={`button-enlarge-${student.deviceId}`}
               title="Expand video - Access zoom, screenshot, and recording controls"
