@@ -25,11 +25,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { StudentStatus, Heartbeat, Settings } from "@shared/schema";
+import type { StudentStatus, Heartbeat, Settings, FlightPath } from "@shared/schema";
 
 interface CurrentUser {
   id: string;
@@ -67,6 +68,9 @@ export default function Dashboard() {
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
   const [showLockScreenDialog, setShowLockScreenDialog] = useState(false);
   const [lockScreenUrl, setLockScreenUrl] = useState("");
+  const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
+  const [selectedFlightPathId, setSelectedFlightPathId] = useState("");
+  const [showFlightPathViewerDialog, setShowFlightPathViewerDialog] = useState(false);
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -90,6 +94,10 @@ export default function Dashboard() {
 
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
+  });
+
+  const { data: flightPaths = [] } = useQuery<FlightPath[]>({
+    queryKey: ['/api/flight-paths'],
   });
 
   const { data: currentUserData } = useQuery<{ success: boolean; user: CurrentUser }>({
@@ -719,6 +727,59 @@ export default function Dashboard() {
     unlockScreenMutation.mutate(targetDeviceIds);
   };
 
+  // Apply Flight Path mutation
+  const applyFlightPathMutation = useMutation({
+    mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/apply-flight-path', { flightPathId, allowedDomains, targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      setShowApplyFlightPathDialog(false);
+      setSelectedFlightPathId("");
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Flight Path handlers
+  const handleApplyFlightPath = () => {
+    if (!selectedFlightPathId) {
+      toast({
+        variant: "destructive",
+        title: "No Flight Path Selected",
+        description: "Please select a flight path to apply",
+      });
+      return;
+    }
+    
+    const flightPath = flightPaths.find(fp => fp.id === selectedFlightPathId);
+    if (!flightPath) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Selected flight path not found",
+      });
+      return;
+    }
+    
+    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    applyFlightPathMutation.mutate({ 
+      flightPathId: flightPath.id, 
+      allowedDomains: flightPath.allowedDomains || [],
+      targetDeviceIds 
+    });
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -987,7 +1048,7 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={() => setShowApplyFlightPathDialog(true)}
             data-testid="button-apply-flight-path"
             className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
           >
@@ -998,7 +1059,7 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={() => setShowFlightPathViewerDialog(true)}
             data-testid="button-flight-path"
             className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
           >
@@ -1439,6 +1500,132 @@ export default function Dashboard() {
             <Button onClick={handleLockScreen} disabled={lockScreenMutation.isPending} data-testid="button-confirm-lock-screen">
               <Lock className="h-4 w-4 mr-2" />
               Lock Screen
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Apply Flight Path Dialog */}
+      <Dialog open={showApplyFlightPathDialog} onOpenChange={setShowApplyFlightPathDialog}>
+        <DialogContent data-testid="dialog-apply-flight-path">
+          <DialogHeader>
+            <DialogTitle>Apply Flight Path to Students</DialogTitle>
+            <DialogDescription>
+              {selectedDeviceIds.size > 0
+                ? `Apply a flight path to ${selectedDeviceIds.size} selected student(s)`
+                : "Apply a flight path to all students"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="flight-path-select">Select Flight Path</Label>
+              <Select value={selectedFlightPathId} onValueChange={setSelectedFlightPathId}>
+                <SelectTrigger id="flight-path-select" data-testid="select-flight-path">
+                  <SelectValue placeholder="Choose a flight path" />
+                </SelectTrigger>
+                <SelectContent>
+                  {flightPaths.map((flightPath) => (
+                    <SelectItem key={flightPath.id} value={flightPath.id} data-testid={`option-flight-path-${flightPath.id}`}>
+                      {flightPath.flightPathName}
+                    </SelectItem>
+                  ))}
+                  {flightPaths.length === 0 && (
+                    <div className="p-2 text-sm text-muted-foreground">
+                      No flight paths available
+                    </div>
+                  )}
+                </SelectContent>
+              </Select>
+              {selectedFlightPathId && (() => {
+                const fp = flightPaths.find(f => f.id === selectedFlightPathId);
+                return fp ? (
+                  <div className="mt-2 p-3 bg-muted/30 rounded-md">
+                    <p className="text-xs font-medium mb-1">Description:</p>
+                    <p className="text-xs text-muted-foreground mb-2">{fp.description || "No description provided"}</p>
+                    <p className="text-xs font-medium mb-1">Allowed Domains ({fp.allowedDomains?.length || 0}):</p>
+                    <div className="flex flex-wrap gap-1">
+                      {fp.allowedDomains && fp.allowedDomains.length > 0 ? (
+                        fp.allowedDomains.map((domain, idx) => (
+                          <Badge key={idx} variant="secondary" className="text-xs">
+                            {domain}
+                          </Badge>
+                        ))
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No restrictions</p>
+                      )}
+                    </div>
+                  </div>
+                ) : null;
+              })()}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowApplyFlightPathDialog(false)} data-testid="button-cancel-apply-flight-path">
+              Cancel
+            </Button>
+            <Button onClick={handleApplyFlightPath} disabled={applyFlightPathMutation.isPending} data-testid="button-confirm-apply-flight-path">
+              <Layers className="h-4 w-4 mr-2" />
+              Apply Flight Path
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Flight Path Viewer Dialog */}
+      <Dialog open={showFlightPathViewerDialog} onOpenChange={setShowFlightPathViewerDialog}>
+        <DialogContent className="max-w-2xl" data-testid="dialog-flight-path-viewer">
+          <DialogHeader>
+            <DialogTitle>Flight Path Status</DialogTitle>
+            <DialogDescription>
+              View which flight paths students are currently on
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[400px] overflow-y-auto">
+            <table className="w-full">
+              <thead className="border-b sticky top-0 bg-background">
+                <tr>
+                  <th className="text-left p-2 text-sm font-medium">Student</th>
+                  <th className="text-left p-2 text-sm font-medium">Flight Path</th>
+                  <th className="text-left p-2 text-sm font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {students.map((student) => (
+                  <tr key={student.studentId} className="border-b" data-testid={`row-student-${student.studentId}`}>
+                    <td className="p-2 text-sm">{student.studentName}</td>
+                    <td className="p-2">
+                      {student.flightPathActive && student.activeFlightPathName ? (
+                        <Badge variant="secondary" className="text-xs" data-testid={`badge-flight-path-${student.studentId}`}>
+                          {student.activeFlightPathName}
+                        </Badge>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">No flight path</span>
+                      )}
+                    </td>
+                    <td className="p-2">
+                      <Badge 
+                        variant={student.status === 'online' ? 'default' : student.status === 'idle' ? 'secondary' : 'outline'}
+                        className="text-xs"
+                        data-testid={`badge-status-${student.studentId}`}
+                      >
+                        {student.status}
+                      </Badge>
+                    </td>
+                  </tr>
+                ))}
+                {students.length === 0 && (
+                  <tr>
+                    <td colSpan={3} className="p-4 text-center text-sm text-muted-foreground">
+                      No students found
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setShowFlightPathViewerDialog(false)} data-testid="button-close-flight-path-viewer">
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>
