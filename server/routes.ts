@@ -679,7 +679,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const statuses = await storage.getAllStudentStatuses();
       console.log('Dashboard requested students - found:', statuses.length, 'students');
       statuses.forEach(s => {
-        console.log(`  - ${s.studentName} (grade: ${s.gradeLevel}, status: ${s.status})`);
+        console.log(`  - ${s.studentName} (grade: ${s.gradeLevel}, status: ${s.status}, screenLocked: ${s.screenLocked})`);
       });
       res.json(statuses);
     } catch (error) {
