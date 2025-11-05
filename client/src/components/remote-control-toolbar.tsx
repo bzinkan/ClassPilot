@@ -429,6 +429,73 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         </div>
       </div>
 
+      {/* Control Buttons Row */}
+      <div className="max-w-screen-2xl mx-auto px-6 mb-8">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowOpenTab(true)}
+            data-testid="button-open-tab"
+          >
+            <MonitorPlay className="h-4 w-4 mr-2" />
+            Open Tab
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleCloseTabs}
+            disabled={isLoading}
+            data-testid="button-close-tabs"
+          >
+            <TabletSmartphone className="h-4 w-4 mr-2" />
+            Close Tabs
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowLockScreen(true)}
+            data-testid="button-lock-screen"
+          >
+            <Lock className="h-4 w-4 mr-2" />
+            Lock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleUnlockScreen}
+            disabled={isLoading}
+            data-testid="button-unlock-screen"
+          >
+            <Unlock className="h-4 w-4 mr-2" />
+            Unlock Screen
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowApplyScene(true)}
+            data-testid="button-apply-flight-path"
+          >
+            <Layers className="h-4 w-4 mr-2" />
+            Apply Flight Path
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowFlightPathDialog(true)}
+            data-testid="button-flight-path"
+          >
+            <Route className="h-4 w-4 mr-2" />
+            Flight Path
+          </Button>
+        </div>
+      </div>
+
       {/* Open Tab Dialog */}
       <Dialog open={showOpenTab} onOpenChange={setShowOpenTab}>
         <DialogContent data-testid="dialog-open-tab">
