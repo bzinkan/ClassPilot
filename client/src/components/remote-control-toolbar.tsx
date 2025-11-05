@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route } from "lucide-react";
+import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -53,6 +54,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
   const [lockUrl, setLockUrl] = useState("");
   const [tabLimit, setTabLimit] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState("");
+  const [selectedStudentForData, setSelectedStudentForData] = useState<string>("all");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
@@ -298,6 +300,38 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
     const nameB = b.studentName || '';
     return nameA.localeCompare(nameB);
   });
+  
+  // Calculate student data statistics
+  const studentDataStats = useMemo(() => {
+    let studentsToAnalyze = students;
+    
+    // Filter to selected student if not "all"
+    if (selectedStudentForData !== "all") {
+      studentsToAnalyze = students.filter(s => s.deviceId === selectedStudentForData);
+    }
+    
+    if (studentsToAnalyze.length === 0) {
+      return [];
+    }
+    
+    // Count students by status
+    const onlineCount = studentsToAnalyze.filter(s => s.status === 'online').length;
+    const idleCount = studentsToAnalyze.filter(s => s.status === 'idle').length;
+    const offlineCount = studentsToAnalyze.filter(s => s.status === 'offline').length;
+    
+    const data = [];
+    if (onlineCount > 0) {
+      data.push({ name: 'Online', value: onlineCount, color: '#22c55e' });
+    }
+    if (idleCount > 0) {
+      data.push({ name: 'Idle', value: idleCount, color: '#f59e0b' });
+    }
+    if (offlineCount > 0) {
+      data.push({ name: 'Offline', value: offlineCount, color: '#6b7280' });
+    }
+    
+    return data;
+  }, [students, selectedStudentForData]);
 
   return (
     <>
@@ -552,6 +586,174 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
             </Button>
             <Button onClick={handleApplyScene} disabled={isLoading || !selectedSceneId} data-testid="button-submit-apply-flight-path">
               Apply Flight Path
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Flight Path View Dialog */}
+      <Dialog open={showFlightPathDialog} onOpenChange={setShowFlightPathDialog}>
+        <DialogContent className="max-w-2xl max-h-[80vh]" data-testid="dialog-flight-path-view">
+          <DialogHeader>
+            <DialogTitle>Student Flight Paths</DialogTitle>
+            <DialogDescription>
+              View which flight path each student is currently on
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4">
+            <Input
+              placeholder="Search students..."
+              className="mb-4"
+              data-testid="input-search-flight-path-students"
+            />
+            <div className="border rounded-lg overflow-hidden">
+              <div className="max-h-96 overflow-y-auto">
+                <table className="w-full">
+                  <thead className="bg-muted sticky top-0 z-10">
+                    <tr>
+                      <th className="text-left p-3 text-sm font-semibold">Student</th>
+                      <th className="text-left p-3 text-sm font-semibold">Flight Path</th>
+                      <th className="text-left p-3 text-sm font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {sortedStudents.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="p-8 text-center text-muted-foreground">
+                          No students found
+                        </td>
+                      </tr>
+                    ) : (
+                      sortedStudents.map((student) => (
+                        <tr key={student.deviceId} className="hover-elevate" data-testid={`row-student-flight-path-${student.deviceId}`}>
+                          <td className="p-3 text-sm font-medium">{student.studentName || 'Unnamed Student'}</td>
+                          <td className="p-3 text-sm">
+                            {student.flightPathActive && student.activeFlightPathName ? (
+                              <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800">
+                                <Layers className="h-3 w-3 mr-1" />
+                                {student.activeFlightPathName}
+                              </Badge>
+                            ) : (
+                              <span className="text-muted-foreground italic">None</span>
+                            )}
+                          </td>
+                          <td className="p-3 text-sm">
+                            <Badge 
+                              variant="outline" 
+                              className={
+                                student.status === 'online' 
+                                  ? 'bg-green-50 text-green-700 border-green-200 dark:bg-green-950 dark:text-green-400 dark:border-green-800'
+                                  : student.status === 'idle'
+                                  ? 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-800'
+                                  : 'bg-gray-50 text-gray-700 border-gray-200 dark:bg-gray-950 dark:text-gray-400 dark:border-gray-800'
+                              }
+                            >
+                              {student.status.charAt(0).toUpperCase() + student.status.slice(1)}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowFlightPathDialog(false)} data-testid="button-close-flight-path-view">
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Student Data Dialog */}
+      <Dialog open={showStudentDataDialog} onOpenChange={setShowStudentDataDialog}>
+        <DialogContent className="max-w-4xl max-h-[80vh]" data-testid="dialog-student-data">
+          <DialogHeader>
+            <DialogTitle>Student Data Analytics</DialogTitle>
+            <DialogDescription>
+              View activity statistics for your class or individual students
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-6">
+            {/* Student Selector */}
+            <div className="space-y-2">
+              <Label htmlFor="student-select">View Data For</Label>
+              <Select value={selectedStudentForData} onValueChange={setSelectedStudentForData}>
+                <SelectTrigger id="student-select" data-testid="select-student-data">
+                  <SelectValue placeholder="Select student or class" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all" data-testid="select-student-all">
+                    Whole Class
+                  </SelectItem>
+                  <DropdownMenuSeparator />
+                  {sortedStudents.map((student) => (
+                    <SelectItem key={student.deviceId} value={student.deviceId} data-testid={`select-student-${student.deviceId}`}>
+                      {student.studentName || 'Unnamed Student'}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            
+            {/* Statistics Display */}
+            <div className="space-y-4">
+              <h3 className="text-lg font-semibold">
+                {selectedStudentForData === "all" 
+                  ? "Class Status Distribution" 
+                  : `${sortedStudents.find(s => s.deviceId === selectedStudentForData)?.studentName || 'Student'} Status`}
+              </h3>
+              
+              {studentDataStats.length > 0 ? (
+                <div className="flex items-center justify-center">
+                  <ResponsiveContainer width="100%" height={300}>
+                    <PieChart>
+                      <Pie
+                        data={studentDataStats}
+                        cx="50%"
+                        cy="50%"
+                        labelLine={false}
+                        label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                        outerRadius={100}
+                        fill="#8884d8"
+                        dataKey="value"
+                      >
+                        {studentDataStats.map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="p-8 text-center text-muted-foreground border rounded-lg">
+                  No data available
+                </div>
+              )}
+              
+              {/* Summary Stats */}
+              {studentDataStats.length > 0 && (
+                <div className="grid grid-cols-3 gap-4 mt-6">
+                  {studentDataStats.map((stat) => (
+                    <div key={stat.name} className="p-4 rounded-lg border" style={{ borderColor: stat.color }}>
+                      <div className="text-sm text-muted-foreground mb-1">{stat.name}</div>
+                      <div className="text-2xl font-bold" style={{ color: stat.color }}>{stat.value}</div>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        {selectedStudentForData === "all" ? "students" : "status"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowStudentDataDialog(false)} data-testid="button-close-student-data">
+              Close
             </Button>
           </DialogFooter>
         </DialogContent>
