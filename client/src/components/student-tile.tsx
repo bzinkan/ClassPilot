@@ -309,6 +309,47 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     },
   });
   
+  // Lock to current screen mutation
+  const lockToCurrentScreenMutation = useMutation({
+    mutationFn: async () => {
+      if (!student.activeTabUrl) {
+        throw new Error("No active tab to lock to");
+      }
+      return await apiRequest("POST", "/api/remote/lock-screen", {
+        url: student.activeTabUrl,
+        targetDeviceIds: [student.deviceId]
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Screen locked",
+        description: `${student.studentName} is now locked to their current screen`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to lock screen",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+  
+  // Unlock screen mutation
+  const unlockScreenMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", "/api/control/unlock-screen", {
+        deviceIds: [student.deviceId]
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Screen unlocked",
+        description: `${student.studentName} can now browse freely`,
+      });
+    },
+  });
+  
   const getStatusColor = (status: string) => {
     switch (status) {
       case 'online':
@@ -459,14 +500,27 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 />
               </div>
             )}
-            {student.screenLocked && (
-              <div title="Screen locked" className="flex-shrink-0">
-                <Lock 
-                  className="h-4 w-4 text-amber-600 dark:text-amber-400" 
-                  data-testid={`icon-locked-${student.deviceId}`}
-                />
-              </div>
-            )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (student.screenLocked) {
+                  unlockScreenMutation.mutate();
+                } else {
+                  lockToCurrentScreenMutation.mutate();
+                }
+              }}
+              title={student.screenLocked ? "Unlock screen" : "Lock to current screen"}
+              data-testid={`button-lock-toggle-${student.deviceId}`}
+            >
+              {student.screenLocked ? (
+                <Lock className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+              ) : (
+                <Unlock className="h-4 w-4" />
+              )}
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -480,6 +534,30 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
+                {student.screenLocked ? (
+                  <DropdownMenuItem 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      unlockScreenMutation.mutate();
+                    }}
+                    data-testid={`menu-unlock-screen-${student.deviceId}`}
+                  >
+                    <Unlock className="h-4 w-4 mr-2" />
+                    Unlock Screen
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem 
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      lockToCurrentScreenMutation.mutate();
+                    }}
+                    disabled={!student.activeTabUrl}
+                    data-testid={`menu-lock-screen-${student.deviceId}`}
+                  >
+                    <Lock className="h-4 w-4 mr-2" />
+                    Lock to Current Screen
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.deviceId}`}>
                   <Edit2 className="h-4 w-4 mr-2" />
                   Edit Info
