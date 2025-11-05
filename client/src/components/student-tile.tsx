@@ -128,6 +128,43 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     queryKey: ['/api/settings'],
   });
   
+  // Fetch recent browsing history for mini history icons
+  const { data: recentHeartbeats = [] } = useQuery<any[]>({
+    queryKey: ['/api/heartbeats', student.deviceId],
+    refetchInterval: 30000, // Refresh every 30 seconds
+  });
+  
+  // Fetch flight paths to check if current URL is blocked
+  const { data: flightPaths = [] } = useQuery<any[]>({
+    queryKey: ['/api/flight-paths'],
+  });
+  
+  // Get unique recent domains (last 5)
+  const recentDomains = recentHeartbeats
+    .slice(0, 10)
+    .reduce((acc: Array<{url: string, favicon?: string, title: string}>, hb) => {
+      try {
+        const urlObj = new URL(hb.activeTabUrl);
+        const domain = urlObj.hostname;
+        
+        // Only add if we don't already have this domain
+        if (!acc.some(item => new URL(item.url).hostname === domain)) {
+          acc.push({
+            url: hb.activeTabUrl,
+            favicon: hb.favicon,
+            title: hb.activeTabTitle
+          });
+        }
+      } catch {}
+      return acc;
+    }, [])
+    .slice(0, 5);
+  
+  // Check if current URL is blocked by active flight path
+  const activeFlightPath = flightPaths.find((fp: any) => fp.flightPathName === student.activeFlightPathName);
+  const isBlockedByFlightPath = student.flightPathActive && activeFlightPath && student.activeTabUrl && 
+    isBlockedDomain(student.activeTabUrl, activeFlightPath.blockedDomains || []);
+  
   const updateStudentMutation = useMutation({
     mutationFn: async (data: { studentId: string; studentName: string; gradeLevel: string }) => {
       return await apiRequest("PATCH", `/api/students/${data.studentId}`, { 
@@ -256,6 +293,21 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   };
   
   const isBlocked = isBlockedDomain(student.activeTabUrl, blockedDomains);
+  
+  // Unblock mutation for flight path
+  const unblockForClassMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", "/api/control/unlock-screen", {
+        deviceIds: [student.deviceId]
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Unblocked for class",
+        description: `${student.studentName} can now access this website`,
+      });
+    },
+  });
   
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -446,25 +498,52 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Alert Badges */}
-        {(isOffTask || isBlocked || student.flightPathActive) && (
-          <div className="flex flex-wrap gap-1.5">
-            {student.flightPathActive && student.activeFlightPathName && (
-              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.deviceId}`}>
-                <Layers className="h-3 w-3 mr-1" />
-                {student.activeFlightPathName}
-              </Badge>
-            )}
-            {isOffTask && (
-              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-offtask-${student.deviceId}`}>
-                <AlertTriangle className="h-3 w-3 mr-1" />
-                Off-Task
-              </Badge>
-            )}
-            {isBlocked && !isOffTask && (
-              <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-${student.deviceId}`}>
-                <AlertTriangle className="h-3 w-3 mr-1" />
-                Blocked Domain
-              </Badge>
+        {(isOffTask || isBlocked || isBlockedByFlightPath || student.flightPathActive) && (
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap gap-1.5">
+              {student.flightPathActive && student.activeFlightPathName && !isBlockedByFlightPath && (
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.deviceId}`}>
+                  <Layers className="h-3 w-3 mr-1" />
+                  {student.activeFlightPathName}
+                </Badge>
+              )}
+              {isBlockedByFlightPath && (
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-by-scene-${student.deviceId}`}>
+                  <AlertTriangle className="h-3 w-3 mr-1" />
+                  Blocked by {student.activeFlightPathName}
+                </Badge>
+              )}
+              {isOffTask && !isBlockedByFlightPath && (
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-offtask-${student.deviceId}`}>
+                  <AlertTriangle className="h-3 w-3 mr-1" />
+                  Off-Task
+                </Badge>
+              )}
+              {isBlocked && !isOffTask && !isBlockedByFlightPath && (
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-${student.deviceId}`}>
+                  <AlertTriangle className="h-3 w-3 mr-1" />
+                  Blocked Domain
+                </Badge>
+              )}
+            </div>
+            {isBlockedByFlightPath && (
+              <div className="flex gap-2">
+                <p className="text-xs text-muted-foreground truncate flex-1">
+                  {student.activeTabUrl}
+                </p>
+                <Button
+                  size="sm"
+                  variant="default"
+                  className="h-7 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    unblockForClassMutation.mutate();
+                  }}
+                  data-testid={`button-unblock-${student.deviceId}`}
+                >
+                  Unblock for class
+                </Button>
+              </div>
             )}
           </div>
         )}
@@ -512,6 +591,35 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 {student.activeTabUrl}
               </p>
             )}
+          </div>
+        )}
+
+        {/* Mini History Icons */}
+        {recentDomains.length > 0 && (
+          <div className="flex items-center gap-1.5 px-1 py-1.5 border-t border-border/20">
+            <span className="text-[10px] text-muted-foreground uppercase tracking-wide font-medium">Recent</span>
+            <div className="flex items-center gap-1 flex-1 overflow-x-auto">
+              {recentDomains.map((domain, idx) => (
+                <div
+                  key={idx}
+                  className="flex-shrink-0 w-5 h-5 rounded bg-muted/50 flex items-center justify-center border border-border/20"
+                  title={domain.title}
+                >
+                  {domain.favicon ? (
+                    <img
+                      src={domain.favicon}
+                      alt=""
+                      className="w-3.5 h-3.5 rounded"
+                      onError={(e) => {
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
+                    />
+                  ) : (
+                    <div className="w-2 h-2 rounded-full bg-muted-foreground/30" />
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
