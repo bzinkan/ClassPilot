@@ -58,11 +58,14 @@ The system employs a full-stack architecture:
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
 -   **Remote Classroom Control**: Includes features like:
-    -   **Remote Tab Control**: Open tabs, close tabs, lock/unlock screens. When screen is locked, students are restricted to a single tab and cannot create new tabs.
+    -   **Open Tab**: Teachers can open a specific URL on all student devices or selected students. Dialog prompts for URL input and shows targeting scope (selected students vs. all students).
+    -   **Close Tabs**: Teachers can close all tabs or close tabs matching a specific URL pattern (e.g., "youtube.com"). Features a tabbed dialog with "Close All Tabs" and "Close by Pattern" options.
+    -   **Lock Screen**: Teachers can lock students to a specific URL, restricting them from navigating away. Students cannot create new tabs when locked. Dialog shows targeting information and URL input with helper text.
+    -   **Unlock Screen**: Teachers can unlock student screens with a single click. No dialog required - action executes immediately with success notification.
     -   **Apply Flight Paths**: Apply predefined flight paths with multiple allowed domains to restrict student browsing to specific educational websites.
     -   **Student Groups**: Organize students for targeted instruction.
     -   **Tab Limiting**: Configure maximum tabs per student.
-    -   **Per-Student Targeting**: All remote commands support targeting specific students via checkbox selection.
+    -   **Per-Student Targeting**: All remote commands support targeting specific students via checkbox selection. Dialogs dynamically display whether commands will affect selected students or all students.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, no collection of sensitive personal input data.
