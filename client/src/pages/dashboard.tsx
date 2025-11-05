@@ -60,6 +60,13 @@ export default function Dashboard() {
   const [exportEndDate, setExportEndDate] = useState("");
   const [showGradeDialog, setShowGradeDialog] = useState(false);
   const [newGrade, setNewGrade] = useState("");
+  const [showOpenTabDialog, setShowOpenTabDialog] = useState(false);
+  const [openTabUrl, setOpenTabUrl] = useState("");
+  const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
+  const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
+  const [closeTabsPattern, setCloseTabsPattern] = useState("");
+  const [showLockScreenDialog, setShowLockScreenDialog] = useState(false);
+  const [lockScreenUrl, setLockScreenUrl] = useState("");
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -571,6 +578,147 @@ export default function Dashboard() {
     updateGradesMutation.mutate(newGrades);
   };
 
+  // Remote control mutations
+  const openTabMutation = useMutation({
+    mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/open-tab', { url, targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      setShowOpenTabDialog(false);
+      setOpenTabUrl("");
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const closeTabsMutation = useMutation({
+    mutationFn: async ({ closeAll, pattern, targetDeviceIds }: { closeAll?: boolean; pattern?: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      setShowCloseTabsDialog(false);
+      setCloseTabsPattern("");
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const lockScreenMutation = useMutation({
+    mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/lock-screen', { url, targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      setShowLockScreenDialog(false);
+      setLockScreenUrl("");
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const unlockScreenMutation = useMutation({
+    mutationFn: async (targetDeviceIds?: string[]) => {
+      const res = await apiRequest('POST', '/api/remote/unlock-screen', { targetDeviceIds });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: data.message,
+      });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Remote control handlers
+  const handleOpenTab = () => {
+    if (!openTabUrl.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid URL",
+        description: "Please enter a valid URL",
+      });
+      return;
+    }
+    
+    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    openTabMutation.mutate({ url: openTabUrl, targetDeviceIds });
+  };
+
+  const handleCloseTabs = () => {
+    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    
+    if (closeTabsMode === "all") {
+      closeTabsMutation.mutate({ closeAll: true, targetDeviceIds });
+    } else {
+      if (!closeTabsPattern.trim()) {
+        toast({
+          variant: "destructive",
+          title: "Invalid Pattern",
+          description: "Please enter a URL pattern",
+        });
+        return;
+      }
+      closeTabsMutation.mutate({ pattern: closeTabsPattern, targetDeviceIds });
+    }
+  };
+
+  const handleLockScreen = () => {
+    if (!lockScreenUrl.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid URL",
+        description: "Please enter a valid URL",
+      });
+      return;
+    }
+    
+    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    lockScreenMutation.mutate({ url: lockScreenUrl, targetDeviceIds });
+  };
+
+  const handleUnlockScreen = () => {
+    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    unlockScreenMutation.mutate(targetDeviceIds);
+  };
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -794,7 +942,7 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={() => setShowOpenTabDialog(true)}
             data-testid="button-open-tab"
             className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
@@ -805,7 +953,7 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={() => setShowCloseTabsDialog(true)}
             data-testid="button-close-tabs"
             className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
           >
@@ -816,7 +964,7 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={() => setShowLockScreenDialog(true)}
             data-testid="button-lock-screen"
             className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
@@ -827,7 +975,8 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => {/* TODO: Add handler */}}
+            onClick={handleUnlockScreen}
+            disabled={unlockScreenMutation.isPending}
             data-testid="button-unlock-screen"
             className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
@@ -1150,6 +1299,146 @@ export default function Dashboard() {
               data-testid="button-close-grade-dialog"
             >
               Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Open Tab Dialog */}
+      <Dialog open={showOpenTabDialog} onOpenChange={setShowOpenTabDialog}>
+        <DialogContent data-testid="dialog-open-tab">
+          <DialogHeader>
+            <DialogTitle>Open Tab on Student Devices</DialogTitle>
+            <DialogDescription>
+              {selectedDeviceIds.size > 0
+                ? `Open a URL on ${selectedDeviceIds.size} selected student(s)`
+                : "Open a URL on all student devices"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="open-tab-url">URL to Open</Label>
+              <Input
+                id="open-tab-url"
+                type="url"
+                placeholder="https://example.com"
+                value={openTabUrl}
+                onChange={(e) => setOpenTabUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !openTabMutation.isPending) {
+                    handleOpenTab();
+                  }
+                }}
+                data-testid="input-open-tab-url"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowOpenTabDialog(false)} data-testid="button-cancel-open-tab">
+              Cancel
+            </Button>
+            <Button onClick={handleOpenTab} disabled={openTabMutation.isPending} data-testid="button-confirm-open-tab">
+              <MonitorPlay className="h-4 w-4 mr-2" />
+              Open Tab
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Close Tabs Dialog */}
+      <Dialog open={showCloseTabsDialog} onOpenChange={setShowCloseTabsDialog}>
+        <DialogContent data-testid="dialog-close-tabs">
+          <DialogHeader>
+            <DialogTitle>Close Tabs on Student Devices</DialogTitle>
+            <DialogDescription>
+              {selectedDeviceIds.size > 0
+                ? `Close tabs on ${selectedDeviceIds.size} selected student(s)`
+                : "Close tabs on all student devices"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <Tabs value={closeTabsMode} onValueChange={(v) => setCloseTabsMode(v as "all" | "pattern")}>
+              <TabsList className="grid w-full grid-cols-2">
+                <TabsTrigger value="all" data-testid="tab-close-all">Close All Tabs</TabsTrigger>
+                <TabsTrigger value="pattern" data-testid="tab-close-pattern">Close by Pattern</TabsTrigger>
+              </TabsList>
+              <TabsContent value="all" className="space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  This will close all tabs on the selected student devices.
+                </p>
+              </TabsContent>
+              <TabsContent value="pattern" className="space-y-2">
+                <Label htmlFor="close-tabs-pattern">URL Pattern</Label>
+                <Input
+                  id="close-tabs-pattern"
+                  type="text"
+                  placeholder="youtube.com"
+                  value={closeTabsPattern}
+                  onChange={(e) => setCloseTabsPattern(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !closeTabsMutation.isPending) {
+                      handleCloseTabs();
+                    }
+                  }}
+                  data-testid="input-close-tabs-pattern"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Enter a domain or URL pattern to match (e.g., "youtube.com" or "social")
+                </p>
+              </TabsContent>
+            </Tabs>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowCloseTabsDialog(false)} data-testid="button-cancel-close-tabs">
+              Cancel
+            </Button>
+            <Button onClick={handleCloseTabs} disabled={closeTabsMutation.isPending} data-testid="button-confirm-close-tabs">
+              <TabletSmartphone className="h-4 w-4 mr-2" />
+              Close Tabs
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Lock Screen Dialog */}
+      <Dialog open={showLockScreenDialog} onOpenChange={setShowLockScreenDialog}>
+        <DialogContent data-testid="dialog-lock-screen">
+          <DialogHeader>
+            <DialogTitle>Lock Student Screens</DialogTitle>
+            <DialogDescription>
+              {selectedDeviceIds.size > 0
+                ? `Lock ${selectedDeviceIds.size} selected student(s) to a specific URL`
+                : "Lock all students to a specific URL"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="lock-screen-url">URL to Lock To</Label>
+              <Input
+                id="lock-screen-url"
+                type="url"
+                placeholder="https://example.com"
+                value={lockScreenUrl}
+                onChange={(e) => setLockScreenUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !lockScreenMutation.isPending) {
+                    handleLockScreen();
+                  }
+                }}
+                data-testid="input-lock-screen-url"
+              />
+              <p className="text-xs text-muted-foreground">
+                Students will be restricted to this URL and cannot navigate away
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowLockScreenDialog(false)} data-testid="button-cancel-lock-screen">
+              Cancel
+            </Button>
+            <Button onClick={handleLockScreen} disabled={lockScreenMutation.isPending} data-testid="button-confirm-lock-screen">
+              <Lock className="h-4 w-4 mr-2" />
+              Lock Screen
             </Button>
           </DialogFooter>
         </DialogContent>
