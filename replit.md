@@ -17,7 +17,13 @@ I like functional programming.
 ### UI/UX Decisions
 The frontend uses React and TypeScript with Tailwind CSS for styling, supporting dark/light modes. The dashboard features a grid-based layout displaying student activity in real-time, categorized into Off-Task, On-Task, Idle, and Offline sections. Detailed student information is available via a drawer, and admin functionalities are in a dedicated interface. Roster management is a separate page for improved UX.
 
-**Dashboard Toolbar Layout**: Control buttons (Open Tab, Close Tabs, Lock/Unlock Screen, Apply Flight Path) are positioned below the search bar. Grade filtering tabs are located in the toolbar area. Two analytics tabs (Flight Path and Student Data) are positioned on the left side for quick access to monitoring insights.
+**Dashboard Layout (3-Row Design)**:
+- **Row 1**: Grade filter tabs on the left (All Grades, Kindergarten, 5th, etc.) with Student Data analytics button positioned on the right for quick access to pie chart visualizations.
+- **Row 2**: Search bar on the left with per-student targeting controls on the right (Target badge showing selection count, Select dropdown menu, and Clear Selection button).
+- **Row 3**: Color-coded control button groups for visual clarity:
+  - **Blue group**: Open Tab and Close Tab (tab management operations)
+  - **Amber group**: Lock Screen and Unlock Screen (screen control operations)
+  - **Purple group**: Apply Flight Path and Flight Path viewer (domain restriction operations)
 
 **Per-Student Targeting (Completed)**: All remote control commands now support targeting specific students via checkbox selection. Student tiles include checkboxes, and the toolbar displays selection count with "Select All" and "Clear Selection" buttons. When students are selected, commands apply only to those students; otherwise, they broadcast to all students. The UI clearly indicates targeting scope with "Target: X selected" or "Target: All students" badges.
 
