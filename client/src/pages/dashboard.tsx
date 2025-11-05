@@ -893,23 +893,25 @@ export default function Dashboard() {
                 </Button>
               )}
               {currentUser?.role === 'admin' && (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setLocation("/admin")}
-                  data-testid="button-admin"
-                >
-                  <Shield className="h-5 w-5" />
-                </Button>
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setLocation("/admin")}
+                    data-testid="button-admin"
+                  >
+                    <Shield className="h-5 w-5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setLocation("/settings")}
+                    data-testid="button-settings"
+                  >
+                    <SettingsIcon className="h-5 w-5" />
+                  </Button>
+                </>
               )}
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => setLocation("/settings")}
-                data-testid="button-settings"
-              >
-                <SettingsIcon className="h-5 w-5" />
-              </Button>
               <Button
                 variant="ghost"
                 size="icon"
