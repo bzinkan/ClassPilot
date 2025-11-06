@@ -1132,165 +1132,25 @@ export default function Dashboard() {
                 : "No student devices are currently registered. Students will appear here when they connect with the Chrome extension."}
             </p>
           </div>
-        ) : (() => {
-          // Partition students into off-task/on-task/idle/offline groups with single pass
-          const { offTaskStudents, onTaskStudents, idleStudents, offlineStudents } = filteredStudents.reduce<{
-            offTaskStudents: StudentStatus[];
-            onTaskStudents: StudentStatus[];
-            idleStudents: StudentStatus[];
-            offlineStudents: StudentStatus[];
-          }>(
-            (acc, student) => {
-              if (isStudentOffTask(student)) {
-                acc.offTaskStudents.push(student);
-              } else if (student.status === 'online') {
-                acc.onTaskStudents.push(student);
-              } else if (student.status === 'idle') {
-                acc.idleStudents.push(student);
-              } else {
-                acc.offlineStudents.push(student);
-              }
-              return acc;
-            },
-            { offTaskStudents: [], onTaskStudents: [], idleStudents: [], offlineStudents: [] }
-          );
-          
-          return (
-            <div className="space-y-8">
-              {/* Off-Task Students Section */}
-              {offTaskStudents.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-3 mb-4">
-                    <AlertTriangle className="h-5 w-5 text-red-500" />
-                    <h2 
-                      className="text-lg font-semibold text-red-600 dark:text-red-400"
-                      data-testid="heading-offtask-students"
-                    >
-                      Off-Task Students ({offTaskStudents.length})
-                    </h2>
-                    <div className="flex-1 h-px bg-red-200 dark:bg-red-800/30"></div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {offTaskStudents.map((student) => (
-                      <StudentTile
-                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
-                        student={student}
-                        onClick={() => setSelectedStudent(student)}
-                        blockedDomains={settings?.blockedDomains || []}
-                        isOffTask={true}
-                        isSelected={selectedDeviceIds.has(student.deviceId)}
-                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
-                        liveStream={liveStreams.get(student.deviceId) || null}
-                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
-                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
-                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* On-Task Students Section */}
-              {onTaskStudents.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-3 mb-4">
-                    <Monitor className="h-5 w-5 text-green-500" />
-                    <h2 
-                      className="text-lg font-semibold text-green-600 dark:text-green-400"
-                      data-testid="heading-ontask-students"
-                    >
-                      On-Task Students ({onTaskStudents.length})
-                    </h2>
-                    <div className="flex-1 h-px bg-green-200 dark:bg-green-800/30"></div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {onTaskStudents.map((student) => (
-                      <StudentTile
-                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
-                        student={student}
-                        onClick={() => setSelectedStudent(student)}
-                        blockedDomains={settings?.blockedDomains || []}
-                        isOffTask={false}
-                        isSelected={selectedDeviceIds.has(student.deviceId)}
-                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
-                        liveStream={liveStreams.get(student.deviceId) || null}
-                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
-                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
-                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Idle Students Section */}
-              {idleStudents.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-3 mb-4">
-                    <Activity className="h-5 w-5 text-amber-500" />
-                    <h2 
-                      className="text-lg font-semibold text-amber-600 dark:text-amber-400"
-                      data-testid="heading-idle-students"
-                    >
-                      Idle Students ({idleStudents.length})
-                    </h2>
-                    <div className="flex-1 h-px bg-amber-200 dark:bg-amber-800/30"></div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {idleStudents.map((student) => (
-                      <StudentTile
-                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
-                        student={student}
-                        onClick={() => setSelectedStudent(student)}
-                        blockedDomains={settings?.blockedDomains || []}
-                        isOffTask={false}
-                        isSelected={selectedDeviceIds.has(student.deviceId)}
-                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
-                        liveStream={liveStreams.get(student.deviceId) || null}
-                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
-                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
-                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Offline Students Section */}
-              {offlineStudents.length > 0 && (
-                <div>
-                  <div className="flex items-center gap-3 mb-4">
-                    <Monitor className="h-5 w-5 text-muted-foreground" />
-                    <h2 
-                      className="text-lg font-semibold text-muted-foreground"
-                      data-testid="heading-offline-students"
-                    >
-                      Offline Students ({offlineStudents.length})
-                    </h2>
-                    <div className="flex-1 h-px bg-border"></div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                    {offlineStudents.map((student) => (
-                      <StudentTile
-                        key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
-                        student={student}
-                        onClick={() => setSelectedStudent(student)}
-                        blockedDomains={settings?.blockedDomains || []}
-                        isOffTask={false}
-                        isSelected={selectedDeviceIds.has(student.deviceId)}
-                        onToggleSelect={() => toggleStudentSelection(student.deviceId)}
-                        liveStream={liveStreams.get(student.deviceId) || null}
-                        onStartLiveView={() => handleStartLiveView(student.deviceId)}
-                        onStopLiveView={() => handleStopLiveView(student.deviceId)}
-                        onEndLiveRefresh={() => refreshTile(student.deviceId)}
-                      />
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            {filteredStudents.map((student) => (
+              <StudentTile
+                key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
+                student={student}
+                onClick={() => setSelectedStudent(student)}
+                blockedDomains={settings?.blockedDomains || []}
+                isOffTask={isStudentOffTask(student)}
+                isSelected={selectedDeviceIds.has(student.deviceId)}
+                onToggleSelect={() => toggleStudentSelection(student.deviceId)}
+                liveStream={liveStreams.get(student.deviceId) || null}
+                onStartLiveView={() => handleStartLiveView(student.deviceId)}
+                onStopLiveView={() => handleStopLiveView(student.deviceId)}
+                onEndLiveRefresh={() => refreshTile(student.deviceId)}
+              />
+            ))}
+          </div>
+        )}
       </main>
 
       {/* Student Detail Drawer */}
