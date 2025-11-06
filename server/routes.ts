@@ -26,6 +26,25 @@ import {
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration } from "@shared/utils";
 
+// Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
+function normalizeGradeLevel(grade: string | null | undefined): string | null {
+  if (!grade) return null;
+  
+  const trimmed = grade.trim();
+  if (!trimmed) return null;
+  
+  // Remove common ordinal suffixes (case-insensitive)
+  // Matches: 1st, 2nd, 3rd, 4th, 5th, etc. and returns just the number
+  const normalized = trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
+  
+  // Also handle special cases like "Kindergarten" → "K"
+  if (/^kindergarten$/i.test(normalized)) {
+    return 'K';
+  }
+  
+  return normalized;
+}
+
 // Rate limiters
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
@@ -944,7 +963,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const studentData = insertStudentSchema.parse({
         deviceId,
         studentName,
-        gradeLevel: gradeLevel || null,
+        gradeLevel: normalizeGradeLevel(gradeLevel),
       });
       
       const student = await storage.createStudent(studentData);
@@ -979,7 +998,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const studentData = insertStudentSchema.parse({
             deviceId: studentInput.deviceId,
             studentName: studentInput.studentName,
-            gradeLevel: studentInput.gradeLevel || null,
+            gradeLevel: normalizeGradeLevel(studentInput.gradeLevel),
           });
           
           const student = await storage.createStudent(studentData);
@@ -1020,7 +1039,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         updates.studentName = req.body.studentName;
       }
       if ('gradeLevel' in req.body) {
-        updates.gradeLevel = req.body.gradeLevel || null;
+        updates.gradeLevel = normalizeGradeLevel(req.body.gradeLevel);
       }
       
       if (Object.keys(updates).length === 0) {
