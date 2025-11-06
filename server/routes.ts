@@ -473,6 +473,110 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Get all teacher-student assignments
+  app.get("/api/admin/teacher-students", requireAdmin, async (req, res) => {
+    try {
+      const users = await storage.getAllUsers();
+      const students = await storage.getAllStudents();
+      
+      // Get assignments for each teacher
+      const teachers = users.filter(user => user.role === 'teacher');
+      const assignments = [];
+      
+      for (const teacher of teachers) {
+        const studentIds = await storage.getTeacherStudents(teacher.id);
+        assignments.push({
+          teacherId: teacher.id,
+          teacherName: teacher.username,
+          studentIds,
+        });
+      }
+      
+      res.json({ 
+        success: true, 
+        teachers: teachers.map(t => ({
+          id: t.id,
+          username: t.username,
+          schoolName: t.schoolName,
+        })),
+        students: students.map(s => ({
+          id: s.id,
+          studentName: s.studentName,
+          studentEmail: s.studentEmail,
+          gradeLevel: s.gradeLevel,
+          deviceId: s.deviceId,
+        })),
+        assignments,
+      });
+    } catch (error) {
+      console.error("Get teacher-students error:", error);
+      res.status(500).json({ error: "Failed to fetch teacher-student assignments" });
+    }
+  });
+
+  // Admin: Assign students to a teacher
+  app.post("/api/admin/teacher-students/:teacherId", requireAdmin, async (req, res) => {
+    try {
+      const { teacherId } = req.params;
+      const { studentIds } = req.body;
+      
+      if (!Array.isArray(studentIds)) {
+        return res.status(400).json({ error: "studentIds must be an array" });
+      }
+      
+      // Verify teacher exists
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher || teacher.role !== 'teacher') {
+        return res.status(404).json({ error: "Teacher not found" });
+      }
+      
+      // Get current assignments
+      const currentStudentIds = await storage.getTeacherStudents(teacherId);
+      
+      // Find students to add and remove
+      const toAdd = studentIds.filter(id => !currentStudentIds.includes(id));
+      const toRemove = currentStudentIds.filter(id => !studentIds.includes(id));
+      
+      // Add new assignments
+      for (const studentId of toAdd) {
+        await storage.assignStudentToTeacher(teacherId, studentId);
+      }
+      
+      // Remove old assignments
+      for (const studentId of toRemove) {
+        await storage.unassignStudentFromTeacher(teacherId, studentId);
+      }
+      
+      res.json({ 
+        success: true, 
+        added: toAdd.length,
+        removed: toRemove.length,
+        message: `Updated assignments for ${teacher.username}`,
+      });
+    } catch (error) {
+      console.error("Assign students error:", error);
+      res.status(500).json({ error: "Failed to assign students to teacher" });
+    }
+  });
+
+  // Admin: Remove a student from a teacher
+  app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAdmin, async (req, res) => {
+    try {
+      const { teacherId, studentId } = req.params;
+      
+      const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
+      
+      if (!success) {
+        return res.status(404).json({ error: "Assignment not found" });
+      }
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Remove student assignment error:", error);
+      res.status(500).json({ error: "Failed to remove student assignment" });
+    }
+  });
+
   // Admin: Clean up all student data
   app.post("/api/admin/cleanup-students", requireAdmin, async (req, res) => {
     try {
