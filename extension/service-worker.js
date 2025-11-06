@@ -845,7 +845,7 @@ async function handleRemoteControl(command) {
         // Show notification with domain
         safeNotify({
           title: 'Screen Locked',
-          message: `Your teacher has locked your screen to ${lockedDomain}. You cannot open new tabs or leave this website.`,
+          message: `Your teacher has locked your screen to the current domain: ${lockedDomain}. You cannot open new tabs or navigate to other websites.`,
           priority: 2,
         });
         
