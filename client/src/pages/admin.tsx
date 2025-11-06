@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { Settings } from "@shared/schema";
 
 const createTeacherSchema = z.object({
   username: z.string().min(3, "Username must be at least 3 characters"),
@@ -85,6 +86,10 @@ export default function Admin() {
 
   const { data: assignmentsData, isLoading: isLoadingAssignments } = useQuery({
     queryKey: ["/api/admin/teacher-students"],
+  });
+
+  const { data: settings } = useQuery<Settings>({
+    queryKey: ["/api/settings"],
   });
 
   const createTeacherMutation = useMutation({
@@ -227,8 +232,8 @@ export default function Admin() {
   const students = assignmentsData?.students || [];
   const assignments = assignmentsData?.assignments || [];
 
-  // Get unique grade levels for filtering
-  const uniqueGrades = [...new Set(students.map((s: Student) => s.gradeLevel).filter(Boolean))].sort();
+  // Use all available grade levels from settings (like dashboard does)
+  const availableGrades = settings?.gradeLevels || [];
 
   // Filter students by grade
   const filteredStudents = selectedGradeFilter 
@@ -423,7 +428,7 @@ export default function Admin() {
               {selectedTeacherId && (
                 <>
                   {/* Grade Filter Tabs */}
-                  {uniqueGrades.length > 0 && (
+                  {availableGrades.length > 0 && (
                     <div className="space-y-2">
                       <Label>Filter by Grade</Label>
                       <Tabs 
@@ -439,10 +444,10 @@ export default function Admin() {
                           >
                             All Grades
                           </TabsTrigger>
-                          {uniqueGrades.map((grade) => (
+                          {availableGrades.map((grade) => (
                             <TabsTrigger 
                               key={grade} 
-                              value={grade as string}
+                              value={grade}
                               data-testid={`grade-tab-${grade}`}
                               className="flex-shrink-0"
                             >
