@@ -76,8 +76,6 @@ export default function Dashboard() {
   const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
   const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
-  const [showLockScreenDialog, setShowLockScreenDialog] = useState(false);
-  const [lockScreenUrl, setLockScreenUrl] = useState("");
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
   const [selectedFlightPathId, setSelectedFlightPathId] = useState("");
   const [showFlightPathViewerDialog, setShowFlightPathViewerDialog] = useState(false);
@@ -657,8 +655,6 @@ export default function Dashboard() {
         title: "Success",
         description: data.message,
       });
-      setShowLockScreenDialog(false);
-      setLockScreenUrl("");
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
     },
     onError: (error: Error) => {
@@ -726,17 +722,9 @@ export default function Dashboard() {
   };
 
   const handleLockScreen = () => {
-    if (!lockScreenUrl.trim()) {
-      toast({
-        variant: "destructive",
-        title: "Invalid URL",
-        description: "Please enter a valid URL",
-      });
-      return;
-    }
-    
     const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
-    lockScreenMutation.mutate({ url: lockScreenUrl, targetDeviceIds });
+    // Send "CURRENT_URL" to lock students to their current page
+    lockScreenMutation.mutate({ url: "CURRENT_URL", targetDeviceIds });
   };
 
   const handleUnlockScreen = () => {
@@ -1076,7 +1064,8 @@ export default function Dashboard() {
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setShowLockScreenDialog(true)}
+            onClick={handleLockScreen}
+            disabled={lockScreenMutation.isPending}
             data-testid="button-lock-screen"
             className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
           >
@@ -1415,50 +1404,6 @@ export default function Dashboard() {
             <Button onClick={handleCloseTabs} disabled={closeTabsMutation.isPending} data-testid="button-confirm-close-tabs">
               <TabletSmartphone className="h-4 w-4 mr-2" />
               Close Tabs
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Lock Screen Dialog */}
-      <Dialog open={showLockScreenDialog} onOpenChange={setShowLockScreenDialog}>
-        <DialogContent data-testid="dialog-lock-screen">
-          <DialogHeader>
-            <DialogTitle>Lock Student Screens</DialogTitle>
-            <DialogDescription>
-              {selectedDeviceIds.size > 0
-                ? `Lock ${selectedDeviceIds.size} selected student(s) to a specific URL`
-                : "Lock all students to a specific URL"}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="lock-screen-url">URL to Lock To</Label>
-              <Input
-                id="lock-screen-url"
-                type="url"
-                placeholder="https://example.com"
-                value={lockScreenUrl}
-                onChange={(e) => setLockScreenUrl(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !lockScreenMutation.isPending) {
-                    handleLockScreen();
-                  }
-                }}
-                data-testid="input-lock-screen-url"
-              />
-              <p className="text-xs text-muted-foreground">
-                Students will be restricted to this URL and cannot navigate away
-              </p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowLockScreenDialog(false)} data-testid="button-cancel-lock-screen">
-              Cancel
-            </Button>
-            <Button onClick={handleLockScreen} disabled={lockScreenMutation.isPending} data-testid="button-confirm-lock-screen">
-              <Lock className="h-4 w-4 mr-2" />
-              Lock Screen
             </Button>
           </DialogFooter>
         </DialogContent>

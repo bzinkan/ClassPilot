@@ -1783,7 +1783,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
   
-  // Lock Screens - Lock students to specific URL
+  // Lock Screens - Lock students to specific URL or current URL
   app.post("/api/remote/lock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
       const { url, targetDeviceIds } = req.body;
@@ -1792,6 +1792,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "URL is required" });
       }
       
+      // Send "CURRENT_URL" to extension to lock to whatever student is currently viewing
       broadcastToStudents({
         type: 'remote-control',
         command: {

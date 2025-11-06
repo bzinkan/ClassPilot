@@ -66,7 +66,7 @@ The system employs a full-stack architecture:
 -   **Remote Classroom Control**: Includes features like:
     -   **Open Tab**: Teachers can open a specific URL on all student devices or selected students. Dialog prompts for URL input and shows targeting scope (selected students vs. all students).
     -   **Close Tabs**: Teachers can close all tabs or close tabs matching a specific URL pattern (e.g., "youtube.com"). Features a tabbed dialog with "Close All Tabs" and "Close by Pattern" options.
-    -   **Lock Screen**: Teachers can lock students to a specific URL, restricting them from navigating away. Students cannot create new tabs when locked. Dialog shows targeting information and URL input with helper text.
+    -   **Lock Screen**: Teachers can instantly lock students to their current URL/domain with a single click. No dialog required - each student is locked to whatever page they're currently viewing and cannot navigate away or open new tabs. Uses special "CURRENT_URL" marker sent to extension.
     -   **Unlock Screen**: Teachers can unlock student screens with a single click. No dialog required - action executes immediately with success notification.
     -   **Apply Flight Paths**: Apply predefined flight paths with multiple allowed domains to restrict student browsing to specific educational websites.
     -   **Student Groups**: Organize students for targeted instruction.

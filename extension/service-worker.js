@@ -790,7 +790,22 @@ async function handleRemoteControl(command) {
         
       case 'lock-screen':
         screenLocked = true;
-        lockedUrl = command.data.url;
+        
+        // Handle "CURRENT_URL" special marker - lock to current active tab
+        let urlToLock = command.data.url;
+        if (urlToLock === "CURRENT_URL") {
+          const allTabs = await chrome.tabs.query({});
+          const activeTab = allTabs.find(t => t.active) || allTabs[0];
+          if (activeTab && activeTab.url) {
+            urlToLock = activeTab.url;
+            console.log('[Lock Screen] Using current tab URL:', urlToLock);
+          } else {
+            console.warn('[Lock Screen] No active tab found, cannot lock to current URL');
+            break;
+          }
+        }
+        
+        lockedUrl = urlToLock;
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
         allowedDomains = []; // Clear scene domains when locking to single domain
         
@@ -810,26 +825,14 @@ async function handleRemoteControl(command) {
         // Apply network-level blocking rules for single domain
         await updateBlockingRules([lockedDomain]);
         
-        let lockedTabId = null;
+        // Close all other tabs - keep only the current tab
+        const allTabs = await chrome.tabs.query({});
+        const activeTab = allTabs.find(t => t.active) || allTabs[0];
         
-        if (lockedUrl) {
-          // Get all tabs and close all except the one we'll lock
-          const allTabs = await chrome.tabs.query({});
-          const activeTab = allTabs.find(t => t.active) || allTabs[0];
-          
-          if (activeTab) {
-            // Update the active tab to the locked URL
-            await chrome.tabs.update(activeTab.id, { url: lockedUrl });
-            lockedTabId = activeTab.id;
-          } else {
-            // No tabs exist, create one
-            const newTab = await chrome.tabs.create({ url: lockedUrl, active: true });
-            lockedTabId = newTab.id;
-          }
-          
+        if (activeTab) {
           // Close all other tabs
           for (const tab of allTabs) {
-            if (tab.id !== lockedTabId && tab.id && !tab.url?.startsWith('chrome://')) {
+            if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')) {
               try {
                 await chrome.tabs.remove(tab.id);
               } catch (error) {
