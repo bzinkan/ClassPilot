@@ -842,7 +842,9 @@ export default function Dashboard() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">ClassPilot</h1>
-                <p className="text-xs text-muted-foreground font-medium">Teacher Dashboard</p>
+                <p className="text-xs text-muted-foreground font-medium">
+                  {currentUser?.role === 'admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -863,24 +865,28 @@ export default function Dashboard() {
                 <Download className="h-4 w-4 mr-2" />
                 Export Excel
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setLocation("/roster")}
-                data-testid="button-roster"
-              >
-                <UserCog className="h-4 w-4 mr-2" />
-                Roster
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => setShowGradeDialog(true)}
-                data-testid="button-manage-grades"
-              >
-                <GraduationCap className="h-4 w-4 mr-2" />
-                Manage Grades
-              </Button>
+              {currentUser?.role === 'admin' && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setLocation("/roster")}
+                    data-testid="button-roster"
+                  >
+                    <UserCog className="h-4 w-4 mr-2" />
+                    Roster
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowGradeDialog(true)}
+                    data-testid="button-manage-grades"
+                  >
+                    <GraduationCap className="h-4 w-4 mr-2" />
+                    Manage Grades
+                  </Button>
+                </>
+              )}
               {currentUser?.role === 'teacher' && (
                 <Button
                   variant="ghost"
