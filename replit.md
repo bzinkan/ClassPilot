@@ -36,6 +36,12 @@ The system employs a full-stack architecture:
 -   **Chrome Extension**: A Manifest V3 extension with a reliable background service worker using `chrome.alarms` for persistent heartbeat monitoring. It includes production-ready configuration, automatic student detection via the Chrome Identity API, reliable 10-second heartbeats, exponential backoff for retries, and `chrome.webNavigation` for tracking browsing activity.
 
 ### Feature Specifications
+-   **Email-Based Student Recognition (Nov 2025)**: Students are now identified by email address across all devices. The system automatically:
+    -   Finds existing student records by email when the extension registers
+    -   Reuses the same student record when a student switches devices
+    -   Updates the deviceId field to track the currently active device
+    -   Prevents duplicate student records from being created
+    -   Maintains a single student identity across multiple Chromebooks or device changes
 -   **Shared Chromebook Support**: Full support for multiple students on the same device, with automatic student detection using Google Workspace email and student-specific activity tracking.
 -   **Teacher Dashboard**: Displays live student activity, manages class rosters, and configures data retention. Features customizable grade tabs, in-dashboard grade management, and options to delete students/devices.
 -   **Roster Management Page**: A dedicated page for comprehensive device and student assignment management, including grade-level filtering, assigning multiple students per device, editing student and device information, and managing deletions.
