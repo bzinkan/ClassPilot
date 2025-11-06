@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, UserCheck } from "lucide-react";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -21,6 +21,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 
 const createTeacherSchema = z.object({
   username: z.string().min(3, "Username must be at least 3 characters"),
@@ -37,12 +45,28 @@ interface Teacher {
   schoolName: string;
 }
 
+interface Student {
+  id: string;
+  studentName: string;
+  studentEmail: string;
+  gradeLevel: string | null;
+  deviceId: string;
+}
+
+interface Assignment {
+  teacherId: string;
+  teacherName: string;
+  studentIds: string[];
+}
+
 export default function Admin() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [teacherToDelete, setTeacherToDelete] = useState<Teacher | null>(null);
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
+  const [selectedTeacherId, setSelectedTeacherId] = useState<string>("");
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -55,6 +79,10 @@ export default function Admin() {
 
   const { data: teachersData, isLoading } = useQuery({
     queryKey: ["/api/admin/teachers"],
+  });
+
+  const { data: assignmentsData, isLoading: isLoadingAssignments } = useQuery({
+    queryKey: ["/api/admin/teacher-students"],
   });
 
   const createTeacherMutation = useMutation({
@@ -121,6 +149,26 @@ export default function Admin() {
     },
   });
 
+  const assignStudentsMutation = useMutation({
+    mutationFn: async ({ teacherId, studentIds }: { teacherId: string; studentIds: string[] }) => {
+      return await apiRequest("POST", `/api/admin/teacher-students/${teacherId}`, { studentIds });
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      toast({
+        title: "Assignments updated",
+        description: data.message || "Student assignments have been updated successfully.",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update assignments",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
   const onSubmit = (data: CreateTeacherForm) => {
     createTeacherMutation.mutate(data);
   };
@@ -136,7 +184,46 @@ export default function Admin() {
     }
   };
 
+  const handleTeacherSelect = (teacherId: string) => {
+    setSelectedTeacherId(teacherId);
+    
+    // Find current assignments for this teacher
+    const assignment = assignmentsData?.assignments?.find(
+      (a: Assignment) => a.teacherId === teacherId
+    );
+    
+    setSelectedStudentIds(new Set(assignment?.studentIds || []));
+  };
+
+  const handleStudentToggle = (studentId: string, checked: boolean) => {
+    const newSet = new Set(selectedStudentIds);
+    if (checked) {
+      newSet.add(studentId);
+    } else {
+      newSet.delete(studentId);
+    }
+    setSelectedStudentIds(newSet);
+  };
+
+  const handleSaveAssignments = () => {
+    if (!selectedTeacherId) {
+      toast({
+        variant: "destructive",
+        title: "No teacher selected",
+        description: "Please select a teacher first.",
+      });
+      return;
+    }
+
+    assignStudentsMutation.mutate({
+      teacherId: selectedTeacherId,
+      studentIds: Array.from(selectedStudentIds),
+    });
+  };
+
   const teachers = teachersData?.teachers || [];
+  const students = assignmentsData?.students || [];
+  const assignments = assignmentsData?.assignments || [];
 
   return (
     <div className="container mx-auto p-6 max-w-6xl space-y-6">
@@ -278,6 +365,99 @@ export default function Admin() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <UserCheck className="h-5 w-5" />
+            Assign Students to Teachers
+          </CardTitle>
+          <CardDescription>
+            Manage which students each teacher can see on their dashboard
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {isLoadingAssignments ? (
+            <div className="text-center py-8 text-muted-foreground">
+              Loading assignments...
+            </div>
+          ) : teachers.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              Create a teacher account first to assign students.
+            </div>
+          ) : students.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              No students registered yet. Students will appear here once they connect with the Chrome extension.
+            </div>
+          ) : (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="teacher-select">Select Teacher</Label>
+                <Select
+                  value={selectedTeacherId}
+                  onValueChange={handleTeacherSelect}
+                >
+                  <SelectTrigger data-testid="select-teacher" className="w-full">
+                    <SelectValue placeholder="Choose a teacher..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {teachers.map((teacher: Teacher) => (
+                      <SelectItem key={teacher.id} value={teacher.id}>
+                        {teacher.username} ({teacher.schoolName})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {selectedTeacherId && (
+                <>
+                  <div className="space-y-2">
+                    <Label>Students ({selectedStudentIds.size} selected)</Label>
+                    <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-3">
+                      {students.map((student: Student) => (
+                        <div
+                          key={student.id}
+                          className="flex items-center space-x-3 p-2 rounded-md hover-elevate"
+                          data-testid={`student-row-${student.id}`}
+                        >
+                          <Checkbox
+                            id={`student-${student.id}`}
+                            data-testid={`checkbox-student-${student.id}`}
+                            checked={selectedStudentIds.has(student.id)}
+                            onCheckedChange={(checked) => 
+                              handleStudentToggle(student.id, checked as boolean)
+                            }
+                          />
+                          <label
+                            htmlFor={`student-${student.id}`}
+                            className="flex-1 cursor-pointer"
+                          >
+                            <p className="font-medium">{student.studentName}</p>
+                            <p className="text-sm text-muted-foreground">
+                              {student.studentEmail}
+                              {student.gradeLevel && ` • ${student.gradeLevel}`}
+                            </p>
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={handleSaveAssignments}
+                    data-testid="button-save-assignments"
+                    disabled={assignStudentsMutation.isPending}
+                    className="w-full"
+                  >
+                    {assignStudentsMutation.isPending ? "Saving..." : "Save Assignments"}
+                  </Button>
+                </>
+              )}
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="border-destructive/50">
         <CardHeader>
