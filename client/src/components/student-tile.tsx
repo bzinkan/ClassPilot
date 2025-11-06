@@ -347,43 +347,27 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     }
   };
 
-  const getBorderStyle = (status: string) => {
+  const getGlowStyle = (status: string) => {
     if (isOffTask) {
-      return 'border-2 border-red-500';
+      // Red glow for off-task students
+      return 'shadow-[0_0_20px_rgba(239,68,68,0.5)] dark:shadow-[0_0_20px_rgba(239,68,68,0.3)]';
     }
     
     if (isBlocked) {
-      return 'border-2 border-destructive';
+      // Red glow for blocked domain
+      return 'shadow-[0_0_20px_rgba(239,68,68,0.5)] dark:shadow-[0_0_20px_rgba(239,68,68,0.3)]';
     }
     
     switch (status) {
       case 'online':
-        return 'border-2 border-green-500/30';
+        // Green glow for on-task students
+        return 'shadow-[0_0_20px_rgba(34,197,94,0.4)] dark:shadow-[0_0_20px_rgba(34,197,94,0.3)]';
       case 'idle':
-        return 'border-2 border-amber-500/30';
+        // Yellow glow for idle students
+        return 'shadow-[0_0_20px_rgba(245,158,11,0.4)] dark:shadow-[0_0_20px_rgba(245,158,11,0.3)]';
       case 'offline':
-        return 'border border-border/40';
-      default:
-        return 'border border-border';
-    }
-  };
-
-  const getShadowStyle = (status: string) => {
-    if (isOffTask) {
-      return 'shadow-lg shadow-red-100 dark:shadow-red-950/30';
-    }
-    
-    if (isBlocked) {
-      return 'shadow-lg shadow-destructive/10';
-    }
-    
-    switch (status) {
-      case 'online':
-        return 'shadow-lg shadow-green-100 dark:shadow-green-950/30';
-      case 'idle':
-        return 'shadow-lg shadow-amber-100 dark:shadow-amber-950/30';
-      case 'offline':
-        return 'shadow-md';
+        // Grey/subtle glow for offline students
+        return 'shadow-[0_0_15px_rgba(156,163,175,0.2)] dark:shadow-[0_0_15px_rgba(156,163,175,0.15)]';
       default:
         return 'shadow-md';
     }

@@ -406,14 +406,7 @@ export default function Dashboard() {
       return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
     })
     .sort((a, b) => {
-      // Online students first, offline students last
-      const aOffline = a.status === 'offline';
-      const bOffline = b.status === 'offline';
-      
-      if (aOffline && !bOffline) return 1;  // a is offline, b is not -> b comes first
-      if (!aOffline && bOffline) return -1; // a is not offline, b is -> a comes first
-      
-      // Within same online/offline status, sort alphabetically by last name
+      // Sort alphabetically by last name only
       const aLastName = getLastName(a.studentName);
       const bLastName = getLastName(b.studentName);
       
