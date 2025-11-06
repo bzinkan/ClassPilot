@@ -61,6 +61,15 @@ interface Assignment {
   studentIds: string[];
 }
 
+interface TeachersResponse {
+  teachers: Teacher[];
+}
+
+interface AssignmentsResponse {
+  students: Student[];
+  assignments: Assignment[];
+}
+
 export default function Admin() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -80,11 +89,11 @@ export default function Admin() {
     },
   });
 
-  const { data: teachersData, isLoading } = useQuery({
+  const { data: teachersData, isLoading } = useQuery<TeachersResponse>({
     queryKey: ["/api/admin/teachers"],
   });
 
-  const { data: assignmentsData, isLoading: isLoadingAssignments } = useQuery({
+  const { data: assignmentsData, isLoading: isLoadingAssignments } = useQuery<AssignmentsResponse>({
     queryKey: ["/api/admin/teacher-students"],
   });
 
