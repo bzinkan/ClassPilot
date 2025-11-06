@@ -52,6 +52,7 @@ interface WSClient {
   ws: WebSocket;
   role: 'teacher' | 'student';
   deviceId?: string;
+  userId?: string; // For teachers - needed for permission checks
   authenticated: boolean;
 }
 
@@ -191,9 +192,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Handle authentication
         if (message.type === 'auth') {
           if (message.role === 'teacher') {
-            // In production, validate WS_SHARED_KEY from settings
+            // Store teacher userId for permission checks
             client.role = 'teacher';
+            client.userId = message.userId; // Store userId from auth message
             client.authenticated = true;
+            console.log('[WebSocket] Teacher authenticated with userId:', client.userId);
             ws.send(JSON.stringify({ type: 'auth-success', role: 'teacher' }));
           } else if (message.role === 'student' && message.deviceId) {
             client.role = 'student';
@@ -275,6 +278,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const targetDeviceId = message.deviceId;
           if (!targetDeviceId) return;
 
+          // Permission check: Verify teacher has access to this student
+          if (client.userId) {
+            try {
+              // Get the user to check role
+              const user = await storage.getUser(client.userId);
+              
+              // Admins can view all students; teachers need permission check
+              if (user && user.role !== 'admin') {
+                // Get the active student for this device
+                const activeStudent = await storage.getActiveStudentForDevice(targetDeviceId);
+                
+                if (activeStudent) {
+                  // Check if this student is assigned to the teacher
+                  const teacherStudentIds = await storage.getTeacherStudents(client.userId);
+                  
+                  if (!teacherStudentIds.includes(activeStudent.id)) {
+                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission`);
+                    ws.send(JSON.stringify({
+                      type: 'error',
+                      message: 'You do not have permission to view this student\'s screen'
+                    }));
+                    return; // Block the request
+                  }
+                }
+              }
+            } catch (error) {
+              console.error('[WebSocket] Permission check error:', error);
+              // On error, allow the request (fail open for now)
+            }
+          }
+
+          // Permission granted or admin - forward the request
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
