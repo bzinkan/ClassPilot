@@ -149,9 +149,13 @@ export default function Dashboard() {
           setWsConnected(true);
           reconnectAttemptsRef.current = 0; // Reset reconnection counter on successful connection
           
-          // Authenticate as teacher
-          socket.send(JSON.stringify({ type: 'auth', role: 'teacher' }));
-          console.log("[Dashboard] Sent auth message");
+          // Authenticate as teacher with userId
+          if (currentUser?.id) {
+            socket.send(JSON.stringify({ type: 'auth', role: 'teacher', userId: currentUser.id }));
+            console.log("[Dashboard] Sent auth message with userId:", currentUser.id);
+          } else {
+            console.warn("[Dashboard] Cannot authenticate - currentUser not available yet");
+          }
         };
 
         socket.onmessage = (event) => {
@@ -245,6 +249,14 @@ export default function Dashboard() {
       webrtc.cleanup();
     };
   }, []); // Empty deps - WebSocket connection should only be created once
+
+  // Re-authenticate when currentUser becomes available (for teachers)
+  useEffect(() => {
+    if (currentUser?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      console.log("[Dashboard] Re-authenticating with userId:", currentUser.id);
+      wsRef.current.send(JSON.stringify({ type: 'auth', role: 'teacher', userId: currentUser.id }));
+    }
+  }, [currentUser?.id]);
 
   // Set initial grade when settings load and validate saved grade
   useEffect(() => {
