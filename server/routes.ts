@@ -764,8 +764,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all persisted students from database (for roster management)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const students = await storage.getAllStudents();
-      res.json(students);
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const allStudents = await storage.getAllStudents();
+      
+      // Admins see all students; teachers see only their assigned students
+      let filteredStudents: typeof allStudents;
+      if (user.role === 'admin') {
+        filteredStudents = allStudents;
+      } else {
+        // Get teacher's assigned student IDs
+        const assignedStudentIds = await storage.getTeacherStudents(userId);
+        const assignedIdSet = new Set(assignedStudentIds);
+        filteredStudents = allStudents.filter(student => assignedIdSet.has(student.id));
+      }
+      
+      res.json(filteredStudents);
     } catch (error) {
       console.error("Get roster students error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -775,8 +797,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all devices from database (for roster management)
   app.get("/api/roster/devices", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const devices = await storage.getAllDevices();
-      res.json(devices);
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const allDevices = await storage.getAllDevices();
+      
+      // Admins see all devices; teachers see only devices with their assigned students
+      let filteredDevices: typeof allDevices;
+      if (user.role === 'admin') {
+        filteredDevices = allDevices;
+      } else {
+        // Get teacher's assigned student IDs
+        const assignedStudentIds = await storage.getTeacherStudents(userId);
+        const allStudents = await storage.getAllStudents();
+        
+        // Get device IDs that have at least one assigned student
+        const deviceIdsWithAssignedStudents = new Set(
+          allStudents
+            .filter(student => assignedStudentIds.includes(student.id))
+            .map(student => student.deviceId)
+        );
+        
+        filteredDevices = allDevices.filter(device => 
+          deviceIdsWithAssignedStudents.has(device.deviceId)
+        );
+      }
+      
+      res.json(filteredDevices);
     } catch (error) {
       console.error("Get roster devices error:", error);
       res.status(500).json({ error: "Internal server error" });
