@@ -32,6 +32,15 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type { Settings } from "@shared/schema";
 
+// Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
+function normalizeGrade(grade: string | null | undefined): string | null {
+  if (!grade) return null;
+  const trimmed = grade.trim();
+  if (!trimmed) return null;
+  // Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+  return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
+}
+
 const createTeacherSchema = z.object({
   username: z.string().min(3, "Username must be at least 3 characters"),
   password: z.string().min(6, "Password must be at least 6 characters"),
@@ -244,9 +253,11 @@ export default function Admin() {
   // Use all available grade levels from settings (like dashboard does)
   const availableGrades = settings?.gradeLevels || [];
 
-  // Filter students by grade
+  // Filter students by grade (normalize both sides for comparison)
   const filteredStudents = selectedGradeFilter 
-    ? students.filter((s: Student) => s.gradeLevel === selectedGradeFilter)
+    ? students.filter((s: Student) => 
+        normalizeGrade(s.gradeLevel) === normalizeGrade(selectedGradeFilter)
+      )
     : students;
 
   return (

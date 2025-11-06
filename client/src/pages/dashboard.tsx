@@ -32,6 +32,15 @@ import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat, Settings, FlightPath } from "@shared/schema";
 
+// Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
+function normalizeGrade(grade: string | null | undefined): string | null {
+  if (!grade) return null;
+  const trimmed = grade.trim();
+  if (!trimmed) return null;
+  // Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+  return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
+}
+
 interface CurrentUser {
   id: string;
   username: string;
@@ -393,8 +402,8 @@ export default function Dashboard() {
       
       if (!matchesSearch) return false;
       
-      // Filter by gradeLevel field (selectedGrade will always have a value from settings)
-      return student.gradeLevel === selectedGrade;
+      // Filter by gradeLevel field (normalize both sides for comparison)
+      return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
     })
     .sort((a, b) => {
       // Online students first, offline students last
@@ -411,8 +420,10 @@ export default function Dashboard() {
       return aLastName.localeCompare(bLastName);
     });
 
-  // Count stats only for students in the currently selected grade
-  const studentsInGrade = students.filter((s) => s.gradeLevel === selectedGrade);
+  // Count stats only for students in the currently selected grade (normalize for comparison)
+  const studentsInGrade = students.filter((s) => 
+    normalizeGrade(s.gradeLevel) === normalizeGrade(selectedGrade)
+  );
   const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
   const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
   const offlineCount = studentsInGrade.filter((s) => s.status === 'offline').length;

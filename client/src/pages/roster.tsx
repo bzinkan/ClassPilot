@@ -16,6 +16,15 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { Device, Student, Settings } from "@shared/schema";
 
+// Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
+function normalizeGrade(grade: string | null | undefined): string | null {
+  if (!grade) return null;
+  const trimmed = grade.trim();
+  if (!trimmed) return null;
+  // Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
+  return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
+}
+
 type DialogType = 
   | { type: 'add-student'; deviceId: string }
   | { type: 'edit-student'; student: Student }
@@ -69,7 +78,7 @@ export default function RosterPage() {
   // Filter students by selected grade
   const filteredStudents = selectedGrade === "All" 
     ? students 
-    : students.filter(s => s.gradeLevel === selectedGrade);
+    : students.filter(s => normalizeGrade(s.gradeLevel) === normalizeGrade(selectedGrade));
 
   // Get devices that have students in the selected grade
   const deviceIdsWithFilteredStudents = new Set(filteredStudents.map(s => s.deviceId));
