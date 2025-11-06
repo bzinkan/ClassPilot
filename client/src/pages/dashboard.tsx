@@ -288,8 +288,11 @@ export default function Dashboard() {
     }
   }, [selectedGrade]);
 
-  // Check if student is off-task (not on allowed domains)
+  // Check if student is off-task (not on allowed domains OR camera is active)
   const isStudentOffTask = (student: StudentStatus): boolean => {
+    // Camera active = always off-task
+    if (student.cameraActive) return true;
+    
     // Only check if allowedDomains is configured and has entries
     if (!settings?.allowedDomains || settings.allowedDomains.length === 0) return false;
     if (!student.activeTabUrl) return false;
@@ -420,7 +423,6 @@ export default function Dashboard() {
   const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
   const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
   const offlineCount = studentsInGrade.filter((s) => s.status === 'offline').length;
-  const cameraActiveCount = studentsInGrade.filter((s) => s.cameraActive).length;
   const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
 
   // Get unique open tabs from selected students (or all if none selected)
@@ -488,31 +490,6 @@ export default function Dashboard() {
       }
     });
   }, [students, settings, toast]);
-
-  // Track camera usage notifications
-  const notifiedCameraUsage = useRef<Set<string>>(new Set());
-  
-  // Check for camera usage and show notifications
-  useEffect(() => {
-    students.forEach((student) => {
-      const cameraKey = `${student.deviceId}-camera`;
-      
-      if (student.cameraActive) {
-        // Only notify if this is new camera usage (not previously notified)
-        if (!notifiedCameraUsage.current.has(cameraKey)) {
-          toast({
-            title: "Camera Active",
-            description: `${student.studentName} has activated their camera`,
-            duration: 5000,
-          });
-          notifiedCameraUsage.current.add(cameraKey);
-        }
-      } else {
-        // Clear notification if student turned off camera
-        notifiedCameraUsage.current.delete(cameraKey);
-      }
-    });
-  }, [students, toast]);
 
   const handleLogout = () => {
     // Clear auth and redirect to login
@@ -991,17 +968,6 @@ export default function Dashboard() {
               <div>
                 <p className="text-3xl font-bold text-gray-700 dark:text-gray-400" data-testid="text-offline-count">{offlineCount}</p>
                 <p className="text-sm text-gray-600 dark:text-gray-500 font-medium">Offline</p>
-              </div>
-            </div>
-          </div>
-          <div className="p-5 rounded-xl bg-gradient-to-br from-purple-50 to-violet-50 dark:from-purple-950/30 dark:to-violet-950/30 border border-purple-200 dark:border-purple-800/50 shadow-lg hover-elevate transition-all duration-300">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-purple-500 flex items-center justify-center shadow-md">
-                <Video className="h-7 w-7 text-white" />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-purple-700 dark:text-purple-400" data-testid="text-camera-count">{cameraActiveCount}</p>
-                <p className="text-sm text-purple-600 dark:text-purple-500 font-medium">Camera Active</p>
               </div>
             </div>
           </div>
