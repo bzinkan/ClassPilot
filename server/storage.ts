@@ -61,6 +61,7 @@ export interface IStorage {
 
   // Students (assigned to devices)
   getStudent(studentId: string): Promise<Student | undefined>;
+  getStudentByEmail(email: string): Promise<Student | undefined>;
   getStudentsByDevice(deviceId: string): Promise<Student[]>;
   getAllStudents(): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
@@ -263,6 +264,11 @@ export class MemStorage implements IStorage {
   // Students
   async getStudent(studentId: string): Promise<Student | undefined> {
     return this.students.get(studentId);
+  }
+
+  async getStudentByEmail(email: string): Promise<Student | undefined> {
+    return Array.from(this.students.values())
+      .find(s => s.studentEmail === email);
   }
 
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
@@ -1006,6 +1012,11 @@ export class DatabaseStorage implements IStorage {
   // Students
   async getStudent(studentId: string): Promise<Student | undefined> {
     const [student] = await db.select().from(students).where(eq(students.id, studentId));
+    return student || undefined;
+  }
+
+  async getStudentByEmail(email: string): Promise<Student | undefined> {
+    const [student] = await db.select().from(students).where(eq(students.studentEmail, email));
     return student || undefined;
   }
 

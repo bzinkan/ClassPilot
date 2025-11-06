@@ -717,15 +717,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         device = await storage.registerDevice(deviceData);
       }
       
-      // Check if student with this email already exists on this device
-      const existingStudents = await storage.getStudentsByDevice(deviceData.deviceId);
-      let student = existingStudents.find(s => s.studentEmail === studentEmail);
+      // Check if student with this email already exists (across ALL devices)
+      let student = await storage.getStudentByEmail(studentEmail);
       
       if (student) {
-        // Student already exists for this device
-        console.log('Student already registered:', studentEmail, 'studentId:', student.id);
+        // Student exists! Check if they switched devices
+        if (student.deviceId !== deviceData.deviceId) {
+          console.log('Student switched devices:', studentEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
+          // Update student's device to the new one
+          student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+        } else {
+          console.log('Student already registered on this device:', studentEmail, 'studentId:', student.id);
+        }
       } else {
-        // Create new student assignment
+        // Create new student (first time seeing this email)
         const studentData = insertStudentSchema.parse({
           deviceId: deviceData.deviceId,
           studentName,
