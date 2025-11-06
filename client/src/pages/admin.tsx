@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const createTeacherSchema = z.object({
   username: z.string().min(3, "Username must be at least 3 characters"),
@@ -67,6 +68,7 @@ export default function Admin() {
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>("");
   const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
+  const [selectedGradeFilter, setSelectedGradeFilter] = useState<string>("");
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -224,6 +226,14 @@ export default function Admin() {
   const teachers = teachersData?.teachers || [];
   const students = assignmentsData?.students || [];
   const assignments = assignmentsData?.assignments || [];
+
+  // Get unique grade levels for filtering
+  const uniqueGrades = [...new Set(students.map((s: Student) => s.gradeLevel).filter(Boolean))].sort();
+
+  // Filter students by grade
+  const filteredStudents = selectedGradeFilter 
+    ? students.filter((s: Student) => s.gradeLevel === selectedGradeFilter)
+    : students;
 
   return (
     <div className="container mx-auto p-6 max-w-6xl space-y-6">
@@ -412,35 +422,79 @@ export default function Admin() {
 
               {selectedTeacherId && (
                 <>
-                  <div className="space-y-2">
-                    <Label>Students ({selectedStudentIds.size} selected)</Label>
-                    <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-3">
-                      {students.map((student: Student) => (
-                        <div
-                          key={student.id}
-                          className="flex items-center space-x-3 p-2 rounded-md hover-elevate"
-                          data-testid={`student-row-${student.id}`}
-                        >
-                          <Checkbox
-                            id={`student-${student.id}`}
-                            data-testid={`checkbox-student-${student.id}`}
-                            checked={selectedStudentIds.has(student.id)}
-                            onCheckedChange={(checked) => 
-                              handleStudentToggle(student.id, checked as boolean)
-                            }
-                          />
-                          <label
-                            htmlFor={`student-${student.id}`}
-                            className="flex-1 cursor-pointer"
+                  {/* Grade Filter Tabs */}
+                  {uniqueGrades.length > 0 && (
+                    <div className="space-y-2">
+                      <Label>Filter by Grade</Label>
+                      <Tabs 
+                        value={selectedGradeFilter} 
+                        onValueChange={setSelectedGradeFilter}
+                        className="w-full"
+                      >
+                        <TabsList className="w-full justify-start flex-wrap h-auto">
+                          <TabsTrigger 
+                            value="" 
+                            data-testid="grade-tab-all"
+                            className="flex-shrink-0"
                           >
-                            <p className="font-medium">{student.studentName}</p>
-                            <p className="text-sm text-muted-foreground">
-                              {student.studentEmail}
-                              {student.gradeLevel && ` • ${student.gradeLevel}`}
-                            </p>
-                          </label>
+                            All Grades
+                          </TabsTrigger>
+                          {uniqueGrades.map((grade) => (
+                            <TabsTrigger 
+                              key={grade} 
+                              value={grade as string}
+                              data-testid={`grade-tab-${grade}`}
+                              className="flex-shrink-0"
+                            >
+                              {grade}
+                            </TabsTrigger>
+                          ))}
+                        </TabsList>
+                      </Tabs>
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    <Label>
+                      Students ({selectedStudentIds.size} selected
+                      {selectedGradeFilter && ` • Showing ${filteredStudents.length} in ${selectedGradeFilter}`})
+                    </Label>
+                    <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-3">
+                      {filteredStudents.length === 0 ? (
+                        <div className="text-center py-8 text-muted-foreground">
+                          {selectedGradeFilter 
+                            ? `No students found in ${selectedGradeFilter}`
+                            : "No students available"
+                          }
                         </div>
-                      ))}
+                      ) : (
+                        filteredStudents.map((student: Student) => (
+                          <div
+                            key={student.id}
+                            className="flex items-center space-x-3 p-2 rounded-md hover-elevate"
+                            data-testid={`student-row-${student.id}`}
+                          >
+                            <Checkbox
+                              id={`student-${student.id}`}
+                              data-testid={`checkbox-student-${student.id}`}
+                              checked={selectedStudentIds.has(student.id)}
+                              onCheckedChange={(checked) => 
+                                handleStudentToggle(student.id, checked as boolean)
+                              }
+                            />
+                            <label
+                              htmlFor={`student-${student.id}`}
+                              className="flex-1 cursor-pointer"
+                            >
+                              <p className="font-medium">{student.studentName}</p>
+                              <p className="text-sm text-muted-foreground">
+                                {student.studentEmail}
+                                {student.gradeLevel && ` • ${student.gradeLevel}`}
+                              </p>
+                            </label>
+                          </div>
+                        ))
+                      )}
                     </div>
                   </div>
 
