@@ -41,6 +41,21 @@ function normalizeGrade(grade: string | null | undefined): string | null {
   return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
 }
 
+// Helper to check if current time is within tracking hours
+function isWithinTrackingHours(settings: Settings | undefined): boolean {
+  if (!settings || !settings.enableTrackingHours) {
+    return true; // Always tracking if not enabled
+  }
+
+  const now = new Date();
+  const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
+
+  const startTime = settings.trackingStartTime || "00:00";
+  const endTime = settings.trackingEndTime || "23:59";
+
+  return currentTime >= startTime && currentTime <= endTime;
+}
+
 interface CurrentUser {
   id: string;
   username: string;
@@ -837,6 +852,16 @@ export default function Dashboard() {
                 <div className={`h-2 w-2 rounded-full mr-1.5 ${wsConnected ? 'bg-status-online animate-pulse' : 'bg-status-offline'}`} />
                 {wsConnected ? 'Connected' : 'Disconnected'}
               </Badge>
+              {settings?.enableTrackingHours && (
+                <Badge
+                  variant={isWithinTrackingHours(settings) ? "default" : "secondary"}
+                  className="text-xs"
+                  data-testid="badge-tracking-status"
+                >
+                  <div className={`h-2 w-2 rounded-full mr-1.5 ${isWithinTrackingHours(settings) ? 'bg-status-online animate-pulse' : 'bg-amber-500'}`} />
+                  {isWithinTrackingHours(settings) ? 'Tracking Active' : 'Tracking Paused'}
+                </Badge>
+              )}
               <Button
                 variant="outline"
                 size="sm"
