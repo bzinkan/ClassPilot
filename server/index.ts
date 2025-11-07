@@ -71,6 +71,7 @@ app.use(
     secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
     resave: false,
     saveUninitialized: false,
+    rolling: true, // Auto-renew session on activity to keep it alive
     cookie: {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production", // true for HTTPS
