@@ -31,6 +31,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat, Settings, FlightPath } from "@shared/schema";
+import { isWithinTrackingHours } from "@shared/utils";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
 function normalizeGrade(grade: string | null | undefined): string | null {
@@ -39,21 +40,6 @@ function normalizeGrade(grade: string | null | undefined): string | null {
   if (!trimmed) return null;
   // Remove ordinal suffixes (1st, 2nd, 3rd, 4th, etc.)
   return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
-}
-
-// Helper to check if current time is within tracking hours
-function isWithinTrackingHours(settings: Settings | undefined): boolean {
-  if (!settings || !settings.enableTrackingHours) {
-    return true; // Always tracking if not enabled
-  }
-
-  const now = new Date();
-  const currentTime = now.toTimeString().slice(0, 5); // HH:MM format
-
-  const startTime = settings.trackingStartTime || "00:00";
-  const endTime = settings.trackingEndTime || "23:59";
-
-  return currentTime >= startTime && currentTime <= endTime;
 }
 
 interface CurrentUser {
@@ -854,12 +840,27 @@ export default function Dashboard() {
               </Badge>
               {settings?.enableTrackingHours && (
                 <Badge
-                  variant={isWithinTrackingHours(settings) ? "default" : "secondary"}
+                  variant={isWithinTrackingHours(
+                    settings.enableTrackingHours,
+                    settings.trackingStartTime,
+                    settings.trackingEndTime,
+                    settings.schoolTimezone
+                  ) ? "default" : "secondary"}
                   className="text-xs"
                   data-testid="badge-tracking-status"
                 >
-                  <div className={`h-2 w-2 rounded-full mr-1.5 ${isWithinTrackingHours(settings) ? 'bg-status-online animate-pulse' : 'bg-amber-500'}`} />
-                  {isWithinTrackingHours(settings) ? 'Tracking Active' : 'Tracking Paused'}
+                  <div className={`h-2 w-2 rounded-full mr-1.5 ${isWithinTrackingHours(
+                    settings.enableTrackingHours,
+                    settings.trackingStartTime,
+                    settings.trackingEndTime,
+                    settings.schoolTimezone
+                  ) ? 'bg-status-online animate-pulse' : 'bg-amber-500'}`} />
+                  {isWithinTrackingHours(
+                    settings.enableTrackingHours,
+                    settings.trackingStartTime,
+                    settings.trackingEndTime,
+                    settings.schoolTimezone
+                  ) ? 'Tracking Active' : 'Tracking Paused'}
                 </Badge>
               )}
               <Button

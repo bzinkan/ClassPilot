@@ -125,3 +125,51 @@ export function groupSessionsByDevice(heartbeats: Heartbeat[]): Map<string, URLS
 
   return deviceSessions;
 }
+
+/**
+ * Check if the current time is within tracking hours, using the school's timezone.
+ * This ensures consistent enforcement across client and server regardless of where they're hosted.
+ * 
+ * @param enableTrackingHours - Whether tracking hours feature is enabled
+ * @param trackingStartTime - Start time in HH:MM format (e.g., "08:00")
+ * @param trackingEndTime - End time in HH:MM format (e.g., "15:00")
+ * @param schoolTimezone - School timezone in IANA format (e.g., "America/New_York")
+ * @returns true if currently within tracking hours (or if feature disabled), false otherwise
+ */
+export function isWithinTrackingHours(
+  enableTrackingHours: boolean | null | undefined,
+  trackingStartTime: string | null | undefined,
+  trackingEndTime: string | null | undefined,
+  schoolTimezone: string | null | undefined
+): boolean {
+  // If tracking hours not enabled, always allow tracking
+  if (!enableTrackingHours) {
+    return true;
+  }
+
+  // Defaults
+  const startTime = trackingStartTime || "00:00";
+  const endTime = trackingEndTime || "23:59";
+  const timezone = schoolTimezone || "America/New_York";
+
+  try {
+    // Get current time in school's timezone
+    const now = new Date();
+    const schoolTimeString = now.toLocaleString("en-US", { 
+      timeZone: timezone,
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+    
+    // Extract HH:MM from the formatted string
+    const currentTime = schoolTimeString.split(', ')[1] || schoolTimeString;
+
+    // Compare times as strings (HH:MM format)
+    return currentTime >= startTime && currentTime <= endTime;
+  } catch (error) {
+    console.error("Error checking tracking hours:", error);
+    // On error, default to allowing tracking (fail open for usability)
+    return true;
+  }
+}

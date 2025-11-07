@@ -209,6 +209,7 @@ export const settings = pgTable("settings", {
   enableTrackingHours: boolean("enable_tracking_hours").default(false), // Enable school-hours-only tracking
   trackingStartTime: text("tracking_start_time").default("08:00"), // School start time (24-hour format, e.g., "08:00")
   trackingEndTime: text("tracking_end_time").default("15:00"), // School end time (24-hour format, e.g., "15:00")
+  schoolTimezone: text("school_timezone").default("America/New_York"), // School timezone (IANA format, e.g., "America/New_York")
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });

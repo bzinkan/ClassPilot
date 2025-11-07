@@ -63,6 +63,13 @@ The system employs a full-stack architecture:
     -   **Snapshots Tab**: Screenshot storage and viewing (placeholder for future implementation)
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
+-   **School Tracking Hours (Nov 2025)**: Privacy-focused feature allowing administrators to configure when student monitoring is active:
+    -   **Timezone-Aware Enforcement**: School hours are enforced in the school's configured timezone (IANA format like "America/New_York"), ensuring consistent behavior regardless of server location
+    -   **Backend Validation**: Heartbeat endpoint validates incoming data against tracking hours, silently rejecting heartbeats outside the configured window
+    -   **Dashboard Indicator**: Real-time badge in dashboard header showing "Tracking Active" (green) or "Tracking Paused" (amber) based on current time in school timezone
+    -   **Admin Configuration**: Admin-only UI to enable/disable tracking hours, set start/end times (HH:MM format), and select school timezone from common US timezones
+    -   **Shared Utility**: `isWithinTrackingHours` function in `shared/utils.ts` ensures consistent enforcement across frontend and backend
+    -   **Extension Compatibility**: Chrome extension continues sending heartbeats; server-side filtering maintains extension stability
 -   **Remote Classroom Control**: Includes features like:
     -   **Open Tab**: Teachers can open a specific URL on all student devices or selected students. Dialog prompts for URL input and shows targeting scope (selected students vs. all students).
     -   **Close Tabs**: Teachers can close all tabs or close tabs matching a specific URL pattern (e.g., "youtube.com"). Features a tabbed dialog with "Close All Tabs" and "Close by Pattern" options.

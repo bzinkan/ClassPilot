@@ -91,6 +91,7 @@ export default function Admin() {
   const [enableTrackingHours, setEnableTrackingHours] = useState(false);
   const [trackingStartTime, setTrackingStartTime] = useState("08:00");
   const [trackingEndTime, setTrackingEndTime] = useState("15:00");
+  const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -203,6 +204,7 @@ export default function Admin() {
         enableTrackingHours,
         trackingStartTime,
         trackingEndTime,
+        schoolTimezone,
       });
     },
     onSuccess: () => {
@@ -227,6 +229,7 @@ export default function Admin() {
       setEnableTrackingHours(settings.enableTrackingHours ?? false);
       setTrackingStartTime(settings.trackingStartTime || "08:00");
       setTrackingEndTime(settings.trackingEndTime || "15:00");
+      setSchoolTimezone(settings.schoolTimezone || "America/New_York");
     }
   }, [settings]);
 
@@ -603,26 +606,49 @@ export default function Admin() {
           </div>
 
           {enableTrackingHours && (
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="trackingStartTime">School Start Time</Label>
-                <Input
-                  id="trackingStartTime"
-                  type="time"
-                  value={trackingStartTime}
-                  onChange={(e) => setTrackingStartTime(e.target.value)}
-                  data-testid="input-tracking-start-time"
-                />
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="trackingStartTime">School Start Time</Label>
+                  <Input
+                    id="trackingStartTime"
+                    type="time"
+                    value={trackingStartTime}
+                    onChange={(e) => setTrackingStartTime(e.target.value)}
+                    data-testid="input-tracking-start-time"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="trackingEndTime">School End Time</Label>
+                  <Input
+                    id="trackingEndTime"
+                    type="time"
+                    value={trackingEndTime}
+                    onChange={(e) => setTrackingEndTime(e.target.value)}
+                    data-testid="input-tracking-end-time"
+                  />
+                </div>
               </div>
+              
               <div className="space-y-2">
-                <Label htmlFor="trackingEndTime">School End Time</Label>
-                <Input
-                  id="trackingEndTime"
-                  type="time"
-                  value={trackingEndTime}
-                  onChange={(e) => setTrackingEndTime(e.target.value)}
-                  data-testid="input-tracking-end-time"
-                />
+                <Label htmlFor="schoolTimezone">School Timezone</Label>
+                <Select value={schoolTimezone} onValueChange={setSchoolTimezone}>
+                  <SelectTrigger id="schoolTimezone" data-testid="select-school-timezone">
+                    <SelectValue placeholder="Select timezone" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="America/New_York">Eastern Time (ET)</SelectItem>
+                    <SelectItem value="America/Chicago">Central Time (CT)</SelectItem>
+                    <SelectItem value="America/Denver">Mountain Time (MT)</SelectItem>
+                    <SelectItem value="America/Phoenix">Arizona (MST)</SelectItem>
+                    <SelectItem value="America/Los_Angeles">Pacific Time (PT)</SelectItem>
+                    <SelectItem value="America/Anchorage">Alaska Time (AKT)</SelectItem>
+                    <SelectItem value="Pacific/Honolulu">Hawaii Time (HST)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Tracking hours will be enforced in this timezone, regardless of server location.
+                </p>
               </div>
             </div>
           )}
