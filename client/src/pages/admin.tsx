@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useForm } from "react-hook-form";
@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, UserCheck } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, UserCheck, Clock, Settings as SettingsIcon } from "lucide-react";
 import { useLocation } from "wouter";
 import {
   AlertDialog,
@@ -88,6 +88,9 @@ export default function Admin() {
   const [selectedTeacherId, setSelectedTeacherId] = useState<string>("");
   const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
   const [selectedGradeFilter, setSelectedGradeFilter] = useState<string>("");
+  const [enableTrackingHours, setEnableTrackingHours] = useState(false);
+  const [trackingStartTime, setTrackingStartTime] = useState("08:00");
+  const [trackingEndTime, setTrackingEndTime] = useState("15:00");
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -193,6 +196,39 @@ export default function Admin() {
       });
     },
   });
+
+  const updateTrackingHoursMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("PATCH", "/api/settings", {
+        enableTrackingHours,
+        trackingStartTime,
+        trackingEndTime,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      toast({
+        title: "Tracking hours updated",
+        description: "School tracking hours have been configured successfully.",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update tracking hours",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  // Initialize tracking hours from settings
+  useEffect(() => {
+    if (settings) {
+      setEnableTrackingHours(settings.enableTrackingHours ?? false);
+      setTrackingStartTime(settings.trackingStartTime || "08:00");
+      setTrackingEndTime(settings.trackingEndTime || "15:00");
+    }
+  }, [settings]);
 
   const onSubmit = (data: CreateTeacherForm) => {
     createTeacherMutation.mutate(data);
@@ -535,6 +571,70 @@ export default function Admin() {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Clock className="h-5 w-5" />
+            School Tracking Hours
+          </CardTitle>
+          <CardDescription>
+            Configure when student monitoring is active for privacy compliance
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="bg-muted p-4 rounded-lg space-y-3">
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="enableTrackingHours"
+                checked={enableTrackingHours}
+                onCheckedChange={(checked) => setEnableTrackingHours(checked as boolean)}
+                data-testid="checkbox-enable-tracking-hours"
+              />
+              <Label htmlFor="enableTrackingHours" className="font-medium cursor-pointer">
+                Enable School Hours Tracking
+              </Label>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              When enabled, student activity will only be tracked during the specified hours. Heartbeats received outside these hours will be ignored.
+            </p>
+          </div>
+
+          {enableTrackingHours && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="trackingStartTime">School Start Time</Label>
+                <Input
+                  id="trackingStartTime"
+                  type="time"
+                  value={trackingStartTime}
+                  onChange={(e) => setTrackingStartTime(e.target.value)}
+                  data-testid="input-tracking-start-time"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="trackingEndTime">School End Time</Label>
+                <Input
+                  id="trackingEndTime"
+                  type="time"
+                  value={trackingEndTime}
+                  onChange={(e) => setTrackingEndTime(e.target.value)}
+                  data-testid="input-tracking-end-time"
+                />
+              </div>
+            </div>
+          )}
+
+          <Button
+            onClick={() => updateTrackingHoursMutation.mutate()}
+            disabled={updateTrackingHoursMutation.isPending}
+            data-testid="button-save-tracking-hours"
+            className="w-full"
+          >
+            {updateTrackingHoursMutation.isPending ? "Saving..." : "Save Tracking Hours"}
+          </Button>
         </CardContent>
       </Card>
 
