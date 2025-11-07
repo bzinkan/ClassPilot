@@ -57,9 +57,9 @@ The system employs a full-stack architecture:
     -   Detailed breakdown list showing exact time (minutes and seconds) spent on each website
     -   Data is calculated from heartbeat intervals, accounting for gaps and session continuity
 -   **Student History Tracking**: Comprehensive tabbed interface in student detail drawer featuring:
-    -   **Screens Tab**: Current activity and recent browsing sessions with duration tracking
+    -   **Screens Tab**: Current activity and top 5 recent browsing sessions sorted by duration (longest first). Shows session durations, time ranges, and favicons for quick insights into student activity patterns.
     -   **Timeline Tab**: Visual timeline view (placeholder for future implementation)
-    -   **History Tab**: Filterable activity timeline with date range picker (calendar-based), showing all heartbeat events with visual indicators for off-task behavior (Flight Path violations), locked screen status, and camera activity. Events are displayed chronologically with favicons, URLs, and timestamps.
+    -   **History Tab**: Filterable activity timeline with date range picker (calendar-based). Shows grouped browsing sessions (not individual heartbeats) with visual indicators for off-task behavior (Flight Path violations), locked screen status, and camera activity. Sessions display total duration, time ranges, favicons, URLs, and timestamps. Much more readable than showing individual 10-second heartbeats.
     -   **Snapshots Tab**: Screenshot storage and viewing (placeholder for future implementation)
 -   **Admin System**: Manages teacher accounts (create, view, delete).
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.

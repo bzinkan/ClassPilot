@@ -256,46 +256,50 @@ export function StudentDetailDrawer({
                             <p className="text-sm text-muted-foreground">No activity history yet</p>
                           </div>
                         ) : (
-                          urlSessions.slice(0, 20).map((session, index) => (
-                            <div
-                              key={`${session.url}-${session.startTime.getTime()}-${index}`}
-                              className="p-3 rounded-md bg-muted/30 border-l-4 border-primary/20"
-                              data-testid={`activity-session-${index}`}
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-2 mb-1">
-                                    {session.favicon && (
-                                      <img
-                                        src={session.favicon}
-                                        alt=""
-                                        className="w-3 h-3 flex-shrink-0"
-                                        onError={(e) => {
-                                          (e.target as HTMLImageElement).style.display = 'none';
-                                        }}
-                                      />
-                                    )}
-                                    <p className="text-sm font-medium truncate">
-                                      {session.title}
+                          // Show top 5 sessions sorted by duration (longest first)
+                          urlSessions
+                            .sort((a, b) => b.durationSeconds - a.durationSeconds)
+                            .slice(0, 5)
+                            .map((session, index) => (
+                              <div
+                                key={`${session.url}-${session.startTime.getTime()}-${index}`}
+                                className="p-3 rounded-md bg-muted/30 border-l-4 border-primary/20 hover-elevate"
+                                data-testid={`activity-session-${index}`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      {session.favicon && (
+                                        <img
+                                          src={session.favicon}
+                                          alt=""
+                                          className="w-3 h-3 flex-shrink-0"
+                                          onError={(e) => {
+                                            (e.target as HTMLImageElement).style.display = 'none';
+                                          }}
+                                        />
+                                      )}
+                                      <p className="text-sm font-medium truncate">
+                                        {session.title}
+                                      </p>
+                                    </div>
+                                    <p className="text-xs font-mono text-muted-foreground truncate mb-1">
+                                      {session.url}
                                     </p>
-                                  </div>
-                                  <p className="text-xs font-mono text-muted-foreground truncate mb-1">
-                                    {session.url}
-                                  </p>
-                                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                                    <Clock className="h-3 w-3" />
-                                    <span className="font-medium text-primary" data-testid={`duration-${index}`}>
-                                      {formatDuration(session.durationSeconds)}
-                                    </span>
-                                    <span className="opacity-60">•</span>
-                                    <span>
-                                      {format(session.startTime, 'HH:mm')} - {format(session.endTime, 'HH:mm')}
-                                    </span>
+                                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                      <Clock className="h-3 w-3" />
+                                      <span className="font-medium text-primary" data-testid={`duration-${index}`}>
+                                        {formatDuration(session.durationSeconds)}
+                                      </span>
+                                      <span className="opacity-60">•</span>
+                                      <span>
+                                        {format(session.startTime, 'HH:mm')} - {format(session.endTime, 'HH:mm')}
+                                      </span>
+                                    </div>
                                   </div>
                                 </div>
                               </div>
-                            </div>
-                          ))
+                            ))
                         )}
                       </div>
                     </div>
@@ -390,7 +394,7 @@ export function StudentDetailDrawer({
                           if (start && timestamp < start) return false;
                           if (end && timestamp > end) return false;
                           return true;
-                        }).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                        });
 
                         if (filteredHistory.length === 0) {
                           return (
@@ -404,70 +408,99 @@ export function StudentDetailDrawer({
                           );
                         }
 
+                        // Group filtered history into sessions
+                        const historySessions = calculateURLSessions(filteredHistory);
+                        
+                        // Sort sessions by start time (most recent first)
+                        const sortedSessions = [...historySessions].sort((a, b) => 
+                          b.startTime.getTime() - a.startTime.getTime()
+                        );
+
+                        // For each session, find if any heartbeat had off-task/locked/camera indicators
+                        const sessionsWithIndicators = sortedSessions.map(session => {
+                          const sessionHeartbeats = filteredHistory.filter(hb => 
+                            hb.activeTabUrl === session.url &&
+                            new Date(hb.timestamp) >= session.startTime &&
+                            new Date(hb.timestamp) <= session.endTime
+                          );
+                          
+                          const hasOffTask = sessionHeartbeats.some(hb => hb.flightPathActive && hb.activeFlightPathName);
+                          const hasLocked = sessionHeartbeats.some(hb => hb.screenLocked);
+                          const hasCamera = sessionHeartbeats.some(hb => hb.cameraActive);
+                          
+                          return {
+                            ...session,
+                            hasOffTask,
+                            hasLocked,
+                            hasCamera,
+                          };
+                        });
+
                         return (
                           <div className="space-y-1">
-                            {filteredHistory.map((event, index) => {
-                              const isBlocked = event.flightPathActive && event.activeFlightPathName;
-                              
-                              return (
-                                <div
-                                  key={`${event.id}-${index}`}
-                                  className="p-3 rounded-md bg-muted/30 border-l-4 hover-elevate cursor-pointer"
-                                  style={{
-                                    borderLeftColor: isBlocked ? '#ef4444' : '#3b82f6'
-                                  }}
-                                  onClick={() => setSelectedEvent(event)}
-                                  data-testid={`history-event-${index}`}
-                                >
-                                  <div className="flex items-start justify-between gap-2">
-                                    <div className="flex-1 min-w-0">
-                                      <div className="flex items-center gap-2 mb-1">
-                                        {event.favicon && (
-                                          <img
-                                            src={event.favicon}
-                                            alt=""
-                                            className="w-3 h-3 flex-shrink-0"
-                                            onError={(e) => {
-                                              (e.target as HTMLImageElement).style.display = 'none';
-                                            }}
-                                          />
-                                        )}
-                                        <p className="text-sm font-medium truncate">
-                                          {event.activeTabTitle}
-                                        </p>
-                                        {isBlocked && (
-                                          <Badge variant="destructive" className="text-xs">
-                                            <AlertTriangle className="h-3 w-3 mr-1" />
-                                            Off-Task
-                                          </Badge>
-                                        )}
-                                        {event.screenLocked && (
-                                          <Badge variant="outline" className="text-xs">
-                                            Locked
-                                          </Badge>
-                                        )}
-                                        {event.cameraActive && (
-                                          <Badge variant="outline" className="text-xs">
-                                            <Camera className="h-3 w-3 mr-1" />
-                                            Camera
-                                          </Badge>
-                                        )}
-                                      </div>
-                                      <p className="text-xs font-mono text-muted-foreground truncate">
-                                        {event.activeTabUrl}
+                            {sessionsWithIndicators.map((session, index) => (
+                              <div
+                                key={`${session.url}-${session.startTime.getTime()}-${index}`}
+                                className="p-3 rounded-md bg-muted/30 border-l-4 hover-elevate"
+                                style={{
+                                  borderLeftColor: session.hasOffTask ? '#ef4444' : '#3b82f6'
+                                }}
+                                data-testid={`history-session-${index}`}
+                              >
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex-1 min-w-0">
+                                    <div className="flex items-center gap-2 mb-1">
+                                      {session.favicon && (
+                                        <img
+                                          src={session.favicon}
+                                          alt=""
+                                          className="w-3 h-3 flex-shrink-0"
+                                          onError={(e) => {
+                                            (e.target as HTMLImageElement).style.display = 'none';
+                                          }}
+                                        />
+                                      )}
+                                      <p className="text-sm font-medium truncate">
+                                        {session.title}
                                       </p>
-                                      <div className="flex items-center gap-2 text-xs text-muted-foreground mt-1">
-                                        <Clock className="h-3 w-3" />
-                                        <span>{format(new Date(event.timestamp), "PPpp")}</span>
-                                      </div>
+                                      {session.hasOffTask && (
+                                        <Badge variant="destructive" className="text-xs">
+                                          <AlertTriangle className="h-3 w-3 mr-1" />
+                                          Off-Task
+                                        </Badge>
+                                      )}
+                                      {session.hasLocked && (
+                                        <Badge variant="outline" className="text-xs">
+                                          Locked
+                                        </Badge>
+                                      )}
+                                      {session.hasCamera && (
+                                        <Badge variant="outline" className="text-xs">
+                                          <Camera className="h-3 w-3 mr-1" />
+                                          Camera
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    <p className="text-xs font-mono text-muted-foreground truncate mb-1">
+                                      {session.url}
+                                    </p>
+                                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                      <Clock className="h-3 w-3" />
+                                      <span className="font-medium text-primary">
+                                        {formatDuration(session.durationSeconds)}
+                                      </span>
+                                      <span className="opacity-60">•</span>
+                                      <span>
+                                        {format(session.startTime, 'MMM d, h:mm a')} - {format(session.endTime, 'h:mm a')}
+                                      </span>
                                     </div>
                                   </div>
                                 </div>
-                              );
-                            })}
+                              </div>
+                            ))}
                             
                             <div className="pt-2 text-xs text-center text-muted-foreground">
-                              Showing {filteredHistory.length} event{filteredHistory.length !== 1 ? 's' : ''}
+                              Showing {sessionsWithIndicators.length} session{sessionsWithIndicators.length !== 1 ? 's' : ''}
                             </div>
                           </div>
                         );
