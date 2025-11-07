@@ -206,6 +206,9 @@ export const settings = pgTable("settings", {
   gradeLevels: text("grade_levels").array().default(sql`'{6,7,8,9,10,11,12}'::text[]`),
   maxTabsPerStudent: text("max_tabs_per_student"), // Nullable - null means unlimited
   activeFlightPathId: text("active_flight_path_id"), // Currently active flight path for the school
+  enableTrackingHours: boolean("enable_tracking_hours").default(false), // Enable school-hours-only tracking
+  trackingStartTime: text("tracking_start_time").default("08:00"), // School start time (24-hour format, e.g., "08:00")
+  trackingEndTime: text("tracking_end_time").default("15:00"), // School end time (24-hour format, e.g., "15:00")
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
