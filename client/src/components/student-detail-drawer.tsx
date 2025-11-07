@@ -256,11 +256,8 @@ export function StudentDetailDrawer({
                             <p className="text-sm text-muted-foreground">No activity history yet</p>
                           </div>
                         ) : (
-                          // Show top 5 sessions sorted by duration (longest first)
-                          urlSessions
-                            .sort((a, b) => b.durationSeconds - a.durationSeconds)
-                            .slice(0, 5)
-                            .map((session, index) => (
+                          // Show most recent 20 sessions in chronological order
+                          urlSessions.slice(0, 20).map((session, index) => (
                               <div
                                 key={`${session.url}-${session.startTime.getTime()}-${index}`}
                                 className="p-3 rounded-md bg-muted/30 border-l-4 border-primary/20 hover-elevate"
