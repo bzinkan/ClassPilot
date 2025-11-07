@@ -1164,7 +1164,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { deviceId } = req.params;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const limit = parseInt(req.query.limit as string) || 1000; // Fetch more history to show more sessions
       
       const heartbeats = await storage.getHeartbeatsByDevice(deviceId, limit);
       res.json(heartbeats);

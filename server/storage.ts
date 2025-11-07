@@ -522,14 +522,14 @@ export class MemStorage implements IStorage {
     return timeSpanSeconds + 10;
   }
 
-  async getHeartbeatsByDevice(deviceId: string, limit: number = 20): Promise<Heartbeat[]> {
+  async getHeartbeatsByDevice(deviceId: string, limit: number = 1000): Promise<Heartbeat[]> {
     return this.heartbeats
       .filter(h => h.deviceId === deviceId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, limit);
   }
 
-  async getHeartbeatsByStudent(studentId: string, limit: number = 20): Promise<Heartbeat[]> {
+  async getHeartbeatsByStudent(studentId: string, limit: number = 1000): Promise<Heartbeat[]> {
     return this.heartbeats
       .filter(h => h.studentId === studentId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -1283,7 +1283,7 @@ export class DatabaseStorage implements IStorage {
     return timeSpanSeconds + 10;
   }
 
-  async getHeartbeatsByDevice(deviceId: string, limit: number = 20): Promise<Heartbeat[]> {
+  async getHeartbeatsByDevice(deviceId: string, limit: number = 1000): Promise<Heartbeat[]> {
     return await db
       .select()
       .from(heartbeats)
@@ -1292,7 +1292,7 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
-  async getHeartbeatsByStudent(studentId: string, limit: number = 20): Promise<Heartbeat[]> {
+  async getHeartbeatsByStudent(studentId: string, limit: number = 1000): Promise<Heartbeat[]> {
     return await db
       .select()
       .from(heartbeats)
