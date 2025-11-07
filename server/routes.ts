@@ -774,6 +774,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const data = result.data;
       console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, url: data.activeTabUrl?.substring(0, 50) });
       
+      // Check if tracking hours are enforced
+      const settings = await storage.getSettings();
+      if (settings?.enableTrackingHours) {
+        const now = new Date();
+        const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+        const startTime = settings.trackingStartTime || "08:00";
+        const endTime = settings.trackingEndTime || "15:00";
+        
+        // Check if current time is within tracking hours
+        if (currentTime < startTime || currentTime >= endTime) {
+          console.log(`Heartbeat rejected - outside tracking hours (${currentTime} not in ${startTime}-${endTime})`);
+          // Return 204 to prevent extension from retrying, but don't store heartbeat
+          return res.sendStatus(204);
+        }
+      }
+      
       // Store heartbeat asynchronously - don't block the response
       storage.addHeartbeat(data)
         .then(() => {
