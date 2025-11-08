@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Plus, Users, Trash2, Edit } from "lucide-react";
+import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -29,6 +29,11 @@ import {
 } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import type { Group, Settings } from "@shared/schema";
 
 // Helper to normalize grade levels
@@ -72,6 +77,107 @@ interface StudentsResponse {
   students: Student[];
 }
 
+interface ClassCardProps {
+  group: Group;
+  teacher: Teacher | undefined;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+  onDelete: () => void;
+  isDeleting: boolean;
+}
+
+function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDeleting }: ClassCardProps) {
+  // Fetch students for this class (always fetch to show count)
+  const { data: classStudents = [], isLoading } = useQuery<Student[]>({
+    queryKey: ["/api/groups", group.id, "students"],
+  });
+
+  return (
+    <Collapsible
+      open={isExpanded}
+      onOpenChange={onToggleExpand}
+      className="border rounded-lg hover-elevate"
+      data-testid={`class-${group.id}`}
+    >
+      <div className="flex items-center justify-between p-3">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <CollapsibleTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                data-testid={`button-toggle-${group.id}`}
+              >
+                {isExpanded ? (
+                  <ChevronDown className="h-4 w-4" />
+                ) : (
+                  <ChevronRight className="h-4 w-4" />
+                )}
+              </Button>
+            </CollapsibleTrigger>
+            <div className="flex-1">
+              <p className="font-medium">{group.name}</p>
+              <p className="text-sm text-muted-foreground">
+                {teacher?.username || 'Unknown Teacher'}
+                {group.periodLabel && ` • ${group.periodLabel}`}
+                {group.gradeLevel && ` • Grade ${group.gradeLevel}`}
+              </p>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <div className="text-sm text-muted-foreground">
+            {isLoading ? (
+              <span className="animate-pulse">...</span>
+            ) : (
+              <span data-testid={`student-count-${group.id}`}>
+                {classStudents.length} {classStudents.length === 1 ? 'student' : 'students'}
+              </span>
+            )}
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onDelete}
+            disabled={isDeleting}
+            data-testid={`button-delete-${group.id}`}
+          >
+            <Trash2 className="h-4 w-4 text-destructive" />
+          </Button>
+        </div>
+      </div>
+      
+      <CollapsibleContent>
+        <div className="px-3 pb-3 pt-0">
+          <div className="border-t pt-3">
+            {isLoading ? (
+              <p className="text-sm text-muted-foreground">Loading students...</p>
+            ) : classStudents.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No students assigned yet</p>
+            ) : (
+              <div className="space-y-1">
+                <p className="text-sm font-medium mb-2">Students in this class:</p>
+                {classStudents.map((student) => (
+                  <div
+                    key={student.id}
+                    className="text-sm text-muted-foreground pl-4"
+                    data-testid={`student-${student.id}-in-${group.id}`}
+                  >
+                    • {student.studentName}
+                    {student.gradeLevel && ` (Grade ${student.gradeLevel})`}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 export default function AdminClasses() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
@@ -79,6 +185,7 @@ export default function AdminClasses() {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [selectedClassId, setSelectedClassId] = useState<string>("");
+  const [expandedClasses, setExpandedClasses] = useState<Set<string>>(new Set());
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -412,30 +519,28 @@ export default function AdminClasses() {
                 ) : (
                   filteredClasses.map((group) => {
                     const teacher = teachers.find(t => t.id === group.teacherId);
+                    const isExpanded = expandedClasses.has(group.id);
+                    
+                    const toggleExpand = () => {
+                      const newExpanded = new Set(expandedClasses);
+                      if (newExpanded.has(group.id)) {
+                        newExpanded.delete(group.id);
+                      } else {
+                        newExpanded.add(group.id);
+                      }
+                      setExpandedClasses(newExpanded);
+                    };
+                    
                     return (
-                      <div
+                      <ClassCard
                         key={group.id}
-                        className="flex items-center justify-between p-3 rounded-lg border hover-elevate"
-                        data-testid={`class-${group.id}`}
-                      >
-                        <div className="flex-1">
-                          <p className="font-medium">{group.name}</p>
-                          <p className="text-sm text-muted-foreground">
-                            {teacher?.username || 'Unknown Teacher'}
-                            {group.periodLabel && ` • ${group.periodLabel}`}
-                            {group.gradeLevel && ` • Grade ${group.gradeLevel}`}
-                          </p>
-                        </div>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => deleteClassMutation.mutate(group.id)}
-                          disabled={deleteClassMutation.isPending}
-                          data-testid={`button-delete-${group.id}`}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </div>
+                        group={group}
+                        teacher={teacher}
+                        isExpanded={isExpanded}
+                        onToggleExpand={toggleExpand}
+                        onDelete={() => deleteClassMutation.mutate(group.id)}
+                        isDeleting={deleteClassMutation.isPending}
+                      />
                     );
                   })
                 )}
