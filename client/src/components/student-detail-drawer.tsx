@@ -7,6 +7,9 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetClose } from "@/components/ui/sheet";
+import { Separator } from "@/components/ui/separator";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -119,58 +122,54 @@ export function StudentDetailDrawer({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-end bg-background/80 backdrop-blur-sm">
-      <div
-        className="fixed inset-0"
-        onClick={onClose}
-        data-testid="overlay-close-drawer"
-      />
-      <div className="relative w-full max-w-md h-full bg-background border-l border-border shadow-2xl animate-in slide-in-from-right duration-300">
-        <div className="flex flex-col h-full">
-          {/* Header */}
-          <div className="p-6 border-b border-border">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-2">
-                  <h2 className="text-xl font-semibold truncate">
-                    {student.studentName}
-                  </h2>
-                  <div className={`h-2.5 w-2.5 rounded-full ${getStatusColor(student.status)}`} />
-                </div>
-                <p className="text-sm font-mono text-muted-foreground truncate">
-                  {student.deviceId}
-                </p>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  <Badge variant="secondary" className="text-xs">
-                    {student.classId}
-                  </Badge>
-                  <Badge variant="outline" className="text-xs">
-                    {getStatusLabel(student.status)}
-                  </Badge>
-                </div>
-                <div className="mt-3">
-                  <Button
-                    size="sm"
-                    variant="destructive"
-                    onClick={() => setShowDeleteDialog(true)}
-                    disabled={deleteStudentMutation.isPending}
-                    data-testid="button-delete-student"
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />
-                    Delete Student
-                  </Button>
-                </div>
-              </div>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={onClose}
-                data-testid="button-close-drawer"
+    <Sheet open={!!student} onOpenChange={(open) => !open && onClose()}>
+      <SheetContent side="right" className="w-[420px] sm:w-[520px] p-0 flex flex-col">
+        <SheetHeader className="px-6 py-4 border-b">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <SheetTitle className="text-xl">
+                {student.studentName}
+              </SheetTitle>
+              <SheetDescription className="mt-2 flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="uppercase text-xs">
+                  {student.classId || "No Class"}
+                </Badge>
+                <Badge className={`text-xs ${
+                  student.status === "offline" ? "bg-status-offline text-white" :
+                  student.status === "idle" ? "bg-status-away text-white" :
+                  "bg-status-online text-white"
+                }`}>
+                  {getStatusLabel(student.status)}
+                </Badge>
+                <span className="text-xs text-muted-foreground font-mono">
+                  device-{student.deviceId.slice(0, 8)}
+                </span>
+              </SheetDescription>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button 
+                variant="destructive" 
+                size="sm" 
+                className="gap-1.5"
+                onClick={() => setShowDeleteDialog(true)}
+                disabled={deleteStudentMutation.isPending}
+                data-testid="button-delete-student"
               >
-                <X className="h-5 w-5" />
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete
               </Button>
+              <SheetClose asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  data-testid="button-close-drawer"
+                >
+                  <X className="h-5 w-5" />
+                </Button>
+              </SheetClose>
             </div>
           </div>
+        </SheetHeader>
 
           {/* Tabs Content */}
           <div className="flex-1 overflow-hidden">
@@ -199,14 +198,15 @@ export function StudentDetailDrawer({
               {/* Screens Tab - Current Activity */}
               <TabsContent value="screens" className="flex-1 overflow-hidden m-0">
                 <ScrollArea className="h-full">
-                  <div className="p-6 space-y-6">
+                  <div className="p-6 space-y-4">
                     {/* Current Activity */}
-                    <div>
-                      <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground mb-3">
-                        Current Activity
-                      </h3>
-                      <div className="space-y-3">
-                        <div className="p-4 rounded-lg bg-muted/50 border border-border">
+                    <Card>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm font-medium">Current Activity</CardTitle>
+                      </CardHeader>
+                      <Separator />
+                      <CardContent className="pt-4">
+                        <div className="p-3 rounded-lg border">
                           <div className="flex items-start gap-2 mb-2">
                             {student.favicon && (
                               <img
@@ -223,12 +223,17 @@ export function StudentDetailDrawer({
                             </p>
                           </div>
                           {student.activeTabUrl && (
-                            <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
+                            <a 
+                              href={student.activeTabUrl} 
+                              target="_blank" 
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground hover:text-foreground truncate"
+                            >
                               <ExternalLink className="h-3 w-3 flex-shrink-0" />
                               <span className="truncate">{student.activeTabUrl}</span>
-                            </div>
+                            </a>
                           )}
-                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-2 pt-2 border-t border-border/50">
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-2 pt-2 border-t">
                             <Clock className="h-3 w-3" />
                             {currentUrlDuration !== null ? (
                               <span className="font-medium text-primary" data-testid="current-url-duration">
@@ -241,15 +246,17 @@ export function StudentDetailDrawer({
                             )}
                           </div>
                         </div>
-                      </div>
-                    </div>
+                      </CardContent>
+                    </Card>
 
                     {/* Recent Activity */}
-                    <div>
-                      <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground mb-3">
-                        Recent Activity
-                      </h3>
-                      <div className="space-y-2">
+                    <Card>
+                      <CardHeader className="pb-3">
+                        <CardTitle className="text-sm font-medium">Recent Activity</CardTitle>
+                      </CardHeader>
+                      <Separator />
+                      <CardContent className="pt-4">
+                        <div className="space-y-2">
                         {urlSessions.length === 0 ? (
                           <div className="p-8 text-center">
                             <Clock className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
@@ -298,8 +305,9 @@ export function StudentDetailDrawer({
                               </div>
                             ))
                         )}
-                      </div>
-                    </div>
+                        </div>
+                      </CardContent>
+                    </Card>
                   </div>
                 </ScrollArea>
               </TabsContent>
@@ -521,33 +529,32 @@ export function StudentDetailDrawer({
               </TabsContent>
             </Tabs>
           </div>
-        </div>
-      </div>
+        </SheetContent>
 
-      {/* Delete Confirmation Dialog */}
-      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Student</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete "{student?.studentName}" ({student?.deviceId})? This will permanently remove the student and all associated activity data from your roster. This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={deleteStudentMutation.isPending}>
-              Cancel
-            </AlertDialogCancel>
-            <AlertDialogAction
-              onClick={handleDeleteConfirm}
-              disabled={deleteStudentMutation.isPending}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              data-testid="button-confirm-delete"
-            >
-              {deleteStudentMutation.isPending ? "Deleting..." : "Delete Student"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-    </div>
+        {/* Delete Confirmation Dialog */}
+        <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Student</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to delete "{student?.studentName}" ({student?.deviceId})? This will permanently remove the student and all associated activity data from your roster. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={deleteStudentMutation.isPending}>
+                Cancel
+              </AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDeleteConfirm}
+                disabled={deleteStudentMutation.isPending}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                data-testid="button-confirm-delete"
+              >
+                {deleteStudentMutation.isPending ? "Deleting..." : "Delete Student"}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+    </Sheet>
   );
 }
