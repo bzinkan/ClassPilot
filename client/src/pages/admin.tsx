@@ -785,6 +785,38 @@ export default function Admin() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
+            <SettingsIcon className="h-5 w-5" />
+            Class Management
+          </CardTitle>
+          <CardDescription>
+            Create and manage class rosters for teachers
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="bg-muted p-4 rounded-lg">
+            <p className="text-sm mb-2">
+              <strong>Admin Class Creation:</strong> Create official class rosters for teachers.
+            </p>
+            <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
+              <li>Browse students by grade level</li>
+              <li>Create classes (e.g., "7th Science P3") and assign to teachers</li>
+              <li>Add students to class rosters</li>
+              <li>Teachers can then start/end sessions for these classes</li>
+            </ul>
+          </div>
+          <Button
+            variant="default"
+            data-testid="button-manage-classes"
+            onClick={() => setLocation("/admin/classes")}
+          >
+            Manage Classes
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5" />
             Active Sessions Monitor
           </CardTitle>
