@@ -18,8 +18,9 @@ import {
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { ArrowLeft, Download, Shield, Clock, AlertCircle, Layers, Plus, Pencil, Trash2, Star, Users } from "lucide-react";
-import type { Settings as SettingsType, Scene, StudentGroup } from "@shared/schema";
+import type { Settings as SettingsType, StudentGroup } from "@shared/schema";
 
 // Helper function to normalize domain names
 function normalizeDomain(domain: string): string {
@@ -420,19 +421,22 @@ export default function Settings() {
       {/* Header */}
       <header className="border-b border-border bg-background">
         <div className="max-w-4xl mx-auto px-6 py-4">
-          <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setLocation("/dashboard")}
-              data-testid="button-back"
-            >
-              <ArrowLeft className="h-5 w-5" />
-            </Button>
-            <div>
-              <h1 className="text-xl font-semibold">Settings</h1>
-              <p className="text-xs text-muted-foreground">Manage your classroom monitoring settings</p>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setLocation("/dashboard")}
+                data-testid="button-back"
+              >
+                <ArrowLeft className="h-5 w-5" />
+              </Button>
+              <div>
+                <h1 className="text-xl font-semibold">Settings</h1>
+                <p className="text-xs text-muted-foreground">Manage your classroom monitoring settings</p>
+              </div>
             </div>
+            <ThemeToggle />
           </div>
         </div>
       </header>

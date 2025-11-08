@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, UserCheck, Clock, Settings as SettingsIcon } from "lucide-react";
 import { useLocation } from "wouter";
+import { ThemeToggle } from "@/components/theme-toggle";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -311,14 +312,17 @@ export default function Admin() {
             <p className="text-muted-foreground">Manage teacher accounts for your school</p>
           </div>
         </div>
-        <Button
-          variant="outline"
-          onClick={() => setLocation("/dashboard")}
-          data-testid="button-back-dashboard"
-        >
-          <ArrowLeft className="h-4 w-4 mr-2" />
-          Back to Dashboard
-        </Button>
+        <div className="flex items-center gap-2">
+          <ThemeToggle />
+          <Button
+            variant="outline"
+            onClick={() => setLocation("/dashboard")}
+            data-testid="button-back-dashboard"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

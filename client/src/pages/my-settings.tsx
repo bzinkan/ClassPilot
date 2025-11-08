@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ArrowLeft, User, Settings as SettingsIcon, Save, Plus, Edit, Trash2, Plane } from "lucide-react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import type { TeacherSettings, FlightPath } from "@shared/schema";
 
 const teacherSettingsSchema = z.object({
@@ -227,6 +228,7 @@ export default function MySettings() {
                 </div>
               </div>
             </div>
+            <ThemeToggle />
           </div>
         </div>
       </div>

@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { StudentTile } from "@/components/student-tile";
 import { StudentDetailDrawer } from "@/components/student-detail-drawer";
 import { RemoteControlToolbar } from "@/components/remote-control-toolbar";
+import { ThemeToggle } from "@/components/theme-toggle";
 import {
   Dialog,
   DialogContent,
@@ -925,6 +926,7 @@ export default function Dashboard() {
                   </Button>
                 </>
               )}
+              <ThemeToggle />
               <Button
                 variant="ghost"
                 size="icon"
