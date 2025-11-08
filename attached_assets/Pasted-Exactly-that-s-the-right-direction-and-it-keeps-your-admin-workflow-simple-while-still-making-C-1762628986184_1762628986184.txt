@@ -1,0 +1,131 @@
+Exactly ✅ — that’s the right direction, and it keeps your admin workflow simple while still making ClassPilot scalable.
+
+Here’s how you can think about it — same foundation you have now, just adding one clean middle layer so admin can go from “students by grade” → “classes within that grade” → “teachers for those classes.”
+
+🧭 1. Keep Grade as Your Starting Point
+
+Grades remain your top-level buckets in the Admin dashboard.
+This is perfect because:
+
+It’s intuitive for admins (“show me all 7th graders”).
+
+It works even if a student isn’t in a class yet.
+
+It keeps new-student onboarding familiar.
+
+So you keep your current workflow:
+
+Extension → Admin assigns Grade → Student appears in Grade list.
+
+That’s still step one. 👍
+
+🧩 2. Add a “Classes Within Grade” Layer
+
+Once the admin clicks a grade (say “7th Grade”), they see all students plus a side panel for class creation:
+
+Example:
+
+7th Grade
+ ├── 7th Science P3 (Teacher: Ellis)
+ ├── 7th ELA P4 (Teacher: Mason)
+ ├── 7th Math P2 (Teacher: Hughes)
+
+
+Each class (or group) belongs to a grade and a teacher.
+So instead of filtering by grade only, you’re filtering by grade → then class.
+
+Admin can:
+
+Create a class within that grade
+
+Select multiple students from the grade roster
+
+Assign them (and a teacher) to that class
+
+Repeat for each subject or period
+
+🧑‍🏫 3. Assign Teachers to Classes (Not Grades)
+
+This is key.
+
+Teachers don’t “own” the entire grade — they own one or more classes inside it.
+
+This also solves the “students have multiple teachers” issue.
+
+For example:
+
+Teacher	Classes they see
+Mrs. Ellis	7th Science P3, 7th Science P5
+Mr. Hughes	7th Math P2
+Mrs. Mason	7th ELA P4
+Mr. Rivera	8th Social Studies P3
+
+That’s exactly how GoGuardian and Securly manage class-level visibility.
+
+🧰 4. How Admin Workflow Feels (Visually)
+
+Picture it like this:
+
+Admin Dashboard
+
+📚 Grades
+   > Grade 5
+   > Grade 6
+   > Grade 7  ← click
+   > Grade 8
+
+
+Inside “Grade 7” View
+
+[ Add New Class ]
+------------------------------------------------
+Existing Classes:
+• 7th Science P3 (Ellis)
+• 7th Math P2 (Hughes)
+• 7th ELA P4 (Mason)
+------------------------------------------------
+Unassigned Students:
+[ ] Ava M.
+[ ] Logan R.
+[ ] Noah S.
+[Assign Selected to Class ⏷]
+
+
+Admin selects a few students and assigns them to a class/teacher.
+If the class doesn’t exist yet, they can click “Add New Class” right there.
+
+🧠 5. Permissions and Filtering Automatically Follow
+
+Once a class is created and linked to a teacher:
+
+That teacher’s dashboard now shows that class as an available group/session.
+
+The teacher can click “Start Class” to begin a live session (Option 2 model).
+
+The teacher sees only those students — no one outside their assigned classes.
+
+Admins still see everything by grade, but teachers’ visibility becomes automatically scoped.
+
+🔒 6. Keeps Everything Simple for Admins
+
+Grades still function as the main organizational tool.
+
+You don’t force admins to deal with complex group logic — it’s just “classes under a grade.”
+
+Admins can reassign teachers or move students between classes easily.
+
+Teachers don’t have to create groups unless they want to make custom ones (“Robotics Club,” “After-School Study”).
+
+✅ TL;DR
+
+Your improved flow:
+
+Extension adds student → Admin assigns grade ✅
+
+Admin clicks that grade → creates classes within it
+
+Assigns students + teacher to each class
+
+Teachers see only their assigned classes (can start/end sessions)
+
+Admin can still view by grade for big-picture oversight

@@ -1,0 +1,66 @@
+nothing breaks and everything we planned still applies.
+Roster sync (Google/Clever/ClassLink/CSV) is just a data source; it plugs into the same model we designed:
+
+Grades remain your top-level buckets for admin browsing.
+
+Classes = groups (admin-managed) remain the source of truth for teacher access.
+
+Teacher small groups still exist as optional, teacher-only subgroups.
+
+Option 2 (Start/End Class) stays the session model.
+
+Permissions still: teacher sees only students in their assigned classes/groups; admin sees all.
+
+Here’s how to merge it cleanly:
+
+What stays exactly the same
+
+Admin can browse by Grade → create classes → assign teacher + students.
+
+Teachers start a session on a class; visibility is scoped to that class.
+
+Teachers may create small groups using only their students.
+
+Admin can monitor/end any active session.
+
+What roster sync adds (on top)
+
+Auto-rosters: Classes/teachers/students are populated/updated from the sync source (nightly or on demand).
+
+ID mapping: New students seen by the extension are matched to roster data by email (or external ID).
+
+“Pending/Unmatched” tray: If the sync can’t match a device/email, the student sits in Pending until admin resolves.
+
+Precedence rule:
+
+Official classes from the sync are authoritative (members/teacher).
+
+Teacher small groups are additive and never overwritten by sync.
+
+Practical flow with sync + your current extension
+
+Extension sees student → create student in Pending (temp group), attach schoolId, capture email.
+
+Grade assignment still happens (auto if known; otherwise admin sets it once).
+
+Nightly/“Sync Now” pulls official classes; student is auto-enrolled to the right classes.
+
+Admin/teacher can still make custom small groups for that teacher’s classes.
+
+Teacher hits Start Class → session uses the synced roster (plus any small-group filters if chosen).
+
+Admin UI impact (minimal)
+
+Add a Rostering page: “Connected to Google/Clever/ClassLink/CSV,” last sync time, Sync Now, and a Pending list to resolve.
+
+Keep your Grade → Class → Student page exactly as designed; synced classes simply appear there and update automatically.
+
+Edge cases (covered)
+
+Schedule changes / transfers: next sync updates class membership; sessions reflect the new roster.
+
+Subs/co-teachers: admin assigns them temporarily to the class; they see it immediately.
+
+Schools without SIS: they can stay fully manual (what you have now) or upload CSV; same UI.
+
+Bottom line: You can implement everything we discussed and add roster sync later (or now). Sync just feeds the same “grades → classes → sessions” pipeline so admins do less manual work, while your permissions and teacher experience stay consistent.

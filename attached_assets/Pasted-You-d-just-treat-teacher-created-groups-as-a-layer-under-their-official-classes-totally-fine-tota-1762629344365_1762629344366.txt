@@ -1,0 +1,76 @@
+You’d just treat teacher-created groups as a layer under their official classes — totally fine, totally safe, and very useful in real classrooms.
+
+Here’s how it fits into your structure cleanly:
+
+🧩 1. Two Types of Groups (Clear and Simple)
+Group Type	Created By	Purpose	Visibility
+Admin Class (Roster Group)	Admin	Official class roster, used for attendance, session access, and admin reporting	Teacher + Admin
+Teacher Small Group	Teacher	Temporary or subject-specific subgroup for their own students	Only visible to that teacher (and Admin for auditing)
+🧑‍🏫 2. What Teachers Can Do
+
+Inside their dashboard, a teacher sees their official classes (set by Admin):
+
+My Classes
+ ├── 7th Science P3
+ ├── 7th Science P5
+
+
+Under each class, they can:
+
+Click “Add Small Group”
+
+Select students only from that class (already assigned to them)
+
+Name the group (“Lab Partners,” “Needs Support,” “Advanced Group”)
+
+Start a session or view data filtered to that group
+
+💡 Key rule: Teachers can only group students they’re already assigned.
+They can’t pull students from another teacher’s class or grade.
+
+🔒 3. Permissions Logic (super easy)
+
+Every teacher group inherits visibility from the teacher’s assigned class list.
+
+The system checks:
+
+“Is this student already assigned to the current teacher?”
+✅ Yes → can be added to a small group
+❌ No → cannot appear in their small group selector
+
+Admins always see all groups for auditing, but only the teacher who created them can manage them.
+
+⚙️ 4. What This Unlocks for Teachers
+
+Flexible instruction: breakout groups, interventions, advanced learners, project teams
+
+Targeted monitoring: watch only that small group live during class
+
+Custom reports: see history or engagement for that subgroup
+
+Session convenience: quick “Start Small Group Session” button for mini-sessions
+
+🧭 5. Admin Experience
+
+Admins still manage only the official classes.
+They don’t need to track or edit teacher-made small groups — those are ephemeral, like “Scenes” or “Collections” in GoGuardian.
+Admins can view them in an audit view if needed (“show all groups created by Mrs. Ellis”), but it’s hands-off by default.
+
+🧱 6. System Snapshot
+Grade 7
+ ├── Class: 7th Science P3 (Admin Created)
+ │     ├── Small Group: Lab Group A (Teacher Created)
+ │     ├── Small Group: Advanced Learners (Teacher Created)
+ │     └── Small Group: Homework Help (Teacher Created)
+ ├── Class: 7th Math P2
+ │     └── Small Group: Algebra Help
+
+✅ TL;DR
+
+Yes, teachers should absolutely be able to make small groups.
+
+They can only use students they’re already assigned.
+
+Admin doesn’t have to touch these.
+
+The structure stays clean, scalable, and secure.

@@ -1,0 +1,134 @@
+How automatic roster sync works
+
+Goal: keep teachers, classes, and student rosters up-to-date every day without anyone clicking around.
+
+Connect a source of truth (one-time by admin)
+
+Admin authorizes ClassPilot to read rosters from:
+
+Clever or ClassLink (OneRoster) – usually the district SIS feeds these.
+
+Google Classroom / Workspace – classes/teachers/students come from Google.
+
+During this step you request limited, read-only scopes and pick which schools/sections to sync.
+
+Map identities (your keys)
+
+You decide your canonical IDs:
+
+school_id (from Clever/ClassLink/Google domain)
+
+teacher_id (email + external id)
+
+student_id (email + external id)
+
+class/group_id (section id / course-section)
+
+You keep a tiny id_map table so the same person is recognized whether they arrive via extension or via SIS.
+
+Pull rosters on a schedule
+
+A nightly (or hourly) job fetches:
+
+Teachers and their sections
+
+Students and their enrollments (who is in which section)
+
+Optional: periods/times, rooms
+
+You compare to yesterday’s snapshot → diff:
+
+New student? Create & enroll.
+
+Withdrawn? Remove enrollment.
+
+Section renamed/teacher changed? Update.
+
+Reconcile with live reality
+
+If your extension saw a brand-new student earlier that day:
+
+Match by email (or SIS id if present).
+
+Attach them to the SIS/Google class list at the next sync.
+
+If there’s a conflict (teacher added a “custom group” vs. SIS roster):
+
+Keep SIS classes authoritative.
+
+Keep teacher small groups additive and local (not overwritten).
+
+Apply permissions automatically
+
+After sync, teachers only see the sections they own.
+
+Admins can see everything for their school.
+
+Your “Start Class / End Class” button simply uses the synced section roster.
+
+Audit and status
+
+Keep a lightweight sync log: when it ran, what changed, errors.
+
+Give admin a Sync Now button for mid-day changes.
+
+Where your current flow fits
+
+You don’t have to throw away “extension detects new student.”
+
+Today: Extension fires → create student → admin sets grade → assign to teacher/groups.
+
+With sync: Extension still creates a pending student. The next roster sync:
+
+Finds the same email in SIS/Google → auto-attaches to correct classes/teachers.
+
+If not found, student stays “pending/unmatched” for admin review (avoids junk).
+
+Options for sources (from light → heavy)
+
+CSV / Google Sheet import (starter)
+
+Admin uploads a simple file (teacher, class name, student email).
+
+You run a scheduled import nightly.
+
+Google Classroom / Workspace
+
+Pull courses, teachers, rosters; uses school’s Google domain.
+
+ClassLink OneRoster (district-friendly)
+
+Standardized rostering API; can do near-real-time events.
+
+Clever Secure Sync
+
+Very common; nightly by default, with on-demand refresh.
+
+What the admin actually sees
+
+Rostering page with a green “Connected to Google/Clever/ClassLink” badge.
+
+Last sync time, next scheduled window, Sync Now button.
+
+“Unmatched students” tray (things the extension saw that the SIS doesn’t know yet).
+
+Simple toggles:
+
+“Make SIS/Google classes authoritative” (on)
+
+“Allow teacher custom groups” (on)
+
+Why schools like this
+
+No manual rebuilds at semester changes.
+
+Students who transfer classes appear/disappear automatically.
+
+Cleaner auditing (who was in what class and when).
+
+Recommended rollout for ClassPilot (phased)
+
+Phase 1 (fast): keep extension flow; add CSV import + nightly cron; introduce id mapping and “pending” bucket.
+Phase 2: add Google Classroom sync for schools on Google.
+Phase 3: add ClassLink/Clever for districts that require SIS-grade integration.
+Always: teacher custom small groups remain local and never overwritten by sync.
