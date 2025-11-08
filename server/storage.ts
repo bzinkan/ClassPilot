@@ -18,6 +18,8 @@ import {
   type InsertTeacherSettings,
   type TeacherStudent,
   type InsertTeacherStudent,
+  type DashboardTab,
+  type InsertDashboardTab,
   type FlightPath,
   type InsertFlightPath,
   type StudentGroup,
@@ -35,6 +37,7 @@ import {
   settings,
   teacherSettings,
   teacherStudents,
+  dashboardTabs,
   flightPaths,
   studentGroups,
   messages,
@@ -105,6 +108,13 @@ export interface IStorage {
   unassignStudentFromTeacher(teacherId: string, studentId: string): Promise<boolean>;
   getTeacherStudents(teacherId: string): Promise<string[]>; // Returns student IDs
   getStudentTeachers(studentId: string): Promise<string[]>; // Returns teacher IDs
+
+  // Dashboard Tabs
+  getDashboardTabs(teacherId: string): Promise<DashboardTab[]>;
+  getDashboardTab(id: string): Promise<DashboardTab | undefined>;
+  createDashboardTab(tab: InsertDashboardTab): Promise<DashboardTab>;
+  updateDashboardTab(id: string, updates: Partial<InsertDashboardTab>): Promise<DashboardTab | undefined>;
+  deleteDashboardTab(id: string): Promise<boolean>;
 
   // Flight Paths (teacher-scoped)
   getFlightPath(id: string): Promise<FlightPath | undefined>;
@@ -618,6 +628,11 @@ export class MemStorage implements IStorage {
       gradeLevels: insertSettings.gradeLevels ?? null,
       maxTabsPerStudent: insertSettings.maxTabsPerStudent ?? null,
       activeFlightPathId: insertSettings.activeFlightPathId ?? null,
+      enableTrackingHours: insertSettings.enableTrackingHours ?? false,
+      trackingStartTime: insertSettings.trackingStartTime ?? "08:00",
+      trackingEndTime: insertSettings.trackingEndTime ?? "15:00",
+      schoolTimezone: insertSettings.schoolTimezone ?? "America/New_York",
+      trackingDays: insertSettings.trackingDays ?? null,
     };
     this.settings = settings;
     return settings;
@@ -824,6 +839,27 @@ export class MemStorage implements IStorage {
     };
     this.checkIns.push(checkIn);
     return checkIn;
+  }
+
+  // Dashboard Tabs (stubs - not used in memory storage)
+  async getDashboardTabs(teacherId: string): Promise<DashboardTab[]> {
+    return [];
+  }
+
+  async getDashboardTab(id: string): Promise<DashboardTab | undefined> {
+    return undefined;
+  }
+
+  async createDashboardTab(tab: InsertDashboardTab): Promise<DashboardTab> {
+    throw new Error("Dashboard tabs not supported in memory storage");
+  }
+
+  async updateDashboardTab(id: string, updates: Partial<InsertDashboardTab>): Promise<DashboardTab | undefined> {
+    return undefined;
+  }
+
+  async deleteDashboardTab(id: string): Promise<boolean> {
+    return false;
   }
 }
 
@@ -1602,6 +1638,47 @@ export class DatabaseStorage implements IStorage {
       .values(insertCheckIn)
       .returning();
     return created;
+  }
+
+  // Dashboard Tabs
+  async getDashboardTabs(teacherId: string): Promise<DashboardTab[]> {
+    return await db
+      .select()
+      .from(dashboardTabs)
+      .where(eq(dashboardTabs.teacherId, teacherId))
+      .orderBy(dashboardTabs.order);
+  }
+
+  async getDashboardTab(id: string): Promise<DashboardTab | undefined> {
+    const [tab] = await db
+      .select()
+      .from(dashboardTabs)
+      .where(eq(dashboardTabs.id, id));
+    return tab || undefined;
+  }
+
+  async createDashboardTab(insertTab: InsertDashboardTab): Promise<DashboardTab> {
+    const [created] = await db
+      .insert(dashboardTabs)
+      .values(insertTab)
+      .returning();
+    return created;
+  }
+
+  async updateDashboardTab(id: string, updates: Partial<InsertDashboardTab>): Promise<DashboardTab | undefined> {
+    const [updated] = await db
+      .update(dashboardTabs)
+      .set(updates)
+      .where(eq(dashboardTabs.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async deleteDashboardTab(id: string): Promise<boolean> {
+    const result = await db
+      .delete(dashboardTabs)
+      .where(eq(dashboardTabs.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
   }
 }
 

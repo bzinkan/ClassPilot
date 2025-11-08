@@ -245,6 +245,21 @@ export const insertTeacherStudentSchema = createInsertSchema(teacherStudents).om
 export type InsertTeacherStudent = z.infer<typeof insertTeacherStudentSchema>;
 export type TeacherStudent = typeof teacherStudents.$inferSelect;
 
+// Dashboard Tabs - User-customizable filter tabs for the dashboard
+export const dashboardTabs = pgTable("dashboard_tabs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  teacherId: text("teacher_id").notNull(), // FK to users table
+  label: text("label").notNull(), // Display label like "Grade 7", "Robotics Club", "Flagged"
+  filterType: text("filter_type").notNull(), // 'grade', 'group', 'status', 'multi-group', 'all'
+  filterValue: jsonb("filter_value"), // JSON for complex filters (e.g., multi-group OR conditions, status criteria)
+  order: text("order").notNull().default("0"), // For ordering tabs
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertDashboardTabSchema = createInsertSchema(dashboardTabs).omit({ id: true, createdAt: true });
+export type InsertDashboardTab = z.infer<typeof insertDashboardTabSchema>;
+export type DashboardTab = typeof dashboardTabs.$inferSelect;
+
 // Login request schema
 export const loginSchema = z.object({
   username: z.string().min(1),

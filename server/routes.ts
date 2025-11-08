@@ -16,6 +16,7 @@ import {
   insertSettingsSchema,
   insertFlightPathSchema,
   insertStudentGroupSchema,
+  insertDashboardTabSchema,
   loginSchema,
   createTeacherSchema,
   type StudentStatus,
@@ -1414,6 +1415,122 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     } catch (error) {
       console.error("Unassign student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Dashboard Tabs endpoints - User-customizable filter tabs
+  app.get("/api/teacher/dashboard-tabs", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      let tabs = await storage.getDashboardTabs(teacherId);
+      
+      // Auto-generate default grade-level tabs if none exist
+      if (tabs.length === 0) {
+        const settings = await storage.getSettings();
+        const gradeLevels = settings?.gradeLevels || ["6", "7", "8", "9", "10", "11", "12"];
+        
+        // Create "All Grades" tab first
+        await storage.createDashboardTab({
+          teacherId,
+          label: "All Grades",
+          filterType: "all",
+          filterValue: null,
+          order: "0",
+        });
+        
+        // Create grade-level tabs
+        for (let i = 0; i < gradeLevels.length; i++) {
+          const grade = gradeLevels[i];
+          const label = grade === "K" ? "Kindergarten" : `Grade ${grade}`;
+          await storage.createDashboardTab({
+            teacherId,
+            label,
+            filterType: "grade",
+            filterValue: { grade },
+            order: String(i + 1),
+          });
+        }
+        
+        // Fetch the newly created tabs
+        tabs = await storage.getDashboardTabs(teacherId);
+      }
+      
+      res.json(tabs);
+    } catch (error) {
+      console.error("Get dashboard tabs error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/teacher/dashboard-tabs", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const data = insertDashboardTabSchema.parse({ ...req.body, teacherId });
+      const tab = await storage.createDashboardTab(data);
+      res.json(tab);
+    } catch (error) {
+      console.error("Create dashboard tab error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.patch("/api/teacher/dashboard-tabs/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { id } = req.params;
+      
+      // Verify ownership
+      const existingTab = await storage.getDashboardTab(id);
+      if (!existingTab || existingTab.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Dashboard tab not found" });
+      }
+      
+      const data = { ...req.body, teacherId };
+      const tab = await storage.updateDashboardTab(id, data);
+      res.json(tab);
+    } catch (error) {
+      console.error("Update dashboard tab error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.delete("/api/teacher/dashboard-tabs/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { id } = req.params;
+      
+      // Verify ownership
+      const existingTab = await storage.getDashboardTab(id);
+      if (!existingTab || existingTab.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Dashboard tab not found" });
+      }
+      
+      const success = await storage.deleteDashboardTab(id);
+      
+      if (success) {
+        res.json({ success: true });
+      } else {
+        res.status(404).json({ error: "Dashboard tab not found" });
+      }
+    } catch (error) {
+      console.error("Delete dashboard tab error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
