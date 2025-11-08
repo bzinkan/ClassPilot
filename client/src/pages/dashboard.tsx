@@ -31,7 +31,7 @@ import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { StudentStatus, Heartbeat, Settings, FlightPath } from "@shared/schema";
+import type { StudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
 import { isWithinTrackingHours } from "@shared/utils";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
@@ -115,6 +115,23 @@ export default function Dashboard() {
   });
 
   const currentUser = currentUserData?.user;
+
+  // Fetch active session and groups
+  const { data: activeSession } = useQuery<Session | null>({
+    queryKey: ['/api/sessions/active'],
+    refetchInterval: 10000, // Check every 10 seconds
+  });
+
+  const { data: groups = [] } = useQuery<Group[]>({
+    queryKey: ['/api/teacher/groups'],
+  });
+
+  // Fetch students in the active session's group
+  const { data: sessionStudentIds = [] } = useQuery<string[]>({
+    queryKey: ['/api/groups', activeSession?.groupId, 'students'],
+    enabled: !!activeSession?.groupId,
+    select: (data: any[]) => data.map((s: any) => s.id),
+  });
 
   // WebSocket connection with automatic reconnection
   useEffect(() => {
@@ -405,6 +422,11 @@ export default function Dashboard() {
       
       if (!matchesSearch) return false;
       
+      // Filter by active session (only show students in current session's group)
+      if (activeSession && sessionStudentIds.length > 0) {
+        if (!sessionStudentIds.includes(student.studentId)) return false;
+      }
+      
       // Filter by gradeLevel field (normalize both sides for comparison)
       return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
     })
@@ -600,6 +622,54 @@ export default function Dashboard() {
     const newGrades = currentGrades.filter(g => g !== grade);
     updateGradesMutation.mutate(newGrades);
   };
+
+  // Session control mutations
+  const startSessionMutation = useMutation({
+    mutationFn: async (groupId: string) => {
+      const res = await apiRequest('POST', '/api/sessions/start', { groupId });
+      return res.json();
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions/active'], exact: false });
+      queryClient.invalidateQueries({ queryKey: ['/api/groups'], exact: false });
+      queryClient.invalidateQueries({ queryKey: ['/api/teacher/groups'], exact: false });
+      const group = groups.find(g => g.id === data.groupId);
+      toast({
+        title: "Class Started",
+        description: `Now teaching: ${group?.name || 'Unknown Class'}`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  const endSessionMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/sessions/end', {});
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/sessions/active'], exact: false });
+      queryClient.invalidateQueries({ queryKey: ['/api/groups'], exact: false });
+      queryClient.invalidateQueries({ queryKey: ['/api/teacher/groups'], exact: false });
+      toast({
+        title: "Class Ended",
+        description: "Class session has been ended",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
 
   // Remote control mutations
   const openTabMutation = useMutation({
@@ -866,6 +936,66 @@ export default function Dashboard() {
                     settings.trackingDays
                   ) ? 'Tracking Active' : 'Tracking Paused'}
                 </Badge>
+              )}
+              {currentUser?.role === 'teacher' && (
+                <>
+                  {activeSession ? (
+                    <>
+                      <Badge variant="default" className="text-xs" data-testid="badge-active-session">
+                        <div className="h-2 w-2 rounded-full mr-1.5 bg-green-500 animate-pulse" />
+                        {groups.find(g => g.id === activeSession.groupId)?.name || 'Active Class'}
+                      </Badge>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => endSessionMutation.mutate()}
+                        disabled={endSessionMutation.isPending}
+                        data-testid="button-end-session"
+                      >
+                        <X className="h-4 w-4 mr-2" />
+                        End Class
+                      </Button>
+                    </>
+                  ) : (
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="default"
+                          size="sm"
+                          disabled={groups.length === 0}
+                          data-testid="button-start-session"
+                        >
+                          <Plus className="h-4 w-4 mr-2" />
+                          Start Class
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-56">
+                        <DropdownMenuLabel>Select Class</DropdownMenuLabel>
+                        <DropdownMenuSeparator />
+                        {groups.length === 0 ? (
+                          <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                            No classes configured
+                          </div>
+                        ) : (
+                          groups.map((group) => (
+                            <DropdownMenuCheckboxItem
+                              key={group.id}
+                              onSelect={() => startSessionMutation.mutate(group.id)}
+                              data-testid={`menu-item-start-${group.id}`}
+                            >
+                              <div className="flex flex-col">
+                                <span className="font-medium">{group.name}</span>
+                                {group.description && (
+                                  <span className="text-xs text-muted-foreground">{group.description}</span>
+                                )}
+                              </div>
+                            </DropdownMenuCheckboxItem>
+                          ))
+                        )}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  )}
+                </>
               )}
               <Button
                 variant="outline"

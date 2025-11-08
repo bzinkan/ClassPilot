@@ -31,7 +31,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { Settings } from "@shared/schema";
+import type { Settings, Session, Group } from "@shared/schema";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
 function normalizeGrade(grade: string | null | undefined): string | null {
@@ -114,6 +114,15 @@ export default function Admin() {
 
   const { data: settings } = useQuery<Settings>({
     queryKey: ["/api/settings"],
+  });
+
+  const { data: activeSessions = [] } = useQuery<Session[]>({
+    queryKey: ["/api/sessions/all"],
+    refetchInterval: 10000, // Poll every 10 seconds
+  });
+
+  const { data: allGroups = [] } = useQuery<Group[]>({
+    queryKey: ["/api/teacher/groups"],
   });
 
   const createTeacherMutation = useMutation({
@@ -222,6 +231,45 @@ export default function Admin() {
         variant: "destructive",
         title: "Failed to update tracking hours",
         description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const migrateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/admin/migrate-to-groups", {});
+      return res.json();
+    },
+    onSuccess: async (data: any) => {
+      // Invalidate all group-related caches with prefix matching
+      await queryClient.invalidateQueries({ 
+        queryKey: ['/api/teacher/groups'],
+        exact: false  
+      });
+      await queryClient.invalidateQueries({ 
+        queryKey: ['/api/groups'],
+        exact: false  // This will match all /api/groups/* queries
+      });
+      await queryClient.invalidateQueries({ 
+        queryKey: ['/api/sessions/active'],
+        exact: false  
+      });
+      await queryClient.invalidateQueries({ 
+        queryKey: ['/api/sessions/all'],
+        exact: false  
+      });
+      // Force immediate refetch
+      await queryClient.refetchQueries({ queryKey: ['/api/teacher/groups'] });
+      toast({
+        title: "Migration completed",
+        description: `Created ${data.groupsCreated} groups and assigned ${data.studentsAssigned} students.`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Migration failed",
+        description: error.message || "An error occurred during migration",
       });
     },
   });
@@ -696,6 +744,85 @@ export default function Admin() {
           >
             {updateTrackingHoursMutation.isPending ? "Saving..." : "Save Tracking Hours"}
           </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Users className="h-5 w-5" />
+            Groups Migration
+          </CardTitle>
+          <CardDescription>
+            Convert existing teacher-student assignments to the new groups system
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="bg-muted p-4 rounded-lg">
+            <p className="text-sm mb-2">
+              <strong>One-time migration:</strong> This will create default groups for each teacher.
+            </p>
+            <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
+              <li>Creates an "All Students" group for each teacher</li>
+              <li>Assigns existing students to their teacher's default group</li>
+              <li>Enables session-based classroom management</li>
+            </ul>
+            <p className="text-sm mt-3 text-muted-foreground">
+              Safe to run multiple times - will not create duplicates.
+            </p>
+          </div>
+          <Button
+            variant="default"
+            data-testid="button-migrate-groups"
+            onClick={() => migrateMutation.mutate()}
+            disabled={migrateMutation.isPending}
+          >
+            {migrateMutation.isPending ? "Migrating..." : "Run Migration"}
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Clock className="h-5 w-5" />
+            Active Sessions Monitor
+          </CardTitle>
+          <CardDescription>
+            View all ongoing class sessions school-wide
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {activeSessions.length === 0 ? (
+            <div className="text-center py-8 text-muted-foreground">
+              <Clock className="h-12 w-12 mx-auto mb-3 text-muted-foreground/30" />
+              <p className="text-sm">No active class sessions</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {activeSessions.map((session) => {
+                const teacher = teachers.find(t => t.id === session.teacherId);
+                const group = allGroups.find(g => g.id === session.groupId);
+                return (
+                  <div
+                    key={session.id}
+                    className="flex items-center justify-between p-3 rounded-lg border hover-elevate"
+                    data-testid={`session-${session.id}`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                      <div>
+                        <p className="font-medium">{group?.name || 'Unknown Group'}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {teacher?.username || 'Unknown Teacher'} • Started {new Date(session.startTime).toLocaleTimeString()}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </CardContent>
       </Card>
 

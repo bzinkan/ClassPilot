@@ -661,6 +661,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Migrate existing teacher_students to groups system
+  app.post("/api/admin/migrate-to-groups", requireAdmin, async (req, res) => {
+    try {
+      // Get all teachers and settings
+      const allUsers = await storage.getAllUsers();
+      const allTeachers = allUsers.filter(user => user.role === 'teacher');
+      const settings = await storage.getSettings();
+      const schoolId = settings?.schoolId || 'default-school';
+      
+      let groupsCreated = 0;
+      let studentsAssigned = 0;
+      
+      // For each teacher, create a default group and assign students
+      for (const teacher of allTeachers) {
+        // Get teacher's assigned students
+        const studentIds = await storage.getTeacherStudents(teacher.id);
+        if (studentIds.length === 0) continue;
+        
+        // Check if teacher already has a default group
+        const existingGroups = await storage.getGroupsByTeacher(teacher.id);
+        let defaultGroup = existingGroups.find(g => g.name === 'All Students');
+        
+        // Create default group if it doesn't exist
+        if (!defaultGroup) {
+          defaultGroup = await storage.createGroup({
+            teacherId: teacher.id,
+            schoolId,
+            name: 'All Students',
+            description: 'Default group containing all assigned students',
+          });
+          groupsCreated++;
+        }
+        
+        // Assign all students to the default group
+        for (const studentId of studentIds) {
+          try {
+            await storage.assignStudentToGroup(defaultGroup.id, studentId);
+            studentsAssigned++;
+          } catch (error) {
+            // Student might already be assigned, skip
+            console.log(`Student ${studentId} already in group ${defaultGroup.id}`);
+          }
+        }
+      }
+      
+      res.json({
+        success: true,
+        message: 'Migration completed successfully',
+        teachersProcessed: allTeachers.length,
+        groupsCreated,
+        studentsAssigned,
+      });
+    } catch (error) {
+      console.error("Migration error:", error);
+      res.status(500).json({ error: "Failed to migrate to groups system" });
+    }
+  });
+
   // Device registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
@@ -1540,12 +1598,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Groups (Class Rosters) endpoints
   app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
-      const groups = await storage.getGroupsByTeacher(teacherId);
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      // Admins see all groups; teachers see only their own
+      if (user.role === 'admin') {
+        const allGroups = await storage.getAllGroups();
+        return res.json(allGroups);
+      }
+      
+      const groups = await storage.getGroupsByTeacher(userId);
       res.json(groups);
     } catch (error) {
       console.error("Get groups error:", error);
