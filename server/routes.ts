@@ -1624,12 +1624,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
-      const data = insertGroupSchema.parse({ ...req.body, teacherId });
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      // Determine target teacherId
+      let targetTeacherId = req.body.teacherId;
+      
+      // If not admin, force teacherId to be current user
+      if (user.role !== 'admin') {
+        targetTeacherId = userId;
+      }
+      
+      // Validate targetTeacherId is provided
+      if (!targetTeacherId) {
+        return res.status(400).json({ error: "teacherId is required" });
+      }
+      
+      // Set default groupType if not provided
+      const groupType = req.body.groupType || 
+        (user.role === 'admin' ? 'admin_class' : 'teacher_created');
+      
+      const data = insertGroupSchema.parse({ 
+        ...req.body, 
+        teacherId: targetTeacherId,
+        groupType 
+      });
       const group = await storage.createGroup(data);
       res.json(group);
     } catch (error) {
@@ -1640,16 +1666,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
       const { id } = req.params;
       
-      // Verify ownership
+      // Verify ownership (admins can edit any group)
       const existingGroup = await storage.getGroup(id);
-      if (!existingGroup || existingGroup.teacherId !== teacherId) {
+      if (!existingGroup) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      if (user.role !== 'admin' && existingGroup.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
@@ -1663,16 +1698,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const user = await storage.getUser(userId);
+      if (!user) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
       const { id } = req.params;
       
-      // Verify ownership
+      // Verify ownership (admins can delete any group)
       const existingGroup = await storage.getGroup(id);
-      if (!existingGroup || existingGroup.teacherId !== teacherId) {
+      if (!existingGroup) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      if (user.role !== 'admin' && existingGroup.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
