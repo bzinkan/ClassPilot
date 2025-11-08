@@ -269,6 +269,8 @@ export const groups = pgTable("groups", {
   description: text("description"), // Optional description
   periodLabel: text("period_label"), // Optional period label (e.g., "P3", "10:10-10:55")
   gradeLevel: text("grade_level"), // Optional grade level for filtering
+  groupType: text("group_type").notNull().default("teacher_created"), // "admin_class" | "teacher_small_group" | "teacher_created" (legacy)
+  parentGroupId: text("parent_group_id"), // FK to groups.id - for small groups within official classes (nullable)
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
