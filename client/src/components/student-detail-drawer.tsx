@@ -1,13 +1,13 @@
 import { useState, useMemo } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { X, ExternalLink, Clock, Monitor, Trash2, Camera, History as HistoryIcon, LayoutGrid, Calendar as CalendarIcon, AlertTriangle } from "lucide-react";
+import { ExternalLink, Clock, Monitor, Trash2, Camera, History as HistoryIcon, LayoutGrid, Calendar as CalendarIcon, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription, SheetClose } from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -146,28 +146,17 @@ export function StudentDetailDrawer({
                 </span>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Button 
-                variant="destructive" 
-                size="sm" 
-                className="gap-1.5"
-                onClick={() => setShowDeleteDialog(true)}
-                disabled={deleteStudentMutation.isPending}
-                data-testid="button-delete-student"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                Delete
-              </Button>
-              <SheetClose asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  data-testid="button-close-drawer"
-                >
-                  <X className="h-5 w-5" />
-                </Button>
-              </SheetClose>
-            </div>
+            <Button 
+              variant="destructive" 
+              size="sm" 
+              className="gap-1.5"
+              onClick={() => setShowDeleteDialog(true)}
+              disabled={deleteStudentMutation.isPending}
+              data-testid="button-delete-student"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </Button>
           </div>
         </SheetHeader>
 
