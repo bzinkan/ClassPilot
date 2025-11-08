@@ -129,10 +129,11 @@ export default function AdminClasses() {
     ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === selectedGrade)
     : allStudents;
 
-  // Filter classes by selected grade
+  // Filter classes by selected grade - ONLY show admin_class type
+  const adminClasses = allGroups.filter(g => g.groupType === 'admin_class');
   const filteredClasses = selectedGrade
-    ? allGroups.filter(g => normalizeGrade(g.gradeLevel) === selectedGrade)
-    : allGroups;
+    ? adminClasses.filter(g => normalizeGrade(g.gradeLevel) === selectedGrade)
+    : adminClasses;
 
   // Create class mutation
   const createClassMutation = useMutation({
@@ -173,7 +174,9 @@ export default function AdminClasses() {
       return results;
     },
     onSuccess: async () => {
+      // Invalidate both /api/groups and /api/teacher/groups to ensure UI updates
       await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
       toast({
         title: "Students Assigned",
         description: `${selectedStudents.size} students added to class`,

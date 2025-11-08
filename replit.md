@@ -39,6 +39,7 @@ The system is built with a full-stack architecture:
 -   **Remote Classroom Control**: Features include Open Tab, Close Tabs (all or by pattern), Lock Screen (to current URL), Unlock Screen, Apply Flight Paths, Student Groups, and Tab Limiting, all with per-student targeting.
 -   **Teacher-Specific Settings (Multi-Tenancy)**: Supports multiple teachers with isolated resources (Flight Paths, Student Groups, settings) and student assignments. Teachers access personal settings to manage Flight Paths, tab limits, and allowed/blocked domains.
 -   **Session-Based Classroom Management**: Teachers create class groups/rosters (e.g., "7th Science P3") and start/end daily class sessions to filter dashboard view. Only students in the active session's group appear on the dashboard, enabling efficient management of 150+ students across multiple class periods. Admin migration tool converts existing teacher-student assignments to default groups. Admin session monitor provides school-wide visibility of all active class sessions.
+-   **Admin Class Management**: Administrators can create official class rosters for teachers through a dedicated interface. Features include grade-based browsing, class creation with teacher assignment, bulk student roster assignment, and full CRUD operations on admin-created classes. Classes are typed (admin_class vs teacher_created) to prevent accidental modification of teacher-owned groups.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, minimal data collection.
