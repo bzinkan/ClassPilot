@@ -845,7 +845,8 @@ export default function Dashboard() {
                     settings.enableTrackingHours,
                     settings.trackingStartTime,
                     settings.trackingEndTime,
-                    settings.schoolTimezone
+                    settings.schoolTimezone,
+                    settings.trackingDays
                   ) ? "default" : "secondary"}
                   className="text-xs"
                   data-testid="badge-tracking-status"
@@ -854,13 +855,15 @@ export default function Dashboard() {
                     settings.enableTrackingHours,
                     settings.trackingStartTime,
                     settings.trackingEndTime,
-                    settings.schoolTimezone
+                    settings.schoolTimezone,
+                    settings.trackingDays
                   ) ? 'bg-status-online animate-pulse' : 'bg-amber-500'}`} />
                   {isWithinTrackingHours(
                     settings.enableTrackingHours,
                     settings.trackingStartTime,
                     settings.trackingEndTime,
-                    settings.schoolTimezone
+                    settings.schoolTimezone,
+                    settings.trackingDays
                   ) ? 'Tracking Active' : 'Tracking Paused'}
                 </Badge>
               )}

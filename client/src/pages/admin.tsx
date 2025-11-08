@@ -93,6 +93,7 @@ export default function Admin() {
   const [trackingStartTime, setTrackingStartTime] = useState("08:00");
   const [trackingEndTime, setTrackingEndTime] = useState("15:00");
   const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
+  const [trackingDays, setTrackingDays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -206,6 +207,7 @@ export default function Admin() {
         trackingStartTime,
         trackingEndTime,
         schoolTimezone,
+        trackingDays,
       });
     },
     onSuccess: () => {
@@ -231,6 +233,7 @@ export default function Admin() {
       setTrackingStartTime(settings.trackingStartTime || "08:00");
       setTrackingEndTime(settings.trackingEndTime || "15:00");
       setSchoolTimezone(settings.schoolTimezone || "America/New_York");
+      setTrackingDays(settings.trackingDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
     }
   }, [settings]);
 
@@ -652,6 +655,34 @@ export default function Admin() {
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   Tracking hours will be enforced in this timezone, regardless of server location.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Tracking Days</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
+                    <div key={day} className="flex items-center space-x-2">
+                      <Checkbox
+                        id={`tracking-day-${day}`}
+                        checked={trackingDays.includes(day)}
+                        onCheckedChange={(checked) => {
+                          if (checked) {
+                            setTrackingDays([...trackingDays, day]);
+                          } else {
+                            setTrackingDays(trackingDays.filter(d => d !== day));
+                          }
+                        }}
+                        data-testid={`checkbox-tracking-day-${day.toLowerCase()}`}
+                      />
+                      <Label htmlFor={`tracking-day-${day}`} className="cursor-pointer text-sm font-normal">
+                        {day}
+                      </Label>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Select which days of the week student activity should be tracked. Deselect weekends or holidays to pause monitoring.
                 </p>
               </div>
             </div>

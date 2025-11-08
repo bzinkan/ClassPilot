@@ -127,20 +127,22 @@ export function groupSessionsByDevice(heartbeats: Heartbeat[]): Map<string, URLS
 }
 
 /**
- * Check if the current time is within tracking hours, using the school's timezone.
+ * Check if the current time is within tracking hours and days, using the school's timezone.
  * This ensures consistent enforcement across client and server regardless of where they're hosted.
  * 
  * @param enableTrackingHours - Whether tracking hours feature is enabled
  * @param trackingStartTime - Start time in HH:MM format (e.g., "08:00")
  * @param trackingEndTime - End time in HH:MM format (e.g., "15:00")
  * @param schoolTimezone - School timezone in IANA format (e.g., "America/New_York")
- * @returns true if currently within tracking hours (or if feature disabled), false otherwise
+ * @param trackingDays - Array of day names when tracking is active (e.g., ["Monday", "Tuesday", ...])
+ * @returns true if currently within tracking hours AND days (or if feature disabled), false otherwise
  */
 export function isWithinTrackingHours(
   enableTrackingHours: boolean | null | undefined,
   trackingStartTime: string | null | undefined,
   trackingEndTime: string | null | undefined,
-  schoolTimezone: string | null | undefined
+  schoolTimezone: string | null | undefined,
+  trackingDays: string[] | null | undefined
 ): boolean {
   // If tracking hours not enabled, always allow tracking
   if (!enableTrackingHours) {
@@ -151,10 +153,23 @@ export function isWithinTrackingHours(
   const startTime = trackingStartTime || "00:00";
   const endTime = trackingEndTime || "23:59";
   const timezone = schoolTimezone || "America/New_York";
+  const activeDays = trackingDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 
   try {
-    // Get current time in school's timezone
     const now = new Date();
+    
+    // Get current day of week in school's timezone
+    const schoolDayName = now.toLocaleString("en-US", { 
+      timeZone: timezone,
+      weekday: 'long'
+    });
+    
+    // Check if current day is in the list of tracking days
+    if (!activeDays.includes(schoolDayName)) {
+      return false;
+    }
+    
+    // Get current time in school's timezone
     const schoolTimeString = now.toLocaleString("en-US", { 
       timeZone: timezone,
       hour12: false,

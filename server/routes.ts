@@ -780,9 +780,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         settings?.enableTrackingHours,
         settings?.trackingStartTime,
         settings?.trackingEndTime,
-        settings?.schoolTimezone
+        settings?.schoolTimezone,
+        settings?.trackingDays
       )) {
-        console.log('Heartbeat rejected - outside school tracking hours');
+        console.log('Heartbeat rejected - outside school tracking hours/days');
         // Return 204 to prevent extension from retrying, but don't store heartbeat
         return res.sendStatus(204);
       }
