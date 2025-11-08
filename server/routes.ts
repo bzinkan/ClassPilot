@@ -17,6 +17,8 @@ import {
   insertFlightPathSchema,
   insertStudentGroupSchema,
   insertDashboardTabSchema,
+  insertGroupSchema,
+  insertSessionSchema,
   loginSchema,
   createTeacherSchema,
   type StudentStatus,
@@ -1531,6 +1533,232 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     } catch (error) {
       console.error("Delete dashboard tab error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Groups (Class Rosters) endpoints
+  app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const groups = await storage.getGroupsByTeacher(teacherId);
+      res.json(groups);
+    } catch (error) {
+      console.error("Get groups error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const data = insertGroupSchema.parse({ ...req.body, teacherId });
+      const group = await storage.createGroup(data);
+      res.json(group);
+    } catch (error) {
+      console.error("Create group error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { id } = req.params;
+      
+      // Verify ownership
+      const existingGroup = await storage.getGroup(id);
+      if (!existingGroup || existingGroup.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      const group = await storage.updateGroup(id, req.body);
+      res.json(group);
+    } catch (error) {
+      console.error("Update group error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { id } = req.params;
+      
+      // Verify ownership
+      const existingGroup = await storage.getGroup(id);
+      if (!existingGroup || existingGroup.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      const success = await storage.deleteGroup(id);
+      res.json({ success });
+    } catch (error) {
+      console.error("Delete group error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Group students endpoints
+  app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { groupId } = req.params;
+      
+      // Verify ownership
+      const group = await storage.getGroup(groupId);
+      if (!group || group.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      const studentIds = await storage.getGroupStudents(groupId);
+      const students = await Promise.all(studentIds.map(id => storage.getStudent(id)));
+      res.json(students.filter(s => s !== undefined));
+    } catch (error) {
+      console.error("Get group students error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { groupId, studentId } = req.params;
+      
+      // Verify ownership
+      const group = await storage.getGroup(groupId);
+      if (!group || group.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      const assignment = await storage.assignStudentToGroup(groupId, studentId);
+      res.json(assignment);
+    } catch (error) {
+      console.error("Assign student to group error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { groupId, studentId } = req.params;
+      
+      // Verify ownership
+      const group = await storage.getGroup(groupId);
+      if (!group || group.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      const success = await storage.unassignStudentFromGroup(groupId, studentId);
+      res.json({ success });
+    } catch (error) {
+      console.error("Unassign student from group error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Session endpoints
+  app.post("/api/sessions/start", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const { groupId } = req.body;
+      
+      // Verify group ownership
+      const group = await storage.getGroup(groupId);
+      if (!group || group.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      
+      // End any existing active session for this teacher
+      const existingSession = await storage.getActiveSessionByTeacher(teacherId);
+      if (existingSession) {
+        await storage.endSession(existingSession.id);
+      }
+      
+      // Start new session
+      const session = await storage.startSession({ groupId, teacherId });
+      res.json(session);
+    } catch (error) {
+      console.error("Start session error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/sessions/end", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const activeSession = await storage.getActiveSessionByTeacher(teacherId);
+      if (!activeSession) {
+        return res.status(404).json({ error: "No active session found" });
+      }
+      
+      const session = await storage.endSession(activeSession.id);
+      res.json(session);
+    } catch (error) {
+      console.error("End session error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/sessions/active", checkIPAllowlist, requireAuth, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      const session = await storage.getActiveSessionByTeacher(teacherId);
+      res.json(session || null);
+    } catch (error) {
+      console.error("Get active session error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/sessions/all", checkIPAllowlist, requireAdmin, async (req, res) => {
+    try {
+      // Admin-only endpoint to view all active sessions school-wide
+      const sessions = await storage.getActiveSessions();
+      res.json(sessions);
+    } catch (error) {
+      console.error("Get all sessions error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

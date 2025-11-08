@@ -20,6 +20,12 @@ import {
   type InsertTeacherStudent,
   type DashboardTab,
   type InsertDashboardTab,
+  type Group,
+  type InsertGroup,
+  type GroupStudent,
+  type InsertGroupStudent,
+  type Session,
+  type InsertSession,
   type FlightPath,
   type InsertFlightPath,
   type StudentGroup,
@@ -38,6 +44,9 @@ import {
   teacherSettings,
   teacherStudents,
   dashboardTabs,
+  groups,
+  groupStudents,
+  sessions,
   flightPaths,
   studentGroups,
   messages,
@@ -115,6 +124,28 @@ export interface IStorage {
   createDashboardTab(tab: InsertDashboardTab): Promise<DashboardTab>;
   updateDashboardTab(id: string, updates: Partial<InsertDashboardTab>): Promise<DashboardTab | undefined>;
   deleteDashboardTab(id: string): Promise<boolean>;
+
+  // Groups (Class Rosters)
+  getGroup(id: string): Promise<Group | undefined>;
+  getGroupsByTeacher(teacherId: string): Promise<Group[]>;
+  getAllGroups(): Promise<Group[]>;
+  createGroup(group: InsertGroup): Promise<Group>;
+  updateGroup(id: string, updates: Partial<InsertGroup>): Promise<Group | undefined>;
+  deleteGroup(id: string): Promise<boolean>;
+  
+  // Group Students (Many-to-many)
+  getGroupStudents(groupId: string): Promise<string[]>; // Returns student IDs
+  assignStudentToGroup(groupId: string, studentId: string): Promise<GroupStudent>;
+  unassignStudentFromGroup(groupId: string, studentId: string): Promise<boolean>;
+  getStudentGroups(studentId: string): Promise<string[]>; // Returns group IDs
+  
+  // Sessions
+  getSession(id: string): Promise<Session | undefined>;
+  getActiveSessionByTeacher(teacherId: string): Promise<Session | undefined>;
+  getActiveSessions(): Promise<Session[]>; // All currently active sessions
+  getAllSessions(): Promise<Session[]>;
+  startSession(session: InsertSession): Promise<Session>;
+  endSession(sessionId: string): Promise<Session | undefined>;
 
   // Flight Paths (teacher-scoped)
   getFlightPath(id: string): Promise<FlightPath | undefined>;
@@ -860,6 +891,73 @@ export class MemStorage implements IStorage {
 
   async deleteDashboardTab(id: string): Promise<boolean> {
     return false;
+  }
+
+  // Groups (stubs - not used in memory storage)
+  async getGroup(id: string): Promise<Group | undefined> {
+    return undefined;
+  }
+
+  async getGroupsByTeacher(teacherId: string): Promise<Group[]> {
+    return [];
+  }
+
+  async getAllGroups(): Promise<Group[]> {
+    return [];
+  }
+
+  async createGroup(group: InsertGroup): Promise<Group> {
+    throw new Error("Groups not supported in memory storage");
+  }
+
+  async updateGroup(id: string, updates: Partial<InsertGroup>): Promise<Group | undefined> {
+    return undefined;
+  }
+
+  async deleteGroup(id: string): Promise<boolean> {
+    return false;
+  }
+
+  // Group Students (stubs)
+  async getGroupStudents(groupId: string): Promise<string[]> {
+    return [];
+  }
+
+  async assignStudentToGroup(groupId: string, studentId: string): Promise<GroupStudent> {
+    throw new Error("Group students not supported in memory storage");
+  }
+
+  async unassignStudentFromGroup(groupId: string, studentId: string): Promise<boolean> {
+    return false;
+  }
+
+  async getStudentGroups(studentId: string): Promise<string[]> {
+    return [];
+  }
+
+  // Sessions (stubs)
+  async getSession(id: string): Promise<Session | undefined> {
+    return undefined;
+  }
+
+  async getActiveSessionByTeacher(teacherId: string): Promise<Session | undefined> {
+    return undefined;
+  }
+
+  async getActiveSessions(): Promise<Session[]> {
+    return [];
+  }
+
+  async getAllSessions(): Promise<Session[]> {
+    return [];
+  }
+
+  async startSession(session: InsertSession): Promise<Session> {
+    throw new Error("Sessions not supported in memory storage");
+  }
+
+  async endSession(sessionId: string): Promise<Session | undefined> {
+    return undefined;
   }
 }
 
@@ -1679,6 +1777,135 @@ export class DatabaseStorage implements IStorage {
       .delete(dashboardTabs)
       .where(eq(dashboardTabs.id, id));
     return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  // Groups (Class Rosters)
+  async getGroup(id: string): Promise<Group | undefined> {
+    const [group] = await db
+      .select()
+      .from(groups)
+      .where(eq(groups.id, id));
+    return group || undefined;
+  }
+
+  async getGroupsByTeacher(teacherId: string): Promise<Group[]> {
+    return await db
+      .select()
+      .from(groups)
+      .where(eq(groups.teacherId, teacherId))
+      .orderBy(groups.createdAt);
+  }
+
+  async getAllGroups(): Promise<Group[]> {
+    return await db.select().from(groups).orderBy(groups.createdAt);
+  }
+
+  async createGroup(insertGroup: InsertGroup): Promise<Group> {
+    const [created] = await db
+      .insert(groups)
+      .values(insertGroup)
+      .returning();
+    return created;
+  }
+
+  async updateGroup(id: string, updates: Partial<InsertGroup>): Promise<Group | undefined> {
+    const [updated] = await db
+      .update(groups)
+      .set(updates)
+      .where(eq(groups.id, id))
+      .returning();
+    return updated || undefined;
+  }
+
+  async deleteGroup(id: string): Promise<boolean> {
+    const result = await db.delete(groups).where(eq(groups.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  // Group Students (Many-to-many)
+  async getGroupStudents(groupId: string): Promise<string[]> {
+    const results = await db
+      .select()
+      .from(groupStudents)
+      .where(eq(groupStudents.groupId, groupId));
+    return results.map(r => r.studentId);
+  }
+
+  async assignStudentToGroup(groupId: string, studentId: string): Promise<GroupStudent> {
+    const [created] = await db
+      .insert(groupStudents)
+      .values({ groupId, studentId })
+      .returning();
+    return created;
+  }
+
+  async unassignStudentFromGroup(groupId: string, studentId: string): Promise<boolean> {
+    const result = await db
+      .delete(groupStudents)
+      .where(
+        drizzleSql`${groupStudents.groupId} = ${groupId} AND ${groupStudents.studentId} = ${studentId}`
+      );
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async getStudentGroups(studentId: string): Promise<string[]> {
+    const results = await db
+      .select()
+      .from(groupStudents)
+      .where(eq(groupStudents.studentId, studentId));
+    return results.map(r => r.groupId);
+  }
+
+  // Sessions
+  async getSession(id: string): Promise<Session | undefined> {
+    const [session] = await db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.id, id));
+    return session || undefined;
+  }
+
+  async getActiveSessionByTeacher(teacherId: string): Promise<Session | undefined> {
+    const [session] = await db
+      .select()
+      .from(sessions)
+      .where(
+        drizzleSql`${sessions.teacherId} = ${teacherId} AND ${sessions.endTime} IS NULL`
+      )
+      .orderBy(desc(sessions.startTime));
+    return session || undefined;
+  }
+
+  async getActiveSessions(): Promise<Session[]> {
+    return await db
+      .select()
+      .from(sessions)
+      .where(drizzleSql`${sessions.endTime} IS NULL`)
+      .orderBy(desc(sessions.startTime));
+  }
+
+  async getAllSessions(): Promise<Session[]> {
+    return await db
+      .select()
+      .from(sessions)
+      .orderBy(desc(sessions.startTime));
+  }
+
+  async startSession(insertSession: InsertSession): Promise<Session> {
+    const [created] = await db
+      .insert(sessions)
+      .values(insertSession)
+      .returning();
+    return created;
+  }
+
+  async endSession(sessionId: string): Promise<Session | undefined> {
+    const [updated] = await db
+      .update(sessions)
+      .set({ endTime: drizzleSql`now()` })
+      .where(eq(sessions.id, sessionId))
+      .returning();
+    return updated || undefined;
   }
 }
 

@@ -260,6 +260,48 @@ export const insertDashboardTabSchema = createInsertSchema(dashboardTabs).omit({
 export type InsertDashboardTab = z.infer<typeof insertDashboardTabSchema>;
 export type DashboardTab = typeof dashboardTabs.$inferSelect;
 
+// Groups - Class rosters (e.g., "7th Science P3", "Robotics Club")
+export const groups = pgTable("groups", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  teacherId: text("teacher_id").notNull(), // FK to users table - which teacher owns this group
+  name: text("name").notNull(), // e.g., "7th Science P3", "Robotics Club"
+  description: text("description"), // Optional description
+  periodLabel: text("period_label"), // Optional period label (e.g., "P3", "10:10-10:55")
+  gradeLevel: text("grade_level"), // Optional grade level for filtering
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertGroupSchema = createInsertSchema(groups).omit({ id: true, createdAt: true });
+export type InsertGroup = z.infer<typeof insertGroupSchema>;
+export type Group = typeof groups.$inferSelect;
+
+// Group Students - Many-to-many join table between groups and students
+export const groupStudents = pgTable("group_students", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  groupId: text("group_id").notNull(), // FK to groups table
+  studentId: text("student_id").notNull(), // FK to students table
+  assignedAt: timestamp("assigned_at").notNull().default(sql`now()`),
+});
+
+export const insertGroupStudentSchema = createInsertSchema(groupStudents).omit({ id: true, assignedAt: true });
+export type InsertGroupStudent = z.infer<typeof insertGroupStudentSchema>;
+export type GroupStudent = typeof groupStudents.$inferSelect;
+
+// Sessions - Active teaching periods (bell-to-bell classroom sessions)
+export const sessions = pgTable("sessions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  groupId: text("group_id").notNull(), // FK to groups table - which class is being taught
+  teacherId: text("teacher_id").notNull(), // FK to users table - which teacher started the session
+  startTime: timestamp("start_time").notNull().default(sql`now()`),
+  endTime: timestamp("end_time"), // NULL means currently active, timestamp means ended
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, createdAt: true, startTime: true });
+export type InsertSession = z.infer<typeof insertSessionSchema>;
+export type Session = typeof sessions.$inferSelect;
+
 // Login request schema
 export const loginSchema = z.object({
   username: z.string().min(1),
