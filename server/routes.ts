@@ -1731,16 +1731,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Group students endpoints
   app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
       const { groupId } = req.params;
       
-      // Verify ownership
+      // Get user to check role
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      // Verify ownership - admins can view any group, teachers only their own
       const group = await storage.getGroup(groupId);
-      if (!group || group.teacherId !== teacherId) {
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (user.role !== 'admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
@@ -1755,16 +1764,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
       const { groupId, studentId } = req.params;
       
-      // Verify ownership
+      // Get user to check role
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      // Verify ownership - admins can manage any group, teachers only their own
       const group = await storage.getGroup(groupId);
-      if (!group || group.teacherId !== teacherId) {
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (user.role !== 'admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
@@ -1778,16 +1796,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const teacherId = req.session?.userId;
-      if (!teacherId) {
+      const userId = req.session?.userId;
+      if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
       const { groupId, studentId } = req.params;
       
-      // Verify ownership
+      // Get user to check role
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      
+      // Verify ownership - admins can manage any group, teachers only their own
       const group = await storage.getGroup(groupId);
-      if (!group || group.teacherId !== teacherId) {
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (user.role !== 'admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
