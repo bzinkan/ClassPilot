@@ -1,0 +1,126 @@
+Here’s a drop-in shadcn/ui version of what you showed (header with class/status chips + Delete button, tabs row, and “Current/Recent Activity” cards). Swap your inner JSX with this and keep your existing data/hooks.
+
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription
+} from "@/components/ui/sheet";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { Globe, Clock, Trash2, ExternalLink } from "lucide-react";
+
+type Activity = { id:string; title:string; url?:string; duration:string; time?:string };
+
+export function StudentDetailSheet({
+  open, onOpenChange, student, current, recent
+}:{
+  open:boolean; onOpenChange:(v:boolean)=>void;
+  student:{ id:string; name:string; grade:number; status:"online"|"idle"|"offline"; group?:string };
+  current: Activity | null;
+  recent: Activity[];
+}) {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-[420px] sm:w-[520px]">
+        <SheetHeader>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <SheetTitle>{student.name}</SheetTitle>
+              <SheetDescription className="mt-1 flex flex-wrap items-center gap-2">
+                <Badge variant="secondary" className="uppercase">{student.group ?? "default-class"}</Badge>
+                <Badge className={
+                  student.status==="offline" ? "bg-slate-400 text-white" :
+                  student.status==="idle"    ? "bg-amber-500 text-white" :
+                                               "bg-emerald-600 text-white"
+                }>
+                  {student.status.charAt(0).toUpperCase() + student.status.slice(1)}
+                </Badge>
+                <span className="text-xs text-muted-foreground">device-{student.id.slice(0,8)}</span>
+              </SheetDescription>
+            </div>
+            <Button variant="destructive" size="sm" className="gap-2">
+              <Trash2 className="h-4 w-4" /> Delete Student
+            </Button>
+          </div>
+        </SheetHeader>
+
+        <Tabs defaultValue="screens" className="mt-4">
+          <TabsList className="grid w-full grid-cols-4">
+            <TabsTrigger value="screens">Screens</TabsTrigger>
+            <TabsTrigger value="timeline">Timeline</TabsTrigger>
+            <TabsTrigger value="history">History</TabsTrigger>
+            <TabsTrigger value="snapshots">Snapshots</TabsTrigger>
+          </TabsList>
+
+          {/* Screens */}
+          <TabsContent value="screens" className="mt-4 space-y-4">
+            <Section title="Current Activity">
+              {current ? <ActivityCard a={current} /> : <EmptyRow text="No active screen." />}
+            </Section>
+            <Section title="Recent Activity">
+              <div className="space-y-2">
+                {recent.length
+                  ? recent.map(a => <ActivityCard key={a.id} a={a} />)
+                  : <EmptyRow text="No recent items." />}
+              </div>
+            </Section>
+          </TabsContent>
+
+          {/* Timeline / History / Snapshots -> fill with your existing components */}
+          <TabsContent value="timeline" className="mt-4">/* your timeline */</TabsContent>
+          <TabsContent value="history" className="mt-4">/* your history table */</TabsContent>
+          <TabsContent value="snapshots" className="mt-4">/* your screenshots */</TabsContent>
+        </Tabs>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+function Section({ title, children }:{title:string; children:React.ReactNode}) {
+  return (
+    <div className="rounded-lg border bg-card">
+      <div className="flex items-center justify-between px-4 py-3">
+        <div className="text-sm font-medium">{title}</div>
+      </div>
+      <Separator />
+      <div className="p-4">{children}</div>
+    </div>
+  );
+}
+
+function ActivityCard({ a }:{ a:Activity }) {
+  return (
+    <div className="rounded-lg border p-3 text-sm">
+      <div className="flex items-center gap-2">
+        <Globe className="h-4 w-4 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="font-medium truncate">{a.title}</div>
+          {a.url && (
+            <a href={a.url} target="_blank" className="flex items-center gap-1 text-xs text-muted-foreground truncate">
+              {a.url} <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </div>
+        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+          <Clock className="h-3 w-3" /> {a.duration}
+        </div>
+      </div>
+      {a.time && <div className="mt-1 text-xs text-muted-foreground">{a.time}</div>}
+    </div>
+  );
+}
+
+function EmptyRow({ text }:{ text:string }) {
+  return <div className="text-sm text-muted-foreground">{text}</div>;
+}
+
+
+Plug-in points for your data:
+
+student: your selected student object.
+
+current: your “Current Activity” (title, url, duration).
+
+recent: your array of recent items (same shape).
+
+This will match the screenshot’s UX but look sharper with shadcn.
