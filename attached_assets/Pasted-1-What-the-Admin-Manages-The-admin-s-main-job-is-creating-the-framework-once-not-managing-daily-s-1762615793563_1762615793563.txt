@@ -1,0 +1,117 @@
+1. What the Admin Manages
+
+The admin’s main job is creating the framework once, not managing daily sessions.
+They set up three things only:
+
+Thing	Description	Example
+Teachers	Each teacher account belongs to the school and has one or more “class rosters.”	Mrs. Ellis, Mr. Hughes
+Groups / Rosters	A list of students attached to each class period.	“7th Science P3”, “7th Science P5”
+Schedule metadata (optional)	Optional start/end times for reference; not required for manual start.	Period 3 10:10–10:55
+
+After that, teachers handle everything else with the Start / End Class buttons.
+
+🗂️ 2. Organizing the Admin Dashboard
+
+A clean layout works like this:
+
+A. School Overview
+
+Displays total teachers, students, and groups.
+
+Quick stats (active sessions right now, total devices online).
+
+B. Teacher Management
+
+List of teachers with their assigned groups.
+
+“Add Teacher” button → assign existing groups or create new ones.
+
+Optional bulk upload (CSV: teacher → group → grade → students).
+
+C. Group (Class) Management
+
+Each group has:
+
+Name
+
+Teacher(s)
+
+Period label (optional)
+
+Linked student roster
+
+Admin can clone or edit groups easily (“Copy 7th Science P3 to P5”).
+
+D. Session Monitor (live view)
+
+Shows which teachers currently have active sessions.
+
+Each tile: teacher name, group name, start time, # students connected.
+
+Admin can “join” (view only) or “end session” if something goes wrong.
+
+That’s it — no micromanaging, just visibility and control.
+
+🧩 3. Teacher Workflow (admin doesn’t repeat this)
+
+Teacher logs in → sees list of their classes (“groups”) created by admin.
+
+Clicks Start Class on whichever group they’re teaching right now.
+
+ClassPilot marks that session “active” and only those students appear.
+
+When the bell rings → teacher clicks End Class (or it times out).
+
+All admin had to do was set those groups up once.
+
+🧰 4. Keeping It Organized at Scale
+
+Best structure for admin setup:
+
+School → Teacher → Groups → Students
+
+
+1 teacher = multiple groups (periods).
+
+1 student = multiple groups (different subjects).
+
+Groups are the building blocks for sessions and permissions.
+
+Each school might end up with:
+
+15–20 teachers
+
+80–100 groups
+
+200–300 students
+All manageable in a simple table view.
+
+⚙️ 5. Automation Options (for later)
+
+Auto-import from Google Classroom, CSV, or SIS → creates groups and rosters automatically.
+
+Auto-archive old groups each semester.
+
+Template cloning → copy last year’s groups for new term.
+
+🔒 6. Permission Logic (admin side)
+
+Admins always see all groups and sessions in their school.
+
+Teachers only see groups they’re assigned to.
+
+Aides or subs can be temporarily added to a group by admin for shared viewing.
+
+✅ 7. Admin Experience Summary
+Task	Admin Does Once	Teacher Does Daily
+Add teacher accounts	✅	
+Create groups / rosters	✅	
+Assign students to groups	✅	
+Start / end classes		✅
+Monitor sessions	✅ (read-only)	
+Edit rosters mid-year	✅ (as needed)	
+TL;DR
+
+Admins set the structure once (teachers + groups + rosters).
+Teachers control live access by starting/ending sessions.
+Admins can always see, join, or stop any session but don’t rebuild anything day-to-day.
