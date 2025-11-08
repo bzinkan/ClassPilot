@@ -130,7 +130,7 @@ export function StudentDetailDrawer({
               <SheetTitle className="text-xl">
                 {student.studentName}
               </SheetTitle>
-              <SheetDescription className="mt-2 flex flex-wrap items-center gap-2">
+              <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Badge variant="secondary" className="uppercase text-xs">
                   {student.classId || "No Class"}
                 </Badge>
@@ -144,7 +144,7 @@ export function StudentDetailDrawer({
                 <span className="text-xs text-muted-foreground font-mono">
                   device-{student.deviceId.slice(0, 8)}
                 </span>
-              </SheetDescription>
+              </div>
             </div>
             <div className="flex items-center gap-2">
               <Button 
