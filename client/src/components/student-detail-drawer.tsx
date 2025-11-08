@@ -1,6 +1,5 @@
 import { useState, useMemo } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { ExternalLink, Clock, Monitor, Trash2, Camera, History as HistoryIcon, LayoutGrid, Calendar as CalendarIcon, AlertTriangle } from "lucide-react";
+import { ExternalLink, Clock, Monitor, Camera, History as HistoryIcon, LayoutGrid, Calendar as CalendarIcon, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -10,18 +9,6 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format, startOfDay, endOfDay } from "date-fns";
 import { calculateURLSessions, formatDuration } from "@shared/utils";
@@ -37,8 +24,6 @@ export function StudentDetailDrawer({
   urlHistory,
   onClose,
 }: StudentDetailDrawerProps) {
-  const { toast } = useToast();
-  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [historyStartDate, setHistoryStartDate] = useState<Date | undefined>(new Date());
   const [historyEndDate, setHistoryEndDate] = useState<Date | undefined>(new Date());
   const [selectedEvent, setSelectedEvent] = useState<Heartbeat | null>(null);
@@ -64,34 +49,6 @@ export function StudentDetailDrawer({
 
     return null;
   }, [student, urlSessions]);
-
-  const deleteStudentMutation = useMutation({
-    mutationFn: async (deviceId: string) => {
-      return await apiRequest("DELETE", `/api/students/${deviceId}`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-      toast({
-        title: "Student deleted",
-        description: "Student has been removed from your roster",
-      });
-      setShowDeleteDialog(false);
-      onClose();
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to delete student",
-        description: error.message || "An error occurred",
-      });
-      setShowDeleteDialog(false);
-    },
-  });
-
-  const handleDeleteConfirm = () => {
-    if (!student) return;
-    deleteStudentMutation.mutate(student.deviceId);
-  };
 
   if (!student) return null;
 
@@ -146,17 +103,6 @@ export function StudentDetailDrawer({
                 </span>
               </div>
             </div>
-            <Button 
-              variant="destructive" 
-              size="sm" 
-              className="gap-1.5"
-              onClick={() => setShowDeleteDialog(true)}
-              disabled={deleteStudentMutation.isPending}
-              data-testid="button-delete-student"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete
-            </Button>
           </div>
         </SheetHeader>
 
@@ -519,31 +465,6 @@ export function StudentDetailDrawer({
             </Tabs>
           </div>
         </SheetContent>
-
-        {/* Delete Confirmation Dialog */}
-        <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Delete Student</AlertDialogTitle>
-              <AlertDialogDescription>
-                Are you sure you want to delete "{student?.studentName}" ({student?.deviceId})? This will permanently remove the student and all associated activity data from your roster. This action cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={deleteStudentMutation.isPending}>
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                onClick={handleDeleteConfirm}
-                disabled={deleteStudentMutation.isPending}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                data-testid="button-confirm-delete"
-              >
-                {deleteStudentMutation.isPending ? "Deleting..." : "Delete Student"}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
     </Sheet>
   );
 }
