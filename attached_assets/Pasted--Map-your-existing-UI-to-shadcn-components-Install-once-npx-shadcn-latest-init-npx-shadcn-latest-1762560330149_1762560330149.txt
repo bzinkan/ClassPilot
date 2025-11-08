@@ -1,0 +1,116 @@
+) Map your existing UI to shadcn components
+
+Install once:
+
+npx shadcn@latest init
+npx shadcn@latest add sheet card badge table button separator scroll-area skeleton
+npm i lucide-react
+
+
+Status → badge variant (keep your existing status enum; only swap the JSX):
+
+import { Badge } from "@/components/ui/badge";
+
+const statusToBadge: Record<"online"|"idle"|"offline"|"offtask", string> = {
+  online:  "bg-emerald-600 text-white",
+  idle:    "bg-amber-500 text-white",
+  offline: "bg-slate-400 text-white",
+  offtask: "bg-rose-600 text-white",
+};
+
+// usage
+<Badge className={statusToBadge[status]}>Online</Badge>
+
+2) Upgrade your existing drawer to a polished Sheet
+
+(keep your isOpen, onOpenChange, and selected student state)
+
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription
+} from "@/components/ui/sheet";
+import { Separator } from "@/components/ui/separator";
+
+<Sheet open={isOpen} onOpenChange={setIsOpen}>
+  <SheetContent side="right" className="w-[480px] sm:w-[560px]">
+    <SheetHeader>
+      <SheetTitle>{student.name}</SheetTitle>
+      <SheetDescription>
+        Grade {student.grade} • ID {student.id}
+      </SheetDescription>
+    </SheetHeader>
+
+    <Separator className="my-4" />
+
+    {/* Live view frame (your WebRTC mounts here) */}
+    <div className="aspect-video rounded-lg bg-muted ring-1 ring-border overflow-hidden">
+      {/* mount your <video> or canvas here */}
+    </div>
+
+    <div className="mt-4 grid grid-cols-2 gap-2">
+      <button className="btn btn-sm">Mark on-task</button>
+      <button className="btn btn-sm">End stream</button>
+    </div>
+
+    <Separator className="my-4" />
+
+    {/* History */}
+    <div className="text-sm font-medium mb-2">Recent activity</div>
+    <div className="rounded-lg border">
+      <table className="w-full text-sm">
+        <thead className="bg-muted/50">
+          <tr className="[&>th]:px-3 [&>th]:py-2 text-left">
+            <th>Time</th><th>Site</th><th>Duration</th><th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.map(row => (
+            <tr key={row.id} className="border-t [&>td]:px-3 [&>td]:py-2">
+              <td>{row.time}</td>
+              <td className="truncate max-w-[220px]">{row.site}</td>
+              <td>{row.duration}m</td>
+              <td><Badge className={statusToBadge[row.status]}>{row.status}</Badge></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  </SheetContent>
+</Sheet>
+
+3) Add “polish” without new logic
+
+Skeletons while loading:
+
+import { Skeleton } from "@/components/ui/skeleton";
+{isLoading && <Skeleton className="h-48 w-full rounded-lg" />}
+
+
+Scroll within the panel: wrap lower content with overflow-y-auto max-h-[40vh].
+
+Density toggle (comfortable/compact) on your student grid:
+
+const [dense, setDense] = useState(false);
+<div className={dense ? "grid gap-3 lg:grid-cols-5" : "grid gap-4 lg:grid-cols-3"}>…</div>
+
+
+Sticky top bar: sticky top-0 bg-background/80 backdrop-blur border-b.
+
+4) Optional: per-school theming (still free)
+
+Add CSS vars once (light/dark friendly), update per school in DB:
+
+:root{
+  --brand: 16 185 129; /* emerald */
+}
+.brand { color: rgb(var(--brand)); }
+
+
+On login: set a data-theme or swap --brand vars from the school record.
+
+5) Zero-risk wiring strategy
+
+Leave your WebRTC + history logic untouched.
+
+Only swap the outer JSX (cards, badges, table, sheet).
+
+Commit in small chunks: status chip → sheet container → history table.
