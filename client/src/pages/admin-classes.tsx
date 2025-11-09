@@ -186,6 +186,9 @@ export default function AdminClasses() {
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [selectedClassId, setSelectedClassId] = useState<string>("");
   const [expandedClasses, setExpandedClasses] = useState<Set<string>>(new Set());
+  const [bulkImportDialogOpen, setBulkImportDialogOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [importResults, setImportResults] = useState<any>(null);
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -322,6 +325,32 @@ export default function AdminClasses() {
     },
   });
 
+  // Bulk import mutation
+  const bulkImportMutation = useMutation({
+    mutationFn: async (csvContent: string) => {
+      const res = await apiRequest("POST", "/api/admin/bulk-import", { csvContent });
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      setImportResults(data.results);
+      toast({
+        title: "Import Complete",
+        description: `Created ${data.results.created} students, updated ${data.results.updated}, assigned ${data.results.assigned} to classes`,
+      });
+      setCsvFile(null);
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Import Failed",
+        description: error.message,
+      });
+    },
+  });
+
   const onSubmit = (data: CreateClassForm) => {
     createClassMutation.mutate(data);
   };
@@ -349,6 +378,47 @@ export default function AdminClasses() {
       newSelection.add(studentId);
     }
     setSelectedStudents(newSelection);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setCsvFile(file);
+      setImportResults(null); // Clear previous results
+    }
+  };
+
+  const handleBulkImport = async () => {
+    if (!csvFile) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Please select a CSV file",
+      });
+      return;
+    }
+
+    try {
+      const text = await csvFile.text();
+      bulkImportMutation.mutate(text);
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Failed to read CSV file",
+      });
+    }
+  };
+
+  const downloadTemplate = () => {
+    const template = "Email,Name,Grade,Class\nstudent@school.edu,John Doe,8,8th Math (sarah)\nstudent2@school.edu,Jane Smith,7,7th Science (bob)";
+    const blob = new Blob([template], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'student_import_template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -476,6 +546,114 @@ export default function AdminClasses() {
                   </form>
                 </DialogContent>
               </Dialog>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Plus className="h-5 w-5" />
+                Bulk Import Students
+              </CardTitle>
+              <CardDescription>
+                Upload a CSV file to import multiple students at once
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="csv-file">CSV File</Label>
+                <Input
+                  id="csv-file"
+                  type="file"
+                  accept=".csv"
+                  onChange={handleFileUpload}
+                  data-testid="input-csv-file"
+                />
+                {csvFile && (
+                  <p className="text-sm text-muted-foreground">
+                    Selected: {csvFile.name}
+                  </p>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <Button
+                  onClick={handleBulkImport}
+                  disabled={!csvFile || bulkImportMutation.isPending}
+                  data-testid="button-bulk-import"
+                  className="flex-1"
+                >
+                  {bulkImportMutation.isPending ? "Importing..." : "Import Students"}
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={downloadTemplate}
+                  data-testid="button-download-template"
+                >
+                  Download Template
+                </Button>
+              </div>
+
+              {importResults && (
+                <div className="mt-4 space-y-3 p-3 border rounded-lg">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-medium">Import Results</h4>
+                  </div>
+                  
+                  <div className="grid grid-cols-3 gap-2 text-sm">
+                    <div className="text-center p-2 bg-green-500/10 rounded">
+                      <p className="font-bold text-green-600 dark:text-green-400">{importResults.created}</p>
+                      <p className="text-muted-foreground">Created</p>
+                    </div>
+                    <div className="text-center p-2 bg-blue-500/10 rounded">
+                      <p className="font-bold text-blue-600 dark:text-blue-400">{importResults.updated}</p>
+                      <p className="text-muted-foreground">Updated</p>
+                    </div>
+                    <div className="text-center p-2 bg-purple-500/10 rounded">
+                      <p className="font-bold text-purple-600 dark:text-purple-400">{importResults.assigned}</p>
+                      <p className="text-muted-foreground">Assigned</p>
+                    </div>
+                  </div>
+
+                  {importResults.errors && importResults.errors.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-destructive">
+                        Errors ({importResults.errors.length}):
+                      </p>
+                      <div className="max-h-40 overflow-y-auto space-y-1">
+                        {importResults.errors.map((error: string, index: number) => (
+                          <p key={index} className="text-sm text-destructive bg-destructive/10 p-2 rounded">
+                            {error}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {importResults.warnings && importResults.warnings.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">
+                        Warnings ({importResults.warnings.length}):
+                      </p>
+                      <div className="max-h-40 overflow-y-auto space-y-1">
+                        {importResults.warnings.map((warning: string, index: number) => (
+                          <p key={index} className="text-sm text-yellow-600 dark:text-yellow-400 bg-yellow-500/10 p-2 rounded">
+                            {warning}
+                          </p>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p><strong>CSV Format:</strong></p>
+                <p>• Required columns: Email, Name</p>
+                <p>• Optional columns: Grade, Class</p>
+                <p>• Class names must match existing classes exactly</p>
+                <p>• Students with existing emails will be updated</p>
+              </div>
             </CardContent>
           </Card>
 
