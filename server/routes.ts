@@ -719,6 +719,151 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Bulk import students from CSV
+  app.post("/api/admin/bulk-import", requireAdmin, async (req, res) => {
+    try {
+      const { csvContent } = req.body;
+      
+      if (!csvContent || typeof csvContent !== 'string') {
+        return res.status(400).json({ error: "CSV content is required" });
+      }
+
+      // Parse CSV content using XLSX
+      const workbook = XLSX.read(csvContent, { type: 'string' });
+      const sheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[sheetName];
+      const data = XLSX.utils.sheet_to_json(worksheet) as any[];
+
+      if (data.length === 0) {
+        return res.status(400).json({ error: "CSV file is empty" });
+      }
+
+      // Get settings for schoolId and deviceId generation
+      const settings = await storage.getSettings();
+      const schoolId = settings?.schoolId || 'default-school';
+      const allGroups = await storage.getAllGroups();
+
+      const results = {
+        total: data.length,
+        created: 0,
+        updated: 0,
+        assigned: 0,
+        errors: [] as string[],
+        warnings: [] as string[],
+      };
+
+      // Process each row
+      for (let i = 0; i < data.length; i++) {
+        const row = data[i];
+        const rowNum = i + 2; // Account for header row and 0-indexing
+
+        try {
+          // Extract and validate fields (case-insensitive column names)
+          const email = (row.Email || row.email || row.EMAIL || '').trim();
+          const name = (row.Name || row.name || row.NAME || row.StudentName || row.studentName || '').trim();
+          const grade = (row.Grade || row.grade || row.GRADE || row.GradeLevel || row.gradeLevel || '').toString().trim();
+          const className = (row.Class || row.class || row.CLASS || row.ClassName || row.className || '').trim();
+
+          // Validate required fields
+          if (!email) {
+            results.errors.push(`Row ${rowNum}: Email is required`);
+            continue;
+          }
+
+          if (!name) {
+            results.errors.push(`Row ${rowNum}: Name is required`);
+            continue;
+          }
+
+          // Validate email format
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (!emailRegex.test(email)) {
+            results.errors.push(`Row ${rowNum}: Invalid email format for ${email}`);
+            continue;
+          }
+
+          // Normalize grade level
+          const normalizedGrade = normalizeGradeLevel(grade) || null;
+
+          // Check if student already exists by email
+          const allStudents = await storage.getAllStudents();
+          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase());
+
+          if (student) {
+            // Update existing student's name and grade if different
+            const needsUpdate = student.studentName !== name || student.gradeLevel !== normalizedGrade;
+            
+            if (needsUpdate) {
+              // Update student record
+              await storage.updateStudent(student.id, {
+                studentName: name,
+                gradeLevel: normalizedGrade,
+              });
+              results.updated++;
+            }
+          } else {
+            // Create new student with a placeholder deviceId
+            // When the student logs in via extension, their deviceId will be updated
+            const placeholderDeviceId = `pending-${email.replace(/[^a-zA-Z0-9]/g, '-')}`;
+            
+            // Check if device exists, create if not
+            let device = await storage.getDevice(placeholderDeviceId);
+            if (!device) {
+              device = await storage.registerDevice({
+                deviceId: placeholderDeviceId,
+                deviceName: `Pending: ${name}`,
+                classId: 'pending',
+                schoolId,
+              });
+            }
+
+            student = await storage.createStudent({
+              deviceId: placeholderDeviceId,
+              studentName: name,
+              studentEmail: email,
+              gradeLevel: normalizedGrade,
+            });
+            results.created++;
+          }
+
+          // Assign to class if className is provided
+          if (className && student) {
+            const group = allGroups.find(g => g.name.toLowerCase() === className.toLowerCase());
+            
+            if (group) {
+              try {
+                await storage.assignStudentToGroup(group.id, student.id);
+                results.assigned++;
+              } catch (error) {
+                // Student might already be in the group
+                results.warnings.push(`Row ${rowNum}: ${name} may already be assigned to ${className}`);
+              }
+            } else {
+              results.warnings.push(`Row ${rowNum}: Class "${className}" not found for ${name}`);
+            }
+          }
+
+        } catch (error: any) {
+          results.errors.push(`Row ${rowNum}: ${error.message || 'Unknown error'}`);
+        }
+      }
+
+      // Notify all connected teachers of the update
+      broadcastToTeachers({
+        type: 'students-updated',
+      });
+
+      res.json({
+        success: true,
+        message: 'Bulk import completed',
+        results,
+      });
+    } catch (error) {
+      console.error("Bulk import error:", error);
+      res.status(500).json({ error: "Failed to process bulk import" });
+    }
+  });
+
   // Device registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
