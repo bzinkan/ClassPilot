@@ -421,6 +421,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Version endpoint for deployment verification
+  app.get("/api/version", async (req, res) => {
+    try {
+      const version = {
+        commit: '31fff44',
+        timestamp: new Date().toISOString(),
+        features: [
+          'deviceId→studentId mapping',
+          'rate-limit-1000/min',
+          'session-based-roster-visibility'
+        ]
+      };
+      res.json(version);
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get version' });
+    }
+  });
+
   app.get("/api/me", requireAuth, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
