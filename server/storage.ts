@@ -34,6 +34,7 @@ import {
   type InsertMessage,
   type CheckIn,
   type InsertCheckIn,
+  makeStatusKey,
   users,
   devices,
   students,
@@ -430,7 +431,8 @@ export class MemStorage implements IStorage {
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
-    this.studentStatuses.set(status.studentId, status);
+    const statusKey = makeStatusKey(status.studentId, status.deviceId);
+    this.studentStatuses.set(statusKey, status);
   }
 
   async getActiveStudentForDevice(deviceId: string): Promise<Student | undefined> {
@@ -467,16 +469,18 @@ export class MemStorage implements IStorage {
     
     // Update or create student status if studentId is provided
     if (heartbeat.studentId) {
-      let status = this.studentStatuses.get(heartbeat.studentId);
+      // Use composite key: studentId-deviceId (allows same student on multiple devices)
+      const statusKey = makeStatusKey(heartbeat.studentId, heartbeat.deviceId);
+      let status = this.studentStatuses.get(statusKey);
       
       // If status doesn't exist, create it from student data
       if (!status) {
         const student = this.students.get(heartbeat.studentId);
         if (student) {
-          const device = this.devices.get(student.deviceId);
+          const device = this.devices.get(heartbeat.deviceId);
           status = {
             studentId: student.id,
-            deviceId: student.deviceId,
+            deviceId: heartbeat.deviceId, // Use heartbeat's deviceId (current device)
             deviceName: device?.deviceName ?? undefined,
             studentName: student.studentName,
             classId: device?.classId || '',
@@ -491,9 +495,10 @@ export class MemStorage implements IStorage {
             activeFlightPathName: heartbeat.activeFlightPathName || undefined,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
+            statusKey, // Store composite key for reference
           };
-          this.studentStatuses.set(heartbeat.studentId, status);
-          console.log('Created StudentStatus:', { studentId: student.id, studentName: student.studentName, gradeLevel: student.gradeLevel });
+          this.studentStatuses.set(statusKey, status);
+          console.log('Created StudentStatus:', { studentId: student.id, deviceId: heartbeat.deviceId, studentName: student.studentName, gradeLevel: student.gradeLevel });
         } else {
           console.warn('Heartbeat has studentId but student not found in database:', heartbeat.studentId);
         }
@@ -520,7 +525,7 @@ export class MemStorage implements IStorage {
         // Calculate current URL duration
         status.currentUrlDuration = this.calculateCurrentUrlDurationMem(heartbeat.studentId, heartbeat.activeTabUrl);
         
-        this.studentStatuses.set(heartbeat.studentId, status);
+        this.studentStatuses.set(statusKey, status);
       }
     }
     
@@ -1294,7 +1299,8 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
-    this.studentStatuses.set(status.studentId, status);
+    const statusKey = makeStatusKey(status.studentId, status.deviceId);
+    this.studentStatuses.set(statusKey, status);
   }
 
   async getActiveStudentForDevice(deviceId: string): Promise<Student | undefined> {
@@ -1339,15 +1345,17 @@ export class DatabaseStorage implements IStorage {
     
     // Update student status if we have a valid studentId
     if (canonicalStudentId) {
-      let status = this.studentStatuses.get(canonicalStudentId);
+      // Use composite key: studentId-deviceId (allows same student on multiple devices)
+      const statusKey = makeStatusKey(canonicalStudentId, heartbeat.deviceId);
+      let status = this.studentStatuses.get(statusKey);
       if (!status) {
         // Status missing (e.g., after restart), get student info and create
         const student = await this.getStudent(canonicalStudentId);
         if (student) {
-          const device = await this.getDevice(student.deviceId);
+          const device = await this.getDevice(heartbeat.deviceId);
           status = {
             studentId: student.id,
-            deviceId: student.deviceId,
+            deviceId: heartbeat.deviceId, // Use heartbeat's deviceId (current device)
             deviceName: device?.deviceName ?? undefined,
             studentName: student.studentName,
             classId: device?.classId || '',
@@ -1362,9 +1370,10 @@ export class DatabaseStorage implements IStorage {
             activeFlightPathName: heartbeat.activeFlightPathName || undefined,
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
+            statusKey, // Store composite key for reference
           };
-          this.studentStatuses.set(canonicalStudentId, status);
-          console.log('Created StudentStatus from DB:', { studentId: student.id, studentName: student.studentName, gradeLevel: student.gradeLevel });
+          this.studentStatuses.set(statusKey, status);
+          console.log('Created StudentStatus from DB:', { studentId: student.id, deviceId: heartbeat.deviceId, studentName: student.studentName, gradeLevel: student.gradeLevel });
         } else {
           console.warn('Heartbeat has canonicalStudentId but student not found in DB:', canonicalStudentId);
         }
@@ -1387,12 +1396,12 @@ export class DatabaseStorage implements IStorage {
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
-        console.log('Updated StudentStatus lastSeenAt:', { studentId: canonicalStudentId, studentName: status.studentName, lastSeenAt: now });
+        console.log('Updated StudentStatus lastSeenAt:', { studentId: canonicalStudentId, deviceId: heartbeat.deviceId, studentName: status.studentName, lastSeenAt: now });
         
         // Calculate current URL duration
         status.currentUrlDuration = await this.calculateCurrentUrlDurationDb(canonicalStudentId, heartbeat.activeTabUrl);
         
-        this.studentStatuses.set(canonicalStudentId, status);
+        this.studentStatuses.set(statusKey, status);
       }
     }
     
