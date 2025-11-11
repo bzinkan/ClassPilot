@@ -57,6 +57,7 @@ const apiLimiter = rateLimit({
 });
 
 // Per-device heartbeat rate limiter (critical for production)
+// Increased limit to 1000/min to prevent rate limiting issues with Chrome Extensions
 const heartbeatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute window
   max: 1000, // 1000 requests per minute per device (extensions send ~6/min, but allow headroom for retries)
