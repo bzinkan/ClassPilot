@@ -570,6 +570,18 @@ export default function AdminClasses() {
     setSelectedStudents(newSelection);
   };
 
+  const selectAllFilteredStudents = () => {
+    const newSelection = new Set(selectedStudents);
+    assignFilteredStudents.forEach(student => {
+      newSelection.add(student.id);
+    });
+    setSelectedStudents(newSelection);
+  };
+
+  const clearAllSelections = () => {
+    setSelectedStudents(new Set());
+  };
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -966,6 +978,31 @@ export default function AdminClasses() {
                   ))}
                 </TabsList>
               </Tabs>
+              
+              {/* Select All / Clear buttons */}
+              {assignFilteredStudents.length > 0 && (
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={selectAllFilteredStudents}
+                    data-testid="button-select-all-students"
+                  >
+                    Select All {assignStudentsGrade ? `Grade ${assignStudentsGrade}` : ''}
+                    {assignStudentsGrade && ` (${assignFilteredStudents.length})`}
+                  </Button>
+                  {selectedStudents.size > 0 && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={clearAllSelections}
+                      data-testid="button-clear-selection"
+                    >
+                      Clear Selection
+                    </Button>
+                  )}
+                </div>
+              )}
               
               <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-2">
                 {assignFilteredStudents.length === 0 ? (
