@@ -113,10 +113,8 @@ function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogPro
 
   const editMutation = useMutation({
     mutationFn: async (data: EditStudentForm) => {
-      return await apiRequest(`/api/students/${student.id}`, {
-        method: "PATCH",
-        body: JSON.stringify(data),
-      });
+      const res = await apiRequest("PATCH", `/api/students/${student.id}`, data);
+      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
@@ -231,9 +229,8 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
 
   const removeStudentMutation = useMutation({
     mutationFn: async (studentId: string) => {
-      return await apiRequest(`/api/groups/${group.id}/students/${studentId}`, {
-        method: "DELETE",
-      });
+      const res = await apiRequest("DELETE", `/api/groups/${group.id}/students/${studentId}`, {});
+      return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/groups", group.id, "students"] });
