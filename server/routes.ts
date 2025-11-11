@@ -1081,7 +1081,64 @@ export async function registerRoutes(app: Express): Promise<Server> {
         filteredStatuses = allStatuses.filter(s => 
           teacherStudentIds.includes(s.studentId)
         );
-        console.log('Dashboard requested students (teacher) - found:', filteredStatuses.length, 'students for teacher', userId);
+        console.log('Dashboard requested students (teacher) - found:', filteredStatuses.length, 'active students for teacher', userId);
+      }
+      
+      // For teachers with active sessions, merge roster students (show offline placeholders)
+      if (user.role === 'teacher') {
+        const activeSession = await storage.getActiveSessionByTeacher(userId);
+        if (activeSession?.groupId) {
+          console.log('Teacher has active session for group:', activeSession.groupId);
+          
+          // Get all students assigned to this session's group
+          const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
+          console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
+          
+          // Find students in roster but not in active statuses (offline students)
+          const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
+          const offlineStudentIds = rosterStudentIds.filter(id => !activeStudentIds.has(id));
+          
+          if (offlineStudentIds.length > 0) {
+            console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
+            
+            // Create offline placeholders for roster students not yet connected
+            const offlinePlaceholders = await Promise.all(
+              offlineStudentIds.map(async (studentId) => {
+                const student = await storage.getStudent(studentId);
+                if (!student) return null;
+                
+                const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
+                
+                return {
+                  studentId: student.id,
+                  deviceId: student.deviceId,
+                  deviceName: device?.deviceName ?? undefined,
+                  studentName: student.studentName,
+                  classId: device?.classId || '',
+                  gradeLevel: student.gradeLevel ?? undefined,
+                  activeTabTitle: '',
+                  activeTabUrl: '',
+                  favicon: undefined,
+                  lastSeenAt: 0,
+                  isSharing: false,
+                  screenLocked: false,
+                  flightPathActive: false,
+                  activeFlightPathName: undefined,
+                  screenLockedSetAt: undefined,
+                  cameraActive: false,
+                  currentUrlDuration: undefined,
+                  viewMode: 'url' as const,
+                  status: 'offline' as const,
+                };
+              })
+            );
+            
+            // Filter out nulls and add to filtered statuses
+            const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
+            filteredStatuses = [...filteredStatuses, ...validPlaceholders];
+            console.log('  - Total students (active + offline):', filteredStatuses.length);
+          }
+        }
       }
       
       filteredStatuses.forEach(s => {
