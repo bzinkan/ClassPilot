@@ -368,6 +368,7 @@ export default function AdminClasses() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [selectedGrade, setSelectedGrade] = useState<string>("");
+  const [assignStudentsGrade, setAssignStudentsGrade] = useState<string>("");
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [selectedClassId, setSelectedClassId] = useState<string>("");
@@ -424,9 +425,9 @@ export default function AdminClasses() {
     return isNaN(numA) || isNaN(numB) ? a.localeCompare(b) : numA - numB;
   });
 
-  // Filter students by selected grade
-  const filteredStudents = selectedGrade
-    ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === selectedGrade)
+  // Filter students by selected grade (for assign students section - independent filter)
+  const assignFilteredStudents = assignStudentsGrade
+    ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === assignStudentsGrade)
     : allStudents;
 
   // Filter classes by selected grade
@@ -946,13 +947,33 @@ export default function AdminClasses() {
 
             <div className="space-y-2">
               <Label>Select Students ({selectedStudents.size} selected)</Label>
+              
+              {/* Grade filter tabs for students */}
+              <Tabs value={assignStudentsGrade} onValueChange={setAssignStudentsGrade} className="w-full">
+                <TabsList className="w-full justify-start flex-wrap h-auto">
+                  <TabsTrigger value="" className="flex-shrink-0" data-testid="assign-grade-tab-all">
+                    All Grades
+                  </TabsTrigger>
+                  {availableGrades.map((grade) => (
+                    <TabsTrigger 
+                      key={grade} 
+                      value={grade}
+                      className="flex-shrink-0"
+                      data-testid={`assign-grade-tab-${grade}`}
+                    >
+                      Grade {grade}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+              
               <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-2">
-                {filteredStudents.length === 0 ? (
+                {assignFilteredStudents.length === 0 ? (
                   <p className="text-sm text-muted-foreground text-center py-4">
-                    {selectedGrade ? `No students in Grade ${selectedGrade}` : "No students available"}
+                    {assignStudentsGrade ? `No students in Grade ${assignStudentsGrade}` : "No students available"}
                   </p>
                 ) : (
-                  filteredStudents.map((student) => (
+                  assignFilteredStudents.map((student) => (
                     <div
                       key={student.id}
                       className="flex items-center space-x-2 p-2 rounded hover-elevate"
