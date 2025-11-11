@@ -37,7 +37,6 @@ export default function MySettings() {
   const [flightPathName, setFlightPathName] = useState("");
   const [flightPathDescription, setFlightPathDescription] = useState("");
   const [flightPathAllowedDomains, setFlightPathAllowedDomains] = useState("");
-  const [flightPathBlockedDomains, setFlightPathBlockedDomains] = useState("");
   const [deleteFlightPathId, setDeleteFlightPathId] = useState<string | null>(null);
 
   const { data: teacherSettings, isLoading } = useQuery<TeacherSettings | null>({
@@ -77,7 +76,6 @@ export default function MySettings() {
     setFlightPathName("");
     setFlightPathDescription("");
     setFlightPathAllowedDomains("");
-    setFlightPathBlockedDomains("");
     setEditingFlightPath(null);
   };
 
@@ -87,7 +85,6 @@ export default function MySettings() {
         flightPathName,
         description: flightPathDescription || undefined,
         allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
-        blockedDomains: flightPathBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -108,7 +105,6 @@ export default function MySettings() {
         flightPathName,
         description: flightPathDescription || undefined,
         allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
-        blockedDomains: flightPathBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -182,7 +178,6 @@ export default function MySettings() {
     setFlightPathName(flightPath.flightPathName);
     setFlightPathDescription(flightPath.description || "");
     setFlightPathAllowedDomains(flightPath.allowedDomains?.join(", ") || "");
-    setFlightPathBlockedDomains(flightPath.blockedDomains?.join(", ") || "");
     setShowFlightPathDialog(true);
   };
 
@@ -520,19 +515,6 @@ export default function MySettings() {
                   <span>Using just <code className="text-xs bg-muted px-1 rounded">google.com</code> allows ALL Google services (YouTube, Gmail, etc.)</span>
                 </p>
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="flight-path-blocked">Blocked Domains</Label>
-              <Input
-                id="flight-path-blocked"
-                data-testid="input-flight-path-blocked"
-                value={flightPathBlockedDomains}
-                onChange={(e) => setFlightPathBlockedDomains(e.target.value)}
-                placeholder="facebook.com, youtube.com, games.com"
-              />
-              <p className="text-xs text-muted-foreground">
-                Comma-separated domains. Students cannot access any page on these domains (blocks entire site).
-              </p>
             </div>
           </div>
           <DialogFooter>

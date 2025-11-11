@@ -2190,10 +2190,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const settings = await storage.getSettings();
       const schoolId = data.schoolId || settings?.schoolId || 'default-school';
       
+      // Ensure blockedDomains defaults to empty array if not provided
       const flightPath = await storage.createFlightPath({
         ...data,
         schoolId,
-        teacherId: data.teacherId ?? teacherId
+        teacherId: data.teacherId ?? teacherId,
+        blockedDomains: data.blockedDomains ?? []
       });
       res.json(flightPath);
     } catch (error) {
@@ -2205,6 +2207,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
       const updates = insertFlightPathSchema.partial().parse(req.body);
+      
+      // If blockedDomains is not provided, explicitly set it to empty array
+      // to clear any previously saved blocked domains
+      if (!('blockedDomains' in req.body)) {
+        updates.blockedDomains = [];
+      }
+      
       const flightPath = await storage.updateFlightPath(req.params.id, updates);
       if (!flightPath) {
         return res.status(404).json({ error: "Flight Path not found" });

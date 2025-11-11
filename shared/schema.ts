@@ -140,7 +140,11 @@ export const flightPaths = pgTable("flight_paths", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 });
 
-export const insertFlightPathSchema = createInsertSchema(flightPaths).omit({ id: true, createdAt: true });
+export const insertFlightPathSchema = createInsertSchema(flightPaths)
+  .omit({ id: true, createdAt: true })
+  .extend({
+    blockedDomains: z.array(z.string()).default([]),
+  });
 export type InsertFlightPath = z.infer<typeof insertFlightPathSchema>;
 export type FlightPath = typeof flightPaths.$inferSelect;
 

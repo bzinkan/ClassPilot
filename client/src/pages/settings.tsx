@@ -67,7 +67,6 @@ export default function Settings() {
   const [flightPathName, setSceneName] = useState("");
   const [sceneDescription, setSceneDescription] = useState("");
   const [sceneAllowedDomains, setSceneAllowedDomains] = useState("");
-  const [sceneBlockedDomains, setSceneBlockedDomains] = useState("");
   const [deleteSceneId, setDeleteSceneId] = useState<string | null>(null);
 
   // Student Groups management state
@@ -182,7 +181,6 @@ export default function Settings() {
         flightPathName,
         description: sceneDescription || undefined,
         allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
-        blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -203,7 +201,6 @@ export default function Settings() {
         flightPathName,
         description: sceneDescription || undefined,
         allowedDomains: sceneAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
-        blockedDomains: sceneBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -235,7 +232,6 @@ export default function Settings() {
     setSceneName("");
     setSceneDescription("");
     setSceneAllowedDomains("");
-    setSceneBlockedDomains("");
     setEditingScene(null);
   };
 
@@ -249,7 +245,6 @@ export default function Settings() {
     setSceneName(scene.flightPathName);
     setSceneDescription(scene.description || "");
     setSceneAllowedDomains(scene.allowedDomains?.join(", ") || "");
-    setSceneBlockedDomains(scene.blockedDomains?.join(", ") || "");
     setShowSceneDialog(true);
   };
 
@@ -860,7 +855,7 @@ export default function Settings() {
           <DialogHeader>
             <DialogTitle>{editingScene ? "Edit Flight Path" : "Create New Flight Path"}</DialogTitle>
             <DialogDescription>
-              {editingScene ? "Update the flight path configuration" : "Create a browsing environment with allowed or blocked websites"}
+              {editingScene ? "Update the flight path configuration" : "Lock students into specific allowed domains for focused learning"}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
@@ -906,19 +901,6 @@ export default function Settings() {
                   <span>Using just <code className="text-xs bg-muted px-1 rounded">google.com</code> allows ALL Google services (YouTube, Gmail, etc.)</span>
                 </p>
               </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="scene-blocked">Blocked Domains</Label>
-              <Input
-                id="scene-blocked"
-                value={sceneBlockedDomains}
-                onChange={(e) => setSceneBlockedDomains(e.target.value)}
-                placeholder="facebook.com, youtube.com, games.com"
-                data-testid="input-scene-blocked-domains"
-              />
-              <p className="text-xs text-muted-foreground">
-                Comma-separated domains. Students cannot access any page on these domains (blocks entire site).
-              </p>
             </div>
           </div>
           <DialogFooter>
