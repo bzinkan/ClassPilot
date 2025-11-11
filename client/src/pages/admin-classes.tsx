@@ -407,13 +407,17 @@ export default function AdminClasses() {
   const teachers = teachersData?.teachers || [];
   const allStudents = studentsData?.students || [];
 
-  // Get available grades
+  // Get available grades from BOTH students AND classes (so empty classes show up in tabs)
+  const adminClasses = allGroups.filter(g => g.groupType === 'admin_class');
+  const gradesFromStudents = allStudents
+    .map(s => normalizeGrade(s.gradeLevel))
+    .filter((g): g is string => g !== null);
+  const gradesFromClasses = adminClasses
+    .map(c => normalizeGrade(c.gradeLevel))
+    .filter((g): g is string => g !== null);
+  
   const availableGrades = Array.from(
-    new Set(
-      allStudents
-        .map(s => normalizeGrade(s.gradeLevel))
-        .filter((g): g is string => g !== null)
-    )
+    new Set([...gradesFromStudents, ...gradesFromClasses])
   ).sort((a, b) => {
     const numA = parseInt(a);
     const numB = parseInt(b);
@@ -425,8 +429,7 @@ export default function AdminClasses() {
     ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === selectedGrade)
     : allStudents;
 
-  // Filter classes by selected grade - ONLY show admin_class type
-  const adminClasses = allGroups.filter(g => g.groupType === 'admin_class');
+  // Filter classes by selected grade
   const filteredClasses = selectedGrade
     ? adminClasses.filter(g => normalizeGrade(g.gradeLevel) === selectedGrade)
     : adminClasses;
