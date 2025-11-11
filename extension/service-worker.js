@@ -117,11 +117,22 @@ if (chrome.runtime.onStartup) {
   console.log('[Service Worker] Waking up...');
   await ensureRegistered();
   
-  // Restore state from storage immediately
+  // MIGRATION: Clear any persisted serverUrl overrides from testing
+  // Force all extensions to use production URL (classpilot.replit.app)
   const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail', 'flightPathState', 'lockScreenState']);
-  if (stored.config) {
-    CONFIG = { ...CONFIG, ...stored.config };
+  if (stored.config?.serverUrl) {
+    console.log('[Service Worker] MIGRATION: Clearing persisted serverUrl override:', stored.config.serverUrl);
+    delete stored.config.serverUrl;
+    await chrome.storage.local.set({ config: stored.config });
   }
+  
+  // Restore state from storage (but serverUrl now always uses DEFAULT_SERVER_URL)
+  if (stored.config) {
+    const { serverUrl, ...safeConfig } = stored.config;
+    CONFIG = { ...CONFIG, ...safeConfig };
+  }
+  // Always enforce production URL
+  CONFIG.serverUrl = DEFAULT_SERVER_URL;
   if (stored.deviceId) {
     CONFIG.deviceId = stored.deviceId;
   }
