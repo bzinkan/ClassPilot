@@ -1,0 +1,132 @@
+Short answer: mapping deviceId → studentId on the server will work, but it’s not the best long-term fix for schools where students hop between devices. Prefer server-issued identity (studentToken / studentId) tied to the logged-in user, with deviceId as a helper—not the source of truth.
+
+Here’s a solid way to ship today (and scale later):
+
+What to change
+1) Stop using locally generated IDs in the extension
+
+On boot, the extension should ask the server who I am and receive a signed token that resolves to the real studentId.
+
+Handshake (extension → server):
+
+Inputs: schoolId, deviceId, and one of:
+
+Google Workspace email (ideal on managed Chromebooks via chrome.identity.getProfileUserInfo)
+
+or a short enroll code the student types once (fallback)
+
+Server returns: { studentId, classIds[], studentToken (JWT), heartbeatIntervalSec }
+
+Then every heartbeat:
+
+{
+  "studentToken": "<JWT>",   // server-signed, resolves to studentId
+  "deviceId": "CROS-ABC123",
+  "classId": "8thMath",      // if you scope by class on the teacher socket
+  "screenLocked": false
+}
+
+
+Server decodes studentToken → studentId and updates status; no guessing.
+
+Result: whether a student switches devices or not, identity stays correct.
+
+2) (Optional but useful) Keep a device mapping table
+
+Still record deviceId so you can speed up future handshakes and detect account/device anomalies, but don’t use it as the identity.
+
+Drizzle schema (Postgres/Neon)
+// db/schema.ts
+import { pgTable, varchar, uuid, timestamp, boolean, primaryKey, uniqueIndex } from "drizzle-orm/pg-core";
+
+export const students = pgTable("students", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  schoolId: uuid("school_id").notNull(),
+  fullName: varchar("full_name", { length: 200 }).notNull(),
+  email: varchar("email", { length: 320 }),        // if roster has emails
+  lastSeenAt: timestamp("last_seen_at"),
+  isOnline: boolean("is_online").default(false),
+});
+
+export const devices = pgTable("devices", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  schoolId: uuid("school_id").notNull(),
+  deviceId: varchar("device_id", { length: 128 }).notNull(), // Chrome deviceId
+  lastSeenAt: timestamp("last_seen_at"),
+}, (t) => ({
+  devicePerSchool: uniqueIndex("ux_device_per_school").on(t.schoolId, t.deviceId),
+}));
+
+export const deviceLinks = pgTable("device_links", {
+  deviceId: uuid("device_id").notNull(),
+  studentId: uuid("student_id").notNull(),
+  // optional: expire links nightly to avoid “sticky identity” on shared carts
+  linkedAt: timestamp("linked_at").defaultNow(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.deviceId, t.studentId] }),
+}));
+
+3) Server routes (pseudo/TS)
+
+POST /v1/handshake
+
+// Inputs: schoolId, deviceId, email? enrollCode?
+const student = await resolveStudent({ schoolId, email, enrollCode });
+// create/find device row
+const device = await upsertDevice({ schoolId, deviceId });
+// (optional) record a link for analytics
+await linkDeviceToStudent({ deviceId: device.id, studentId: student.id });
+
+const token = signJWT({ studentId: student.id, schoolId }, { expiresIn: "8h" });
+return { studentId: student.id, studentToken: token, heartbeatIntervalSec: 10, classIds };
+
+
+WS heartbeat handler
+
+socket.on("heartbeat", async (payload) => {
+  // verify token → studentId
+  const { studentId, schoolId } = verifyJWT(payload.studentToken);
+  const { classId, deviceId, screenLocked } = payload;
+
+  // update presence
+  await db.update(students)
+    .set({ isOnline: true, lastSeenAt: new Date() })
+    .where(eq(students.id, studentId));
+
+  // notify only teachers subscribed to this class/school
+  if (classId) io.to(classId).emit("studentStatusUpdate", { studentId, isOnline: true });
+  else io.to(schoolId).emit("studentStatusUpdate", { studentId, isOnline: true }); // fallback
+});
+
+
+This eliminates the “almost 59 years ago” (epoch default) because lastSeenAt is always set for the correct row.
+
+If you still want a quick bridge today
+
+You can ship a temporary mapping so current extensions work while you add handshake:
+
+Maintain device_assignments (deviceId, studentId, expiresAt).
+
+On heartbeat with only deviceId, look up studentId and update that row.
+
+Auto-expire links nightly or after logout to handle cart/lab devices.
+
+This makes your proposed “map deviceId → roster studentId before updating status” correct as a transitional fix, but add TTL so students who swap devices don’t inherit the wrong identity.
+
+Edge cases to handle
+
+Shared/loaner devices: require handshake each login; don’t persist links indefinitely.
+
+No Workspace email available: use a short enroll code per class/school returned by the teacher dashboard; server resolves to roster studentId and issues token.
+
+Class scoping: include classId in heartbeat (or subscribe teacher to the whole schoolId room + filter on the client).
+
+Security: never accept a client-provided studentId. Only accept a server-signed token.
+
+TL;DR
+
+Yes, mapping deviceId → studentId on the server will fix the immediate “Offline” bug—but it’s brittle for multi-device days.
+
+The robust fix is a server handshake that returns a studentToken (JWT) resolving to the real studentId; heartbeats carry that token.
+
+Keep deviceId for convenience/analytics, not identity. Add TTL to any device→student links.
