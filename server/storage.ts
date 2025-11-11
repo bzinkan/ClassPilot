@@ -1318,12 +1318,31 @@ export class DatabaseStorage implements IStorage {
       .values(insertHeartbeat)
       .returning();
     
-    // Update student status if studentId is provided
-    if (heartbeat.studentId) {
-      let status = this.studentStatuses.get(heartbeat.studentId);
+    // Map deviceId to the correct roster studentId (critical for matching extension-sent IDs to database IDs)
+    let canonicalStudentId = heartbeat.studentId;
+    
+    // First try: Check if there's an active student mapped to this device
+    const activeStudent = await this.getActiveStudentForDevice(heartbeat.deviceId);
+    if (activeStudent) {
+      canonicalStudentId = activeStudent.id;
+      console.log('Mapped deviceId', heartbeat.deviceId, 'to canonical studentId:', canonicalStudentId, '(student:', activeStudent.studentName, ')');
+    } else if (heartbeat.studentId) {
+      // Second try: Check if the heartbeat's studentId exists in database
+      const studentExists = await this.getStudent(heartbeat.studentId);
+      if (studentExists) {
+        canonicalStudentId = heartbeat.studentId;
+      } else {
+        console.warn('No active student mapping for deviceId:', heartbeat.deviceId, 'and studentId not found in DB:', heartbeat.studentId);
+        canonicalStudentId = null;
+      }
+    }
+    
+    // Update student status if we have a valid studentId
+    if (canonicalStudentId) {
+      let status = this.studentStatuses.get(canonicalStudentId);
       if (!status) {
         // Status missing (e.g., after restart), get student info and create
-        const student = await this.getStudent(heartbeat.studentId);
+        const student = await this.getStudent(canonicalStudentId);
         if (student) {
           const device = await this.getDevice(student.deviceId);
           status = {
@@ -1344,10 +1363,10 @@ export class DatabaseStorage implements IStorage {
             cameraActive: heartbeat.cameraActive ?? false,
             status: 'online',
           };
-          this.studentStatuses.set(heartbeat.studentId, status);
+          this.studentStatuses.set(canonicalStudentId, status);
           console.log('Created StudentStatus from DB:', { studentId: student.id, studentName: student.studentName, gradeLevel: student.gradeLevel });
         } else {
-          console.warn('Heartbeat has studentId but student not found in DB:', heartbeat.studentId);
+          console.warn('Heartbeat has canonicalStudentId but student not found in DB:', canonicalStudentId);
         }
       } else {
         // Update existing status
@@ -1368,11 +1387,12 @@ export class DatabaseStorage implements IStorage {
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
+        console.log('Updated StudentStatus lastSeenAt:', { studentId: canonicalStudentId, studentName: status.studentName, lastSeenAt: now });
         
         // Calculate current URL duration
-        status.currentUrlDuration = await this.calculateCurrentUrlDurationDb(heartbeat.studentId, heartbeat.activeTabUrl);
+        status.currentUrlDuration = await this.calculateCurrentUrlDurationDb(canonicalStudentId, heartbeat.activeTabUrl);
         
-        this.studentStatuses.set(heartbeat.studentId, status);
+        this.studentStatuses.set(canonicalStudentId, status);
       }
     }
     
