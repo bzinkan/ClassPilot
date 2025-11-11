@@ -20,7 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ArrowLeft, Download, Shield, Clock, AlertCircle, Layers, Plus, Pencil, Trash2, Star, Users } from "lucide-react";
-import type { Settings as SettingsType, StudentGroup, FlightPath } from "@shared/schema";
+import type { Settings as SettingsType, FlightPath } from "@shared/schema";
 
 // Helper function to normalize domain names
 function normalizeDomain(domain: string): string {
@@ -69,12 +69,6 @@ export default function Settings() {
   const [sceneAllowedDomains, setSceneAllowedDomains] = useState("");
   const [deleteSceneId, setDeleteSceneId] = useState<string | null>(null);
 
-  // Student Groups management state
-  const [showGroupDialog, setShowGroupDialog] = useState(false);
-  const [editingGroup, setEditingGroup] = useState<StudentGroup | null>(null);
-  const [groupName, setGroupName] = useState("");
-  const [groupDescription, setGroupDescription] = useState("");
-  const [deleteGroupId, setDeleteGroupId] = useState<string | null>(null);
 
   const { data: settings, isLoading } = useQuery<SettingsType>({
     queryKey: ['/api/settings'],
@@ -82,10 +76,6 @@ export default function Settings() {
 
   const { data: scenes = [], isLoading: scenesLoading } = useQuery<FlightPath[]>({
     queryKey: ['/api/flight-paths'],
-  });
-
-  const { data: groups = [], isLoading: groupsLoading } = useQuery<StudentGroup[]>({
-    queryKey: ['/api/groups'],
   });
 
   const form = useForm<SettingsForm>({
@@ -267,101 +257,6 @@ export default function Settings() {
   const confirmDeleteScene = () => {
     if (deleteSceneId) {
       deleteSceneMutation.mutate(deleteSceneId);
-    }
-  };
-
-  // Student Groups mutations
-  const createGroupMutation = useMutation({
-    mutationFn: async () => {
-      const schoolId = settings?.schoolId || "default-school";
-      return await apiRequest("POST", "/api/groups", {
-        schoolId,
-        groupName,
-        description: groupDescription || undefined,
-        studentIds: [],
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/groups'] });
-      toast({ title: "Group created", description: `"${groupName}" has been created successfully` });
-      setShowGroupDialog(false);
-      resetGroupForm();
-    },
-    onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to create group", description: error.message });
-    },
-  });
-
-  const updateGroupMutation = useMutation({
-    mutationFn: async () => {
-      if (!editingGroup) throw new Error("No group to update");
-      return await apiRequest("PATCH", `/api/groups/${editingGroup.id}`, {
-        groupName,
-        description: groupDescription || undefined,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/groups'] });
-      toast({ title: "Group updated", description: `"${groupName}" has been updated successfully` });
-      setShowGroupDialog(false);
-      resetGroupForm();
-    },
-    onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to update group", description: error.message });
-    },
-  });
-
-  const deleteGroupMutation = useMutation({
-    mutationFn: async (groupId: string) => {
-      return await apiRequest("DELETE", `/api/groups/${groupId}`);
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/groups'] });
-      toast({ title: "Group deleted", description: "The group has been deleted successfully" });
-      setDeleteGroupId(null);
-    },
-    onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to delete group", description: error.message });
-    },
-  });
-
-  const resetGroupForm = () => {
-    setGroupName("");
-    setGroupDescription("");
-    setEditingGroup(null);
-  };
-
-  const handleCreateGroup = () => {
-    resetGroupForm();
-    setShowGroupDialog(true);
-  };
-
-  const handleEditGroup = (group: StudentGroup) => {
-    setEditingGroup(group);
-    setGroupName(group.groupName);
-    setGroupDescription(group.description || "");
-    setShowGroupDialog(true);
-  };
-
-  const handleSaveGroup = () => {
-    if (!groupName.trim()) {
-      toast({ variant: "destructive", title: "Group name required", description: "Please enter a name for the group" });
-      return;
-    }
-    if (editingGroup) {
-      updateGroupMutation.mutate();
-    } else {
-      createGroupMutation.mutate();
-    }
-  };
-
-  const handleDeleteGroup = (groupId: string) => {
-    setDeleteGroupId(groupId);
-  };
-
-  const confirmDeleteGroup = () => {
-    if (deleteGroupId) {
-      deleteGroupMutation.mutate(deleteGroupId);
     }
   };
 
@@ -705,85 +600,6 @@ export default function Settings() {
           </CardContent>
         </Card>
 
-        {/* Student Groups Management */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Users className="h-5 w-5" />
-                Student Groups
-              </div>
-              <Button
-                size="sm"
-                onClick={handleCreateGroup}
-                data-testid="button-create-group"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Create Group
-              </Button>
-            </CardTitle>
-            <CardDescription>
-              Organize students into groups for differentiated instruction and targeted interventions
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {groupsLoading ? (
-              <div className="text-center py-8">
-                <div className="h-6 w-6 border-2 border-primary border-t-transparent rounded-full animate-spin mx-auto mb-2"></div>
-                <p className="text-sm text-muted-foreground">Loading groups...</p>
-              </div>
-            ) : groups.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <Users className="h-12 w-12 mx-auto mb-3 opacity-20" />
-                <p className="text-sm">No groups created yet</p>
-                <p className="text-xs mt-1">Create a group to organize students</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {groups.map((group) => (
-                  <div
-                    key={group.id}
-                    className="border rounded-lg p-4 space-y-2 hover-elevate"
-                    data-testid={`group-card-${group.id}`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1">
-                        <h4 className="font-medium">{group.groupName}</h4>
-                        {group.description && (
-                          <p className="text-sm text-muted-foreground mt-1">{group.description}</p>
-                        )}
-                        <div className="mt-2">
-                          <span className="text-xs text-muted-foreground">
-                            {group.studentIds?.length || 0} student{(group.studentIds?.length || 0) !== 1 ? 's' : ''}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 ml-4">
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => handleEditGroup(group)}
-                          data-testid={`button-edit-group-${group.id}`}
-                        >
-                          <Pencil className="h-4 w-4" />
-                        </Button>
-                        <Button
-                          size="icon"
-                          variant="ghost"
-                          onClick={() => handleDeleteGroup(group.id)}
-                          data-testid={`button-delete-group-${group.id}`}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
         {/* Privacy Notice */}
         <Card className="border-primary/20 bg-primary/5">
           <CardHeader>
@@ -946,85 +762,6 @@ export default function Settings() {
               data-testid="button-confirm-delete-scene"
             >
               {deleteSceneMutation.isPending ? "Deleting..." : "Delete Flight Path"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Group Create/Edit Dialog */}
-      <Dialog open={showGroupDialog} onOpenChange={setShowGroupDialog}>
-        <DialogContent data-testid="dialog-group-form">
-          <DialogHeader>
-            <DialogTitle>{editingGroup ? "Edit Group" : "Create New Group"}</DialogTitle>
-            <DialogDescription>
-              {editingGroup ? "Update the group information" : "Create a new student group for organizing your class"}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="group-name">Group Name *</Label>
-              <Input
-                id="group-name"
-                value={groupName}
-                onChange={(e) => setGroupName(e.target.value)}
-                placeholder="e.g., Advanced Readers, Math Support, Project Team A"
-                data-testid="input-group-name"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="group-description">Description</Label>
-              <Input
-                id="group-description"
-                value={groupDescription}
-                onChange={(e) => setGroupDescription(e.target.value)}
-                placeholder="Optional description of this group"
-                data-testid="input-group-description"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button 
-              variant="outline" 
-              onClick={() => setShowGroupDialog(false)}
-              data-testid="button-cancel-group"
-            >
-              Cancel
-            </Button>
-            <Button 
-              onClick={handleSaveGroup}
-              disabled={createGroupMutation.isPending || updateGroupMutation.isPending}
-              data-testid="button-save-group"
-            >
-              {createGroupMutation.isPending || updateGroupMutation.isPending ? "Saving..." : (editingGroup ? "Update Group" : "Create Group")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete Group Confirmation Dialog */}
-      <Dialog open={deleteGroupId !== null} onOpenChange={(open) => !open && setDeleteGroupId(null)}>
-        <DialogContent data-testid="dialog-delete-group">
-          <DialogHeader>
-            <DialogTitle>Delete Group</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete this group? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button 
-              variant="outline" 
-              onClick={() => setDeleteGroupId(null)}
-              data-testid="button-cancel-delete-group"
-            >
-              Cancel
-            </Button>
-            <Button 
-              variant="destructive" 
-              onClick={confirmDeleteGroup}
-              disabled={deleteGroupMutation.isPending}
-              data-testid="button-confirm-delete-group"
-            >
-              {deleteGroupMutation.isPending ? "Deleting..." : "Delete Group"}
             </Button>
           </DialogFooter>
         </DialogContent>
