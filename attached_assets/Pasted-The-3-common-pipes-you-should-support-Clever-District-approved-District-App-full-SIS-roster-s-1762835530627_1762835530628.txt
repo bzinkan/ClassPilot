@@ -1,0 +1,165 @@
+The 3 common pipes you should support
+
+Clever (District-approved “District App”) – full SIS roster sync + SSO (OAuth/OIDC). Ideal when a district turns you on in Clever. 
+Clever Developer Docs
++1
+
+ClassLink Roster Server (OneRoster) – pulls from the district’s SIS via OneRoster CSV/REST; you read it via ClassLink’s API (OAuth2 proxy). Great coverage beyond Clever. 
+classlink.com
++2
+ClassLink
++2
+
+Google Classroom (teacher or domain-admin level) – quick win for small schools: import courses, teachers, and students straight from Classroom. 
+Google for Developers
++1
+
+(And underpin it all with the OneRoster standard so you only write one mapping layer.) 
+IMS Global
++1
+
+Data model to normalize into (Postgres / Drizzle)
+
+Map every source into these tables so the rest of your app stays source-agnostic:
+
+schools(id, name, source, source_tenant_id)
+
+people(id, school_id, role enum['student','teacher','staff'], given_name, family_name, email, source_user_id)
+
+courses(id, school_id, title, grade, source_course_id)
+
+sections(id, school_id, course_id, name, period, term, source_section_id)
+
+enrollments(id, section_id, person_id, role enum['student','teacher'], status)
+
+This mirrors OneRoster/Clever “sections” = the glue between teachers & students. 
+Clever Developer Docs
++1
+
+Clever integration (district-approved)
+
+Use cases: auto-provision classes daily; let users “Log in with Clever.”
+
+SSO (OAuth/OIDC)
+
+Add “Log in with Clever” on your login page.
+
+Implement Clever’s OAuth flow; accept ID token (OIDC) and create/find your user by their Clever user id + district id (for multi-tenant). 
+Clever Developer Docs
+
+Roster ingest
+
+After the first district admin connects you, pull: /districts, /schools, /terms, /sections, and /users?role=teacher|student.
+
+Clever v3 consolidates people under /users; filter by role to reduce calls. 
+Clever Developer Docs
++2
+Clever Developer Docs
++2
+
+Delta updates
+
+Nightly full sync is fine to start.
+
+For near-real-time, consume Clever Events API (30-day window of changes) to upsert deletes/adds without a full pull. 
+Clever Developer Docs
+
+Important Clever quirks to handle
+
+Sections drive relationships (not raw student↔teacher joins).
+
+Multi-site users (one person can appear in multiple schools). Keep your school_id foreign keys flexible. 
+Clever Developer Docs
++1
+
+ClassLink (OneRoster) integration
+
+Two modes you’ll see:
+
+ClassLink Roster Server (recommended): district grants you an OAuth key/secret; you call their OneRoster REST endpoints via ClassLink’s proxy. 
+ClassLink
++1
+
+Direct OneRoster (no ClassLink): district gives you an endpoint + client id/secret for their SIS’ OneRoster API, or nightly SFTP CSV zip. 
+Lightspeed Systems Help
++1
+
+Endpoints to read (OneRoster 1.1/1.2): orgs/schools, users, classes, enrollments, academicSessions. You then map to your tables above. 
+IMS Global
++1
+
+Google Classroom import (fastest to ship)
+
+Teacher flow: teacher OAuth → list courses.list they teach → for each course, students.list and teachers.list.
+
+Domain-admin flow: admin OAuth → import all courses across the domain. 
+Google for Developers
++1
+
+Minimal, concrete plan for your stack (Express + Drizzle + Neon)
+
+A) Tenants & connections
+
+data_sources table: id, school_id, type enum['clever','classlink','oneroster_csv','google_classroom'], oauth_access_token, oauth_refresh_token, expires_at, endpoint_base, status.
+
+B) OAuth routes
+
+/oauth/clever/callback, /oauth/classlink/callback, /oauth/google/callback
+Store tokens scoped to a school (district) or user (teacher) depending on source.
+
+C) Pull jobs
+
+sync:full (on connect + nightly):
+
+Clever: paginate through /schools/:id/sections, /users?role=student|teacher.
+
+ClassLink/OneRoster: GET /ims/oneroster/v1p1/classes, /users, /enrollments.
+
+Google Classroom: courses.list → students.list / teachers.list.
+Upsert by (source, source_*_id) to your normalized tables. 
+Clever Developer Docs
++2
+ClassLink
++2
+
+sync:delta (optional upgrade):
+
+Clever Events API every 5–10 minutes; re-fetch affected records by id. 
+Clever Developer Docs
+
+D) Matching & deduping
+
+Prefer source IDs (Clever user id, OneRoster sourcedId, Google user id).
+
+Secondary match by email when a person appears from multiple sources (guard with per-school domain).
+
+E) Safety rails
+
+Soft-delete enrollments when sections disappear; don’t hard-delete people immediately.
+
+Store the raw JSON payload per record revision for audit.
+
+Teacher vs Admin onboarding UX
+
+District-level: “Connect with Clever” / “Connect with ClassLink” button in your Admin → Settings → Rostering.
+
+Small school / pilot: “Import from Google Classroom” on a teacher’s Classes page.
+
+Edge cases you’ll hit (and what to do)
+
+Term rollovers (summer): students become inactive; don’t nuke them—swap section memberships based on the current term. (Some SIS OneRoster feeds mark students inactive post-year.) 
+Clever Support
+
+Multiple sections with the same name (e.g., “Science 7” in different periods): use (courseId, sectionId) + period to display uniquely. 
+Clever Developer Docs
+
+Multi-school teachers in a single district: keep person unique per district; associate to many schools via sections. 
+Clever Developer Docs
+
+Security & privacy
+
+Use OAuth/OIDC where possible (no storing passwords).
+
+Encrypt tokens at rest; rotate refresh tokens on schedule.
+
+Scope tokens per tenant (school/district) and least-privilege Classroom scopes.
