@@ -42,11 +42,12 @@ interface RemoteControlToolbarProps {
   selectedGrade: string;
   onGradeChange: (grade: string) => void;
   onShowFlightPathDialog?: () => void;
+  userRole?: string;
 }
 
 export { type RemoteControlToolbarProps };
 
-export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange, userRole }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
@@ -345,8 +346,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         <div className="max-w-screen-2xl mx-auto">
           {/* Top Row: Grade Tabs + Student Data Button */}
           <div className="flex items-center justify-between gap-4 flex-wrap">
-            {/* Left Side: Grade Tabs */}
-            {settings?.gradeLevels && settings.gradeLevels.length > 0 && (
+            {/* Left Side: Grade Tabs (Admin Only) */}
+            {userRole === 'admin' && settings?.gradeLevels && settings.gradeLevels.length > 0 && (
               <Tabs value={selectedGrade} onValueChange={onGradeChange}>
                 <TabsList className="flex-wrap h-auto gap-2 p-1.5 bg-muted/50 rounded-xl">
                   {settings.gradeLevels.map((grade) => (

@@ -413,22 +413,31 @@ export default function Dashboard() {
     refreshTile(deviceId);
   };
 
-  const filteredStudents = students
+  // Session-only filtered students (no search filter) - used for stats
+  const sessionFilteredStudents = students.filter((student) => {
+    // Filter by active session (only show students in current session's group)
+    if (activeSession && sessionStudentIds.length > 0) {
+      if (!sessionStudentIds.includes(student.studentId)) return false;
+    }
+    
+    // Filter by gradeLevel field ONLY for admins (teachers use session-based filtering)
+    if (currentUser?.role === 'admin') {
+      return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
+    }
+    
+    // Teachers: no grade filtering (managed by session)
+    return true;
+  });
+
+  // Full filtered students list (includes search filter) - used for display
+  const filteredStudents = sessionFilteredStudents
     .filter((student) => {
       const matchesSearch = 
         (student.studentName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.classId.toLowerCase().includes(searchQuery.toLowerCase());
       
-      if (!matchesSearch) return false;
-      
-      // Filter by active session (only show students in current session's group)
-      if (activeSession && sessionStudentIds.length > 0) {
-        if (!sessionStudentIds.includes(student.studentId)) return false;
-      }
-      
-      // Filter by gradeLevel field (normalize both sides for comparison)
-      return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
+      return matchesSearch;
     })
     .sort((a, b) => {
       // Sort alphabetically by last name only
@@ -438,14 +447,14 @@ export default function Dashboard() {
       return aLastName.localeCompare(bLastName);
     });
 
-  // Count stats only for students in the currently selected grade (normalize for comparison)
-  const studentsInGrade = students.filter((s) => 
-    normalizeGrade(s.gradeLevel) === normalizeGrade(selectedGrade)
-  );
-  const onlineCount = studentsInGrade.filter((s) => s.status === 'online').length;
-  const idleCount = studentsInGrade.filter((s) => s.status === 'idle').length;
-  const offlineCount = studentsInGrade.filter((s) => s.status === 'offline').length;
-  const offTaskCount = studentsInGrade.filter(isStudentOffTask).length;
+  // Count stats from session-filtered students (not search-filtered)
+  // This ensures stats stay accurate while searching
+  const statsStudents = sessionFilteredStudents;
+  
+  const onlineCount = statsStudents.filter((s) => s.status === 'online').length;
+  const idleCount = statsStudents.filter((s) => s.status === 'idle').length;
+  const offlineCount = statsStudents.filter((s) => s.status === 'offline').length;
+  const offTaskCount = statsStudents.filter(isStudentOffTask).length;
 
   // Get unique open tabs from selected students (or all if none selected)
   const relevantStudents = selectedDeviceIds.size > 0 
@@ -1075,18 +1084,22 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
-        {/* Remote Control Toolbar - now inside main */}
-        <RemoteControlToolbar 
-          selectedDeviceIds={selectedDeviceIds}
-          students={filteredStudents}
-          onToggleStudent={toggleStudentSelection}
-          onClearSelection={clearSelection}
-          selectedGrade={selectedGrade}
-          onGradeChange={setSelectedGrade}
-        />
+        {/* Remote Control Toolbar - only show if admin OR teacher with active session */}
+        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+          <RemoteControlToolbar 
+            selectedDeviceIds={selectedDeviceIds}
+            students={filteredStudents}
+            onToggleStudent={toggleStudentSelection}
+            onClearSelection={clearSelection}
+            selectedGrade={selectedGrade}
+            onGradeChange={setSelectedGrade}
+            userRole={currentUser?.role}
+          />
+        )}
         
-        {/* Stats Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
+        {/* Stats Cards - only show if admin OR teacher with active session */}
+        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
               <div className="h-14 w-14 rounded-xl bg-green-500 flex items-center justify-center shadow-md">
@@ -1131,10 +1144,12 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
-        </div>
+          </div>
+        )}
 
-        {/* Search Bar + Selection Controls */}
-        <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
+        {/* Search Bar + Selection Controls - only show if admin OR teacher with active session */}
+        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+          <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
           <Input
             placeholder="Search student"
             value={searchQuery}
@@ -1196,10 +1211,12 @@ export default function Dashboard() {
               Clear Selection
             </Button>
           </div>
-        </div>
+          </div>
+        )}
 
-        {/* Control Buttons */}
-        <div className="flex items-center gap-2 flex-wrap mb-8">
+        {/* Control Buttons - only show if admin OR teacher with active session */}
+        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+          <div className="flex items-center gap-2 flex-wrap mb-8">
           <Button
             size="sm"
             variant="outline"
@@ -1267,10 +1284,26 @@ export default function Dashboard() {
             <Route className="h-4 w-4 mr-2" />
             Flight Path
           </Button>
-        </div>
+          </div>
+        )}
 
         {/* Student Tiles */}
-        {filteredStudents.length === 0 ? (
+        {currentUser?.role === 'teacher' && !activeSession ? (
+          <div className="py-20 text-center">
+            <div className="h-20 w-20 mx-auto mb-6 rounded-2xl bg-muted/30 flex items-center justify-center">
+              <Calendar className="h-10 w-10 text-muted-foreground/50" />
+            </div>
+            <h3 className="text-xl font-semibold mb-2">No Active Class Session</h3>
+            <p className="text-sm text-muted-foreground max-w-md mx-auto mb-6">
+              Start a class session to view and monitor your students. Click "Start Class" in the top right to select a class period.
+            </p>
+            {groups.length === 0 && (
+              <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                You don't have any class groups yet. Contact your administrator to have students assigned to your classes.
+              </p>
+            )}
+          </div>
+        ) : filteredStudents.length === 0 ? (
           <div className="py-20 text-center">
             <div className="h-20 w-20 mx-auto mb-6 rounded-2xl bg-muted/30 flex items-center justify-center">
               <Monitor className="h-10 w-10 text-muted-foreground/50" />
