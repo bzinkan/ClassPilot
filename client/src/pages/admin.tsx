@@ -189,45 +189,6 @@ export default function Admin() {
     },
   });
 
-  const migrateMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/admin/migrate-to-groups", {});
-      return res.json();
-    },
-    onSuccess: async (data: any) => {
-      // Invalidate all group-related caches with prefix matching
-      await queryClient.invalidateQueries({ 
-        queryKey: ['/api/teacher/groups'],
-        exact: false  
-      });
-      await queryClient.invalidateQueries({ 
-        queryKey: ['/api/groups'],
-        exact: false  // This will match all /api/groups/* queries
-      });
-      await queryClient.invalidateQueries({ 
-        queryKey: ['/api/sessions/active'],
-        exact: false  
-      });
-      await queryClient.invalidateQueries({ 
-        queryKey: ['/api/sessions/all'],
-        exact: false  
-      });
-      // Force immediate refetch
-      await queryClient.refetchQueries({ queryKey: ['/api/teacher/groups'] });
-      toast({
-        title: "Migration completed",
-        description: `Created ${data.groupsCreated} groups and assigned ${data.studentsAssigned} students.`,
-      });
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Migration failed",
-        description: error.message || "An error occurred during migration",
-      });
-    },
-  });
-
   // Initialize tracking hours from settings
   useEffect(() => {
     if (settings) {
@@ -511,41 +472,6 @@ export default function Admin() {
             className="w-full"
           >
             {updateTrackingHoursMutation.isPending ? "Saving..." : "Save Tracking Hours"}
-          </Button>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Users className="h-5 w-5" />
-            Groups Migration
-          </CardTitle>
-          <CardDescription>
-            Convert existing teacher-student assignments to the new groups system
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="bg-muted p-4 rounded-lg">
-            <p className="text-sm mb-2">
-              <strong>One-time migration:</strong> This will create default groups for each teacher.
-            </p>
-            <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
-              <li>Creates an "All Students" group for each teacher</li>
-              <li>Assigns existing students to their teacher's default group</li>
-              <li>Enables session-based classroom management</li>
-            </ul>
-            <p className="text-sm mt-3 text-muted-foreground">
-              Safe to run multiple times - will not create duplicates.
-            </p>
-          </div>
-          <Button
-            variant="default"
-            data-testid="button-migrate-groups"
-            onClick={() => migrateMutation.mutate()}
-            disabled={migrateMutation.isPending}
-          >
-            {migrateMutation.isPending ? "Migrating..." : "Run Migration"}
           </Button>
         </CardContent>
       </Card>
