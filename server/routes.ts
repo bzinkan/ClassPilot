@@ -1254,7 +1254,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update student information (student name and grade level)
+  // Update student information (student name, email, and grade level)
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { studentId } = req.params;
@@ -1265,6 +1265,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       if ('gradeLevel' in req.body) {
         updates.gradeLevel = normalizeGradeLevel(req.body.gradeLevel);
+      }
+      if ('studentEmail' in req.body) {
+        const email = req.body.studentEmail?.trim();
+        // Validate email format
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (email && !emailRegex.test(email)) {
+          return res.status(400).json({ error: "Invalid email format" });
+        }
+        updates.studentEmail = email;
       }
       
       if (Object.keys(updates).length === 0) {

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight } from "lucide-react";
+import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight, X } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -26,7 +26,16 @@ import {
   DialogHeader,
   DialogTitle,
   DialogTrigger,
+  DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
@@ -54,6 +63,14 @@ const createClassSchema = z.object({
 
 type CreateClassForm = z.infer<typeof createClassSchema>;
 
+const editStudentSchema = z.object({
+  studentName: z.string().min(1, "Name is required"),
+  studentEmail: z.string().email("Invalid email format"),
+  gradeLevel: z.string().optional(),
+});
+
+type EditStudentForm = z.infer<typeof editStudentSchema>;
+
 interface Teacher {
   id: string;
   username: string;
@@ -77,6 +94,123 @@ interface StudentsResponse {
   students: Student[];
 }
 
+interface EditStudentDialogProps {
+  student: Student;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogProps) {
+  const { toast } = useToast();
+  const form = useForm<EditStudentForm>({
+    resolver: zodResolver(editStudentSchema),
+    defaultValues: {
+      studentName: student.studentName,
+      studentEmail: student.studentEmail,
+      gradeLevel: student.gradeLevel || "",
+    },
+  });
+
+  const editMutation = useMutation({
+    mutationFn: async (data: EditStudentForm) => {
+      return await apiRequest(`/api/students/${student.id}`, {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      toast({
+        title: "Student updated",
+        description: "Student information has been updated successfully.",
+      });
+      onOpenChange(false);
+      form.reset();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to update student",
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent data-testid="dialog-edit-student">
+        <DialogHeader>
+          <DialogTitle>Edit Student</DialogTitle>
+          <DialogDescription>
+            Update student information
+          </DialogDescription>
+        </DialogHeader>
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit((data) => editMutation.mutate(data))} className="space-y-4">
+            <FormField
+              control={form.control}
+              name="studentName"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Student Name</FormLabel>
+                  <FormControl>
+                    <Input {...field} data-testid="input-edit-student-name" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="studentEmail"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Email</FormLabel>
+                  <FormControl>
+                    <Input {...field} type="email" data-testid="input-edit-student-email" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="gradeLevel"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Grade Level (Optional)</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder="e.g., 9" data-testid="input-edit-student-grade" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                data-testid="button-cancel-edit"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={editMutation.isPending}
+                data-testid="button-save-student"
+              >
+                {editMutation.isPending ? "Saving..." : "Save Changes"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 interface ClassCardProps {
   group: Group;
   teacher: Teacher | undefined;
@@ -87,9 +221,34 @@ interface ClassCardProps {
 }
 
 function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDeleting }: ClassCardProps) {
+  const { toast } = useToast();
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  
   // Fetch students for this class (always fetch to show count)
   const { data: classStudents = [], isLoading } = useQuery<Student[]>({
     queryKey: ["/api/groups", group.id, "students"],
+  });
+
+  const removeStudentMutation = useMutation({
+    mutationFn: async (studentId: string) => {
+      return await apiRequest(`/api/groups/${group.id}/students/${studentId}`, {
+        method: "DELETE",
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/groups", group.id, "students"] });
+      toast({
+        title: "Student removed",
+        description: "Student has been removed from the class.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to remove student from class",
+        variant: "destructive",
+      });
+    },
   });
 
   return (
@@ -157,16 +316,39 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
             ) : classStudents.length === 0 ? (
               <p className="text-sm text-muted-foreground">No students assigned yet</p>
             ) : (
-              <div className="space-y-1">
+              <div className="space-y-2">
                 <p className="text-sm font-medium mb-2">Students in this class:</p>
                 {classStudents.map((student) => (
                   <div
                     key={student.id}
-                    className="text-sm text-muted-foreground pl-4"
+                    className="flex items-center justify-between pl-4 pr-2 py-1 rounded hover-elevate"
                     data-testid={`student-${student.id}-in-${group.id}`}
                   >
-                    • {student.studentName}
-                    {student.gradeLevel && ` (Grade ${student.gradeLevel})`}
+                    <span className="text-sm text-muted-foreground">
+                      • {student.studentName}
+                      {student.gradeLevel && ` (Grade ${student.gradeLevel})`}
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => setEditingStudent(student)}
+                        data-testid={`button-edit-student-${student.id}`}
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={() => removeStudentMutation.mutate(student.id)}
+                        disabled={removeStudentMutation.isPending}
+                        data-testid={`button-remove-student-${student.id}`}
+                      >
+                        <X className="h-3.5 w-3.5 text-destructive" />
+                      </Button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -174,6 +356,13 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
           </div>
         </div>
       </CollapsibleContent>
+      {editingStudent && (
+        <EditStudentDialog
+          student={editingStudent}
+          open={!!editingStudent}
+          onOpenChange={(open) => !open && setEditingStudent(null)}
+        />
+      )}
     </Collapsible>
   );
 }
