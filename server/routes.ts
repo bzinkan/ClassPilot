@@ -1090,21 +1090,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const allStatuses = await storage.getAllStudentStatuses();
       
-      // Admins see all students; teachers see only their assigned students
+      // Admins see all students; teachers see only students in their active session
       let filteredStatuses: typeof allStatuses;
       if (user.role === 'admin') {
         filteredStatuses = allStatuses;
         console.log('Dashboard requested students (admin) - found:', filteredStatuses.length, 'students');
       } else {
-        const teacherStudentIds = await storage.getTeacherStudents(userId);
-        filteredStatuses = allStatuses.filter(s => 
-          teacherStudentIds.includes(s.studentId)
-        );
-        console.log('Dashboard requested students (teacher) - found:', filteredStatuses.length, 'active students for teacher', userId);
-      }
-      
-      // For teachers with active sessions, merge roster students (show offline placeholders)
-      if (user.role === 'teacher') {
+        // Teachers: Only show students when they have an active session
         const activeSession = await storage.getActiveSessionByTeacher(userId);
         if (activeSession?.groupId) {
           console.log('Teacher has active session for group:', activeSession.groupId);
@@ -1112,6 +1104,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Get all students assigned to this session's group
           const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
           console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
+          
+          // Filter active statuses to only include students in this session's roster
+          filteredStatuses = allStatuses.filter(s => rosterStudentIds.includes(s.studentId));
+          console.log('  - Found', filteredStatuses.length, 'active students in session roster');
           
           // Find students in roster but not in active statuses (offline students)
           const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
@@ -1157,6 +1153,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
             filteredStatuses = [...filteredStatuses, ...validPlaceholders];
             console.log('  - Total students (active + offline):', filteredStatuses.length);
           }
+        } else {
+          // No active session = no students shown (empty state)
+          filteredStatuses = [];
+          console.log('Teacher has no active session - showing empty state');
         }
       }
       
