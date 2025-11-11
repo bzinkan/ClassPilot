@@ -20,7 +20,7 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ArrowLeft, Download, Shield, Clock, AlertCircle, Layers, Plus, Pencil, Trash2, Star, Users } from "lucide-react";
-import type { Settings as SettingsType, StudentGroup } from "@shared/schema";
+import type { Settings as SettingsType, StudentGroup, FlightPath } from "@shared/schema";
 
 // Helper function to normalize domain names
 function normalizeDomain(domain: string): string {
@@ -61,9 +61,9 @@ export default function Settings() {
   const [exportStartDate, setExportStartDate] = useState("");
   const [exportEndDate, setExportEndDate] = useState("");
   
-  // Scenes management state
+  // Flight Paths management state
   const [showSceneDialog, setShowSceneDialog] = useState(false);
-  const [editingScene, setEditingScene] = useState<Scene | null>(null);
+  const [editingScene, setEditingScene] = useState<FlightPath | null>(null);
   const [flightPathName, setSceneName] = useState("");
   const [sceneDescription, setSceneDescription] = useState("");
   const [sceneAllowedDomains, setSceneAllowedDomains] = useState("");
@@ -81,7 +81,7 @@ export default function Settings() {
     queryKey: ['/api/settings'],
   });
 
-  const { data: scenes = [], isLoading: scenesLoading } = useQuery<Scene[]>({
+  const { data: scenes = [], isLoading: scenesLoading } = useQuery<FlightPath[]>({
     queryKey: ['/api/flight-paths'],
   });
 
@@ -187,12 +187,12 @@ export default function Settings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
-      toast({ title: "Scene created", description: `"${flightPathName}" has been created successfully` });
+      toast({ title: "Flight path created", description: `"${flightPathName}" has been created successfully` });
       setShowSceneDialog(false);
       resetSceneForm();
     },
     onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to create scene", description: error.message });
+      toast({ variant: "destructive", title: "Failed to create flight path", description: error.message });
     },
   });
 
@@ -208,12 +208,12 @@ export default function Settings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
-      toast({ title: "Scene updated", description: `"${flightPathName}" has been updated successfully` });
+      toast({ title: "Flight path updated", description: `"${flightPathName}" has been updated successfully` });
       setShowSceneDialog(false);
       resetSceneForm();
     },
     onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to update scene", description: error.message });
+      toast({ variant: "destructive", title: "Failed to update flight path", description: error.message });
     },
   });
 
@@ -223,11 +223,11 @@ export default function Settings() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/flight-paths'] });
-      toast({ title: "Scene deleted", description: "The scene has been deleted successfully" });
+      toast({ title: "Flight path deleted", description: "The flight path has been deleted successfully" });
       setDeleteSceneId(null);
     },
     onError: (error: any) => {
-      toast({ variant: "destructive", title: "Failed to delete scene", description: error.message });
+      toast({ variant: "destructive", title: "Failed to delete flight path", description: error.message });
     },
   });
 
@@ -244,7 +244,7 @@ export default function Settings() {
     setShowSceneDialog(true);
   };
 
-  const handleEditScene = (scene: Scene) => {
+  const handleEditScene = (scene: FlightPath) => {
     setEditingScene(scene);
     setSceneName(scene.flightPathName);
     setSceneDescription(scene.description || "");
@@ -255,7 +255,7 @@ export default function Settings() {
 
   const handleSaveScene = () => {
     if (!flightPathName.trim()) {
-      toast({ variant: "destructive", title: "Scene name required", description: "Please enter a name for the scene" });
+      toast({ variant: "destructive", title: "Flight path name required", description: "Please enter a name for the flight path" });
       return;
     }
     if (editingScene) {
@@ -854,18 +854,18 @@ export default function Settings() {
         </DialogContent>
       </Dialog>
 
-      {/* Scene Create/Edit Dialog */}
+      {/* Flight Path Create/Edit Dialog */}
       <Dialog open={showSceneDialog} onOpenChange={setShowSceneDialog}>
         <DialogContent data-testid="dialog-scene-form">
           <DialogHeader>
-            <DialogTitle>{editingScene ? "Edit Scene" : "Create New Scene"}</DialogTitle>
+            <DialogTitle>{editingScene ? "Edit Flight Path" : "Create New Flight Path"}</DialogTitle>
             <DialogDescription>
-              {editingScene ? "Update the scene configuration" : "Create a browsing environment with allowed or blocked websites"}
+              {editingScene ? "Update the flight path configuration" : "Create a browsing environment with allowed or blocked websites"}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label htmlFor="scene-name">Scene Name *</Label>
+              <Label htmlFor="scene-name">Flight Path Name *</Label>
               <Input
                 id="scene-name"
                 value={flightPathName}
@@ -880,7 +880,7 @@ export default function Settings() {
                 id="scene-description"
                 value={sceneDescription}
                 onChange={(e) => setSceneDescription(e.target.value)}
-                placeholder="Optional description of this scene"
+                placeholder="Optional description of this flight path"
                 data-testid="input-scene-description"
               />
             </div>
@@ -940,13 +940,13 @@ export default function Settings() {
         </DialogContent>
       </Dialog>
 
-      {/* Delete Scene Confirmation Dialog */}
+      {/* Delete Flight Path Confirmation Dialog */}
       <Dialog open={deleteSceneId !== null} onOpenChange={(open) => !open && setDeleteSceneId(null)}>
         <DialogContent data-testid="dialog-delete-scene">
           <DialogHeader>
-            <DialogTitle>Delete Scene</DialogTitle>
+            <DialogTitle>Delete Flight Path</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this scene? This action cannot be undone.
+              Are you sure you want to delete this flight path? This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -963,7 +963,7 @@ export default function Settings() {
               disabled={deleteSceneMutation.isPending}
               data-testid="button-confirm-delete-scene"
             >
-              {deleteSceneMutation.isPending ? "Deleting..." : "Delete Scene"}
+              {deleteSceneMutation.isPending ? "Deleting..." : "Delete Flight Path"}
             </Button>
           </DialogFooter>
         </DialogContent>

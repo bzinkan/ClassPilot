@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { ArrowLeft, User, Settings as SettingsIcon, Save, Plus, Edit, Trash2, Plane } from "lucide-react";
+import { ArrowLeft, User, Settings as SettingsIcon, Save, Plus, Edit, Trash2, Plane, AlertCircle } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { TeacherSettings, FlightPath } from "@shared/schema";
 
@@ -37,6 +37,7 @@ export default function MySettings() {
   const [flightPathName, setFlightPathName] = useState("");
   const [flightPathDescription, setFlightPathDescription] = useState("");
   const [flightPathAllowedDomains, setFlightPathAllowedDomains] = useState("");
+  const [flightPathBlockedDomains, setFlightPathBlockedDomains] = useState("");
   const [deleteFlightPathId, setDeleteFlightPathId] = useState<string | null>(null);
 
   const { data: teacherSettings, isLoading } = useQuery<TeacherSettings | null>({
@@ -76,6 +77,7 @@ export default function MySettings() {
     setFlightPathName("");
     setFlightPathDescription("");
     setFlightPathAllowedDomains("");
+    setFlightPathBlockedDomains("");
     setEditingFlightPath(null);
   };
 
@@ -85,6 +87,7 @@ export default function MySettings() {
         flightPathName,
         description: flightPathDescription || undefined,
         allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+        blockedDomains: flightPathBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -105,6 +108,7 @@ export default function MySettings() {
         flightPathName,
         description: flightPathDescription || undefined,
         allowedDomains: flightPathAllowedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
+        blockedDomains: flightPathBlockedDomains.split(",").map(d => normalizeDomain(d)).filter(Boolean),
       });
     },
     onSuccess: () => {
@@ -178,6 +182,7 @@ export default function MySettings() {
     setFlightPathName(flightPath.flightPathName);
     setFlightPathDescription(flightPath.description || "");
     setFlightPathAllowedDomains(flightPath.allowedDomains?.join(", ") || "");
+    setFlightPathBlockedDomains(flightPath.blockedDomains?.join(", ") || "");
     setShowFlightPathDialog(true);
   };
 
@@ -494,17 +499,39 @@ export default function MySettings() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="flight-path-domains">Allowed Domains *</Label>
-              <Textarea
+              <Label htmlFor="flight-path-domains">Allowed Domains</Label>
+              <Input
                 id="flight-path-domains"
-                data-testid="textarea-flight-path-domains"
+                data-testid="input-flight-path-domains"
                 value={flightPathAllowedDomains}
                 onChange={(e) => setFlightPathAllowedDomains(e.target.value)}
-                placeholder="google.com, khanacademy.org, wikipedia.org"
-                className="min-h-[120px] font-mono text-sm"
+                placeholder="classroom.google.com, docs.google.com, khanacademy.org"
+              />
+              <div className="text-xs text-muted-foreground space-y-1">
+                <p>Comma-separated domains. Use specific subdomains for best control.</p>
+                <p className="font-medium text-primary">Google Services Examples:</p>
+                <ul className="ml-3 space-y-0.5">
+                  <li>• <code className="text-xs bg-muted px-1 rounded">classroom.google.com</code> - Google Classroom only</li>
+                  <li>• <code className="text-xs bg-muted px-1 rounded">docs.google.com</code> - Forms, Docs, Sheets, Slides</li>
+                  <li>• <code className="text-xs bg-muted px-1 rounded">drive.google.com</code> - Google Drive only</li>
+                </ul>
+                <p className="text-amber-600 dark:text-amber-500 pt-1 flex items-start gap-1">
+                  <AlertCircle className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                  <span>Using just <code className="text-xs bg-muted px-1 rounded">google.com</code> allows ALL Google services (YouTube, Gmail, etc.)</span>
+                </p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="flight-path-blocked">Blocked Domains</Label>
+              <Input
+                id="flight-path-blocked"
+                data-testid="input-flight-path-blocked"
+                value={flightPathBlockedDomains}
+                onChange={(e) => setFlightPathBlockedDomains(e.target.value)}
+                placeholder="facebook.com, youtube.com, games.com"
               />
               <p className="text-xs text-muted-foreground">
-                Comma-separated list of domains students can visit when this Flight Path is active.
+                Comma-separated domains. Students cannot access any page on these domains (blocks entire site).
               </p>
             </div>
           </div>
@@ -520,7 +547,7 @@ export default function MySettings() {
             <Button
               type="button"
               onClick={handleSaveFlightPath}
-              disabled={!flightPathName.trim() || !flightPathAllowedDomains.trim() || 
+              disabled={!flightPathName.trim() || 
                        createFlightPathMutation.isPending || updateFlightPathMutation.isPending}
               data-testid="button-save-flight-path"
             >
