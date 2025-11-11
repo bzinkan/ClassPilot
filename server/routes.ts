@@ -90,8 +90,9 @@ function broadcastToTeachers(message: any) {
   });
 }
 
-function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]) {
+function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
   const messageStr = JSON.stringify(message);
+  let sentCount = 0;
   wsClients.forEach((client, ws) => {
     if (client.role === 'student' && client.authenticated && ws.readyState === WebSocket.OPEN) {
       // If targetDeviceIds is specified, only send to those devices
@@ -103,9 +104,11 @@ function broadcastToStudents(message: any, filterFn?: (client: WSClient) => bool
       // Apply additional filter function if provided
       if (!filterFn || filterFn(client)) {
         ws.send(messageStr);
+        sentCount++;
       }
     }
   });
+  return sentCount;
 }
 
 function sendToDevice(deviceId: string, message: any) {
@@ -2493,7 +2496,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // Broadcast to targeted students or all students
-      broadcastToStudents({
+      const sentCount = broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'open-tab',
@@ -2501,10 +2504,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         },
       }, undefined, targetDeviceIds);
       
+      console.log(`Open tab command sent to ${sentCount} connected device(s)`);
+      
+      if (sentCount === 0) {
+        return res.status(200).json({ 
+          success: true, 
+          sentCount: 0,
+          message: `No student devices are currently connected. Make sure students have the Chrome extension installed and running.`
+        });
+      }
+      
       const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
-        : "all students";
-      res.json({ success: true, message: `Opened ${url} on ${target}` });
+        ? `${sentCount} selected device(s)` 
+        : `${sentCount} connected device(s)`;
+      res.json({ success: true, sentCount, message: `Opened ${url} on ${target}` });
     } catch (error) {
       console.error("Open tab error:", error);
       res.status(500).json({ error: "Internal server error" });
