@@ -72,6 +72,13 @@ export interface StudentStatus {
   currentUrlDuration?: number; // Duration in seconds spent on current URL
   viewMode?: 'url' | 'thumb' | 'live'; // Display mode for the student tile
   status: 'online' | 'idle' | 'offline';
+  statusKey?: string; // Composite key: studentId-deviceId (for multi-device tracking)
+}
+
+// Helper function to create consistent composite keys for student status tracking
+// This allows the same student to appear multiple times (once per device)
+export function makeStatusKey(studentId: string, deviceId: string): string {
+  return `${studentId}-${deviceId}`;
 }
 
 // Heartbeat data

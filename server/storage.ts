@@ -181,7 +181,7 @@ export class MemStorage implements IStorage {
   private devices: Map<string, Device>;
   private students: Map<string, Student>; // Keyed by student ID
   private activeStudents: Map<string, string>; // deviceId -> studentId
-  private studentStatuses: Map<string, StudentStatus>; // Keyed by student ID
+  private studentStatuses: Map<string, StudentStatus>; // Keyed by studentId-deviceId composite
   private heartbeats: Heartbeat[];
   private events: Event[];
   private rosters: Map<string, Roster>;
@@ -964,7 +964,7 @@ export class MemStorage implements IStorage {
 // Database storage implementation
 export class DatabaseStorage implements IStorage {
   private activeStudents: Map<string, string>; // deviceId -> studentId
-  private studentStatuses: Map<string, StudentStatus>; // studentId -> status
+  private studentStatuses: Map<string, StudentStatus>; // studentId-deviceId -> status
 
   constructor() {
     this.activeStudents = new Map();
