@@ -11,4 +11,5 @@ export function invalidateStudentCaches() {
   queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
   queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
   queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+  queryClient.invalidateQueries({ queryKey: ["/api/admin/live-students"] });
 }

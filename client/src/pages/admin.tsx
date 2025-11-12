@@ -730,11 +730,11 @@ export default function Admin() {
 
               <div className="flex items-center justify-between py-2">
                 <p className="text-sm text-muted-foreground" data-testid="text-student-count">
-                  {filteredStudents.length} of {liveStudents.length} students
+                  {filteredStudents.length} of {safeStudents.length} students
                 </p>
               </div>
 
-              {isLoadingStudents && liveStudents.length === 0 ? (
+              {isLoadingStudents && safeStudents.length === 0 ? (
                 <div className="text-center py-12" data-testid="status-monitoring-loading">
                   <Monitor className="h-12 w-12 mx-auto mb-3 text-muted-foreground/30" />
                   <p className="text-sm text-muted-foreground">Loading students...</p>
