@@ -27,6 +27,7 @@ import {
   type InsertRoster,
   type InsertStudent,
   type InsertDevice,
+  type StudentUpdateFields,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration, isWithinTrackingHours, normalizeEmail } from "@shared/utils";
 
@@ -1161,7 +1162,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           } else {
             // Create new student (first time seeing this email in this school)
             console.log('✓ Creating new student with email:', normalizedEmail);
-            student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, null);
+            student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, undefined);
             // Add this device to the student's device list
             await storage.addStudentDevice(student.id, deviceData.deviceId);
           }
@@ -1378,7 +1379,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 
                 return {
                   studentId: student.id,
-                  deviceId: student.deviceId,
+                  deviceId: student.deviceId || '',
                   deviceName: device?.deviceName ?? undefined,
                   studentName: student.studentName,
                   classId: device?.classId || '',
@@ -1613,19 +1614,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { studentId } = req.params;
-      const updates: Partial<InsertStudent> = {};
+      const updates: Partial<StudentUpdateFields> = {};
       
-      if ('studentName' in req.body) {
+      if ('studentName' in req.body && typeof req.body.studentName === 'string') {
         updates.studentName = req.body.studentName;
       }
-      if ('gradeLevel' in req.body) {
+      if ('gradeLevel' in req.body && req.body.gradeLevel !== undefined) {
         updates.gradeLevel = normalizeGradeLevel(req.body.gradeLevel);
       }
       if ('studentEmail' in req.body) {
         const email = req.body.studentEmail?.trim();
+        // Guard empty emails before calling normalizeEmail
+        if (!email) {
+          return res.status(400).json({ error: "Email cannot be empty" });
+        }
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (email && !emailRegex.test(email)) {
+        if (!emailRegex.test(email)) {
           return res.status(400).json({ error: "Invalid email format" });
         }
         // Normalize email for consistent storage

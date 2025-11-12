@@ -53,9 +53,12 @@ export const students = pgTable("students", {
   schoolEmailUnique: uniqueIndex("students_school_email_unique").on(table.schoolId, table.emailLc),
 }));
 
-export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true, emailLc: true, deviceId: true });
+export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true, emailLc: true, deviceId: true } as const);
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
+
+// Type for updating student fields
+export type StudentUpdateFields = Pick<Student, "studentName" | "gradeLevel" | "studentEmail">;
 
 // Student Devices - Many-to-many junction table (one student can use multiple devices)
 export const studentDevices = pgTable("student_devices", {

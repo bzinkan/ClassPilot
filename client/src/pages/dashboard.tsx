@@ -30,6 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
+import { useWebSocket } from "@/components/websocket-provider";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import type { StudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
@@ -65,7 +66,6 @@ export default function Dashboard() {
       return "";
     }
   });
-  const [wsConnected, setWsConnected] = useState(false);
   const [liveStreams, setLiveStreams] = useState<Map<string, MediaStream>>(new Map());
   const [tileRevisions, setTileRevisions] = useState<Record<string, number>>({});
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -84,14 +84,12 @@ export default function Dashboard() {
   const [showFlightPathViewerDialog, setShowFlightPathViewerDialog] = useState(false);
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
-  const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const isMountedRef = useRef(true); // Track if component is mounted
-  const maxReconnectDelay = 30000; // 30 seconds max delay
+  
+  // Use global WebSocket connection
+  const { ws, isConnected: wsConnected } = useWebSocket();
   
   // WebRTC hook for live video streaming
-  const webrtc = useWebRTC(wsRef.current);
+  const webrtc = useWebRTC(ws);
 
   const { data: students = [], refetch } = useQuery<StudentStatus[]>({
     queryKey: ['/api/students'],
@@ -134,158 +132,37 @@ export default function Dashboard() {
     select: (data: any[]) => data.map((s: any) => s.id),
   });
 
-  // WebSocket connection with automatic reconnection
+  // WebRTC signaling message listener
   useEffect(() => {
-    // Mark component as mounted (important for React StrictMode double-invocation)
-    isMountedRef.current = true;
-    
-    // Clear any stale reconnection timeouts from previous mounts
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    
-    // Reset reconnection attempts counter for fresh mount
-    reconnectAttemptsRef.current = 0;
-    
-    const connectWebSocket = () => {
-      // Clear any existing reconnection timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
+    if (!ws) return;
 
-      // Close existing connection if any
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-
-      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
-      console.log('[Dashboard] Connecting to WebSocket (attempt', reconnectAttemptsRef.current + 1, '):', wsUrl);
-      
+    const handleMessage = (event: MessageEvent) => {
       try {
-        const socket = new WebSocket(wsUrl);
-        wsRef.current = socket;
-
-        socket.onopen = () => {
-          if (!isMountedRef.current) return; // Don't update state if unmounted
-          
-          console.log("[Dashboard] WebSocket connected successfully");
-          setWsConnected(true);
-          reconnectAttemptsRef.current = 0; // Reset reconnection counter on successful connection
-          
-          // Authenticate as teacher with userId
-          if (currentUser?.id) {
-            socket.send(JSON.stringify({ type: 'auth', role: 'teacher', userId: currentUser.id }));
-            console.log("[Dashboard] Sent auth message with userId:", currentUser.id);
-          } else {
-            console.warn("[Dashboard] Cannot authenticate - currentUser not available yet");
-          }
-        };
-
-        socket.onmessage = (event) => {
-          if (!isMountedRef.current) return; // Don't process messages if unmounted
-          
-          try {
-            const message = JSON.parse(event.data);
-            console.log("[Dashboard] WebSocket message received:", message);
-            
-            // Handle student registration broadcasts
-            if (message.type === 'student-registered') {
-              console.log("[Dashboard] Student registered, invalidating caches...", message.data);
-              // Use comprehensive cache invalidation for all student-related queries
-              invalidateStudentCaches();
-            }
-            
-            // Handle WebRTC signaling messages
-            if (message.type === 'answer') {
-              console.log("[Dashboard] Received WebRTC answer from", message.from);
-              webrtc.handleAnswer(message.from, message.sdp);
-            }
-            
-            if (message.type === 'ice') {
-              console.log("[Dashboard] Received ICE candidate from", message.from);
-              webrtc.handleIceCandidate(message.from, message.candidate);
-            }
-          } catch (error) {
-            console.error("[Dashboard] WebSocket message error:", error);
-          }
-        };
-
-        socket.onclose = (event) => {
-          console.log("[Dashboard] WebSocket disconnected, code:", event.code, "reason:", event.reason);
-          
-          // Only update state and reconnect if component is still mounted
-          if (!isMountedRef.current) {
-            console.log("[Dashboard] Component unmounted, skipping reconnection");
-            return;
-          }
-          
-          setWsConnected(false);
-          wsRef.current = null;
-          
-          // Attempt to reconnect with exponential backoff
-          reconnectAttemptsRef.current++;
-          const delay = Math.min(
-            1000 * Math.pow(2, reconnectAttemptsRef.current - 1), // Exponential: 1s, 2s, 4s, 8s, 16s...
-            maxReconnectDelay // Cap at 30 seconds
-          );
-          
-          console.log(`[Dashboard] Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current})...`);
-          reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
-        };
-
-        socket.onerror = (error) => {
-          if (!isMountedRef.current) return; // Don't update state if unmounted
-          
-          console.error("[Dashboard] WebSocket error:", error);
-          setWsConnected(false);
-        };
-      } catch (error) {
-        console.error("[Dashboard] Failed to create WebSocket:", error);
-        setWsConnected(false);
+        const message = JSON.parse(event.data);
         
-        // Attempt to reconnect
-        reconnectAttemptsRef.current++;
-        const delay = Math.min(
-          1000 * Math.pow(2, reconnectAttemptsRef.current - 1),
-          maxReconnectDelay
-        );
-        reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
+        // Handle WebRTC signaling messages
+        if (message.type === 'answer') {
+          console.log("[Dashboard] Received WebRTC answer from", message.from);
+          webrtc.handleAnswer(message.from, message.sdp);
+        }
+        
+        if (message.type === 'ice') {
+          console.log("[Dashboard] Received ICE candidate from", message.from);
+          webrtc.handleIceCandidate(message.from, message.candidate);
+        }
+      } catch (error) {
+        console.error("[Dashboard] WebSocket message error:", error);
       }
     };
 
-    // Initial connection
-    connectWebSocket();
+    ws.addEventListener('message', handleMessage);
 
-    // Cleanup on unmount
     return () => {
-      console.log("[Dashboard] Cleaning up WebSocket connection");
-      isMountedRef.current = false; // Mark as unmounted to prevent reconnection
-      
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      
-      // Clean up WebRTC connections
+      ws.removeEventListener('message', handleMessage);
+      // Clean up WebRTC connections on unmount
       webrtc.cleanup();
     };
-  }, []); // Empty deps - WebSocket connection should only be created once
-
-  // Re-authenticate when currentUser becomes available (for teachers)
-  useEffect(() => {
-    if (currentUser?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      console.log("[Dashboard] Re-authenticating with userId:", currentUser.id);
-      wsRef.current.send(JSON.stringify({ type: 'auth', role: 'teacher', userId: currentUser.id }));
-    }
-  }, [currentUser?.id]);
+  }, [ws, webrtc]);
 
   // Set initial grade when settings load and validate saved grade
   useEffect(() => {
@@ -403,7 +280,7 @@ export default function Dashboard() {
     console.log(`[Dashboard] Stopping live view for ${deviceId}`);
     
     // Stop WebRTC connection and notify student
-    webrtc.stopLiveView(deviceId, wsRef.current);
+    webrtc.stopLiveView(deviceId, ws);
     
     // Clear stream from state
     setLiveStreams((prev) => {
