@@ -53,6 +53,7 @@ import {
   messages,
   checkIns,
 } from "@shared/schema";
+import { normalizeEmail } from "@shared/utils";
 import { randomUUID } from "crypto";
 import { db } from "./db";
 import { eq, desc, lt, sql as drizzleSql, inArray } from "drizzle-orm";
@@ -309,8 +310,9 @@ export class MemStorage implements IStorage {
   }
 
   async getStudentByEmail(email: string): Promise<Student | undefined> {
+    const normalizedEmail = normalizeEmail(email);
     return Array.from(this.students.values())
-      .find(s => s.studentEmail === email);
+      .find(s => normalizeEmail(s.studentEmail) === normalizedEmail);
   }
 
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
@@ -328,7 +330,7 @@ export class MemStorage implements IStorage {
       id,
       deviceId: insertStudent.deviceId,
       studentName: insertStudent.studentName,
-      studentEmail: insertStudent.studentEmail ?? null,
+      studentEmail: normalizeEmail(insertStudent.studentEmail) ?? null,
       gradeLevel: insertStudent.gradeLevel ?? null,
       createdAt: new Date(),
     };
@@ -362,7 +364,13 @@ export class MemStorage implements IStorage {
     const student = this.students.get(studentId);
     if (!student) return undefined;
     
-    Object.assign(student, updates);
+    // Normalize email if it's being updated
+    const normalizedUpdates = { ...updates };
+    if (normalizedUpdates.studentEmail !== undefined) {
+      normalizedUpdates.studentEmail = normalizeEmail(normalizedUpdates.studentEmail);
+    }
+    
+    Object.assign(student, normalizedUpdates);
     this.students.set(studentId, student);
     
     // Update status map if relevant fields changed
@@ -1155,7 +1163,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getStudentByEmail(email: string): Promise<Student | undefined> {
-    const [student] = await db.select().from(students).where(eq(students.studentEmail, email));
+    const normalizedEmail = normalizeEmail(email);
+    // Use case-insensitive comparison via SQL lower() function
+    const [student] = await db
+      .select()
+      .from(students)
+      .where(drizzleSql`LOWER(${students.studentEmail}) = LOWER(${normalizedEmail})`);
     return student || undefined;
   }
 
@@ -1168,9 +1181,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
+    // Normalize email before insertion
+    const normalizedData = {
+      ...insertStudent,
+      studentEmail: normalizeEmail(insertStudent.studentEmail),
+    };
+    
     const [student] = await db
       .insert(students)
-      .values(insertStudent)
+      .values(normalizedData)
       .returning();
     
     // Get device info for this student
@@ -1217,9 +1236,15 @@ export class DatabaseStorage implements IStorage {
   }
 
   async updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined> {
+    // Normalize email if it's being updated
+    const normalizedUpdates = { ...updates };
+    if (normalizedUpdates.studentEmail !== undefined) {
+      normalizedUpdates.studentEmail = normalizeEmail(normalizedUpdates.studentEmail);
+    }
+    
     const [student] = await db
       .update(students)
-      .set(updates)
+      .set(normalizedUpdates)
       .where(eq(students.id, studentId))
       .returning();
     
