@@ -1037,15 +1037,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { deviceId, deviceName, classId, schoolId = 'default-school', studentEmail, studentName } = req.body;
       
-      // Validate required fields
-      if (!studentEmail || !studentName) {
-        return res.status(400).json({ error: "studentEmail and studentName are required" });
+      // Log if email is missing (indicates Chrome Identity API didn't provide it)
+      if (!studentEmail) {
+        console.warn('⚠️  Student registration without email - Chrome Identity API may lack permissions', {
+          deviceId,
+          studentName,
+          classId
+        });
       }
       
-      // Normalize email for consistent storage and lookup
-      const normalizedEmail = normalizeEmail(studentEmail);
-      if (!normalizedEmail) {
-        return res.status(400).json({ error: "Invalid email address" });
+      // Validate studentName is provided
+      if (!studentName) {
+        return res.status(400).json({ error: "studentName is required" });
       }
       
       // Register or update device
@@ -1061,42 +1064,88 @@ export async function registerRoutes(app: Express): Promise<Server> {
         device = await storage.registerDevice(deviceData);
       }
       
-      // Check if student with this email already exists (across ALL devices)
-      let student = await storage.getStudentByEmail(normalizedEmail);
+      let student: Student | undefined = undefined;
       
-      if (student) {
-        // Student exists! Check if they switched devices
-        if (student.deviceId !== deviceData.deviceId) {
-          console.log('Student switched devices:', normalizedEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
-          // Update student's device to the new one
-          student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
-        } else {
-          console.log('Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
+      // Path 1: Email provided - use email-based matching (preferred)
+      if (studentEmail) {
+        const normalizedEmail = normalizeEmail(studentEmail);
+        if (!normalizedEmail) {
+          return res.status(400).json({ error: "Invalid email address" });
         }
-      } else {
-        // Create new student (first time seeing this email)
-        const studentData = insertStudentSchema.parse({
-          deviceId: deviceData.deviceId,
-          studentName,
-          studentEmail: normalizedEmail,
-          gradeLevel: null, // Teacher can assign grade later
-        });
         
-        student = await storage.createStudent(studentData);
-        console.log('New student auto-registered:', normalizedEmail, 'studentId:', student.id);
+        // Check if student with this email already exists (across ALL devices)
+        student = await storage.getStudentByEmail(normalizedEmail);
+        
+        if (student) {
+          // Student exists! Check if they switched devices
+          if (student.deviceId !== deviceData.deviceId) {
+            console.log('✓ Student switched devices:', normalizedEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
+            // Update student's device to the new one
+            student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+          } else {
+            console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
+          }
+        } else {
+          // Create new student (first time seeing this email)
+          const studentData = insertStudentSchema.parse({
+            deviceId: deviceData.deviceId,
+            studentName,
+            studentEmail: normalizedEmail,
+            gradeLevel: null, // Teacher can assign grade later
+          });
+          
+          student = await storage.createStudent(studentData);
+          console.log('✓ New student auto-registered with email:', normalizedEmail, 'studentId:', student.id);
+        }
+      } 
+      // Path 2: No email provided - try to find existing student by checking placeholder devices
+      else {
+        // Get all students to check for potential matches
+        const allStudents = await storage.getAllStudents();
+        
+        // Strategy A: Check if any student has a pending placeholder deviceId
+        // These are created during CSV import with pattern: "pending-{email}"
+        const pendingStudent = allStudents.find(s => 
+          s.deviceId.startsWith('pending-') && 
+          !s.deviceId.includes(deviceData.deviceId)
+        );
+        
+        if (pendingStudent) {
+          console.log('✓ Found CSV-imported student via placeholder device:', pendingStudent.deviceId, '→', deviceData.deviceId);
+          // Update the pending student to use the actual device
+          student = await storage.updateStudent(pendingStudent.id, { 
+            deviceId: deviceData.deviceId 
+          }) || pendingStudent;
+        } else {
+          // Strategy B: Fail instead of creating duplicate
+          // This prevents creating mystery students that teachers can't track
+          return res.status(400).json({ 
+            error: "Chrome Extension could not retrieve student email. Please ensure the extension has 'identity.email' permission, or manually assign this device to a student from the teacher dashboard.",
+            details: {
+              deviceId: deviceData.deviceId,
+              missingEmail: true,
+              suggestion: "Check Chrome Extension permissions or pre-import students via CSV"
+            }
+          });
+        }
       }
       
       // Set this student as the active student for this device
-      await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
-      console.log('Set active student for device:', deviceData.deviceId, '→', student.id);
-      
-      // Notify teachers
-      broadcastToTeachers({
-        type: 'student-registered',
-        data: { device, student },
-      });
+      if (student) {
+        await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
+        console.log('✓ Set active student for device:', deviceData.deviceId, '→', student.id);
+        
+        // Notify teachers
+        broadcastToTeachers({
+          type: 'student-registered',
+          data: { device, student },
+        });
 
-      res.json({ success: true, device, student });
+        res.json({ success: true, device, student });
+      } else {
+        // Should not reach here, but safety fallback
+        return res.status(500).json({ error: "Failed to create or find student" });
+      }
     } catch (error) {
       console.error("Student registration error:", error);
       res.status(400).json({ error: "Invalid request" });
