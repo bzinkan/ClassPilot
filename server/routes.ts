@@ -1445,10 +1445,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get all persisted students from database (for roster management)
+  // Returns students with device information from student_devices junction table
+  // Students with multiple devices will appear multiple times (once per device)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const students = await storage.getAllStudents();
-      res.json(students);
+      
+      // Expand students to include their devices from junction table
+      const studentsWithDevices = [];
+      for (const student of students) {
+        const devices = await storage.getStudentDevices(student.id);
+        
+        if (devices.length === 0) {
+          // Student has no devices - include them with NULL deviceId
+          studentsWithDevices.push(student);
+        } else {
+          // Student has one or more devices - create one entry per device
+          for (const device of devices) {
+            studentsWithDevices.push({
+              ...student,
+              deviceId: device.deviceId, // Populate from junction table
+            });
+          }
+        }
+      }
+      
+      res.json(studentsWithDevices);
     } catch (error) {
       console.error("Get roster students error:", error);
       res.status(500).json({ error: "Internal server error" });
