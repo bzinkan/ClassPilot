@@ -111,6 +111,36 @@ if (chrome.runtime.onStartup) {
   });
 }
 
+// Listen for Chrome profile changes (student sign-out/sign-in on shared Chromebooks)
+if (chrome.identity?.onSignInChanged) {
+  chrome.identity.onSignInChanged.addListener(async (account, signedIn) => {
+    console.log('[Service Worker] Chrome profile changed:', { account, signedIn });
+    
+    if (signedIn) {
+      // A student just signed in - re-register with new email
+      console.log('[Service Worker] New student signed in - re-registering...');
+      await ensureRegistered();
+      
+      // Send an immediate heartbeat with new student info
+      setTimeout(() => {
+        console.log('[Service Worker] Sending heartbeat after profile change');
+        healthCheck();
+      }, 1000);
+    } else {
+      // Student signed out - clear student data but keep device ID
+      console.log('[Service Worker] Student signed out - clearing student data');
+      const stored = await chrome.storage.local.get(['deviceId']);
+      await chrome.storage.local.clear();
+      if (stored.deviceId) {
+        await chrome.storage.local.set({ deviceId: stored.deviceId });
+        CONFIG.deviceId = stored.deviceId;
+      }
+      CONFIG.studentEmail = null;
+      CONFIG.studentName = null;
+    }
+  });
+}
+
 // Run immediately on service worker load/wake-up
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
