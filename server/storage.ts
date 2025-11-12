@@ -401,7 +401,15 @@ export class MemStorage implements IStorage {
     if (!student) return false;
     
     const existed = this.students.delete(studentId);
+    
+    // Delete studentStatus entries: both plain studentId and composite studentId-deviceId keys
     this.studentStatuses.delete(studentId);
+    const statusKeys = Array.from(this.studentStatuses.keys());
+    for (const key of statusKeys) {
+      if (key.startsWith(`${studentId}-`)) {
+        this.studentStatuses.delete(key);
+      }
+    }
     
     // Clear from active students if this student is active
     const entries = Array.from(this.activeStudents.entries());
@@ -411,9 +419,22 @@ export class MemStorage implements IStorage {
       }
     }
     
-    // Delete related data
+    // CASCADE DELETE: Remove all related records
     this.heartbeats = this.heartbeats.filter(h => h.studentId !== studentId);
     this.events = this.events.filter(e => e.studentId !== studentId);
+    this.messages = this.messages.filter(m => m.toStudentId !== studentId);
+    this.checkIns = this.checkIns.filter(c => c.studentId !== studentId);
+    this.teacherStudents = this.teacherStudents.filter(ts => ts.studentId !== studentId);
+    
+    // Remove student from all StudentGroups (legacy student groups with studentIds array)
+    for (const [groupId, group] of Array.from(this.studentGroups.entries())) {
+      if (group.studentIds && Array.isArray(group.studentIds)) {
+        const updatedStudentIds = group.studentIds.filter((id: string) => id !== studentId);
+        if (updatedStudentIds.length !== group.studentIds.length) {
+          this.studentGroups.set(groupId, { ...group, studentIds: updatedStudentIds });
+        }
+      }
+    }
     
     return existed;
   }
@@ -1274,23 +1295,43 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteStudent(studentId: string): Promise<boolean> {
-    // Delete heartbeats for this student
+    // CASCADE DELETE: Remove all related records in the correct order
+    
+    // 1. Delete heartbeats for this student
     await db.delete(heartbeats).where(eq(heartbeats.studentId, studentId));
     
-    // Delete events for this student
+    // 2. Delete events for this student
     await db.delete(events).where(eq(events.studentId, studentId));
+    
+    // 3. Delete messages for this student
+    await db.delete(messages).where(eq(messages.toStudentId, studentId));
+    
+    // 4. Delete check-ins for this student
+    await db.delete(checkIns).where(eq(checkIns.studentId, studentId));
+    
+    // 5. Delete group_students assignments (prevents orphaned records)
+    await db.delete(groupStudents).where(eq(groupStudents.studentId, studentId));
+    
+    // 6. Delete teacher_students assignments (prevents orphaned records)
+    await db.delete(teacherStudents).where(eq(teacherStudents.studentId, studentId));
     
     // Get student to find device for active student cleanup
     const student = await this.getStudent(studentId);
     
-    // Delete student
+    // 7. Finally, delete the student record itself
     const [deletedStudent] = await db
       .delete(students)
       .where(eq(students.id, studentId))
       .returning();
     
-    // Remove from in-memory status map
+    // Delete studentStatus entries: both plain studentId and composite studentId-deviceId keys
     this.studentStatuses.delete(studentId);
+    const statusKeys = Array.from(this.studentStatuses.keys());
+    for (const key of statusKeys) {
+      if (key.startsWith(`${studentId}-`)) {
+        this.studentStatuses.delete(key);
+      }
+    }
     
     // Clear from active students if this student is active
     if (student) {

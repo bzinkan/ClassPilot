@@ -21,6 +21,7 @@ import {
   insertSessionSchema,
   loginSchema,
   createTeacherSchema,
+  type Student,
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
