@@ -1076,6 +1076,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         
         console.log('🔍 EMAIL LOOKUP: Looking for student with email:', normalizedEmail, 'in school:', schoolId);
         
+        // RECONCILIATION STEP: Check if this device has a pending_email placeholder
+        const devicesForThisDevice = await storage.getDeviceStudents(deviceData.deviceId);
+        const pendingPlaceholder = devicesForThisDevice.find(s => s.studentStatus === 'pending_email');
+        
         // Check if student with this email already exists (for this school, across ALL devices)
         student = await storage.getStudentByEmail(schoolId, normalizedEmail);
         
@@ -1094,13 +1098,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
           } else {
             console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
           }
+          
+          // Clean up pending placeholder if it exists (device promoted from pending → real student)
+          if (pendingPlaceholder && pendingPlaceholder.id !== student.id) {
+            console.log('✓ Promoting device from placeholder', pendingPlaceholder.id, '→ real student', student.id);
+            await storage.deleteStudent(pendingPlaceholder.id);
+          }
         } else {
-          // Create new student (first time seeing this email in this school)
-          console.log('✓ Creating new student with email:', normalizedEmail);
-          student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, null);
-          // Add this device to the student's device list
-          await storage.addStudentDevice(student.id, deviceData.deviceId);
-          console.log('✓ New student auto-registered with email:', normalizedEmail, 'studentId:', student.id);
+          // Check if the pending placeholder should be promoted
+          if (pendingPlaceholder) {
+            console.log('✓ Promoting pending_email placeholder to real student:', pendingPlaceholder.id);
+            student = await storage.updateStudent(pendingPlaceholder.id, {
+              studentEmail: normalizedEmail,
+              studentName: studentName,
+              studentStatus: 'active',
+            }) || pendingPlaceholder;
+          } else {
+            // Create new student (first time seeing this email in this school)
+            console.log('✓ Creating new student with email:', normalizedEmail);
+            student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, null);
+            // Add this device to the student's device list
+            await storage.addStudentDevice(student.id, deviceData.deviceId);
+          }
+          console.log('✓ Student auto-registered with email:', normalizedEmail, 'studentId:', student.id);
         }
       } 
       // Path 2: No email provided - try to find existing student by checking placeholder devices
@@ -1139,7 +1159,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             schoolId,
             studentName: studentName || `Unidentified Student (${deviceData.deviceId.substring(0, 8)})`,
             studentEmail: null, // NULL email marks this as pending
-            gradeLevel: 'PENDING_EMAIL', // Reserved marker for admin queue filtering
+            studentStatus: 'pending_email', // Explicit status for admin queue filtering
+            gradeLevel: null,
           });
           student = await storage.createStudent(placeholderData);
           // Link the device to this placeholder student

@@ -43,9 +43,10 @@ export const students = pgTable("students", {
   schoolId: text("school_id").notNull().default('default-school'), // Which school this student belongs to - REQUIRED for email-first architecture
   deviceId: text("device_id"), // DEPRECATED: Use student_devices junction table instead (nullable for migration)
   studentName: text("student_name").notNull(),
-  studentEmail: text("student_email"), // Google Workspace email - unique per school (nullable for placeholder students during migration)
+  studentEmail: text("student_email"), // Google Workspace email - unique per school (nullable for placeholder students)
   emailLc: text("email_lc").generatedAlwaysAs((): SQL => sql`lower(trim(${students.studentEmail}))`), // Normalized email for lookups
   gradeLevel: text("grade_level"),
+  studentStatus: text("student_status").notNull().default('active'), // 'active' | 'pending_email' - filters pending students from teacher dashboards
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
 }, (table) => ({
   // Unique constraint: one student per email per school (prevents duplicate students)
