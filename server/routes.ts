@@ -1023,7 +1023,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/admin/live-students", requireAdmin, async (req, res) => {
     try {
       const enrichedStatuses = await storage.getAllStudentStatusesEnriched();
-      res.json({ success: true, students: enrichedStatuses });
+      res.json(enrichedStatuses); // Return array directly (matches other endpoints)
     } catch (error) {
       console.error("Get enriched student statuses error:", error);
       res.status(500).json({ error: "Failed to fetch live student data" });
