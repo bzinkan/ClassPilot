@@ -53,6 +53,7 @@ The system is built with a full-stack architecture:
 -   **IP Allowlist**: Optional IP-based access control for the teacher dashboard.
 -   **API Design**: Clear separation of concerns with distinct endpoints for student, device, and active student management.
 -   **Cache Invalidation**: Standardized pattern using `invalidateStudentCaches()` helper in `client/src/lib/cacheUtils.ts` ensures all views (Dashboard, Roster, Admin) stay synchronized when student data changes. All student mutations (create, edit, delete, assign, bulk import, cleanup) use this shared helper to invalidate `/api/roster/students`, `/api/students`, `/api/groups`, `/api/admin/teacher-students`, and `/api/teacher/groups`.
+-   **CASCADE Delete Pattern**: The `deleteStudent()` function in `server/storage.ts` implements comprehensive CASCADE cleanup to prevent orphaned records and ghost student tiles. Both MemStorage and DatabaseStorage delete all related data including: plain and composite studentStatus keys (studentId and studentId-deviceId), activeStudents entries, heartbeats, events, messages (by toStudentId), checkIns, groupStudents/teacherStudents relationships, and StudentGroups.studentIds arrays. This ensures complete data cleanup when students are deleted, preventing stale UI references.
 
 ## External Dependencies
 -   **Database**: PostgreSQL (Neon-backed)
