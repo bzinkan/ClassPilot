@@ -1074,42 +1074,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "Invalid email address" });
         }
         
-        console.log('🔍 EMAIL LOOKUP: Looking for student with email:', normalizedEmail);
+        console.log('🔍 EMAIL LOOKUP: Looking for student with email:', normalizedEmail, 'in school:', schoolId);
         
-        // Check if student with this email already exists (across ALL devices)
-        student = await storage.getStudentByEmail(normalizedEmail);
+        // Check if student with this email already exists (for this school, across ALL devices)
+        student = await storage.getStudentByEmail(schoolId, normalizedEmail);
         
         if (student) {
-          // Student exists! Check if they switched devices
-          console.log('✅ EMAIL MATCH FOUND: Student exists with id:', student.id, 'name:', student.studentName, 'deviceId:', student.deviceId);
-          if (student.deviceId !== deviceData.deviceId) {
-            console.log('✓ Student switched devices:', normalizedEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
-            // Update student's device to the new one
-            student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+          // Student exists! Check if they are using this device
+          console.log('✅ EMAIL MATCH FOUND: Student exists with id:', student.id, 'name:', student.studentName);
+          
+          // Check if student is already registered on this device
+          const devices = await storage.getStudentDevices(student.id);
+          const isOnThisDevice = devices.some(d => d.deviceId === deviceData.deviceId);
+          
+          if (!isOnThisDevice) {
+            console.log('✓ Student using new device:', normalizedEmail, '→', deviceData.deviceId);
+            // Add this device to the student's device list
+            await storage.addStudentDevice(student.id, deviceData.deviceId);
           } else {
             console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
           }
         } else {
-          // Check all students to debug why email lookup failed
-          const allStudents = await storage.getAllStudents();
-          console.log('❌ EMAIL LOOKUP FAILED: No student found with email:', normalizedEmail);
-          console.log('📊 All students in database:', allStudents.map(s => ({
-            id: s.id.substring(0, 8),
-            name: s.studentName,
-            email: s.studentEmail,
-            normalizedEmail: normalizeEmail(s.studentEmail),
-            deviceId: s.deviceId,
-          })));
-          
-          // Create new student (first time seeing this email)
-          const studentData = insertStudentSchema.parse({
-            deviceId: deviceData.deviceId,
-            studentName,
-            studentEmail: normalizedEmail,
-            gradeLevel: null, // Teacher can assign grade later
-          });
-          
-          student = await storage.createStudent(studentData);
+          // Create new student (first time seeing this email in this school)
+          console.log('✓ Creating new student with email:', normalizedEmail);
+          student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, null);
+          // Add this device to the student's device list
+          await storage.addStudentDevice(student.id, deviceData.deviceId);
           console.log('✓ New student auto-registered with email:', normalizedEmail, 'studentId:', student.id);
         }
       } 
@@ -1120,17 +1110,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
         
         // Strategy A: Check if any student has a pending placeholder deviceId
         // These are created during CSV import with pattern: "pending-{email}"
-        const pendingStudent = allStudents.find(s => 
-          s.deviceId.startsWith('pending-') && 
-          !s.deviceId.includes(deviceData.deviceId)
-        );
+        // Use getStudentDevices to check each student's devices
+        let foundPendingStudent: Student | undefined = undefined;
         
-        if (pendingStudent) {
-          console.log('✓ Found CSV-imported student via placeholder device:', pendingStudent.deviceId, '→', deviceData.deviceId);
-          // Update the pending student to use the actual device
-          student = await storage.updateStudent(pendingStudent.id, { 
-            deviceId: deviceData.deviceId 
-          }) || pendingStudent;
+        for (const s of allStudents) {
+          const devices = await storage.getStudentDevices(s.id);
+          const hasPendingDevice = devices.some(d => 
+            d.deviceId.startsWith('pending-') && 
+            d.deviceId !== deviceData.deviceId
+          );
+          
+          if (hasPendingDevice) {
+            foundPendingStudent = s;
+            break;
+          }
+        }
+        
+        if (foundPendingStudent) {
+          console.log('✓ Found CSV-imported student, linking to real device:', deviceData.deviceId);
+          // Add the actual device to the student's device list
+          await storage.addStudentDevice(foundPendingStudent.id, deviceData.deviceId);
+          student = foundPendingStudent;
         } else {
           // Strategy B: Fail instead of creating duplicate
           // This prevents creating mystery students that teachers can't track

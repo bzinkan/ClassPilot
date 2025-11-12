@@ -109,6 +109,7 @@ export const heartbeats = pgTable("heartbeats", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(),
   studentId: text("student_id"), // Nullable - which student is currently active
+  studentEmail: text("student_email"), // Nullable - for email-first reconciliation
   activeTabTitle: text("active_tab_title").notNull(),
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),

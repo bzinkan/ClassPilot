@@ -322,19 +322,18 @@ async function autoDetectAndRegister() {
       studentName: displayName,
     });
     
-    // Auto-register if not already registered
-    const stored = await chrome.storage.local.get(['registered']);
-    if (!stored.registered) {
-      try {
-        // Get or create device ID
-        const deviceId = await getOrCreateDeviceId();
-        
-        // Register with auto-detected info
-        await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
-        console.log('Auto-registered student:', userInfo.email);
-      } catch (error) {
-        console.error('Auto-registration failed:', error);
-      }
+    // CRITICAL: Always register on EVERY startup/wake-up (email-first architecture)
+    // This ensures student-device linkage is fresh after Chrome storage resets, device switches, etc.
+    try {
+      // Get or create device ID
+      const deviceId = await getOrCreateDeviceId();
+      
+      // Register with auto-detected info (server will upsert student and update device linkage)
+      await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
+      console.log('Auto-registered student on startup:', userInfo.email);
+    } catch (error) {
+      console.error('Auto-registration failed:', error);
+      // Don't block startup - extension can still work with cached IDs
     }
   } else {
     console.warn('Could not detect logged-in user email - manual registration required');
@@ -531,12 +530,17 @@ async function sendHeartbeat() {
       cameraActive: cameraActive,
     };
     
-    // Include studentId if available
+    // CRITICAL: Include both studentId AND studentEmail for resilient email-first architecture
+    // This handles Chrome storage resets, device switches, and shared Chromebooks
     if (CONFIG.activeStudentId) {
       heartbeatData.studentId = CONFIG.activeStudentId;
-      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId, '| screenLocked:', screenLocked);
+    }
+    
+    if (CONFIG.studentEmail) {
+      heartbeatData.studentEmail = CONFIG.studentEmail;
+      console.log('Sending heartbeat with email:', CONFIG.studentEmail, 'studentId:', CONFIG.activeStudentId || 'none', '| screenLocked:', screenLocked);
     } else {
-      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined) | screenLocked:', screenLocked);
+      console.log('Sending heartbeat WITHOUT email (activeStudentId:', CONFIG.activeStudentId || 'none', ') | screenLocked:', screenLocked);
     }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
