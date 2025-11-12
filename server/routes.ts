@@ -861,6 +861,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
 
             student = await storage.createStudent({
+              schoolId, // REQUIRED: school_id is NOT NULL
               deviceId: placeholderDeviceId,
               studentName: name,
               studentEmail: email,
@@ -965,6 +966,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Create student with normalized email
       const student = await storage.createStudent({
+        schoolId, // REQUIRED: school_id is NOT NULL
         studentName,
         studentEmail: normalizedEmail,
         gradeLevel: normalizedGrade,
