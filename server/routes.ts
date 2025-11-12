@@ -317,17 +317,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 const activeStudent = await storage.getActiveStudentForDevice(targetDeviceId);
                 
                 if (activeStudent) {
-                  // Check if this student is assigned to the teacher
+                  // Check if this student is assigned to the teacher (direct assignment)
                   const teacherStudentIds = await storage.getTeacherStudents(client.userId);
+                  const hasDirectAssignment = teacherStudentIds.includes(activeStudent.id);
                   
-                  if (!teacherStudentIds.includes(activeStudent.id)) {
-                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission`);
+                  // Check if teacher has an active session with a group containing this student
+                  let hasSessionAccess = false;
+                  const activeSession = await storage.getActiveSessionByTeacher(client.userId);
+                  if (activeSession) {
+                    const sessionGroupStudents = await storage.getGroupStudents(activeSession.groupId);
+                    hasSessionAccess = sessionGroupStudents.includes(activeStudent.id);
+                  }
+                  
+                  // Allow if either direct assignment OR active session
+                  if (!hasDirectAssignment && !hasSessionAccess) {
+                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission (no direct assignment or active session)`);
                     ws.send(JSON.stringify({
                       type: 'error',
                       message: 'You do not have permission to view this student\'s screen'
                     }));
                     return; // Block the request
                   }
+                  
+                  console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (direct: ${hasDirectAssignment}, session: ${hasSessionAccess})`);
                 }
               }
             } catch (error) {
