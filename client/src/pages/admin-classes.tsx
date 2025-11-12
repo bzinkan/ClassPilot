@@ -698,7 +698,6 @@ export default function AdminClasses() {
         title: "Import Complete",
         description: `Created ${data.results.created} students, updated ${data.results.updated}, assigned ${data.results.assigned} to classes`,
       });
-      setCsvFile(null);
     },
     onError: (error: Error) => {
       toast({
