@@ -145,6 +145,37 @@ app.use((req, res, next) => {
   // Initialize default data
   await initializeApp();
   
+  // Schedule daily cleanup of stale student-device associations
+  // Runs at midnight (00:00) daily for shared Chromebook reset
+  const scheduleDailyCleanup = async () => {
+    const storage = (await import('./storage')).storage;
+    
+    // Calculate milliseconds until next midnight
+    const now = new Date();
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    const msUntilMidnight = tomorrow.getTime() - now.getTime();
+    
+    // Schedule first cleanup at midnight
+    setTimeout(async () => {
+      console.log('🧹 Running daily cleanup: Removing student-device associations older than 24 hours...');
+      const count = await storage.cleanupStaleStudentDevices(24);
+      console.log(`✅ Daily cleanup complete: Removed ${count} stale student-device associations`);
+      
+      // Schedule subsequent cleanups every 24 hours
+      setInterval(async () => {
+        console.log('🧹 Running daily cleanup: Removing student-device associations older than 24 hours...');
+        const count = await storage.cleanupStaleStudentDevices(24);
+        console.log(`✅ Daily cleanup complete: Removed ${count} stale student-device associations`);
+      }, 24 * 60 * 60 * 1000); // 24 hours
+    }, msUntilMidnight);
+    
+    console.log(`🕐 Daily cleanup scheduled for midnight (in ${Math.round(msUntilMidnight / 1000 / 60)} minutes)`);
+  };
+  
+  scheduleDailyCleanup();
+  
   const server = await registerRoutes(app);
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
