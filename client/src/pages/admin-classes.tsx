@@ -241,10 +241,12 @@ function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialo
 
   const createMutation = useMutation({
     mutationFn: async (data: CreateStudentForm) => {
+      console.log("[CreateStudent] Submitting data:", data);
       const res = await apiRequest("POST", "/api/admin/students", data);
       return res.json();
     },
     onSuccess: () => {
+      console.log("[CreateStudent] Success!");
       invalidateStudentCaches();
       toast({
         title: "Student created",
@@ -254,6 +256,7 @@ function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialo
       form.reset();
     },
     onError: (error: Error) => {
+      console.error("[CreateStudent] Error:", error);
       toast({
         title: "Error",
         description: error.message || "Failed to create student",
@@ -272,7 +275,15 @@ function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialo
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form onSubmit={form.handleSubmit((data) => createMutation.mutate(data))} className="space-y-4">
+          <form onSubmit={form.handleSubmit(
+            (data) => {
+              console.log("[CreateStudent] Form validation passed, data:", data);
+              createMutation.mutate(data);
+            },
+            (errors) => {
+              console.error("[CreateStudent] Form validation failed, errors:", errors);
+            }
+          )} className="space-y-4">
             <FormField
               control={form.control}
               name="studentName"
