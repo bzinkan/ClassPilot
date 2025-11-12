@@ -95,6 +95,7 @@ export interface IStorage {
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
   getAllStudentStatuses(): Promise<StudentStatus[]>;
+  getAllStudentStatusesEnriched(): Promise<StudentStatus[]>; // Admin view with teacher/group metadata
   updateStudentStatus(status: StudentStatus): Promise<void>;
   getActiveStudentForDevice(deviceId: string): Promise<Student | undefined>;
   setActiveStudentForDevice(deviceId: string, studentId: string | null): Promise<void>;
@@ -557,6 +558,52 @@ export class MemStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
+  }
+
+  async getAllStudentStatusesEnriched(): Promise<StudentStatus[]> {
+    const statuses = await this.getAllStudentStatuses();
+    
+    // Build student → teacher metadata map from teacherStudents junction table
+    const studentToTeacher = new Map<string, { teacherId: string; teacherName?: string }>();
+    for (const ts of this.teacherStudents) {
+      if (!studentToTeacher.has(ts.studentId)) {
+        const teacher = this.users.get(ts.teacherId);
+        studentToTeacher.set(ts.studentId, {
+          teacherId: ts.teacherId,
+          teacherName: teacher?.username,
+        });
+      }
+    }
+    
+    // Build student → group metadata map from studentGroups.studentIds arrays
+    const studentToGroup = new Map<string, { groupId: string; groupName?: string; teacherId?: string }>();
+    for (const group of Array.from(this.studentGroups.values())) {
+      if (group.studentIds) {
+        for (const studentId of group.studentIds) {
+          if (!studentToGroup.has(studentId)) {
+            studentToGroup.set(studentId, {
+              groupId: group.id,
+              groupName: group.groupName,
+              teacherId: group.teacherId ?? undefined,
+            });
+          }
+        }
+      }
+    }
+    
+    // Enrich statuses with teacher/group metadata in one pass
+    return statuses.map(status => {
+      const teacher = studentToTeacher.get(status.studentId);
+      const group = studentToGroup.get(status.studentId);
+      
+      return {
+        ...status,
+        teacherId: teacher?.teacherId,
+        teacherName: teacher?.teacherName,
+        groupId: group?.groupId,
+        groupName: group?.groupName,
+      };
+    });
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
@@ -1533,6 +1580,65 @@ export class DatabaseStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
+  }
+
+  async getAllStudentStatusesEnriched(): Promise<StudentStatus[]> {
+    const statuses = await this.getAllStudentStatuses();
+    
+    // Batch-load all relationships (3 queries total)
+    const teacherStudentRows = await db.select().from(teacherStudents);
+    const groupRows = await db.select().from(studentGroups);
+    
+    // Get unique teacher IDs and batch-load teachers
+    const uniqueTeacherIds = Array.from(new Set(teacherStudentRows.map(ts => ts.teacherId)));
+    const teachers = uniqueTeacherIds.length > 0
+      ? await db.select().from(users).where(inArray(users.id, uniqueTeacherIds))
+      : [];
+    
+    // Build teacher lookup map
+    const teacherMap = new Map(teachers.map(t => [t.id, t]));
+    
+    // Build student → teacher metadata map from teacherStudents junction table
+    const studentToTeacher = new Map<string, { teacherId: string; teacherName?: string }>();
+    for (const ts of teacherStudentRows) {
+      if (!studentToTeacher.has(ts.studentId)) {
+        const teacher = teacherMap.get(ts.teacherId);
+        studentToTeacher.set(ts.studentId, {
+          teacherId: ts.teacherId,
+          teacherName: teacher?.username,
+        });
+      }
+    }
+    
+    // Build student → group metadata map from studentGroups.studentIds arrays
+    const studentToGroup = new Map<string, { groupId: string; groupName?: string; teacherId?: string }>();
+    for (const group of groupRows) {
+      if (group.studentIds) {
+        for (const studentId of group.studentIds) {
+          if (!studentToGroup.has(studentId)) {
+            studentToGroup.set(studentId, {
+              groupId: group.id,
+              groupName: group.groupName,
+              teacherId: group.teacherId ?? undefined,
+            });
+          }
+        }
+      }
+    }
+    
+    // Enrich statuses with teacher/group metadata in one pass
+    return statuses.map(status => {
+      const teacher = studentToTeacher.get(status.studentId);
+      const group = studentToGroup.get(status.studentId);
+      
+      return {
+        ...status,
+        teacherId: teacher?.teacherId,
+        teacherName: teacher?.teacherName,
+        groupId: group?.groupId,
+        groupName: group?.groupName,
+      };
+    });
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {

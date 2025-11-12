@@ -31,8 +31,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { Settings, Session, Group } from "@shared/schema";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import type { Settings, Session, Group, StudentStatus } from "@shared/schema";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
 function normalizeGrade(grade: string | null | undefined): string | null {

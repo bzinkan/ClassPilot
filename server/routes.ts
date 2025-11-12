@@ -1002,6 +1002,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Get all student statuses with teacher/group metadata for live monitoring
+  app.get("/api/admin/live-students", requireAdmin, async (req, res) => {
+    try {
+      const enrichedStatuses = await storage.getAllStudentStatusesEnriched();
+      res.json({ success: true, students: enrichedStatuses });
+    } catch (error) {
+      console.error("Get enriched student statuses error:", error);
+      res.status(500).json({ error: "Failed to fetch live student data" });
+    }
+  });
+
   // Device registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {

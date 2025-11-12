@@ -97,6 +97,12 @@ export interface StudentStatus {
   viewMode?: 'url' | 'thumb' | 'live'; // Display mode for the student tile
   status: 'online' | 'idle' | 'offline';
   statusKey?: string; // Composite key: studentId-deviceId (for multi-device tracking)
+  
+  // Admin-only metadata for filtering and display
+  teacherId?: string; // ID of the teacher this student is assigned to
+  teacherName?: string; // Name of the assigned teacher
+  groupId?: string; // ID of the group this student belongs to
+  groupName?: string; // Name of the group
 }
 
 // Helper function to create consistent composite keys for student status tracking
