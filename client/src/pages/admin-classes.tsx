@@ -517,8 +517,8 @@ export default function AdminClasses() {
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
-    mutationFn: async (csvContent: string) => {
-      const res = await apiRequest("POST", "/api/admin/bulk-import", { csvContent });
+    mutationFn: async ({ fileContent, fileType }: { fileContent: string; fileType: 'csv' | 'excel' }) => {
+      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType });
       return res.json();
     },
     onSuccess: async (data) => {
@@ -595,19 +595,42 @@ export default function AdminClasses() {
       toast({
         variant: "destructive",
         title: "Error",
-        description: "Please select a CSV file",
+        description: "Please select a file",
       });
       return;
     }
 
     try {
-      const text = await csvFile.text();
-      bulkImportMutation.mutate(text);
+      const fileExtension = csvFile.name.split('.').pop()?.toLowerCase();
+      const isExcel = fileExtension === 'xlsx' || fileExtension === 'xls';
+      
+      let fileContent: string;
+      const fileType: 'csv' | 'excel' = isExcel ? 'excel' : 'csv';
+      
+      if (isExcel) {
+        // Read Excel file as base64
+        fileContent = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const result = reader.result as string;
+            // Remove the data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64, prefix
+            const base64 = result.split(',')[1];
+            resolve(base64);
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(csvFile);
+        });
+      } else {
+        // Read CSV file as text
+        fileContent = await csvFile.text();
+      }
+      
+      bulkImportMutation.mutate({ fileContent, fileType });
     } catch (error) {
       toast({
         variant: "destructive",
         title: "Error",
-        description: "Failed to read CSV file",
+        description: "Failed to read file",
       });
     }
   };
@@ -763,11 +786,11 @@ export default function AdminClasses() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="csv-file">CSV File</Label>
+                <Label htmlFor="csv-file">CSV or Excel File</Label>
                 <Input
                   id="csv-file"
                   type="file"
-                  accept=".csv"
+                  accept=".csv,.xlsx,.xls"
                   onChange={handleFileUpload}
                   data-testid="input-csv-file"
                 />

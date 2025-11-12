@@ -741,23 +741,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Admin: Bulk import students from CSV
+  // Admin: Bulk import students from CSV or Excel
   app.post("/api/admin/bulk-import", requireAdmin, async (req, res) => {
     try {
-      const { csvContent } = req.body;
+      const { fileContent, fileType } = req.body;
       
-      if (!csvContent || typeof csvContent !== 'string') {
-        return res.status(400).json({ error: "CSV content is required" });
+      if (!fileContent) {
+        return res.status(400).json({ error: "File content is required" });
       }
 
-      // Parse CSV content using XLSX
-      const workbook = XLSX.read(csvContent, { type: 'string' });
+      // Parse file content using XLSX (supports both CSV and Excel)
+      // For CSV: fileContent is a string, use type: 'string'
+      // For Excel: fileContent is base64, use type: 'base64'
+      const readType = fileType === 'excel' ? 'base64' : 'string';
+      const workbook = XLSX.read(fileContent, { type: readType });
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       const data = XLSX.utils.sheet_to_json(worksheet) as any[];
 
       if (data.length === 0) {
-        return res.status(400).json({ error: "CSV file is empty" });
+        return res.status(400).json({ error: "File is empty" });
       }
 
       // Get settings for schoolId and deviceId generation
