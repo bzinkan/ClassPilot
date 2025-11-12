@@ -3,6 +3,18 @@
 ## Overview
 ClassPilot is a privacy-aware classroom monitoring system for educational settings. It's a full-stack web application with a teacher dashboard and a Chrome Extension, designed for transparent monitoring of student activity on managed Chromebooks. The system prioritizes privacy through clear disclosure banners and opt-in screen sharing, offering real-time activity tracking, class roster management, and robust data retention controls. ClassPilot aims for FERPA/COPPA compliance by collecting minimal, essential data, supporting shared Chromebook environments, and providing comprehensive remote classroom control features. Its goal is to empower educators with effective digital classroom management while safeguarding student privacy and adhering to educational regulations.
 
+## Recent Changes (Nov 12, 2025)
+
+### Screen Sharing Fixes
+**Problem**: Teachers couldn't view student screens. Screen share dialog wouldn't appear, and when it did (for admins), video was black.
+
+**Fixes Implemented**:
+1. **Permission System** - Added class-based permission checking. Teachers can now view students assigned to their classes via "Assign Students to Class" feature. Permission check validates: (1) direct assignment, (2) student in teacher's group/class, or (3) active session.
+
+2. **Video Playback** - Fixed black video by adding explicit `video.play()` calls after DOM reparenting. Video element now restarts playback when moved from tile to portal and back.
+
+3. **TypeScript Safety** - Created `StudentUpdateFields` type for proper student update typing, fixed offline student device handling, and added validation guards.
+
 ## User Preferences
 I prefer detailed explanations.
 Do not make changes to the folder `Z`.

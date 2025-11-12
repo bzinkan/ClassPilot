@@ -96,15 +96,26 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       videoElementRef.current = video;
     }
     
-    // Attach stream to video element
+    // Attach stream to video element and start playback
     if (videoElementRef.current) {
       videoElementRef.current.srcObject = liveStream || null;
+      
+      // Explicitly start playback after setting stream
+      if (liveStream) {
+        videoElementRef.current.play().catch((error) => {
+          console.error('[StudentTile] Video play error:', error);
+        });
+      }
     }
     
     // Mount video into tile slot when stream exists, remove when it doesn't
     if (liveStream && tileVideoSlotRef.current && videoElementRef.current) {
       if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.appendChild(videoElementRef.current);
+        // Ensure playback starts after mounting
+        videoElementRef.current.play().catch((error) => {
+          console.error('[StudentTile] Video play error after mount:', error);
+        });
       }
     } else if (!liveStream && videoElementRef.current) {
       // Close portal if expanded
@@ -247,6 +258,10 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       const portalSlot = document.querySelector('#portal-video-slot');
       if (portalSlot && videoElementRef.current && !portalSlot.contains(videoElementRef.current)) {
         portalSlot.appendChild(videoElementRef.current);
+        // Restart playback after moving to portal (required for browser autoplay policies)
+        videoElementRef.current.play().catch((error) => {
+          console.error('[StudentTile] Video play error after portal move:', error);
+        });
       }
     });
   };
@@ -256,6 +271,10 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     const tileSlot = tileVideoSlotRef.current;
     if (tileSlot && videoElementRef.current && !tileSlot.contains(videoElementRef.current)) {
       tileSlot.appendChild(videoElementRef.current);
+      // Restart playback after moving back to tile
+      videoElementRef.current.play().catch((error) => {
+        console.error('[StudentTile] Video play error after collapse:', error);
+      });
     }
     setExpanded(false);
   };
