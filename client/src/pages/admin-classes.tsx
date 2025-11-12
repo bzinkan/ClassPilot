@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -51,15 +52,6 @@ function normalizeGrade(grade: string | null | undefined): string | null {
   const trimmed = grade.trim();
   if (!trimmed) return null;
   return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
-}
-
-// Helper to invalidate all student-related caches across the app
-function invalidateStudentCaches() {
-  queryClient.invalidateQueries({ queryKey: ["/api/roster/students"] });
-  queryClient.invalidateQueries({ queryKey: ["/api/students"] });
-  queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
-  queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
-  queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
 }
 
 const createClassSchema = z.object({
