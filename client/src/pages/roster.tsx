@@ -590,6 +590,7 @@ export default function RosterPage() {
                                 <TableHeader>
                                   <TableRow>
                                     <TableHead>Student Name</TableHead>
+                                    <TableHead>Email</TableHead>
                                     <TableHead>Grade Level</TableHead>
                                     <TableHead className="text-right">Actions</TableHead>
                                   </TableRow>
@@ -602,6 +603,9 @@ export default function RosterPage() {
                                     >
                                       <TableCell data-testid={`text-student-name-${student.id}`}>
                                         {student.studentName}
+                                      </TableCell>
+                                      <TableCell data-testid={`text-student-email-${student.id}`} className="text-muted-foreground">
+                                        {student.studentEmail || <span className="text-muted-foreground italic">Pending</span>}
                                       </TableCell>
                                       <TableCell data-testid={`text-grade-level-${student.id}`}>
                                         {student.gradeLevel || <span className="text-muted-foreground">-</span>}
@@ -699,6 +703,16 @@ export default function RosterPage() {
                     value={formData.studentName}
                     onChange={(e) => setFormData({ ...formData, studentName: e.target.value })}
                     data-testid="input-edit-student-name"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-student-email">Student Email</Label>
+                  <Input
+                    id="edit-student-email"
+                    value={dialog.student.studentEmail || 'Pending'}
+                    disabled
+                    className="text-muted-foreground"
+                    data-testid="input-edit-student-email"
                   />
                 </div>
                 <div className="space-y-2">
