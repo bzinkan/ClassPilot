@@ -1447,21 +1447,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all persisted students from database (for roster management)
   // Returns students with device information from student_devices junction table
   // Students with multiple devices will appear multiple times (once per device)
+  // ONLY shows devices used in the last 24 hours (daily reset for shared Chromebooks)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const students = await storage.getAllStudents();
+      const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
       
       // Expand students to include their devices from junction table
       const studentsWithDevices = [];
       for (const student of students) {
         const devices = await storage.getStudentDevices(student.id);
         
-        if (devices.length === 0) {
-          // Student has no devices - include them with NULL deviceId
+        // Filter to only include devices seen in the last 24 hours
+        const recentDevices = devices.filter(d => d.lastSeenAt >= cutoffTime);
+        
+        if (recentDevices.length === 0) {
+          // Student has no recent devices - include them with NULL deviceId
           studentsWithDevices.push(student);
         } else {
-          // Student has one or more devices - create one entry per device
-          for (const device of devices) {
+          // Student has one or more recent devices - create one entry per device
+          for (const device of recentDevices) {
             studentsWithDevices.push({
               ...student,
               deviceId: device.deviceId, // Populate from junction table

@@ -528,7 +528,8 @@ export class MemStorage implements IStorage {
     const cutoffTime = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
     const toDelete: string[] = [];
     
-    for (const [key, sd] of this.studentDevices.entries()) {
+    // Convert iterator to array for iteration
+    for (const [key, sd] of Array.from(this.studentDevices.entries())) {
       if (sd.lastSeenAt < cutoffTime) {
         toDelete.push(key);
       }
