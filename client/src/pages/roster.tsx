@@ -8,6 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
+import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import { ArrowLeft, Edit, Monitor, Trash2, UserPlus, GraduationCap, Plus, X, Info } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -116,8 +117,7 @@ export default function RosterPage() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      invalidateStudentCaches();
       toast({
         title: "Student assigned",
         description: "Student has been assigned to the device successfully",
@@ -143,8 +143,7 @@ export default function RosterPage() {
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      invalidateStudentCaches();
       toast({
         title: "Student updated",
         description: "Student information has been updated successfully",
@@ -194,8 +193,7 @@ export default function RosterPage() {
       return apiRequest('DELETE', `/api/students/${studentId}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      invalidateStudentCaches();
       toast({
         title: "Student removed",
         description: "Student assignment has been removed successfully",
@@ -218,8 +216,7 @@ export default function RosterPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/roster/devices'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+      invalidateStudentCaches();
       toast({
         title: "Device deleted",
         description: "Device and all assigned students have been removed successfully",

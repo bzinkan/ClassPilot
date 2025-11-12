@@ -130,8 +130,7 @@ function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogPro
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      invalidateStudentCaches();
       toast({
         title: "Student updated",
         description: "Student information has been updated successfully.",
@@ -396,7 +395,7 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/groups", group.id, "students"] });
+      invalidateStudentCaches();
       toast({
         title: "Student removed",
         description: "Student has been removed from the class.",
@@ -639,9 +638,7 @@ export default function AdminClasses() {
       return results;
     },
     onSuccess: async () => {
-      // Invalidate both /api/groups and /api/teacher/groups to ensure UI updates
-      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
-      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      invalidateStudentCaches();
       toast({
         title: "Students Assigned",
         description: `${selectedStudents.size} students added to class`,

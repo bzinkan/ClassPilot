@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -147,7 +148,7 @@ export default function Admin() {
       return await apiRequest("POST", "/api/admin/cleanup-students");
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+      invalidateStudentCaches();
       toast({
         title: "Student data cleared",
         description: "All student devices and activity data have been cleared successfully.",
