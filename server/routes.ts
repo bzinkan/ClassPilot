@@ -908,7 +908,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Check for duplicate email (case-insensitive)
       const allStudents = await storage.getAllStudents();
       const existingStudent = allStudents.find(
-        s => s.studentEmail.toLowerCase() === studentEmail.toLowerCase()
+        s => s.studentEmail?.toLowerCase() === studentEmail.toLowerCase()
       );
 
       if (existingStudent) {
@@ -933,7 +933,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         studentEmail,
         gradeLevel: normalizedGrade,
         deviceId,
-        schoolId,
       });
 
       // Assign to class if classId provided
