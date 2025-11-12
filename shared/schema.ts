@@ -40,7 +40,7 @@ export type Device = typeof devices.$inferSelect;
 // Students - identified by email across devices (email-first architecture)
 export const students = pgTable("students", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  schoolId: text("school_id"), // Which school this student belongs to (nullable during migration, will be NOT NULL after backfill)
+  schoolId: text("school_id").notNull().default('default-school'), // Which school this student belongs to - REQUIRED for email-first architecture
   deviceId: text("device_id"), // DEPRECATED: Use student_devices junction table instead (nullable for migration)
   studentName: text("student_name").notNull(),
   studentEmail: text("student_email"), // Google Workspace email - unique per school (nullable for placeholder students during migration)
@@ -59,8 +59,8 @@ export type Student = typeof students.$inferSelect;
 // Student Devices - Many-to-many junction table (one student can use multiple devices)
 export const studentDevices = pgTable("student_devices", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  studentId: text("student_id").notNull(), // FK to students table
-  deviceId: text("device_id").notNull(), // Device identifier (chrome.runtime.id or similar)
+  studentId: text("student_id").notNull().references(() => students.id, { onDelete: 'cascade' }), // FK to students table with CASCADE delete
+  deviceId: text("device_id").notNull().references(() => devices.deviceId, { onDelete: 'cascade' }), // FK to devices table with CASCADE delete
   firstSeenAt: timestamp("first_seen_at").notNull().default(sql`now()`),
   lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
 }, (table) => ({

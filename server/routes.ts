@@ -1132,16 +1132,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           await storage.addStudentDevice(foundPendingStudent.id, deviceData.deviceId);
           student = foundPendingStudent;
         } else {
-          // Strategy B: Fail instead of creating duplicate
-          // This prevents creating mystery students that teachers can't track
-          return res.status(400).json({ 
-            error: "Chrome Extension could not retrieve student email. Please ensure the extension has 'identity.email' permission, or manually assign this device to a student from the teacher dashboard.",
-            details: {
-              deviceId: deviceData.deviceId,
-              missingEmail: true,
-              suggestion: "Check Chrome Extension permissions or pre-import students via CSV"
-            }
+          // Strategy B: Create placeholder student for email-less devices
+          // This allows unmanaged Chromebooks to work while awaiting email/roster assignment
+          console.log('✓ Creating pending_email placeholder student for device:', deviceData.deviceId);
+          const placeholderData = insertStudentSchema.parse({
+            schoolId,
+            studentName: studentName || `Unidentified Student (${deviceData.deviceId.substring(0, 8)})`,
+            studentEmail: null, // NULL email marks this as pending
+            gradeLevel: 'PENDING_EMAIL', // Reserved marker for admin queue filtering
           });
+          student = await storage.createStudent(placeholderData);
+          // Link the device to this placeholder student
+          await storage.addStudentDevice(student.id, deviceData.deviceId);
+          console.log('✓ Pending student created:', student.id, '- admin can assign email later');
         }
       }
       
