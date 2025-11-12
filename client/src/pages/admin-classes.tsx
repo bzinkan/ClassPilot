@@ -53,6 +53,15 @@ function normalizeGrade(grade: string | null | undefined): string | null {
   return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
 }
 
+// Helper to invalidate all student-related caches across the app
+function invalidateStudentCaches() {
+  queryClient.invalidateQueries({ queryKey: ["/api/roster/students"] });
+  queryClient.invalidateQueries({ queryKey: ["/api/students"] });
+  queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+  queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
+  queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+}
+
 const createClassSchema = z.object({
   name: z.string().min(1, "Class name is required"),
   teacherId: z.string().min(1, "Teacher is required"),
@@ -245,9 +254,7 @@ function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialo
       return res.json();
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"] });
+      invalidateStudentCaches();
       toast({
         title: "Student created",
         description: "Student has been created successfully.",
@@ -688,9 +695,7 @@ export default function AdminClasses() {
       return res.json();
     },
     onSuccess: async (data) => {
-      await queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
-      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
-      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      invalidateStudentCaches();
       setImportResults(data.results);
       setCsvFile(null);
       setBulkImportGrade("");
