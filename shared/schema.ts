@@ -1,5 +1,5 @@
-import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index } from "drizzle-orm/pg-core";
+import { sql, SQL } from "drizzle-orm";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index, uniqueIndex, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -37,19 +37,42 @@ export const insertDeviceSchema = createInsertSchema(devices).omit({ registeredA
 export type InsertDevice = z.infer<typeof insertDeviceSchema>;
 export type Device = typeof devices.$inferSelect;
 
-// Students assigned to devices (multiple students can share one device)
+// Students - identified by email across devices (email-first architecture)
 export const students = pgTable("students", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  deviceId: text("device_id").notNull(), // FK to devices table
+  schoolId: text("school_id"), // Which school this student belongs to (nullable during migration, will be NOT NULL after backfill)
+  deviceId: text("device_id"), // DEPRECATED: Use student_devices junction table instead (nullable for migration)
   studentName: text("student_name").notNull(),
-  studentEmail: text("student_email"), // Google Workspace email for auto-detection
+  studentEmail: text("student_email"), // Google Workspace email - unique per school (nullable for placeholder students during migration)
+  emailLc: text("email_lc").generatedAlwaysAs((): SQL => sql`lower(trim(${students.studentEmail}))`), // Normalized email for lookups
   gradeLevel: text("grade_level"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
-});
+}, (table) => ({
+  // Unique constraint: one student per email per school (prevents duplicate students)
+  schoolEmailUnique: uniqueIndex("students_school_email_unique").on(table.schoolId, table.emailLc),
+}));
 
-export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
+export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true, emailLc: true, deviceId: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
+
+// Student Devices - Many-to-many junction table (one student can use multiple devices)
+export const studentDevices = pgTable("student_devices", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  studentId: text("student_id").notNull(), // FK to students table
+  deviceId: text("device_id").notNull(), // Device identifier (chrome.runtime.id or similar)
+  firstSeenAt: timestamp("first_seen_at").notNull().default(sql`now()`),
+  lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
+}, (table) => ({
+  // Unique constraint: one row per student-device pair
+  studentDeviceUnique: uniqueIndex("student_devices_unique").on(table.studentId, table.deviceId),
+  // Index for efficient lookups by device
+  deviceIdIdx: index("student_devices_device_id_idx").on(table.deviceId),
+}));
+
+export const insertStudentDeviceSchema = createInsertSchema(studentDevices).omit({ id: true, firstSeenAt: true, lastSeenAt: true });
+export type InsertStudentDevice = z.infer<typeof insertStudentDeviceSchema>;
+export type StudentDevice = typeof studentDevices.$inferSelect;
 
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
