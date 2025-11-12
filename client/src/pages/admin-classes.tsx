@@ -74,11 +74,14 @@ type EditStudentForm = z.infer<typeof editStudentSchema>;
 const createStudentSchema = z.object({
   studentName: z.string().min(1, "Name is required"),
   studentEmail: z.string().email("Invalid email format"),
-  gradeLevel: z.string().optional(),
+  gradeLevel: z.string().min(1, "Grade level is required"),
   classId: z.string().optional(),
 });
 
 type CreateStudentForm = z.infer<typeof createStudentSchema>;
+
+// Predefined grade options
+const GRADE_OPTIONS = ['K', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
 
 interface Teacher {
   id: string;
@@ -303,10 +306,21 @@ function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialo
               name="gradeLevel"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Grade Level (Optional)</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder="e.g., 9" data-testid="input-create-student-grade" />
-                  </FormControl>
+                  <FormLabel>Grade Level</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger data-testid="select-create-student-grade">
+                        <SelectValue placeholder="Select grade" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {GRADE_OPTIONS.map((grade) => (
+                        <SelectItem key={grade} value={grade}>
+                          {grade === 'K' ? 'Kindergarten' : `Grade ${grade}`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                   <FormMessage />
                 </FormItem>
               )}
@@ -527,6 +541,7 @@ export default function AdminClasses() {
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [importResults, setImportResults] = useState<any>(null);
   const [createStudentOpen, setCreateStudentOpen] = useState(false);
+  const [bulkImportGrade, setBulkImportGrade] = useState<string>("");
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -668,8 +683,8 @@ export default function AdminClasses() {
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
-    mutationFn: async ({ fileContent, fileType }: { fileContent: string; fileType: 'csv' | 'excel' }) => {
-      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType });
+    mutationFn: async ({ fileContent, fileType, gradeLevel }: { fileContent: string; fileType: 'csv' | 'excel'; gradeLevel: string }) => {
+      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType, gradeLevel });
       return res.json();
     },
     onSuccess: async (data) => {
@@ -677,6 +692,8 @@ export default function AdminClasses() {
       await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
       await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
       setImportResults(data.results);
+      setCsvFile(null);
+      setBulkImportGrade("");
       toast({
         title: "Import Complete",
         description: `Created ${data.results.created} students, updated ${data.results.updated}, assigned ${data.results.assigned} to classes`,
@@ -751,6 +768,15 @@ export default function AdminClasses() {
       return;
     }
 
+    if (!bulkImportGrade) {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: "Please select a grade level",
+      });
+      return;
+    }
+
     try {
       const fileExtension = csvFile.name.split('.').pop()?.toLowerCase();
       const isExcel = fileExtension === 'xlsx' || fileExtension === 'xls';
@@ -776,7 +802,7 @@ export default function AdminClasses() {
         fileContent = await csvFile.text();
       }
       
-      bulkImportMutation.mutate({ fileContent, fileType });
+      bulkImportMutation.mutate({ fileContent, fileType, gradeLevel: bulkImportGrade });
     } catch (error) {
       toast({
         variant: "destructive",
@@ -959,6 +985,25 @@ export default function AdminClasses() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="space-y-2">
+                <Label htmlFor="bulk-import-grade">Grade Level</Label>
+                <Select value={bulkImportGrade} onValueChange={setBulkImportGrade}>
+                  <SelectTrigger id="bulk-import-grade" data-testid="select-bulk-import-grade">
+                    <SelectValue placeholder="Select grade for import" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {GRADE_OPTIONS.map((grade) => (
+                      <SelectItem key={grade} value={grade}>
+                        {grade === 'K' ? 'Kindergarten' : `Grade ${grade}`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  All students in the file will be assigned this grade
+                </p>
+              </div>
+
+              <div className="space-y-2">
                 <Label htmlFor="csv-file">CSV or Excel File</Label>
                 <Input
                   id="csv-file"
@@ -977,7 +1022,7 @@ export default function AdminClasses() {
               <div className="flex gap-2">
                 <Button
                   onClick={handleBulkImport}
-                  disabled={!csvFile || bulkImportMutation.isPending}
+                  disabled={!csvFile || !bulkImportGrade || bulkImportMutation.isPending}
                   data-testid="button-bulk-import"
                   className="flex-1"
                 >

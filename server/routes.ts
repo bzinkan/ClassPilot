@@ -744,10 +744,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin: Bulk import students from CSV or Excel
   app.post("/api/admin/bulk-import", requireAdmin, async (req, res) => {
     try {
-      const { fileContent, fileType } = req.body;
+      const { fileContent, fileType, gradeLevel } = req.body;
       
       if (!fileContent) {
         return res.status(400).json({ error: "File content is required" });
+      }
+
+      // Validate grade level if provided
+      if (gradeLevel) {
+        const trimmed = gradeLevel.trim();
+        if (!trimmed) {
+          return res.status(400).json({ error: "Grade level cannot be empty" });
+        }
+        // Allow K, 1-12, or other common formats
+        const gradePattern = /^(K|[1-9]|1[0-2])$/i;
+        if (!gradePattern.test(trimmed) && !/^\d+$/.test(trimmed)) {
+          return res.status(400).json({ 
+            error: "Grade level must be K or a number (1-12)" 
+          });
+        }
       }
 
       // Parse file content using XLSX (supports both CSV and Excel)
@@ -786,7 +801,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Extract and validate fields (case-insensitive column names)
           const email = (row.Email || row.email || row.EMAIL || '').trim();
           const name = (row.Name || row.name || row.NAME || row.StudentName || row.studentName || '').trim();
-          const grade = (row.Grade || row.grade || row.GRADE || row.GradeLevel || row.gradeLevel || '').toString().trim();
           const className = (row.Class || row.class || row.CLASS || row.ClassName || row.className || '').trim();
 
           // Validate required fields
@@ -807,8 +821,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             continue;
           }
 
-          // Normalize grade level
-          const normalizedGrade = normalizeGradeLevel(grade) || null;
+          // Use the grade level from the request (applies to all students in the import)
+          const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
 
           // Check if student already exists by email
           const allStudents = await storage.getAllStudents();
@@ -897,6 +911,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Validate required fields
       if (!studentName || !studentEmail) {
         return res.status(400).json({ error: "Name and email are required" });
+      }
+
+      // Validate grade level if provided
+      if (gradeLevel) {
+        const trimmed = gradeLevel.trim();
+        if (!trimmed) {
+          return res.status(400).json({ error: "Grade level cannot be empty" });
+        }
+        // Allow K, 1-12, or other common formats
+        const gradePattern = /^(K|[1-9]|1[0-2])$/i;
+        if (!gradePattern.test(trimmed) && !/^\d+$/.test(trimmed)) {
+          return res.status(400).json({ 
+            error: "Grade level must be K or a number (1-12)" 
+          });
+        }
       }
 
       // Validate email format
