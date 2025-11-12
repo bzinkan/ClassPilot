@@ -1,11 +1,14 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
-// Production server URL - can be overridden in extension settings
-const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
+// Server URL Configuration
+// Priority: 1. chrome.storage (user setting) 2. window.location (auto-detect) 3. DEFAULT_SERVER_URL
+// For development: Extension auto-detects server from current page URL
+// For production: Set DEFAULT_SERVER_URL to your published domain
+const DEFAULT_SERVER_URL = 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
 
 let CONFIG = {
-  serverUrl: DEFAULT_SERVER_URL,
+  serverUrl: DEFAULT_SERVER_URL, // Will be overridden by detectServerUrl() during init
   heartbeatInterval: 10000, // 10 seconds
   schoolId: 'default-school',
   deviceId: null,
