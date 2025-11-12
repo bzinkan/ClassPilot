@@ -31,6 +31,7 @@ import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
+import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import type { StudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
 import { isWithinTrackingHours } from "@shared/utils";
 
@@ -190,10 +191,12 @@ export default function Dashboard() {
           try {
             const message = JSON.parse(event.data);
             console.log("[Dashboard] WebSocket message received:", message);
-            if (message.type === 'student-update') {
-              console.log("[Dashboard] Student update detected, invalidating queries...");
-              // Invalidate queries to force refetch (needed because staleTime: Infinity)
-              queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+            
+            // Handle student registration broadcasts
+            if (message.type === 'student-registered') {
+              console.log("[Dashboard] Student registered, invalidating caches...", message.data);
+              // Use comprehensive cache invalidation for all student-related queries
+              invalidateStudentCaches();
             }
             
             // Handle WebRTC signaling messages

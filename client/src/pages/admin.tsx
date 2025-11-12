@@ -109,28 +109,31 @@ export default function Admin() {
   });
 
   // Live Monitoring query - only poll when monitoring tab is active
-  const { data: liveStudents = [], isLoading: isLoadingStudents, error: studentsError } = useQuery<StudentStatus[]>({
+  const { data: liveStudents, isLoading: isLoadingStudents, error: studentsError } = useQuery<StudentStatus[]>({
     queryKey: ["/api/admin/live-students"],
     refetchInterval: activeTab === "monitoring" ? 5000 : false,
     staleTime: 4000,
     refetchOnWindowFocus: true,
     enabled: activeTab === "monitoring", // Only fetch when on monitoring tab
   });
+  
+  // Ensure liveStudents is always an array (even when disabled/loading)
+  const safeStudents = Array.isArray(liveStudents) ? liveStudents : [];
 
   // Extract unique teachers and grades from live student data
   const uniqueTeachers = useMemo(() => {
     const teacherMap = new Map<string, string>();
-    liveStudents.forEach(student => {
+    safeStudents.forEach(student => {
       if (student.teacherId && student.teacherName) {
         teacherMap.set(student.teacherId, student.teacherName);
       }
     });
     return Array.from(teacherMap.entries()).map(([id, name]) => ({ id, name }));
-  }, [liveStudents]);
+  }, [safeStudents]);
 
   const uniqueGrades = useMemo(() => {
     const grades = new Set<string>();
-    liveStudents.forEach(student => {
+    safeStudents.forEach(student => {
       const normalized = normalizeGrade(student.gradeLevel);
       if (normalized) grades.add(normalized);
     });
@@ -140,11 +143,11 @@ export default function Admin() {
       if (!isNaN(aNum) && !isNaN(bNum)) return aNum - bNum;
       return a.localeCompare(b);
     });
-  }, [liveStudents]);
+  }, [safeStudents]);
 
   // Filter students based on selected filters
   const filteredStudents = useMemo(() => {
-    return liveStudents.filter(student => {
+    return safeStudents.filter(student => {
       // Teacher filter
       if (selectedTeacherId !== "all" && student.teacherId !== selectedTeacherId) {
         return false;
