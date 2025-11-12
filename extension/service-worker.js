@@ -148,20 +148,112 @@ async function ensureRegistered() {
   }
 }
 
-// Run auto-registration on install and startup
-chrome.runtime.onInstalled.addListener(() => {
+// Single shared initialization promise to prevent races
+let initPromise = null;
+
+// Initialize extension once - all entry points use this
+// This is the ONLY function that loads and mutates CONFIG
+async function initializeExtensionOnce() {
+  if (initPromise) {
+    console.log('[Service Worker] Initialization already in progress, waiting...');
+    return initPromise;
+  }
+  
+  initPromise = (async () => {
+    console.log('[Service Worker] Initializing extension...');
+    
+    try {
+      // Step 1: Load config from storage
+      const stored = await chrome.storage.local.get(['config', 'deviceId', 'activeStudentId', 'studentEmail']);
+      
+      if (stored.config) {
+        CONFIG = { ...CONFIG, ...stored.config };
+      }
+      if (stored.deviceId) {
+        CONFIG.deviceId = stored.deviceId;
+      }
+      if (stored.activeStudentId) {
+        CONFIG.activeStudentId = stored.activeStudentId;
+      }
+      if (stored.studentEmail) {
+        CONFIG.studentEmail = stored.studentEmail;
+      }
+      
+      // Ensure serverUrl is set
+      if (!CONFIG.serverUrl) {
+        CONFIG.serverUrl = DEFAULT_SERVER_URL;
+      }
+      
+      console.log('[Service Worker] Config loaded from storage:', { 
+        deviceId: CONFIG.deviceId,
+        activeStudentId: CONFIG.activeStudentId,
+        hasEmail: !!CONFIG.studentEmail
+      });
+      
+      // Step 2: Auto-detect logged-in user (if not already done)
+      if (!CONFIG.studentEmail && chrome.identity?.getProfileUserInfo) {
+        try {
+          const userInfo = await new Promise((resolve, reject) => {
+            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (info) => {
+              if (chrome.runtime.lastError) {
+                reject(chrome.runtime.lastError);
+              } else {
+                resolve(info);
+              }
+            });
+          });
+          
+          if (userInfo?.email) {
+            console.log('[Service Worker] Auto-detected user email:', userInfo.email);
+            CONFIG.studentEmail = userInfo.email;
+            await chrome.storage.local.set({ studentEmail: userInfo.email });
+          }
+        } catch (error) {
+          console.log('[Service Worker] Could not auto-detect email:', error);
+        }
+      }
+      
+      // Step 3: Ensure registration (this may update CONFIG with server's canonical student ID)
+      await ensureRegistered();
+      
+      // Step 4: Start heartbeat if we have a device ID
+      if (CONFIG.deviceId) {
+        startHeartbeat();
+        connectWebSocket();
+      } else {
+        console.warn('[Service Worker] No deviceId - heartbeat not started');
+      }
+      
+      // Step 5: Create alarms
+      chrome.alarms.create('health-check', {
+        periodInMinutes: 1,
+      });
+      chrome.alarms.create('keep-alive', {
+        periodInMinutes: 0.416666667,
+      });
+      
+      console.log('[Service Worker] Extension initialized successfully');
+    } catch (error) {
+      console.error('[Service Worker] Initialization failed:', error);
+      initPromise = null; // Clear promise on error so next call retries
+      throw error;
+    }
+  })();
+  
+  return initPromise;
+}
+
+// Run on install/update
+chrome.runtime.onInstalled.addListener(async () => {
   console.log('[Service Worker] Extension installed/updated');
-  ensureRegistered();
-  // Run health check immediately to ensure everything starts
-  setTimeout(() => healthCheck(), 2000);
+  await initializeExtensionOnce();
 });
 
+// Run on browser startup
 if (chrome.runtime.onStartup) {
-  chrome.runtime.onStartup.addListener(() => {
+  chrome.runtime.onStartup.addListener(async () => {
     console.log('[Service Worker] Browser started');
-    ensureRegistered();
-    // Run health check immediately to ensure everything starts
-    setTimeout(() => healthCheck(), 2000);
+    await initializeExtensionOnce();
   });
 }
 
@@ -424,54 +516,13 @@ async function autoDetectAndRegister() {
   }
 }
 
-// Load config from storage on startup
-chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (result) => {
-  if (result.config) {
-    CONFIG = { ...CONFIG, ...result.config };
-    console.log('Loaded config:', CONFIG);
-  }
-  
-  // Ensure serverUrl is set (use stored config, or fall back to default production URL)
-  if (!CONFIG.serverUrl) {
-    CONFIG.serverUrl = DEFAULT_SERVER_URL;
-  }
-  console.log('Using server URL:', CONFIG.serverUrl);
-  
-  // Load active student ID
-  if (result.activeStudentId) {
-    CONFIG.activeStudentId = result.activeStudentId;
-    console.log('Loaded active student ID:', CONFIG.activeStudentId);
-  }
-  
-  // Load student email
-  if (result.studentEmail) {
-    CONFIG.studentEmail = result.studentEmail;
-  }
-  
-  // Auto-detect logged-in user and register
-  await autoDetectAndRegister();
-  
-  // Start heartbeat if configured
-  if (CONFIG.deviceId) {
-    startHeartbeat();
-    connectWebSocket();
-  }
-  
-  // Start health check alarm (runs every 60 seconds to ensure extension stays alive)
-  // This recovers from service worker restarts without manual reload
-  chrome.alarms.create('health-check', {
-    periodInMinutes: 1, // 60 seconds (Chrome minimum)
-  });
-  console.log('[Init] Health check alarm started');
-  
-  // Keep-alive alarm to prevent service worker termination
-  // Chrome terminates service workers after 30 seconds of inactivity
-  // This alarm pings every 25 seconds to keep it alive
-  chrome.alarms.create('keep-alive', {
-    periodInMinutes: 0.416666667, // 25 seconds (just under 30 second timeout)
-  });
-  console.log('[Init] Keep-alive alarm started');
-});
+// Top-level initialization when service worker first loads
+// All config loading and registration happens in initializeExtensionOnce()
+(async () => {
+  console.log('[Service Worker] Top-level initialization starting...');
+  await initializeExtensionOnce();
+  console.log('[Service Worker] Top-level initialization complete');
+})();
 
 // Generate unique device ID if not exists
 async function getOrCreateDeviceId() {
@@ -710,26 +761,8 @@ async function healthCheck() {
   console.log('[Health Check] Running...');
   
   try {
-    // Check if we have a deviceId - if not, try to initialize
-    if (!CONFIG.deviceId) {
-      console.log('[Health Check] No deviceId found, loading from storage...');
-      const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail']);
-      
-      if (stored.config) {
-        CONFIG = { ...CONFIG, ...stored.config };
-      }
-      if (stored.deviceId) {
-        CONFIG.deviceId = stored.deviceId;
-      }
-      if (stored.activeStudentId) {
-        CONFIG.activeStudentId = stored.activeStudentId;
-      }
-      if (stored.studentEmail) {
-        CONFIG.studentEmail = stored.studentEmail;
-      }
-      
-      console.log('[Health Check] Loaded config:', CONFIG);
-    }
+    // Always ensure initialization first - this loads CONFIG if needed
+    await initializeExtensionOnce();
     
     // Only proceed if we have a deviceId
     if (!CONFIG.deviceId) {
@@ -757,7 +790,12 @@ async function healthCheck() {
 }
 
 // Alarm listener for heartbeat and WebSocket reconnection
-chrome.alarms.onAlarm.addListener((alarm) => {
+// CRITICAL: Always await initialization before processing alarms to prevent race conditions
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  // Ensure extension is initialized before processing any alarms
+  // This prevents heartbeat failures when alarms fire before CONFIG is loaded
+  await initializeExtensionOnce();
+  
   if (alarm.name === 'heartbeat') {
     sendHeartbeat();
     // Reschedule next heartbeat (manual periodic behavior)
