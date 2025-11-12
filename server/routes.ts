@@ -306,6 +306,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const targetDeviceId = message.deviceId;
           if (!targetDeviceId) return;
 
+          console.log(`[WebSocket] Teacher ${client.userId} requesting stream from device ${targetDeviceId}`);
+
           // Permission check: Verify teacher has access to this student
           if (client.userId) {
             try {
@@ -317,36 +319,63 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 // Get the active student for this device
                 const activeStudent = await storage.getActiveStudentForDevice(targetDeviceId);
                 
-                if (activeStudent) {
-                  // Check if this student is assigned to the teacher (direct assignment)
-                  const teacherStudentIds = await storage.getTeacherStudents(client.userId);
-                  const hasDirectAssignment = teacherStudentIds.includes(activeStudent.id);
+                if (!activeStudent) {
+                  console.warn(`[WebSocket] No active student found for device ${targetDeviceId}`);
+                  ws.send(JSON.stringify({
+                    type: 'error',
+                    message: 'No student found on this device'
+                  }));
+                  return;
+                }
+                
+                console.log(`[WebSocket] Checking permissions for teacher ${client.userId} to view student ${activeStudent.id} (${activeStudent.studentName})`);
+                
+                // Check 1: Direct teacher-student assignment
+                const teacherStudentIds = await storage.getTeacherStudents(client.userId);
+                const hasDirectAssignment = teacherStudentIds.includes(activeStudent.id);
+                
+                if (hasDirectAssignment) {
+                  console.log(`[WebSocket] ✓ Permission granted: direct assignment`);
+                } else {
+                  // Check 2: Student in any group owned by this teacher
+                  const teacherGroups = await storage.getGroupsByTeacher(client.userId);
+                  let hasGroupAccess = false;
                   
-                  // Short-circuit if direct assignment already grants access
-                  if (hasDirectAssignment) {
-                    console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (direct assignment)`);
-                  } else {
-                    // Check if teacher has an active session with a group containing this student
-                    let hasSessionAccess = false;
+                  for (const group of teacherGroups) {
+                    const groupStudentIds = await storage.getGroupStudents(group.id);
+                    if (groupStudentIds.includes(activeStudent.id)) {
+                      hasGroupAccess = true;
+                      console.log(`[WebSocket] ✓ Permission granted: student in teacher's group "${group.name}"`);
+                      break;
+                    }
+                  }
+                  
+                  if (!hasGroupAccess) {
+                    // Check 3: Active session with a group containing this student
                     const activeSession = await storage.getActiveSessionByTeacher(client.userId);
+                    let hasSessionAccess = false;
+                    
                     if (activeSession) {
                       const sessionGroupStudents = await storage.getGroupStudents(activeSession.groupId);
                       hasSessionAccess = sessionGroupStudents.includes(activeStudent.id);
+                      if (hasSessionAccess) {
+                        console.log(`[WebSocket] ✓ Permission granted: active session`);
+                      }
                     }
                     
-                    // Block if neither direct assignment nor active session
+                    // Block if no permission found
                     if (!hasSessionAccess) {
-                      console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission (no direct assignment or active session)`);
+                      console.warn(`[WebSocket] ✗ Permission denied: teacher ${client.userId} attempted to view student ${activeStudent.id} without permission`);
                       ws.send(JSON.stringify({
                         type: 'error',
-                        message: 'You do not have permission to view this student\'s screen'
+                        message: 'You do not have permission to view this student\'s screen. Please assign them to one of your classes first.'
                       }));
                       return; // Block the request
                     }
-                    
-                    console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (active session)`);
                   }
                 }
+              } else {
+                console.log(`[WebSocket] Admin ${client.userId} requesting stream - bypassing permission check`);
               }
             } catch (error) {
               console.error('[WebSocket] Permission check error:', error);
@@ -355,12 +384,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           // Permission granted or admin - forward the request
+          console.log(`[WebSocket] Forwarding request-stream to device ${targetDeviceId}`);
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
                 type: 'request-stream',
                 from: 'teacher'
               }));
+              console.log(`[WebSocket] ✓ Sent request-stream to device ${targetDeviceId}`);
               break;
             }
           }
