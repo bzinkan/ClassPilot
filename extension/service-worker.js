@@ -730,8 +730,13 @@ async function handleRemoteControl(command) {
     switch (command.type) {
       case 'open-tab':
         if (command.data.url) {
-          await chrome.tabs.create({ url: command.data.url, active: true });
-          console.log('Opened tab:', command.data.url);
+          let url = command.data.url.trim();
+          // Add https:// if the URL doesn't have a protocol
+          if (!url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)) {
+            url = 'https://' + url;
+          }
+          await chrome.tabs.create({ url: url, active: true });
+          console.log('Opened tab:', url);
         }
         break;
         
