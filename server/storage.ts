@@ -5,6 +5,8 @@ import {
   type InsertDevice,
   type Student,
   type InsertStudent,
+  type StudentDevice,
+  type InsertStudentDevice,
   type StudentStatus,
   type Heartbeat,
   type InsertHeartbeat,
@@ -38,6 +40,7 @@ import {
   users,
   devices,
   students,
+  studentDevices,
   heartbeats,
   events,
   rosters,
@@ -73,14 +76,20 @@ export interface IStorage {
   updateDevice(deviceId: string, updates: Partial<Omit<InsertDevice, 'deviceId'>>): Promise<Device | undefined>;
   deleteDevice(deviceId: string): Promise<boolean>;
 
-  // Students (assigned to devices)
+  // Students (email-first architecture)
   getStudent(studentId: string): Promise<Student | undefined>;
-  getStudentByEmail(email: string): Promise<Student | undefined>;
+  getStudentByEmail(schoolId: string, email: string): Promise<Student | undefined>;
+  upsertStudent(schoolId: string, email: string, name: string, gradeLevel?: string): Promise<Student>;
   getStudentsByDevice(deviceId: string): Promise<Student[]>;
   getAllStudents(): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
+
+  // Student Devices (many-to-many tracking)
+  addStudentDevice(studentId: string, deviceId: string): Promise<StudentDevice>;
+  getStudentDevices(studentId: string): Promise<StudentDevice[]>;
+  getDeviceStudents(deviceId: string): Promise<Student[]>;
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
@@ -309,10 +318,33 @@ export class MemStorage implements IStorage {
     return this.students.get(studentId);
   }
 
-  async getStudentByEmail(email: string): Promise<Student | undefined> {
+  async getStudentByEmail(schoolId: string, email: string): Promise<Student | undefined> {
     const normalizedEmail = normalizeEmail(email);
     return Array.from(this.students.values())
-      .find(s => normalizeEmail(s.studentEmail) === normalizedEmail);
+      .find(s => s.schoolId === schoolId && normalizeEmail(s.studentEmail) === normalizedEmail);
+  }
+
+  async upsertStudent(schoolId: string, email: string, name: string, gradeLevel?: string): Promise<Student> {
+    const normalizedEmail = normalizeEmail(email);
+    
+    // Try to find existing student by (schoolId, email)
+    const existing = await this.getStudentByEmail(schoolId, email);
+    
+    if (existing) {
+      // Update existing student
+      const updates: Partial<InsertStudent> = { studentName: name };
+      if (gradeLevel) updates.gradeLevel = gradeLevel;
+      const updated = await this.updateStudent(existing.id, updates);
+      return updated!;
+    }
+    
+    // Create new student
+    return this.createStudent({
+      schoolId,
+      studentEmail: normalizedEmail,
+      studentName: name,
+      gradeLevel: gradeLevel ?? null,
+    });
   }
 
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
