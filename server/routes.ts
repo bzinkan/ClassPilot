@@ -1074,11 +1074,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ error: "Invalid email address" });
         }
         
+        console.log('🔍 EMAIL LOOKUP: Looking for student with email:', normalizedEmail);
+        
         // Check if student with this email already exists (across ALL devices)
         student = await storage.getStudentByEmail(normalizedEmail);
         
         if (student) {
           // Student exists! Check if they switched devices
+          console.log('✅ EMAIL MATCH FOUND: Student exists with id:', student.id, 'name:', student.studentName, 'deviceId:', student.deviceId);
           if (student.deviceId !== deviceData.deviceId) {
             console.log('✓ Student switched devices:', normalizedEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
             // Update student's device to the new one
@@ -1087,6 +1090,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
             console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
           }
         } else {
+          // Check all students to debug why email lookup failed
+          const allStudents = await storage.getAllStudents();
+          console.log('❌ EMAIL LOOKUP FAILED: No student found with email:', normalizedEmail);
+          console.log('📊 All students in database:', allStudents.map(s => ({
+            id: s.id.substring(0, 8),
+            name: s.studentName,
+            email: s.studentEmail,
+            normalizedEmail: normalizeEmail(s.studentEmail),
+            deviceId: s.deviceId,
+          })));
+          
           // Create new student (first time seeing this email)
           const studentData = insertStudentSchema.parse({
             deviceId: deviceData.deviceId,
