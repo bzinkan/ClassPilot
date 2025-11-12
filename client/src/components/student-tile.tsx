@@ -706,7 +706,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               {student.currentUrlDuration !== undefined ? (
                 formatDuration(student.currentUrlDuration)
               ) : (
-                formatDistanceToNow(student.lastSeenAt, { addSuffix: true })
+                formatDistanceToNow(new Date(student.lastSeenAt), { addSuffix: true })
               )}
             </span>
           </div>
