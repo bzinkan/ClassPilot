@@ -92,19 +92,37 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       video.playsInline = true;
       video.style.width = '100%';
       video.style.height = 'auto';
+      video.style.minHeight = '100px';
+      video.style.backgroundColor = '#000';
       video.className = 'rounded-md';
       videoElementRef.current = video;
+      console.log('[StudentTile] Created video element for', student.studentName);
     }
     
     // Attach stream to video element and start playback
     if (videoElementRef.current) {
+      const prevStream = videoElementRef.current.srcObject as MediaStream | null;
       videoElementRef.current.srcObject = liveStream || null;
       
-      // Explicitly start playback after setting stream
+      // Debug logging
       if (liveStream) {
-        videoElementRef.current.play().catch((error) => {
-          console.error('[StudentTile] Video play error:', error);
+        const tracks = liveStream.getTracks();
+        const videoTracks = liveStream.getVideoTracks();
+        console.log('[StudentTile] Setting stream for', student.studentName, {
+          streamId: liveStream.id,
+          totalTracks: tracks.length,
+          videoTracks: videoTracks.length,
+          videoTrackEnabled: videoTracks[0]?.enabled,
+          videoTrackReadyState: videoTracks[0]?.readyState,
+          prevStreamId: prevStream?.id,
         });
+        
+        // Explicitly start playback after setting stream
+        videoElementRef.current.play().catch((error) => {
+          console.error('[StudentTile] Video play error for', student.studentName, ':', error);
+        });
+      } else {
+        console.log('[StudentTile] Clearing stream for', student.studentName);
       }
     }
     
@@ -112,9 +130,10 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     if (liveStream && tileVideoSlotRef.current && videoElementRef.current) {
       if (!tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.appendChild(videoElementRef.current);
+        console.log('[StudentTile] Mounted video to tile for', student.studentName);
         // Ensure playback starts after mounting
         videoElementRef.current.play().catch((error) => {
-          console.error('[StudentTile] Video play error after mount:', error);
+          console.error('[StudentTile] Video play error after mount for', student.studentName, ':', error);
         });
       }
     } else if (!liveStream && videoElementRef.current) {
@@ -127,12 +146,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       const portalSlot = document.querySelector('#portal-video-slot');
       if (portalSlot && portalSlot.contains(videoElementRef.current)) {
         portalSlot.removeChild(videoElementRef.current);
+        console.log('[StudentTile] Removed video from portal for', student.studentName);
       }
       if (tileVideoSlotRef.current && tileVideoSlotRef.current.contains(videoElementRef.current)) {
         tileVideoSlotRef.current.removeChild(videoElementRef.current);
+        console.log('[StudentTile] Removed video from tile for', student.studentName);
       }
     }
-  }, [liveStream, expanded]);
+  }, [liveStream, expanded, student.studentName]);
   
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
