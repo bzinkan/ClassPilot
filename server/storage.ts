@@ -90,6 +90,7 @@ export interface IStorage {
   addStudentDevice(studentId: string, deviceId: string): Promise<StudentDevice>;
   getStudentDevices(studentId: string): Promise<StudentDevice[]>;
   getDeviceStudents(deviceId: string): Promise<Student[]>;
+  cleanupStaleStudentDevices(hoursOld: number): Promise<number>; // Remove student-device associations older than X hours
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
@@ -521,6 +522,20 @@ export class MemStorage implements IStorage {
     
     return Array.from(this.students.values())
       .filter(s => studentIds.includes(s.id));
+  }
+
+  async cleanupStaleStudentDevices(hoursOld: number): Promise<number> {
+    const cutoffTime = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
+    const toDelete: string[] = [];
+    
+    for (const [key, sd] of this.studentDevices.entries()) {
+      if (sd.lastSeenAt < cutoffTime) {
+        toDelete.push(key);
+      }
+    }
+    
+    toDelete.forEach(key => this.studentDevices.delete(key));
+    return toDelete.length;
   }
 
   // Student Status
@@ -1432,6 +1447,17 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(inArray(students.id, studentIds));
+  }
+
+  async cleanupStaleStudentDevices(hoursOld: number): Promise<number> {
+    const cutoffTime = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
+    
+    const deleted = await db
+      .delete(studentDevices)
+      .where(lt(studentDevices.lastSeenAt, cutoffTime))
+      .returning();
+    
+    return deleted.length;
   }
 
   async deleteStudent(studentId: string): Promise<boolean> {
