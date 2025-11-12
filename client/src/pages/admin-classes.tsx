@@ -71,6 +71,15 @@ const editStudentSchema = z.object({
 
 type EditStudentForm = z.infer<typeof editStudentSchema>;
 
+const createStudentSchema = z.object({
+  studentName: z.string().min(1, "Name is required"),
+  studentEmail: z.string().email("Invalid email format"),
+  gradeLevel: z.string().optional(),
+  classId: z.string().optional(),
+});
+
+type CreateStudentForm = z.infer<typeof createStudentSchema>;
+
 interface Teacher {
   id: string;
   username: string;
@@ -200,6 +209,147 @@ function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogPro
                 data-testid="button-save-student"
               >
                 {editMutation.isPending ? "Saving..." : "Save Changes"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+interface CreateStudentDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  classes: Group[];
+}
+
+function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialogProps) {
+  const { toast } = useToast();
+  const form = useForm<CreateStudentForm>({
+    resolver: zodResolver(createStudentSchema),
+    defaultValues: {
+      studentName: "",
+      studentEmail: "",
+      gradeLevel: "",
+      classId: "",
+    },
+  });
+
+  const createMutation = useMutation({
+    mutationFn: async (data: CreateStudentForm) => {
+      const res = await apiRequest("POST", "/api/admin/students", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"] });
+      toast({
+        title: "Student created",
+        description: "Student has been created successfully.",
+      });
+      onOpenChange(false);
+      form.reset();
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to create student",
+        variant: "destructive",
+      });
+    },
+  });
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent data-testid="dialog-create-student">
+        <DialogHeader>
+          <DialogTitle>Create Student</DialogTitle>
+          <DialogDescription>
+            Add a new student to the system
+          </DialogDescription>
+        </DialogHeader>
+        <Form {...form}>
+          <form onSubmit={form.handleSubmit((data) => createMutation.mutate(data))} className="space-y-4">
+            <FormField
+              control={form.control}
+              name="studentName"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Student Name</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder="John Doe" data-testid="input-create-student-name" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="studentEmail"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Email</FormLabel>
+                  <FormControl>
+                    <Input {...field} type="email" placeholder="student@school.edu" data-testid="input-create-student-email" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="gradeLevel"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Grade Level (Optional)</FormLabel>
+                  <FormControl>
+                    <Input {...field} placeholder="e.g., 9" data-testid="input-create-student-grade" />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="classId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Assign to Class (Optional)</FormLabel>
+                  <Select onValueChange={field.onChange} value={field.value}>
+                    <FormControl>
+                      <SelectTrigger data-testid="select-create-student-class">
+                        <SelectValue placeholder="Select a class" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      {classes.map((group) => (
+                        <SelectItem key={group.id} value={group.id}>
+                          {group.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                data-testid="button-cancel-create"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={createMutation.isPending}
+                data-testid="button-create-student"
+              >
+                {createMutation.isPending ? "Creating..." : "Create Student"}
               </Button>
             </DialogFooter>
           </form>
@@ -376,6 +526,7 @@ export default function AdminClasses() {
   const [bulkImportDialogOpen, setBulkImportDialogOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [importResults, setImportResults] = useState<any>(null);
+  const [createStudentOpen, setCreateStudentOpen] = useState(false);
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -778,10 +929,32 @@ export default function AdminClasses() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Plus className="h-5 w-5" />
+                Add Single Student
+              </CardTitle>
+              <CardDescription>
+                Create one student at a time
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Button
+                onClick={() => setCreateStudentOpen(true)}
+                className="w-full"
+                data-testid="button-open-create-student"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create Student
+              </Button>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Plus className="h-5 w-5" />
                 Bulk Import Students
               </CardTitle>
               <CardDescription>
-                Upload a CSV file to import multiple students at once
+                Upload CSV or Excel files to import multiple students
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -1075,6 +1248,12 @@ export default function AdminClasses() {
           </CardContent>
         </Card>
       </div>
+
+      <CreateStudentDialog
+        open={createStudentOpen}
+        onOpenChange={setCreateStudentOpen}
+        classes={adminClasses}
+      />
     </div>
   );
 }

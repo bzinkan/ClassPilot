@@ -889,6 +889,79 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Admin: Create a single student
+  app.post("/api/admin/students", requireAdmin, async (req, res) => {
+    try {
+      const { studentName, studentEmail, gradeLevel, classId } = req.body;
+
+      // Validate required fields
+      if (!studentName || !studentEmail) {
+        return res.status(400).json({ error: "Name and email are required" });
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(studentEmail)) {
+        return res.status(400).json({ error: "Invalid email format" });
+      }
+
+      // Check for duplicate email (case-insensitive)
+      const allStudents = await storage.getAllStudents();
+      const existingStudent = allStudents.find(
+        s => s.studentEmail.toLowerCase() === studentEmail.toLowerCase()
+      );
+
+      if (existingStudent) {
+        return res.status(400).json({ 
+          error: `A student with email ${studentEmail} already exists` 
+        });
+      }
+
+      // Get settings for schoolId
+      const settings = await storage.getSettings();
+      const schoolId = settings?.schoolId || 'default-school';
+
+      // Normalize grade level
+      const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
+
+      // Create placeholder deviceId based on email
+      const deviceId = `pending-${studentEmail.split('@')[0]}-${Date.now()}`;
+
+      // Create student
+      const student = await storage.createStudent({
+        studentName,
+        studentEmail,
+        gradeLevel: normalizedGrade,
+        deviceId,
+        schoolId,
+      });
+
+      // Assign to class if classId provided
+      if (classId && student) {
+        try {
+          await storage.assignStudentToGroup(classId, student.id);
+        } catch (error) {
+          console.error("Failed to assign student to class:", error);
+          // Continue - student was created successfully
+        }
+      }
+
+      // Notify teachers
+      broadcastToTeachers({
+        type: 'students-updated',
+      });
+
+      res.json({
+        success: true,
+        message: 'Student created successfully',
+        student,
+      });
+    } catch (error) {
+      console.error("Create student error:", error);
+      res.status(500).json({ error: "Failed to create student" });
+    }
+  });
+
   // Device registration (from extension)
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
