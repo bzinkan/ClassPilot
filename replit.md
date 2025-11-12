@@ -50,6 +50,7 @@ The system is built with a full-stack architecture:
 -   **Deployment**: Designed for production, supporting Google Admin force-install of the Chrome Extension.
 -   **IP Allowlist**: Optional IP-based access control for the teacher dashboard.
 -   **API Design**: Clear separation of concerns with distinct endpoints for student, device, and active student management.
+-   **Cache Invalidation**: Standardized pattern using `invalidateStudentCaches()` helper in `client/src/lib/cacheUtils.ts` ensures all views (Dashboard, Roster, Admin) stay synchronized when student data changes. All student mutations (create, edit, delete, assign, bulk import, cleanup) use this shared helper to invalidate `/api/roster/students`, `/api/students`, `/api/groups`, `/api/admin/teacher-students`, and `/api/teacher/groups`.
 
 ## External Dependencies
 -   **Database**: PostgreSQL (Neon-backed)
