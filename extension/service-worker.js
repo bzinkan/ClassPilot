@@ -45,21 +45,17 @@ async function ensureRegistered() {
       .then(r => r.json())
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
-    // Get or create IDs
-    let stored = await kv.get(['studentId', 'classId', 'deviceId', 'studentEmail', 'teacherId']);
+    // Get or create deviceId (stable across reloads)
+    let stored = await kv.get(['activeStudentId', 'classId', 'deviceId', 'studentEmail']);
     
-    // Generate IDs if missing (don't require teacherId at startup)
-    if (!stored.studentId) {
-      stored.studentId = 'student-' + crypto.randomUUID().slice(0, 8);
-    }
     if (!stored.deviceId) {
-      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 8);
+      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 13);
     }
     if (!stored.classId) {
       stored.classId = 'default-class';
     }
     
-    // Try to detect student email (optional, non-blocking)
+    // Try to detect student email
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
       try {
         const profile = await new Promise(resolve => 
@@ -67,32 +63,87 @@ async function ensureRegistered() {
         );
         if (profile?.email) {
           stored.studentEmail = profile.email;
+          console.log('Logged-in user Email:', stored.studentEmail);
         }
       } catch (err) {
         console.log('[Service Worker] Could not get profile info:', err);
       }
     }
     
-    // Save IDs to storage
-    await kv.set(stored);
+    // CRITICAL FIX: Call server to get/create canonical student record
+    if (stored.studentEmail) {
+      try {
+        console.log('Auto-registering with server using email:', stored.studentEmail);
+        const response = await fetch(`${DEFAULT_SERVER_URL}/api/register-student`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId: stored.deviceId,
+            deviceName: null,
+            schoolId: CONFIG.schoolId,
+            classId: stored.classId,
+            studentEmail: stored.studentEmail,
+            studentName: stored.studentEmail.split('@')[0], // Use email prefix as fallback name
+          }),
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          console.log('Auto-registered student on startup:', stored.studentEmail, 'studentId:', data.student?.id);
+          
+          // Use the server's canonical student ID
+          stored.activeStudentId = data.student?.id;
+          CONFIG.activeStudentId = data.student?.id;
+          CONFIG.studentName = data.student?.studentName || stored.studentEmail;
+          CONFIG.studentEmail = stored.studentEmail;
+          CONFIG.deviceId = stored.deviceId;
+          CONFIG.classId = stored.classId;
+          
+          // Save server-provided student ID
+          await kv.set({
+            activeStudentId: stored.activeStudentId,
+            deviceId: stored.deviceId,
+            classId: stored.classId,
+            studentEmail: stored.studentEmail,
+          });
+          
+          console.log('[Service Worker] Registration complete:', {
+            activeStudentId: stored.activeStudentId,
+            deviceId: stored.deviceId,
+            classId: stored.classId,
+            hasEmail: true
+          });
+          
+          return stored;
+        }
+      } catch (err) {
+        console.error('[Service Worker] Server registration failed:', err);
+      }
+    }
     
-    // Update CONFIG
-    CONFIG.deviceId = stored.deviceId;
-    CONFIG.studentName = stored.studentEmail || stored.studentId;
-    CONFIG.studentEmail = stored.studentEmail;
-    CONFIG.classId = stored.classId;
-    
-    console.log('[Service Worker] Registration complete:', {
-      studentId: stored.studentId,
+    // Fallback: No email or server registration failed
+    // Preserve any existing student ID from previous sync
+    await kv.set({
+      activeStudentId: stored.activeStudentId, // Keep existing if present
       deviceId: stored.deviceId,
       classId: stored.classId,
+      studentEmail: stored.studentEmail,
+    });
+    
+    CONFIG.deviceId = stored.deviceId;
+    CONFIG.studentEmail = stored.studentEmail;
+    CONFIG.classId = stored.classId;
+    CONFIG.activeStudentId = stored.activeStudentId; // Preserve existing student ID
+    
+    console.log('[Service Worker] Registered device (fallback):', {
+      deviceId: stored.deviceId,
+      activeStudentId: stored.activeStudentId || 'none',
       hasEmail: !!stored.studentEmail
     });
     
     return stored;
   } catch (error) {
     console.error('[Service Worker] Registration failed:', error);
-    // Don't throw - extension can still work with defaults
     return {};
   }
 }
@@ -538,6 +589,11 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 async function sendHeartbeat() {
   if (!CONFIG.deviceId) {
     console.log('Skipping heartbeat - no deviceId');
+    return;
+  }
+  
+  if (!CONFIG.activeStudentId) {
+    console.log('Skipping heartbeat - no activeStudentId (waiting for server registration)');
     return;
   }
   

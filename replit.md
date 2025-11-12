@@ -5,6 +5,20 @@ ClassPilot is a privacy-aware classroom monitoring system for educational settin
 
 ## Recent Changes (Nov 12, 2025)
 
+### Extension-Server Sync Fix (v1.0.7) ✅
+**Problem**: Extension generated random student IDs offline, never synced with server, causing "student not found in DB" errors and empty dashboards.
+
+**Root Cause**: `ensureRegistered()` generated random IDs BEFORE calling server, creating ID mismatch between extension heartbeats and CSV-imported students.
+
+**Fix Implemented**:
+1. Extension now calls `/api/register-student` on startup with student email
+2. Uses server's canonical student ID (not random generated)
+3. Stores server ID in chrome.storage for all heartbeats
+4. Fallback preserves existing student IDs if server temporarily offline
+5. Heartbeats skip if no valid student ID present
+
+**Result**: CSV-imported students now appear on dashboard when they sign in. Extension heartbeats use correct database student IDs.
+
 ### Screen Sharing Fixes
 **Problem**: Teachers couldn't view student screens. Screen share dialog wouldn't appear, and when it did (for admins), video was black.
 
