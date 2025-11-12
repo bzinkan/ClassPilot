@@ -1,0 +1,161 @@
+Got it—let’s lock this down so it’s email-based, multi-device safe, and stop the dupes/offline weirdness.
+
+1) Duplicate students when you import before the extension loads
+Why it’s happening
+
+Import path creates a student row by email.
+
+Extension path creates/looks up by deviceId or a random id, not by email → a second row appears.
+
+Fix (server-side, permanent)
+
+Make email (lowercased) the identity key per school.
+
+Add a unique index: (school_id, email_lc) where email_lc is LOWER(TRIM(email)).
+
+Normalize and upsert everywhere.
+
+On CSV import and on extension heartbeat, do:
+
+email_lc = email.trim().toLowerCase()
+
+INSERT ... ON CONFLICT (school_id, email_lc) DO UPDATE SET name=EXCLUDED.name ...
+
+Never create by deviceId. Devices are many-to-one with the student.
+
+Store devices separately (optional but nice):
+
+Table student_devices(student_id, device_id, first_seen_at, last_seen_at) with unique (student_id, device_id).
+
+On heartbeat, upsert a row here; don’t spawn students.
+
+One-time dedupe migration (safe to run now):
+
+Pick the canonical row per (school_id, email_lc) (keep the oldest created_at).
+
+Repoint foreign keys (student_status, enrollments, passes, etc.) to the canonical id.
+
+Delete the extras.
+
+Drizzle/SQL sketch (conceptual)
+
+-- 1) add normalized column
+ALTER TABLE students ADD COLUMN email_lc text GENERATED ALWAYS AS (lower(trim(email))) STORED;
+-- 2) ensure school scoping exists
+-- ALTER TABLE students ADD COLUMN school_id uuid NOT NULL;  -- if not already
+-- 3) unique identity per school+email
+CREATE UNIQUE INDEX IF NOT EXISTS students_school_email_unique ON students(school_id, email_lc);
+
+-- DEDUPE (one-time): keep oldest id
+WITH ranked AS (
+  SELECT id, school_id, email_lc,
+         ROW_NUMBER() OVER (PARTITION BY school_id, email_lc ORDER BY created_at) AS rn,
+         MIN(id) OVER (PARTITION BY school_id, email_lc) AS keep_id
+  FROM students
+)
+-- Example for one child table; repeat per FK table:
+UPDATE student_status ss
+SET student_id = r.keep_id
+FROM ranked r
+WHERE ss.student_id = r.id AND r.rn > 1;
+
+DELETE FROM students s
+USING ranked r
+WHERE s.id = r.id AND r.rn > 1;
+
+
+Extension change (tiny):
+
+Include email and schoolId in the heartbeat (or a signed studentToken that encodes them).
+
+Do not let the extension create students by itself; it only sends identity → server does the upsert by (school_id,email_lc).
+
+2) Dashboard shows them “offline” even though both extensions are running
+
+This is usually an identity mismatch or a heartbeat not landing in the right tenant. Quick triage:
+
+A. Verify heartbeats are reaching the right row
+
+Run these queries while the devices are on:
+
+-- What did we see in the last 5 minutes for this school?
+SELECT s.id, s.name, s.email, s.last_seen_at
+FROM students s
+WHERE s.school_id = $SCHOOL
+  AND s.last_seen_at > now() - interval '5 minutes'
+ORDER BY s.last_seen_at DESC;
+
+-- If you keep a heartbeat log:
+SELECT created_at, email, device_id, version, school_id
+FROM heartbeats
+WHERE school_id = $SCHOOL
+ORDER BY created_at DESC LIMIT 50;
+
+
+If last_seen_at isn’t moving but heartbeats are present, your update query is pointing at the wrong key (e.g., using studentId instead of (school_id,email_lc)).
+
+B. Common causes & quick fixes
+
+Wrong tenant: heartbeat is missing/using the wrong schoolId.
+→ Require schoolId (or put it inside the JWT). Reject heartbeats without a valid tenant.
+
+Email mismatch: extension sends John.Doe@School.org while DB row is john.doe@school.org.
+→ Always toLowerCase().trim() both sides; use email_lc.
+
+Time window feature accidentally suppressing updates: if you added “school hours”, make sure the server still records lastSeenAt, even if the UI chooses to hide live views off-hours.
+
+Background service worker sleeps (MV3): if you rely on setInterval, it will die.
+→ Use chrome.alarms.create('heartbeat', { periodInMinutes: 0.5 }) and send every ~30s.
+→ Also send an immediate heartbeat on startup and on chrome.runtime.onStartup / onInstalled.
+
+CORS/HTTPS/env mismatch: extension hitting http://localhost or your dev URL while the dashboard reads prod.
+→ Hard-switch to your prod BASE_URL in release builds.
+
+Socket not joined (if your dashboard is real-time): you update the DB, but the teacher UI only updates on a socket event it never receives.
+→ Emit student:seen after each heartbeat and ensure the dashboard joins the correct schoolId/classId room.
+
+Clock skew: server stores UTC but UI compares with local time incorrectly.
+→ Compute “offline” as Date.now() - lastSeenAt <= 90_000.
+
+C. Minimal heartbeat contract (email-first)
+
+Extension → Server (every 30s and on startup)
+
+POST /api/heartbeat
+{
+  "schoolId": "uuid-of-school",
+  "email": "student@school.org",
+  "deviceId": "chrome.machine.id.or.install.id",
+  "version": "ext-1.0.3"
+}
+
+
+Server
+
+// Pseudocode
+const email_lc = email.trim().toLowerCase();
+const student = await db.upsertStudent({ schoolId, email_lc }); // by unique index
+await db.updateStudentLastSeen(student.id, now());
+await db.upsertStudentDevice(student.id, deviceId, now());
+emitToSchool(schoolId, 'student:seen', { studentId: student.id, lastSeenAt: now() });
+
+
+If you prefer JWTs: have the extension fetch a studentToken (signed) once per install/session that includes schoolId + email. Heartbeats send Authorization: Bearer <token> → server validates and extracts identity; no raw email required.
+
+3) What to change right now (short checklist)
+
+ Add (school_id, email_lc) unique index and normalize emails everywhere.
+
+ Switch all student lookups/updates to use that composite key (or a JWT carrying those).
+
+ Ensure heartbeat handler never inserts by deviceId.
+
+ Add student_devices table (optional) to track many devices per student.
+
+ Run the dedupe migration to merge existing duplicates.
+
+ In the extension, send heartbeats via chrome.alarms (MV3-safe) every 30–60s.
+
+ Log heartbeat responses (HTTP status + JSON) and include version so you can spot old clients.
+
+ In the dashboard, consider “online” = lastSeenAt within 90 seconds; show the timestamp for debugging.
