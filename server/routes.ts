@@ -862,11 +862,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
             student = await storage.createStudent({
               schoolId, // REQUIRED: school_id is NOT NULL
-              deviceId: placeholderDeviceId,
+              deviceId: placeholderDeviceId, // DEPRECATED but kept for backward compatibility
               studentName: name,
               studentEmail: email,
               gradeLevel: normalizedGrade,
             });
+            
+            // Link placeholder device to student via junction table
+            await storage.addStudentDevice(student.id, placeholderDeviceId);
             results.created++;
           }
 
@@ -1097,6 +1100,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             console.log('✓ Student using new device:', normalizedEmail, '→', deviceData.deviceId);
             // Add this device to the student's device list
             await storage.addStudentDevice(student.id, deviceData.deviceId);
+            
+            // Clean up any placeholder devices for this email (from CSV import)
+            const placeholderDeviceId = `pending-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '-')}`;
+            const placeholderDevice = await storage.getDevice(placeholderDeviceId);
+            if (placeholderDevice) {
+              console.log('✓ Deleting placeholder device from CSV import:', placeholderDeviceId);
+              await storage.deleteDevice(placeholderDeviceId);
+            }
           } else {
             console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
           }
@@ -1115,6 +1126,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               studentName: studentName,
               studentStatus: 'active',
             }) || pendingPlaceholder;
+            
+            // Link the real device to the promoted student
+            await storage.addStudentDevice(student.id, deviceData.deviceId);
+            console.log('✓ Linked real device to promoted student:', deviceData.deviceId, '→', student.id);
           } else {
             // Create new student (first time seeing this email in this school)
             console.log('✓ Creating new student with email:', normalizedEmail);
