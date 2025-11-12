@@ -27,7 +27,7 @@ import {
   type InsertStudent,
   type InsertDevice,
 } from "@shared/schema";
-import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
+import { groupSessionsByDevice, formatDuration, isWithinTrackingHours, normalizeEmail } from "@shared/utils";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -799,12 +799,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         try {
           // Extract and validate fields (case-insensitive column names)
-          const email = (row.Email || row.email || row.EMAIL || '').trim();
+          const rawEmail = (row.Email || row.email || row.EMAIL || '').trim();
           const name = (row.Name || row.name || row.NAME || row.StudentName || row.studentName || '').trim();
           const className = (row.Class || row.class || row.CLASS || row.ClassName || row.className || '').trim();
 
           // Validate required fields
-          if (!email) {
+          if (!rawEmail) {
             results.errors.push(`Row ${rowNum}: Email is required`);
             continue;
           }
@@ -816,17 +816,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           // Validate email format
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!emailRegex.test(email)) {
-            results.errors.push(`Row ${rowNum}: Invalid email format for ${email}`);
+          if (!emailRegex.test(rawEmail)) {
+            results.errors.push(`Row ${rowNum}: Invalid email format for ${rawEmail}`);
             continue;
           }
+
+          // Normalize email for consistent storage and lookup
+          const email = normalizeEmail(rawEmail) || '';
 
           // Use the grade level from the request (applies to all students in the import)
           const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
 
-          // Check if student already exists by email
+          // Check if student already exists by email (using normalized email)
           const allStudents = await storage.getAllStudents();
-          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase());
+          let student = allStudents.find(s => normalizeEmail(s.studentEmail) === email);
 
           if (student) {
             // Update existing student's name and grade if different
@@ -934,10 +937,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Invalid email format" });
       }
 
-      // Check for duplicate email (case-insensitive)
+      // Normalize email for consistent storage and lookup
+      const normalizedEmail = normalizeEmail(studentEmail);
+
+      // Check for duplicate email (using normalized comparison)
       const allStudents = await storage.getAllStudents();
       const existingStudent = allStudents.find(
-        s => s.studentEmail?.toLowerCase() === studentEmail.toLowerCase()
+        s => normalizeEmail(s.studentEmail) === normalizedEmail
       );
 
       if (existingStudent) {
@@ -954,12 +960,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
 
       // Create placeholder deviceId based on email
-      const deviceId = `pending-${studentEmail.split('@')[0]}-${Date.now()}`;
+      const deviceId = `pending-${normalizedEmail?.split('@')[0]}-${Date.now()}`;
 
-      // Create student
+      // Create student with normalized email
       const student = await storage.createStudent({
         studentName,
-        studentEmail,
+        studentEmail: normalizedEmail,
         gradeLevel: normalizedGrade,
         deviceId,
       });
@@ -1036,6 +1042,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "studentEmail and studentName are required" });
       }
       
+      // Normalize email for consistent storage and lookup
+      const normalizedEmail = normalizeEmail(studentEmail);
+      if (!normalizedEmail) {
+        return res.status(400).json({ error: "Invalid email address" });
+      }
+      
       // Register or update device
       const deviceData = insertDeviceSchema.parse({
         deviceId,
@@ -1050,28 +1062,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // Check if student with this email already exists (across ALL devices)
-      let student = await storage.getStudentByEmail(studentEmail);
+      let student = await storage.getStudentByEmail(normalizedEmail);
       
       if (student) {
         // Student exists! Check if they switched devices
         if (student.deviceId !== deviceData.deviceId) {
-          console.log('Student switched devices:', studentEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
+          console.log('Student switched devices:', normalizedEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
           // Update student's device to the new one
           student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
         } else {
-          console.log('Student already registered on this device:', studentEmail, 'studentId:', student.id);
+          console.log('Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
         }
       } else {
         // Create new student (first time seeing this email)
         const studentData = insertStudentSchema.parse({
           deviceId: deviceData.deviceId,
           studentName,
-          studentEmail,
+          studentEmail: normalizedEmail,
           gradeLevel: null, // Teacher can assign grade later
         });
         
         student = await storage.createStudent(studentData);
-        console.log('New student auto-registered:', studentEmail, 'studentId:', student.id);
+        console.log('New student auto-registered:', normalizedEmail, 'studentId:', student.id);
       }
       
       // Set this student as the active student for this device
@@ -1456,7 +1468,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (email && !emailRegex.test(email)) {
           return res.status(400).json({ error: "Invalid email format" });
         }
-        updates.studentEmail = email;
+        // Normalize email for consistent storage
+        updates.studentEmail = normalizeEmail(email);
       }
       
       if (Object.keys(updates).length === 0) {
