@@ -321,25 +321,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   const teacherStudentIds = await storage.getTeacherStudents(client.userId);
                   const hasDirectAssignment = teacherStudentIds.includes(activeStudent.id);
                   
-                  // Check if teacher has an active session with a group containing this student
-                  let hasSessionAccess = false;
-                  const activeSession = await storage.getActiveSessionByTeacher(client.userId);
-                  if (activeSession) {
-                    const sessionGroupStudents = await storage.getGroupStudents(activeSession.groupId);
-                    hasSessionAccess = sessionGroupStudents.includes(activeStudent.id);
+                  // Short-circuit if direct assignment already grants access
+                  if (hasDirectAssignment) {
+                    console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (direct assignment)`);
+                  } else {
+                    // Check if teacher has an active session with a group containing this student
+                    let hasSessionAccess = false;
+                    const activeSession = await storage.getActiveSessionByTeacher(client.userId);
+                    if (activeSession) {
+                      const sessionGroupStudents = await storage.getGroupStudents(activeSession.groupId);
+                      hasSessionAccess = sessionGroupStudents.includes(activeStudent.id);
+                    }
+                    
+                    // Block if neither direct assignment nor active session
+                    if (!hasSessionAccess) {
+                      console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission (no direct assignment or active session)`);
+                      ws.send(JSON.stringify({
+                        type: 'error',
+                        message: 'You do not have permission to view this student\'s screen'
+                      }));
+                      return; // Block the request
+                    }
+                    
+                    console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (active session)`);
                   }
-                  
-                  // Allow if either direct assignment OR active session
-                  if (!hasDirectAssignment && !hasSessionAccess) {
-                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission (no direct assignment or active session)`);
-                    ws.send(JSON.stringify({
-                      type: 'error',
-                      message: 'You do not have permission to view this student\'s screen'
-                    }));
-                    return; // Block the request
-                  }
-                  
-                  console.log(`[WebSocket] Permission granted for teacher ${client.userId} to view student ${activeStudent.id} (direct: ${hasDirectAssignment}, session: ${hasSessionAccess})`);
                 }
               }
             } catch (error) {
