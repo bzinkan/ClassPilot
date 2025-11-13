@@ -459,17 +459,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 <span className="text-xs text-muted-foreground">
                   {getStatusLabel(student.status)}
                 </span>
-                {student.deviceCount > 0 && (
-                  <Badge 
-                    variant="secondary" 
-                    className="h-4 px-1.5 text-[10px] font-normal gap-1"
-                    title={`${student.deviceCount} ${student.deviceCount === 1 ? 'device' : 'devices'} connected`}
-                    data-testid={`badge-device-count-${student.primaryDeviceId}`}
-                  >
-                    <Monitor className="h-2.5 w-2.5" />
-                    {student.deviceCount}
-                  </Badge>
-                )}
               </div>
             </div>
           </div>
