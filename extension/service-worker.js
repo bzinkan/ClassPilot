@@ -60,7 +60,7 @@ async function ensureRegistered() {
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
     // Get or create IDs
-    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId']);
+    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId', 'registered', 'lastRegisteredEmail']);
     
     // Get student email from Chrome profile (managed devices)
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
@@ -86,7 +86,7 @@ async function ensureRegistered() {
     
     // Always create a deviceId internally (never exposed to teachers)
     if (!stored.deviceId) {
-      stored.deviceId = 'dev-' + crypto.randomUUID().slice(0, 8);
+      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 11);
     }
     
     // Set default schoolId if not present
@@ -104,10 +104,57 @@ async function ensureRegistered() {
     CONFIG.schoolId = stored.schoolId;
     CONFIG.classId = stored.schoolId; // Legacy compatibility
     
+    // Register with server if we have email and haven't registered yet (or email changed)
+    const emailChanged = stored.lastRegisteredEmail !== stored.studentEmail;
+    const needsRegistration = stored.studentEmail && (!stored.registered || emailChanged);
+    
+    if (needsRegistration) {
+      try {
+        console.log('[Service Worker] Registering student with server:', stored.studentEmail);
+        const response = await fetch(`${CONFIG.serverUrl}/api/register-student`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deviceId: stored.deviceId,
+            deviceName: null, // No device name needed
+            schoolId: stored.schoolId,
+            classId: stored.schoolId,
+            studentEmail: stored.studentEmail,
+            studentName: CONFIG.studentName,
+          }),
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+          throw new Error(errorData.error || 'Student registration failed');
+        }
+        
+        const data = await response.json();
+        console.log('[Service Worker] Student registered successfully:', data);
+        
+        // Mark as registered and save the email we registered with
+        await kv.set({ registered: true, lastRegisteredEmail: stored.studentEmail });
+        
+        // Update CONFIG with student ID from server
+        if (data.student?.id) {
+          CONFIG.activeStudentId = data.student.id;
+          await kv.set({ activeStudentId: data.student.id });
+        }
+      } catch (error) {
+        console.error('[Service Worker] Student registration error:', error);
+        // Clear registered flag so we retry next time
+        await kv.set({ registered: false });
+        // Don't throw - extension can still try to send heartbeats
+      }
+    } else if (stored.studentEmail) {
+      console.log('[Service Worker] Already registered:', stored.studentEmail);
+    }
+    
     console.log('[Service Worker] Registration complete:', {
       email: stored.studentEmail,
       deviceId: stored.deviceId,
       schoolId: stored.schoolId,
+      registered: stored.registered || needsRegistration,
     });
     
     return stored;
