@@ -82,6 +82,11 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
       return;
     }
 
+    // Validate selection before executing command
+    if (!validateSelection()) {
+      return;
+    }
+
     // Normalize URL - add https:// if no protocol specified
     let normalizedUrl = targetUrl.trim();
     if (!normalizedUrl.match(/^https?:\/\//i)) {
@@ -115,6 +120,11 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
   };
 
   const handleCloseTabs = async () => {
+    // Validate selection before executing command
+    if (!validateSelection()) {
+      return;
+    }
+
     setIsLoading(true);
     try {
       await apiRequest("POST", "/api/remote/close-tabs", { 
@@ -146,6 +156,11 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
         description: "Please enter a URL to lock to",
         variant: "destructive",
       });
+      return;
+    }
+
+    // Validate selection before executing command
+    if (!validateSelection()) {
       return;
     }
 
@@ -190,6 +205,11 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
   };
 
   const handleUnlockScreen = async () => {
+    // Validate selection before executing command
+    if (!validateSelection()) {
+      return;
+    }
+
     setIsLoading(true);
     try {
       await apiRequest("POST", "/api/remote/unlock-screen", { 
@@ -263,6 +283,11 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
       return;
     }
 
+    // Validate selection before executing command
+    if (!validateSelection()) {
+      return;
+    }
+
     const scene = scenes.find(s => s.id === selectedSceneId);
     if (!scene) {
       toast({
@@ -318,8 +343,24 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
       }
     });
     
-    return deviceIds.length > 0 ? deviceIds : undefined;
+    // IMPORTANT: Return empty array (not undefined) when students selected but no devices
+    // This prevents silently targeting "all students" when selected students are offline
+    return deviceIds;
   }, [selectedStudentIds, students]);
+  
+  // Validate that selected students have active devices before executing commands
+  const validateSelection = (): boolean => {
+    // If students selected but none have devices, show warning
+    if (selectedStudentIds.size > 0 && targetDeviceIdsArray && targetDeviceIdsArray.length === 0) {
+      toast({
+        title: "No Active Devices",
+        description: "Selected students have no active devices. Make sure students are online before sending commands.",
+        variant: "destructive",
+      });
+      return false;
+    }
+    return true;
+  };
   
   const selectionText = selectedStudentIds.size > 0 
     ? `${selectedStudentIds.size} selected`
