@@ -540,30 +540,46 @@ async function sendHeartbeat() {
   }
   
   try {
-    // Get active tab
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const activeTab = tabs[0];
+    // Get active tab (prefer current window, fallback to global)
+    let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     
-    if (!activeTab) {
-      console.log('Skipping heartbeat - no active tab');
-      return;
+    // If no tab in current window, try global query
+    if (tabs.length === 0) {
+      tabs = await chrome.tabs.query({ active: true });
     }
     
-    // Skip chrome-internal URLs (chrome://, chrome-extension://, etc.)
-    let activeTabUrl = activeTab.url || 'No URL';
-    let activeTabTitle = activeTab.title || 'No title';
-    if (activeTabUrl && !activeTabUrl.startsWith('http')) {
-      activeTabUrl = null;
-      activeTabTitle = 'Internal page';
-    }
+    // Determine tab data or use fallback for "no active tab" state
+    // IMPORTANT: Use empty strings instead of null for Zod schema validation
+    let activeTabUrl = '';
+    let activeTabTitle = '';
+    let favicon = null;
     
+    // Only report tab if we have exactly one active tab with HTTP URL
+    // Avoid reporting arbitrary tabs from multi-window scenarios
+    if (tabs.length === 1) {
+      const activeTab = tabs[0];
+      // Skip chrome-internal URLs (chrome://, chrome-extension://, etc.)
+      if (activeTab.url && activeTab.url.startsWith('http')) {
+        activeTabUrl = activeTab.url;
+        activeTabTitle = activeTab.title || '';
+        favicon = activeTab.favIconUrl || null;
+      }
+      // Otherwise keep empty strings (Chrome internal page = no monitored activity)
+    } else if (tabs.length > 1) {
+      // Multiple active tabs across windows - indeterminate state
+      console.log('Multiple active tabs detected (' + tabs.length + ') - reporting as no active tab');
+    }
+    // If tabs.length === 0, keep empty strings
+    
+    // Send heartbeat even without active tab (keeps student "online")
+    // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
       email: CONFIG.studentEmail,           // 🟢 Primary identity
       deviceId: CONFIG.deviceId,            // Internal device tracking
       schoolId: CONFIG.schoolId,            // Multi-tenant support
-      activeTabTitle: activeTabTitle,
-      activeTabUrl: activeTabUrl,
-      favicon: activeTab.favIconUrl || null,
+      activeTabTitle: activeTabTitle,       // '' = no monitored tab
+      activeTabUrl: activeTabUrl,           // '' = no monitored tab
+      favicon: favicon,
       screenLocked: screenLocked,
       flightPathActive: screenLocked && allowedDomains.length > 0,
       activeFlightPathName: activeFlightPathName,
