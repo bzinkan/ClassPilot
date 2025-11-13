@@ -57,6 +57,7 @@ import {
   studentGroups,
   messages,
   checkIns,
+  normalizeEmail,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
@@ -700,15 +701,35 @@ export class MemStorage implements IStorage {
     };
     this.heartbeats.push(heartbeat);
     
-    // Update or create student status if studentId is provided
-    if (heartbeat.studentId) {
+    // Map to canonical studentId (same logic as DatabaseStorage)
+    let canonicalStudentId = heartbeat.studentId;
+    
+    // Try to find studentId if not provided
+    if (!canonicalStudentId) {
+      // First try: Check active student mapping
+      const activeStudentId = this.activeStudents.get(heartbeat.deviceId);
+      if (activeStudentId) {
+        canonicalStudentId = activeStudentId;
+      } else if (heartbeat.studentEmail && heartbeat.schoolId) {
+        // Second try: Look up by email (EMAIL-FIRST FLOW)
+        const studentByEmail = await this.getStudentBySchoolEmail(heartbeat.schoolId, normalizeEmail(heartbeat.studentEmail));
+        if (studentByEmail) {
+          canonicalStudentId = studentByEmail.id;
+          // Cache mapping for future heartbeats
+          this.activeStudents.set(heartbeat.deviceId, studentByEmail.id);
+        }
+      }
+    }
+    
+    // Update or create student status if we have a studentId
+    if (canonicalStudentId) {
       // Use composite key: studentId-deviceId (allows same student on multiple devices)
-      const statusKey = makeStatusKey(heartbeat.studentId, heartbeat.deviceId);
+      const statusKey = makeStatusKey(canonicalStudentId, heartbeat.deviceId);
       let status = this.studentStatuses.get(statusKey);
       
       // If status doesn't exist, create it from student data
       if (!status) {
-        const student = this.students.get(heartbeat.studentId);
+        const student = this.students.get(canonicalStudentId);
         if (student) {
           const device = this.devices.get(heartbeat.deviceId);
           status = {
@@ -1809,6 +1830,20 @@ export class DatabaseStorage implements IStorage {
         canonicalStudentId = heartbeat.studentId;
       } else {
         console.warn('No active student mapping for deviceId:', heartbeat.deviceId, 'and studentId not found in DB:', heartbeat.studentId);
+        canonicalStudentId = null;
+      }
+    } else if (heartbeat.studentEmail && heartbeat.schoolId) {
+      // Third try: Look up student by email (EMAIL-FIRST FLOW)
+      // Use the schoolId from the heartbeat (don't override with settings)
+      console.log('🔍 [addHeartbeat] Looking up student by email:', heartbeat.studentEmail, 'schoolId:', heartbeat.schoolId);
+      const studentByEmail = await this.getStudentBySchoolEmail(heartbeat.schoolId, normalizeEmail(heartbeat.studentEmail));
+      if (studentByEmail) {
+        canonicalStudentId = studentByEmail.id;
+        console.log('🔍 [addHeartbeat] Found student by email:', studentByEmail.id, 'name:', studentByEmail.studentName);
+        // Update active student mapping for future heartbeats
+        await this.setActiveStudentForDevice(heartbeat.deviceId, studentByEmail.id);
+      } else {
+        console.warn('⚠️ [addHeartbeat] No student found for email:', heartbeat.studentEmail, 'schoolId:', heartbeat.schoolId);
         canonicalStudentId = null;
       }
     }
