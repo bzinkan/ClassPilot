@@ -57,16 +57,12 @@ interface StudentsResponse {
   students: Student[];
 }
 
+// Admin Guard Wrapper - Only checks auth, doesn't run any queries/mutations
 export default function StudentsPage() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const [selectedGrade, setSelectedGrade] = useState<string>("");
-  const [csvFile, setCsvFile] = useState<File | null>(null);
-  const [importResults, setImportResults] = useState<any>(null);
-  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
-  const [deletingStudent, setDeletingStudent] = useState<Student | null>(null);
 
-  // Admin access control
+  // Only fetch current user for auth check
   const { data: currentUserData, isLoading: isLoadingUser } = useQuery<{ success: boolean; user: CurrentUser }>({
     queryKey: ['/api/me'],
   });
@@ -85,13 +81,7 @@ export default function StudentsPage() {
     }
   }, [currentUser, isLoadingUser, setLocation, toast]);
 
-  // Fetch all students
-  const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
-    queryKey: ["/api/admin/teacher-students"],
-    enabled: currentUser?.role === 'admin', // Only fetch if admin
-  });
-
-  // Guard: Show loading while checking auth
+  // Show loading while checking auth
   if (isLoadingUser) {
     return (
       <div className="container mx-auto p-6 max-w-7xl">
@@ -102,10 +92,29 @@ export default function StudentsPage() {
     );
   }
 
-  // Guard: Non-admin shouldn't see anything (redirect happens in useEffect)
+  // Don't render anything for non-admins
   if (currentUser?.role !== 'admin') {
     return null;
   }
+
+  // Only render content for confirmed admins
+  return <StudentsContent />;
+}
+
+// Content Component - Only runs for confirmed admins
+function StudentsContent() {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const [selectedGrade, setSelectedGrade] = useState<string>("");
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [importResults, setImportResults] = useState<any>(null);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [deletingStudent, setDeletingStudent] = useState<Student | null>(null);
+
+  // Fetch all students (only runs for admins)
+  const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
+    queryKey: ["/api/admin/teacher-students"],
+  });
 
   const allStudents = studentsData?.students || [];
 
@@ -203,42 +212,35 @@ export default function StudentsPage() {
       const fileType: 'csv' | 'excel' = isExcel ? 'excel' : 'csv';
       
       if (isExcel) {
+        // Use ArrayBuffer for Excel files
         fileContent = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = () => {
             const result = reader.result;
             
-            // Handle both data URL (string) and ArrayBuffer formats
-            if (typeof result === 'string') {
-              // Data URL format: validate and extract base64
-              if (!result.includes(';base64,')) {
-                reject(new Error("Invalid file format - expected base64 data URL"));
-                return;
-              }
-              
-              const base64 = result.split(',')[1];
-              if (!base64) {
-                reject(new Error("Invalid file format - missing base64 payload"));
-                return;
-              }
-              
-              resolve(base64);
-            } else if (result instanceof ArrayBuffer) {
-              // ArrayBuffer format: convert to base64
-              const bytes = new Uint8Array(result);
-              const binaryString = Array.from(bytes)
-                .map(byte => String.fromCharCode(byte))
-                .join('');
-              const base64 = btoa(binaryString);
-              resolve(base64);
-            } else {
-              reject(new Error("Invalid file format - unexpected result type"));
+            if (!(result instanceof ArrayBuffer)) {
+              reject(new Error("Failed to read file as ArrayBuffer"));
+              return;
             }
+            
+            // Convert ArrayBuffer to base64
+            const bytes = new Uint8Array(result);
+            if (bytes.length === 0) {
+              reject(new Error("File is empty"));
+              return;
+            }
+            
+            const binaryString = Array.from(bytes)
+              .map(byte => String.fromCharCode(byte))
+              .join('');
+            const base64 = btoa(binaryString);
+            resolve(base64);
           };
-          reader.onerror = reject;
-          reader.readAsDataURL(csvFile);
+          reader.onerror = () => reject(new Error("Failed to read file"));
+          reader.readAsArrayBuffer(csvFile);
         });
       } else {
+        // Read CSV as text
         fileContent = await csvFile.text();
       }
       
@@ -247,7 +249,7 @@ export default function StudentsPage() {
       toast({
         variant: "destructive",
         title: "Error",
-        description: "Failed to read file",
+        description: error instanceof Error ? error.message : "Failed to read file",
       });
     }
   };
