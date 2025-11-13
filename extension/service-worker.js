@@ -31,7 +31,24 @@ const kv = {
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
 };
 
+// Email normalization: ensures consistent student identity
+function normalizeEmail(raw) {
+  if (!raw) return null;
+  try {
+    const email = raw.trim().toLowerCase();
+    const [local, domain] = email.split('@');
+    if (!local || !domain) return null;
+    // Strip +tags from email (e.g., john+test@school.org → john@school.org)
+    const baseLocal = local.split('+')[0];
+    return `${baseLocal}@${domain}`;
+  } catch (err) {
+    console.error('[Service Worker] Email normalization failed:', err);
+    return null;
+  }
+}
+
 // Auto-registration: ensures extension always has IDs before sharing
+// EMAIL-FIRST IDENTITY: Email is required, deviceId is internal tracking only
 async function ensureRegistered() {
   console.log('[Service Worker] Ensuring registration...');
   
@@ -43,47 +60,54 @@ async function ensureRegistered() {
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
     // Get or create IDs
-    let stored = await kv.get(['studentId', 'classId', 'deviceId', 'studentEmail', 'teacherId']);
+    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId']);
     
-    // Generate IDs if missing (don't require teacherId at startup)
-    if (!stored.studentId) {
-      stored.studentId = 'student-' + crypto.randomUUID().slice(0, 8);
-    }
-    if (!stored.deviceId) {
-      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 8);
-    }
-    if (!stored.classId) {
-      stored.classId = 'default-class';
-    }
-    
-    // Try to detect student email (optional, non-blocking)
+    // Get student email from Chrome profile (managed devices)
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
       try {
         const profile = await new Promise(resolve => 
           chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
         );
         if (profile?.email) {
-          stored.studentEmail = profile.email;
+          stored.studentEmail = normalizeEmail(profile.email);
+          console.log('[Service Worker] Auto-detected email:', stored.studentEmail);
         }
       } catch (err) {
         console.log('[Service Worker] Could not get profile info:', err);
       }
     }
     
-    // Save IDs to storage
+    // If we still have no email, this is probably a dev machine
+    // For production, bail out. For dev, use a test email.
+    if (!stored.studentEmail) {
+      console.warn('[Service Worker] No studentEmail detected – running in dev mode');
+      // Uncomment for dev testing: stored.studentEmail = 'dev-student@example.com';
+    }
+    
+    // Always create a deviceId internally (never exposed to teachers)
+    if (!stored.deviceId) {
+      stored.deviceId = 'dev-' + crypto.randomUUID().slice(0, 8);
+    }
+    
+    // Set default schoolId if not present
+    if (!stored.schoolId) {
+      stored.schoolId = 'default-school';
+    }
+    
+    // Save to storage
     await kv.set(stored);
     
-    // Update CONFIG
-    CONFIG.deviceId = stored.deviceId;
-    CONFIG.studentName = stored.studentEmail || stored.studentId;
+    // Update CONFIG (email is primary identity)
     CONFIG.studentEmail = stored.studentEmail;
-    CONFIG.classId = stored.classId;
+    CONFIG.studentName = stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail;
+    CONFIG.deviceId = stored.deviceId;
+    CONFIG.schoolId = stored.schoolId;
+    CONFIG.classId = stored.schoolId; // Legacy compatibility
     
     console.log('[Service Worker] Registration complete:', {
-      studentId: stored.studentId,
+      email: stored.studentEmail,
       deviceId: stored.deviceId,
-      classId: stored.classId,
-      hasEmail: !!stored.studentEmail
+      schoolId: stored.schoolId,
     });
     
     return stored;
@@ -504,6 +528,12 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 
 // Send heartbeat with current tab info
 async function sendHeartbeat() {
+  // EMAIL-FIRST: Require email before sending heartbeats
+  if (!CONFIG.studentEmail) {
+    console.log('Skipping heartbeat - no studentEmail (dev mode or not logged in)');
+    return;
+  }
+  
   if (!CONFIG.deviceId) {
     console.log('Skipping heartbeat - no deviceId');
     return;
@@ -519,25 +549,29 @@ async function sendHeartbeat() {
       return;
     }
     
+    // Skip chrome-internal URLs (chrome://, chrome-extension://, etc.)
+    let activeTabUrl = activeTab.url || 'No URL';
+    let activeTabTitle = activeTab.title || 'No title';
+    if (activeTabUrl && !activeTabUrl.startsWith('http')) {
+      activeTabUrl = null;
+      activeTabTitle = 'Internal page';
+    }
+    
     const heartbeatData = {
-      deviceId: CONFIG.deviceId,
-      activeTabTitle: activeTab.title || 'No title',
-      activeTabUrl: activeTab.url || 'No URL',
+      email: CONFIG.studentEmail,           // 🟢 Primary identity
+      deviceId: CONFIG.deviceId,            // Internal device tracking
+      schoolId: CONFIG.schoolId,            // Multi-tenant support
+      activeTabTitle: activeTabTitle,
+      activeTabUrl: activeTabUrl,
       favicon: activeTab.favIconUrl || null,
       screenLocked: screenLocked,
-      flightPathActive: screenLocked && allowedDomains.length > 0, // True if scene is active
-      activeFlightPathName: activeFlightPathName, // Name of the currently active scene
+      flightPathActive: screenLocked && allowedDomains.length > 0,
+      activeFlightPathName: activeFlightPathName,
       isSharing: false,
       cameraActive: cameraActive,
     };
     
-    // Include studentId if available
-    if (CONFIG.activeStudentId) {
-      heartbeatData.studentId = CONFIG.activeStudentId;
-      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId, '| screenLocked:', screenLocked);
-    } else {
-      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined) | screenLocked:', screenLocked);
-    }
+    console.log('Sending heartbeat for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId, '| screenLocked:', screenLocked);
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
       method: 'POST',
@@ -1439,7 +1473,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Connect to WebSocket for signaling
 function connectWebSocket() {
-  if (!CONFIG.deviceId) return;
+  // EMAIL-FIRST: Require both email and deviceId for WebSocket
+  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
+    console.log('Skipping WebSocket - missing email or deviceId');
+    return;
+  }
   
   // Clear any pending reconnection alarm since we're connecting now
   chrome.alarms.clear('ws-reconnect');
@@ -1451,14 +1489,16 @@ function connectWebSocket() {
   
   ws.onopen = () => {
     console.log('WebSocket connected');
-    // Authenticate as student with proper state checking
+    // Authenticate as student with email as primary identity
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: 'auth',
           role: 'student',
-          deviceId: CONFIG.deviceId,
+          email: CONFIG.studentEmail,    // 🟢 Primary identity
+          deviceId: CONFIG.deviceId,      // Internal tracking
         }));
+        console.log('WebSocket auth sent for:', CONFIG.studentEmail);
       } else {
         console.warn('WebSocket not ready yet, will retry on next connection');
       }

@@ -1,4 +1,5 @@
 // Popup script for ClassPilot
+// EMAIL-FIRST: No manual registration - auto-detect from Chrome profile
 
 let currentConfig = null;
 
@@ -9,29 +10,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     const config = response.config;
     currentConfig = config;
     
-    if (config.studentName && config.deviceId) {
-      // Already registered, show main view
-      showMainView(config);
-    } else {
-      // Check for auto-detected student info
-      const stored = await chrome.storage.local.get(['studentEmail', 'studentName']);
-      if (stored.studentEmail) {
-        // Show main view with auto-detected info
-        showMainView({
-          studentName: stored.studentName || 'Auto-detected Student',
-          studentEmail: stored.studentEmail,
-          classId: config.classId || 'default-class',
-          deviceId: config.deviceId || 'Registering...',
-        });
-      } else {
-        // Need to register
-        showSetupView();
-      }
-    }
+    // ALWAYS show main view with auto-detected info (no manual registration)
+    showMainView(config);
   });
-  
-  // Setup form submission
-  document.getElementById('setup-submit').addEventListener('click', handleSetup);
   
   // Load and display messages
   loadMessages();
@@ -43,11 +24,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 });
-
-function showSetupView() {
-  document.getElementById('setup-view').classList.remove('hidden');
-  document.getElementById('main-view').classList.add('hidden');
-}
 
 function showMainView(config) {
   document.getElementById('setup-view').classList.add('hidden');
@@ -73,44 +49,6 @@ function showMainView(config) {
   
   // Update status every 5 seconds
   setInterval(updateStatus, 5000);
-}
-
-async function handleSetup() {
-  const deviceId = document.getElementById('device-id').value.trim();
-  const deviceNumber = document.getElementById('chromebook-number').value.trim();
-  const classroomLocation = document.getElementById('classroom-location').value.trim();
-  
-  if (!deviceId || !deviceNumber || !classroomLocation) {
-    alert('Please fill in all fields');
-    return;
-  }
-  
-  // Create device name from device number and classroom location
-  const deviceName = `${deviceNumber} - ${classroomLocation}`;
-  
-  const button = document.getElementById('setup-submit');
-  button.disabled = true;
-  button.textContent = 'Registering...';
-  
-  // Send registration to background
-  chrome.runtime.sendMessage({
-    type: 'register',
-    deviceId,
-    deviceName,
-    classId: classroomLocation, // Use classroom location as classId for now
-  }, (response) => {
-    if (response.success) {
-      showMainView({
-        studentName: deviceName, // Display device name until teacher assigns student
-        classId: classroomLocation,
-        deviceId: deviceId,
-      });
-    } else {
-      alert('Registration failed: ' + response.error);
-      button.disabled = false;
-      button.textContent = 'Register Chromebook';
-    }
-  });
 }
 
 function updateStatus() {

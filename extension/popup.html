@@ -275,32 +275,7 @@
     <p id="school-name">Loading...</p>
   </div>
   
-  <!-- Setup Form (shown if not registered) -->
-  <div id="setup-view" class="hidden">
-    <div class="setup-form">
-      <h2 style="font-size: 14px; font-weight: 600; margin-bottom: 8px;">Chromebook Registration</h2>
-      <p style="font-size: 12px; color: #64748b; margin-bottom: 16px;">
-        Register this Chromebook for classroom monitoring.
-      </p>
-      <div class="form-group">
-        <label for="device-id">Device ID</label>
-        <input type="text" id="device-id" placeholder="e.g., chromebook-abc123" required>
-      </div>
-      <div class="form-group">
-        <label for="chromebook-number">Device Number</label>
-        <input type="text" id="chromebook-number" placeholder="e.g., CB-23 or 45" required>
-      </div>
-      <div class="form-group">
-        <label for="classroom-location">Classroom Location</label>
-        <input type="text" id="classroom-location" placeholder="e.g., Room 201 or Period 3" required>
-      </div>
-      <button class="share-button" id="setup-submit">
-        Register Chromebook
-      </button>
-    </div>
-  </div>
-  
-  <!-- Main View (shown after registration) -->
+  <!-- Main View (email-first, no manual registration) -->
   <div id="main-view" class="hidden">
     <div class="banner">
       <svg class="banner-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">

@@ -40,16 +40,32 @@ export type Device = typeof devices.$inferSelect;
 // Students assigned to devices (multiple students can share one device)
 export const students = pgTable("students", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  deviceId: text("device_id").notNull(), // FK to devices table
+  deviceId: text("device_id"), // FK to devices table - nullable to support email-first approach
   studentName: text("student_name").notNull(),
   studentEmail: text("student_email"), // Google Workspace email for auto-detection
   gradeLevel: text("grade_level"),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  schoolId: text("school_id").notNull(), // Existing field in database
+  emailLc: text("email_lc"), // Existing field - lowercase email for case-insensitive lookups
+  studentStatus: text("student_status").notNull(), // Existing field in database
 });
 
 export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
+
+// Student-Device join table - Tracks which students use which devices (email-first multi-device support)
+export const studentDevices = pgTable("student_devices", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  studentId: text("student_id").notNull(), // FK to students table
+  deviceId: text("device_id").notNull(), // FK to devices table
+  firstSeenAt: timestamp("first_seen_at").notNull().default(sql`now()`),
+  lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
+});
+
+export const insertStudentDeviceSchema = createInsertSchema(studentDevices).omit({ id: true, firstSeenAt: true, lastSeenAt: true });
+export type InsertStudentDevice = z.infer<typeof insertStudentDeviceSchema>;
+export type StudentDevice = typeof studentDevices.$inferSelect;
 
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
@@ -119,12 +135,15 @@ export interface AggregatedStudentStatus {
 }
 
 // Heartbeat data
+// PHASE 3: Email-first identity - studentEmail is now the primary identifier
 export const heartbeats = pgTable("heartbeats", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(),
-  studentId: text("student_id"), // Nullable - which student is currently active
+  studentId: text("student_id"), // LEGACY - kept for backward compatibility, will be removed after migration
+  studentEmail: text("student_email"), // NEW: Primary student identifier (email-first)
+  schoolId: text("school_id"), // NEW: Multi-tenant support
   activeTabTitle: text("active_tab_title").notNull(),
-  activeTabUrl: text("active_tab_url").notNull(),
+  activeTabUrl: text("active_tab_url"),  // Now nullable to skip chrome-internal URLs
   favicon: text("favicon"),
   screenLocked: boolean("screen_locked").default(false),
   flightPathActive: boolean("flight_path_active").default(false), // True if flight path is active (vs single-domain lock)
@@ -136,8 +155,11 @@ export const heartbeats = pgTable("heartbeats", {
   // Indexes for performance with 30-day retention
   timestampIdx: index("heartbeats_timestamp_idx").on(table.timestamp),
   studentIdIdx: index("heartbeats_student_id_idx").on(table.studentId),
+  studentEmailIdx: index("heartbeats_student_email_idx").on(table.studentEmail), // NEW: Email-based lookup
   deviceIdIdx: index("heartbeats_device_id_idx").on(table.deviceId),
   studentTimestampIdx: index("heartbeats_student_timestamp_idx").on(table.studentId, table.timestamp),
+  emailTimestampIdx: index("heartbeats_email_timestamp_idx").on(table.studentEmail, table.timestamp), // NEW: Email+time lookup
+  schoolEmailIdx: index("heartbeats_school_email_idx").on(table.schoolId, table.studentEmail), // NEW: Multi-tenant email lookup
 }));
 
 export const insertHeartbeatSchema = createInsertSchema(heartbeats).omit({ id: true, timestamp: true });

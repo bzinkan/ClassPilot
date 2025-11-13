@@ -1,0 +1,293 @@
+I walked through the extension code in your zip. Short version: it’s very device-ID–centric right now and only uses email as a nice-to-have. Here’s what it’s doing and how I’d tweak it to become:
+
+Email = student identity
+Multi-device aware = many devices per email, but 1 student tile
+
+What the current extension is doing
+Identity right now
+
+In service-worker.js:
+
+On startup it does:
+
+let stored = await kv.get(['studentId', 'classId', 'deviceId', 'studentEmail', 'teacherId']);
+
+if (!stored.studentId) {
+  stored.studentId = 'student-' + crypto.randomUUID().slice(0, 8);
+}
+if (!stored.deviceId) {
+  stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 8);
+}
+if (!stored.classId) {
+  stored.classId = 'default-class';
+}
+
+// Try to detect student email (optional)
+if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
+  const profile = await new Promise(resolve =>
+    chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+  );
+  if (profile?.email) stored.studentEmail = profile.email;
+}
+
+await kv.set(stored);
+
+CONFIG.deviceId     = stored.deviceId;
+CONFIG.studentName  = stored.studentEmail || stored.studentId;
+CONFIG.studentEmail = stored.studentEmail;
+CONFIG.classId      = stored.classId;
+
+
+Heartbeats only send:
+
+const heartbeatData = {
+  deviceId: CONFIG.deviceId,
+  activeTabTitle: activeTab.title || 'No title',
+  activeTabUrl: activeTab.url || 'No URL',
+  ...
+};
+// optionally heartbeatData.studentId = CONFIG.activeStudentId;
+
+
+WebSocket auth also only sends deviceId:
+
+ws.send(JSON.stringify({
+  type: 'auth',
+  role: 'student',
+  deviceId: CONFIG.deviceId,
+}));
+
+
+So your backend is essentially “device-based”, with email being a side attribute.
+
+Popup / registration
+
+popup.js makes the student / IT type in a device ID + location:
+
+async function handleSetup() {
+  const deviceId = document.getElementById('device-id').value.trim();
+  const deviceNumber = document.getElementById('device-number').value.trim();
+  const classroomLocation = document.getElementById('classroom-location').value.trim();
+  const deviceName = `${deviceNumber} - ${classroomLocation}`;
+
+  chrome.runtime.sendMessage({
+    type: 'register',
+    deviceId,
+    deviceName,
+    classId: classroomLocation,
+  }, ...);
+}
+
+
+That’s exactly the thing you want to get rid of.
+
+Goal: email-first, multi-device-aware
+Conceptual changes
+
+Primary identity = normalized email
+
+Internally: CONFIG.studentEmail is required, not optional.
+
+Server: all status rows keyed by student_email, not deviceId.
+
+Device IDs are purely internal
+
+Extension still generates a deviceId for multi-device handling and debugging.
+
+Server uses deviceId only to know which device the heartbeat came from.
+
+Teacher never sees or manages device IDs.
+
+No manual registration in popup
+
+On managed Chromebooks, the extension auto-registers using the signed-in profile email.
+
+Popup just shows “Monitoring active for <email>” and maybe the current class.
+
+Concrete changes I’d make
+1. Normalize and require email at startup
+
+Add a helper:
+
+function normalizeEmail(raw) {
+  if (!raw) return null;
+  const [local, domain] = raw.trim().toLowerCase().split('@');
+  const baseLocal = local.split('+')[0]; // strip +tags
+  return `${baseLocal}@${domain}`;
+}
+
+
+Update your registration logic in service-worker.js:
+
+let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId']);
+
+// Get student email from Chrome profile (managed devices)
+if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
+  try {
+    const profile = await new Promise(resolve =>
+      chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+    );
+    if (profile?.email) {
+      stored.studentEmail = normalizeEmail(profile.email);
+    }
+  } catch (err) {
+    console.log('[Service Worker] Could not get profile info:', err);
+  }
+}
+
+// If we still have no email, this is probably a dev machine.
+// You can either:
+//  - bail out and not register, or
+//  - fallback to a stored test email.
+if (!stored.studentEmail) {
+  console.warn('[Service Worker] No studentEmail detected – running in dev mode');
+  // stored.studentEmail = 'dev-student@example.com'; // optional for testing
+}
+
+// Always create a deviceId internally, but never expose it to teachers
+if (!stored.deviceId) {
+  stored.deviceId = 'dev-' + crypto.randomUUID().slice(0, 8);
+}
+
+await kv.set(stored);
+
+CONFIG.studentEmail = stored.studentEmail;
+CONFIG.studentName  = stored.studentEmail?.split('@')[0] || stored.studentEmail;
+CONFIG.deviceId     = stored.deviceId;
+CONFIG.schoolId     = stored.schoolId || 'default-school';
+
+
+You can drop studentId entirely if you don’t need multi-student on one device.
+
+2. Include email in every heartbeat & event
+
+Change your heartbeat data:
+
+const heartbeatData = {
+  email: CONFIG.studentEmail,        // 🟢 use this as primary key on server
+  deviceId: CONFIG.deviceId,         // internal per-device tracking
+  schoolId: CONFIG.schoolId,         // if you support multi-school
+  activeTabTitle: activeTab.title || 'No title',
+  activeTabUrl: activeTab.url || 'No URL',
+  favicon: activeTab.favIconUrl || null,
+  screenLocked,
+  flightPathActive: screenLocked && allowedDomains.length > 0,
+  activeFlightPathName,
+  isSharing: false,
+  cameraActive,
+};
+
+
+Also, for URL tracking sanity, skip chrome-internal stuff:
+
+if (!activeTab.url || !activeTab.url.startsWith('http')) {
+  heartbeatData.activeTabUrl = null;
+}
+
+
+Then your backend can do:
+
+student_online_state grouped by email
+
+devices table keyed by device_id with email foreign key.
+
+3. WebSocket auth: send email too
+
+Change connectWebSocket():
+
+ws.send(JSON.stringify({
+  type: 'auth',
+  role: 'student',
+  email: CONFIG.studentEmail,
+  deviceId: CONFIG.deviceId,
+}));
+
+
+On the server, when a WS connects:
+
+Look up student by email.
+
+Attach that email to the connection.
+
+When you push commands, you fan-out per device but group per email in your dashboard.
+
+4. Kill manual “device registration” from popup
+
+Since the school forces sign-in with school email, you don’t need the device-id, device-number, classroom-location fields on the Chromebook.
+
+Simplest path:
+
+In popup.html, hide the setup form for production.
+
+In popup.js, skip showSetupView() entirely and just show the main view with auto-detected email.
+
+For example:
+
+document.addEventListener('DOMContentLoaded', async () => {
+  chrome.runtime.sendMessage({ type: 'get-config' }, (response) => {
+    const config = response.config;
+    currentConfig = config;
+    showMainView(config);
+  });
+
+  // You can keep handleSetup only for dev if you want,
+  // but it shouldn’t run in production.
+});
+
+
+Update the UI:
+
+function showMainView(config) {
+  document.getElementById('setup-view').classList.add('hidden');
+  document.getElementById('main-view').classList.remove('hidden');
+
+  document.getElementById('school-name').textContent = config.schoolId || 'School';
+  document.getElementById('student-name-display').textContent =
+    config.studentEmail || '-';
+  document.getElementById('detected-student-email').textContent =
+    config.studentEmail || 'No email detected';
+}
+
+
+No more “Register Chromebook” step, no more device IDs exposed.
+
+5. Multi-device behavior (server-side)
+
+With the above changes, each extension instance sends:
+
+{
+  "email": "student@school.org",
+  "deviceId": "dev-abc12345",
+  "activeTabUrl": "...",
+  ...
+}
+
+
+Your backend logic to compute “online” can be:
+
+student_online = EXISTS device where email = ? AND last_heartbeat > now() - 45s
+
+devices_online_count = COUNT(devices where email = ? AND last_heartbeat > …)
+
+Teacher tile for the student email can show:
+
+Online / Offline
+
+“2 devices active” if relevant (nice but optional).
+
+The important part: no teacher ever has to care about deviceId; it’s just your plumbing.
+
+6. Optional small polish
+
+A few quick wins I noticed:
+
+Ignore chrome-internal URLs when logging events (chrome://, chrome-extension://) so your dashboard doesn’t fill up with junk.
+
+Send schoolId with every heartbeat so your backend can stay multi-tenant easily.
+
+Consider bailing if there’s no email and you’re not in dev mode, to avoid ghost devices:
+
+if (!CONFIG.studentEmail && !IS_DEV) {
+  console.warn('No email; skipping heartbeat');
+  return;
+}
