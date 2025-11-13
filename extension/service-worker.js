@@ -1558,8 +1558,9 @@ function connectWebSocket() {
         ws.send(JSON.stringify({
           type: 'auth',
           role: 'student',
-          email: CONFIG.studentEmail,    // 🟢 Primary identity
-          deviceId: CONFIG.deviceId,      // Internal tracking
+          studentEmail: CONFIG.studentEmail,  // 🟢 Primary identity (FIXED: was 'email')
+          deviceId: CONFIG.deviceId,          // Internal tracking
+          schoolId: CONFIG.schoolId,          // Multi-tenant support
         }));
         console.log('WebSocket auth sent for:', CONFIG.studentEmail);
       } else {
