@@ -1531,7 +1531,7 @@ export default function Dashboard() {
             <Tabs value={closeTabsMode} onValueChange={(v) => setCloseTabsMode(v as "all" | "pattern")}>
               <TabsList className="grid w-full grid-cols-2">
                 <TabsTrigger value="all" data-testid="tab-close-all">Close All Tabs</TabsTrigger>
-                <TabsTrigger value="pattern" data-testid="tab-close-pattern">Close by Pattern</TabsTrigger>
+                <TabsTrigger value="pattern" data-testid="tab-close-pattern">Close by Tab</TabsTrigger>
               </TabsList>
               <TabsContent value="all" className="space-y-2">
                 <p className="text-sm text-muted-foreground">
