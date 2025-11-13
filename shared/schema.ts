@@ -70,6 +70,26 @@ export const insertStudentDeviceSchema = createInsertSchema(studentDevices).omit
 export type InsertStudentDevice = z.infer<typeof insertStudentDeviceSchema>;
 export type StudentDevice = typeof studentDevices.$inferSelect;
 
+// Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
+// Tracks "Student X is on Device Y RIGHT NOW"
+// Enables: device switching, shared Chromebooks, cart classrooms
+export const studentSessions = pgTable("student_sessions", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  studentId: text("student_id").notNull(), // FK to students table
+  deviceId: text("device_id").notNull(), // FK to devices table
+  startedAt: timestamp("started_at").notNull().default(sql`now()`),
+  lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
+  endedAt: timestamp("ended_at"), // Nullable - null means session still active
+  isActive: boolean("is_active").notNull().default(true),
+}, (table) => ({
+  // Index for fast "find active session for student" queries
+  studentActiveIdx: index("student_sessions_student_active_idx").on(table.studentId, table.isActive),
+}));
+
+export const insertStudentSessionSchema = createInsertSchema(studentSessions).omit({ id: true, startedAt: true, lastSeenAt: true });
+export type InsertStudentSession = z.infer<typeof insertStudentSessionSchema>;
+export type StudentSession = typeof studentSessions.$inferSelect;
+
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
   studentId: string;
