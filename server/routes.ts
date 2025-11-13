@@ -57,33 +57,51 @@ async function ensureStudentDeviceAssociation(
   studentEmail: string,
   schoolId: string
 ): Promise<any> {
+  console.log('📍 [ensureStudentDeviceAssociation] START:', { deviceId, studentEmail, schoolId });
+  
   // Normalize email for consistent lookups
   const normalizedEmail = normalizeEmail(studentEmail);
+  console.log('📍 [ensureStudentDeviceAssociation] Normalized email:', normalizedEmail);
   
   // DEVICE-FIRST: Look up student by email (email = student identity, device = stable ID)
   let student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+  console.log('📍 [ensureStudentDeviceAssociation] Student lookup result:', student ? `Found: ${student.id}` : 'Not found');
   
   if (student) {
     // Found existing student (from CSV import or previous auto-provision)
     console.log('Session-based: Found student', student.studentEmail, 'for device', deviceId);
+    console.log('📍 [ensureStudentDeviceAssociation] Current student deviceId:', student.deviceId);
     
     // Update student's current deviceId if changed (tracks most recent device)
     if (student.deviceId !== deviceId) {
+      console.log('📍 [ensureStudentDeviceAssociation] Updating deviceId:', student.deviceId, '→', deviceId);
       await storage.updateStudent(student.id, { deviceId });
       console.log('Session-based: Updated student device', student.id, ':', student.deviceId, '→', deviceId);
+    } else {
+      console.log('📍 [ensureStudentDeviceAssociation] DeviceId unchanged, skipping update');
     }
     
     // Track historical student-device relationship
+    console.log('📍 [ensureStudentDeviceAssociation] Upserting student-device relationship');
     await storage.upsertStudentDevice(student.id, deviceId);
     
     // Start or update session (automatically handles device switches and evictions)
+    console.log('📍 [ensureStudentDeviceAssociation] Starting student session');
     const session = await storage.startStudentSession(student.id, deviceId);
     console.log('Session-based: Started/updated session', session.id, 'for student', student.id, 'on device', deviceId);
+    console.log('📍 [ensureStudentDeviceAssociation] Session created:', {
+      sessionId: session.id,
+      studentId: session.studentId,
+      deviceId: session.deviceId,
+      isActive: session.isActive,
+      startedAt: session.startedAt
+    });
     
     return student;
   } else {
     // Student not found - auto-provision placeholder record
     console.log('Session-based: Auto-provisioning student for email', normalizedEmail);
+    console.log('📍 [ensureStudentDeviceAssociation] Creating new student record');
     
     const newStudent = await storage.createStudent({
       deviceId,
@@ -93,13 +111,22 @@ async function ensureStudentDeviceAssociation(
       schoolId,
       studentStatus: 'active',
     });
+    console.log('📍 [ensureStudentDeviceAssociation] New student created:', newStudent.id);
     
     // Track historical student-device relationship
+    console.log('📍 [ensureStudentDeviceAssociation] Upserting student-device relationship for new student');
     await storage.upsertStudentDevice(newStudent.id, deviceId);
     
     // Start session for new student
+    console.log('📍 [ensureStudentDeviceAssociation] Starting session for new student');
     const session = await storage.startStudentSession(newStudent.id, deviceId);
     console.log('Session-based: Auto-provisioned student', newStudent.id, 'and started session', session.id);
+    console.log('📍 [ensureStudentDeviceAssociation] New student session created:', {
+      sessionId: session.id,
+      studentId: session.studentId,
+      deviceId: session.deviceId,
+      isActive: session.isActive
+    });
     
     return newStudent;
   }
@@ -537,7 +564,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // Get active session
-      const sessions = await storage.getActiveSessionsByStudent(student.id);
+      const activeSession = await storage.findActiveStudentSession(student.id);
       
       // Get recent heartbeats
       const allHeartbeats = await storage.getAllHeartbeats();
@@ -555,7 +582,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           deviceId: student.deviceId,
           gradeLevel: student.gradeLevel,
         },
-        activeSessions: sessions,
+        activeSession: activeSession ? {
+          id: activeSession.id,
+          deviceId: activeSession.deviceId,
+          isActive: activeSession.isActive,
+          lastSeenAt: activeSession.lastSeenAt,
+          startedAt: activeSession.startedAt,
+        } : null,
         recentHeartbeats: recentHeartbeats.map(hb => ({
           deviceId: hb.deviceId,
           timestamp: hb.timestamp,
@@ -1155,12 +1188,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // EMAIL-FIRST AUTO-PROVISIONING: If heartbeat has email+schoolId, ensure student exists
       if (data.studentEmail && data.schoolId) {
+        console.log('🔄 [HEARTBEAT] Starting ensureStudentDeviceAssociation for:', {
+          deviceId: data.deviceId,
+          email: data.studentEmail,
+          schoolId: data.schoolId
+        });
         try {
-          await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
+          const result = await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
+          console.log('✅ [HEARTBEAT] ensureStudentDeviceAssociation completed:', {
+            studentId: result.id,
+            deviceId: result.deviceId,
+            email: result.studentEmail
+          });
         } catch (error) {
-          console.error('Email-first provisioning error in heartbeat:', error);
+          console.error('❌ [HEARTBEAT] Email-first provisioning ERROR:', error);
+          console.error('❌ [HEARTBEAT] Stack:', error instanceof Error ? error.stack : 'No stack');
           // Continue to store heartbeat even if provisioning fails
         }
+      } else {
+        console.warn('⚠️ [HEARTBEAT] Missing email or schoolId:', {
+          hasEmail: !!data.studentEmail,
+          hasSchoolId: !!data.schoolId,
+          deviceId: data.deviceId
+        });
       }
       
       // Store heartbeat asynchronously - don't block the response
