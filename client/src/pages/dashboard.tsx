@@ -800,8 +800,14 @@ export default function Dashboard() {
       return;
     }
     
+    // Normalize URL - add https:// if no protocol specified
+    let normalizedUrl = openTabUrl.trim();
+    if (!normalizedUrl.match(/^https?:\/\//i)) {
+      normalizedUrl = 'https://' + normalizedUrl;
+    }
+    
     const targetDeviceIds = getTargetDeviceIds();
-    openTabMutation.mutate({ url: openTabUrl, targetDeviceIds });
+    openTabMutation.mutate({ url: normalizedUrl, targetDeviceIds });
   };
 
   const handleCloseTabs = () => {
