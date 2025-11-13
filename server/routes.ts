@@ -49,6 +49,74 @@ function normalizeGradeLevel(grade: string | null | undefined): string | null {
   return normalized;
 }
 
+// EMAIL-FIRST: Helper to ensure student-device association exists
+// Used by both heartbeat endpoint and WebSocket auth handler
+async function ensureStudentDeviceAssociation(
+  deviceId: string,
+  studentEmail: string,
+  schoolId: string
+): Promise<any> {
+  // Normalize email for consistent lookups
+  const normalizedEmail = normalizeEmail(studentEmail);
+  
+  // Check if there's already an active student for this device
+  const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+  
+  // Normalize active student's email for comparison (handles mixed-case records)
+  const activeStudentEmail = activeStudent?.studentEmail 
+    ? normalizeEmail(activeStudent.studentEmail) 
+    : null;
+  
+  // Provision if no active student OR different student email (re-login scenario)
+  if (!activeStudent || activeStudentEmail !== normalizedEmail) {
+    // Look up by email
+    const existingStudent = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+    
+    if (existingStudent) {
+      // Found existing student (from CSV import) - associate with this device
+      console.log('Email-first: Associating existing student', existingStudent.studentEmail, 'with device', deviceId);
+      
+      // Update student's deviceId if different
+      if (existingStudent.deviceId !== deviceId) {
+        await storage.updateStudent(existingStudent.id, { deviceId });
+      }
+      
+      // Track student-device relationship
+      await storage.upsertStudentDevice(existingStudent.id, deviceId);
+      
+      // Set as active student for this device
+      await storage.setActiveStudentForDevice(deviceId, existingStudent.id);
+      console.log('Email-first: Set active student for device:', deviceId, '→', existingStudent.id);
+      
+      return existingStudent;
+    } else {
+      // Student not found - auto-provision placeholder record
+      console.log('Email-first: Auto-provisioning student for email', normalizedEmail);
+      
+      const newStudent = await storage.createStudent({
+        deviceId,
+        studentName: normalizedEmail.split('@')[0], // Use email prefix as placeholder
+        studentEmail: normalizedEmail,
+        gradeLevel: null,
+        schoolId,
+        studentStatus: 'active',
+      });
+      
+      // Track student-device relationship
+      await storage.upsertStudentDevice(newStudent.id, deviceId);
+      
+      // Set as active student for this device
+      await storage.setActiveStudentForDevice(deviceId, newStudent.id);
+      console.log('Email-first: Auto-provisioned student', newStudent.id, 'for email', normalizedEmail);
+      
+      return newStudent;
+    }
+  }
+  
+  // Active student already matches - no change needed
+  return activeStudent;
+}
+
 // Rate limiters
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
@@ -229,6 +297,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
             client.role = 'student';
             client.deviceId = message.deviceId;
             client.authenticated = true;
+            
+            // EMAIL-FIRST AUTO-PROVISIONING: If auth has email+schoolId, ensure student exists
+            if (message.studentEmail && message.schoolId) {
+              try {
+                await ensureStudentDeviceAssociation(message.deviceId, message.studentEmail, message.schoolId);
+              } catch (error) {
+                console.error('[WebSocket] Email-first provisioning error:', error);
+                // Continue with auth even if provisioning fails
+              }
+            }
             
             // Get school settings and send maxTabsPerStudent to extension
             try {
@@ -1007,7 +1085,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const data = result.data;
-      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, url: data.activeTabUrl?.substring(0, 50) });
+      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50) });
       
       // Check if tracking hours are enforced (timezone-aware)
       const settings = await storage.getSettings();
@@ -1021,6 +1099,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log('Heartbeat rejected - outside school tracking hours/days');
         // Return 204 to prevent extension from retrying, but don't store heartbeat
         return res.sendStatus(204);
+      }
+      
+      // EMAIL-FIRST AUTO-PROVISIONING: If heartbeat has email+schoolId, ensure student exists
+      if (data.studentEmail && data.schoolId) {
+        try {
+          await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
+        } catch (error) {
+          console.error('Email-first provisioning error in heartbeat:', error);
+          // Continue to store heartbeat even if provisioning fails
+        }
       }
       
       // Store heartbeat asynchronously - don't block the response
