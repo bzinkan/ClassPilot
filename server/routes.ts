@@ -49,7 +49,8 @@ function normalizeGradeLevel(grade: string | null | undefined): string | null {
   return normalized;
 }
 
-// EMAIL-FIRST: Helper to ensure student-device association exists
+// SESSION-BASED: Helper to ensure student-device association exists
+// INDUSTRY STANDARD: Device identity (primary) → Email (student identity) → Sessions (active tracking)
 // Used by both heartbeat endpoint and WebSocket auth handler
 async function ensureStudentDeviceAssociation(
   deviceId: string,
@@ -59,62 +60,49 @@ async function ensureStudentDeviceAssociation(
   // Normalize email for consistent lookups
   const normalizedEmail = normalizeEmail(studentEmail);
   
-  // Check if there's already an active student for this device
-  const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+  // DEVICE-FIRST: Look up student by email (email = student identity, device = stable ID)
+  let student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
   
-  // Normalize active student's email for comparison (handles mixed-case records)
-  const activeStudentEmail = activeStudent?.studentEmail 
-    ? normalizeEmail(activeStudent.studentEmail) 
-    : null;
-  
-  // Provision if no active student OR different student email (re-login scenario)
-  if (!activeStudent || activeStudentEmail !== normalizedEmail) {
-    // Look up by email
-    const existingStudent = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+  if (student) {
+    // Found existing student (from CSV import or previous auto-provision)
+    console.log('Session-based: Found student', student.studentEmail, 'for device', deviceId);
     
-    if (existingStudent) {
-      // Found existing student (from CSV import) - associate with this device
-      console.log('Email-first: Associating existing student', existingStudent.studentEmail, 'with device', deviceId);
-      
-      // Update student's deviceId if different
-      if (existingStudent.deviceId !== deviceId) {
-        await storage.updateStudent(existingStudent.id, { deviceId });
-      }
-      
-      // Track student-device relationship
-      await storage.upsertStudentDevice(existingStudent.id, deviceId);
-      
-      // Set as active student for this device
-      await storage.setActiveStudentForDevice(deviceId, existingStudent.id);
-      console.log('Email-first: Set active student for device:', deviceId, '→', existingStudent.id);
-      
-      return existingStudent;
-    } else {
-      // Student not found - auto-provision placeholder record
-      console.log('Email-first: Auto-provisioning student for email', normalizedEmail);
-      
-      const newStudent = await storage.createStudent({
-        deviceId,
-        studentName: normalizedEmail.split('@')[0], // Use email prefix as placeholder
-        studentEmail: normalizedEmail,
-        gradeLevel: null,
-        schoolId,
-        studentStatus: 'active',
-      });
-      
-      // Track student-device relationship
-      await storage.upsertStudentDevice(newStudent.id, deviceId);
-      
-      // Set as active student for this device
-      await storage.setActiveStudentForDevice(deviceId, newStudent.id);
-      console.log('Email-first: Auto-provisioned student', newStudent.id, 'for email', normalizedEmail);
-      
-      return newStudent;
+    // Update student's current deviceId if changed (tracks most recent device)
+    if (student.deviceId !== deviceId) {
+      await storage.updateStudent(student.id, { deviceId });
+      console.log('Session-based: Updated student device', student.id, ':', student.deviceId, '→', deviceId);
     }
+    
+    // Track historical student-device relationship
+    await storage.upsertStudentDevice(student.id, deviceId);
+    
+    // Start or update session (automatically handles device switches and evictions)
+    const session = await storage.startStudentSession(student.id, deviceId);
+    console.log('Session-based: Started/updated session', session.id, 'for student', student.id, 'on device', deviceId);
+    
+    return student;
+  } else {
+    // Student not found - auto-provision placeholder record
+    console.log('Session-based: Auto-provisioning student for email', normalizedEmail);
+    
+    const newStudent = await storage.createStudent({
+      deviceId,
+      studentName: normalizedEmail.split('@')[0], // Use email prefix as placeholder
+      studentEmail: normalizedEmail,
+      gradeLevel: null,
+      schoolId,
+      studentStatus: 'active',
+    });
+    
+    // Track historical student-device relationship
+    await storage.upsertStudentDevice(newStudent.id, deviceId);
+    
+    // Start session for new student
+    const session = await storage.startStudentSession(newStudent.id, deviceId);
+    console.log('Session-based: Auto-provisioned student', newStudent.id, 'and started session', session.id);
+    
+    return newStudent;
   }
-  
-  // Active student already matches - no change needed
-  return activeStudent;
 }
 
 // Rate limiters
@@ -3093,17 +3081,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Data cleanup cron (run periodically)
+  // Session expiration job (runs frequently for real-time accuracy)
   setInterval(async () => {
     try {
+      // Expire stale student sessions (not seen in 90 seconds)
+      const expiredSessions = await storage.expireStaleStudentSessions(90);
+      if (expiredSessions > 0) {
+        console.log(`[Session Cleanup] Expired ${expiredSessions} stale student sessions`);
+        // Notify teachers to update UI after session expiration
+        broadcastToTeachers({
+          type: 'student-update',
+        });
+      }
+    } catch (error) {
+      console.error("[Session Cleanup] Error:", error);
+    }
+  }, 60 * 1000); // Run every minute for real-time monitoring
+  
+  // Data cleanup cron (run periodically for old data)
+  setInterval(async () => {
+    try {
+      // Clean up old heartbeats based on retention settings
       const settings = await storage.getSettings();
       const retentionHours = parseInt(settings?.retentionHours || "24");
       const deleted = await storage.cleanupOldHeartbeats(retentionHours);
       if (deleted > 0) {
-        console.log(`Cleaned up ${deleted} old heartbeats`);
+        console.log(`[Data Cleanup] Cleaned up ${deleted} old heartbeats`);
       }
     } catch (error) {
-      console.error("Cleanup error:", error);
+      console.error("[Data Cleanup] Error:", error);
     }
   }, 60 * 60 * 1000); // Run every hour
 
