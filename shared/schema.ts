@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -61,7 +61,10 @@ export const studentDevices = pgTable("student_devices", {
   deviceId: text("device_id").notNull(), // FK to devices table
   firstSeenAt: timestamp("first_seen_at").notNull().default(sql`now()`),
   lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
-});
+}, (table) => ({
+  // Unique constraint required for upsertStudentDevice ON CONFLICT
+  uniqueStudentDevice: unique().on(table.studentId, table.deviceId),
+}));
 
 export const insertStudentDeviceSchema = createInsertSchema(studentDevices).omit({ id: true, firstSeenAt: true, lastSeenAt: true });
 export type InsertStudentDevice = z.infer<typeof insertStudentDeviceSchema>;
