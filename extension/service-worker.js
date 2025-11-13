@@ -618,6 +618,22 @@ async function sendHeartbeat() {
     }
     // If tabs.length === 0, keep empty strings
     
+    // Collect ALL open tabs for teacher dashboard
+    let allOpenTabs = [];
+    try {
+      const allTabs = await chrome.tabs.query({});
+      allOpenTabs = allTabs
+        .filter(tab => tab.url && tab.url.startsWith('http')) // Only HTTP(S), skip chrome://
+        .slice(0, 20) // Limit to 20 tabs
+        .map(tab => ({
+          url: (tab.url || '').substring(0, 512), // Truncate to 512 chars
+          title: (tab.title || 'Untitled').substring(0, 512), // Truncate to 512 chars
+        }));
+    } catch (error) {
+      console.warn('Failed to collect all tabs:', error);
+      // Continue with empty array
+    }
+    
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
@@ -627,6 +643,7 @@ async function sendHeartbeat() {
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
       favicon: favicon,
+      allOpenTabs: allOpenTabs,             // 🆕 ALL tabs (in-memory only, not persisted)
       screenLocked: screenLocked,
       flightPathActive: screenLocked && allowedDomains.length > 0,
       activeFlightPathName: activeFlightPathName,
