@@ -527,12 +527,14 @@ export class MemStorage implements IStorage {
       session.endedAt = new Date();
       this.sessions.set(sessionId, session);
       
-      // Sync in-memory status map to mark student offline
-      const statusKey = makeStatusKey(session.studentId, session.deviceId);
-      const status = this.studentStatuses.get(statusKey);
-      if (status) {
-        status.lastSeenAt = 0; // Force status to 'offline'
-        this.studentStatuses.set(statusKey, status);
+      // Sync in-memory status map to mark student offline (defensive guard for null deviceId)
+      if (session.deviceId) {
+        const statusKey = makeStatusKey(session.studentId, session.deviceId);
+        const status = this.studentStatuses.get(statusKey);
+        if (status) {
+          status.lastSeenAt = 0; // Force status to 'offline'
+          this.studentStatuses.set(statusKey, status);
+        }
       }
     }
   }
@@ -557,12 +559,14 @@ export class MemStorage implements IStorage {
         this.sessions.set(session.id, session);
         expiredCount++;
         
-        // Sync in-memory status map to mark student offline
-        const statusKey = makeStatusKey(session.studentId, session.deviceId);
-        const status = this.studentStatuses.get(statusKey);
-        if (status) {
-          status.lastSeenAt = 0; // Force status to 'offline'
-          this.studentStatuses.set(statusKey, status);
+        // Sync in-memory status map to mark student offline (defensive guard for null deviceId)
+        if (session.deviceId) {
+          const statusKey = makeStatusKey(session.studentId, session.deviceId);
+          const status = this.studentStatuses.get(statusKey);
+          if (status) {
+            status.lastSeenAt = 0; // Force status to 'offline'
+            this.studentStatuses.set(statusKey, status);
+          }
         }
       }
     }
@@ -1630,8 +1634,8 @@ export class DatabaseStorage implements IStorage {
       .set({ isActive: false, endedAt: drizzleSql`now()` })
       .where(eq(studentSessions.id, sessionId));
     
-    // Sync in-memory status map to mark student offline
-    if (session) {
+    // Sync in-memory status map to mark student offline (defensive guard for null deviceId)
+    if (session && session.deviceId) {
       const statusKey = makeStatusKey(session.studentId, session.deviceId);
       const status = this.studentStatuses.get(statusKey);
       if (status) {
@@ -1662,12 +1666,15 @@ export class DatabaseStorage implements IStorage {
     
     // Also update in-memory status map to mark expired students as offline
     // CRITICAL: Use composite key makeStatusKey(studentId, deviceId) for lookup
+    // Defensive guard: Skip entries with null/undefined deviceId to prevent orphaned status entries
     for (const session of result) {
-      const statusKey = makeStatusKey(session.studentId, session.deviceId);
-      const status = this.studentStatuses.get(statusKey);
-      if (status) {
-        status.lastSeenAt = 0; // Force status to 'offline'
-        this.studentStatuses.set(statusKey, status);
+      if (session.deviceId) {
+        const statusKey = makeStatusKey(session.studentId, session.deviceId);
+        const status = this.studentStatuses.get(statusKey);
+        if (status) {
+          status.lastSeenAt = 0; // Force status to 'offline'
+          this.studentStatuses.set(statusKey, status);
+        }
       }
     }
     
