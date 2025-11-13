@@ -621,7 +621,7 @@ async function sendHeartbeat() {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      email: CONFIG.studentEmail,           // 🟢 Primary identity
+      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity (FIXED: was 'email')
       deviceId: CONFIG.deviceId,            // Internal device tracking
       schoolId: CONFIG.schoolId,            // Multi-tenant support
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
