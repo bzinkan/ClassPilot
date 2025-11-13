@@ -1,17 +1,5 @@
 import type { Heartbeat } from './schema';
 
-/**
- * Normalize email address for consistent storage and lookup.
- * Prevents duplicate students due to case sensitivity (e.g., "Lucy@School.org" vs "lucy@school.org")
- * 
- * @param email - Email address to normalize
- * @returns Trimmed, lowercase email address, or null if input is null/undefined
- */
-export function normalizeEmail(email: string | null | undefined): string | null {
-  if (!email) return null;
-  return email.trim().toLowerCase();
-}
-
 export interface URLSession {
   url: string;
   title: string;

@@ -8,7 +8,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { queryClient, apiRequest } from "@/lib/queryClient";
-import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import { ArrowLeft, Edit, Monitor, Trash2, UserPlus, GraduationCap, Plus, X, Info } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -117,7 +116,8 @@ export default function RosterPage() {
       });
     },
     onSuccess: () => {
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Student assigned",
         description: "Student has been assigned to the device successfully",
@@ -143,7 +143,8 @@ export default function RosterPage() {
       });
     },
     onSuccess: () => {
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Student updated",
         description: "Student information has been updated successfully",
@@ -193,7 +194,8 @@ export default function RosterPage() {
       return apiRequest('DELETE', `/api/students/${studentId}`);
     },
     onSuccess: () => {
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Student removed",
         description: "Student assignment has been removed successfully",
@@ -216,7 +218,8 @@ export default function RosterPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/roster/devices'] });
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ['/api/roster/students'] });
+      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Device deleted",
         description: "Device and all assigned students have been removed successfully",
@@ -590,7 +593,6 @@ export default function RosterPage() {
                                 <TableHeader>
                                   <TableRow>
                                     <TableHead>Student Name</TableHead>
-                                    <TableHead>Email</TableHead>
                                     <TableHead>Grade Level</TableHead>
                                     <TableHead className="text-right">Actions</TableHead>
                                   </TableRow>
@@ -603,9 +605,6 @@ export default function RosterPage() {
                                     >
                                       <TableCell data-testid={`text-student-name-${student.id}`}>
                                         {student.studentName}
-                                      </TableCell>
-                                      <TableCell data-testid={`text-student-email-${student.id}`} className="text-muted-foreground">
-                                        {student.studentEmail || <span className="text-muted-foreground italic">Pending</span>}
                                       </TableCell>
                                       <TableCell data-testid={`text-grade-level-${student.id}`}>
                                         {student.gradeLevel || <span className="text-muted-foreground">-</span>}
@@ -703,16 +702,6 @@ export default function RosterPage() {
                     value={formData.studentName}
                     onChange={(e) => setFormData({ ...formData, studentName: e.target.value })}
                     data-testid="input-edit-student-name"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-student-email">Student Email</Label>
-                  <Input
-                    id="edit-student-email"
-                    value={dialog.student.studentEmail || 'Pending'}
-                    disabled
-                    className="text-muted-foreground"
-                    data-testid="input-edit-student-email"
                   />
                 </div>
                 <div className="space-y-2">

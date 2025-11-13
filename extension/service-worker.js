@@ -1,14 +1,11 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
-// Server URL Configuration
-// Priority: 1. chrome.storage (user setting) 2. window.location (auto-detect) 3. DEFAULT_SERVER_URL
-// For development: Extension auto-detects server from current page URL
-// For production: Set DEFAULT_SERVER_URL to your published domain
-const DEFAULT_SERVER_URL = 'https://62d255e0-27ab-4c9e-9d3c-da535ded49b0-00-3n6xv61n40v9i.riker.replit.dev';
+// Production server URL - can be overridden in extension settings
+const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
 
 let CONFIG = {
-  serverUrl: DEFAULT_SERVER_URL, // Will be overridden by detectServerUrl() during init
+  serverUrl: DEFAULT_SERVER_URL,
   heartbeatInterval: 10000, // 10 seconds
   schoolId: 'default-school',
   deviceId: null,
@@ -45,17 +42,21 @@ async function ensureRegistered() {
       .then(r => r.json())
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
-    // Get or create deviceId (stable across reloads)
-    let stored = await kv.get(['activeStudentId', 'classId', 'deviceId', 'studentEmail']);
+    // Get or create IDs
+    let stored = await kv.get(['studentId', 'classId', 'deviceId', 'studentEmail', 'teacherId']);
     
+    // Generate IDs if missing (don't require teacherId at startup)
+    if (!stored.studentId) {
+      stored.studentId = 'student-' + crypto.randomUUID().slice(0, 8);
+    }
     if (!stored.deviceId) {
-      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 13);
+      stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 8);
     }
     if (!stored.classId) {
       stored.classId = 'default-class';
     }
     
-    // Try to detect student email
+    // Try to detect student email (optional, non-blocking)
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
       try {
         const profile = await new Promise(resolve => 
@@ -63,227 +64,50 @@ async function ensureRegistered() {
         );
         if (profile?.email) {
           stored.studentEmail = profile.email;
-          console.log('Logged-in user Email:', stored.studentEmail);
         }
       } catch (err) {
         console.log('[Service Worker] Could not get profile info:', err);
       }
     }
     
-    // CRITICAL FIX: Call server to get/create canonical student record
-    if (stored.studentEmail) {
-      try {
-        console.log('Auto-registering with server using email:', stored.studentEmail);
-        const response = await fetch(`${DEFAULT_SERVER_URL}/api/register-student`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            deviceId: stored.deviceId,
-            deviceName: null,
-            schoolId: CONFIG.schoolId,
-            classId: stored.classId,
-            studentEmail: stored.studentEmail,
-            studentName: stored.studentEmail.split('@')[0], // Use email prefix as fallback name
-          }),
-        });
-        
-        if (response.ok) {
-          const data = await response.json();
-          console.log('Auto-registered student on startup:', stored.studentEmail, 'studentId:', data.student?.id);
-          
-          // Use the server's canonical student ID
-          stored.activeStudentId = data.student?.id;
-          CONFIG.activeStudentId = data.student?.id;
-          CONFIG.studentName = data.student?.studentName || stored.studentEmail;
-          CONFIG.studentEmail = stored.studentEmail;
-          CONFIG.deviceId = stored.deviceId;
-          CONFIG.classId = stored.classId;
-          
-          // Save server-provided student ID
-          await kv.set({
-            activeStudentId: stored.activeStudentId,
-            deviceId: stored.deviceId,
-            classId: stored.classId,
-            studentEmail: stored.studentEmail,
-          });
-          
-          console.log('[Service Worker] Registration complete:', {
-            activeStudentId: stored.activeStudentId,
-            deviceId: stored.deviceId,
-            classId: stored.classId,
-            hasEmail: true
-          });
-          
-          return stored;
-        }
-      } catch (err) {
-        console.error('[Service Worker] Server registration failed:', err);
-      }
-    }
+    // Save IDs to storage
+    await kv.set(stored);
     
-    // Fallback: No email or server registration failed
-    // Preserve any existing student ID from previous sync
-    await kv.set({
-      activeStudentId: stored.activeStudentId, // Keep existing if present
-      deviceId: stored.deviceId,
-      classId: stored.classId,
-      studentEmail: stored.studentEmail,
-    });
-    
+    // Update CONFIG
     CONFIG.deviceId = stored.deviceId;
+    CONFIG.studentName = stored.studentEmail || stored.studentId;
     CONFIG.studentEmail = stored.studentEmail;
     CONFIG.classId = stored.classId;
-    CONFIG.activeStudentId = stored.activeStudentId; // Preserve existing student ID
     
-    console.log('[Service Worker] Registered device (fallback):', {
+    console.log('[Service Worker] Registration complete:', {
+      studentId: stored.studentId,
       deviceId: stored.deviceId,
-      activeStudentId: stored.activeStudentId || 'none',
+      classId: stored.classId,
       hasEmail: !!stored.studentEmail
     });
     
     return stored;
   } catch (error) {
     console.error('[Service Worker] Registration failed:', error);
+    // Don't throw - extension can still work with defaults
     return {};
   }
 }
 
-// Single shared initialization promise to prevent races
-let initPromise = null;
-
-// Initialize extension once - all entry points use this
-// This is the ONLY function that loads and mutates CONFIG
-async function initializeExtensionOnce() {
-  if (initPromise) {
-    console.log('[Service Worker] Initialization already in progress, waiting...');
-    return initPromise;
-  }
-  
-  initPromise = (async () => {
-    console.log('[Service Worker] Initializing extension...');
-    
-    try {
-      // Step 1: Load config from storage
-      const stored = await chrome.storage.local.get(['config', 'deviceId', 'activeStudentId', 'studentEmail']);
-      
-      if (stored.config) {
-        CONFIG = { ...CONFIG, ...stored.config };
-      }
-      if (stored.deviceId) {
-        CONFIG.deviceId = stored.deviceId;
-      }
-      if (stored.activeStudentId) {
-        CONFIG.activeStudentId = stored.activeStudentId;
-      }
-      if (stored.studentEmail) {
-        CONFIG.studentEmail = stored.studentEmail;
-      }
-      
-      // Ensure serverUrl is set
-      if (!CONFIG.serverUrl) {
-        CONFIG.serverUrl = DEFAULT_SERVER_URL;
-      }
-      
-      console.log('[Service Worker] Config loaded from storage:', { 
-        deviceId: CONFIG.deviceId,
-        activeStudentId: CONFIG.activeStudentId,
-        hasEmail: !!CONFIG.studentEmail
-      });
-      
-      // Step 2: Auto-detect logged-in user (if not already done)
-      if (!CONFIG.studentEmail && chrome.identity?.getProfileUserInfo) {
-        try {
-          const userInfo = await new Promise((resolve, reject) => {
-            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (info) => {
-              if (chrome.runtime.lastError) {
-                reject(chrome.runtime.lastError);
-              } else {
-                resolve(info);
-              }
-            });
-          });
-          
-          if (userInfo?.email) {
-            console.log('[Service Worker] Auto-detected user email:', userInfo.email);
-            CONFIG.studentEmail = userInfo.email;
-            await chrome.storage.local.set({ studentEmail: userInfo.email });
-          }
-        } catch (error) {
-          console.log('[Service Worker] Could not auto-detect email:', error);
-        }
-      }
-      
-      // Step 3: Ensure registration (this may update CONFIG with server's canonical student ID)
-      await ensureRegistered();
-      
-      // Step 4: Start heartbeat if we have a device ID
-      if (CONFIG.deviceId) {
-        startHeartbeat();
-        connectWebSocket();
-      } else {
-        console.warn('[Service Worker] No deviceId - heartbeat not started');
-      }
-      
-      // Step 5: Create alarms
-      chrome.alarms.create('health-check', {
-        periodInMinutes: 1,
-      });
-      chrome.alarms.create('keep-alive', {
-        periodInMinutes: 0.416666667,
-      });
-      
-      console.log('[Service Worker] Extension initialized successfully');
-    } catch (error) {
-      console.error('[Service Worker] Initialization failed:', error);
-      initPromise = null; // Clear promise on error so next call retries
-      throw error;
-    }
-  })();
-  
-  return initPromise;
-}
-
-// Run on install/update
-chrome.runtime.onInstalled.addListener(async () => {
+// Run auto-registration on install and startup
+chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
-  await initializeExtensionOnce();
+  ensureRegistered();
+  // Run health check immediately to ensure everything starts
+  setTimeout(() => healthCheck(), 2000);
 });
 
-// Run on browser startup
 if (chrome.runtime.onStartup) {
-  chrome.runtime.onStartup.addListener(async () => {
+  chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
-    await initializeExtensionOnce();
-  });
-}
-
-// Listen for Chrome profile changes (student sign-out/sign-in on shared Chromebooks)
-if (chrome.identity?.onSignInChanged) {
-  chrome.identity.onSignInChanged.addListener(async (account, signedIn) => {
-    console.log('[Service Worker] Chrome profile changed:', { account, signedIn });
-    
-    if (signedIn) {
-      // A student just signed in - re-register with new email
-      console.log('[Service Worker] New student signed in - re-registering...');
-      await ensureRegistered();
-      
-      // Send an immediate heartbeat with new student info
-      setTimeout(() => {
-        console.log('[Service Worker] Sending heartbeat after profile change');
-        healthCheck();
-      }, 1000);
-    } else {
-      // Student signed out - clear student data but keep device ID
-      console.log('[Service Worker] Student signed out - clearing student data');
-      const stored = await chrome.storage.local.get(['deviceId']);
-      await chrome.storage.local.clear();
-      if (stored.deviceId) {
-        await chrome.storage.local.set({ deviceId: stored.deviceId });
-        CONFIG.deviceId = stored.deviceId;
-      }
-      CONFIG.studentEmail = null;
-      CONFIG.studentName = null;
-    }
+    ensureRegistered();
+    // Run health check immediately to ensure everything starts
+    setTimeout(() => healthCheck(), 2000);
   });
 }
 
@@ -498,31 +322,73 @@ async function autoDetectAndRegister() {
       studentName: displayName,
     });
     
-    // CRITICAL: Always register on EVERY startup/wake-up (email-first architecture)
-    // This ensures student-device linkage is fresh after Chrome storage resets, device switches, etc.
-    try {
-      // Get or create device ID
-      const deviceId = await getOrCreateDeviceId();
-      
-      // Register with auto-detected info (server will upsert student and update device linkage)
-      await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
-      console.log('Auto-registered student on startup:', userInfo.email);
-    } catch (error) {
-      console.error('Auto-registration failed:', error);
-      // Don't block startup - extension can still work with cached IDs
+    // Auto-register if not already registered
+    const stored = await chrome.storage.local.get(['registered']);
+    if (!stored.registered) {
+      try {
+        // Get or create device ID
+        const deviceId = await getOrCreateDeviceId();
+        
+        // Register with auto-detected info
+        await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
+        console.log('Auto-registered student:', userInfo.email);
+      } catch (error) {
+        console.error('Auto-registration failed:', error);
+      }
     }
   } else {
     console.warn('Could not detect logged-in user email - manual registration required');
   }
 }
 
-// Top-level initialization when service worker first loads
-// All config loading and registration happens in initializeExtensionOnce()
-(async () => {
-  console.log('[Service Worker] Top-level initialization starting...');
-  await initializeExtensionOnce();
-  console.log('[Service Worker] Top-level initialization complete');
-})();
+// Load config from storage on startup
+chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (result) => {
+  if (result.config) {
+    CONFIG = { ...CONFIG, ...result.config };
+    console.log('Loaded config:', CONFIG);
+  }
+  
+  // Ensure serverUrl is set (use stored config, or fall back to default production URL)
+  if (!CONFIG.serverUrl) {
+    CONFIG.serverUrl = DEFAULT_SERVER_URL;
+  }
+  console.log('Using server URL:', CONFIG.serverUrl);
+  
+  // Load active student ID
+  if (result.activeStudentId) {
+    CONFIG.activeStudentId = result.activeStudentId;
+    console.log('Loaded active student ID:', CONFIG.activeStudentId);
+  }
+  
+  // Load student email
+  if (result.studentEmail) {
+    CONFIG.studentEmail = result.studentEmail;
+  }
+  
+  // Auto-detect logged-in user and register
+  await autoDetectAndRegister();
+  
+  // Start heartbeat if configured
+  if (CONFIG.deviceId) {
+    startHeartbeat();
+    connectWebSocket();
+  }
+  
+  // Start health check alarm (runs every 60 seconds to ensure extension stays alive)
+  // This recovers from service worker restarts without manual reload
+  chrome.alarms.create('health-check', {
+    periodInMinutes: 1, // 60 seconds (Chrome minimum)
+  });
+  console.log('[Init] Health check alarm started');
+  
+  // Keep-alive alarm to prevent service worker termination
+  // Chrome terminates service workers after 30 seconds of inactivity
+  // This alarm pings every 25 seconds to keep it alive
+  chrome.alarms.create('keep-alive', {
+    periodInMinutes: 0.416666667, // 25 seconds (just under 30 second timeout)
+  });
+  console.log('[Init] Keep-alive alarm started');
+});
 
 // Generate unique device ID if not exists
 async function getOrCreateDeviceId() {
@@ -643,11 +509,6 @@ async function sendHeartbeat() {
     return;
   }
   
-  if (!CONFIG.activeStudentId) {
-    console.log('Skipping heartbeat - no activeStudentId (waiting for server registration)');
-    return;
-  }
-  
   try {
     // Get active tab
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -670,17 +531,12 @@ async function sendHeartbeat() {
       cameraActive: cameraActive,
     };
     
-    // CRITICAL: Include both studentId AND studentEmail for resilient email-first architecture
-    // This handles Chrome storage resets, device switches, and shared Chromebooks
+    // Include studentId if available
     if (CONFIG.activeStudentId) {
       heartbeatData.studentId = CONFIG.activeStudentId;
-    }
-    
-    if (CONFIG.studentEmail) {
-      heartbeatData.studentEmail = CONFIG.studentEmail;
-      console.log('Sending heartbeat with email:', CONFIG.studentEmail, 'studentId:', CONFIG.activeStudentId || 'none', '| screenLocked:', screenLocked);
+      console.log('Sending heartbeat with studentId:', CONFIG.activeStudentId, '| screenLocked:', screenLocked);
     } else {
-      console.log('Sending heartbeat WITHOUT email (activeStudentId:', CONFIG.activeStudentId || 'none', ') | screenLocked:', screenLocked);
+      console.log('Sending heartbeat WITHOUT studentId (CONFIG.activeStudentId is null/undefined) | screenLocked:', screenLocked);
     }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
@@ -761,8 +617,26 @@ async function healthCheck() {
   console.log('[Health Check] Running...');
   
   try {
-    // Always ensure initialization first - this loads CONFIG if needed
-    await initializeExtensionOnce();
+    // Check if we have a deviceId - if not, try to initialize
+    if (!CONFIG.deviceId) {
+      console.log('[Health Check] No deviceId found, loading from storage...');
+      const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail']);
+      
+      if (stored.config) {
+        CONFIG = { ...CONFIG, ...stored.config };
+      }
+      if (stored.deviceId) {
+        CONFIG.deviceId = stored.deviceId;
+      }
+      if (stored.activeStudentId) {
+        CONFIG.activeStudentId = stored.activeStudentId;
+      }
+      if (stored.studentEmail) {
+        CONFIG.studentEmail = stored.studentEmail;
+      }
+      
+      console.log('[Health Check] Loaded config:', CONFIG);
+    }
     
     // Only proceed if we have a deviceId
     if (!CONFIG.deviceId) {
@@ -790,12 +664,7 @@ async function healthCheck() {
 }
 
 // Alarm listener for heartbeat and WebSocket reconnection
-// CRITICAL: Always await initialization before processing alarms to prevent race conditions
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  // Ensure extension is initialized before processing any alarms
-  // This prevents heartbeat failures when alarms fire before CONFIG is loaded
-  await initializeExtensionOnce();
-  
+chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     sendHeartbeat();
     // Reschedule next heartbeat (manual periodic behavior)
@@ -857,13 +726,8 @@ async function handleRemoteControl(command) {
     switch (command.type) {
       case 'open-tab':
         if (command.data.url) {
-          let url = command.data.url.trim();
-          // Add https:// if the URL doesn't have a protocol
-          if (!url.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/)) {
-            url = 'https://' + url;
-          }
-          await chrome.tabs.create({ url: url, active: true });
-          console.log('Opened tab:', url);
+          await chrome.tabs.create({ url: command.data.url, active: true });
+          console.log('Opened tab:', command.data.url);
         }
         break;
         

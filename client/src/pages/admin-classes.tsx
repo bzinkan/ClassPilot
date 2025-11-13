@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import { invalidateStudentCaches } from "@/lib/cacheUtils";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -72,18 +71,6 @@ const editStudentSchema = z.object({
 
 type EditStudentForm = z.infer<typeof editStudentSchema>;
 
-const createStudentSchema = z.object({
-  studentName: z.string().min(1, "Name is required"),
-  studentEmail: z.string().email("Invalid email format"),
-  gradeLevel: z.string().min(1, "Grade level is required"),
-  classId: z.string().optional(),
-});
-
-type CreateStudentForm = z.infer<typeof createStudentSchema>;
-
-// Predefined grade options
-const GRADE_OPTIONS = ['K', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
-
 interface Teacher {
   id: string;
   username: string;
@@ -130,7 +117,8 @@ function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogPro
       return res.json();
     },
     onSuccess: () => {
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
       toast({
         title: "Student updated",
         description: "Student information has been updated successfully.",
@@ -221,167 +209,6 @@ function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogPro
   );
 }
 
-interface CreateStudentDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  classes: Group[];
-}
-
-function CreateStudentDialog({ open, onOpenChange, classes }: CreateStudentDialogProps) {
-  const { toast } = useToast();
-  const form = useForm<CreateStudentForm>({
-    resolver: zodResolver(createStudentSchema),
-    defaultValues: {
-      studentName: "",
-      studentEmail: "",
-      gradeLevel: "",
-      classId: "",
-    },
-  });
-
-  const createMutation = useMutation({
-    mutationFn: async (data: CreateStudentForm) => {
-      console.log("[CreateStudent] Submitting data:", data);
-      const res = await apiRequest("POST", "/api/admin/students", data);
-      return res.json();
-    },
-    onSuccess: () => {
-      console.log("[CreateStudent] Success!");
-      invalidateStudentCaches();
-      toast({
-        title: "Student created",
-        description: "Student has been created successfully.",
-      });
-      onOpenChange(false);
-      form.reset();
-    },
-    onError: (error: Error) => {
-      console.error("[CreateStudent] Error:", error);
-      toast({
-        title: "Error",
-        description: error.message || "Failed to create student",
-        variant: "destructive",
-      });
-    },
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent data-testid="dialog-create-student">
-        <DialogHeader>
-          <DialogTitle>Create Student</DialogTitle>
-          <DialogDescription>
-            Add a new student to the system
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit(
-            (data) => {
-              console.log("[CreateStudent] Form validation passed, data:", data);
-              createMutation.mutate(data);
-            },
-            (errors) => {
-              console.error("[CreateStudent] Form validation failed, errors:", errors);
-            }
-          )} className="space-y-4">
-            <FormField
-              control={form.control}
-              name="studentName"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Student Name</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder="John Doe" data-testid="input-create-student-name" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="studentEmail"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Email</FormLabel>
-                  <FormControl>
-                    <Input {...field} type="email" placeholder="student@school.edu" data-testid="input-create-student-email" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="gradeLevel"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Grade Level</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger data-testid="select-create-student-grade">
-                        <SelectValue placeholder="Select grade" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {GRADE_OPTIONS.map((grade) => (
-                        <SelectItem key={grade} value={grade}>
-                          {grade === 'K' ? 'Kindergarten' : `Grade ${grade}`}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="classId"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Assign to Class (Optional)</FormLabel>
-                  <Select onValueChange={field.onChange} value={field.value}>
-                    <FormControl>
-                      <SelectTrigger data-testid="select-create-student-class">
-                        <SelectValue placeholder="Select a class" />
-                      </SelectTrigger>
-                    </FormControl>
-                    <SelectContent>
-                      {classes.map((group) => (
-                        <SelectItem key={group.id} value={group.id}>
-                          {group.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-                data-testid="button-cancel-create"
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                disabled={createMutation.isPending}
-                data-testid="button-create-student"
-              >
-                {createMutation.isPending ? "Creating..." : "Create Student"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 interface ClassCardProps {
   group: Group;
   teacher: Teacher | undefined;
@@ -406,7 +233,7 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
       return res.json();
     },
     onSuccess: () => {
-      invalidateStudentCaches();
+      queryClient.invalidateQueries({ queryKey: ["/api/groups", group.id, "students"] });
       toast({
         title: "Student removed",
         description: "Student has been removed from the class.",
@@ -549,8 +376,6 @@ export default function AdminClasses() {
   const [bulkImportDialogOpen, setBulkImportDialogOpen] = useState(false);
   const [csvFile, setCsvFile] = useState<File | null>(null);
   const [importResults, setImportResults] = useState<any>(null);
-  const [createStudentOpen, setCreateStudentOpen] = useState(false);
-  const [bulkImportGrade, setBulkImportGrade] = useState<string>("");
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -649,7 +474,9 @@ export default function AdminClasses() {
       return results;
     },
     onSuccess: async () => {
-      invalidateStudentCaches();
+      // Invalidate both /api/groups and /api/teacher/groups to ensure UI updates
+      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
       toast({
         title: "Students Assigned",
         description: `${selectedStudents.size} students added to class`,
@@ -690,19 +517,20 @@ export default function AdminClasses() {
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
-    mutationFn: async ({ fileContent, fileType, gradeLevel }: { fileContent: string; fileType: 'csv' | 'excel'; gradeLevel: string }) => {
-      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType, gradeLevel });
+    mutationFn: async ({ fileContent, fileType }: { fileContent: string; fileType: 'csv' | 'excel' }) => {
+      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType });
       return res.json();
     },
     onSuccess: async (data) => {
-      invalidateStudentCaches();
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
       setImportResults(data.results);
-      setCsvFile(null);
-      setBulkImportGrade("");
       toast({
         title: "Import Complete",
         description: `Created ${data.results.created} students, updated ${data.results.updated}, assigned ${data.results.assigned} to classes`,
       });
+      setCsvFile(null);
     },
     onError: (error: Error) => {
       toast({
@@ -772,15 +600,6 @@ export default function AdminClasses() {
       return;
     }
 
-    if (!bulkImportGrade) {
-      toast({
-        variant: "destructive",
-        title: "Error",
-        description: "Please select a grade level",
-      });
-      return;
-    }
-
     try {
       const fileExtension = csvFile.name.split('.').pop()?.toLowerCase();
       const isExcel = fileExtension === 'xlsx' || fileExtension === 'xls';
@@ -806,7 +625,7 @@ export default function AdminClasses() {
         fileContent = await csvFile.text();
       }
       
-      bulkImportMutation.mutate({ fileContent, fileType, gradeLevel: bulkImportGrade });
+      bulkImportMutation.mutate({ fileContent, fileType });
     } catch (error) {
       toast({
         variant: "destructive",
@@ -959,54 +778,13 @@ export default function AdminClasses() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Plus className="h-5 w-5" />
-                Add Single Student
-              </CardTitle>
-              <CardDescription>
-                Create one student at a time
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Button
-                onClick={() => setCreateStudentOpen(true)}
-                className="w-full"
-                data-testid="button-open-create-student"
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Create Student
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Plus className="h-5 w-5" />
                 Bulk Import Students
               </CardTitle>
               <CardDescription>
-                Upload CSV or Excel files to import multiple students
+                Upload a CSV file to import multiple students at once
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="bulk-import-grade">Grade Level</Label>
-                <Select value={bulkImportGrade} onValueChange={setBulkImportGrade}>
-                  <SelectTrigger id="bulk-import-grade" data-testid="select-bulk-import-grade">
-                    <SelectValue placeholder="Select grade for import" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {GRADE_OPTIONS.map((grade) => (
-                      <SelectItem key={grade} value={grade}>
-                        {grade === 'K' ? 'Kindergarten' : `Grade ${grade}`}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  All students in the file will be assigned this grade
-                </p>
-              </div>
-
               <div className="space-y-2">
                 <Label htmlFor="csv-file">CSV or Excel File</Label>
                 <Input
@@ -1026,7 +804,7 @@ export default function AdminClasses() {
               <div className="flex gap-2">
                 <Button
                   onClick={handleBulkImport}
-                  disabled={!csvFile || !bulkImportGrade || bulkImportMutation.isPending}
+                  disabled={!csvFile || bulkImportMutation.isPending}
                   data-testid="button-bulk-import"
                   className="flex-1"
                 >
@@ -1297,12 +1075,6 @@ export default function AdminClasses() {
           </CardContent>
         </Card>
       </div>
-
-      <CreateStudentDialog
-        open={createStudentOpen}
-        onOpenChange={setCreateStudentOpen}
-        classes={adminClasses}
-      />
     </div>
   );
 }

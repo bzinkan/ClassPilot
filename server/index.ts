@@ -63,39 +63,23 @@ const sessionStore = process.env.DATABASE_URL
     })
   : undefined; // Use default MemoryStore in development if no DATABASE_URL
 
-// Session configuration with conditional bypass for extension endpoints
-// Extension endpoints don't need sessions and should avoid cold-start DB connection issues
-const sessionMiddleware = session({
-  name: 'classpilot_session',
-  store: sessionStore,
-  secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
-  resave: false,
-  saveUninitialized: false,
-  rolling: true, // Auto-renew session on activity to keep it alive
-  cookie: {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production", // true for HTTPS
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
-    maxAge: 24 * 60 * 60 * 1000, // 24 hours
-  },
-});
-
-// Skip session middleware for extension endpoints to avoid 500 errors on cold start
-app.use((req, res, next) => {
-  const extensionEndpoints = [
-    '/api/heartbeat',
-    '/api/event',
-    '/api/register-student',
-    '/api/register-device',
-    '/client-config.json'
-  ];
-  
-  if (extensionEndpoints.includes(req.path)) {
-    return next(); // Skip session for extension endpoints
-  }
-  
-  return sessionMiddleware(req, res, next);
-});
+// Session configuration
+app.use(
+  session({
+    name: 'classpilot_session',
+    store: sessionStore,
+    secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
+    resave: false,
+    saveUninitialized: false,
+    rolling: true, // Auto-renew session on activity to keep it alive
+    cookie: {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production", // true for HTTPS
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+    },
+  })
+);
 
 // Extend session type
 declare module "express-session" {
@@ -160,37 +144,6 @@ app.use((req, res, next) => {
 (async () => {
   // Initialize default data
   await initializeApp();
-  
-  // Schedule daily cleanup of stale student-device associations
-  // Runs at midnight (00:00) daily for shared Chromebook reset
-  const scheduleDailyCleanup = async () => {
-    const storage = (await import('./storage')).storage;
-    
-    // Calculate milliseconds until next midnight
-    const now = new Date();
-    const tomorrow = new Date(now);
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    tomorrow.setHours(0, 0, 0, 0);
-    const msUntilMidnight = tomorrow.getTime() - now.getTime();
-    
-    // Schedule first cleanup at midnight
-    setTimeout(async () => {
-      console.log('🧹 Running daily cleanup: Removing student-device associations older than 24 hours...');
-      const count = await storage.cleanupStaleStudentDevices(24);
-      console.log(`✅ Daily cleanup complete: Removed ${count} stale student-device associations`);
-      
-      // Schedule subsequent cleanups every 24 hours
-      setInterval(async () => {
-        console.log('🧹 Running daily cleanup: Removing student-device associations older than 24 hours...');
-        const count = await storage.cleanupStaleStudentDevices(24);
-        console.log(`✅ Daily cleanup complete: Removed ${count} stale student-device associations`);
-      }, 24 * 60 * 60 * 1000); // 24 hours
-    }, msUntilMidnight);
-    
-    console.log(`🕐 Daily cleanup scheduled for midnight (in ${Math.round(msUntilMidnight / 1000 / 60)} minutes)`);
-  };
-  
-  scheduleDailyCleanup();
   
   const server = await registerRoutes(app);
 

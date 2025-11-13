@@ -1,5 +1,5 @@
-import { sql, SQL } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index, uniqueIndex, unique } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -37,46 +37,19 @@ export const insertDeviceSchema = createInsertSchema(devices).omit({ registeredA
 export type InsertDevice = z.infer<typeof insertDeviceSchema>;
 export type Device = typeof devices.$inferSelect;
 
-// Students - identified by email across devices (email-first architecture)
+// Students assigned to devices (multiple students can share one device)
 export const students = pgTable("students", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  schoolId: text("school_id").notNull().default('default-school'), // Which school this student belongs to - REQUIRED for email-first architecture
-  deviceId: text("device_id"), // DEPRECATED: Use student_devices junction table instead (nullable for migration)
+  deviceId: text("device_id").notNull(), // FK to devices table
   studentName: text("student_name").notNull(),
-  studentEmail: text("student_email"), // Google Workspace email - unique per school (nullable for placeholder students)
-  emailLc: text("email_lc").generatedAlwaysAs((): SQL => sql`lower(trim(${students.studentEmail}))`), // Normalized email for lookups
+  studentEmail: text("student_email"), // Google Workspace email for auto-detection
   gradeLevel: text("grade_level"),
-  studentStatus: text("student_status").notNull().default('active'), // 'active' | 'pending_email' - filters pending students from teacher dashboards
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
-}, (table) => ({
-  // Unique constraint: one student per email per school (prevents duplicate students)
-  schoolEmailUnique: uniqueIndex("students_school_email_unique").on(table.schoolId, table.emailLc),
-}));
+});
 
-export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true, emailLc: true, deviceId: true } as const);
+export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
-
-// Type for updating student fields
-export type StudentUpdateFields = Pick<Student, "studentName" | "gradeLevel" | "studentEmail">;
-
-// Student Devices - Many-to-many junction table (one student can use multiple devices)
-export const studentDevices = pgTable("student_devices", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  studentId: text("student_id").notNull().references(() => students.id, { onDelete: 'cascade' }), // FK to students table with CASCADE delete
-  deviceId: text("device_id").notNull().references(() => devices.deviceId, { onDelete: 'cascade' }), // FK to devices table with CASCADE delete
-  firstSeenAt: timestamp("first_seen_at").notNull().default(sql`now()`),
-  lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
-}, (table) => ({
-  // Unique constraint: one row per student-device pair
-  studentDeviceUnique: uniqueIndex("student_devices_unique").on(table.studentId, table.deviceId),
-  // Index for efficient lookups by device
-  deviceIdIdx: index("student_devices_device_id_idx").on(table.deviceId),
-}));
-
-export const insertStudentDeviceSchema = createInsertSchema(studentDevices).omit({ id: true, firstSeenAt: true, lastSeenAt: true });
-export type InsertStudentDevice = z.infer<typeof insertStudentDeviceSchema>;
-export type StudentDevice = typeof studentDevices.$inferSelect;
 
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
@@ -100,12 +73,6 @@ export interface StudentStatus {
   viewMode?: 'url' | 'thumb' | 'live'; // Display mode for the student tile
   status: 'online' | 'idle' | 'offline';
   statusKey?: string; // Composite key: studentId-deviceId (for multi-device tracking)
-  
-  // Admin-only metadata for filtering and display
-  teacherId?: string; // ID of the teacher this student is assigned to
-  teacherName?: string; // Name of the assigned teacher
-  groupId?: string; // ID of the group this student belongs to
-  groupName?: string; // Name of the group
 }
 
 // Helper function to create consistent composite keys for student status tracking
@@ -119,7 +86,6 @@ export const heartbeats = pgTable("heartbeats", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   deviceId: text("device_id").notNull(),
   studentId: text("student_id"), // Nullable - which student is currently active
-  studentEmail: text("student_email"), // Nullable - for email-first reconciliation
   activeTabTitle: text("active_tab_title").notNull(),
   activeTabUrl: text("active_tab_url").notNull(),
   favicon: text("favicon"),

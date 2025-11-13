@@ -21,15 +21,13 @@ import {
   insertSessionSchema,
   loginSchema,
   createTeacherSchema,
-  type Student,
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
   type InsertStudent,
   type InsertDevice,
-  type StudentUpdateFields,
 } from "@shared/schema";
-import { groupSessionsByDevice, formatDuration, isWithinTrackingHours, normalizeEmail } from "@shared/utils";
+import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -306,8 +304,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const targetDeviceId = message.deviceId;
           if (!targetDeviceId) return;
 
-          console.log(`[WebSocket] Teacher ${client.userId} requesting stream from device ${targetDeviceId}`);
-
           // Permission check: Verify teacher has access to this student
           if (client.userId) {
             try {
@@ -319,63 +315,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 // Get the active student for this device
                 const activeStudent = await storage.getActiveStudentForDevice(targetDeviceId);
                 
-                if (!activeStudent) {
-                  console.warn(`[WebSocket] No active student found for device ${targetDeviceId}`);
-                  ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'No student found on this device'
-                  }));
-                  return;
-                }
-                
-                console.log(`[WebSocket] Checking permissions for teacher ${client.userId} to view student ${activeStudent.id} (${activeStudent.studentName})`);
-                
-                // Check 1: Direct teacher-student assignment
-                const teacherStudentIds = await storage.getTeacherStudents(client.userId);
-                const hasDirectAssignment = teacherStudentIds.includes(activeStudent.id);
-                
-                if (hasDirectAssignment) {
-                  console.log(`[WebSocket] ✓ Permission granted: direct assignment`);
-                } else {
-                  // Check 2: Student in any group owned by this teacher
-                  const teacherGroups = await storage.getGroupsByTeacher(client.userId);
-                  let hasGroupAccess = false;
+                if (activeStudent) {
+                  // Check if this student is assigned to the teacher
+                  const teacherStudentIds = await storage.getTeacherStudents(client.userId);
                   
-                  for (const group of teacherGroups) {
-                    const groupStudentIds = await storage.getGroupStudents(group.id);
-                    if (groupStudentIds.includes(activeStudent.id)) {
-                      hasGroupAccess = true;
-                      console.log(`[WebSocket] ✓ Permission granted: student in teacher's group "${group.name}"`);
-                      break;
-                    }
-                  }
-                  
-                  if (!hasGroupAccess) {
-                    // Check 3: Active session with a group containing this student
-                    const activeSession = await storage.getActiveSessionByTeacher(client.userId);
-                    let hasSessionAccess = false;
-                    
-                    if (activeSession) {
-                      const sessionGroupStudents = await storage.getGroupStudents(activeSession.groupId);
-                      hasSessionAccess = sessionGroupStudents.includes(activeStudent.id);
-                      if (hasSessionAccess) {
-                        console.log(`[WebSocket] ✓ Permission granted: active session`);
-                      }
-                    }
-                    
-                    // Block if no permission found
-                    if (!hasSessionAccess) {
-                      console.warn(`[WebSocket] ✗ Permission denied: teacher ${client.userId} attempted to view student ${activeStudent.id} without permission`);
-                      ws.send(JSON.stringify({
-                        type: 'error',
-                        message: 'You do not have permission to view this student\'s screen. Please assign them to one of your classes first.'
-                      }));
-                      return; // Block the request
-                    }
+                  if (!teacherStudentIds.includes(activeStudent.id)) {
+                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} without permission`);
+                    ws.send(JSON.stringify({
+                      type: 'error',
+                      message: 'You do not have permission to view this student\'s screen'
+                    }));
+                    return; // Block the request
                   }
                 }
-              } else {
-                console.log(`[WebSocket] Admin ${client.userId} requesting stream - bypassing permission check`);
               }
             } catch (error) {
               console.error('[WebSocket] Permission check error:', error);
@@ -384,14 +336,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           // Permission granted or admin - forward the request
-          console.log(`[WebSocket] Forwarding request-stream to device ${targetDeviceId}`);
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
                 type: 'request-stream',
                 from: 'teacher'
               }));
-              console.log(`[WebSocket] ✓ Sent request-stream to device ${targetDeviceId}`);
               break;
             }
           }
@@ -794,25 +744,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin: Bulk import students from CSV or Excel
   app.post("/api/admin/bulk-import", requireAdmin, async (req, res) => {
     try {
-      const { fileContent, fileType, gradeLevel } = req.body;
+      const { fileContent, fileType } = req.body;
       
       if (!fileContent) {
         return res.status(400).json({ error: "File content is required" });
-      }
-
-      // Validate grade level if provided
-      if (gradeLevel) {
-        const trimmed = gradeLevel.trim();
-        if (!trimmed) {
-          return res.status(400).json({ error: "Grade level cannot be empty" });
-        }
-        // Allow K, 1-12, or other common formats
-        const gradePattern = /^(K|[1-9]|1[0-2])$/i;
-        if (!gradePattern.test(trimmed) && !/^\d+$/.test(trimmed)) {
-          return res.status(400).json({ 
-            error: "Grade level must be K or a number (1-12)" 
-          });
-        }
       }
 
       // Parse file content using XLSX (supports both CSV and Excel)
@@ -849,12 +784,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         try {
           // Extract and validate fields (case-insensitive column names)
-          const rawEmail = (row.Email || row.email || row.EMAIL || '').trim();
+          const email = (row.Email || row.email || row.EMAIL || '').trim();
           const name = (row.Name || row.name || row.NAME || row.StudentName || row.studentName || '').trim();
+          const grade = (row.Grade || row.grade || row.GRADE || row.GradeLevel || row.gradeLevel || '').toString().trim();
           const className = (row.Class || row.class || row.CLASS || row.ClassName || row.className || '').trim();
 
           // Validate required fields
-          if (!rawEmail) {
+          if (!email) {
             results.errors.push(`Row ${rowNum}: Email is required`);
             continue;
           }
@@ -866,20 +802,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           // Validate email format
           const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-          if (!emailRegex.test(rawEmail)) {
-            results.errors.push(`Row ${rowNum}: Invalid email format for ${rawEmail}`);
+          if (!emailRegex.test(email)) {
+            results.errors.push(`Row ${rowNum}: Invalid email format for ${email}`);
             continue;
           }
 
-          // Normalize email for consistent storage and lookup
-          const email = normalizeEmail(rawEmail) || '';
+          // Normalize grade level
+          const normalizedGrade = normalizeGradeLevel(grade) || null;
 
-          // Use the grade level from the request (applies to all students in the import)
-          const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
-
-          // Check if student already exists by email (using normalized email)
+          // Check if student already exists by email
           const allStudents = await storage.getAllStudents();
-          let student = allStudents.find(s => normalizeEmail(s.studentEmail) === email);
+          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase());
 
           if (student) {
             // Update existing student's name and grade if different
@@ -910,15 +843,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
 
             student = await storage.createStudent({
-              schoolId, // REQUIRED: school_id is NOT NULL
-              deviceId: placeholderDeviceId, // DEPRECATED but kept for backward compatibility
+              deviceId: placeholderDeviceId,
               studentName: name,
               studentEmail: email,
               gradeLevel: normalizedGrade,
             });
-            
-            // Link placeholder device to student via junction table
-            await storage.addStudentDevice(student.id, placeholderDeviceId);
             results.created++;
           }
 
@@ -957,108 +886,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Bulk import error:", error);
       res.status(500).json({ error: "Failed to process bulk import" });
-    }
-  });
-
-  // Admin: Create a single student
-  app.post("/api/admin/students", requireAdmin, async (req, res) => {
-    try {
-      const { studentName, studentEmail, gradeLevel, classId } = req.body;
-
-      // Validate required fields
-      if (!studentName || !studentEmail) {
-        return res.status(400).json({ error: "Name and email are required" });
-      }
-
-      // Validate grade level if provided
-      if (gradeLevel) {
-        const trimmed = gradeLevel.trim();
-        if (!trimmed) {
-          return res.status(400).json({ error: "Grade level cannot be empty" });
-        }
-        // Allow K, 1-12, or other common formats
-        const gradePattern = /^(K|[1-9]|1[0-2])$/i;
-        if (!gradePattern.test(trimmed) && !/^\d+$/.test(trimmed)) {
-          return res.status(400).json({ 
-            error: "Grade level must be K or a number (1-12)" 
-          });
-        }
-      }
-
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(studentEmail)) {
-        return res.status(400).json({ error: "Invalid email format" });
-      }
-
-      // Normalize email for consistent storage and lookup
-      const normalizedEmail = normalizeEmail(studentEmail);
-
-      // Check for duplicate email (using normalized comparison)
-      const allStudents = await storage.getAllStudents();
-      const existingStudent = allStudents.find(
-        s => normalizeEmail(s.studentEmail) === normalizedEmail
-      );
-
-      if (existingStudent) {
-        return res.status(400).json({ 
-          error: `A student with email ${studentEmail} already exists` 
-        });
-      }
-
-      // Get settings for schoolId
-      const settings = await storage.getSettings();
-      const schoolId = settings?.schoolId || 'default-school';
-
-      // Normalize grade level
-      const normalizedGrade = normalizeGradeLevel(gradeLevel) || null;
-
-      // Create placeholder deviceId based on email
-      const deviceId = `pending-${normalizedEmail?.split('@')[0]}-${Date.now()}`;
-
-      // Create student with normalized email
-      const student = await storage.createStudent({
-        schoolId, // REQUIRED: school_id is NOT NULL
-        studentName,
-        studentEmail: normalizedEmail,
-        gradeLevel: normalizedGrade,
-        deviceId,
-      });
-
-      // Assign to class if classId provided
-      if (classId && student) {
-        try {
-          await storage.assignStudentToGroup(classId, student.id);
-        } catch (error) {
-          console.error("Failed to assign student to class:", error);
-          // Continue - student was created successfully
-        }
-      }
-
-      // Notify teachers
-      broadcastToTeachers({
-        type: 'students-updated',
-      });
-
-      res.json({
-        success: true,
-        message: 'Student created successfully',
-        student,
-      });
-    } catch (error) {
-      console.error("Create student error:", error);
-      res.status(500).json({ error: "Failed to create student" });
-    }
-  });
-
-  // Admin: Get all student statuses with teacher/group metadata for live monitoring
-  app.get("/api/admin/live-students", requireAdmin, async (req, res) => {
-    try {
-      const enrichedStatuses = await storage.getAllStudentStatusesEnriched();
-      res.json(enrichedStatuses); // Return array directly (matches other endpoints)
-    } catch (error) {
-      console.error("Get enriched student statuses error:", error);
-      res.status(500).json({ error: "Failed to fetch live student data" });
     }
   });
 
@@ -1103,18 +930,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { deviceId, deviceName, classId, schoolId = 'default-school', studentEmail, studentName } = req.body;
       
-      // Log if email is missing (indicates Chrome Identity API didn't provide it)
-      if (!studentEmail) {
-        console.warn('⚠️  Student registration without email - Chrome Identity API may lack permissions', {
-          deviceId,
-          studentName,
-          classId
-        });
-      }
-      
-      // Validate studentName is provided
-      if (!studentName) {
-        return res.status(400).json({ error: "studentName is required" });
+      // Validate required fields
+      if (!studentEmail || !studentName) {
+        return res.status(400).json({ error: "studentEmail and studentName are required" });
       }
       
       // Register or update device
@@ -1130,138 +948,42 @@ export async function registerRoutes(app: Express): Promise<Server> {
         device = await storage.registerDevice(deviceData);
       }
       
-      let student: Student | undefined = undefined;
+      // Check if student with this email already exists (across ALL devices)
+      let student = await storage.getStudentByEmail(studentEmail);
       
-      // Path 1: Email provided - use email-based matching (preferred)
-      if (studentEmail) {
-        const normalizedEmail = normalizeEmail(studentEmail);
-        if (!normalizedEmail) {
-          return res.status(400).json({ error: "Invalid email address" });
-        }
-        
-        console.log('🔍 EMAIL LOOKUP: Looking for student with email:', normalizedEmail, 'in school:', schoolId);
-        
-        // RECONCILIATION STEP: Check if this device has a pending_email placeholder
-        const devicesForThisDevice = await storage.getDeviceStudents(deviceData.deviceId);
-        const pendingPlaceholder = devicesForThisDevice.find(s => s.studentStatus === 'pending_email');
-        
-        // Check if student with this email already exists (for this school, across ALL devices)
-        student = await storage.getStudentByEmail(schoolId, normalizedEmail);
-        
-        if (student) {
-          // Student exists! Check if they are using this device
-          console.log('✅ EMAIL MATCH FOUND: Student exists with id:', student.id, 'name:', student.studentName);
-          
-          // Check if student is already registered on this device
-          const devices = await storage.getStudentDevices(student.id);
-          const isOnThisDevice = devices.some(d => d.deviceId === deviceData.deviceId);
-          
-          if (!isOnThisDevice) {
-            console.log('✓ Student using new device:', normalizedEmail, '→', deviceData.deviceId);
-            // Add this device to the student's device list
-            await storage.addStudentDevice(student.id, deviceData.deviceId);
-            
-            // Clean up any placeholder devices for this email (from CSV import)
-            const placeholderDeviceId = `pending-${normalizedEmail.replace(/[^a-zA-Z0-9]/g, '-')}`;
-            const placeholderDevice = await storage.getDevice(placeholderDeviceId);
-            if (placeholderDevice) {
-              console.log('✓ Deleting placeholder device from CSV import:', placeholderDeviceId);
-              await storage.deleteDevice(placeholderDeviceId);
-            }
-          } else {
-            console.log('✓ Student already registered on this device:', normalizedEmail, 'studentId:', student.id);
-          }
-          
-          // Clean up pending placeholder if it exists (device promoted from pending → real student)
-          if (pendingPlaceholder && pendingPlaceholder.id !== student.id) {
-            console.log('✓ Promoting device from placeholder', pendingPlaceholder.id, '→ real student', student.id);
-            await storage.deleteStudent(pendingPlaceholder.id);
-          }
+      if (student) {
+        // Student exists! Check if they switched devices
+        if (student.deviceId !== deviceData.deviceId) {
+          console.log('Student switched devices:', studentEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
+          // Update student's device to the new one
+          student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
         } else {
-          // Check if the pending placeholder should be promoted
-          if (pendingPlaceholder) {
-            console.log('✓ Promoting pending_email placeholder to real student:', pendingPlaceholder.id);
-            student = await storage.updateStudent(pendingPlaceholder.id, {
-              studentEmail: normalizedEmail,
-              studentName: studentName,
-              studentStatus: 'active',
-            }) || pendingPlaceholder;
-            
-            // Link the real device to the promoted student
-            await storage.addStudentDevice(student.id, deviceData.deviceId);
-            console.log('✓ Linked real device to promoted student:', deviceData.deviceId, '→', student.id);
-          } else {
-            // Create new student (first time seeing this email in this school)
-            console.log('✓ Creating new student with email:', normalizedEmail);
-            student = await storage.upsertStudent(schoolId, normalizedEmail, studentName, undefined);
-            // Add this device to the student's device list
-            await storage.addStudentDevice(student.id, deviceData.deviceId);
-          }
-          console.log('✓ Student auto-registered with email:', normalizedEmail, 'studentId:', student.id);
+          console.log('Student already registered on this device:', studentEmail, 'studentId:', student.id);
         }
-      } 
-      // Path 2: No email provided - try to find existing student by checking placeholder devices
-      else {
-        // Get all students to check for potential matches
-        const allStudents = await storage.getAllStudents();
+      } else {
+        // Create new student (first time seeing this email)
+        const studentData = insertStudentSchema.parse({
+          deviceId: deviceData.deviceId,
+          studentName,
+          studentEmail,
+          gradeLevel: null, // Teacher can assign grade later
+        });
         
-        // Strategy A: Check if any student has a pending placeholder deviceId
-        // These are created during CSV import with pattern: "pending-{email}"
-        // Use getStudentDevices to check each student's devices
-        let foundPendingStudent: Student | undefined = undefined;
-        
-        for (const s of allStudents) {
-          const devices = await storage.getStudentDevices(s.id);
-          const hasPendingDevice = devices.some(d => 
-            d.deviceId.startsWith('pending-') && 
-            d.deviceId !== deviceData.deviceId
-          );
-          
-          if (hasPendingDevice) {
-            foundPendingStudent = s;
-            break;
-          }
-        }
-        
-        if (foundPendingStudent) {
-          console.log('✓ Found CSV-imported student, linking to real device:', deviceData.deviceId);
-          // Add the actual device to the student's device list
-          await storage.addStudentDevice(foundPendingStudent.id, deviceData.deviceId);
-          student = foundPendingStudent;
-        } else {
-          // Strategy B: Create placeholder student for email-less devices
-          // This allows unmanaged Chromebooks to work while awaiting email/roster assignment
-          console.log('✓ Creating pending_email placeholder student for device:', deviceData.deviceId);
-          const placeholderData = insertStudentSchema.parse({
-            schoolId,
-            studentName: studentName || `Unidentified Student (${deviceData.deviceId.substring(0, 8)})`,
-            studentEmail: null, // NULL email marks this as pending
-            studentStatus: 'pending_email', // Explicit status for admin queue filtering
-            gradeLevel: null,
-          });
-          student = await storage.createStudent(placeholderData);
-          // Link the device to this placeholder student
-          await storage.addStudentDevice(student.id, deviceData.deviceId);
-          console.log('✓ Pending student created:', student.id, '- admin can assign email later');
-        }
+        student = await storage.createStudent(studentData);
+        console.log('New student auto-registered:', studentEmail, 'studentId:', student.id);
       }
       
       // Set this student as the active student for this device
-      if (student) {
-        await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
-        console.log('✓ Set active student for device:', deviceData.deviceId, '→', student.id);
-        
-        // Notify teachers
-        broadcastToTeachers({
-          type: 'student-registered',
-          data: { device, student },
-        });
+      await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
+      console.log('Set active student for device:', deviceData.deviceId, '→', student.id);
+      
+      // Notify teachers
+      broadcastToTeachers({
+        type: 'student-registered',
+        data: { device, student },
+      });
 
-        res.json({ success: true, device, student });
-      } else {
-        // Should not reach here, but safety fallback
-        return res.status(500).json({ error: "Failed to create or find student" });
-      }
+      res.json({ success: true, device, student });
     } catch (error) {
       console.error("Student registration error:", error);
       res.status(400).json({ error: "Invalid request" });
@@ -1410,7 +1132,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 
                 return {
                   studentId: student.id,
-                  deviceId: student.deviceId || '',
+                  deviceId: student.deviceId,
                   deviceName: device?.deviceName ?? undefined,
                   studentName: student.studentName,
                   classId: device?.classId || '',
@@ -1505,37 +1227,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Get all persisted students from database (for roster management)
-  // Returns students with device information from student_devices junction table
-  // Students with multiple devices will appear multiple times (once per device)
-  // ONLY shows devices used in the last 24 hours (daily reset for shared Chromebooks)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const students = await storage.getAllStudents();
-      const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
-      
-      // Expand students to include their devices from junction table
-      const studentsWithDevices = [];
-      for (const student of students) {
-        const devices = await storage.getStudentDevices(student.id);
-        
-        // Filter to only include devices seen in the last 24 hours
-        const recentDevices = devices.filter(d => d.lastSeenAt >= cutoffTime);
-        
-        if (recentDevices.length === 0) {
-          // Student has no recent devices - include them with NULL deviceId
-          studentsWithDevices.push(student);
-        } else {
-          // Student has one or more recent devices - create one entry per device
-          for (const device of recentDevices) {
-            studentsWithDevices.push({
-              ...student,
-              deviceId: device.deviceId, // Populate from junction table
-            });
-          }
-        }
-      }
-      
-      res.json(studentsWithDevices);
+      res.json(students);
     } catch (error) {
       console.error("Get roster students error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -1645,27 +1340,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
       const { studentId } = req.params;
-      const updates: Partial<StudentUpdateFields> = {};
+      const updates: Partial<InsertStudent> = {};
       
-      if ('studentName' in req.body && typeof req.body.studentName === 'string') {
+      if ('studentName' in req.body) {
         updates.studentName = req.body.studentName;
       }
-      if ('gradeLevel' in req.body && req.body.gradeLevel !== undefined) {
+      if ('gradeLevel' in req.body) {
         updates.gradeLevel = normalizeGradeLevel(req.body.gradeLevel);
       }
       if ('studentEmail' in req.body) {
         const email = req.body.studentEmail?.trim();
-        // Guard empty emails before calling normalizeEmail
-        if (!email) {
-          return res.status(400).json({ error: "Email cannot be empty" });
-        }
         // Validate email format
         const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        if (!emailRegex.test(email)) {
+        if (email && !emailRegex.test(email)) {
           return res.status(400).json({ error: "Invalid email format" });
         }
-        // Normalize email for consistent storage
-        updates.studentEmail = normalizeEmail(email);
+        updates.studentEmail = email;
       }
       
       if (Object.keys(updates).length === 0) {

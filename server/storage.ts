@@ -5,8 +5,6 @@ import {
   type InsertDevice,
   type Student,
   type InsertStudent,
-  type StudentDevice,
-  type InsertStudentDevice,
   type StudentStatus,
   type Heartbeat,
   type InsertHeartbeat,
@@ -40,7 +38,6 @@ import {
   users,
   devices,
   students,
-  studentDevices,
   heartbeats,
   events,
   rosters,
@@ -56,7 +53,6 @@ import {
   messages,
   checkIns,
 } from "@shared/schema";
-import { normalizeEmail } from "@shared/utils";
 import { randomUUID } from "crypto";
 import { db } from "./db";
 import { eq, desc, lt, sql as drizzleSql, inArray } from "drizzle-orm";
@@ -76,26 +72,18 @@ export interface IStorage {
   updateDevice(deviceId: string, updates: Partial<Omit<InsertDevice, 'deviceId'>>): Promise<Device | undefined>;
   deleteDevice(deviceId: string): Promise<boolean>;
 
-  // Students (email-first architecture)
+  // Students (assigned to devices)
   getStudent(studentId: string): Promise<Student | undefined>;
-  getStudentByEmail(schoolId: string, email: string): Promise<Student | undefined>;
-  upsertStudent(schoolId: string, email: string, name: string, gradeLevel?: string): Promise<Student>;
+  getStudentByEmail(email: string): Promise<Student | undefined>;
   getStudentsByDevice(deviceId: string): Promise<Student[]>;
   getAllStudents(): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
 
-  // Student Devices (many-to-many tracking)
-  addStudentDevice(studentId: string, deviceId: string): Promise<StudentDevice>;
-  getStudentDevices(studentId: string): Promise<StudentDevice[]>;
-  getDeviceStudents(deviceId: string): Promise<Student[]>;
-  cleanupStaleStudentDevices(hoursOld: number): Promise<number>; // Remove student-device associations older than X hours
-
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
   getAllStudentStatuses(): Promise<StudentStatus[]>;
-  getAllStudentStatusesEnriched(): Promise<StudentStatus[]>; // Admin view with teacher/group metadata
   updateStudentStatus(status: StudentStatus): Promise<void>;
   getActiveStudentForDevice(deviceId: string): Promise<Student | undefined>;
   setActiveStudentForDevice(deviceId: string, studentId: string | null): Promise<void>;
@@ -193,7 +181,6 @@ export class MemStorage implements IStorage {
   private users: Map<string, User>;
   private devices: Map<string, Device>;
   private students: Map<string, Student>; // Keyed by student ID
-  private studentDevices: Map<string, StudentDevice>; // Keyed by studentId-deviceId composite
   private activeStudents: Map<string, string>; // deviceId -> studentId
   private studentStatuses: Map<string, StudentStatus>; // Keyed by studentId-deviceId composite
   private heartbeats: Heartbeat[];
@@ -211,7 +198,6 @@ export class MemStorage implements IStorage {
     this.users = new Map();
     this.devices = new Map();
     this.students = new Map();
-    this.studentDevices = new Map();
     this.activeStudents = new Map();
     this.studentStatuses = new Map();
     this.heartbeats = [];
@@ -299,20 +285,12 @@ export class MemStorage implements IStorage {
     const existed = this.devices.has(deviceId);
     this.devices.delete(deviceId);
     
-    // CASCADE DELETE: Remove from student_devices junction table
-    const deviceKeys = Array.from(this.studentDevices.keys());
-    for (const key of deviceKeys) {
-      if (key.endsWith(`-${deviceId}`)) {
-        this.studentDevices.delete(key);
-      }
-    }
-    
-    // Delete studentStatus entries for this device (composite keys)
-    const statusKeys = Array.from(this.studentStatuses.keys());
-    for (const key of statusKeys) {
-      if (key.endsWith(`-${deviceId}`)) {
-        this.studentStatuses.delete(key);
-      }
+    // Delete all students assigned to this device
+    const studentsToDelete = Array.from(this.students.values())
+      .filter(s => s.deviceId === deviceId);
+    for (const student of studentsToDelete) {
+      this.students.delete(student.id);
+      this.studentStatuses.delete(student.id);
     }
     
     // Clear active student mapping
@@ -330,43 +308,14 @@ export class MemStorage implements IStorage {
     return this.students.get(studentId);
   }
 
-  async getStudentByEmail(schoolId: string, email: string): Promise<Student | undefined> {
-    const normalizedEmail = normalizeEmail(email);
+  async getStudentByEmail(email: string): Promise<Student | undefined> {
     return Array.from(this.students.values())
-      .find(s => s.schoolId === schoolId && normalizeEmail(s.studentEmail) === normalizedEmail);
-  }
-
-  async upsertStudent(schoolId: string, email: string, name: string, gradeLevel?: string): Promise<Student> {
-    const normalizedEmail = normalizeEmail(email);
-    
-    // Try to find existing student by (schoolId, email)
-    const existing = await this.getStudentByEmail(schoolId, email);
-    
-    if (existing) {
-      // Update existing student
-      const updates: Partial<InsertStudent> = { studentName: name };
-      if (gradeLevel) updates.gradeLevel = gradeLevel;
-      const updated = await this.updateStudent(existing.id, updates);
-      return updated!;
-    }
-    
-    // Create new student
-    return this.createStudent({
-      schoolId,
-      studentEmail: normalizedEmail,
-      studentName: name,
-      gradeLevel: gradeLevel ?? null,
-    });
+      .find(s => s.studentEmail === email);
   }
 
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
-    // Use studentDevices junction table instead of deprecated deviceId column
-    const studentIds = Array.from(this.studentDevices.values())
-      .filter(sd => sd.deviceId === deviceId)
-      .map(sd => sd.studentId);
-    
     return Array.from(this.students.values())
-      .filter(s => studentIds.includes(s.id));
+      .filter(s => s.deviceId === deviceId);
   }
 
   async getAllStudents(): Promise<Student[]> {
@@ -377,18 +326,34 @@ export class MemStorage implements IStorage {
     const id = randomUUID();
     const student: Student = {
       id,
-      schoolId: insertStudent.schoolId ?? null, // Required for tenant scoping
-      deviceId: null, // DEPRECATED: Use studentDevices junction table instead
+      deviceId: insertStudent.deviceId,
       studentName: insertStudent.studentName,
-      studentEmail: normalizeEmail(insertStudent.studentEmail) ?? null,
-      emailLc: normalizeEmail(insertStudent.studentEmail) ?? null, // Generated column fallback for MemStorage
+      studentEmail: insertStudent.studentEmail ?? null,
       gradeLevel: insertStudent.gradeLevel ?? null,
       createdAt: new Date(),
     };
     this.students.set(id, student);
     
-    // Note: Student status is initialized on first heartbeat, not during creation
-    // This allows multi-device tracking via studentDevices junction table
+    // Initialize status for this student
+    const device = this.devices.get(student.deviceId);
+    const status: StudentStatus = {
+      studentId: student.id,
+      deviceId: student.deviceId,
+      deviceName: device?.deviceName ?? undefined,
+      studentName: student.studentName,
+      classId: device?.classId || '',
+      gradeLevel: student.gradeLevel ?? undefined,
+      activeTabTitle: "",
+      activeTabUrl: "",
+      lastSeenAt: 0,
+      isSharing: false,
+      screenLocked: false,
+      flightPathActive: false,
+      activeFlightPathName: undefined,
+      cameraActive: false,
+      status: 'offline',
+    };
+    this.studentStatuses.set(student.id, status);
     
     return student;
   }
@@ -397,13 +362,7 @@ export class MemStorage implements IStorage {
     const student = this.students.get(studentId);
     if (!student) return undefined;
     
-    // Normalize email if it's being updated
-    const normalizedUpdates = { ...updates };
-    if (normalizedUpdates.studentEmail !== undefined) {
-      normalizedUpdates.studentEmail = normalizeEmail(normalizedUpdates.studentEmail);
-    }
-    
-    Object.assign(student, normalizedUpdates);
+    Object.assign(student, updates);
     this.students.set(studentId, student);
     
     // Update status map if relevant fields changed
@@ -433,111 +392,22 @@ export class MemStorage implements IStorage {
     const student = this.students.get(studentId);
     if (!student) return false;
     
-    // Get all devices this student has used (for complete cleanup)
-    const devices = await this.getStudentDevices(studentId);
-    const deviceIds = devices.map(d => d.deviceId);
-    
     const existed = this.students.delete(studentId);
-    
-    // Delete studentStatus entries: both plain studentId and composite studentId-deviceId keys
     this.studentStatuses.delete(studentId);
-    const statusKeys = Array.from(this.studentStatuses.keys());
-    for (const key of statusKeys) {
-      if (key.startsWith(`${studentId}-`)) {
-        this.studentStatuses.delete(key);
-      }
-    }
     
-    // Clear from active students for ALL devices this student used
-    for (const deviceId of deviceIds) {
-      const activeStudentId = this.activeStudents.get(deviceId);
+    // Clear from active students if this student is active
+    const entries = Array.from(this.activeStudents.entries());
+    for (const [deviceId, activeStudentId] of entries) {
       if (activeStudentId === studentId) {
         this.activeStudents.delete(deviceId);
       }
     }
     
-    // CASCADE DELETE: Remove all related records
+    // Delete related data
     this.heartbeats = this.heartbeats.filter(h => h.studentId !== studentId);
     this.events = this.events.filter(e => e.studentId !== studentId);
-    this.messages = this.messages.filter(m => m.toStudentId !== studentId);
-    this.checkIns = this.checkIns.filter(c => c.studentId !== studentId);
-    this.teacherStudents = this.teacherStudents.filter(ts => ts.studentId !== studentId);
-    
-    // Remove student from all StudentGroups (legacy student groups with studentIds array)
-    for (const [groupId, group] of Array.from(this.studentGroups.entries())) {
-      if (group.studentIds && Array.isArray(group.studentIds)) {
-        const updatedStudentIds = group.studentIds.filter((id: string) => id !== studentId);
-        if (updatedStudentIds.length !== group.studentIds.length) {
-          this.studentGroups.set(groupId, { ...group, studentIds: updatedStudentIds });
-        }
-      }
-    }
-    
-    // CASCADE DELETE: Remove from studentDevices junction table
-    const deviceKeys = Array.from(this.studentDevices.keys());
-    for (const key of deviceKeys) {
-      if (key.startsWith(`${studentId}-`)) {
-        this.studentDevices.delete(key);
-      }
-    }
     
     return existed;
-  }
-
-  // Student Devices (many-to-many tracking)
-  async addStudentDevice(studentId: string, deviceId: string): Promise<StudentDevice> {
-    const key = `${studentId}-${deviceId}`;
-    const existing = this.studentDevices.get(key);
-    
-    if (existing) {
-      // Update lastSeenAt
-      const updated: StudentDevice = {
-        ...existing,
-        lastSeenAt: new Date(),
-      };
-      this.studentDevices.set(key, updated);
-      return updated;
-    }
-    
-    // Create new student-device relationship
-    const studentDevice: StudentDevice = {
-      id: randomUUID(),
-      studentId,
-      deviceId,
-      firstSeenAt: new Date(),
-      lastSeenAt: new Date(),
-    };
-    this.studentDevices.set(key, studentDevice);
-    return studentDevice;
-  }
-
-  async getStudentDevices(studentId: string): Promise<StudentDevice[]> {
-    return Array.from(this.studentDevices.values())
-      .filter(sd => sd.studentId === studentId);
-  }
-
-  async getDeviceStudents(deviceId: string): Promise<Student[]> {
-    const studentIds = Array.from(this.studentDevices.values())
-      .filter(sd => sd.deviceId === deviceId)
-      .map(sd => sd.studentId);
-    
-    return Array.from(this.students.values())
-      .filter(s => studentIds.includes(s.id));
-  }
-
-  async cleanupStaleStudentDevices(hoursOld: number): Promise<number> {
-    const cutoffTime = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
-    const toDelete: string[] = [];
-    
-    // Convert iterator to array for iteration
-    for (const [key, sd] of Array.from(this.studentDevices.entries())) {
-      if (sd.lastSeenAt < cutoffTime) {
-        toDelete.push(key);
-      }
-    }
-    
-    toDelete.forEach(key => this.studentDevices.delete(key));
-    return toDelete.length;
   }
 
   // Student Status
@@ -558,52 +428,6 @@ export class MemStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
-  }
-
-  async getAllStudentStatusesEnriched(): Promise<StudentStatus[]> {
-    const statuses = await this.getAllStudentStatuses();
-    
-    // Build student → teacher metadata map from teacherStudents junction table
-    const studentToTeacher = new Map<string, { teacherId: string; teacherName?: string }>();
-    for (const ts of this.teacherStudents) {
-      if (!studentToTeacher.has(ts.studentId)) {
-        const teacher = this.users.get(ts.teacherId);
-        studentToTeacher.set(ts.studentId, {
-          teacherId: ts.teacherId,
-          teacherName: teacher?.username,
-        });
-      }
-    }
-    
-    // Build student → group metadata map from studentGroups.studentIds arrays
-    const studentToGroup = new Map<string, { groupId: string; groupName?: string; teacherId?: string }>();
-    for (const group of Array.from(this.studentGroups.values())) {
-      if (group.studentIds) {
-        for (const studentId of group.studentIds) {
-          if (!studentToGroup.has(studentId)) {
-            studentToGroup.set(studentId, {
-              groupId: group.id,
-              groupName: group.groupName,
-              teacherId: group.teacherId ?? undefined,
-            });
-          }
-        }
-      }
-    }
-    
-    // Enrich statuses with teacher/group metadata in one pass
-    return statuses.map(status => {
-      const teacher = studentToTeacher.get(status.studentId);
-      const group = studentToGroup.get(status.studentId);
-      
-      return {
-        ...status,
-        teacherId: teacher?.teacherId,
-        teacherName: teacher?.teacherName,
-        groupId: group?.groupId,
-        groupName: group?.groupName,
-      };
-    });
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
@@ -1292,22 +1116,25 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteDevice(deviceId: string): Promise<boolean> {
-    // CASCADE DELETE: Remove from student_devices junction table
-    await db.delete(studentDevices).where(eq(studentDevices.deviceId, deviceId));
-    
-    // Delete studentStatus entries for this device (composite keys)
-    const statusKeys = Array.from(this.studentStatuses.keys());
-    for (const key of statusKeys) {
-      if (key.endsWith(`-${deviceId}`)) {
-        this.studentStatuses.delete(key);
-      }
-    }
+    // Get all students on this device
+    const studentsOnDevice = await this.getStudentsByDevice(deviceId);
+    const studentIds = studentsOnDevice.map(s => s.id);
     
     // Delete heartbeats for this device
     await db.delete(heartbeats).where(eq(heartbeats.deviceId, deviceId));
     
     // Delete events for this device
     await db.delete(events).where(eq(events.deviceId, deviceId));
+    
+    // Delete all students on this device
+    if (studentIds.length > 0) {
+      await db.delete(students).where(inArray(students.id, studentIds));
+      
+      // Remove from in-memory status maps
+      for (const studentId of studentIds) {
+        this.studentStatuses.delete(studentId);
+      }
+    }
     
     // Clear active student mapping
     this.activeStudents.delete(deviceId);
@@ -1327,64 +1154,13 @@ export class DatabaseStorage implements IStorage {
     return student || undefined;
   }
 
-  async getStudentByEmail(schoolId: string, email: string): Promise<Student | undefined> {
-    const normalizedEmail = normalizeEmail(email);
-    // Use email_lc generated column and schoolId for lookup (case-insensitive, scoped by school)
-    const [student] = await db
-      .select()
-      .from(students)
-      .where(drizzleSql`${students.schoolId} = ${schoolId} AND ${students.emailLc} = ${normalizedEmail}`);
+  async getStudentByEmail(email: string): Promise<Student | undefined> {
+    const [student] = await db.select().from(students).where(eq(students.studentEmail, email));
     return student || undefined;
   }
 
-  async upsertStudent(schoolId: string, email: string, name: string, gradeLevel?: string): Promise<Student> {
-    const normalizedEmail = normalizeEmail(email);
-    
-    // Try to find existing student by (schoolId, email_lc)
-    const existing = await this.getStudentByEmail(schoolId, email);
-    
-    if (existing) {
-      // Update existing student
-      const [updated] = await db
-        .update(students)
-        .set({
-          studentName: name,
-          ...(gradeLevel ? { gradeLevel } : {}),
-        })
-        .where(eq(students.id, existing.id))
-        .returning();
-      return updated;
-    }
-    
-    // Create new student
-    const [newStudent] = await db
-      .insert(students)
-      .values({
-        schoolId,
-        studentEmail: normalizedEmail,
-        studentName: name,
-        gradeLevel: gradeLevel ?? null,
-        deviceId: null, // DEPRECATED: Use studentDevices junction table
-      })
-      .returning();
-    
-    return newStudent;
-  }
-
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
-    // Use studentDevices junction table instead of deprecated deviceId column
-    const deviceStudents = await db
-      .select()
-      .from(studentDevices)
-      .where(eq(studentDevices.deviceId, deviceId));
-    
-    if (deviceStudents.length === 0) return [];
-    
-    const studentIds = deviceStudents.map(sd => sd.studentId);
-    return await db
-      .select()
-      .from(students)
-      .where(inArray(students.id, studentIds));
+    return await db.select().from(students).where(eq(students.deviceId, deviceId));
   }
 
   async getAllStudents(): Promise<Student[]> {
@@ -1392,34 +1168,58 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
-    // Normalize email before insertion
     const [student] = await db
       .insert(students)
-      .values({
-        schoolId: insertStudent.schoolId ?? null, // Required for tenant scoping
-        studentEmail: normalizeEmail(insertStudent.studentEmail),
-        studentName: insertStudent.studentName,
-        gradeLevel: insertStudent.gradeLevel ?? null,
-        deviceId: null, // DEPRECATED: Use studentDevices junction table instead
-      })
+      .values(insertStudent)
       .returning();
     
-    // Note: Student status is initialized on first heartbeat, not during creation
-    // This allows multi-device tracking via studentDevices junction table
+    // Get device info for this student
+    const device = await this.getDevice(student.deviceId);
+    
+    // Get most recent heartbeat to initialize status with real data
+    const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
+    const lastHeartbeat = recentHeartbeats[0];
+    
+    let lastSeenAt = 0;
+    let activeTabTitle = "";
+    let activeTabUrl = "";
+    let favicon: string | undefined = undefined;
+    
+    if (lastHeartbeat) {
+      lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+      activeTabTitle = lastHeartbeat.activeTabTitle;
+      activeTabUrl = lastHeartbeat.activeTabUrl;
+      favicon = lastHeartbeat.favicon || undefined;
+    }
+    
+    // Initialize status
+    const status: StudentStatus = {
+      studentId: student.id,
+      deviceId: student.deviceId,
+      deviceName: device?.deviceName ?? undefined,
+      studentName: student.studentName,
+      classId: device?.classId || '',
+      gradeLevel: student.gradeLevel ?? undefined,
+      activeTabTitle,
+      activeTabUrl,
+      favicon,
+      lastSeenAt,
+      isSharing: false,
+      screenLocked: false,
+      flightPathActive: false,
+      activeFlightPathName: undefined,
+      cameraActive: false,
+      status: this.calculateStatus(lastSeenAt),
+    };
+    this.studentStatuses.set(student.id, status);
     
     return student;
   }
 
   async updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined> {
-    // Normalize email if it's being updated
-    const normalizedUpdates = { ...updates };
-    if (normalizedUpdates.studentEmail !== undefined) {
-      normalizedUpdates.studentEmail = normalizeEmail(normalizedUpdates.studentEmail);
-    }
-    
     const [student] = await db
       .update(students)
-      .set(normalizedUpdates)
+      .set(updates)
       .where(eq(students.id, studentId))
       .returning();
     
@@ -1448,114 +1248,30 @@ export class DatabaseStorage implements IStorage {
     return student;
   }
 
-  // Student Devices (many-to-many tracking)
-  async addStudentDevice(studentId: string, deviceId: string): Promise<StudentDevice> {
-    // Upsert: create or update lastSeenAt
-    const existing = await db
-      .select()
-      .from(studentDevices)
-      .where(drizzleSql`${studentDevices.studentId} = ${studentId} AND ${studentDevices.deviceId} = ${deviceId}`)
-      .limit(1);
-    
-    if (existing.length > 0) {
-      // Update lastSeenAt
-      const [updated] = await db
-        .update(studentDevices)
-        .set({ lastSeenAt: new Date() })
-        .where(drizzleSql`${studentDevices.studentId} = ${studentId} AND ${studentDevices.deviceId} = ${deviceId}`)
-        .returning();
-      return updated;
-    }
-    
-    // Create new student-device relationship
-    const [studentDevice] = await db
-      .insert(studentDevices)
-      .values({ studentId, deviceId })
-      .returning();
-    return studentDevice;
-  }
-
-  async getStudentDevices(studentId: string): Promise<StudentDevice[]> {
-    return await db
-      .select()
-      .from(studentDevices)
-      .where(eq(studentDevices.studentId, studentId));
-  }
-
-  async getDeviceStudents(deviceId: string): Promise<Student[]> {
-    const deviceStudents = await db
-      .select()
-      .from(studentDevices)
-      .where(eq(studentDevices.deviceId, deviceId));
-    
-    if (deviceStudents.length === 0) return [];
-    
-    const studentIds = deviceStudents.map(sd => sd.studentId);
-    return await db
-      .select()
-      .from(students)
-      .where(inArray(students.id, studentIds));
-  }
-
-  async cleanupStaleStudentDevices(hoursOld: number): Promise<number> {
-    const cutoffTime = new Date(Date.now() - hoursOld * 60 * 60 * 1000);
-    
-    const deleted = await db
-      .delete(studentDevices)
-      .where(lt(studentDevices.lastSeenAt, cutoffTime))
-      .returning();
-    
-    return deleted.length;
-  }
-
   async deleteStudent(studentId: string): Promise<boolean> {
-    // CASCADE DELETE: Remove all related records in the correct order
-    
-    // 1. Delete heartbeats for this student
+    // Delete heartbeats for this student
     await db.delete(heartbeats).where(eq(heartbeats.studentId, studentId));
     
-    // 2. Delete events for this student
+    // Delete events for this student
     await db.delete(events).where(eq(events.studentId, studentId));
     
-    // 3. Delete messages for this student
-    await db.delete(messages).where(eq(messages.toStudentId, studentId));
+    // Get student to find device for active student cleanup
+    const student = await this.getStudent(studentId);
     
-    // 4. Delete check-ins for this student
-    await db.delete(checkIns).where(eq(checkIns.studentId, studentId));
-    
-    // 5. Delete group_students assignments (prevents orphaned records)
-    await db.delete(groupStudents).where(eq(groupStudents.studentId, studentId));
-    
-    // 6. Delete teacher_students assignments (prevents orphaned records)
-    await db.delete(teacherStudents).where(eq(teacherStudents.studentId, studentId));
-    
-    // 7. Get all devices this student has used (for complete cleanup)
-    const devices = await this.getStudentDevices(studentId);
-    const deviceIds = devices.map(d => d.deviceId);
-    
-    // 8. Delete student_devices assignments (prevents orphaned records in junction table)
-    await db.delete(studentDevices).where(eq(studentDevices.studentId, studentId));
-    
-    // 9. Finally, delete the student record itself
+    // Delete student
     const [deletedStudent] = await db
       .delete(students)
       .where(eq(students.id, studentId))
       .returning();
     
-    // Delete studentStatus entries: both plain studentId and composite studentId-deviceId keys
+    // Remove from in-memory status map
     this.studentStatuses.delete(studentId);
-    const statusKeys = Array.from(this.studentStatuses.keys());
-    for (const key of statusKeys) {
-      if (key.startsWith(`${studentId}-`)) {
-        this.studentStatuses.delete(key);
-      }
-    }
     
-    // Clear from active students for ALL devices this student used
-    for (const deviceId of deviceIds) {
-      const activeStudentId = this.activeStudents.get(deviceId);
+    // Clear from active students if this student is active
+    if (student) {
+      const activeStudentId = this.activeStudents.get(student.deviceId);
       if (activeStudentId === studentId) {
-        this.activeStudents.delete(deviceId);
+        this.activeStudents.delete(student.deviceId);
       }
     }
     
@@ -1580,65 +1296,6 @@ export class DatabaseStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
-  }
-
-  async getAllStudentStatusesEnriched(): Promise<StudentStatus[]> {
-    const statuses = await this.getAllStudentStatuses();
-    
-    // Batch-load all relationships (3 queries total)
-    const teacherStudentRows = await db.select().from(teacherStudents);
-    const groupRows = await db.select().from(studentGroups);
-    
-    // Get unique teacher IDs and batch-load teachers
-    const uniqueTeacherIds = Array.from(new Set(teacherStudentRows.map(ts => ts.teacherId)));
-    const teachers = uniqueTeacherIds.length > 0
-      ? await db.select().from(users).where(inArray(users.id, uniqueTeacherIds))
-      : [];
-    
-    // Build teacher lookup map
-    const teacherMap = new Map(teachers.map(t => [t.id, t]));
-    
-    // Build student → teacher metadata map from teacherStudents junction table
-    const studentToTeacher = new Map<string, { teacherId: string; teacherName?: string }>();
-    for (const ts of teacherStudentRows) {
-      if (!studentToTeacher.has(ts.studentId)) {
-        const teacher = teacherMap.get(ts.teacherId);
-        studentToTeacher.set(ts.studentId, {
-          teacherId: ts.teacherId,
-          teacherName: teacher?.username,
-        });
-      }
-    }
-    
-    // Build student → group metadata map from studentGroups.studentIds arrays
-    const studentToGroup = new Map<string, { groupId: string; groupName?: string; teacherId?: string }>();
-    for (const group of groupRows) {
-      if (group.studentIds) {
-        for (const studentId of group.studentIds) {
-          if (!studentToGroup.has(studentId)) {
-            studentToGroup.set(studentId, {
-              groupId: group.id,
-              groupName: group.groupName,
-              teacherId: group.teacherId ?? undefined,
-            });
-          }
-        }
-      }
-    }
-    
-    // Enrich statuses with teacher/group metadata in one pass
-    return statuses.map(status => {
-      const teacher = studentToTeacher.get(status.studentId);
-      const group = studentToGroup.get(status.studentId);
-      
-      return {
-        ...status,
-        teacherId: teacher?.teacherId,
-        teacherName: teacher?.teacherName,
-        groupId: group?.groupId,
-        groupName: group?.groupName,
-      };
-    });
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
