@@ -70,7 +70,7 @@ export type StudentDevice = typeof studentDevices.$inferSelect;
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
   studentId: string;
-  deviceId: string;
+  deviceId?: string | null; // NULLABLE: Email-first students may not have deviceId yet
   deviceName?: string;
   studentName: string;
   classId: string;
@@ -93,8 +93,8 @@ export interface StudentStatus {
 
 // Helper function to create consistent composite keys for student status tracking
 // This allows the same student to appear multiple times (once per device)
-export function makeStatusKey(studentId: string, deviceId: string): string {
-  return `${studentId}-${deviceId}`;
+export function makeStatusKey(studentId: string, deviceId?: string | null): string {
+  return `${studentId}-${deviceId || 'no-device'}`;
 }
 
 // Aggregated student status - combines all devices for a single student
@@ -120,7 +120,7 @@ export interface AggregatedStudentStatus {
   lastSeenAt: number; // Most recent across all devices
   
   // Primary device data (from most active device)
-  primaryDeviceId: string; // Device with most recent activity
+  primaryDeviceId?: string | null; // Device with most recent activity (nullable for email-first)
   deviceName?: string; // Name of primary device (for display compatibility)
   activeTabTitle: string;
   activeTabUrl: string;
@@ -162,7 +162,45 @@ export const heartbeats = pgTable("heartbeats", {
   schoolEmailIdx: index("heartbeats_school_email_idx").on(table.schoolId, table.studentEmail), // NEW: Multi-tenant email lookup
 }));
 
-export const insertHeartbeatSchema = createInsertSchema(heartbeats).omit({ id: true, timestamp: true });
+// Email normalization helper for consistent lookups
+export function normalizeEmail(email: string): string {
+  const trimmed = email.trim().toLowerCase();
+  
+  // Remove +tags from Gmail (user+tag@gmail.com → user@gmail.com)
+  const atIndex = trimmed.indexOf('@');
+  if (atIndex === -1) return trimmed;
+  
+  const localPart = trimmed.substring(0, atIndex);
+  const domain = trimmed.substring(atIndex);
+  
+  // Remove +tag from local part
+  const plusIndex = localPart.indexOf('+');
+  const cleanLocal = plusIndex === -1 ? localPart : localPart.substring(0, plusIndex);
+  
+  return cleanLocal + domain;
+}
+
+// Heartbeat validation: Require EITHER studentId OR (studentEmail + schoolId)
+export const insertHeartbeatSchema = createInsertSchema(heartbeats)
+  .omit({ id: true, timestamp: true })
+  .superRefine((data, ctx) => {
+    const hasStudentId = !!data.studentId;
+    const hasEmail = !!data.studentEmail && !!data.schoolId;
+    
+    if (!hasStudentId && !hasEmail) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Either studentId or (studentEmail + schoolId) must be provided",
+        path: ['studentId'],
+      });
+    }
+    
+    // Normalize email if provided
+    if (data.studentEmail) {
+      data.studentEmail = normalizeEmail(data.studentEmail);
+    }
+  });
+
 export type InsertHeartbeat = z.infer<typeof insertHeartbeatSchema>;
 export type Heartbeat = typeof heartbeats.$inferSelect;
 

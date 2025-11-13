@@ -21,6 +21,7 @@ import {
   insertSessionSchema,
   loginSchema,
   createTeacherSchema,
+  normalizeEmail, // Email normalization helper
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
@@ -846,7 +847,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               deviceId: placeholderDeviceId,
               studentName: name,
               studentEmail: email,
+              emailLc: normalizeEmail(email), // Normalized: lowercase + strip +tags
               gradeLevel: normalizedGrade,
+              schoolId,
+              studentStatus: "active", // Default status for CSV imports
             });
             results.created++;
           }
@@ -1645,6 +1649,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Calculate duration for each URL
       for (let i = 0; i < filteredHeartbeats.length; i++) {
         const current = filteredHeartbeats[i];
+        
+        // Skip heartbeats with no URL (chrome-internal URLs filtered by extension)
+        if (!current.activeTabUrl) continue;
+        
         let duration = 10; // Default 10 seconds per heartbeat
         
         // If there's a next heartbeat from the same device with the same URL, calculate exact duration
@@ -1678,9 +1686,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         } catch {
           // If URL parsing fails, clean up common patterns
-          if (domain.includes('chrome://')) {
+          if (domain && domain.includes('chrome://')) {
             domain = 'chrome (extensions)';
-          } else if (domain.includes('replit')) {
+          } else if (domain && domain.includes('replit')) {
             domain = 'replit.dev';
           }
         }
