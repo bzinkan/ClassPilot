@@ -11,6 +11,7 @@ import Settings from "@/pages/settings";
 import MySettings from "@/pages/my-settings";
 import Admin from "@/pages/admin";
 import AdminClasses from "@/pages/admin-classes";
+import StudentsPage from "@/pages/students";
 import Roster from "@/pages/roster";
 
 function Router() {
@@ -23,6 +24,7 @@ function Router() {
       <Route path="/my-settings" component={MySettings} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/classes" component={AdminClasses} />
+      <Route path="/students" component={StudentsPage} />
       <Route path="/class/:classId">
         {(params) => <Dashboard />}
       </Route>

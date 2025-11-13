@@ -43,6 +43,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import { EditStudentDialog } from "@/components/edit-student-dialog";
 import type { Group, Settings } from "@shared/schema";
 
 // Helper to normalize grade levels
@@ -62,14 +63,6 @@ const createClassSchema = z.object({
 });
 
 type CreateClassForm = z.infer<typeof createClassSchema>;
-
-const editStudentSchema = z.object({
-  studentName: z.string().min(1, "Name is required"),
-  studentEmail: z.string().email("Invalid email format"),
-  gradeLevel: z.string().optional(),
-});
-
-type EditStudentForm = z.infer<typeof editStudentSchema>;
 
 interface Teacher {
   id: string;
@@ -92,121 +85,6 @@ interface TeachersResponse {
 
 interface StudentsResponse {
   students: Student[];
-}
-
-interface EditStudentDialogProps {
-  student: Student;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-}
-
-function EditStudentDialog({ student, open, onOpenChange }: EditStudentDialogProps) {
-  const { toast } = useToast();
-  const form = useForm<EditStudentForm>({
-    resolver: zodResolver(editStudentSchema),
-    defaultValues: {
-      studentName: student.studentName,
-      studentEmail: student.studentEmail,
-      gradeLevel: student.gradeLevel || "",
-    },
-  });
-
-  const editMutation = useMutation({
-    mutationFn: async (data: EditStudentForm) => {
-      const res = await apiRequest("PATCH", `/api/students/${student.id}`, data);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/groups"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
-      toast({
-        title: "Student updated",
-        description: "Student information has been updated successfully.",
-      });
-      onOpenChange(false);
-      form.reset();
-    },
-    onError: (error: Error) => {
-      toast({
-        title: "Error",
-        description: error.message || "Failed to update student",
-        variant: "destructive",
-      });
-    },
-  });
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent data-testid="dialog-edit-student">
-        <DialogHeader>
-          <DialogTitle>Edit Student</DialogTitle>
-          <DialogDescription>
-            Update student information
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form onSubmit={form.handleSubmit((data) => editMutation.mutate(data))} className="space-y-4">
-            <FormField
-              control={form.control}
-              name="studentName"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Student Name</FormLabel>
-                  <FormControl>
-                    <Input {...field} data-testid="input-edit-student-name" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="studentEmail"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Email</FormLabel>
-                  <FormControl>
-                    <Input {...field} type="email" data-testid="input-edit-student-email" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormField
-              control={form.control}
-              name="gradeLevel"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Grade Level (Optional)</FormLabel>
-                  <FormControl>
-                    <Input {...field} placeholder="e.g., 9" data-testid="input-edit-student-grade" />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => onOpenChange(false)}
-                data-testid="button-cancel-edit"
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                disabled={editMutation.isPending}
-                data-testid="button-save-student"
-              >
-                {editMutation.isPending ? "Saving..." : "Save Changes"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 interface ClassCardProps {
@@ -358,6 +236,10 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
           student={editingStudent}
           open={!!editingStudent}
           onOpenChange={(open) => !open && setEditingStudent(null)}
+          onSuccess={() => {
+            queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+            queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+          }}
         />
       )}
     </Collapsible>

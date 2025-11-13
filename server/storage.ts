@@ -405,9 +405,21 @@ export class MemStorage implements IStorage {
       }
     }
     
+    // Delete teacher-student assignments
+    this.teacherStudents = this.teacherStudents.filter(ts => ts.studentId !== studentId);
+    
+    // Delete group-student assignments (remove studentId from all groups)
+    for (const [groupId, group] of Array.from(this.studentGroups.entries())) {
+      if (group.studentIds && group.studentIds.includes(studentId)) {
+        group.studentIds = group.studentIds.filter((id: string) => id !== studentId);
+        this.studentGroups.set(groupId, group);
+      }
+    }
+    
     // Delete related data
     this.heartbeats = this.heartbeats.filter(h => h.studentId !== studentId);
     this.events = this.events.filter(e => e.studentId !== studentId);
+    this.checkIns = this.checkIns.filter(c => c.studentId !== studentId);
     
     return existed;
   }
@@ -1318,11 +1330,20 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteStudent(studentId: string): Promise<boolean> {
+    // Delete teacher-student assignments
+    await db.delete(teacherStudents).where(eq(teacherStudents.studentId, studentId));
+    
+    // Delete group-student assignments (remove from all classes)
+    await db.delete(groupStudents).where(eq(groupStudents.studentId, studentId));
+    
     // Delete heartbeats for this student
     await db.delete(heartbeats).where(eq(heartbeats.studentId, studentId));
     
     // Delete events for this student
     await db.delete(events).where(eq(events.studentId, studentId));
+    
+    // Delete check-ins for this student
+    await db.delete(checkIns).where(eq(checkIns.studentId, studentId));
     
     // Get student to find device for active student cleanup
     const student = await this.getStudent(studentId);

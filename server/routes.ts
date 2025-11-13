@@ -1480,6 +1480,39 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Delete student (admin-only)
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAdmin, async (req, res) => {
+    try {
+      const { studentId } = req.params;
+      
+      // Validate student ID format
+      if (!studentId || typeof studentId !== 'string') {
+        return res.status(400).json({ error: "Invalid student ID" });
+      }
+      
+      // Get student info before deletion for broadcast
+      const student = await storage.getStudent(studentId);
+      
+      const deleted = await storage.deleteStudent(studentId);
+      
+      if (!deleted) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      
+      // Broadcast update to teachers using student's actual device ID (if available)
+      // This triggers dashboard refresh to remove deleted student
+      broadcastToTeachers({
+        type: 'student-update',
+        deviceId: student?.deviceId || studentId,
+      });
+      
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Update device information (device name and class assignment)
   app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
