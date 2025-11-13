@@ -81,6 +81,42 @@ export function makeStatusKey(studentId: string, deviceId: string): string {
   return `${studentId}-${deviceId}`;
 }
 
+// Aggregated student status - combines all devices for a single student
+// Used for dashboard display (one tile per student)
+export interface AggregatedStudentStatus {
+  studentId: string;
+  studentEmail?: string; // Primary identity
+  studentName: string;
+  gradeLevel?: string;
+  classId: string;
+  
+  // Multi-device awareness
+  deviceCount: number; // How many devices this student is using
+  devices: Array<{
+    deviceId: string;
+    deviceName?: string;
+    status: 'online' | 'idle' | 'offline';
+    lastSeenAt: number;
+  }>;
+  
+  // Aggregated status (best across all devices)
+  status: 'online' | 'idle' | 'offline'; // Online if ANY device online
+  lastSeenAt: number; // Most recent across all devices
+  
+  // Primary device data (from most active device)
+  primaryDeviceId: string; // Device with most recent activity
+  activeTabTitle: string;
+  activeTabUrl: string;
+  favicon?: string;
+  isSharing: boolean;
+  screenLocked: boolean;
+  flightPathActive: boolean;
+  activeFlightPathName?: string;
+  cameraActive: boolean;
+  currentUrlDuration?: number;
+  viewMode?: 'url' | 'thumb' | 'live';
+}
+
 // Heartbeat data
 export const heartbeats = pgTable("heartbeats", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),

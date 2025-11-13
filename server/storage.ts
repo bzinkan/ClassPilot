@@ -6,6 +6,7 @@ import {
   type Student,
   type InsertStudent,
   type StudentStatus,
+  type AggregatedStudentStatus,
   type Heartbeat,
   type InsertHeartbeat,
   type Event,
@@ -84,6 +85,7 @@ export interface IStorage {
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
   getAllStudentStatuses(): Promise<StudentStatus[]>;
+  getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]>; // One entry per student
   updateStudentStatus(status: StudentStatus): Promise<void>;
   getActiveStudentForDevice(deviceId: string): Promise<Student | undefined>;
   setActiveStudentForDevice(deviceId: string, studentId: string | null): Promise<void>;
@@ -428,6 +430,72 @@ export class MemStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
+  }
+
+  async getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]> {
+    const allStatuses = await this.getAllStudentStatuses();
+    
+    // Group statuses by studentId
+    const statusesByStudent = new Map<string, StudentStatus[]>();
+    for (const status of allStatuses) {
+      const existing = statusesByStudent.get(status.studentId) || [];
+      existing.push(status);
+      statusesByStudent.set(status.studentId, existing);
+    }
+    
+    // Aggregate each student's devices
+    const aggregated: AggregatedStudentStatus[] = [];
+    for (const [studentId, deviceStatuses] of Array.from(statusesByStudent.entries())) {
+      // Find most recent device (primary device)
+      const primaryStatus = deviceStatuses.reduce((latest: StudentStatus, current: StudentStatus) => 
+        current.lastSeenAt > latest.lastSeenAt ? current : latest
+      );
+      
+      // Determine best status across all devices (Online > Idle > Offline)
+      const statusPriority: Record<string, number> = { online: 3, idle: 2, offline: 1 };
+      const bestStatus = deviceStatuses.reduce((best: StudentStatus, current: StudentStatus) => 
+        statusPriority[current.status] > statusPriority[best.status] ? current : best
+      );
+      
+      // Get student email from student record
+      const student = this.students.get(studentId);
+      
+      aggregated.push({
+        studentId,
+        studentEmail: student?.studentEmail || undefined,
+        studentName: primaryStatus.studentName,
+        gradeLevel: primaryStatus.gradeLevel,
+        classId: primaryStatus.classId,
+        
+        // Multi-device info
+        deviceCount: deviceStatuses.length,
+        devices: deviceStatuses.map((s: StudentStatus) => ({
+          deviceId: s.deviceId,
+          deviceName: s.deviceName,
+          status: s.status,
+          lastSeenAt: s.lastSeenAt,
+        })),
+        
+        // Aggregated status
+        status: bestStatus.status,
+        lastSeenAt: Math.max(...deviceStatuses.map((s: StudentStatus) => s.lastSeenAt)),
+        
+        // Primary device data (most recent)
+        primaryDeviceId: primaryStatus.deviceId,
+        activeTabTitle: primaryStatus.activeTabTitle,
+        activeTabUrl: primaryStatus.activeTabUrl,
+        favicon: primaryStatus.favicon,
+        isSharing: primaryStatus.isSharing,
+        screenLocked: primaryStatus.screenLocked,
+        flightPathActive: primaryStatus.flightPathActive,
+        activeFlightPathName: primaryStatus.activeFlightPathName,
+        cameraActive: primaryStatus.cameraActive,
+        currentUrlDuration: primaryStatus.currentUrlDuration,
+        viewMode: primaryStatus.viewMode,
+      });
+    }
+    
+    return aggregated;
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
@@ -1296,6 +1364,72 @@ export class DatabaseStorage implements IStorage {
       ...status,
       status: this.calculateStatus(status.lastSeenAt),
     }));
+  }
+
+  async getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]> {
+    const allStatuses = await this.getAllStudentStatuses();
+    
+    // Group statuses by studentId
+    const statusesByStudent = new Map<string, StudentStatus[]>();
+    for (const status of allStatuses) {
+      const existing = statusesByStudent.get(status.studentId) || [];
+      existing.push(status);
+      statusesByStudent.set(status.studentId, existing);
+    }
+    
+    // Aggregate each student's devices
+    const aggregated: AggregatedStudentStatus[] = [];
+    for (const [studentId, deviceStatuses] of Array.from(statusesByStudent.entries())) {
+      // Find most recent device (primary device)
+      const primaryStatus = deviceStatuses.reduce((latest: StudentStatus, current: StudentStatus) => 
+        current.lastSeenAt > latest.lastSeenAt ? current : latest
+      );
+      
+      // Determine best status across all devices (Online > Idle > Offline)
+      const statusPriority: Record<string, number> = { online: 3, idle: 2, offline: 1 };
+      const bestStatus = deviceStatuses.reduce((best: StudentStatus, current: StudentStatus) => 
+        statusPriority[current.status] > statusPriority[best.status] ? current : best
+      );
+      
+      // Get student email from student record
+      const student = await this.getStudent(studentId);
+      
+      aggregated.push({
+        studentId,
+        studentEmail: student?.studentEmail || undefined,
+        studentName: primaryStatus.studentName,
+        gradeLevel: primaryStatus.gradeLevel,
+        classId: primaryStatus.classId,
+        
+        // Multi-device info
+        deviceCount: deviceStatuses.length,
+        devices: deviceStatuses.map((s: StudentStatus) => ({
+          deviceId: s.deviceId,
+          deviceName: s.deviceName,
+          status: s.status,
+          lastSeenAt: s.lastSeenAt,
+        })),
+        
+        // Aggregated status
+        status: bestStatus.status,
+        lastSeenAt: Math.max(...deviceStatuses.map((s: StudentStatus) => s.lastSeenAt)),
+        
+        // Primary device data (most recent)
+        primaryDeviceId: primaryStatus.deviceId,
+        activeTabTitle: primaryStatus.activeTabTitle,
+        activeTabUrl: primaryStatus.activeTabUrl,
+        favicon: primaryStatus.favicon,
+        isSharing: primaryStatus.isSharing,
+        screenLocked: primaryStatus.screenLocked,
+        flightPathActive: primaryStatus.flightPathActive,
+        activeFlightPathName: primaryStatus.activeFlightPathName,
+        cameraActive: primaryStatus.cameraActive,
+        currentUrlDuration: primaryStatus.currentUrlDuration,
+        viewMode: primaryStatus.viewMode,
+      });
+    }
+    
+    return aggregated;
   }
 
   async updateStudentStatus(status: StudentStatus): Promise<void> {
