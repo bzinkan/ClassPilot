@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -81,14 +81,19 @@ export const studentSessions = pgTable("student_sessions", {
   lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
   endedAt: timestamp("ended_at"), // Nullable - null means session still active
   isActive: boolean("is_active").notNull().default(true),
-}, (table) => ({
+}, (table) => [
   // Partial unique indexes to enforce: ONE active session per student, ONE active session per device
   // These prevent race conditions and ensure clean session transitions
-  uniqueActiveStudent: unique("student_sessions_active_student_unique").on(table.studentId).where(sql`${table.isActive} = true`),
-  uniqueActiveDevice: unique("student_sessions_active_device_unique").on(table.deviceId).where(sql`${table.isActive} = true`),
+  uniqueIndex("student_sessions_active_student_unique")
+    .on(table.studentId)
+    .where(sql`${table.isActive} = true`),
+  uniqueIndex("student_sessions_active_device_unique")
+    .on(table.deviceId)
+    .where(sql`${table.isActive} = true`),
   // Composite index for fast lookups
-  studentDeviceActiveIdx: index("student_sessions_student_device_active_idx").on(table.studentId, table.deviceId, table.isActive),
-}));
+  index("student_sessions_student_device_active_idx")
+    .on(table.studentId, table.deviceId, table.isActive),
+]);
 
 export const insertStudentSessionSchema = createInsertSchema(studentSessions).omit({ 
   id: true, 

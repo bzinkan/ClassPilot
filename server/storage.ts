@@ -90,12 +90,12 @@ export interface IStorage {
 
   // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
   // Tracks "Student X is on Device Y RIGHT NOW"
-  findActiveSession(studentId: string): Promise<StudentSession | undefined>; // Find active session for a student
-  findActiveSessionByDevice(deviceId: string): Promise<StudentSession | undefined>; // Find active session for a device
-  startSession(studentId: string, deviceId: string): Promise<StudentSession>; // Start new session
-  endSession(sessionId: string): Promise<void>; // End a session (set isActive=false, endedAt=now)
-  updateSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void>; // Update lastSeenAt timestamp
-  expireStaleSessions(maxAgeSeconds: number): Promise<number>; // Auto-expire old sessions, returns count
+  findActiveStudentSession(studentId: string): Promise<StudentSession | undefined>; // Find active session for a student
+  findActiveStudentSessionByDevice(deviceId: string): Promise<StudentSession | undefined>; // Find active session for a device
+  startStudentSession(studentId: string, deviceId: string): Promise<StudentSession>; // Start new student session
+  endStudentSession(sessionId: string): Promise<void>; // End a student session (set isActive=false, endedAt=now)
+  updateStudentSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void>; // Update lastSeenAt timestamp
+  expireStaleStudentSessions(maxAgeSeconds: number): Promise<number>; // Auto-expire old student sessions, returns count
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
@@ -200,6 +200,7 @@ export class MemStorage implements IStorage {
   private students: Map<string, Student>; // Keyed by student ID
   private activeStudents: Map<string, string>; // deviceId -> studentId
   private studentStatuses: Map<string, StudentStatus>; // Keyed by studentId-deviceId composite
+  private sessions: Map<string, StudentSession>; // Session-based tracking (industry standard)
   private heartbeats: Heartbeat[];
   private events: Event[];
   private rosters: Map<string, Roster>;
@@ -217,6 +218,7 @@ export class MemStorage implements IStorage {
     this.students = new Map();
     this.activeStudents = new Map();
     this.studentStatuses = new Map();
+    this.sessions = new Map();
     this.heartbeats = [];
     this.events = [];
     this.rosters = new Map();
@@ -463,6 +465,93 @@ export class MemStorage implements IStorage {
     // For in-memory storage, student-device tracking is implicit via student.deviceId
     // No-op for now, but DrizzleStorage will update student_devices table
     return Promise.resolve();
+  }
+
+  // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
+  async findActiveStudentSession(studentId: string): Promise<StudentSession | undefined> {
+    return Array.from(this.sessions.values()).find(
+      session => session.studentId === studentId && session.isActive
+    );
+  }
+
+  async findActiveStudentSessionByDevice(deviceId: string): Promise<StudentSession | undefined> {
+    return Array.from(this.sessions.values()).find(
+      session => session.deviceId === deviceId && session.isActive
+    );
+  }
+
+  async startStudentSession(studentId: string, deviceId: string): Promise<StudentSession> {
+    // INDUSTRY STANDARD SWAP LOGIC: Enforce one active session per student/device
+    
+    // 1. Check if student already has an active session
+    const existingStudentSession = await this.findActiveStudentSession(studentId);
+    
+    // 2. If student active on SAME device, just update heartbeat (no-op, return existing)
+    if (existingStudentSession && existingStudentSession.deviceId === deviceId) {
+      await this.updateStudentSessionHeartbeat(existingStudentSession.id, new Date());
+      return existingStudentSession;
+    }
+    
+    // 3. If student active on DIFFERENT device, end old session (student switched devices)
+    if (existingStudentSession && existingStudentSession.deviceId !== deviceId) {
+      await this.endStudentSession(existingStudentSession.id);
+    }
+    
+    // 4. Check if device already has an active session (another student logged in)
+    const existingDeviceSession = await this.findActiveStudentSessionByDevice(deviceId);
+    
+    // 5. If different student on this device, end their session (device eviction)
+    if (existingDeviceSession && existingDeviceSession.studentId !== studentId) {
+      await this.endStudentSession(existingDeviceSession.id);
+    }
+    
+    // 6. Create new active session
+    const now = new Date();
+    const session: StudentSession = {
+      id: randomUUID(),
+      studentId,
+      deviceId,
+      startedAt: now,
+      lastSeenAt: now,
+      endedAt: null,
+      isActive: true,
+    };
+    this.sessions.set(session.id, session);
+    return session;
+  }
+
+  async endStudentSession(sessionId: string): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.isActive = false;
+      session.endedAt = new Date();
+      this.sessions.set(sessionId, session);
+    }
+  }
+
+  async updateStudentSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.lastSeenAt = lastSeenAt;
+      this.sessions.set(sessionId, session);
+    }
+  }
+
+  async expireStaleStudentSessions(maxAgeSeconds: number): Promise<number> {
+    const now = new Date();
+    const cutoffTime = new Date(now.getTime() - maxAgeSeconds * 1000);
+    let expiredCount = 0;
+
+    for (const session of Array.from(this.sessions.values())) {
+      if (session.isActive && session.lastSeenAt < cutoffTime) {
+        session.isActive = false;
+        session.endedAt = now;
+        this.sessions.set(session.id, session);
+        expiredCount++;
+      }
+    }
+
+    return expiredCount;
   }
 
   // Student Status
@@ -1456,6 +1545,83 @@ export class DatabaseStorage implements IStorage {
           lastSeenAt: drizzleSql`now()`,
         },
       });
+  }
+
+  // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING (PostgreSQL)
+  async findActiveStudentSession(studentId: string): Promise<StudentSession | undefined> {
+    const [session] = await db
+      .select()
+      .from(studentSessions)
+      .where(drizzleSql`${studentSessions.studentId} = ${studentId} AND ${studentSessions.isActive} = true`)
+      .limit(1);
+    return session;
+  }
+
+  async findActiveStudentSessionByDevice(deviceId: string): Promise<StudentSession | undefined> {
+    const [session] = await db
+      .select()
+      .from(studentSessions)
+      .where(drizzleSql`${studentSessions.deviceId} = ${deviceId} AND ${studentSessions.isActive} = true`)
+      .limit(1);
+    return session;
+  }
+
+  async startStudentSession(studentId: string, deviceId: string): Promise<StudentSession> {
+    // INDUSTRY STANDARD SWAP LOGIC: Enforce one active session per student/device
+    // Uses database constraints + transactional logic to prevent race conditions
+    
+    // 1. Check if student already has an active session
+    const existingStudentSession = await this.findActiveStudentSession(studentId);
+    
+    // 2. If student active on SAME device, just update heartbeat (no-op, return existing)
+    if (existingStudentSession && existingStudentSession.deviceId === deviceId) {
+      await this.updateStudentSessionHeartbeat(existingStudentSession.id, new Date());
+      return existingStudentSession;
+    }
+    
+    // 3. If student active on DIFFERENT device, end old session (student switched devices)
+    if (existingStudentSession && existingStudentSession.deviceId !== deviceId) {
+      await this.endStudentSession(existingStudentSession.id);
+    }
+    
+    // 4. Check if device already has an active session (another student logged in)
+    const existingDeviceSession = await this.findActiveStudentSessionByDevice(deviceId);
+    
+    // 5. If different student on this device, end their session (device eviction)
+    if (existingDeviceSession && existingDeviceSession.studentId !== studentId) {
+      await this.endStudentSession(existingDeviceSession.id);
+    }
+    
+    // 6. Create new active session (DB unique constraints ensure no duplicates)
+    const [session] = await db
+      .insert(studentSessions)
+      .values({ studentId, deviceId })
+      .returning();
+    return session;
+  }
+
+  async endStudentSession(sessionId: string): Promise<void> {
+    await db
+      .update(studentSessions)
+      .set({ isActive: false, endedAt: drizzleSql`now()` })
+      .where(eq(studentSessions.id, sessionId));
+  }
+
+  async updateStudentSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void> {
+    await db
+      .update(studentSessions)
+      .set({ lastSeenAt })
+      .where(eq(studentSessions.id, sessionId));
+  }
+
+  async expireStaleStudentSessions(maxAgeSeconds: number): Promise<number> {
+    const cutoffTime = new Date(Date.now() - maxAgeSeconds * 1000);
+    const result = await db
+      .update(studentSessions)
+      .set({ isActive: false, endedAt: drizzleSql`now()` })
+      .where(drizzleSql`${studentSessions.isActive} = true AND ${studentSessions.lastSeenAt} < ${cutoffTime.toISOString()}`)
+      .returning({ id: studentSessions.id });
+    return result.length;
   }
 
   // Student Status (in-memory tracking)
