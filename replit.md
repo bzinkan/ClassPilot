@@ -5,6 +5,18 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 ## Recent Changes
 
+### v2.0.0-extension-field-fix (November 13, 2025)
+**CRITICAL Chrome Extension Bug Fix: Heartbeat Field Name Mismatch**
+- **Problem**: Students appeared "Offline" on dashboard even though Chrome Extension was sending heartbeats every 10 seconds.
+- **Root Cause**: Chrome Extension service worker was sending heartbeats with field name `email` instead of `studentEmail`, causing backend Zod schema validation to reject all heartbeats silently.
+- **Solution**: Changed `extension/service-worker.js` line 627 from `email: CONFIG.studentEmail` to `studentEmail: CONFIG.studentEmail` to match backend schema expectations.
+- **Impact**: Students now correctly appear as "Online" immediately when their Chrome Extensions send heartbeats. Real-time student status tracking now works in production.
+- **Technical Details**:
+  - Backend schema defines `studentEmail: text("student_email")` in `shared/schema.ts`
+  - Extension must send exact field name `studentEmail` in heartbeat payload
+  - Field name mismatch caused silent validation failures (heartbeats rejected but no error logged)
+  - Fix requires extension reload/reinstall on student Chromebooks to take effect
+
 ### v2.0.0-session-fix (November 13, 2025)
 **Critical Bug Fix: Email-Based Student Status Updates**
 - **Problem**: Students appeared "Offline" with "almost 56 years ago" timestamps because `addHeartbeat()` wasn't updating the `studentStatuses` map when heartbeats arrived with only `studentEmail` + `schoolId` (no `studentId`).
