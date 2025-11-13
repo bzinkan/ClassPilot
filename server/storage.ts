@@ -564,9 +564,11 @@ export class MemStorage implements IStorage {
     const heartbeat: Heartbeat = {
       id: randomUUID(),
       deviceId: insertHeartbeat.deviceId,
+      schoolId: insertHeartbeat.schoolId ?? null,
+      studentEmail: insertHeartbeat.studentEmail ?? null,
       studentId: insertHeartbeat.studentId ?? null,
-      activeTabTitle: insertHeartbeat.activeTabTitle,
-      activeTabUrl: insertHeartbeat.activeTabUrl,
+      activeTabTitle: insertHeartbeat.activeTabTitle ?? null,
+      activeTabUrl: insertHeartbeat.activeTabUrl ?? null,
       favicon: insertHeartbeat.favicon ?? null,
       screenLocked: insertHeartbeat.screenLocked ?? false,
       flightPathActive: insertHeartbeat.flightPathActive ?? false,
@@ -595,8 +597,8 @@ export class MemStorage implements IStorage {
             studentName: student.studentName,
             classId: device?.classId || '',
             gradeLevel: student.gradeLevel ?? undefined,
-            activeTabTitle: heartbeat.activeTabTitle,
-            activeTabUrl: heartbeat.activeTabUrl,
+            activeTabTitle: heartbeat.activeTabTitle || "",
+            activeTabUrl: heartbeat.activeTabUrl || "",
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
@@ -615,8 +617,8 @@ export class MemStorage implements IStorage {
       } else {
         // Update existing status
         const now = Date.now();
-        status.activeTabTitle = heartbeat.activeTabTitle;
-        status.activeTabUrl = heartbeat.activeTabUrl;
+        status.activeTabTitle = heartbeat.activeTabTitle || "";
+        status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;
         
         // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
@@ -643,7 +645,12 @@ export class MemStorage implements IStorage {
   }
 
   // Helper function to calculate duration on current URL (MemStorage)
-  private calculateCurrentUrlDurationMem(studentId: string, currentUrl: string): number {
+  private calculateCurrentUrlDurationMem(studentId: string, currentUrl: string | null): number {
+    // Handle null URL
+    if (!currentUrl) {
+      return 0;
+    }
+    
     // Get recent heartbeats for this student
     const studentHeartbeats = this.heartbeats
       .filter(h => h.studentId === studentId)
@@ -1110,6 +1117,9 @@ export class DatabaseStorage implements IStorage {
     const deviceMap = new Map(allDevices.map(d => [d.deviceId, d]));
     
     for (const student of allStudents) {
+      // Skip students without deviceId (email-only students)
+      if (!student.deviceId) continue;
+      
       const device = deviceMap.get(student.deviceId);
       
       // Get most recent heartbeat for this student to restore actual last seen time
@@ -1117,8 +1127,8 @@ export class DatabaseStorage implements IStorage {
       const lastHeartbeat = recentHeartbeats[0];
       
       let lastSeenAt = 0;
-      let activeTabTitle = "";
-      let activeTabUrl = "";
+      let activeTabTitle: string | null = null;
+      let activeTabUrl: string | null = null;
       let favicon: string | undefined = undefined;
       
       if (lastHeartbeat) {
@@ -1135,8 +1145,8 @@ export class DatabaseStorage implements IStorage {
         studentName: student.studentName,
         classId: device?.classId || '',
         gradeLevel: student.gradeLevel ?? undefined,
-        activeTabTitle,
-        activeTabUrl,
+        activeTabTitle: activeTabTitle || "",
+        activeTabUrl: activeTabUrl || "",
         favicon,
         lastSeenAt,
         isSharing: false,
@@ -1299,16 +1309,16 @@ export class DatabaseStorage implements IStorage {
       .values(insertStudent)
       .returning();
     
-    // Get device info for this student
-    const device = await this.getDevice(student.deviceId);
+    // Get device info for this student (only if deviceId exists)
+    const device = student.deviceId ? await this.getDevice(student.deviceId) : undefined;
     
     // Get most recent heartbeat to initialize status with real data
     const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
     const lastHeartbeat = recentHeartbeats[0];
     
     let lastSeenAt = 0;
-    let activeTabTitle = "";
-    let activeTabUrl = "";
+    let activeTabTitle: string | null = null;
+    let activeTabUrl: string | null = null;
     let favicon: string | undefined = undefined;
     
     if (lastHeartbeat) {
@@ -1326,8 +1336,8 @@ export class DatabaseStorage implements IStorage {
       studentName: student.studentName,
       classId: device?.classId || '',
       gradeLevel: student.gradeLevel ?? undefined,
-      activeTabTitle,
-      activeTabUrl,
+      activeTabTitle: activeTabTitle || "",
+      activeTabUrl: activeTabUrl || "",
       favicon,
       lastSeenAt,
       isSharing: false,
@@ -1360,13 +1370,17 @@ export class DatabaseStorage implements IStorage {
       if (updates.gradeLevel !== undefined) {
         status.gradeLevel = updates.gradeLevel ?? undefined;
       }
-      if (updates.deviceId) {
+      if (updates.deviceId && updates.deviceId !== null) {
         status.deviceId = updates.deviceId;
         const device = await this.getDevice(updates.deviceId);
         if (device) {
           status.deviceName = device.deviceName ?? undefined;
           status.classId = device.classId;
         }
+      } else if (updates.deviceId === null) {
+        // Email-first student with no device
+        status.deviceId = null;
+        status.deviceName = undefined;
       }
       this.studentStatuses.set(studentId, status);
     }
@@ -1404,10 +1418,12 @@ export class DatabaseStorage implements IStorage {
     
     // Clear from active students if this student is active
     if (student) {
-      const activeStudentId = this.activeStudents.get(student.deviceId);
-      if (activeStudentId === studentId) {
-        this.activeStudents.delete(student.deviceId);
-      }
+      this.withDeviceId(student.deviceId, (deviceId) => {
+        const activeStudentId = this.activeStudents.get(deviceId);
+        if (activeStudentId === studentId) {
+          this.activeStudents.delete(deviceId);
+        }
+      });
     }
     
     return !!deletedStudent;
@@ -1579,8 +1595,8 @@ export class DatabaseStorage implements IStorage {
             studentName: student.studentName,
             classId: device?.classId || '',
             gradeLevel: student.gradeLevel ?? undefined,
-            activeTabTitle: heartbeat.activeTabTitle,
-            activeTabUrl: heartbeat.activeTabUrl,
+            activeTabTitle: heartbeat.activeTabTitle || "",
+            activeTabUrl: heartbeat.activeTabUrl || "",
             favicon: heartbeat.favicon ?? undefined,
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
@@ -1599,8 +1615,8 @@ export class DatabaseStorage implements IStorage {
       } else {
         // Update existing status
         const now = Date.now();
-        status.activeTabTitle = heartbeat.activeTabTitle;
-        status.activeTabUrl = heartbeat.activeTabUrl;
+        status.activeTabTitle = heartbeat.activeTabTitle || "";
+        status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;
         
         // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
@@ -1628,7 +1644,12 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Helper function to calculate duration on current URL (DatabaseStorage)
-  private async calculateCurrentUrlDurationDb(studentId: string, currentUrl: string): Promise<number> {
+  private async calculateCurrentUrlDurationDb(studentId: string, currentUrl: string | null): Promise<number> {
+    // Handle null URL
+    if (!currentUrl) {
+      return 0;
+    }
+    
     // Get recent heartbeats for this student
     const studentHeartbeats = await db
       .select()
