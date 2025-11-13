@@ -539,7 +539,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Debug endpoint for production troubleshooting (admin only)
-  app.get("/api/debug/student-status", requireAuth, async (req, res) => {
+  app.get("/api/debug/student-status", requireAdmin, async (req, res) => {
     try {
       const { email } = req.query;
       
