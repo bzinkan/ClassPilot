@@ -9,12 +9,12 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { StudentStatus, Heartbeat } from "@shared/schema";
+import type { AggregatedStudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format, startOfDay, endOfDay } from "date-fns";
 import { calculateURLSessions, formatDuration } from "@shared/utils";
 
 interface StudentDetailDrawerProps {
-  student: StudentStatus | null;
+  student: AggregatedStudentStatus | null;
   urlHistory: Heartbeat[];
   onClose: () => void;
 }
@@ -99,7 +99,7 @@ export function StudentDetailDrawer({
                   {getStatusLabel(student.status)}
                 </Badge>
                 <span className="text-xs text-muted-foreground font-mono">
-                  device-{student.deviceId.slice(0, 8)}
+                  device-{student.primaryDeviceId.slice(0, 8)}
                 </span>
               </div>
             </div>

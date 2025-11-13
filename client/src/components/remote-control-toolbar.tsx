@@ -32,12 +32,12 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useQuery } from "@tanstack/react-query";
-import type { FlightPath, StudentStatus, Settings } from "@shared/schema";
+import type { FlightPath, AggregatedStudentStatus, Settings } from "@shared/schema";
 
 interface RemoteControlToolbarProps {
-  selectedDeviceIds: Set<string>;
-  students: StudentStatus[];
-  onToggleStudent: (deviceId: string) => void;
+  selectedStudentIds: Set<string>;
+  students: AggregatedStudentStatus[];
+  onToggleStudent: (studentId: string) => void;
   onClearSelection: () => void;
   selectedGrade: string;
   onGradeChange: (grade: string) => void;
@@ -47,7 +47,7 @@ interface RemoteControlToolbarProps {
 
 export { type RemoteControlToolbarProps };
 
-export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange, userRole }: RemoteControlToolbarProps) {
+export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStudent, onClearSelection, selectedGrade, onGradeChange, userRole }: RemoteControlToolbarProps) {
   const [showOpenTab, setShowOpenTab] = useState(false);
   const [showLockScreen, setShowLockScreen] = useState(false);
   const [showFlightPathDialog, setShowFlightPathDialog] = useState(false);
@@ -94,8 +94,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         url: normalizedUrl,
         targetDeviceIds: targetDeviceIdsArray
       });
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
+      const target = selectedStudentIds.size > 0 
+        ? `${selectedStudentIds.size} student(s)` 
         : "all students";
       toast({
         title: "Success",
@@ -121,8 +121,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         closeAll: true,
         targetDeviceIds: targetDeviceIdsArray
       });
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
+      const target = selectedStudentIds.size > 0 
+        ? `${selectedStudentIds.size} student(s)` 
         : "all students";
       toast({
         title: "Success",
@@ -165,8 +165,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
       // Invalidate cache to update lock icon immediately
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
+      const target = selectedStudentIds.size > 0 
+        ? `${selectedStudentIds.size} student(s)` 
         : "all students";
       
       // Extract domain for display
@@ -199,8 +199,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
       // Invalidate cache to update lock icon immediately
       queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
+      const target = selectedStudentIds.size > 0 
+        ? `${selectedStudentIds.size} student(s)` 
         : "all students";
       toast({
         title: "Success",
@@ -280,8 +280,8 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
         allowedDomains: scene.allowedDomains,
         targetDeviceIds: targetDeviceIdsArray
       });
-      const target = selectedDeviceIds.size > 0 
-        ? `${selectedDeviceIds.size} student(s)` 
+      const target = selectedStudentIds.size > 0 
+        ? `${selectedStudentIds.size} student(s)` 
         : "all students";
       toast({
         title: "Success",
@@ -300,10 +300,29 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
     }
   };
 
-  // Convert Set to Array for API calls - Sets serialize to {} in JSON
-  const targetDeviceIdsArray = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
-  const selectionText = selectedDeviceIds.size > 0 
-    ? `${selectedDeviceIds.size} selected`
+  // Convert selected student IDs to device IDs for API calls
+  const targetDeviceIdsArray = useMemo(() => {
+    if (selectedStudentIds.size === 0) return undefined; // All students
+    
+    const deviceIds: string[] = [];
+    students.forEach(student => {
+      if (selectedStudentIds.has(student.studentId)) {
+        // Add all devices for this student
+        student.devices.forEach(device => {
+          deviceIds.push(device.deviceId);
+        });
+        // Also add primary device if it exists and isn't in the devices array
+        if (student.primaryDeviceId && !deviceIds.includes(student.primaryDeviceId)) {
+          deviceIds.push(student.primaryDeviceId);
+        }
+      }
+    });
+    
+    return deviceIds.length > 0 ? deviceIds : undefined;
+  }, [selectedStudentIds, students]);
+  
+  const selectionText = selectedStudentIds.size > 0 
+    ? `${selectedStudentIds.size} selected`
     : "All students";
 
   // Sort students alphabetically by name
@@ -570,7 +589,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                       </tr>
                     ) : (
                       sortedStudents.map((student) => (
-                        <tr key={student.deviceId} className="hover-elevate" data-testid={`row-student-flight-path-${student.deviceId}`}>
+                        <tr key={student.studentId} className="hover-elevate" data-testid={`row-student-flight-path-${student.studentId}`}>
                           <td className="p-3 text-sm font-medium">{student.studentName || 'Unnamed Student'}</td>
                           <td className="p-3 text-sm">
                             {student.flightPathActive && student.activeFlightPathName ? (
@@ -635,7 +654,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
                   </SelectItem>
                   <DropdownMenuSeparator />
                   {sortedStudents.map((student) => (
-                    <SelectItem key={student.deviceId} value={student.deviceId} data-testid={`select-student-${student.deviceId}`}>
+                    <SelectItem key={student.studentId} value={student.studentId} data-testid={`select-student-${student.studentId}`}>
                       {student.studentName || 'Unnamed Student'}
                     </SelectItem>
                   ))}
@@ -648,7 +667,7 @@ export function RemoteControlToolbar({ selectedDeviceIds, students, onToggleStud
               <h3 className="text-lg font-semibold">
                 {selectedStudentForData === "all" 
                   ? "Top Websites Visited (Last 24 Hours)" 
-                  : `${sortedStudents.find(s => s.deviceId === selectedStudentForData)?.studentName || 'Student'}'s Top Websites`}
+                  : `${sortedStudents.find(s => s.studentId === selectedStudentForData)?.studentName || 'Student'}'s Top Websites`}
               </h3>
               
               {studentDataStats.length > 0 ? (

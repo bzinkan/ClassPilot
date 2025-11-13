@@ -28,7 +28,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Lock, Unlock, Video, Layers, Maximize2, MoreVertical } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { StudentStatus, Settings } from "@shared/schema";
+import type { StudentStatus, AggregatedStudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
 import { formatDuration } from "@shared/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -36,7 +36,7 @@ import { apiRequest, queryClient } from "@/lib/queryClient";
 import { VideoPortal } from "@/components/video-portal";
 
 interface StudentTileProps {
-  student: StudentStatus;
+  student: AggregatedStudentStatus;
   onClick: () => void;
   blockedDomains?: string[];
   isOffTask?: boolean;
@@ -129,7 +129,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   
   // Fetch recent browsing history for mini history icons
   const { data: recentHeartbeats = [] } = useQuery<any[]>({
-    queryKey: ['/api/heartbeats', student.deviceId],
+    queryKey: ['/api/heartbeats', student.primaryDeviceId],
     refetchInterval: 30000, // Refresh every 30 seconds
   });
   
@@ -232,7 +232,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     // Update device name if changed
     if (newDeviceName !== (student.deviceName || '')) {
       updateDeviceMutation.mutate({
-        deviceId: student.deviceId,
+        deviceId: student.primaryDeviceId,
         deviceName: newDeviceName
       });
     }
@@ -266,7 +266,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const unblockForClassMutation = useMutation({
     mutationFn: async () => {
       return await apiRequest("POST", "/api/remote/unlock-screen", {
-        targetDeviceIds: [student.deviceId]
+        targetDeviceIds: [student.primaryDeviceId]
       });
     },
     onSuccess: () => {
@@ -286,7 +286,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       }
       return await apiRequest("POST", "/api/remote/lock-screen", {
         url: student.activeTabUrl,
-        targetDeviceIds: [student.deviceId]
+        targetDeviceIds: [student.primaryDeviceId]
       });
     },
     onSuccess: () => {
@@ -309,7 +309,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
       return await apiRequest("POST", "/api/remote/unlock-screen", {
-        targetDeviceIds: [student.deviceId]
+        targetDeviceIds: [student.primaryDeviceId]
       });
     },
     onSuccess: () => {
@@ -425,7 +425,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
   return (
     <Card
-      data-testid={`card-student-${student.deviceId}`}
+      data-testid={`card-student-${student.primaryDeviceId}`}
       className={`${getBorderStyle(student.status)} ${getShadowStyle(student.status)} ${getOpacity(student.status)} hover-elevate cursor-pointer transition-all duration-200 overflow-hidden`}
       onClick={onClick}
     >
@@ -438,14 +438,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 checked={isSelected}
                 onCheckedChange={onToggleSelect}
                 onClick={(e) => e.stopPropagation()}
-                data-testid={`checkbox-select-student-${student.deviceId}`}
+                data-testid={`checkbox-select-student-${student.primaryDeviceId}`}
               />
             )}
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-base truncate" data-testid={`text-student-name-${student.deviceId}`}>
+              <h3 className="font-semibold text-base truncate" data-testid={`text-student-name-${student.primaryDeviceId}`}>
                 {student.studentName || (
                   <span className="text-muted-foreground italic text-sm">
-                    {student.deviceName || student.deviceId}
+                    {student.deviceName || student.primaryDeviceId}
                   </span>
                 )}
               </h3>
@@ -476,7 +476,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 }
               }}
               title={student.screenLocked ? "Unlock screen" : "Lock to current screen"}
-              data-testid={`button-lock-toggle-${student.deviceId}`}
+              data-testid={`button-lock-toggle-${student.primaryDeviceId}`}
             >
               {student.screenLocked ? (
                 <Lock className="h-4 w-4 text-amber-600 dark:text-amber-400" />
@@ -491,7 +491,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   size="icon"
                   className="h-7 w-7"
                   onClick={(e) => e.stopPropagation()}
-                  data-testid={`button-menu-${student.deviceId}`}
+                  data-testid={`button-menu-${student.primaryDeviceId}`}
                 >
                   <MoreVertical className="h-4 w-4" />
                 </Button>
@@ -503,7 +503,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                       e.stopPropagation();
                       unlockScreenMutation.mutate();
                     }}
-                    data-testid={`menu-unlock-screen-${student.deviceId}`}
+                    data-testid={`menu-unlock-screen-${student.primaryDeviceId}`}
                   >
                     <Unlock className="h-4 w-4 mr-2" />
                     Unlock Current Screen
@@ -515,13 +515,13 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                       lockToCurrentScreenMutation.mutate();
                     }}
                     disabled={!student.activeTabUrl}
-                    data-testid={`menu-lock-screen-${student.deviceId}`}
+                    data-testid={`menu-lock-screen-${student.primaryDeviceId}`}
                   >
                     <Lock className="h-4 w-4 mr-2" />
                     Lock to Current Screen
                   </DropdownMenuItem>
                 )}
-                <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.deviceId}`}>
+                <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.primaryDeviceId}`}>
                   <Edit2 className="h-4 w-4 mr-2" />
                   Edit Info
                 </DropdownMenuItem>
@@ -535,25 +535,25 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap gap-1.5">
               {student.flightPathActive && student.activeFlightPathName && !isBlockedByFlightPath && (
-                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.deviceId}`}>
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.primaryDeviceId}`}>
                   <Layers className="h-3 w-3 mr-1" />
                   {student.activeFlightPathName}
                 </Badge>
               )}
               {isBlockedByFlightPath && (
-                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-by-scene-${student.deviceId}`}>
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-by-scene-${student.primaryDeviceId}`}>
                   <AlertTriangle className="h-3 w-3 mr-1" />
                   Blocked by {student.activeFlightPathName}
                 </Badge>
               )}
               {isOffTask && !isBlockedByFlightPath && (
-                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-offtask-${student.deviceId}`}>
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-offtask-${student.primaryDeviceId}`}>
                   <AlertTriangle className="h-3 w-3 mr-1" />
                   Off-Task
                 </Badge>
               )}
               {isBlocked && !isOffTask && !isBlockedByFlightPath && (
-                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-${student.deviceId}`}>
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-50 text-red-700 border-red-200 dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-blocked-${student.primaryDeviceId}`}>
                   <AlertTriangle className="h-3 w-3 mr-1" />
                   Blocked Domain
                 </Badge>
@@ -572,7 +572,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                     e.stopPropagation();
                     unblockForClassMutation.mutate();
                   }}
-                  data-testid={`button-unblock-${student.deviceId}`}
+                  data-testid={`button-unblock-${student.primaryDeviceId}`}
                 >
                   Unblock for class
                 </Button>
@@ -586,9 +586,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           <div className="aspect-video rounded-md bg-black relative group">
             <div 
               ref={tileVideoSlotRef}
-              id={`tile-video-slot-${student.deviceId}`}
+              id={`tile-video-slot-${student.primaryDeviceId}`}
               className="w-full h-full rounded-md overflow-hidden"
-              data-testid={`video-live-${student.deviceId}`}
+              data-testid={`video-live-${student.primaryDeviceId}`}
             />
             <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none rounded-md" />
             <Button
@@ -596,7 +596,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               size="icon"
               className="absolute top-2 right-2 h-8 w-8 bg-black/60 hover:bg-black/80 text-white opacity-90 hover:opacity-100 transition-all shadow-lg pointer-events-auto z-10"
               onClick={handleExpand}
-              data-testid={`button-enlarge-${student.deviceId}`}
+              data-testid={`button-enlarge-${student.primaryDeviceId}`}
               title="Expand video - Access zoom, screenshot, and recording controls"
             >
               <Maximize2 className="h-4 w-4" />
@@ -615,12 +615,12 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   }}
                 />
               )}
-              <p className="font-medium text-sm leading-tight line-clamp-3" data-testid={`text-tab-title-${student.deviceId}`}>
+              <p className="font-medium text-sm leading-tight line-clamp-3" data-testid={`text-tab-title-${student.primaryDeviceId}`}>
                 {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
               </p>
             </div>
             {student.activeTabUrl && (
-              <p className="text-xs font-mono text-muted-foreground truncate" data-testid={`text-tab-url-${student.deviceId}`}>
+              <p className="text-xs font-mono text-muted-foreground truncate" data-testid={`text-tab-url-${student.primaryDeviceId}`}>
                 {student.activeTabUrl}
               </p>
             )}
@@ -662,7 +662,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             <span className="uppercase tracking-wide text-[10px] font-medium">
               {student.currentUrlDuration !== undefined ? 'DURATION' : 'LAST SEEN'}
             </span>
-            <span className="text-foreground font-medium" data-testid={student.currentUrlDuration !== undefined ? `current-url-duration-${student.deviceId}` : `text-last-seen-${student.deviceId}`}>
+            <span className="text-foreground font-medium" data-testid={student.currentUrlDuration !== undefined ? `current-url-duration-${student.primaryDeviceId}` : `text-last-seen-${student.primaryDeviceId}`}>
               {student.currentUrlDuration !== undefined ? (
                 formatDuration(student.currentUrlDuration)
               ) : (
@@ -685,7 +685,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   }
                 }}
                 title={liveStream ? "Stop live view" : "Start live view"}
-                data-testid={`button-live-view-${student.deviceId}`}
+                data-testid={`button-live-view-${student.primaryDeviceId}`}
               >
                 <Monitor className="h-3.5 w-3.5 mr-1" />
                 {liveStream ? "Stop" : "View"}
@@ -697,7 +697,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
       {/* Edit Student Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.deviceId}`}>
+        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId}`}>
           <DialogHeader>
             <DialogTitle>Edit Student Information</DialogTitle>
             <DialogDescription>
@@ -709,7 +709,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-id">Device ID (Read-only)</Label>
               <Input
                 id="device-id"
-                value={student.deviceId}
+                value={student.primaryDeviceId}
                 disabled
                 className="font-mono text-sm"
               />
@@ -718,7 +718,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-name">Device Name (Optional)</Label>
               <Input
                 id="device-name"
-                data-testid={`input-edit-device-name-${student.deviceId}`}
+                data-testid={`input-edit-device-name-${student.primaryDeviceId}`}
                 value={newDeviceName}
                 onChange={(e) => setNewDeviceName(e.target.value)}
                 placeholder="e.g., 6th chromebook 1"
@@ -733,7 +733,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="student-name">Student Name</Label>
               <Input
                 id="student-name"
-                data-testid={`input-edit-student-name-${student.deviceId}`}
+                data-testid={`input-edit-student-name-${student.primaryDeviceId}`}
                 value={newStudentName}
                 onChange={(e) => setNewStudentName(e.target.value)}
                 placeholder="e.g., Lucy Garcia"
@@ -750,7 +750,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 value={newGradeLevel || undefined}
                 onValueChange={(value) => setNewGradeLevel(value || '')}
               >
-                <SelectTrigger id="grade-level" data-testid={`select-edit-grade-level-${student.deviceId}`}>
+                <SelectTrigger id="grade-level" data-testid={`select-edit-grade-level-${student.primaryDeviceId}`}>
                   <SelectValue placeholder="Select grade level" />
                 </SelectTrigger>
                 <SelectContent>
@@ -792,7 +792,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       {/* Video Portal for enlarged view */}
       {expanded && liveStream && (
         <VideoPortal
-          studentName={student.studentName || student.deviceName || student.deviceId}
+          studentName={student.studentName || student.deviceName || student.primaryDeviceId}
           onClose={handleCollapse}
         />
       )}

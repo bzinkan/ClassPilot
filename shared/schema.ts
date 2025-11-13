@@ -105,6 +105,7 @@ export interface AggregatedStudentStatus {
   
   // Primary device data (from most active device)
   primaryDeviceId: string; // Device with most recent activity
+  deviceName?: string; // Name of primary device (for display compatibility)
   activeTabTitle: string;
   activeTabUrl: string;
   favicon?: string;

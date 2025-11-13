@@ -482,6 +482,7 @@ export class MemStorage implements IStorage {
         
         // Primary device data (most recent)
         primaryDeviceId: primaryStatus.deviceId,
+        deviceName: primaryStatus.deviceName, // Device name from primary device
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,
@@ -1416,6 +1417,7 @@ export class DatabaseStorage implements IStorage {
         
         // Primary device data (most recent)
         primaryDeviceId: primaryStatus.deviceId,
+        deviceName: primaryStatus.deviceName, // Device name from primary device
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,

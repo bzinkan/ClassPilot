@@ -31,7 +31,7 @@ import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { StudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
+import type { StudentStatus, AggregatedStudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
 import { isWithinTrackingHours } from "@shared/utils";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
@@ -52,8 +52,8 @@ interface CurrentUser {
 
 export default function Dashboard() {
   const [, setLocation] = useLocation();
-  const [selectedStudent, setSelectedStudent] = useState<StudentStatus | null>(null);
-  const [selectedDeviceIds, setSelectedDeviceIds] = useState<Set<string>>(new Set());
+  const [selectedStudent, setSelectedStudent] = useState<AggregatedStudentStatus | null>(null);
+  const [selectedStudentIds, setSelectedStudentIds] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedGrade, setSelectedGrade] = useState<string>(() => {
     // Initialize from localStorage if available
@@ -92,13 +92,13 @@ export default function Dashboard() {
   // WebRTC hook for live video streaming
   const webrtc = useWebRTC(wsRef.current);
 
-  const { data: students = [], refetch } = useQuery<StudentStatus[]>({
-    queryKey: ['/api/students'],
+  const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
+    queryKey: ['/api/students-aggregated'],
     refetchInterval: 5000, // Poll every 5 seconds to update idle/offline status
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
-    queryKey: ['/api/heartbeats', selectedStudent?.deviceId],
+    queryKey: ['/api/heartbeats', selectedStudent?.primaryDeviceId],
     enabled: !!selectedStudent,
   });
 
@@ -193,7 +193,7 @@ export default function Dashboard() {
             if (message.type === 'student-update') {
               console.log("[Dashboard] Student update detected, invalidating queries...");
               // Invalidate queries to force refetch (needed because staleTime: Infinity)
-              queryClient.invalidateQueries({ queryKey: ['/api/students'] });
+              queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
             }
             
             // Handle WebRTC signaling messages
@@ -306,7 +306,7 @@ export default function Dashboard() {
   }, [selectedGrade]);
 
   // Check if student is off-task (not on allowed domains OR camera is active)
-  const isStudentOffTask = (student: StudentStatus): boolean => {
+  const isStudentOffTask = (student: AggregatedStudentStatus): boolean => {
     // Camera active = always off-task
     if (student.cameraActive) return true;
     
@@ -355,25 +355,25 @@ export default function Dashboard() {
   };
 
   // Selection handlers
-  const toggleStudentSelection = (deviceId: string) => {
-    setSelectedDeviceIds((prev) => {
+  const toggleStudentSelection = (studentId: string) => {
+    setSelectedStudentIds((prev) => {
       const newSet = new Set(prev);
-      if (newSet.has(deviceId)) {
-        newSet.delete(deviceId);
+      if (newSet.has(studentId)) {
+        newSet.delete(studentId);
       } else {
-        newSet.add(deviceId);
+        newSet.add(studentId);
       }
       return newSet;
     });
   };
 
   const selectAll = () => {
-    const allDeviceIds = filteredStudents.map((s) => s.deviceId);
-    setSelectedDeviceIds(new Set(allDeviceIds));
+    const allStudentIds = filteredStudents.map((s) => s.studentId);
+    setSelectedStudentIds(new Set(allStudentIds));
   };
 
   const clearSelection = () => {
-    setSelectedDeviceIds(new Set());
+    setSelectedStudentIds(new Set());
   };
 
   // Live view handlers
@@ -434,7 +434,7 @@ export default function Dashboard() {
     .filter((student) => {
       const matchesSearch = 
         (student.studentName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-        student.deviceId.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        student.studentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.classId.toLowerCase().includes(searchQuery.toLowerCase());
       
       return matchesSearch;
@@ -456,9 +456,30 @@ export default function Dashboard() {
   const offlineCount = statsStudents.filter((s) => s.status === 'offline').length;
   const offTaskCount = statsStudents.filter(isStudentOffTask).length;
 
+  // Convert selected student IDs to all associated device IDs for remote control
+  const getTargetDeviceIds = (): string[] | undefined => {
+    if (selectedStudentIds.size === 0) return undefined; // All students
+    
+    const deviceIds: string[] = [];
+    students.forEach(student => {
+      if (selectedStudentIds.has(student.studentId)) {
+        // Add all devices for this student
+        student.devices.forEach(device => {
+          deviceIds.push(device.deviceId);
+        });
+        // Also add primary device if it exists and isn't in the devices array
+        if (student.primaryDeviceId && !deviceIds.includes(student.primaryDeviceId)) {
+          deviceIds.push(student.primaryDeviceId);
+        }
+      }
+    });
+    
+    return deviceIds.length > 0 ? deviceIds : undefined;
+  };
+
   // Get unique open tabs from selected students (or all if none selected)
-  const relevantStudents = selectedDeviceIds.size > 0 
-    ? students.filter(s => selectedDeviceIds.has(s.deviceId))
+  const relevantStudents = selectedStudentIds.size > 0 
+    ? students.filter(s => selectedStudentIds.has(s.studentId))
     : students;
   
   const openTabs = relevantStudents
@@ -482,7 +503,7 @@ export default function Dashboard() {
     if (!settings?.blockedDomains || settings.blockedDomains.length === 0) return;
 
     students.forEach((student) => {
-      const deviceId = student.deviceId;
+      const deviceId = student.primaryDeviceId;
       
       if (!student.activeTabUrl) {
         // Clear all violations for this device if no URL
@@ -779,12 +800,12 @@ export default function Dashboard() {
       return;
     }
     
-    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    const targetDeviceIds = getTargetDeviceIds();
     openTabMutation.mutate({ url: openTabUrl, targetDeviceIds });
   };
 
   const handleCloseTabs = () => {
-    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    const targetDeviceIds = getTargetDeviceIds();
     
     if (closeTabsMode === "all") {
       closeTabsMutation.mutate({ closeAll: true, targetDeviceIds });
@@ -803,13 +824,13 @@ export default function Dashboard() {
   };
 
   const handleLockScreen = () => {
-    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    const targetDeviceIds = getTargetDeviceIds();
     // Send "CURRENT_URL" to lock students to their current page
     lockScreenMutation.mutate({ url: "CURRENT_URL", targetDeviceIds });
   };
 
   const handleUnlockScreen = () => {
-    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    const targetDeviceIds = getTargetDeviceIds();
     unlockScreenMutation.mutate(targetDeviceIds);
   };
 
@@ -880,7 +901,7 @@ export default function Dashboard() {
       return;
     }
     
-    const targetDeviceIds = selectedDeviceIds.size > 0 ? Array.from(selectedDeviceIds) : undefined;
+    const targetDeviceIds = getTargetDeviceIds();
     applyFlightPathMutation.mutate({ 
       flightPathId: flightPath.id, 
       allowedDomains: flightPath.allowedDomains || [],
@@ -1087,7 +1108,7 @@ export default function Dashboard() {
         {/* Remote Control Toolbar - only show if admin OR teacher with active session */}
         {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
           <RemoteControlToolbar 
-            selectedDeviceIds={selectedDeviceIds}
+            selectedStudentIds={selectedStudentIds}
             students={filteredStudents}
             onToggleStudent={toggleStudentSelection}
             onClearSelection={clearSelection}
@@ -1160,7 +1181,7 @@ export default function Dashboard() {
           
           <div className="flex items-center gap-2">
             <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
-              Target: {selectedDeviceIds.size > 0 ? `${selectedDeviceIds.size} selected` : "All students"}
+              Target: {selectedStudentIds.size > 0 ? `${selectedStudentIds.size} selected` : "All students"}
             </Badge>
             
             <DropdownMenu>
@@ -1187,11 +1208,11 @@ export default function Dashboard() {
                     .sort((a, b) => (a.studentName || '').localeCompare(b.studentName || ''))
                     .map((student) => (
                       <DropdownMenuCheckboxItem
-                        key={student.deviceId}
-                        checked={selectedDeviceIds.has(student.deviceId)}
-                        onCheckedChange={() => toggleStudentSelection(student.deviceId)}
+                        key={student.studentId}
+                        checked={selectedStudentIds.has(student.studentId)}
+                        onCheckedChange={() => toggleStudentSelection(student.studentId)}
                         onSelect={(e) => e.preventDefault()}
-                        data-testid={`dropdown-item-student-${student.deviceId}`}
+                        data-testid={`dropdown-item-student-${student.studentId}`}
                       >
                         {student.studentName || 'Unnamed Student'}
                       </DropdownMenuCheckboxItem>
@@ -1204,7 +1225,7 @@ export default function Dashboard() {
               size="sm"
               variant="ghost"
               onClick={clearSelection}
-              disabled={selectedDeviceIds.size === 0}
+              disabled={selectedStudentIds.size === 0}
               data-testid="button-clear-selection"
             >
               <XSquare className="h-4 w-4 mr-1" />
@@ -1319,17 +1340,17 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6 gap-6">
             {filteredStudents.map((student) => (
               <StudentTile
-                key={`${student.studentId}-${tileRevisions[student.deviceId] ?? 0}`}
+                key={`${student.studentId}-${tileRevisions[student.primaryDeviceId] ?? 0}`}
                 student={student}
                 onClick={() => setSelectedStudent(student)}
                 blockedDomains={settings?.blockedDomains || []}
                 isOffTask={isStudentOffTask(student)}
-                isSelected={selectedDeviceIds.has(student.deviceId)}
-                onToggleSelect={() => toggleStudentSelection(student.deviceId)}
-                liveStream={liveStreams.get(student.deviceId) || null}
-                onStartLiveView={() => handleStartLiveView(student.deviceId)}
-                onStopLiveView={() => handleStopLiveView(student.deviceId)}
-                onEndLiveRefresh={() => refreshTile(student.deviceId)}
+                isSelected={selectedStudentIds.has(student.studentId)}
+                onToggleSelect={() => toggleStudentSelection(student.studentId)}
+                liveStream={liveStreams.get(student.primaryDeviceId) || null}
+                onStartLiveView={() => handleStartLiveView(student.primaryDeviceId)}
+                onStopLiveView={() => handleStopLiveView(student.primaryDeviceId)}
+                onEndLiveRefresh={() => refreshTile(student.primaryDeviceId)}
               />
             ))}
           </div>
@@ -1465,8 +1486,8 @@ export default function Dashboard() {
           <DialogHeader>
             <DialogTitle>Open Tab on Student Devices</DialogTitle>
             <DialogDescription>
-              {selectedDeviceIds.size > 0
-                ? `Open a URL on ${selectedDeviceIds.size} selected student(s)`
+              {selectedStudentIds.size > 0
+                ? `Open a URL on ${selectedStudentIds.size} selected student(s)`
                 : "Open a URL on all student devices"}
             </DialogDescription>
           </DialogHeader>
@@ -1506,8 +1527,8 @@ export default function Dashboard() {
           <DialogHeader>
             <DialogTitle>Close Tabs on Student Devices</DialogTitle>
             <DialogDescription>
-              {selectedDeviceIds.size > 0
-                ? `Close tabs on ${selectedDeviceIds.size} selected student(s)`
+              {selectedStudentIds.size > 0
+                ? `Close tabs on ${selectedStudentIds.size} selected student(s)`
                 : "Close tabs on all student devices"}
             </DialogDescription>
           </DialogHeader>
@@ -1526,7 +1547,7 @@ export default function Dashboard() {
                 <Label>Select Tabs to Close</Label>
                 {openTabs.length === 0 ? (
                   <p className="text-sm text-muted-foreground py-4">
-                    No tabs are currently open on {selectedDeviceIds.size > 0 ? 'selected students' : 'any student devices'}
+                    No tabs are currently open on {selectedStudentIds.size > 0 ? 'selected students' : 'any student devices'}
                   </p>
                 ) : (
                   <>
@@ -1609,8 +1630,8 @@ export default function Dashboard() {
           <DialogHeader>
             <DialogTitle>Apply Flight Path to Students</DialogTitle>
             <DialogDescription>
-              {selectedDeviceIds.size > 0
-                ? `Apply a flight path to ${selectedDeviceIds.size} selected student(s)`
+              {selectedStudentIds.size > 0
+                ? `Apply a flight path to ${selectedStudentIds.size} selected student(s)`
                 : "Apply a flight path to all students"}
             </DialogDescription>
           </DialogHeader>
@@ -1711,11 +1732,11 @@ export default function Dashboard() {
                       </Badge>
                     </td>
                     <td className="p-2">
-                      {student.flightPathActive && student.deviceId ? (
+                      {student.flightPathActive && student.primaryDeviceId ? (
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => handleRemoveFlightPath(student.deviceId)}
+                          onClick={() => handleRemoveFlightPath(student.primaryDeviceId)}
                           disabled={removeFlightPathMutation.isPending}
                           data-testid={`button-remove-flight-path-${student.studentId}`}
                           className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
@@ -1723,11 +1744,11 @@ export default function Dashboard() {
                           <X className="h-3 w-3 mr-1" />
                           Remove
                         </Button>
-                      ) : student.screenLocked && student.deviceId ? (
+                      ) : student.screenLocked && student.primaryDeviceId ? (
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => unlockScreenMutation.mutate([student.deviceId])}
+                          onClick={() => unlockScreenMutation.mutate([student.primaryDeviceId])}
                           disabled={unlockScreenMutation.isPending}
                           data-testid={`button-unlock-screen-${student.studentId}`}
                           className="h-7 px-2 text-xs"
