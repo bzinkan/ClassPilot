@@ -2862,7 +2862,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { closeAll, pattern, specificUrls, allowedDomains, targetDeviceIds } = req.body;
       
-      broadcastToStudents({
+      const sentCount = broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'close-tab',
@@ -2871,8 +2871,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }, undefined, targetDeviceIds);
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
-        : "all students";
+        ? `${sentCount} device(s)` 
+        : "all connected devices";
       
       const message = specificUrls && specificUrls.length > 0
         ? `Closed ${specificUrls.length} selected tab(s) on ${target}`
@@ -2909,6 +2909,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : (await storage.getAllDevices()).map(d => d.deviceId);
       
       const now = Date.now();
+      const lockedStudentIds = new Set<string>();
       for (const deviceId of deviceIdsToUpdate) {
         // Try to get active student, fall back to all students for this device
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
@@ -2917,6 +2918,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           : await storage.getStudentsByDevice(deviceId);
         
         for (const student of studentsToUpdate) {
+          lockedStudentIds.add(student.id);
           let status = await storage.getStudentStatus(student.id);
           
           // Create status if it doesn't exist (e.g., student is offline)
@@ -2953,7 +2955,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
+        ? `${lockedStudentIds.size} student(s)` 
         : "all students";
       res.json({ success: true, message: `Locked ${target} to ${url}` });
     } catch (error) {
@@ -2981,6 +2983,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         : (await storage.getAllDevices()).map(d => d.deviceId);
       
       const now = Date.now();
+      const unlockedStudentIds = new Set<string>();
       for (const deviceId of deviceIdsToUpdate) {
         // Try to get active student, fall back to all students for this device
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
@@ -2989,6 +2992,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           : await storage.getStudentsByDevice(deviceId);
         
         for (const student of studentsToUpdate) {
+          unlockedStudentIds.add(student.id);
           let status = await storage.getStudentStatus(student.id);
           
           // Create status if it doesn't exist (e.g., student is offline)
@@ -3025,7 +3029,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
+        ? `${unlockedStudentIds.size} student(s)` 
         : "all students";
       res.json({ success: true, message: `Unlocked ${target}` });
     } catch (error) {
@@ -3047,7 +3051,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const flightPath = await storage.getFlightPath(flightPathId);
       const flightPathName = flightPath?.flightPathName || 'Unknown Flight Path';
       
-      broadcastToStudents({
+      const sentCount = broadcastToStudents({
         type: 'remote-control',
         command: {
           type: 'apply-flight-path',
@@ -3060,8 +3064,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }, undefined, targetDeviceIds);
       
       const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${targetDeviceIds.length} student(s)` 
-        : "all students";
+        ? `${sentCount} device(s)` 
+        : "all connected devices";
       res.json({ success: true, message: `Applied flight path "${flightPathName}" to ${target}` });
     } catch (error) {
       console.error("Apply flight path error:", error);
@@ -3088,9 +3092,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // Immediately update StudentStatus for instant UI feedback
       const now = Date.now();
+      const removedStudentIds = new Set<string>();
       for (const deviceId of targetDeviceIds) {
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
+          removedStudentIds.add(activeStudent.id);
           const status = await storage.getStudentStatus(activeStudent.id);
           if (status) {
             status.flightPathActive = false;
@@ -3106,7 +3112,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         type: 'student-update',
       });
       
-      const target = `${targetDeviceIds.length} student(s)`;
+      const target = `${removedStudentIds.size} student(s)`;
       res.json({ success: true, message: `Removed flight path from ${target}` });
     } catch (error) {
       console.error("Remove flight path error:", error);
