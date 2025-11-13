@@ -1,0 +1,224 @@
+Step 1 – Confirm the extension is talking to the production server
+
+On Brian’s device:
+
+Open Chrome DevTools → Network tab.
+
+Filter by heartbeat or whatever your endpoint is called (/api/heartbeat, /api/status, etc.).
+
+Trigger some activity (e.g., switch tabs, wait 5–10 seconds).
+
+You want to see:
+
+Request URL: this MUST be your production URL
+
+e.g. https://classpilot.yourrepliturl.repl.co/api/heartbeat
+
+NOT http://localhost:3000
+
+NOT an old Replit URL
+
+Status: 200 (or at least something not 4xx/5xx)
+
+If the URL is wrong → that’s 100% the issue.
+Fix in your extension background script / config:
+
+// background.ts
+const API_BASE_URL = "https://<your-prod-app>.repl.co"; // or your current production domain
+
+async function sendHeartbeat(payload: any) {
+  try {
+    await fetch(`${API_BASE_URL}/api/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      credentials: "include",
+    });
+  } catch (err) {
+    console.error("Heartbeat error", err);
+  }
+}
+
+
+Republish the extension (with a bumped version in manifest), then re-try the Network-tab test.
+
+Step 2 – Prove the server is actually updating Brian’s status
+
+On the server (Express), in your heartbeat route, log aggressively:
+
+// routes/heartbeat.ts
+app.post("/api/heartbeat", async (req, res) => {
+  try {
+    const { email, url } = req.body;
+
+    console.log("HEARTBEAT IN:", { email, url, at: new Date().toISOString() });
+
+    const student = await db.query.students.findFirst({
+      where: (s, { eq }) => eq(s.email, email),
+    });
+
+    if (!student) {
+      console.log("No student found for email", email);
+      return res.status(404).json({ ok: false });
+    }
+
+    const now = new Date();
+
+    await db
+      .update(studentStatuses)
+      .set({
+        lastSeenAt: now,
+        lastUrl: url,
+      })
+      .where(eq(studentStatuses.studentId, student.id));
+
+    console.log("STATUS UPDATED:", {
+      studentId: student.id,
+      lastSeenAt: now.toISOString(),
+    });
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Heartbeat error:", e);
+    res.status(500).json({ ok: false });
+  }
+});
+
+
+Then add a temporary debug endpoint so you can confirm from the browser:
+
+app.get("/api/debug/student-status", async (req, res) => {
+  const { email } = req.query;
+
+  const student = await db.query.students.findFirst({
+    where: (s, { eq }) => eq(s.email, String(email)),
+  });
+
+  if (!student) return res.status(404).json({ error: "No student" });
+
+  const status = await db.query.studentStatuses.findFirst({
+    where: (st, { eq }) => eq(st.studentId, student.id),
+  });
+
+  res.json({ student, status });
+});
+
+
+Now, in your browser, hit:
+
+https://<your-prod-app>.repl.co/api/debug/student-status?email=bzinkan@...
+
+You should see lastSeenAt updating every time a heartbeat goes out.
+
+If heartbeat route logs appear and lastSeenAt updates → backend is fine, issue is dashboard logic.
+
+If no logs → extension isn’t really reaching the server (wrong URL, CORS, blocked by auth, etc.).
+
+Step 3 – Fix the “offline” logic on the dashboard
+
+Most likely the teacher dashboard is using a stale or mismatched “online” check.
+
+Typical pattern:
+
+function isOnline(lastSeenAt: string | null | Date | undefined): boolean {
+  if (!lastSeenAt) return false;
+
+  const last = new Date(lastSeenAt).getTime();
+  const now = Date.now();
+
+  // 15-second online window
+  return now - last < 15 * 1000;
+}
+
+
+Make sure:
+
+lastSeenAt is stored in the DB as an actual timestamp, not a string epoch in seconds.
+
+Frontend is treating it as milliseconds, not seconds.
+
+If you ever did Date.now() / 1000 or Math.floor(Date.now() / 1000) and stored that, then you must multiply by 1000 when reading:
+
+const last = Number(lastSeenAt) * 1000;
+
+
+Also confirm the teacher query is hitting the same DB rows that are being updated:
+
+Teacher view: GET /api/teacher/classes/:id/students
+
+Must JOIN students → studentStatuses on student.id = studentStatuses.studentId
+
+Must be the same tenant/school as Brian
+
+Must include Brian in that class
+
+If Admin dashboard shows “online” but Teacher shows “offline”, that screams:
+
+Admin endpoint is using one table/query
+
+Teacher endpoint is using a different or older join/filter
+
+Compare their code and make them share the same “online” logic.
+
+Step 4 – Make communication simple: use boring HTTP heartbeats (for now)
+
+Replit + WebSockets can be flaky. For ClassPilot MVP, I’d strongly suggest:
+
+Extension → Server
+
+Every 5 seconds:
+
+setInterval(() => {
+  chrome.identity.getProfileUserInfo(user => {
+    const email = user.email;
+
+    chrome.tabs.query({ active: true, currentWindow: true }, tabs => {
+      const activeTab = tabs[0];
+
+      sendHeartbeat({
+        email,
+        url: activeTab?.url,
+        title: activeTab?.title,
+      });
+    });
+  });
+}, 5000);
+
+Server → Dashboard
+
+Teacher dashboard polls every 4–6 seconds:
+
+async function loadStatuses() {
+  const res = await fetch(`/api/teacher/classes/${classId}/students`);
+  const data = await res.json();
+  setStudents(data.students);
+}
+
+useEffect(() => {
+  loadStatuses();
+  const id = setInterval(loadStatuses, 5000);
+  return () => clearInterval(id);
+}, [classId]);
+
+
+No WebSockets needed yet. Just HTTP → DB → HTTP.
+
+Once this works flawlessly (Brian’s tile flips green reliably), then you can consider upgrading to websockets for lower latency.
+
+Step 5 – Double-check production vs dev DB
+
+A sneaky gotcha:
+
+Extension and teacher dashboard might be hitting different backends.
+
+One hitting a Replit instance with Neon branch A, the other with Neon branch B.
+
+Verify:
+
+The base URL in the extension
+
+The base URL used in the teacher dashboard fetch calls
+
+The DATABASE_URL environment variable in your prod server
+
+All of them should point to the same Neon database/branch.
