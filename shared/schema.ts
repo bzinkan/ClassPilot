@@ -82,11 +82,21 @@ export const studentSessions = pgTable("student_sessions", {
   endedAt: timestamp("ended_at"), // Nullable - null means session still active
   isActive: boolean("is_active").notNull().default(true),
 }, (table) => ({
-  // Index for fast "find active session for student" queries
-  studentActiveIdx: index("student_sessions_student_active_idx").on(table.studentId, table.isActive),
+  // Partial unique indexes to enforce: ONE active session per student, ONE active session per device
+  // These prevent race conditions and ensure clean session transitions
+  uniqueActiveStudent: unique("student_sessions_active_student_unique").on(table.studentId).where(sql`${table.isActive} = true`),
+  uniqueActiveDevice: unique("student_sessions_active_device_unique").on(table.deviceId).where(sql`${table.isActive} = true`),
+  // Composite index for fast lookups
+  studentDeviceActiveIdx: index("student_sessions_student_device_active_idx").on(table.studentId, table.deviceId, table.isActive),
 }));
 
-export const insertStudentSessionSchema = createInsertSchema(studentSessions).omit({ id: true, startedAt: true, lastSeenAt: true });
+export const insertStudentSessionSchema = createInsertSchema(studentSessions).omit({ 
+  id: true, 
+  startedAt: true, 
+  lastSeenAt: true,
+  endedAt: true, // Auto-managed by session lifecycle
+  isActive: true, // Defaults to true on creation
+});
 export type InsertStudentSession = z.infer<typeof insertStudentSessionSchema>;
 export type StudentSession = typeof studentSessions.$inferSelect;
 
