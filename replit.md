@@ -3,6 +3,20 @@
 ## Overview
 ClassPilot is a privacy-aware classroom monitoring system designed for educational settings. This full-stack web application, comprising a teacher dashboard and a Chrome Extension, enables transparent monitoring of student activity on managed Chromebooks. It prioritizes privacy with clear disclosure banners and opt-in screen sharing, provides real-time activity tracking, class roster management, and robust data retention controls. The system aims for FERPA/COPPA compliance by collecting minimal, essential data, supporting shared Chromebook environments, and offering comprehensive remote classroom control features. The project's ambition is to provide educators with effective digital classroom management while upholding student privacy and complying with educational regulations.
 
+## Recent Changes
+
+### v2.0.0-session-fix (November 13, 2025)
+**Critical Bug Fix: Email-Based Student Status Updates**
+- **Problem**: Students appeared "Offline" with "almost 56 years ago" timestamps because `addHeartbeat()` wasn't updating the `studentStatuses` map when heartbeats arrived with only `studentEmail` + `schoolId` (no `studentId`).
+- **Root Cause**: The heartbeat processing logic assumed all heartbeats had a `studentId`, but the Chrome Extension now sends email-first heartbeats after the session-based architecture migration. The email lookup was missing from the status update path.
+- **Solution**: Added email-based student lookup to both MemStorage and DatabaseStorage `addHeartbeat()` methods using `getStudentBySchoolEmail()` with proper `normalizeEmail()` normalization (handles Gmail+ tags, case sensitivity, etc.).
+- **Impact**: Students now correctly appear as "Online" on the dashboard when their Chrome Extensions send heartbeats. The fix maintains multi-tenant safety by using the heartbeat's schoolId directly.
+- **Technical Details**:
+  - Added canonicalStudentId resolution: checks activeStudents cache first (performance), falls back to email lookup
+  - Caches email-to-studentId mappings in activeStudents map for future heartbeats
+  - Includes emoji-prefixed logging (🔍) for production debugging
+  - Works seamlessly with existing session management and device tracking
+
 ## User Preferences
 I prefer detailed explanations.
 Do not make changes to the folder `Z`.
