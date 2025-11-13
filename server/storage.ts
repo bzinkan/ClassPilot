@@ -7,6 +7,8 @@ import {
   type InsertStudent,
   type StudentStatus,
   type AggregatedStudentStatus,
+  type StudentSession,
+  type InsertStudentSession,
   type Heartbeat,
   type InsertHeartbeat,
   type Event,
@@ -40,6 +42,7 @@ import {
   devices,
   students,
   studentDevices, // PHASE 3: Student-device join table
+  studentSessions, // SESSION-BASED TRACKING: Student sessions table
   heartbeats,
   events,
   rosters,
@@ -84,6 +87,15 @@ export interface IStorage {
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
   upsertStudentDevice(studentId: string, deviceId: string): Promise<void>; // PHASE 3: Track student-device relationships
+
+  // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
+  // Tracks "Student X is on Device Y RIGHT NOW"
+  findActiveSession(studentId: string): Promise<StudentSession | undefined>; // Find active session for a student
+  findActiveSessionByDevice(deviceId: string): Promise<StudentSession | undefined>; // Find active session for a device
+  startSession(studentId: string, deviceId: string): Promise<StudentSession>; // Start new session
+  endSession(sessionId: string): Promise<void>; // End a session (set isActive=false, endedAt=now)
+  updateSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void>; // Update lastSeenAt timestamp
+  expireStaleSessions(maxAgeSeconds: number): Promise<number>; // Auto-expire old sessions, returns count
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
