@@ -109,7 +109,7 @@ export interface AggregatedStudentStatus {
   // Multi-device awareness
   deviceCount: number; // How many devices this student is using
   devices: Array<{
-    deviceId: string;
+    deviceId?: string | null; // Nullable for email-first students
     deviceName?: string;
     status: 'online' | 'idle' | 'offline';
     lastSeenAt: number;

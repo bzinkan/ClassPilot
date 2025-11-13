@@ -39,6 +39,7 @@ import {
   users,
   devices,
   students,
+  studentDevices, // PHASE 3: Student-device join table
   heartbeats,
   events,
   rosters,
@@ -76,11 +77,13 @@ export interface IStorage {
   // Students (assigned to devices)
   getStudent(studentId: string): Promise<Student | undefined>;
   getStudentByEmail(email: string): Promise<Student | undefined>;
+  getStudentBySchoolEmail(schoolId: string, emailLc: string): Promise<Student | undefined>; // PHASE 3: Email-first lookup with multi-tenancy
   getStudentsByDevice(deviceId: string): Promise<Student[]>;
   getAllStudents(): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
+  upsertStudentDevice(studentId: string, deviceId: string): Promise<void>; // PHASE 3: Track student-device relationships
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
@@ -315,6 +318,11 @@ export class MemStorage implements IStorage {
       .find(s => s.studentEmail === email);
   }
 
+  async getStudentBySchoolEmail(schoolId: string, emailLc: string): Promise<Student | undefined> {
+    return Array.from(this.students.values())
+      .find(s => s.schoolId === schoolId && s.emailLc === emailLc);
+  }
+
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
     return Array.from(this.students.values())
       .filter(s => s.deviceId === deviceId);
@@ -328,16 +336,19 @@ export class MemStorage implements IStorage {
     const id = randomUUID();
     const student: Student = {
       id,
-      deviceId: insertStudent.deviceId,
+      deviceId: insertStudent.deviceId ?? null,
       studentName: insertStudent.studentName,
       studentEmail: insertStudent.studentEmail ?? null,
+      emailLc: insertStudent.emailLc ?? null, // Email normalization
       gradeLevel: insertStudent.gradeLevel ?? null,
+      schoolId: insertStudent.schoolId,
+      studentStatus: insertStudent.studentStatus,
       createdAt: new Date(),
     };
     this.students.set(id, student);
     
     // Initialize status for this student
-    const device = this.devices.get(student.deviceId);
+    const device = student.deviceId ? this.devices.get(student.deviceId) : undefined;
     const status: StudentStatus = {
       studentId: student.id,
       deviceId: student.deviceId,
@@ -376,13 +387,17 @@ export class MemStorage implements IStorage {
       if (updates.gradeLevel !== undefined) {
         status.gradeLevel = updates.gradeLevel ?? undefined;
       }
-      if (updates.deviceId) {
+      if (updates.deviceId && updates.deviceId !== null) {
         status.deviceId = updates.deviceId;
         const device = this.devices.get(updates.deviceId);
         if (device) {
           status.deviceName = device.deviceName ?? undefined;
           status.classId = device.classId;
         }
+      } else if (updates.deviceId === null) {
+        // Email-first student with no device
+        status.deviceId = null;
+        status.deviceName = undefined;
       }
       this.studentStatuses.set(studentId, status);
     }
@@ -422,6 +437,12 @@ export class MemStorage implements IStorage {
     this.checkIns = this.checkIns.filter(c => c.studentId !== studentId);
     
     return existed;
+  }
+
+  async upsertStudentDevice(studentId: string, deviceId: string): Promise<void> {
+    // For in-memory storage, student-device tracking is implicit via student.deviceId
+    // No-op for now, but DrizzleStorage will update student_devices table
+    return Promise.resolve();
   }
 
   // Student Status
@@ -1240,6 +1261,14 @@ export class DatabaseStorage implements IStorage {
     return student || undefined;
   }
 
+  async getStudentBySchoolEmail(schoolId: string, emailLc: string): Promise<Student | undefined> {
+    const [student] = await db
+      .select()
+      .from(students)
+      .where(drizzleSql`${students.schoolId} = ${schoolId} AND ${students.emailLc} = ${emailLc}`);
+    return student || undefined;
+  }
+
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
     return await db.select().from(students).where(eq(students.deviceId, deviceId));
   }
@@ -1366,6 +1395,23 @@ export class DatabaseStorage implements IStorage {
     }
     
     return !!deletedStudent;
+  }
+
+  async upsertStudentDevice(studentId: string, deviceId: string): Promise<void> {
+    // Track student-device relationship in student_devices table
+    // Insert or update lastSeenAt if already exists
+    await db
+      .insert(studentDevices)
+      .values({
+        studentId,
+        deviceId,
+      })
+      .onConflictDoUpdate({
+        target: [studentDevices.studentId, studentDevices.deviceId],
+        set: {
+          lastSeenAt: drizzleSql`now()`,
+        },
+      });
   }
 
   // Student Status (in-memory tracking)
