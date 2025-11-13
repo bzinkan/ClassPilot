@@ -105,6 +105,12 @@ export const insertStudentSessionSchema = createInsertSchema(studentSessions).om
 export type InsertStudentSession = z.infer<typeof insertStudentSessionSchema>;
 export type StudentSession = typeof studentSessions.$inferSelect;
 
+// Tab info for all-tabs tracking
+export interface TabInfo {
+  url: string;
+  title: string;
+}
+
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
   studentId: string;
@@ -116,6 +122,7 @@ export interface StudentStatus {
   activeTabTitle: string;
   activeTabUrl: string;
   favicon?: string;
+  allOpenTabs?: TabInfo[]; // ALL tabs open on this device (in-memory only, not persisted)
   lastSeenAt: number;
   isSharing: boolean;
   screenLocked: boolean;
@@ -163,6 +170,7 @@ export interface AggregatedStudentStatus {
   activeTabTitle: string;
   activeTabUrl: string;
   favicon?: string;
+  allOpenTabs?: TabInfo[]; // ALL tabs from primary device (in-memory only)
   isSharing: boolean;
   screenLocked: boolean;
   flightPathActive: boolean;
@@ -241,6 +249,15 @@ export const insertHeartbeatSchema = createInsertSchema(heartbeats)
 
 export type InsertHeartbeat = z.infer<typeof insertHeartbeatSchema>;
 export type Heartbeat = typeof heartbeats.$inferSelect;
+
+// Heartbeat API payload - extends database schema with in-memory-only fields
+export const heartbeatRequestSchema = insertHeartbeatSchema.extend({
+  allOpenTabs: z.array(z.object({
+    url: z.string().max(512), // Truncate long URLs
+    title: z.string().max(512), // Truncate long titles
+  })).max(20).optional(), // Limit to 20 tabs max (in-memory only, not persisted)
+});
+export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
 
 // Event logging for audit
 export const events = pgTable("events", {
