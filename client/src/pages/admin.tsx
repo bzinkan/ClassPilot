@@ -479,6 +479,38 @@ export default function Admin() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
+            <Users className="h-5 w-5" />
+            Student Roster Management
+          </CardTitle>
+          <CardDescription>
+            Manage student records and import new students
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="bg-muted p-4 rounded-lg">
+            <p className="text-sm mb-2">
+              <strong>Student Roster:</strong> Centralized management of all student records.
+            </p>
+            <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
+              <li>Import students via CSV or Excel files</li>
+              <li>Edit student information (name, email, grade)</li>
+              <li>Delete student records</li>
+              <li>Filter students by grade level</li>
+            </ul>
+          </div>
+          <Button
+            variant="default"
+            data-testid="button-manage-students"
+            onClick={() => setLocation("/students")}
+          >
+            Manage Students
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
             <SettingsIcon className="h-5 w-5" />
             Class Management
           </CardTitle>
@@ -492,9 +524,9 @@ export default function Admin() {
               <strong>Admin Class Creation:</strong> Create official class rosters for teachers.
             </p>
             <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
-              <li>Browse students by grade level</li>
+              <li>Browse classes by grade level</li>
               <li>Create classes (e.g., "7th Science P3") and assign to teachers</li>
-              <li>Add students to class rosters</li>
+              <li>Assign students to class rosters</li>
               <li>Teachers can then start/end sessions for these classes</li>
             </ul>
           </div>
