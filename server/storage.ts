@@ -224,6 +224,14 @@ export class MemStorage implements IStorage {
     return 'offline';
   }
 
+  // Helper to execute function only when deviceId is non-null
+  private withDeviceId<T>(deviceId: string | null | undefined, fn: (deviceId: string) => T): T | undefined {
+    if (deviceId && deviceId !== null) {
+      return fn(deviceId);
+    }
+    return undefined;
+  }
+
   // Users
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
@@ -1084,6 +1092,14 @@ export class DatabaseStorage implements IStorage {
     if (timeSinceLastSeen < 30000) return 'online';
     if (timeSinceLastSeen < 120000) return 'idle';
     return 'offline';
+  }
+
+  // Helper to execute function only when deviceId is non-null
+  private withDeviceId<T>(deviceId: string | null | undefined, fn: (deviceId: string) => T): T | undefined {
+    if (deviceId && deviceId !== null) {
+      return fn(deviceId);
+    }
+    return undefined;
   }
 
   // Rehydrate studentStatuses from database on startup
