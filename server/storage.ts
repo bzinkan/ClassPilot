@@ -526,6 +526,14 @@ export class MemStorage implements IStorage {
       session.isActive = false;
       session.endedAt = new Date();
       this.sessions.set(sessionId, session);
+      
+      // Sync in-memory status map to mark student offline
+      const statusKey = makeStatusKey(session.studentId, session.deviceId);
+      const status = this.studentStatuses.get(statusKey);
+      if (status) {
+        status.lastSeenAt = 0; // Force status to 'offline'
+        this.studentStatuses.set(statusKey, status);
+      }
     }
   }
 
@@ -548,6 +556,14 @@ export class MemStorage implements IStorage {
         session.endedAt = now;
         this.sessions.set(session.id, session);
         expiredCount++;
+        
+        // Sync in-memory status map to mark student offline
+        const statusKey = makeStatusKey(session.studentId, session.deviceId);
+        const status = this.studentStatuses.get(statusKey);
+        if (status) {
+          status.lastSeenAt = 0; // Force status to 'offline'
+          this.studentStatuses.set(statusKey, status);
+        }
       }
     }
 
@@ -1601,10 +1617,28 @@ export class DatabaseStorage implements IStorage {
   }
 
   async endStudentSession(sessionId: string): Promise<void> {
+    // Get session details before ending it (for status map sync)
+    const [session] = await db
+      .select()
+      .from(studentSessions)
+      .where(eq(studentSessions.id, sessionId))
+      .limit(1);
+    
+    // Mark session as ended
     await db
       .update(studentSessions)
       .set({ isActive: false, endedAt: drizzleSql`now()` })
       .where(eq(studentSessions.id, sessionId));
+    
+    // Sync in-memory status map to mark student offline
+    if (session) {
+      const statusKey = makeStatusKey(session.studentId, session.deviceId);
+      const status = this.studentStatuses.get(statusKey);
+      if (status) {
+        status.lastSeenAt = 0; // Force status to 'offline'
+        this.studentStatuses.set(statusKey, status);
+      }
+    }
   }
 
   async updateStudentSessionHeartbeat(sessionId: string, lastSeenAt: Date): Promise<void> {
@@ -1620,7 +1654,23 @@ export class DatabaseStorage implements IStorage {
       .update(studentSessions)
       .set({ isActive: false, endedAt: drizzleSql`now()` })
       .where(drizzleSql`${studentSessions.isActive} = true AND ${studentSessions.lastSeenAt} < ${cutoffTime.toISOString()}`)
-      .returning({ id: studentSessions.id });
+      .returning({ 
+        id: studentSessions.id, 
+        studentId: studentSessions.studentId,
+        deviceId: studentSessions.deviceId,
+      });
+    
+    // Also update in-memory status map to mark expired students as offline
+    // CRITICAL: Use composite key makeStatusKey(studentId, deviceId) for lookup
+    for (const session of result) {
+      const statusKey = makeStatusKey(session.studentId, session.deviceId);
+      const status = this.studentStatuses.get(statusKey);
+      if (status) {
+        status.lastSeenAt = 0; // Force status to 'offline'
+        this.studentStatuses.set(statusKey, status);
+      }
+    }
+    
     return result.length;
   }
 
