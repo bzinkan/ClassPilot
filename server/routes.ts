@@ -495,17 +495,81 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get("/api/version", async (req, res) => {
     try {
       const version = {
-        commit: '31fff44',
+        commit: 'v2.0.0-session-fix',
         timestamp: new Date().toISOString(),
         features: [
           'deviceId→studentId mapping',
           'rate-limit-1000/min',
-          'session-based-roster-visibility'
+          'session-based-roster-visibility',
+          'ensureStudentDeviceAssociation',
+          'aggressive-session-logging'
         ]
       };
       res.json(version);
     } catch (error) {
       res.status(500).json({ error: 'Failed to get version' });
+    }
+  });
+
+  // Debug endpoint for production troubleshooting (admin only)
+  app.get("/api/debug/student-status", requireAuth, async (req, res) => {
+    try {
+      const { email } = req.query;
+      
+      if (!email || typeof email !== 'string') {
+        return res.status(400).json({ error: 'Email query parameter required' });
+      }
+      
+      const normalizedEmail = normalizeEmail(email);
+      const settings = await storage.getSettings();
+      const schoolId = settings?.schoolId || 'default-school';
+      
+      // Get student by email
+      const student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+      
+      if (!student) {
+        return res.json({ 
+          found: false, 
+          email: normalizedEmail,
+          schoolId,
+          message: 'No student found with this email' 
+        });
+      }
+      
+      // Get active session
+      const sessions = await storage.getActiveSessionsByStudent(student.id);
+      
+      // Get recent heartbeats
+      const allHeartbeats = await storage.getAllHeartbeats();
+      const recentHeartbeats = allHeartbeats
+        .filter(hb => hb.studentEmail === normalizedEmail)
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 5);
+      
+      res.json({
+        found: true,
+        student: {
+          id: student.id,
+          studentEmail: student.studentEmail,
+          studentName: student.studentName,
+          deviceId: student.deviceId,
+          gradeLevel: student.gradeLevel,
+        },
+        activeSessions: sessions,
+        recentHeartbeats: recentHeartbeats.map(hb => ({
+          deviceId: hb.deviceId,
+          timestamp: hb.timestamp,
+          activeTabUrl: hb.activeTabUrl?.substring(0, 50),
+        })),
+        debug: {
+          lookupEmail: normalizedEmail,
+          schoolId,
+          timestamp: new Date().toISOString(),
+        }
+      });
+    } catch (error) {
+      console.error('Debug endpoint error:', error);
+      res.status(500).json({ error: 'Internal server error', details: String(error) });
     }
   });
 
