@@ -1,0 +1,250 @@
+Nice, this screenshot + console log actually narrow it down a lot.
+
+What we know now:
+
+The extension is definitely alive (service-worker log shows:
+
+“WebSocket connected / authenticated”
+
+“Sending heartbeat for email: zinkan.brian@gmail.com | deviceId: …” on repeat ✅
+
+The dashboard still shows:
+
+“Offline”
+
+“No active tab”
+
+“Last seen: almost 56 years ago” → that’s null/0 in the DB ❌
+
+So:
+👉 The extension is sending heartbeats, but your backend is not successfully turning those heartbeats into lastSeenAt + lastUrl in the database for that student.
+
+There are three super-likely culprits:
+
+The student in your DB has a different email than the one the extension is sending (zinkan.brian@gmail.com), so the lookup by email fails.
+
+The /api/heartbeat route either doesn’t exist or doesn’t update studentStatuses, or returns an error.
+
+The admin dashboard query isn’t actually reading the studentStatuses row (or isn’t using lastSeenAt at all).
+
+I’ll give you a concrete “known-good” pipeline you can drop into your app; then I’ll point out the two quick checks that will show you exactly which of the three is happening.
+
+1. Make sure the student email matches
+
+On your admin side (where you manage students):
+
+Check the email value stored for “Brian Zinkan”.
+
+Your service worker log shows:
+Sending heartbeat for email: zinkan.brian@gmail.com ...
+
+If the roster email is anything else (school account, typo, etc.), then this code on the server:
+
+const student = await db.query.students.findFirst({
+  where: (s, { eq }) => eq(s.email, email),
+});
+
+
+will never find him → status never updates → offline forever.
+
+Fix options:
+
+EITHER change Brian’s student email in the app to exactly zinkan.brian@gmail.com
+
+OR change the extension to send the same email the roster uses (e.g. school account).
+
+Even if we fix the route, this mismatch alone will keep him offline.
+
+2. Heartbeat route: drop-in version that definitely updates status
+
+Add (or replace) this route in your Express server:
+
+// heartbeat.ts (or in your main routes file)
+import { db } from "./db";
+import { students, studentStatuses } from "./db/schema";
+import { eq } from "drizzle-orm";
+
+app.post("/api/heartbeat", async (req, res) => {
+  try {
+    const { email, url, title, screenLocked } = req.body;
+
+    console.log("HEARTBEAT IN:", { email, url, title, screenLocked });
+
+    if (!email) {
+      console.log("Heartbeat missing email");
+      return res.status(400).json({ ok: false, error: "Missing email" });
+    }
+
+    const student = await db.query.students.findFirst({
+      where: (s, { eq }) => eq(s.email, email),
+    });
+
+    if (!student) {
+      console.log("No student found for email", email);
+      return res.status(404).json({ ok: false, error: "No student" });
+    }
+
+    const now = new Date();
+
+    // Check if status row exists
+    const status = await db.query.studentStatuses.findFirst({
+      where: (st, { eq }) => eq(st.studentId, student.id),
+    });
+
+    if (!status) {
+      await db.insert(studentStatuses).values({
+        studentId: student.id,
+        lastSeenAt: now,
+        lastUrl: url,
+        lastTitle: title,
+        screenLocked: !!screenLocked,
+      });
+      console.log("STATUS INSERTED:", {
+        studentId: student.id,
+        lastSeenAt: now.toISOString(),
+        lastUrl: url,
+      });
+    } else {
+      await db
+        .update(studentStatuses)
+        .set({
+          lastSeenAt: now,
+          lastUrl: url,
+          lastTitle: title,
+          screenLocked: !!screenLocked,
+        })
+        .where(eq(studentStatuses.studentId, student.id));
+
+      console.log("STATUS UPDATED:", {
+        studentId: student.id,
+        lastSeenAt: now.toISOString(),
+        lastUrl: url,
+      });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("Heartbeat error:", err);
+    return res.status(500).json({ ok: false, error: "Server error" });
+  }
+});
+
+
+Then restart your Replit server so that route is actually live.
+
+3. Extension side: log the heartbeat response so we know if it’s failing
+
+In your service worker, where you already log:
+
+Sending heartbeat for email: …
+
+wrap the fetch like this:
+
+const API_BASE_URL = "https://classpilot.replit.app"; // keeping it simple
+
+async function sendHeartbeat() {
+  const email = await getUserEmail(); // however you’re doing this
+  if (!email) return;
+
+  chrome.tabs.query({ active: true, currentWindow: true }, async tabs => {
+    const activeTab = tabs[0];
+
+    const payload = {
+      email,
+      url: activeTab?.url || null,
+      title: activeTab?.title || null,
+      screenLocked: false, // or your real value
+    };
+
+    console.log("[ClassPilot] Sending heartbeat", payload);
+
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/heartbeat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        credentials: "include",
+      });
+
+      const text = await res.text();
+      console.log("[ClassPilot] Heartbeat response", res.status, text);
+    } catch (err) {
+      console.error("[ClassPilot] Heartbeat fetch error", err);
+    }
+  });
+}
+
+
+Now you’ll see in the service-worker console:
+
+Heartbeat response 200 {"ok":true} → backend got it and didn’t crash.
+
+OR 404 / 500 + error text → we know exactly what’s wrong.
+
+4. Quick manual test (no extension needed)
+
+From your browser console, while logged into the admin app, run:
+
+fetch("https://classpilot.replit.app/api/heartbeat", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    email: "zinkan.brian@gmail.com", // or whatever email Brian has in the roster
+    url: "https://example.com",
+    title: "Test page",
+    screenLocked: false,
+  }),
+})
+  .then(r => r.text())
+  .then(t => console.log(t));
+
+
+Then reload the admin dashboard:
+
+If Brian’s tile still says “last seen 56 years ago”, that means your dashboard query is ignoring studentStatuses.lastSeenAt.
+
+If it changes to “a few seconds ago” and shows https://example.com (or at least no longer says “No active tab”), then the route + DB are working, and the only remaining issue is the extension not successfully calling that route (bad URL or error).
+
+5. Dashboard query & “online” logic
+
+Double-check that your endpoint feeding the admin dashboard actually pulls in the status:
+
+const studentsWithStatus = await db
+  .select({
+    id: students.id,
+    name: students.name,
+    email: students.email,
+    lastSeenAt: studentStatuses.lastSeenAt,
+    lastUrl: studentStatuses.lastUrl,
+  })
+  .from(students)
+  .leftJoin(
+    studentStatuses,
+    eq(studentStatuses.studentId, students.id)
+  )
+  .where(/* grade / school filters */);
+
+
+And in React:
+
+function isOnline(lastSeenAt?: string | null) {
+  if (!lastSeenAt) return false;
+  const last = new Date(lastSeenAt).getTime();
+  const now = Date.now();
+  return now - last < 15 * 1000; // online if seen in last 15s
+}
+
+
+The “almost 56 years ago” text is coming from doing new Date(lastSeenAt) when lastSeenAt is 0/null, so once that value is actually updated, the tile will behave.
+
+TL;DR actionable checks
+
+Confirm Brian’s student email in the app matches zinkan.brian@gmail.com. If not, fix that first.
+
+Add the exact /api/heartbeat route above + restart server.
+
+Add the Heartbeat response log to the extension and see what status code you get.
+
+Run the manual fetch('/api/heartbeat') test from the browser console to verify DB + dashboard wiring.
+
+Do those and last seen 56 years ago should finally die, and you’ll start seeing “last seen a few seconds ago” + URL tracking.
