@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import compassLogo from "@assets/generated_images/Clean_compass_no_borders_bcf381be.png";
+import compassLogo from "@assets/generated_images/Blue_square_compass_no_white_border_5ad483fa.png";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
