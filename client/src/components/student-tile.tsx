@@ -656,16 +656,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         )}
 
-        {/* Footer Zone - Time Info + Actions */}
-        <div className="flex items-center justify-between gap-2 text-xs pt-2 border-t border-border/20">
-          <div className="flex items-center gap-1.5 text-muted-foreground">
-            <span className="uppercase tracking-wide text-[10px] font-medium">
-              LAST SEEN
-            </span>
-            <span className="text-foreground font-medium" data-testid={`text-last-seen-${student.primaryDeviceId}`}>
-              {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
-            </span>
-          </div>
+        {/* Footer Zone - Actions */}
+        <div className="flex items-center justify-end gap-2 text-xs pt-2 border-t border-border/20">
           <div className="flex items-center gap-1">
             {onStartLiveView && onStopLiveView && (
               <Button
