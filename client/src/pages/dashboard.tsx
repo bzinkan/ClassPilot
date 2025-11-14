@@ -1546,7 +1546,7 @@ export default function Dashboard() {
 
       {/* Close Tabs Dialog */}
       <Dialog open={showCloseTabsDialog} onOpenChange={setShowCloseTabsDialog}>
-        <DialogContent data-testid="dialog-close-tabs">
+        <DialogContent className="max-w-2xl" data-testid="dialog-close-tabs">
           <DialogHeader>
             <DialogTitle>Close Tabs on Student Devices</DialogTitle>
             <DialogDescription>
