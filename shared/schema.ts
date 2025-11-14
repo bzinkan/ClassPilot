@@ -251,12 +251,12 @@ export type InsertHeartbeat = z.infer<typeof insertHeartbeatSchema>;
 export type Heartbeat = typeof heartbeats.$inferSelect;
 
 // Heartbeat API payload - extends database schema with in-memory-only fields
-export const heartbeatRequestSchema = insertHeartbeatSchema.extend({
+export const heartbeatRequestSchema = insertHeartbeatSchema.and(z.object({
   allOpenTabs: z.array(z.object({
     url: z.string().max(512), // Truncate long URLs
     title: z.string().max(512), // Truncate long titles
   })).max(20).optional(), // Limit to 20 tabs max (in-memory only, not persisted)
-});
+}));
 export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
 
 // Event logging for audit

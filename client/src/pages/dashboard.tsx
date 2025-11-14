@@ -482,20 +482,34 @@ export default function Dashboard() {
     ? students.filter(s => selectedStudentIds.has(s.studentId))
     : students;
   
+  // Use allOpenTabs if available, otherwise fall back to active tab (NO deduplication)
   const openTabs = relevantStudents
-    .filter(s => s.activeTabUrl && s.activeTabUrl.trim() && !s.activeTabUrl.startsWith('chrome://'))
-    .map(s => ({
-      url: s.activeTabUrl!,
-      title: s.activeTabTitle || 'Untitled',
-      studentName: s.studentName,
-    }))
-    .reduce((acc, tab) => {
-      // Deduplicate by URL
-      if (!acc.find(t => t.url === tab.url)) {
-        acc.push(tab);
+    .flatMap(s => {
+      // Prefer allOpenTabs if available (shows ALL tabs from student)
+      if (s.allOpenTabs && s.allOpenTabs.length > 0) {
+        return s.allOpenTabs
+          .filter(tab => tab.url && !tab.url.startsWith('chrome://')) // Filter out privileged URLs
+          .map(tab => ({
+            url: tab.url,
+            title: tab.title || 'Untitled',
+            studentName: s.studentName,
+            studentId: s.studentId, // Track which student has this tab
+          }));
+      } 
+      // Fall back to active tab (backwards compatibility)
+      else if (s.activeTabUrl && s.activeTabUrl.trim() && !s.activeTabUrl.startsWith('chrome://')) {
+        return [{
+          url: s.activeTabUrl,
+          title: s.activeTabTitle || 'Untitled',
+          studentName: s.studentName,
+          studentId: s.studentId,
+        }];
+      } 
+      // No tabs to show for this student
+      else {
+        return [];
       }
-      return acc;
-    }, [] as Array<{ url: string; title: string; studentName: string }>)
+    })
     .sort((a, b) => a.title.localeCompare(b.title));
 
   // Check for blocked domain violations and show notifications
@@ -1576,9 +1590,9 @@ export default function Dashboard() {
                     <div className="border rounded-md max-h-60 overflow-y-auto">
                       {openTabs.map((tab) => (
                         <label
-                          key={tab.url}
+                          key={`${tab.studentId}-${tab.url}`}
                           className="flex items-start gap-3 p-3 hover:bg-muted/50 cursor-pointer border-b last:border-b-0"
-                          data-testid={`tab-option-${tab.url}`}
+                          data-testid={`tab-option-${tab.studentId}-${tab.url}`}
                         >
                           <input
                             type="checkbox"
@@ -1596,7 +1610,10 @@ export default function Dashboard() {
                             data-testid={`checkbox-tab-${tab.url}`}
                           />
                           <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium truncate">{tab.title}</div>
+                            <div className="flex items-center gap-2">
+                              <div className="text-sm font-medium truncate">{tab.title}</div>
+                              <span className="text-xs text-muted-foreground shrink-0">• {tab.studentName}</span>
+                            </div>
                             <div className="text-xs text-muted-foreground truncate">{tab.url}</div>
                           </div>
                         </label>
