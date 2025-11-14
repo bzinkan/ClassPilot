@@ -98,9 +98,11 @@ export function StudentDetailDrawer({
                 }`}>
                   {getStatusLabel(student.status)}
                 </Badge>
-                <span className="text-xs text-muted-foreground font-mono">
-                  device-{student.primaryDeviceId.slice(0, 8)}
-                </span>
+                {student.primaryDeviceId && (
+                  <span className="text-xs text-muted-foreground font-mono">
+                    device-{student.primaryDeviceId.slice(0, 8)}
+                  </span>
+                )}
               </div>
             </div>
           </div>
@@ -250,12 +252,261 @@ export function StudentDetailDrawer({
               {/* Timeline Tab */}
               <TabsContent value="timeline" className="flex-1 overflow-hidden m-0">
                 <ScrollArea className="h-full">
-                  <div className="p-6">
-                    <div className="p-8 text-center text-muted-foreground">
-                      <Clock className="h-12 w-12 mx-auto mb-3 opacity-50" />
-                      <p className="font-medium">Timeline View</p>
-                      <p className="text-sm mt-1">Visual timeline coming soon</p>
+                  <div className="p-6 space-y-4">
+                    {/* Date Selector */}
+                    <div className="flex items-center gap-2 justify-between">
+                      <h3 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">
+                        Activity Timeline
+                      </h3>
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button variant="outline" size="sm" className="w-[180px] justify-start text-left font-normal" data-testid="button-timeline-date">
+                            <CalendarIcon className="mr-2 h-4 w-4" />
+                            {historyStartDate ? format(historyStartDate, "PPP") : "Select date"}
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-auto p-0">
+                          <Calendar
+                            mode="single"
+                            selected={historyStartDate}
+                            onSelect={setHistoryStartDate}
+                            initialFocus
+                          />
+                        </PopoverContent>
+                      </Popover>
                     </div>
+
+                    {(() => {
+                      // Filter sessions by selected date
+                      const selectedDate = historyStartDate || new Date();
+                      const dayStart = startOfDay(selectedDate);
+                      const dayEnd = endOfDay(selectedDate);
+                      
+                      // Calculate ALL sessions from full history first (preserves cross-midnight sessions)
+                      const allSessions = calculateURLSessions(urlHistory);
+                      
+                      // Filter to sessions that OVERLAP with the selected day
+                      // Includes: sessions starting on the day, sessions ending on the day,
+                      // and sessions spanning across the day
+                      const daySessions = allSessions.filter(session => {
+                        return session.startTime < dayEnd && session.endTime > dayStart;
+                      });
+
+                      if (daySessions.length === 0) {
+                        return (
+                          <div className="p-8 text-center border rounded-lg">
+                            <Clock className="h-12 w-12 mx-auto mb-3 text-muted-foreground opacity-50" />
+                            <p className="text-sm text-muted-foreground font-medium">No activity found</p>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              No browsing activity recorded for {format(selectedDate, 'MMM d, yyyy')}
+                            </p>
+                          </div>
+                        );
+                      }
+                      
+                      // Find earliest and latest activity using fractional hours from day start
+                      // This handles cross-midnight sessions correctly
+                      const MS_PER_HOUR = 3600000;
+                      const fractionalHours: number[] = [];
+                      daySessions.forEach(session => {
+                        const startFractional = (session.startTime.getTime() - dayStart.getTime()) / MS_PER_HOUR;
+                        const endFractional = (session.endTime.getTime() - dayStart.getTime()) / MS_PER_HOUR;
+                        fractionalHours.push(startFractional, endFractional);
+                      });
+                      
+                      // Calculate hour range with padding, allowing full day coverage including cross-midnight
+                      const minFractionalHour = Math.min(...fractionalHours);
+                      const maxFractionalHour = Math.max(...fractionalHours);
+                      const earliestHour = Math.max(0, Math.floor(minFractionalHour) - 1); // Pad by 1 hour before, min 0
+                      const latestHour = Math.min(48, Math.ceil(maxFractionalHour) + 1);  // Pad by 1 hour after, allow up to 48 for cross-midnight
+                      const totalHours = Math.max(1, latestHour - earliestHour); // Ensure at least 1 hour to prevent division by zero
+                      
+                      // Check for off-task indicators
+                      const sessionsWithData = daySessions.map(session => {
+                        const sessionHeartbeats = urlHistory.filter(hb => 
+                          hb.activeTabUrl === session.url &&
+                          new Date(hb.timestamp) >= session.startTime &&
+                          new Date(hb.timestamp) <= session.endTime
+                        );
+                        
+                        const hasOffTask = sessionHeartbeats.some(hb => hb.flightPathActive && hb.activeFlightPathName);
+                        const hasCamera = sessionHeartbeats.some(hb => hb.cameraActive);
+                        
+                        return { ...session, hasOffTask, hasCamera };
+                      });
+
+                      return (
+                        <div className="space-y-4">
+                          {/* Timeline Grid */}
+                          <div className="border rounded-lg p-4 bg-muted/10">
+                            {/* Hour Labels */}
+                            <div className="flex items-center mb-2">
+                              <div className="w-20 flex-shrink-0 text-xs text-muted-foreground font-medium">Time</div>
+                              <div className="flex-1 relative" style={{ height: '24px' }}>
+                                {Array.from({ length: totalHours + 1 }).map((_, i) => {
+                                  const hour = earliestHour + i;
+                                  const displayHour = hour % 24; // Handle hours >= 24 (cross-midnight)
+                                  const nextDay = hour >= 24;
+                                  return (
+                                    <div
+                                      key={hour}
+                                      className="absolute text-xs text-muted-foreground"
+                                      style={{
+                                        left: `${(i / totalHours) * 100}%`,
+                                        transform: 'translateX(-50%)'
+                                      }}
+                                    >
+                                      {format(new Date().setHours(displayHour, 0), 'ha')}
+                                      {nextDay && <span className="text-xxs">+1</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Activity Bars */}
+                            <div className="space-y-2">
+                              {sessionsWithData.map((session, index) => {
+                                // Calculate fractional hours from day start (handles cross-midnight correctly)
+                                const startHour = (session.startTime.getTime() - dayStart.getTime()) / MS_PER_HOUR;
+                                const endHour = (session.endTime.getTime() - dayStart.getTime()) / MS_PER_HOUR;
+                                
+                                // Calculate bar position and width, clamping to visible range
+                                const rawLeftPercent = ((startHour - earliestHour) / totalHours) * 100;
+                                const rawRightPercent = ((endHour - earliestHour) / totalHours) * 100;
+                                
+                                // Clamp to 0-100% range
+                                const leftPercent = Math.max(0, Math.min(100, rawLeftPercent));
+                                const rightPercent = Math.max(0, Math.min(100, rawRightPercent));
+                                const widthPercent = Math.max(0.5, rightPercent - leftPercent); // Minimum 0.5% width for visibility
+                                
+                                const barColor = session.hasOffTask 
+                                  ? 'bg-red-500 dark:bg-red-600' 
+                                  : 'bg-primary';
+                                
+                                return (
+                                  <Popover key={index}>
+                                    <PopoverTrigger asChild>
+                                      <div className="flex items-center group cursor-pointer">
+                                        <div className="w-20 flex-shrink-0">
+                                          <p className="text-xs font-medium truncate">
+                                            {format(session.startTime, 'h:mm a')}
+                                          </p>
+                                        </div>
+                                        <div className="flex-1 relative" style={{ height: '32px' }}>
+                                          <div
+                                            className={`absolute ${barColor} rounded hover-elevate transition-all h-6 flex items-center px-2 overflow-hidden`}
+                                            style={{
+                                              left: `${leftPercent}%`,
+                                              width: `${Math.max(widthPercent, 2)}%`,
+                                              minWidth: '4px'
+                                            }}
+                                          >
+                                            <span className="text-xs text-white font-medium truncate">
+                                              {session.title}
+                                            </span>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </PopoverTrigger>
+                                    <PopoverContent className="w-80" side="top">
+                                      <div className="space-y-2">
+                                        <div className="flex items-start gap-2">
+                                          {session.favicon && (
+                                            <img
+                                              src={session.favicon}
+                                              alt=""
+                                              className="w-4 h-4 flex-shrink-0 mt-0.5"
+                                              onError={(e) => {
+                                                (e.target as HTMLImageElement).style.display = 'none';
+                                              }}
+                                            />
+                                          )}
+                                          <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-medium break-words">{session.title}</p>
+                                            <p className="text-xs text-muted-foreground font-mono break-all mt-1">
+                                              {session.url}
+                                            </p>
+                                          </div>
+                                        </div>
+                                        <Separator />
+                                        <div className="flex items-center gap-4 text-xs">
+                                          <div className="flex items-center gap-1">
+                                            <Clock className="h-3 w-3" />
+                                            <span className="font-medium text-primary">{formatDuration(session.durationSeconds)}</span>
+                                          </div>
+                                          <span className="text-muted-foreground">
+                                            {format(session.startTime, 'h:mm a')} - {format(session.endTime, 'h:mm a')}
+                                          </span>
+                                        </div>
+                                        {session.hasOffTask && (
+                                          <Badge variant="destructive" className="text-xs">
+                                            <AlertTriangle className="h-3 w-3 mr-1" />
+                                            Off-Task Activity
+                                          </Badge>
+                                        )}
+                                        {session.hasCamera && (
+                                          <Badge variant="outline" className="text-xs">
+                                            <Camera className="h-3 w-3 mr-1" />
+                                            Camera Active
+                                          </Badge>
+                                        )}
+                                      </div>
+                                    </PopoverContent>
+                                  </Popover>
+                                );
+                              })}
+                            </div>
+
+                            {/* Legend */}
+                            <div className="flex items-center gap-4 mt-4 pt-4 border-t text-xs">
+                              <div className="flex items-center gap-2">
+                                <div className="w-4 h-4 bg-primary rounded"></div>
+                                <span className="text-muted-foreground">On-Task</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="w-4 h-4 bg-red-500 rounded"></div>
+                                <span className="text-muted-foreground">Off-Task</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Summary Stats */}
+                          <Card>
+                            <CardHeader className="pb-3">
+                              <CardTitle className="text-sm font-medium">Daily Summary</CardTitle>
+                            </CardHeader>
+                            <Separator />
+                            <CardContent className="pt-4">
+                              <div className="grid grid-cols-2 gap-4">
+                                <div>
+                                  <p className="text-xs text-muted-foreground mb-1">Total Sessions</p>
+                                  <p className="text-2xl font-bold">{sessionsWithData.length}</p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground mb-1">Total Time</p>
+                                  <p className="text-2xl font-bold">
+                                    {formatDuration(sessionsWithData.reduce((sum, s) => sum + s.durationSeconds, 0))}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground mb-1">Off-Task Alerts</p>
+                                  <p className="text-2xl font-bold text-red-600 dark:text-red-500">
+                                    {sessionsWithData.filter(s => s.hasOffTask).length}
+                                  </p>
+                                </div>
+                                <div>
+                                  <p className="text-xs text-muted-foreground mb-1">First Activity</p>
+                                  <p className="text-lg font-semibold">
+                                    {sessionsWithData.length > 0 ? format(sessionsWithData[0].startTime, 'h:mm a') : 'N/A'}
+                                  </p>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </ScrollArea>
               </TabsContent>
