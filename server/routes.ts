@@ -2863,23 +2863,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Close Tabs - Close all or specific tabs
   app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
-      const { closeAll, pattern, specificUrls, allowedDomains, targetDeviceIds } = req.body;
+      const { closeAll, pattern, specificUrls, allowedDomains, targetDeviceIds, tabsToClose } = req.body;
       
-      const sentCount = broadcastToStudents({
-        type: 'remote-control',
-        command: {
-          type: 'close-tab',
-          data: { closeAll, pattern, specificUrls, allowedDomains },
-        },
-      }, undefined, targetDeviceIds);
+      // Reject if new paradigm is mixed with old parameters
+      if (tabsToClose && (specificUrls || targetDeviceIds || closeAll || pattern || allowedDomains)) {
+        return res.status(400).json({ error: "Cannot mix tabsToClose with closeAll/pattern/specificUrls/allowedDomains/targetDeviceIds" });
+      }
       
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${sentCount} device(s)` 
-        : "all connected devices";
+      let sentCount = 0;
+      let message = "";
       
-      const message = specificUrls && specificUrls.length > 0
-        ? `Closed ${specificUrls.length} selected tab(s) on ${target}`
-        : `Closed tabs on ${target}`;
+      // New paradigm: per-device tab closure
+      if (tabsToClose && Array.isArray(tabsToClose)) {
+        // Validate tabsToClose structure (strict validation for non-empty strings)
+        const tabsToCloseSchema = z.array(z.object({
+          deviceId: z.string().min(1).trim().refine(val => val.length > 0, {
+            message: "deviceId cannot be empty or whitespace",
+          }),
+          url: z.string().min(1).trim().refine(val => val.length > 0, {
+            message: "url cannot be empty or whitespace",
+          }),
+        }));
+        
+        const validation = tabsToCloseSchema.safeParse(tabsToClose);
+        if (!validation.success) {
+          return res.status(400).json({ 
+            error: "Invalid tabsToClose format - deviceId and url must be non-empty strings", 
+            details: validation.error.errors 
+          });
+        }
+        
+        // Deduplicate entries (same deviceId + url)
+        const seen = new Set<string>();
+        const dedupedTabs: Array<{deviceId: string; url: string}> = [];
+        validation.data.forEach(({ deviceId, url }) => {
+          const key = `${deviceId}|${url}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            dedupedTabs.push({ deviceId, url });
+          }
+        });
+        
+        // Group tabs by deviceId for efficient broadcasting
+        const tabsByDevice = new Map<string, string[]>();
+        dedupedTabs.forEach(({ deviceId, url }) => {
+          if (!tabsByDevice.has(deviceId)) {
+            tabsByDevice.set(deviceId, []);
+          }
+          tabsByDevice.get(deviceId)!.push(url);
+        });
+        
+        // Send per-device close commands
+        tabsByDevice.forEach((urls, deviceId) => {
+          const count = broadcastToStudents({
+            type: 'remote-control',
+            command: {
+              type: 'close-tab',
+              data: { specificUrls: urls },
+            },
+          }, undefined, [deviceId]);
+          sentCount += count;
+        });
+        
+        message = `Closed ${dedupedTabs.length} tab(s) on ${tabsByDevice.size} device(s)`;
+      }
+      // Old paradigm (backward compatibility with deprecation warning)
+      else {
+        console.warn('[DEPRECATED] close-tabs using specificUrls+targetDeviceIds is deprecated. Use tabsToClose instead.');
+        
+        sentCount = broadcastToStudents({
+          type: 'remote-control',
+          command: {
+            type: 'close-tab',
+            data: { closeAll, pattern, specificUrls, allowedDomains },
+          },
+        }, undefined, targetDeviceIds);
+        
+        const target = targetDeviceIds && targetDeviceIds.length > 0 
+          ? `${sentCount} device(s)` 
+          : "all connected devices";
+        
+        message = specificUrls && specificUrls.length > 0
+          ? `Closed ${specificUrls.length} selected tab(s) on ${target}`
+          : `Closed tabs on ${target}`;
+      }
       
       res.json({ success: true, message });
     } catch (error) {

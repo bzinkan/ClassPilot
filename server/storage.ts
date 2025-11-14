@@ -650,7 +650,21 @@ export class MemStorage implements IStorage {
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,
-        allOpenTabs: primaryStatus.allOpenTabs, // 🆕 All tabs from primary device (in-memory only)
+        // Merge allOpenTabs from ALL devices (include deviceId, skip devices without valid ID)
+        allOpenTabs: (() => {
+          const mergedTabs: Array<TabInfo & {deviceId: string}> = [];
+          deviceStatuses.forEach(deviceStatus => {
+            // Only include tabs from devices with valid (non-empty) deviceId
+            if (!deviceStatus.deviceId || deviceStatus.deviceId.trim() === '') {
+              console.warn(`⚠️ Skipping tabs for student ${studentId} - device has no valid deviceId`);
+              return;
+            }
+            deviceStatus.allOpenTabs?.forEach(tab => {
+              mergedTabs.push({ ...tab, deviceId: deviceStatus.deviceId! }); // deviceId guaranteed non-empty here
+            });
+          });
+          return mergedTabs.length > 0 ? mergedTabs : undefined;
+        })(),
         isSharing: primaryStatus.isSharing,
         screenLocked: primaryStatus.screenLocked,
         flightPathActive: primaryStatus.flightPathActive,
@@ -1780,7 +1794,21 @@ export class DatabaseStorage implements IStorage {
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,
-        allOpenTabs: primaryStatus.allOpenTabs, // 🆕 All tabs from primary device (in-memory only)
+        // Merge allOpenTabs from ALL devices (include deviceId, skip devices without valid ID)
+        allOpenTabs: (() => {
+          const mergedTabs: Array<TabInfo & {deviceId: string}> = [];
+          deviceStatuses.forEach(deviceStatus => {
+            // Only include tabs from devices with valid (non-empty) deviceId
+            if (!deviceStatus.deviceId || deviceStatus.deviceId.trim() === '') {
+              console.warn(`⚠️ Skipping tabs for student ${studentId} - device has no valid deviceId`);
+              return;
+            }
+            deviceStatus.allOpenTabs?.forEach(tab => {
+              mergedTabs.push({ ...tab, deviceId: deviceStatus.deviceId! }); // deviceId guaranteed non-empty here
+            });
+          });
+          return mergedTabs.length > 0 ? mergedTabs : undefined;
+        })(),
         isSharing: primaryStatus.isSharing,
         screenLocked: primaryStatus.screenLocked,
         flightPathActive: primaryStatus.flightPathActive,

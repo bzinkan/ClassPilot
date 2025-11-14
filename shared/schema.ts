@@ -170,7 +170,7 @@ export interface AggregatedStudentStatus {
   activeTabTitle: string;
   activeTabUrl: string;
   favicon?: string;
-  allOpenTabs?: TabInfo[]; // ALL tabs from primary device (in-memory only)
+  allOpenTabs?: Array<TabInfo & {deviceId: string}>; // ALL tabs from ALL devices with deviceId (in-memory only)
   isSharing: boolean;
   screenLocked: boolean;
   flightPathActive: boolean;

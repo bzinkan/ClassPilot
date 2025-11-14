@@ -77,6 +77,7 @@ export default function Dashboard() {
   const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
   const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
+  // Track selected tabs by composite key: "studentId|deviceId|url"
   const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
   const [selectedFlightPathId, setSelectedFlightPathId] = useState("");
@@ -482,27 +483,29 @@ export default function Dashboard() {
     ? students.filter(s => selectedStudentIds.has(s.studentId))
     : students;
   
-  // Use allOpenTabs if available, otherwise fall back to active tab (NO deduplication)
+  // Use allOpenTabs if available, otherwise fall back to active tab (with deviceId tracking)
   const openTabs = relevantStudents
     .flatMap(s => {
-      // Prefer allOpenTabs if available (shows ALL tabs from student)
+      // Prefer allOpenTabs if available (shows ALL tabs from ALL devices)
       if (s.allOpenTabs && s.allOpenTabs.length > 0) {
         return s.allOpenTabs
-          .filter(tab => tab.url && !tab.url.startsWith('chrome://')) // Filter out privileged URLs
-          .map(tab => ({
+          .filter((tab: any) => tab.url && !tab.url.startsWith('chrome://')) // Filter out privileged URLs
+          .map((tab: any) => ({
             url: tab.url,
             title: tab.title || 'Untitled',
             studentName: s.studentName,
-            studentId: s.studentId, // Track which student has this tab
+            studentId: s.studentId,
+            deviceId: tab.deviceId, // Track which device has this tab
           }));
       } 
-      // Fall back to active tab (backwards compatibility)
-      else if (s.activeTabUrl && s.activeTabUrl.trim() && !s.activeTabUrl.startsWith('chrome://')) {
+      // Fall back to active tab (backwards compatibility - only if primaryDeviceId exists)
+      else if (s.activeTabUrl && s.activeTabUrl.trim() && !s.activeTabUrl.startsWith('chrome://') && s.primaryDeviceId) {
         return [{
           url: s.activeTabUrl,
           title: s.activeTabTitle || 'Untitled',
           studentName: s.studentName,
           studentId: s.studentId,
+          deviceId: s.primaryDeviceId, // Use primary device for fallback
         }];
       } 
       // No tabs to show for this student
@@ -739,8 +742,8 @@ export default function Dashboard() {
   });
 
   const closeTabsMutation = useMutation({
-    mutationFn: async ({ closeAll, pattern, specificUrls, targetDeviceIds }: { closeAll?: boolean; pattern?: string; specificUrls?: string[]; targetDeviceIds?: string[] }) => {
-      const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, specificUrls, targetDeviceIds });
+    mutationFn: async ({ closeAll, pattern, specificUrls, targetDeviceIds, tabsToClose }: { closeAll?: boolean; pattern?: string; specificUrls?: string[]; targetDeviceIds?: string[]; tabsToClose?: Array<{ deviceId: string; url: string }> }) => {
+      const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, specificUrls, targetDeviceIds, tabsToClose });
       return res.json();
     },
     onSuccess: (data) => {
@@ -839,7 +842,18 @@ export default function Dashboard() {
         });
         return;
       }
-      closeTabsMutation.mutate({ specificUrls: Array.from(selectedTabsToClose), targetDeviceIds });
+      
+      // Parse composite keys "studentId|deviceId|url" into structured data
+      const tabsToClose: Array<{ deviceId: string; url: string }> = [];
+      selectedTabsToClose.forEach(compositeKey => {
+        const parts = compositeKey.split('|');
+        if (parts.length === 3) {
+          const [, deviceId, url] = parts; // studentId not needed
+          tabsToClose.push({ deviceId, url });
+        }
+      });
+      
+      closeTabsMutation.mutate({ tabsToClose });
     }
   };
 
@@ -1565,7 +1579,7 @@ export default function Dashboard() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => setSelectedTabsToClose(new Set(openTabs.map(t => t.url)))}
+                        onClick={() => setSelectedTabsToClose(new Set(openTabs.map(t => `${t.studentId}|${t.deviceId}|${t.url}`)))}
                         data-testid="button-select-all-tabs"
                         className="h-8"
                       >
@@ -1590,20 +1604,21 @@ export default function Dashboard() {
                     <div className="border rounded-md max-h-60 overflow-y-auto">
                       {openTabs.map((tab) => (
                         <label
-                          key={`${tab.studentId}-${tab.url}`}
+                          key={`${tab.studentId}-${tab.deviceId}-${tab.url}`}
                           className="flex items-start gap-3 p-3 hover:bg-muted/50 cursor-pointer border-b last:border-b-0"
-                          data-testid={`tab-option-${tab.studentId}-${tab.url}`}
+                          data-testid={`tab-option-${tab.studentId}-${tab.deviceId}-${tab.url}`}
                         >
                           <input
                             type="checkbox"
                             className="mt-1 h-4 w-4"
-                            checked={selectedTabsToClose.has(tab.url)}
+                            checked={selectedTabsToClose.has(`${tab.studentId}|${tab.deviceId}|${tab.url}`)}
                             onChange={(e) => {
+                              const compositeKey = `${tab.studentId}|${tab.deviceId}|${tab.url}`;
                               const newSet = new Set(selectedTabsToClose);
                               if (e.target.checked) {
-                                newSet.add(tab.url);
+                                newSet.add(compositeKey);
                               } else {
-                                newSet.delete(tab.url);
+                                newSet.delete(compositeKey);
                               }
                               setSelectedTabsToClose(newSet);
                             }}
