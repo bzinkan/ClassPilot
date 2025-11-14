@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClassPilot - IT Staff Tutorial</title>
+    <style>
+        @page {
+            margin: 1in;
+        }
+        body {
+            font-family: Calibri, Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 40px;
+            background: white;
+            color: #333;
+        }
+        h1 {
+            color: #2563eb;
+            border-bottom: 3px solid #2563eb;
+            padding-bottom: 15px;
+            margin-top: 40px;
+            font-size: 32px;
+        }
+        h1:first-of-type {
+            margin-top: 0;
+        }
+        h2 {
+            color: #1e40af;
+            margin-top: 35px;
+            border-bottom: 2px solid #93c5fd;
+            padding-bottom: 10px;
+            font-size: 24px;
+        }
+        h3 {
+            color: #1e3a8a;
+            margin-top: 25px;
+            font-size: 20px;
+        }
+        h4 {
+            color: #3b82f6;
+            margin-top: 20px;
+            font-size: 18px;
+        }
+        code {
+            background-color: #f3f4f6;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-family: 'Courier New', Consolas, monospace;
+            font-size: 14px;
+        }
+        pre {
+            background-color: #f3f4f6;
+            padding: 20px;
+            border-radius: 6px;
+            overflow-x: auto;
+            border-left: 4px solid #2563eb;
+        }
+        pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+        blockquote {
+            border-left: 5px solid #2563eb;
+            padding-left: 20px;
+            margin: 20px 0;
+            color: #4b5563;
+            font-style: italic;
+        }
+        ul, ol {
+            margin: 15px 0;
+            padding-left: 30px;
+        }
+        li {
+            margin: 8px 0;
+        }
+        strong {
+            color: #1e40af;
+        }
+        .checkmark {
+            color: #10b981;
+            font-weight: bold;
+        }
+        .section {
+            page-break-inside: avoid;
+        }
+        @media print {
+            body {
+                margin: 0;
+                padding: 20px;
+            }
+        }
+        .download-button {
+            background-color: #2563eb;
+            color: white;
+            padding: 15px 30px;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            margin: 20px 0;
+            display: inline-block;
+        }
+        .download-button:hover {
+            background-color: #1e40af;
+        }
+    </style>
+</head>
+<body>
+
+<div style="text-align: center; margin-bottom: 40px;">
+    <h1 style="border: none; font-size: 42px; margin: 0;">ClassPilot</h1>
+    <p style="font-size: 24px; color: #6b7280;">IT Staff Tutorial & Technical Breakdown</p>
+    <p style="color: #9ca3af;">Version 1.0.5</p>
+    <p style="margin-top: 30px; padding: 15px; background-color: #dbeafe; border-radius: 6px; color: #1e40af;">
+        <strong>💡 To save as Word:</strong> Press <kbd>Ctrl+P</kbd> (or Cmd+P on Mac), then choose "Save as PDF" or use your browser's "Save Page As" feature, then open in Microsoft Word
+    </p>
+</div>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="table-of-contents">📑 Table of Contents</h2>
+<ol>
+    <li><a href="#executive-summary">Executive Summary</a></li>
+    <li><a href="#system-architecture">System Architecture</a></li>
+    <li><a href="#key-features">Key Features</a></li>
+    <li><a href="#privacy-compliance">Privacy & Compliance</a></li>
+    <li><a href="#deployment-guide">Deployment Guide</a></li>
+    <li><a href="#demo-walkthrough">Demo Walkthrough</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+</ol>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="executive-summary">1. Executive Summary</h2>
+
+<h3>What is ClassPilot?</h3>
+<p>ClassPilot is a privacy-aware classroom monitoring system designed for educational institutions using managed Chromebooks. It enables teachers to monitor student activity in real-time while maintaining transparency and compliance with FERPA/COPPA regulations.</p>
+
+<h3>Core Components</h3>
+<ul>
+    <li><strong>Teacher Dashboard</strong> (Web Application) - Real-time monitoring interface for educators</li>
+    <li><strong>Chrome Extension</strong> (v1.0.5) - Lightweight monitoring agent on student Chromebooks</li>
+</ul>
+
+<h3>Key Value Propositions</h3>
+<ul>
+    <li><span class="checkmark">✅</span> Transparent monitoring with student disclosure</li>
+    <li><span class="checkmark">✅</span> Real-time classroom oversight</li>
+    <li><span class="checkmark">✅</span> Remote classroom control capabilities</li>
+    <li><span class="checkmark">✅</span> Privacy-first design with configurable data retention</li>
+    <li><span class="checkmark">✅</span> Works with Google Workspace for Education</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="system-architecture">2. System Architecture</h2>
+
+<h3>High-Level Overview</h3>
+<pre><code>┌─────────────────────────────────────────────────────────────┐
+│                     ClassPilot System                        │
+└─────────────────────────────────────────────────────────────┘
+
+┌──────────────────┐         ┌──────────────────┐
+│  Student Device  │         │  Teacher Device  │
+│  (Chromebook)    │         │  (Any Browser)   │
+│                  │         │                  │
+│  ┌────────────┐  │         │  ┌────────────┐  │
+│  │  Chrome    │  │         │  │  Dashboard │  │
+│  │ Extension  │◄─┼─────────┼─►│  Web App   │  │
+│  │  (v1.0.5)  │  │         │  │            │  │
+│  └────────────┘  │         │  └────────────┘  │
+└────────┬─────────┘         └────────┬─────────┘
+         │                            │
+         │        WebSocket/REST      │
+         └────────────┬───────────────┘
+                      │
+            ┌─────────▼─────────┐
+            │   Backend Server   │
+            │   (Node.js/Express)│
+            │                    │
+            │   • REST APIs      │
+            │   • WebSocket      │
+            │   • WebRTC Signal  │
+            └─────────┬──────────┘
+                      │
+            ┌─────────▼─────────┐
+            │   PostgreSQL DB    │
+            │   (Neon-backed)    │
+            │                    │
+            │   • Students       │
+            │   • Devices        │
+            │   • Activity Logs  │
+            │   • Sessions       │
+            └────────────────────┘
+</code></pre>
+
+<h3>Technology Stack</h3>
+
+<h4>Frontend (Teacher Dashboard):</h4>
+<ul>
+    <li>React + TypeScript</li>
+    <li>TanStack Query (data fetching)</li>
+    <li>Tailwind CSS + Shadcn UI (styling)</li>
+    <li>Wouter (routing)</li>
+    <li>WebSockets (real-time updates)</li>
+    <li>WebRTC (live screen viewing)</li>
+</ul>
+
+<h4>Backend:</h4>
+<ul>
+    <li>Node.js + Express</li>
+    <li>WebSocket server (ws library)</li>
+    <li>PostgreSQL database (Neon-backed)</li>
+    <li>Drizzle ORM</li>
+    <li>Session-based authentication</li>
+    <li>Rate limiting & CSRF protection</li>
+</ul>
+
+<h4>Chrome Extension:</h4>
+<ul>
+    <li>Manifest V3 (latest Chrome standard)</li>
+    <li>Chrome Identity API (student detection)</li>
+    <li>Background service worker with chrome.alarms</li>
+    <li>WebNavigation API (browsing tracking)</li>
+    <li>WebRTC (screen sharing)</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="key-features">3. Key Features</h2>
+
+<h3>3.1 Real-Time Student Monitoring</h3>
+<p><strong>How it Works:</strong></p>
+<ul>
+    <li>Chrome Extension sends heartbeats every 10 seconds</li>
+    <li>Reports current tab title, URL, favicon, and timestamp</li>
+    <li>Tracks all open tabs (up to 20 per device)</li>
+    <li>Dashboard updates in real-time via WebSocket</li>
+</ul>
+
+<p><strong>Student Status Classifications:</strong></p>
+<ul>
+    <li>🟢 <strong>Online</strong> - Active within last 30 seconds</li>
+    <li>🟡 <strong>Idle</strong> - No activity for 30-120 seconds</li>
+    <li>⚫ <strong>Offline</strong> - No activity for 2+ minutes</li>
+</ul>
+
+<p><strong>What Teachers See:</strong></p>
+<ul>
+    <li>Student name and device</li>
+    <li>Current active tab and website</li>
+    <li>All open tabs across all devices</li>
+    <li>Time spent on current site</li>
+    <li>Recent browsing history</li>
+</ul>
+
+<h3>3.2 Session-Based Classroom Management</h3>
+<p><strong>Class Sessions:</strong></p>
+<ul>
+    <li>Teachers create class rosters/groups</li>
+    <li>Start a class session when teaching begins</li>
+    <li>Dashboard filters to show only students in active session</li>
+    <li>End session when class concludes</li>
+</ul>
+
+<h3>3.3 Remote Classroom Control</h3>
+<p><strong>Available Commands:</strong></p>
+
+<h4>📂 Open Tab</h4>
+<ul>
+    <li>Send URL to selected students</li>
+    <li>Opens in new tab on their Chromebook</li>
+    <li>Useful for directing to assignments</li>
+</ul>
+
+<h4>❌ Close Tabs</h4>
+<ul>
+    <li>Close all tabs or specific tabs by pattern</li>
+    <li>Per-device targeting (no cross-device pollution)</li>
+    <li>Composite key system: <code>studentId|deviceId|url</code></li>
+</ul>
+
+<h4>🔒 Lock Screen</h4>
+<ul>
+    <li>Prevents student from browsing</li>
+    <li>Shows "Screen Locked by Teacher" message</li>
+    <li>Maintains focus until unlocked</li>
+</ul>
+
+<h4>🔓 Unlock Screen</h4>
+<ul>
+    <li>Restores normal browsing capability</li>
+</ul>
+
+<h4>🛤️ Apply Flight Path</h4>
+<ul>
+    <li>Pre-configured allowed/blocked domain lists</li>
+    <li>Restrict browsing to approved sites</li>
+    <li>Useful for test-taking or focused work</li>
+</ul>
+
+<h3>3.4 Live Screen Viewing</h3>
+<p><strong>WebRTC Screen Sharing:</strong></p>
+<ul>
+    <li>Real-time screen capture from student devices</li>
+    <li>Silent tab capture (works on managed Chromebooks)</li>
+    <li>Advanced video controls (play/pause/fullscreen)</li>
+    <li>Privacy disclosure banner shown to students</li>
+</ul>
+
+<h3>3.5 Privacy & Data Retention</h3>
+<p><strong>Configurable Data Retention:</strong></p>
+<ul>
+    <li>Set retention period (7, 30, 60, 90 days, or indefinite)</li>
+    <li>Automatic cleanup of old activity logs</li>
+    <li>Excel export before deletion</li>
+</ul>
+
+<p><strong>Privacy Features:</strong></p>
+<ul>
+    <li>All-tabs data stored in-memory only (not persisted)</li>
+    <li>Student disclosure banner in extension</li>
+    <li>Explicit consent for screen sharing</li>
+    <li>Minimal data collection (only browsing activity)</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="privacy-compliance">4. Privacy & Compliance</h2>
+
+<h3>FERPA/COPPA Compliance</h3>
+
+<h4>Data Minimization:</h4>
+<ul>
+    <li>Only collects essential browsing data (URL, title, timestamp)</li>
+    <li>No keystroke logging, screenshot capture (except explicit screen sharing)</li>
+    <li>No personal information beyond school email</li>
+</ul>
+
+<h4>Transparency:</h4>
+<ul>
+    <li>Chrome Extension displays disclosure banner</li>
+    <li>Students know monitoring is active</li>
+    <li>Screen sharing requires explicit action (not automatic)</li>
+</ul>
+
+<h4>Data Security:</h4>
+<ul>
+    <li>Session-based authentication with bcrypt password hashing</li>
+    <li>Rate limiting to prevent brute force attacks</li>
+    <li>CSRF protection</li>
+    <li>Secure WebSocket connections</li>
+    <li>IP allowlist for dashboard access (optional)</li>
+</ul>
+
+<h3>Google Workspace Compatibility</h3>
+<p><strong>Supported Environments:</strong></p>
+<ul>
+    <li><span class="checkmark">✅</span> Google Workspace for Education accounts (@school.edu)</li>
+    <li><span class="checkmark">✅</span> Personal Google accounts (@gmail.com)</li>
+    <li><span class="checkmark">✅</span> Mixed environments (both types)</li>
+</ul>
+
+<p><strong>Chrome Identity API:</strong></p>
+<ul>
+    <li>Automatically detects logged-in student email</li>
+    <li>No manual student ID entry required</li>
+    <li>Works across devices seamlessly</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="deployment-guide">5. Deployment Guide</h2>
+
+<h3>Prerequisites</h3>
+<ol>
+    <li><strong>Google Workspace Admin Access</strong> (for force-installing extension)</li>
+    <li><strong>Server/Hosting</strong> (for Teacher Dashboard)</li>
+    <li><strong>PostgreSQL Database</strong> (provided by Replit or your own)</li>
+    <li><strong>Domain Name</strong> (optional but recommended)</li>
+</ol>
+
+<h3>Step 1: Deploy Teacher Dashboard</h3>
+<p><strong>Using Replit (Recommended for Quick Setup):</strong></p>
+<ol>
+    <li>This project is already configured on Replit</li>
+    <li>Click "Publish" button in Replit</li>
+    <li>Configure custom domain (optional)</li>
+    <li>Set up environment variables</li>
+</ol>
+
+<h3>Step 2: Publish Chrome Extension to Chrome Web Store</h3>
+<p><strong>Package the Extension:</strong></p>
+<pre><code>cd extension
+zip -r classpilot-extension-v1.0.5.zip .</code></pre>
+
+<p><strong>Upload to Chrome Web Store:</strong></p>
+<ol>
+    <li>Go to: https://chrome.google.com/webstore/devconsole</li>
+    <li>Pay $5 one-time developer fee (if first extension)</li>
+    <li>Upload <code>classpilot-extension-v1.0.5.zip</code></li>
+    <li>Fill in store listing details</li>
+    <li>Select visibility: <strong>Private</strong> (unlisted) or <strong>Public</strong></li>
+    <li>Submit for review (typically 1-3 days)</li>
+</ol>
+
+<h3>Step 3: Configure Google Workspace Admin Console</h3>
+<p><strong>Force-Install Extension on Student Chromebooks:</strong></p>
+<ol>
+    <li>Go to: https://admin.google.com</li>
+    <li>Navigate to: <strong>Devices → Chrome → Apps & Extensions → Users & Browsers</strong></li>
+    <li>Click "Add Chrome app or extension"</li>
+    <li>Enter Extension ID from Chrome Web Store</li>
+    <li>Configure installation policy:
+        <ul>
+            <li><strong>Installation Policy:</strong> Force install</li>
+            <li><strong>Organizational Unit:</strong> Select student OU (e.g., "Students")</li>
+        </ul>
+    </li>
+    <li>Save</li>
+</ol>
+
+<h3>Step 4: Configure Dashboard</h3>
+<p><strong>Initial Setup:</strong></p>
+<ol>
+    <li>Login as admin</li>
+    <li>Navigate to Settings</li>
+    <li>Configure:
+        <ul>
+            <li>School Name</li>
+            <li>Grade Levels (e.g., 6th, 7th, 8th)</li>
+            <li>Tracking Hours (e.g., 8:00 AM - 3:00 PM)</li>
+            <li>Weekend Tracking (on/off)</li>
+            <li>Data Retention (7, 30, 60, 90 days, indefinite)</li>
+            <li>IP Allowlist (optional)</li>
+        </ul>
+    </li>
+</ol>
+
+<h3>Step 5: Teacher Onboarding</h3>
+<ol>
+    <li>Provide login credentials</li>
+    <li>Teachers access dashboard at your URL</li>
+    <li>Teachers create class rosters</li>
+    <li>Start class session when teaching begins</li>
+</ol>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="demo-walkthrough">6. Demo Walkthrough</h2>
+
+<h3>Recommended Demo Flow (15 minutes)</h3>
+
+<h4>1. Login & Overview (2 min)</h4>
+<ul>
+    <li>Show login page</li>
+    <li>Explain teacher vs admin roles</li>
+    <li>Point out ClassPilot branding</li>
+</ul>
+
+<h4>2. Dashboard Overview (3 min)</h4>
+<ul>
+    <li>Show empty dashboard (no active students yet)</li>
+    <li>Explain status cards: Online, Idle, Offline, Off-Task Alert</li>
+    <li>Show grade filter dropdown</li>
+    <li>Point out student search</li>
+</ul>
+
+<h4>3. Start Class Session (1 min)</h4>
+<ul>
+    <li>Click "Select Class" dropdown</li>
+    <li>Choose a class roster</li>
+    <li>Click "Start Class"</li>
+    <li>Explain: Dashboard now shows students from this roster</li>
+</ul>
+
+<h4>4. Student Activity Monitoring (4 min)</h4>
+<ul>
+    <li>Student appears as "Online" when extension sends heartbeat</li>
+    <li>Show student tile with current activity</li>
+    <li>Click student tile to open detail drawer</li>
+    <li>Show "Screens" tab with all open tabs</li>
+    <li>Show "History" tab with recent browsing activity</li>
+    <li>Show analytics pie chart (time on site)</li>
+</ul>
+
+<h4>5. Remote Control Demo (3 min)</h4>
+<ul>
+    <li><strong>Open Tab:</strong> Enter a URL → Opens on student device</li>
+    <li><strong>Close Tabs:</strong> Select specific tab → Closes on student device</li>
+    <li><strong>Lock Screen:</strong> Locks student Chromebook</li>
+    <li><strong>Unlock Screen:</strong> Restores browsing</li>
+    <li><strong>Apply Flight Path:</strong> Show domain restrictions in action</li>
+</ul>
+
+<h4>6. Flight Paths (1 min)</h4>
+<ul>
+    <li>Navigate to Flight Paths page</li>
+    <li>Create example: "Testing Mode"</li>
+    <li>Allowed: <code>testing-platform.com</code></li>
+    <li>Blocked: <code>youtube.com, facebook.com</code></li>
+    <li>Show how to apply to students</li>
+</ul>
+
+<h4>7. Admin Features (1 min)</h4>
+<ul>
+    <li>Switch to admin account</li>
+    <li>Show teacher management</li>
+    <li>Show student import (CSV)</li>
+    <li>Show system settings</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2 id="troubleshooting">7. Troubleshooting</h2>
+
+<h3>Common Issues</h3>
+
+<h4>Issue: Extension not appearing on student Chromebooks</h4>
+<p><strong>Solution:</strong></p>
+<ul>
+    <li>Verify extension is force-installed in Admin Console</li>
+    <li>Check correct OU is targeted (Students, not Staff)</li>
+    <li>Verify Chrome policies are applied (run <code>chrome://policy</code>)</li>
+    <li>Wait 15 minutes for policy refresh, or force refresh</li>
+</ul>
+
+<h4>Issue: Student not appearing in dashboard</h4>
+<p><strong>Possible Causes:</strong></p>
+<ol>
+    <li>Student not in active session roster</li>
+    <li>Student email not matching database</li>
+    <li>Extension not sending heartbeats</li>
+</ol>
+
+<p><strong>Solution:</strong></p>
+<ul>
+    <li>Ensure student is added to class roster</li>
+    <li>Verify student email in Admin → Students</li>
+    <li>Check extension popup on student device</li>
+</ul>
+
+<h4>Issue: WebSocket connection failing</h4>
+<p><strong>Solution:</strong></p>
+<ul>
+    <li>Verify WebSocket port is open</li>
+    <li>Check firewall settings</li>
+    <li>Ensure HTTPS for production (WSS requires HTTPS)</li>
+</ul>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<h2>Conclusion</h2>
+
+<p>ClassPilot provides a comprehensive, privacy-aware classroom monitoring solution that balances educational oversight with student privacy rights. The system is designed for easy deployment in Google Workspace for Education environments and scales from small classrooms to entire school districts.</p>
+
+<h3>Key Takeaways:</h3>
+<ul>
+    <li><span class="checkmark">✅</span> Two components: Chrome Extension + Web Dashboard</li>
+    <li><span class="checkmark">✅</span> Privacy-first design with transparency</li>
+    <li><span class="checkmark">✅</span> Real-time monitoring with remote control</li>
+    <li><span class="checkmark">✅</span> Easy deployment via Google Workspace Admin</li>
+    <li><span class="checkmark">✅</span> FERPA/COPPA compliant architecture</li>
+</ul>
+
+<h3>Next Steps:</h3>
+<ol>
+    <li>Schedule deployment timeline</li>
+    <li>Prepare Google Workspace Admin Console</li>
+    <li>Create teacher accounts</li>
+    <li>Import student roster</li>
+    <li>Pilot with 1-2 classrooms</li>
+    <li>Gather feedback and refine</li>
+    <li>Roll out school-wide</li>
+</ol>
+
+<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
+
+<div style="text-align: center; padding: 40px; background-color: #f9fafb; border-radius: 8px; margin-top: 40px;">
+    <h3 style="color: #2563eb; margin-top: 0;">ClassPilot v1.0.5</h3>
+    <p style="color: #6b7280; font-size: 18px;">Privacy-Aware Classroom Monitoring</p>
+</div>
+
+</body>
+</html>
