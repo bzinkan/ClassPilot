@@ -11,6 +11,7 @@ import {
   insertDeviceSchema,
   insertStudentSchema,
   insertHeartbeatSchema,
+  heartbeatRequestSchema, // 🆕 Includes allOpenTabs (in-memory only)
   insertEventSchema,
   insertRosterSchema,
   insertSettingsSchema,
@@ -1160,8 +1161,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/heartbeat", heartbeatLimiter, async (req, res) => {
     try {
-      // Validate input with safe parse
-      const result = insertHeartbeatSchema.safeParse(req.body);
+      // Validate input with heartbeatRequestSchema (includes allOpenTabs)
+      const result = heartbeatRequestSchema.safeParse(req.body);
       
       if (!result.success) {
         console.warn('Invalid heartbeat data:', result.error.format(), req.body);
@@ -1169,8 +1170,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.sendStatus(204);
       }
       
-      const data = result.data;
-      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50) });
+      const fullData = result.data;
+      // Extract allOpenTabs (in-memory only) and database fields separately
+      const { allOpenTabs, ...data } = fullData;
+      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50), tabCount: allOpenTabs?.length || 0 });
       
       // Check if tracking hours are enforced (timezone-aware)
       const settings = await storage.getSettings();
@@ -1214,7 +1217,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // Store heartbeat asynchronously - don't block the response
-      storage.addHeartbeat(data)
+      storage.addHeartbeat(data, allOpenTabs)
         .then(() => {
           // Notify teachers of update (non-blocking)
           broadcastToTeachers({

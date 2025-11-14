@@ -37,6 +37,7 @@ import {
   type InsertMessage,
   type CheckIn,
   type InsertCheckIn,
+  type TabInfo, // 🆕 All-tabs tracking
   makeStatusKey,
   users,
   devices,
@@ -107,7 +108,7 @@ export interface IStorage {
   setActiveStudentForDevice(deviceId: string, studentId: string | null): Promise<void>;
 
   // Heartbeats
-  addHeartbeat(heartbeat: InsertHeartbeat): Promise<Heartbeat>;
+  addHeartbeat(heartbeat: InsertHeartbeat, allOpenTabs?: TabInfo[]): Promise<Heartbeat>;
   getHeartbeatsByDevice(deviceId: string, limit?: number): Promise<Heartbeat[]>;
   getHeartbeatsByStudent(studentId: string, limit?: number): Promise<Heartbeat[]>;
   getAllHeartbeats(): Promise<Heartbeat[]>;
@@ -649,6 +650,7 @@ export class MemStorage implements IStorage {
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,
+        allOpenTabs: primaryStatus.allOpenTabs, // 🆕 All tabs from primary device (in-memory only)
         isSharing: primaryStatus.isSharing,
         screenLocked: primaryStatus.screenLocked,
         flightPathActive: primaryStatus.flightPathActive,
@@ -682,7 +684,7 @@ export class MemStorage implements IStorage {
   }
 
   // Heartbeats
-  async addHeartbeat(insertHeartbeat: InsertHeartbeat): Promise<Heartbeat> {
+  async addHeartbeat(insertHeartbeat: InsertHeartbeat, allOpenTabs?: TabInfo[]): Promise<Heartbeat> {
     const heartbeat: Heartbeat = {
       id: randomUUID(),
       deviceId: insertHeartbeat.deviceId,
@@ -742,6 +744,7 @@ export class MemStorage implements IStorage {
             activeTabTitle: heartbeat.activeTabTitle || "",
             activeTabUrl: heartbeat.activeTabUrl || "",
             favicon: heartbeat.favicon ?? undefined,
+            allOpenTabs, // 🆕 All tabs (in-memory only)
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
@@ -762,6 +765,7 @@ export class MemStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle || "";
         status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;
+        status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
         // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
         const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
@@ -1776,6 +1780,7 @@ export class DatabaseStorage implements IStorage {
         activeTabTitle: primaryStatus.activeTabTitle,
         activeTabUrl: primaryStatus.activeTabUrl,
         favicon: primaryStatus.favicon,
+        allOpenTabs: primaryStatus.allOpenTabs, // 🆕 All tabs from primary device (in-memory only)
         isSharing: primaryStatus.isSharing,
         screenLocked: primaryStatus.screenLocked,
         flightPathActive: primaryStatus.flightPathActive,
@@ -1809,7 +1814,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Heartbeats
-  async addHeartbeat(insertHeartbeat: InsertHeartbeat): Promise<Heartbeat> {
+  async addHeartbeat(insertHeartbeat: InsertHeartbeat, allOpenTabs?: TabInfo[]): Promise<Heartbeat> {
     const [heartbeat] = await db
       .insert(heartbeats)
       .values(insertHeartbeat)
@@ -1868,6 +1873,7 @@ export class DatabaseStorage implements IStorage {
             activeTabTitle: heartbeat.activeTabTitle || "",
             activeTabUrl: heartbeat.activeTabUrl || "",
             favicon: heartbeat.favicon ?? undefined,
+            allOpenTabs, // 🆕 All tabs (in-memory only)
             lastSeenAt: Date.now(),
             isSharing: heartbeat.isSharing ?? false,
             screenLocked: heartbeat.screenLocked ?? false,
@@ -1888,6 +1894,7 @@ export class DatabaseStorage implements IStorage {
         status.activeTabTitle = heartbeat.activeTabTitle || "";
         status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;
+        status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
         // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
         const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
