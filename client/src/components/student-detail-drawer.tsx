@@ -337,7 +337,8 @@ export function StudentDetailDrawer({
                         const isNoTab = !session.url || session.url.trim() === '';
                         
                         // Use shared off-task detection logic (checks camera AND allowed domains)
-                        const hasOffTask = isSessionOffTask(session.url, hasCamera, allowedDomains);
+                        // BUT skip off-task check for "no active tab" sessions - they're neutral, not off-task
+                        const hasOffTask = isNoTab ? false : isSessionOffTask(session.url, hasCamera, allowedDomains);
                         
                         return { 
                           ...session, 
