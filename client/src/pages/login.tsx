@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import compassLogo from "@assets/generated_images/Blue_square_compass_no_white_border_5ad483fa.png";
+import { Monitor } from "lucide-react";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
@@ -61,11 +61,9 @@ export default function Login() {
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-3 text-center">
           <div className="flex justify-center mb-2">
-            <img 
-              src={compassLogo} 
-              alt="ClassPilot Logo" 
-              className="h-16 w-16 rounded-lg"
-            />
+            <div className="h-12 w-12 rounded-lg bg-primary flex items-center justify-center">
+              <Monitor className="h-7 w-7 text-primary-foreground" />
+            </div>
           </div>
           <CardTitle className="text-2xl font-semibold">Teacher Login</CardTitle>
           <CardDescription>
