@@ -11,17 +11,19 @@ import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { AggregatedStudentStatus, Heartbeat } from "@shared/schema";
 import { formatDistanceToNow, format, startOfDay, endOfDay } from "date-fns";
-import { calculateURLSessions, formatDuration } from "@shared/utils";
+import { calculateURLSessions, formatDuration, isSessionOffTask } from "@shared/utils";
 
 interface StudentDetailDrawerProps {
   student: AggregatedStudentStatus | null;
   urlHistory: Heartbeat[];
+  allowedDomains: string[];
   onClose: () => void;
 }
 
 export function StudentDetailDrawer({
   student,
   urlHistory,
+  allowedDomains,
   onClose,
 }: StudentDetailDrawerProps) {
   const [historyStartDate, setHistoryStartDate] = useState<Date | undefined>(new Date());
@@ -329,11 +331,13 @@ export function StudentDetailDrawer({
                           new Date(hb.timestamp) <= session.endTime
                         );
                         
-                        const hasOffTask = sessionHeartbeats.some(hb => hb.flightPathActive && hb.activeFlightPathName);
                         const hasCamera = sessionHeartbeats.some(hb => hb.cameraActive);
                         
                         // Check if this is a "no active tab" session
                         const isNoTab = !session.url || session.url.trim() === '';
+                        
+                        // Use shared off-task detection logic (checks camera AND allowed domains)
+                        const hasOffTask = isSessionOffTask(session.url, hasCamera, allowedDomains);
                         
                         return { 
                           ...session, 

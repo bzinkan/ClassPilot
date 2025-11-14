@@ -1385,6 +1385,7 @@ export default function Dashboard() {
         <StudentDetailDrawer
           student={selectedStudent}
           urlHistory={urlHistory}
+          allowedDomains={settings?.allowedDomains || []}
           onClose={() => setSelectedStudent(null)}
         />
       )}

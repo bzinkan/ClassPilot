@@ -127,6 +127,60 @@ export function groupSessionsByDevice(heartbeats: Heartbeat[]): Map<string, URLS
 }
 
 /**
+ * Check if a URL is on the allowed domains list (flexible matching)
+ * @param url - The URL to check
+ * @param allowedDomains - Array of allowed domain strings
+ * @returns true if URL is allowed, false otherwise
+ */
+export function isUrlAllowed(url: string | null | undefined, allowedDomains: string[]): boolean {
+  if (!url) return false;
+  if (!allowedDomains || allowedDomains.length === 0) return true; // No restrictions = all allowed
+  
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    
+    // Check if URL is on any allowed domain (flexible matching)
+    return allowedDomains.some(allowed => {
+      const allowedLower = allowed.toLowerCase().trim();
+      
+      // Flexible domain matching: check if the allowed domain appears in the hostname
+      // This allows ixl.com to match: ixl.com, www.ixl.com, signin.ixl.com, etc.
+      return (
+        hostname === allowedLower ||                        // Exact match: ixl.com
+        hostname.endsWith('.' + allowedLower) ||            // Subdomain: www.ixl.com
+        hostname.includes('.' + allowedLower + '.') ||      // Middle segment: sub.ixl.com.au
+        hostname.startsWith(allowedLower + '.') ||          // Starts with: ixl.com.au
+        hostname.includes(allowedLower)                     // Contains anywhere (most flexible)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a session is off-task based on camera usage and allowed domains
+ * @param url - The URL being visited
+ * @param cameraActive - Whether camera is active
+ * @param allowedDomains - Array of allowed domain strings
+ * @returns true if off-task, false otherwise
+ */
+export function isSessionOffTask(
+  url: string | null | undefined,
+  cameraActive: boolean,
+  allowedDomains: string[]
+): boolean {
+  // Camera active = always off-task
+  if (cameraActive) return true;
+  
+  // No allowed domains configured = nothing is off-task
+  if (!allowedDomains || allowedDomains.length === 0) return false;
+  
+  // Not on allowed domain = off-task
+  return !isUrlAllowed(url, allowedDomains);
+}
+
+/**
  * Check if the current time is within tracking hours and days, using the school's timezone.
  * This ensures consistent enforcement across client and server regardless of where they're hosted.
  * 
