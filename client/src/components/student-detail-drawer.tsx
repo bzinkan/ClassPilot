@@ -80,7 +80,7 @@ export function StudentDetailDrawer({
 
   return (
     <Sheet open={!!student} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-[420px] sm:w-[520px] p-0 flex flex-col">
+      <SheetContent side="right" className="w-full sm:w-[600px] md:w-[700px] max-w-[90vw] p-0 flex flex-col">
         <SheetHeader className="px-6 py-4 border-b">
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
