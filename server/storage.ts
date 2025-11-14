@@ -371,26 +371,8 @@ export class MemStorage implements IStorage {
     };
     this.students.set(id, student);
     
-    // Initialize status for this student
-    const device = student.deviceId ? this.devices.get(student.deviceId) : undefined;
-    const status: StudentStatus = {
-      studentId: student.id,
-      deviceId: student.deviceId,
-      deviceName: device?.deviceName ?? undefined,
-      studentName: student.studentName,
-      classId: device?.classId || '',
-      gradeLevel: student.gradeLevel ?? undefined,
-      activeTabTitle: "",
-      activeTabUrl: "",
-      lastSeenAt: 0,
-      isSharing: false,
-      screenLocked: false,
-      flightPathActive: false,
-      activeFlightPathName: undefined,
-      cameraActive: false,
-      status: 'offline',
-    };
-    this.studentStatuses.set(student.id, status);
+    // Status will be created when first heartbeat arrives (no epoch timestamps)
+    console.log(`Created student ${id} - status will be initialized on first heartbeat`);
     
     return student;
   }
@@ -399,31 +381,50 @@ export class MemStorage implements IStorage {
     const student = this.students.get(studentId);
     if (!student) return undefined;
     
+    const oldDeviceId = student.deviceId;
     Object.assign(student, updates);
     this.students.set(studentId, student);
     
-    // Update status map if relevant fields changed
-    const status = this.studentStatuses.get(studentId);
-    if (status) {
-      if (updates.studentName) {
-        status.studentName = updates.studentName;
-      }
-      if (updates.gradeLevel !== undefined) {
-        status.gradeLevel = updates.gradeLevel ?? undefined;
-      }
-      if (updates.deviceId && updates.deviceId !== null) {
-        status.deviceId = updates.deviceId;
-        const device = this.devices.get(updates.deviceId);
-        if (device) {
-          status.deviceName = device.deviceName ?? undefined;
-          status.classId = device.classId;
+    // If deviceId changed, we need to move the status to a new key
+    if (updates.deviceId !== undefined && oldDeviceId !== student.deviceId) {
+      const oldKey = makeStatusKey(studentId, oldDeviceId);
+      const status = this.studentStatuses.get(oldKey);
+      
+      if (status) {
+        // Delete old key
+        this.studentStatuses.delete(oldKey);
+        
+        // Update deviceId and related fields
+        status.deviceId = student.deviceId;
+        if (student.deviceId) {
+          const device = this.devices.get(student.deviceId);
+          if (device) {
+            status.deviceName = device.deviceName ?? undefined;
+            status.classId = device.classId;
+          }
+        } else {
+          status.deviceName = undefined;
+          status.classId = '';
         }
-      } else if (updates.deviceId === null) {
-        // Email-first student with no device
-        status.deviceId = null;
-        status.deviceName = undefined;
+        
+        // Set with new key
+        const newKey = makeStatusKey(studentId, student.deviceId);
+        status.statusKey = newKey;
+        this.studentStatuses.set(newKey, status);
       }
-      this.studentStatuses.set(studentId, status);
+    } else {
+      // DeviceId didn't change, just update fields
+      const statusKey = makeStatusKey(studentId, student.deviceId);
+      const status = this.studentStatuses.get(statusKey);
+      if (status) {
+        if (updates.studentName) {
+          status.studentName = updates.studentName;
+        }
+        if (updates.gradeLevel !== undefined) {
+          status.gradeLevel = updates.gradeLevel ?? undefined;
+        }
+        this.studentStatuses.set(statusKey, status);
+      }
     }
     
     return student;
@@ -434,7 +435,9 @@ export class MemStorage implements IStorage {
     if (!student) return false;
     
     const existed = this.students.delete(studentId);
-    this.studentStatuses.delete(studentId);
+    // Delete status using composite key
+    const statusKey = makeStatusKey(studentId, student.deviceId);
+    this.studentStatuses.delete(statusKey);
     
     // Clear from active students if this student is active
     const entries = Array.from(this.activeStudents.entries());
@@ -1388,10 +1391,11 @@ export class DatabaseStorage implements IStorage {
     
     if (!device) return undefined;
     
-    // Update statuses for all students on this device
+    // Update statuses for all students on this device (using composite keys)
     const studentsOnDevice = await this.getStudentsByDevice(deviceId);
     for (const student of studentsOnDevice) {
-      const status = this.studentStatuses.get(student.id);
+      const statusKey = makeStatusKey(student.id, deviceId);
+      const status = this.studentStatuses.get(statusKey);
       if (status) {
         if (updates.deviceName !== undefined) {
           status.deviceName = updates.deviceName ?? undefined;
@@ -1399,7 +1403,7 @@ export class DatabaseStorage implements IStorage {
         if (updates.classId !== undefined) {
           status.classId = updates.classId;
         }
-        this.studentStatuses.set(student.id, status);
+        this.studentStatuses.set(statusKey, status);
       }
     }
     
@@ -1421,9 +1425,10 @@ export class DatabaseStorage implements IStorage {
     if (studentIds.length > 0) {
       await db.delete(students).where(inArray(students.id, studentIds));
       
-      // Remove from in-memory status maps
-      for (const studentId of studentIds) {
-        this.studentStatuses.delete(studentId);
+      // Remove from in-memory status maps using composite keys
+      for (const student of studentsOnDevice) {
+        const statusKey = makeStatusKey(student.id, deviceId);
+        this.studentStatuses.delete(statusKey);
       }
     }
     
@@ -1479,43 +1484,46 @@ export class DatabaseStorage implements IStorage {
     const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
     const lastHeartbeat = recentHeartbeats[0];
     
-    let lastSeenAt = 0;
-    let activeTabTitle: string | null = null;
-    let activeTabUrl: string | null = null;
-    let favicon: string | undefined = undefined;
-    
-    if (lastHeartbeat) {
-      lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
-      activeTabTitle = lastHeartbeat.activeTabTitle;
-      activeTabUrl = lastHeartbeat.activeTabUrl;
-      favicon = lastHeartbeat.favicon || undefined;
+    // Only initialize status if we have a real heartbeat (no epoch timestamps)
+    if (lastHeartbeat && student.deviceId) {
+      const lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+      const activeTabTitle = lastHeartbeat.activeTabTitle;
+      const activeTabUrl = lastHeartbeat.activeTabUrl;
+      const favicon = lastHeartbeat.favicon || undefined;
+      
+      const statusKey = makeStatusKey(student.id, student.deviceId);
+      const status: StudentStatus = {
+        studentId: student.id,
+        deviceId: student.deviceId,
+        deviceName: device?.deviceName ?? undefined,
+        studentName: student.studentName,
+        classId: device?.classId || '',
+        gradeLevel: student.gradeLevel ?? undefined,
+        activeTabTitle: activeTabTitle || "",
+        activeTabUrl: activeTabUrl || "",
+        favicon,
+        lastSeenAt,
+        isSharing: false,
+        screenLocked: false,
+        flightPathActive: false,
+        activeFlightPathName: undefined,
+        cameraActive: false,
+        status: this.calculateStatus(lastSeenAt),
+        statusKey,
+      };
+      this.studentStatuses.set(statusKey, status);
+    } else {
+      console.log(`Skipping status creation for new student ${student.id} - will be created on first heartbeat`);
     }
-    
-    // Initialize status
-    const status: StudentStatus = {
-      studentId: student.id,
-      deviceId: student.deviceId,
-      deviceName: device?.deviceName ?? undefined,
-      studentName: student.studentName,
-      classId: device?.classId || '',
-      gradeLevel: student.gradeLevel ?? undefined,
-      activeTabTitle: activeTabTitle || "",
-      activeTabUrl: activeTabUrl || "",
-      favicon,
-      lastSeenAt,
-      isSharing: false,
-      screenLocked: false,
-      flightPathActive: false,
-      activeFlightPathName: undefined,
-      cameraActive: false,
-      status: this.calculateStatus(lastSeenAt),
-    };
-    this.studentStatuses.set(student.id, status);
     
     return student;
   }
 
   async updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined> {
+    // Get student before update to know old deviceId
+    const oldStudent = await this.getStudent(studentId);
+    if (!oldStudent) return undefined;
+    
     const [student] = await db
       .update(students)
       .set(updates)
@@ -1524,28 +1532,54 @@ export class DatabaseStorage implements IStorage {
     
     if (!student) return undefined;
     
-    // Update status map if relevant fields changed
-    const status = this.studentStatuses.get(studentId);
-    if (status) {
-      if (updates.studentName) {
-        status.studentName = updates.studentName;
-      }
-      if (updates.gradeLevel !== undefined) {
-        status.gradeLevel = updates.gradeLevel ?? undefined;
-      }
-      if (updates.deviceId && updates.deviceId !== null) {
-        status.deviceId = updates.deviceId;
-        const device = await this.getDevice(updates.deviceId);
-        if (device) {
-          status.deviceName = device.deviceName ?? undefined;
-          status.classId = device.classId;
+    // If deviceId changed, we need to move the status to a new key
+    if (updates.deviceId !== undefined && oldStudent.deviceId !== student.deviceId) {
+      const oldKey = makeStatusKey(studentId, oldStudent.deviceId);
+      const status = this.studentStatuses.get(oldKey);
+      
+      if (status) {
+        // Delete old key
+        this.studentStatuses.delete(oldKey);
+        
+        // Update deviceId and related fields
+        status.deviceId = student.deviceId;
+        if (student.deviceId) {
+          const device = await this.getDevice(student.deviceId);
+          if (device) {
+            status.deviceName = device.deviceName ?? undefined;
+            status.classId = device.classId;
+          }
+        } else {
+          status.deviceName = undefined;
+          status.classId = '';
         }
-      } else if (updates.deviceId === null) {
-        // Email-first student with no device
-        status.deviceId = null;
-        status.deviceName = undefined;
+        
+        // Update other fields
+        if (updates.studentName) {
+          status.studentName = updates.studentName;
+        }
+        if (updates.gradeLevel !== undefined) {
+          status.gradeLevel = updates.gradeLevel ?? undefined;
+        }
+        
+        // Set with new key
+        const newKey = makeStatusKey(studentId, student.deviceId);
+        status.statusKey = newKey;
+        this.studentStatuses.set(newKey, status);
       }
-      this.studentStatuses.set(studentId, status);
+    } else {
+      // DeviceId didn't change, just update fields
+      const statusKey = makeStatusKey(studentId, student.deviceId);
+      const status = this.studentStatuses.get(statusKey);
+      if (status) {
+        if (updates.studentName) {
+          status.studentName = updates.studentName;
+        }
+        if (updates.gradeLevel !== undefined) {
+          status.gradeLevel = updates.gradeLevel ?? undefined;
+        }
+        this.studentStatuses.set(statusKey, status);
+      }
     }
     
     return student;
@@ -1576,8 +1610,11 @@ export class DatabaseStorage implements IStorage {
       .where(eq(students.id, studentId))
       .returning();
     
-    // Remove from in-memory status map
-    this.studentStatuses.delete(studentId);
+    // Remove from in-memory status map using composite key
+    if (student) {
+      const statusKey = makeStatusKey(studentId, student.deviceId);
+      this.studentStatuses.delete(statusKey);
+    }
     
     // Clear from active students if this student is active
     if (student) {
