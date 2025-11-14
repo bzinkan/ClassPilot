@@ -1,55 +1,7 @@
 # ClassPilot - Teacher Dashboard & Chrome Extension
 
 ## Overview
-ClassPilot is a privacy-aware classroom monitoring system designed for educational settings. This full-stack web application, comprising a teacher dashboard and a Chrome Extension, enables transparent monitoring of student activity on managed Chromebooks. It prioritizes privacy with clear disclosure banners and opt-in screen sharing, provides real-time activity tracking, class roster management, and robust data retention controls. The system aims for FERPA/COPPA compliance by collecting minimal, essential data, supporting shared Chromebook environments, and offering comprehensive remote classroom control features. The project's ambition is to provide educators with effective digital classroom management while upholding student privacy and complying with educational regulations.
-
-## Recent Changes
-
-### v2.1.0-all-tabs-tracking (November 14, 2025)
-**All-Tabs Tracking with Per-Device Precision**
-- **Feature**: Chrome Extension now sends ALL open tabs (not just active tab) in every heartbeat. Dashboard displays all tabs from all students with per-device targeting for precise tab closure.
-- **Data Flow**:
-  - Extension collects all tabs (max 20) → sends in heartbeat with `allOpenTabs` array
-  - Backend validates via Zod schema (512 char limits per field)
-  - Storage keeps tabs in-memory only (StudentStatus/AggregatedStudentStatus) for GDPR compliance
-  - Aggregation merges tabs from ALL student devices with deviceId tracking
-  - Dashboard shows composite keys `${studentId}|${deviceId}|${url}` for precise selection
-- **Per-Device Tab Closure**:
-  - Teacher selects specific tabs → dashboard sends `{deviceId, url}` pairs
-  - Backend validates with strict Zod schema (required fields, no whitespace, no mixed paradigms)
-  - Deduplicates entries → groups by deviceId → sends ONE close command per device
-  - NO cross-device pollution (each selection targets EXACTLY one device)
-- **Type Safety**:
-  - `AggregatedStudentStatus.allOpenTabs: Array<TabInfo & {deviceId: string}>` enforces deviceId
-  - Aggregation filters out devices without valid deviceIds (logs warnings)
-  - Dashboard guards prevent empty/null deviceIds from reaching backend
-  - Backend rejects invalid/missing deviceIds with detailed error messages
-- **Backward Compatibility**: Old API (`specificUrls + targetDeviceIds`) still works with deprecation warning
-- **Architecture Decision**: All-tabs stored in-memory only (not database) for privacy and performance
-
-### v2.0.0-extension-field-fix (November 13, 2025)
-**CRITICAL Chrome Extension Bug Fix: Heartbeat Field Name Mismatch**
-- **Problem**: Students appeared "Offline" on dashboard even though Chrome Extension was sending heartbeats every 10 seconds.
-- **Root Cause**: Chrome Extension service worker was sending heartbeats with field name `email` instead of `studentEmail`, causing backend Zod schema validation to reject all heartbeats silently.
-- **Solution**: Changed `extension/service-worker.js` line 627 from `email: CONFIG.studentEmail` to `studentEmail: CONFIG.studentEmail` to match backend schema expectations.
-- **Impact**: Students now correctly appear as "Online" immediately when their Chrome Extensions send heartbeats. Real-time student status tracking now works in production.
-- **Technical Details**:
-  - Backend schema defines `studentEmail: text("student_email")` in `shared/schema.ts`
-  - Extension must send exact field name `studentEmail` in heartbeat payload
-  - Field name mismatch caused silent validation failures (heartbeats rejected but no error logged)
-  - Fix requires extension reload/reinstall on student Chromebooks to take effect
-
-### v2.0.0-session-fix (November 13, 2025)
-**Critical Bug Fix: Email-Based Student Status Updates**
-- **Problem**: Students appeared "Offline" with "almost 56 years ago" timestamps because `addHeartbeat()` wasn't updating the `studentStatuses` map when heartbeats arrived with only `studentEmail` + `schoolId` (no `studentId`).
-- **Root Cause**: The heartbeat processing logic assumed all heartbeats had a `studentId`, but the Chrome Extension now sends email-first heartbeats after the session-based architecture migration. The email lookup was missing from the status update path.
-- **Solution**: Added email-based student lookup to both MemStorage and DatabaseStorage `addHeartbeat()` methods using `getStudentBySchoolEmail()` with proper `normalizeEmail()` normalization (handles Gmail+ tags, case sensitivity, etc.).
-- **Impact**: Students now correctly appear as "Online" on the dashboard when their Chrome Extensions send heartbeats. The fix maintains multi-tenant safety by using the heartbeat's schoolId directly.
-- **Technical Details**:
-  - Added canonicalStudentId resolution: checks activeStudents cache first (performance), falls back to email lookup
-  - Caches email-to-studentId mappings in activeStudents map for future heartbeats
-  - Includes emoji-prefixed logging (🔍) for production debugging
-  - Works seamlessly with existing session management and device tracking
+ClassPilot is a privacy-aware classroom monitoring system for educational settings. This full-stack web application, consisting of a teacher dashboard and a Chrome Extension, enables transparent monitoring of student activity on managed Chromebooks. It prioritizes privacy with disclosure banners and opt-in screen sharing, provides real-time activity tracking, class roster management, and robust data retention controls. The system aims for FERPA/COPPA compliance by collecting minimal, essential data, supporting shared Chromebook environments, and offering comprehensive remote classroom control features. The project's ambition is to provide educators with effective digital classroom management while upholding student privacy and complying with educational regulations.
 
 ## User Preferences
 I prefer detailed explanations.
@@ -63,39 +15,39 @@ I like functional programming.
 ## System Architecture
 
 ### UI/UX Decisions
-The frontend utilizes React and TypeScript with Tailwind CSS for styling, supporting both dark and light modes. The dashboard features a grid-based layout for real-time student activity, with student tiles sorted alphabetically and color-coded statuses (green: on-task, red: off-task, yellow: idle, grey: offline). Detailed student information is accessible via a drawer, and administration functionalities are in a dedicated interface. Roster management is a separate page for improved user experience. The dashboard employs a 3-row design for grade filtering, student targeting controls, and color-coded action buttons for tab management, screen control, and domain restrictions. All remote control commands support per-student targeting via checkboxes, with UI indicators showing the targeting scope.
+The frontend uses React, TypeScript, and Tailwind CSS, supporting dark/light modes. The dashboard features a grid-based layout for real-time student activity, with alphabetical sorting and color-coded statuses (on-task, off-task, idle, offline). Detailed student information is via a drawer, and administration is in a dedicated interface. Roster management is a separate page. The dashboard employs a 3-row design for grade filtering, student targeting controls, and color-coded action buttons for tab management, screen control, and domain restrictions. Remote control commands support per-student targeting with UI indicators.
 
 ### Technical Implementations
 The system is built with a full-stack architecture:
--   **Frontend**: React, TypeScript, TanStack Query for server state management, and WebSockets for real-time updates.
--   **Backend**: Express and Node.js provide RESTful APIs for authentication, device registration, heartbeats, event logging, student data, WebRTC signaling, and school settings. It incorporates robust security measures including role-based access control, bcrypt, session management, rate limiting, and CSRF protection.
--   **Real-time Communication**: A WebSocket server handles live updates and WebRTC facilitates screen sharing, both with automatic reconnection logic.
--   **WebRTC Live View Signaling**: A simplified signaling flow ensures reliable screen sharing. The Chrome Extension uses an MV3-compliant offscreen document for WebRTC.
--   **Chrome Extension**: A Manifest V3 extension with a reliable background service worker using `chrome.alarms` for persistent heartbeat monitoring. It includes production-ready configuration, automatic student detection via the Chrome Identity API, and `chrome.webNavigation` for tracking browsing activity.
--   **Email-Based Student Recognition**: Students are identified by email across devices, allowing for automatic student record matching, device ID updates, and prevention of duplicate student records.
--   **Shared Chromebook Support**: Full support for multiple students on the same device, with automatic student detection and student-specific activity tracking.
--   **Session-Based Device Tracking**: Device-first identification architecture matching GoGuardian/Securly/LanSchool design patterns. The `student_sessions` table tracks "Student X on Device Y RIGHT NOW" with transactional swap logic enforcing the invariant "one active session per student, one active session per device." When a student switches devices or another student logs into a device, old sessions end atomically before new sessions start, preventing race conditions. Partial unique indexes (`WHERE isActive = true`) enforce single active sessions at the database level. Background expiration job runs every 60 seconds to mark sessions inactive after 90 seconds of inactivity (3 missed heartbeats). Session lifecycle hooks sync the in-memory status map using composite keys `makeStatusKey(studentId, deviceId)`, ensuring dashboard aggregation reflects expired/ended sessions as offline without extra broadcasts. Sessions table tracks current state (startedAt, lastSeenAt, endedAt, isActive) while student_devices maintains historical audit trail of device associations.
--   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Students are classified as Online, Idle, or Offline.
--   **All-Tabs Tracking (v2.1.0)**: Chrome Extension sends ALL open tabs (max 20) in every heartbeat. Dashboard displays all tabs across all student devices with per-device targeting. Teachers can select specific tabs to close with precise device-level control, preventing cross-device pollution. Data stored in-memory only for GDPR compliance. Includes strict validation, deduplication, and backward compatibility.
+-   **Frontend**: React, TypeScript, TanStack Query, WebSockets for real-time updates.
+-   **Backend**: Express and Node.js provide RESTful APIs for authentication, device registration, heartbeats, event logging, student data, WebRTC signaling, and school settings, with security measures like role-based access control, bcrypt, session management, rate limiting, and CSRF protection.
+-   **Real-time Communication**: A WebSocket server handles live updates, and WebRTC facilitates screen sharing, both with automatic reconnection.
+-   **WebRTC Live View Signaling**: Simplified signaling for reliable screen sharing; Chrome Extension uses an MV3-compliant offscreen document.
+-   **Chrome Extension**: Manifest V3 extension with a reliable background service worker using `chrome.alarms` for persistent heartbeat monitoring, production-ready configuration, automatic student detection via Chrome Identity API, and `chrome.webNavigation` for browsing activity tracking.
+-   **Email-Based Student Recognition**: Students are identified by email across devices for automatic record matching and device ID updates.
+-   **Shared Chromebook Support**: Supports multiple students on the same device with automatic detection and student-specific tracking.
+-   **Session-Based Device Tracking**: Device-first identification architecture with a `student_sessions` table tracking "Student X on Device Y RIGHT NOW." Transactional swap logic ensures one active session per student and device. Background jobs manage session expiration.
+-   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Classifies students as Online, Idle, or Offline.
+-   **All-Tabs Tracking**: Chrome Extension sends all open tabs (max 20) in every heartbeat. The dashboard displays all tabs across all student devices with per-device targeting. Teachers can close specific tabs with precise device-level control. Data is stored in-memory only for privacy.
 -   **Camera Usage Monitoring**: Detects camera activation via the Chrome extension, treating it as off-task behavior.
--   **Live Screen Viewing**: Real-time screen capture using WebRTC with silent tab capture on managed Chromebooks and advanced video controls (zoom, screenshot, recording, fullscreen, picture-in-picture).
--   **Website Duration Tracking**: Calculates and displays time spent on websites by grouping consecutive heartbeats.
+-   **Live Screen Viewing**: Real-time screen capture using WebRTC with silent tab capture on managed Chromebooks and advanced video controls.
+-   **Website Duration Tracking**: Calculates and displays time spent on websites.
 -   **Flight Path Analytics**: Provides insights into active Flight Paths for each student.
--   **Student Data Analytics**: Interactive pie chart visualization of website visit durations for the past 24 hours, viewable for the whole class or individual students.
--   **Student History Tracking**: Comprehensive tabbed interface in the student detail drawer, including "Screens" (current activity and recent browsing sessions), and "History" (filterable activity timeline with grouped browsing sessions).
+-   **Student Data Analytics**: Interactive pie chart visualization of website visit durations.
+-   **Student History Tracking**: Comprehensive tabbed interface in the student detail drawer, including "Screens" (current activity and recent browsing sessions) and "History" (filterable activity timeline).
 -   **Admin System**: Manages teacher accounts.
 -   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
--   **School Tracking Hours**: Privacy-focused feature allowing administrators to configure monitoring times based on school timezone and specific days of the week, with backend validation and a dashboard indicator.
--   **Remote Classroom Control**: Features include Open Tab, Close Tabs (all or by pattern), Lock Screen (to current URL), Unlock Screen, Apply Flight Paths, Student Groups, and Tab Limiting, all with per-student targeting.
--   **Teacher-Specific Settings (Multi-Tenancy)**: Supports multiple teachers with isolated resources (Flight Paths, Student Groups, settings) and student assignments. Teachers access personal settings to manage Flight Paths, tab limits, and allowed/blocked domains.
--   **Session-Based Classroom Management**: Teachers create class groups/rosters (e.g., "7th Science P3") and start/end daily class sessions to filter dashboard view. When a session is active, ALL students in the session's group roster appear on the dashboard—including offline students who haven't connected yet. Offline students display with grey status indicators and placeholder data until their Chrome Extensions send first heartbeat. This enables teachers to immediately see their complete class roster upon starting a session, rather than waiting for devices to connect. Admin migration tool converts existing teacher-student assignments to default groups. Admin session monitor provides school-wide visibility of all active class sessions.
--   **Admin Class Management**: Administrators can create official class rosters for teachers through a dedicated interface. Features include grade-based browsing, class creation with teacher assignment, bulk student roster assignment, and full CRUD operations on admin-created classes. Classes are typed (admin_class vs teacher_created) to prevent accidental modification of teacher-owned groups.
--   **CSV Bulk Student Import**: Administrators can upload CSV files to import multiple students at once. The system matches students by email (creating new records or updating existing ones), assigns them to classes by name, and provides detailed import results with success/error counts. Students imported via CSV are pre-created with placeholder device IDs, and the Chrome Extension automatically recognizes them on first login via email matching. Supports flexible CSV column names (Email/email, Name/name, etc.) and provides a downloadable template. Import results display created/updated/assigned counts, plus detailed error and warning lists for troubleshooting.
--   **Admin Student Roster Management (Phase 1 & 2 Complete)**: Dedicated `/students` page for admin-only student roster management. Features include CSV/Excel bulk import with ArrayBuffer support for Excel files, dynamic grade filtering tabs, student table view (Name, Email, Grade, Actions), edit student dialog (shared component reused across pages), delete student with confirmation and cascade deletes across all related tables (teacherStudents, groupStudents, checkIns, heartbeats, events). Security implemented via guard component pattern: `StudentsPage` wrapper verifies admin role before rendering `StudentsContent`, preventing data leaks to non-admin users. DELETE endpoint broadcasts proper deviceId for teacher dashboard updates. **Phase 2**: Bulk import removed from Classes page and consolidated to Students page. Admin dashboard reorganized with clear workflow: Students page (import/edit roster) → Classes page (create classes, assign students) → Admin dashboard. Admin interface now features dedicated "Student Roster Management" and "Class Management" cards with navigation buttons.
+-   **School Tracking Hours**: Privacy-focused feature allowing administrators to configure monitoring times.
+-   **Remote Classroom Control**: Features include Open Tab, Close Tabs, Lock Screen, Unlock Screen, Apply Flight Paths, Student Groups, and Tab Limiting, all with per-student targeting.
+-   **Teacher-Specific Settings (Multi-Tenancy)**: Supports multiple teachers with isolated resources (Flight Paths, Student Groups, settings) and student assignments.
+-   **Session-Based Classroom Management**: Teachers create class groups/rosters and start/end daily class sessions to filter the dashboard view. All students in an active session's roster appear, including offline students.
+-   **Admin Class Management**: Administrators can create official class rosters, assign teachers, and manage students with full CRUD operations.
+-   **CSV Bulk Student Import**: Administrators can upload CSV files to import multiple students, matching by email, assigning to classes, and providing detailed import results.
+-   **Admin Student Roster Management**: Dedicated `/students` page for admin-only student roster management, including CSV/Excel bulk import, dynamic grade filtering, student table view, and edit/delete functionalities.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, minimal data collection.
--   **Scalability**: Utilizes PostgreSQL (Neon-backed) with Drizzle ORM and a normalized schema.
+-   **Scalability**: Utilizes PostgreSQL (Neon-backed) with Drizzle ORM.
 -   **Deployment**: Designed for production, supporting Google Admin force-install of the Chrome Extension.
 -   **IP Allowlist**: Optional IP-based access control for the teacher dashboard.
 -   **API Design**: Clear separation of concerns with distinct endpoints for student, device, and active student management.
