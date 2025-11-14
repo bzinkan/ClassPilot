@@ -321,7 +321,7 @@ export function StudentDetailDrawer({
                       const latestHour = Math.min(48, Math.ceil(maxFractionalHour) + 1);  // Pad by 1 hour after, allow up to 48 for cross-midnight
                       const totalHours = Math.max(1, latestHour - earliestHour); // Ensure at least 1 hour to prevent division by zero
                       
-                      // Check for off-task indicators
+                      // Check for off-task indicators and enhance session data
                       const sessionsWithData = daySessions.map(session => {
                         const sessionHeartbeats = urlHistory.filter(hb => 
                           hb.activeTabUrl === session.url &&
@@ -332,7 +332,18 @@ export function StudentDetailDrawer({
                         const hasOffTask = sessionHeartbeats.some(hb => hb.flightPathActive && hb.activeFlightPathName);
                         const hasCamera = sessionHeartbeats.some(hb => hb.cameraActive);
                         
-                        return { ...session, hasOffTask, hasCamera };
+                        // Check if this is a "no active tab" session
+                        const isNoTab = !session.url || session.url.trim() === '';
+                        
+                        return { 
+                          ...session, 
+                          hasOffTask, 
+                          hasCamera,
+                          isNoTab,
+                          // Override display values for no-tab sessions
+                          displayTitle: isNoTab ? 'No Active Tab' : session.title,
+                          displayUrl: isNoTab ? 'Browser open but no tab focused' : session.url
+                        };
                       });
 
                       return (
@@ -382,6 +393,8 @@ export function StudentDetailDrawer({
                                 
                                 const barColor = session.hasOffTask 
                                   ? 'bg-red-500 dark:bg-red-600' 
+                                  : session.isNoTab
+                                  ? 'bg-muted-foreground/50' // Gray for no active tab
                                   : 'bg-primary';
                                 
                                 return (
@@ -402,8 +415,8 @@ export function StudentDetailDrawer({
                                               minWidth: '4px'
                                             }}
                                           >
-                                            <span className="text-xs text-white font-medium truncate">
-                                              {session.title}
+                                            <span className={`text-xs font-medium truncate ${session.isNoTab ? 'text-muted-foreground' : 'text-white'}`}>
+                                              {session.displayTitle}
                                             </span>
                                           </div>
                                         </div>
@@ -412,7 +425,7 @@ export function StudentDetailDrawer({
                                     <PopoverContent className="w-80" side="top">
                                       <div className="space-y-2">
                                         <div className="flex items-start gap-2">
-                                          {session.favicon && (
+                                          {session.favicon && !session.isNoTab && (
                                             <img
                                               src={session.favicon}
                                               alt=""
@@ -423,9 +436,9 @@ export function StudentDetailDrawer({
                                             />
                                           )}
                                           <div className="flex-1 min-w-0">
-                                            <p className="text-sm font-medium break-words">{session.title}</p>
+                                            <p className="text-sm font-medium break-words">{session.displayTitle}</p>
                                             <p className="text-xs text-muted-foreground font-mono break-all mt-1">
-                                              {session.url}
+                                              {session.displayUrl}
                                             </p>
                                           </div>
                                         </div>
@@ -459,7 +472,7 @@ export function StudentDetailDrawer({
                             </div>
 
                             {/* Legend */}
-                            <div className="flex items-center gap-4 mt-4 pt-4 border-t text-xs">
+                            <div className="flex items-center gap-4 mt-4 pt-4 border-t text-xs flex-wrap">
                               <div className="flex items-center gap-2">
                                 <div className="w-4 h-4 bg-primary rounded"></div>
                                 <span className="text-muted-foreground">On-Task</span>
@@ -467,6 +480,10 @@ export function StudentDetailDrawer({
                               <div className="flex items-center gap-2">
                                 <div className="w-4 h-4 bg-red-500 rounded"></div>
                                 <span className="text-muted-foreground">Off-Task</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <div className="w-4 h-4 bg-muted-foreground/50 rounded"></div>
+                                <span className="text-muted-foreground">No Active Tab</span>
                               </div>
                             </div>
                           </div>
