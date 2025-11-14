@@ -59,8 +59,8 @@ async function ensureRegistered() {
       .then(r => r.json())
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
-    // Get or create IDs
-    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId', 'registered', 'lastRegisteredEmail']);
+    // Get or create IDs (including studentToken for consistent state)
+    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId', 'registered', 'lastRegisteredEmail', 'studentToken']);
     
     // Get student email from Chrome profile (managed devices)
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
@@ -104,6 +104,13 @@ async function ensureRegistered() {
     CONFIG.schoolId = stored.schoolId;
     CONFIG.classId = stored.schoolId; // Legacy compatibility
     
+    // ✅ JWT FIX: Load existing studentToken BEFORE deciding to skip registration
+    // This prevents timing issues where service worker wakes up without token in memory
+    if (stored.studentToken) {
+      CONFIG.studentToken = stored.studentToken;
+      console.log('✅ [JWT] Loaded existing studentToken in ensureRegistered()');
+    }
+    
     // Register with server if we have email and haven't registered yet (or email changed)
     const emailChanged = stored.lastRegisteredEmail !== stored.studentEmail;
     const needsRegistration = stored.studentEmail && (!stored.registered || emailChanged);
@@ -132,6 +139,15 @@ async function ensureRegistered() {
         const data = await response.json();
         console.log('[Service Worker] Student registered successfully:', data);
         
+        // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
+        if (data.studentToken) {
+          console.log('✅ [JWT] Received studentToken from server - storing for future heartbeats');
+          await kv.set({ studentToken: data.studentToken });
+          CONFIG.studentToken = data.studentToken; // Cache in memory too
+        } else {
+          console.warn('⚠️  No studentToken in registration response - legacy mode');
+        }
+        
         // Mark as registered and save the email we registered with
         await kv.set({ registered: true, lastRegisteredEmail: stored.studentEmail });
         
@@ -142,9 +158,16 @@ async function ensureRegistered() {
         }
       } catch (error) {
         console.error('[Service Worker] Student registration error:', error);
-        // Clear registered flag so we retry next time
-        await kv.set({ registered: false });
+        // ✅ JWT FIX: Clear BOTH registered flag AND token so we retry next time
+        // This prevents getting stuck if re-registration fails after token expiry
+        await kv.set({ registered: false, studentToken: null });
+        CONFIG.studentToken = null;
         // Don't throw - extension can still try to send heartbeats
+        // Schedule retry with backoff to prevent infinite loops
+        setTimeout(() => {
+          console.log('[Service Worker] Retrying registration after error...');
+          ensureRegistered();
+        }, 5000); // 5 second delay before retry
       }
     } else if (stored.studentEmail) {
       console.log('[Service Worker] Already registered:', stored.studentEmail);
@@ -413,7 +436,7 @@ async function autoDetectAndRegister() {
 }
 
 // Load config from storage on startup
-chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (result) => {
+chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentToken'], async (result) => {
   if (result.config) {
     CONFIG = { ...CONFIG, ...result.config };
     console.log('Loaded config:', CONFIG);
@@ -434,6 +457,12 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail'], async (r
   // Load student email
   if (result.studentEmail) {
     CONFIG.studentEmail = result.studentEmail;
+  }
+  
+  // ✅ JWT AUTHENTICATION: Load studentToken from storage
+  if (result.studentToken) {
+    CONFIG.studentToken = result.studentToken;
+    console.log('✅ [JWT] Loaded studentToken from storage');
   }
   
   // Auto-detect logged-in user and register
@@ -637,9 +666,9 @@ async function sendHeartbeat() {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity (FIXED: was 'email')
-      deviceId: CONFIG.deviceId,            // Internal device tracking
-      schoolId: CONFIG.schoolId,            // Multi-tenant support
+      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity (legacy fallback)
+      deviceId: CONFIG.deviceId,            // Internal device tracking (legacy fallback)
+      schoolId: CONFIG.schoolId,            // Multi-tenant support (legacy fallback)
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
       favicon: favicon,
@@ -651,7 +680,13 @@ async function sendHeartbeat() {
       cameraActive: cameraActive,
     };
     
-    console.log('Sending heartbeat for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId, '| screenLocked:', screenLocked);
+    // ✅ JWT AUTHENTICATION: Include studentToken if available (INDUSTRY STANDARD)
+    if (CONFIG.studentToken) {
+      heartbeatData.studentToken = CONFIG.studentToken;
+      console.log('Sending JWT-authenticated heartbeat for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId);
+    } else {
+      console.log('⚠️  Sending legacy heartbeat (no JWT) for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId);
+    }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
       method: 'POST',
@@ -659,7 +694,15 @@ async function sendHeartbeat() {
       body: JSON.stringify(heartbeatData),
     });
     
-    if (response.status >= 500) {
+    if (response.status === 401 || response.status === 403) {
+      // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
+      console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
+      await kv.set({ studentToken: null, registered: false });
+      CONFIG.studentToken = null;
+      // Trigger re-registration (with backoff to prevent infinite loops)
+      setTimeout(() => ensureRegistered(), 2000); // 2 second delay before re-registering
+      return; // Skip rest of error handling
+    } else if (response.status >= 500) {
       // Server error - use exponential backoff
       backoffMs = Math.min(60000, (backoffMs || 5000) * 2);
       console.error('Heartbeat server error:', response.status, 'backing off', backoffMs, 'ms');

@@ -251,12 +251,30 @@ export type InsertHeartbeat = z.infer<typeof insertHeartbeatSchema>;
 export type Heartbeat = typeof heartbeats.$inferSelect;
 
 // Heartbeat API payload - extends database schema with in-memory-only fields
+// INDUSTRY STANDARD: Supports JWT-based authentication
 export const heartbeatRequestSchema = insertHeartbeatSchema.and(z.object({
   allOpenTabs: z.array(z.object({
     url: z.string().max(512), // Truncate long URLs
     title: z.string().max(512), // Truncate long titles
   })).max(20).optional(), // Limit to 20 tabs max (in-memory only, not persisted)
-}));
+  studentToken: z.string().optional(), // JWT token for authenticated heartbeats (RECOMMENDED)
+})).superRefine((data, ctx) => {
+  // JWT-FIRST: If studentToken is provided, ignore legacy fields (they'll be extracted from token)
+  // This allows gradual migration from legacy authentication to JWT
+  if (!data.studentToken) {
+    // Legacy mode: require either studentId OR (studentEmail + schoolId)
+    const hasStudentId = !!data.studentId;
+    const hasEmail = !!data.studentEmail && !!data.schoolId;
+    
+    if (!hasStudentId && !hasEmail) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Either studentToken (recommended) or studentId or (studentEmail + schoolId) must be provided",
+        path: ['studentToken'],
+      });
+    }
+  }
+});
 export type HeartbeatRequest = z.infer<typeof heartbeatRequestSchema>;
 
 // Event logging for audit

@@ -30,6 +30,7 @@ import {
   type InsertDevice,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
+import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -1145,13 +1146,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
       await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
       console.log('Set active student for device:', deviceData.deviceId, '→', student.id);
       
+      // ✅ JWT AUTHENTICATION: Generate studentToken for industry-standard authentication
+      const studentToken = createStudentToken({
+        studentId: student.id,
+        deviceId: deviceData.deviceId,
+        schoolId: schoolId,
+        studentEmail: studentEmail,
+      });
+      
+      console.log('✅ Generated studentToken for:', { studentId: student.id, deviceId: deviceData.deviceId });
+      
       // Notify teachers
       broadcastToTeachers({
         type: 'student-registered',
         data: { device, student },
       });
 
-      res.json({ success: true, device, student });
+      res.json({ success: true, device, student, studentToken }); // 🔑 Return JWT token
     } catch (error) {
       console.error("Student registration error:", error);
       res.status(400).json({ error: "Invalid request" });
@@ -1172,8 +1183,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const fullData = result.data;
       // Extract allOpenTabs (in-memory only) and database fields separately
-      const { allOpenTabs, ...data } = fullData;
-      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50), tabCount: allOpenTabs?.length || 0 });
+      const { allOpenTabs, studentToken, ...data } = fullData;
+      
+      // ✅ JWT AUTHENTICATION: Verify studentToken if provided (INDUSTRY STANDARD)
+      if (studentToken) {
+        try {
+          const payload = verifyStudentToken(studentToken);
+          console.log('✅ JWT verified:', { studentId: payload.studentId, deviceId: payload.deviceId, schoolId: payload.schoolId });
+          
+          // Override heartbeat data with authenticated values from JWT
+          // This prevents tampering with studentId, deviceId, or schoolId
+          data.studentId = payload.studentId;
+          data.deviceId = payload.deviceId;
+          data.schoolId = payload.schoolId;
+          if (payload.studentEmail) {
+            data.studentEmail = payload.studentEmail;
+          }
+        } catch (error) {
+          if (error instanceof TokenExpiredError) {
+            console.warn('❌ Token expired - student needs to re-register');
+            // Return 401 to trigger extension re-registration
+            return res.status(401).json({ error: 'Token expired, please re-register' });
+          } else if (error instanceof InvalidTokenError) {
+            console.warn('❌ Invalid token - rejecting heartbeat');
+            return res.status(403).json({ error: 'Invalid token' });
+          }
+          throw error; // Unexpected error
+        }
+      } else {
+        console.log('⚠️  Legacy heartbeat (no JWT) - consider upgrading extension');
+      }
+      
+      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50), tabCount: allOpenTabs?.length || 0, authenticated: !!studentToken });
       
       // Check if tracking hours are enforced (timezone-aware)
       const settings = await storage.getSettings();
