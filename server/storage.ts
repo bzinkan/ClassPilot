@@ -794,8 +794,8 @@ export class MemStorage implements IStorage {
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
         
-        // Calculate current URL duration
-        status.currentUrlDuration = this.calculateCurrentUrlDurationMem(heartbeat.studentId, heartbeat.activeTabUrl);
+        // Calculate current URL duration using canonical student ID
+        status.currentUrlDuration = this.calculateCurrentUrlDurationMem(canonicalStudentId, heartbeat.activeTabUrl);
         
         this.studentStatuses.set(statusKey, status);
       }
@@ -805,15 +805,17 @@ export class MemStorage implements IStorage {
   }
 
   // Helper function to calculate duration on current URL (MemStorage)
-  private calculateCurrentUrlDurationMem(studentId: string, currentUrl: string | null): number {
+  // @param canonicalStudentId - The resolved student ID (handles email-first students)
+  private calculateCurrentUrlDurationMem(canonicalStudentId: string, currentUrl: string | null): number {
     // Handle null URL
     if (!currentUrl) {
       return 0;
     }
     
-    // Get recent heartbeats for this student
+    // Get recent heartbeats for this student (filter by canonical studentId)
+    // This works because canonicalStudentId is set on heartbeats during addHeartbeat
     const studentHeartbeats = this.heartbeats
-      .filter(h => h.studentId === studentId)
+      .filter(h => h.studentId === canonicalStudentId)
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     
     if (studentHeartbeats.length === 0) {
@@ -1949,6 +1951,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Helper function to calculate duration on current URL (DatabaseStorage)
+  // @param studentId - The canonical student ID (handles email-first students)
   private async calculateCurrentUrlDurationDb(studentId: string, currentUrl: string | null): Promise<number> {
     // Handle null URL
     if (!currentUrl) {
