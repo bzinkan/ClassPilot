@@ -5,6 +5,28 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 ## Recent Changes
 
+### v2.1.0-all-tabs-tracking (November 14, 2025)
+**All-Tabs Tracking with Per-Device Precision**
+- **Feature**: Chrome Extension now sends ALL open tabs (not just active tab) in every heartbeat. Dashboard displays all tabs from all students with per-device targeting for precise tab closure.
+- **Data Flow**:
+  - Extension collects all tabs (max 20) → sends in heartbeat with `allOpenTabs` array
+  - Backend validates via Zod schema (512 char limits per field)
+  - Storage keeps tabs in-memory only (StudentStatus/AggregatedStudentStatus) for GDPR compliance
+  - Aggregation merges tabs from ALL student devices with deviceId tracking
+  - Dashboard shows composite keys `${studentId}|${deviceId}|${url}` for precise selection
+- **Per-Device Tab Closure**:
+  - Teacher selects specific tabs → dashboard sends `{deviceId, url}` pairs
+  - Backend validates with strict Zod schema (required fields, no whitespace, no mixed paradigms)
+  - Deduplicates entries → groups by deviceId → sends ONE close command per device
+  - NO cross-device pollution (each selection targets EXACTLY one device)
+- **Type Safety**:
+  - `AggregatedStudentStatus.allOpenTabs: Array<TabInfo & {deviceId: string}>` enforces deviceId
+  - Aggregation filters out devices without valid deviceIds (logs warnings)
+  - Dashboard guards prevent empty/null deviceIds from reaching backend
+  - Backend rejects invalid/missing deviceIds with detailed error messages
+- **Backward Compatibility**: Old API (`specificUrls + targetDeviceIds`) still works with deprecation warning
+- **Architecture Decision**: All-tabs stored in-memory only (not database) for privacy and performance
+
 ### v2.0.0-extension-field-fix (November 13, 2025)
 **CRITICAL Chrome Extension Bug Fix: Heartbeat Field Name Mismatch**
 - **Problem**: Students appeared "Offline" on dashboard even though Chrome Extension was sending heartbeats every 10 seconds.
@@ -54,6 +76,7 @@ The system is built with a full-stack architecture:
 -   **Shared Chromebook Support**: Full support for multiple students on the same device, with automatic student detection and student-specific activity tracking.
 -   **Session-Based Device Tracking**: Device-first identification architecture matching GoGuardian/Securly/LanSchool design patterns. The `student_sessions` table tracks "Student X on Device Y RIGHT NOW" with transactional swap logic enforcing the invariant "one active session per student, one active session per device." When a student switches devices or another student logs into a device, old sessions end atomically before new sessions start, preventing race conditions. Partial unique indexes (`WHERE isActive = true`) enforce single active sessions at the database level. Background expiration job runs every 60 seconds to mark sessions inactive after 90 seconds of inactivity (3 missed heartbeats). Session lifecycle hooks sync the in-memory status map using composite keys `makeStatusKey(studentId, deviceId)`, ensuring dashboard aggregation reflects expired/ended sessions as offline without extra broadcasts. Sessions table tracks current state (startedAt, lastSeenAt, endedAt, isActive) while student_devices maintains historical audit trail of device associations.
 -   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Students are classified as Online, Idle, or Offline.
+-   **All-Tabs Tracking (v2.1.0)**: Chrome Extension sends ALL open tabs (max 20) in every heartbeat. Dashboard displays all tabs across all student devices with per-device targeting. Teachers can select specific tabs to close with precise device-level control, preventing cross-device pollution. Data stored in-memory only for GDPR compliance. Includes strict validation, deduplication, and backward compatibility.
 -   **Camera Usage Monitoring**: Detects camera activation via the Chrome extension, treating it as off-task behavior.
 -   **Live Screen Viewing**: Real-time screen capture using WebRTC with silent tab capture on managed Chromebooks and advanced video controls (zoom, screenshot, recording, fullscreen, picture-in-picture).
 -   **Website Duration Tracking**: Calculates and displays time spent on websites by grouping consecutive heartbeats.

@@ -2877,13 +2877,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (tabsToClose && Array.isArray(tabsToClose)) {
         // Validate tabsToClose structure (strict validation for non-empty strings)
         const tabsToCloseSchema = z.array(z.object({
-          deviceId: z.string().min(1).trim().refine(val => val.length > 0, {
+          deviceId: z.string({required_error: "deviceId is required"}).min(1).trim().refine(val => val.length > 0, {
             message: "deviceId cannot be empty or whitespace",
           }),
-          url: z.string().min(1).trim().refine(val => val.length > 0, {
+          url: z.string({required_error: "url is required"}).min(1).trim().refine(val => val.length > 0, {
             message: "url cannot be empty or whitespace",
           }),
-        }));
+        }).strict()); // Reject extra properties
         
         const validation = tabsToCloseSchema.safeParse(tabsToClose);
         if (!validation.success) {
