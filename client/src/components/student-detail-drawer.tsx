@@ -207,18 +207,18 @@ export function StudentDetailDrawer({
                               >
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
+                                    <div className="flex items-start gap-2 mb-1">
                                       {session.favicon && (
                                         <img
                                           src={session.favicon}
                                           alt=""
-                                          className="w-3 h-3 flex-shrink-0"
+                                          className="w-3 h-3 flex-shrink-0 mt-0.5"
                                           onError={(e) => {
                                             (e.target as HTMLImageElement).style.display = 'none';
                                           }}
                                         />
                                       )}
-                                      <p className="text-sm font-medium truncate">
+                                      <p className="text-sm font-medium break-words flex-1">
                                         {session.title}
                                       </p>
                                     </div>
@@ -389,18 +389,18 @@ export function StudentDetailDrawer({
                               >
                                 <div className="flex items-start justify-between gap-2">
                                   <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
+                                    <div className="flex items-start gap-2 mb-1 flex-wrap">
                                       {session.favicon && (
                                         <img
                                           src={session.favicon}
                                           alt=""
-                                          className="w-3 h-3 flex-shrink-0"
+                                          className="w-3 h-3 flex-shrink-0 mt-0.5"
                                           onError={(e) => {
                                             (e.target as HTMLImageElement).style.display = 'none';
                                           }}
                                         />
                                       )}
-                                      <p className="text-sm font-medium truncate">
+                                      <p className="text-sm font-medium break-words flex-1 min-w-0">
                                         {session.title}
                                       </p>
                                       {session.hasOffTask && (
