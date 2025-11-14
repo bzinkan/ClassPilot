@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { Monitor } from "lucide-react";
+import compassLogo from "@assets/generated_images/Compass_app_icon_logo_44b26a95.png";
 
 const loginSchema = z.object({
   username: z.string().min(1, "Username is required"),
