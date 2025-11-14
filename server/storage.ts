@@ -1288,18 +1288,18 @@ export class DatabaseStorage implements IStorage {
       const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
       const lastHeartbeat = recentHeartbeats[0];
       
-      let lastSeenAt = 0;
-      let activeTabTitle: string | null = null;
-      let activeTabUrl: string | null = null;
-      let favicon: string | undefined = undefined;
-      
-      if (lastHeartbeat) {
-        lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
-        activeTabTitle = lastHeartbeat.activeTabTitle;
-        activeTabUrl = lastHeartbeat.activeTabUrl;
-        favicon = lastHeartbeat.favicon || undefined;
+      // Only create status if we have a real heartbeat (no epoch timestamps)
+      if (!lastHeartbeat) {
+        console.log(`Skipping status creation for student ${student.id} - no heartbeats yet`);
+        continue;
       }
       
+      const lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+      const activeTabTitle = lastHeartbeat.activeTabTitle;
+      const activeTabUrl = lastHeartbeat.activeTabUrl;
+      const favicon = lastHeartbeat.favicon || undefined;
+      
+      const statusKey = makeStatusKey(student.id, student.deviceId);
       const status: StudentStatus = {
         studentId: student.id,
         deviceId: student.deviceId,
@@ -1317,8 +1317,9 @@ export class DatabaseStorage implements IStorage {
         activeFlightPathName: undefined,
         cameraActive: false,
         status: this.calculateStatus(lastSeenAt),
+        statusKey,
       };
-      this.studentStatuses.set(student.id, status);
+      this.studentStatuses.set(statusKey, status);
     }
   }
 
