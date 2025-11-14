@@ -109,8 +109,8 @@ export function StudentDetailDrawer({
           {/* Tabs Content */}
           <div className="flex-1 overflow-hidden">
             <Tabs defaultValue="screens" className="flex flex-col h-full">
-              <div className="px-6 border-b border-border">
-                <TabsList className="w-full justify-start bg-transparent h-auto p-0" data-testid="student-tabs">
+              <div className="px-6 border-b border-border overflow-x-auto">
+                <TabsList className="w-full justify-start bg-transparent h-auto p-0 flex-nowrap" data-testid="student-tabs">
                   <TabsTrigger value="screens" className="data-[state=active]:border-b-2 data-[state=active]:border-primary rounded-none" data-testid="tab-screens">
                     <Monitor className="h-4 w-4 mr-2" />
                     Screens
