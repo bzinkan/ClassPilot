@@ -660,14 +660,10 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         <div className="flex items-center justify-between gap-2 text-xs pt-2 border-t border-border/20">
           <div className="flex items-center gap-1.5 text-muted-foreground">
             <span className="uppercase tracking-wide text-[10px] font-medium">
-              {student.currentUrlDuration !== undefined ? 'DURATION' : 'LAST SEEN'}
+              LAST SEEN
             </span>
-            <span className="text-foreground font-medium" data-testid={student.currentUrlDuration !== undefined ? `current-url-duration-${student.primaryDeviceId}` : `text-last-seen-${student.primaryDeviceId}`}>
-              {student.currentUrlDuration !== undefined ? (
-                formatDuration(student.currentUrlDuration)
-              ) : (
-                formatDistanceToNow(student.lastSeenAt, { addSuffix: true })
-              )}
+            <span className="text-foreground font-medium" data-testid={`text-last-seen-${student.primaryDeviceId}`}>
+              {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
             </span>
           </div>
           <div className="flex items-center gap-1">
