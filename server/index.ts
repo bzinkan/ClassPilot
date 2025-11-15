@@ -3,9 +3,11 @@ import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "@neondatabase/serverless";
 import cors from "cors";
+import passport from "passport";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
+import { setupGoogleAuth } from "./googleAuth";
 
 // Global error handlers to prevent process crashes
 process.on('unhandledRejection', (reason) => {
@@ -80,6 +82,9 @@ app.use(
     },
   })
 );
+
+// Setup Google OAuth (must be after session middleware)
+setupGoogleAuth(app);
 
 // Extend session type
 declare module "express-session" {
