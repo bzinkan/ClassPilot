@@ -682,13 +682,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin routes for managing teachers
   app.get("/api/admin/teachers", requireAdmin, async (req, res) => {
     try {
-      const users = await storage.getAllUsers();
-      // Filter to only teachers (exclude admins) and remove passwords
+      // Get the admin's school ID from session
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin || !admin.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
+      // Get only users from the same school
+      const users = await storage.getUsersBySchool(admin.schoolId);
+      
+      // Filter to only teachers and remove passwords
       const teachers = users
         .filter(user => user.role === 'teacher')
         .map(user => ({
           id: user.id,
           username: user.username,
+          email: user.email,
+          displayName: user.displayName,
           role: user.role,
           schoolName: user.schoolName,
         }));
@@ -701,6 +711,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/admin/teachers", requireAdmin, async (req, res) => {
     try {
+      // Get the admin's school ID from session
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin || !admin.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
       const data = createTeacherSchema.parse(req.body);
       
       // Check if email already exists
@@ -712,15 +728,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Hash password
       const hashedPassword = await bcrypt.hash(data.password, 10);
       
-      // Create teacher
+      // Create teacher with admin's schoolId (enforce tenant isolation)
       const teacher = await storage.createUser({
         email: data.email,
         username: data.username,
         password: hashedPassword,
         role: 'teacher',
-        schoolId: data.schoolId,
+        schoolId: admin.schoolId, // Use admin's schoolId, not from request
         displayName: data.displayName,
-        schoolName: data.schoolName,
+        schoolName: admin.schoolName || data.schoolName,
       });
 
       res.json({ 
@@ -728,6 +744,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         teacher: {
           id: teacher.id,
           username: teacher.username,
+          email: teacher.email,
+          displayName: teacher.displayName,
           role: teacher.role,
           schoolName: teacher.schoolName,
         }
@@ -747,6 +765,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const { id } = req.params;
       
+      // Get the admin's school ID from session
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin || !admin.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+      
       // Don't allow deleting yourself
       if (id === req.session.userId) {
         return res.status(400).json({ error: "Cannot delete your own account" });
@@ -758,7 +782,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Teacher not found" });
       }
       
-      if (user.role === 'admin') {
+      // Verify the teacher belongs to the same school (tenant isolation)
+      if (user.schoolId !== admin.schoolId) {
+        return res.status(403).json({ error: "Cannot delete teachers from other schools" });
+      }
+      
+      if (user.role === 'admin' || user.role === 'school_admin') {
         return res.status(403).json({ error: "Cannot delete admin accounts" });
       }
 
@@ -980,8 +1009,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin: Get all teacher-student assignments
   app.get("/api/admin/teacher-students", requireAdmin, async (req, res) => {
     try {
-      const users = await storage.getAllUsers();
-      const students = await storage.getAllStudents();
+      // Get the admin's school ID from session
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin || !admin.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
+      // Get only users and students from the same school (tenant isolation)
+      const users = await storage.getUsersBySchool(admin.schoolId);
+      const allStudents = await storage.getAllStudents();
+      const students = allStudents.filter(s => s.schoolId === admin.schoolId);
       
       // Get assignments for each teacher
       const teachers = users.filter(user => user.role === 'teacher');
@@ -1001,6 +1038,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         teachers: teachers.map(t => ({
           id: t.id,
           username: t.username,
+          email: t.email,
+          displayName: t.displayName,
           schoolName: t.schoolName,
         })),
         students: students.map(s => ({
@@ -1021,6 +1060,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Admin: Assign students to a teacher
   app.post("/api/admin/teacher-students/:teacherId", requireAdmin, async (req, res) => {
     try {
+      // Get the admin's school ID from session
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin || !admin.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
       const { teacherId } = req.params;
       const { studentIds } = req.body;
       
@@ -1028,10 +1073,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "studentIds must be an array" });
       }
       
-      // Verify teacher exists
+      // Verify teacher exists and belongs to same school (tenant isolation)
       const teacher = await storage.getUser(teacherId);
       if (!teacher || teacher.role !== 'teacher') {
         return res.status(404).json({ error: "Teacher not found" });
+      }
+      
+      if (teacher.schoolId !== admin.schoolId) {
+        return res.status(403).json({ error: "Cannot assign students to teachers from other schools" });
+      }
+      
+      // Verify all students belong to same school (tenant isolation)
+      const allStudents = await storage.getAllStudents();
+      for (const studentId of studentIds) {
+        const student = allStudents.find(s => s.id === studentId);
+        if (student && student.schoolId !== admin.schoolId) {
+          return res.status(403).json({ error: "Cannot assign students from other schools" });
+        }
       }
       
       // Get current assignments
@@ -1591,13 +1649,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: "Unauthorized" });
       }
       
-      const allStatuses = await storage.getAllStudentStatuses();
+      // Enforce tenant isolation: only show students from user's school
+      if (!user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
       
-      // Admins see all students; teachers see only students in their active session
+      const allStatuses = await storage.getAllStudentStatuses();
+      const allStudents = await storage.getAllStudents();
+      const schoolStudentIds = new Set(
+        allStudents.filter(s => s.schoolId === user.schoolId).map(s => s.id)
+      );
+      
+      // Filter to only students from the same school (tenant isolation)
+      const schoolStatuses = allStatuses.filter(s => schoolStudentIds.has(s.studentId));
+      
+      // Admins see all students from their school; teachers see only students in their active session
       let filteredStatuses: typeof allStatuses;
-      if (user.role === 'admin') {
-        filteredStatuses = allStatuses;
-        console.log('Dashboard requested students (admin) - found:', filteredStatuses.length, 'students');
+      if (user.role === 'admin' || user.role === 'school_admin') {
+        filteredStatuses = schoolStatuses;
+        console.log('Dashboard requested students (admin) - found:', filteredStatuses.length, 'students in school');
       } else {
         // Teachers: Only show students when they have an active session
         const activeSession = await storage.getActiveSessionByTeacher(userId);
@@ -1825,7 +1895,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all persisted students from database (for roster management)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const students = await storage.getAllStudents();
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
+      // Enforce tenant isolation: only show students from user's school
+      const allStudents = await storage.getAllStudents();
+      const students = allStudents.filter(s => s.schoolId === user.schoolId);
       res.json(students);
     } catch (error) {
       console.error("Get roster students error:", error);
@@ -1836,7 +1913,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all devices from database (for roster management)
   app.get("/api/roster/devices", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
-      const devices = await storage.getAllDevices();
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
+      // Enforce tenant isolation: only show devices that have students from user's school
+      const allDevices = await storage.getAllDevices();
+      const allStudents = await storage.getAllStudents();
+      const schoolStudentDeviceIds = new Set(
+        allStudents.filter(s => s.schoolId === user.schoolId).map(s => s.deviceId)
+      );
+      
+      const devices = allDevices.filter(d => schoolStudentDeviceIds.has(d.deviceId));
       res.json(devices);
     } catch (error) {
       console.error("Get roster devices error:", error);
@@ -1847,6 +1936,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Create student manually (for roster management)
   app.post("/api/roster/student", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
     try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
       const { studentName, deviceId, gradeLevel } = req.body;
       
       if (!studentName || typeof studentName !== 'string') {
@@ -1863,10 +1957,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(404).json({ error: "Device not found" });
       }
       
+      // Enforce tenant isolation: create student with user's schoolId
       const studentData = insertStudentSchema.parse({
         deviceId,
         studentName,
         gradeLevel: normalizeGradeLevel(gradeLevel),
+        schoolId: user.schoolId, // Enforce tenant isolation
       });
       
       const student = await storage.createStudent(studentData);
@@ -1935,7 +2031,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update student information (student name, email, and grade level)
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
       const { studentId } = req.params;
+      
+      // Verify student exists and belongs to same school (tenant isolation)
+      const existingStudent = await storage.getStudent(studentId);
+      if (!existingStudent) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      
+      if (existingStudent.schoolId !== user.schoolId) {
+        return res.status(403).json({ error: "Cannot update students from other schools" });
+      }
+      
       const updates: Partial<InsertStudent> = {};
       
       if ('studentName' in req.body) {
@@ -1980,6 +2092,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Delete student (admin-only)
   app.delete("/api/students/:studentId", checkIPAllowlist, requireAdmin, async (req, res) => {
     try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
       const { studentId } = req.params;
       
       // Validate student ID format
@@ -1989,6 +2106,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // Get student info before deletion for broadcast
       const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      
+      // Verify student belongs to same school (tenant isolation)
+      if (student.schoolId !== user.schoolId) {
+        return res.status(403).json({ error: "Cannot delete students from other schools" });
+      }
       
       const deleted = await storage.deleteStudent(studentId);
       
@@ -2013,7 +2138,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update device information (device name and class assignment)
   app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
       const { deviceId } = req.params;
+      
+      // Enforce tenant isolation: verify device has students from user's school
+      const allStudents = await storage.getAllStudents();
+      const deviceStudents = allStudents.filter(s => s.deviceId === deviceId);
+      
+      if (deviceStudents.length === 0) {
+        return res.status(404).json({ error: "Device not found or has no students" });
+      }
+      
+      // Check if any student on this device belongs to the user's school
+      const hasSchoolStudent = deviceStudents.some(s => s.schoolId === user.schoolId);
+      if (!hasSchoolStudent) {
+        return res.status(403).json({ error: "Cannot update devices from other schools" });
+      }
+      
       const updates: Partial<Omit<InsertDevice, 'deviceId'>> = {};
       
       if ('deviceName' in req.body) {
@@ -2079,7 +2224,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Delete device and all its student assignments
   app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
       const { deviceId } = req.params;
+      
+      // Enforce tenant isolation: verify device has students from user's school
+      const allStudents = await storage.getAllStudents();
+      const deviceStudents = allStudents.filter(s => s.deviceId === deviceId);
+      
+      if (deviceStudents.length > 0) {
+        // Check if any student on this device belongs to the user's school
+        const hasSchoolStudent = deviceStudents.some(s => s.schoolId === user.schoolId);
+        if (!hasSchoolStudent) {
+          return res.status(403).json({ error: "Cannot delete devices from other schools" });
+        }
+      }
       
       const deleted = await storage.deleteDevice(deviceId);
       
