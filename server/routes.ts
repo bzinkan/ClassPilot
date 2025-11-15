@@ -1576,7 +1576,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           throw error; // Unexpected error
         }
       } else {
-        console.log('⚠️  Legacy heartbeat (no JWT) - consider upgrading extension');
+        // Legacy mode (no JWT) - determine schoolId from email domain
+        console.log('⚠️  Legacy heartbeat (no JWT) - using email domain for school lookup');
+        
+        if (data.studentEmail) {
+          const schoolInfo = await getSchoolFromEmail(data.studentEmail);
+          if (!schoolInfo) {
+            const domain = data.studentEmail.split('@')[1];
+            console.error('[heartbeat] No school found for domain:', domain);
+            // Return 404 to indicate school not configured
+            return res.status(404).json({ 
+              error: `No school configured for domain: ${domain}`,
+              details: 'Please contact your administrator to set up your school in ClassPilot.'
+            });
+          }
+          
+          data.schoolId = schoolInfo.schoolId;
+          console.log('[heartbeat] Legacy mode - determined schoolId from email:', { email: data.studentEmail, schoolId: data.schoolId });
+        } else {
+          console.error('[heartbeat] Legacy heartbeat missing email - cannot determine schoolId');
+          return res.status(400).json({ error: 'Student email is required' });
+        }
       }
       
       console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50), tabCount: allOpenTabs?.length || 0, authenticated: !!studentToken });
