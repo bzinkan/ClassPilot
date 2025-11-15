@@ -1871,7 +1871,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         if (timestamp < cutoffTime) return false;
         
         if (isAllStudents) return true;
-        return hb.deviceId === studentId;
+        return hb.studentId === studentId;
       });
       
       // Group by URL domain and calculate total duration
