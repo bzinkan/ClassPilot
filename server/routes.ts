@@ -51,6 +51,37 @@ function normalizeGradeLevel(grade: string | null | undefined): string | null {
   return normalized;
 }
 
+// Helper function to extract domain from email and lookup school
+async function getSchoolFromEmail(email: string): Promise<{ schoolId: string; schoolName: string } | null> {
+  // Extract domain from email (part after @)
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) {
+    console.error('[getSchoolFromEmail] Invalid email:', email);
+    return null;
+  }
+  
+  const domain = normalizedEmail.split('@')[1];
+  if (!domain) {
+    console.error('[getSchoolFromEmail] No domain found in email:', normalizedEmail);
+    return null;
+  }
+  
+  console.log('[getSchoolFromEmail] Looking up school for domain:', domain);
+  
+  // Look up school by domain
+  const school = await storage.getSchoolByDomain(domain);
+  if (!school) {
+    console.warn('[getSchoolFromEmail] No school found for domain:', domain);
+    return null;
+  }
+  
+  console.log('[getSchoolFromEmail] Found school:', school.id, school.name);
+  return {
+    schoolId: school.id,
+    schoolName: school.name,
+  };
+}
+
 // SESSION-BASED: Helper to ensure student-device association exists
 // INDUSTRY STANDARD: Device identity (primary) → Email (student identity) → Sessions (active tracking)
 // Used by both heartbeat endpoint and WebSocket auth handler
