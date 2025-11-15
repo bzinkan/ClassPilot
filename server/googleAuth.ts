@@ -27,41 +27,18 @@ export function setupGoogleAuth(app: Express) {
           let user = await storage.getUserByEmail(email);
 
           if (user) {
-            // Update Google ID and profile info if missing
-            if (!user.googleId) {
-              user = await storage.updateUser(user.id, {
-                googleId,
-                profileImageUrl,
-              });
-            }
+            // Always update Google ID and profile info to keep data fresh
+            user = await storage.updateUser(user.id, {
+              googleId,
+              profileImageUrl,
+              displayName: displayName || user.displayName,
+            });
             return done(null, user);
           }
 
-          // User does not exist - parse domain and attempt auto-creation
-          const emailDomain = email.split("@")[1]?.toLowerCase();
-          if (!emailDomain) {
-            return done(new Error("Invalid email format"));
-          }
-
-          // Try to find school by domain
-          const school = await storage.getSchoolByDomain(emailDomain);
-          
-          if (!school) {
-            // No school found for this domain - show clear error
-            return done(new Error(`Your account isn't set up yet. No school configured for domain: ${emailDomain}. Ask your school admin to invite you.`));
-          }
-
-          // Auto-create user as teacher in the matched school
-          const newUser = await storage.createUser({
-            email,
-            googleId,
-            displayName,
-            profileImageUrl,
-            role: "teacher",
-            schoolId: school.id,
-          });
-
-          return done(null, newUser);
+          // User does not exist - REJECT auto-provisioning for security
+          // Only pre-created users (by school admin/super admin) can log in
+          return done(new Error(`Your account isn't set up yet. Ask your school administrator to create your account first, then sign in with Google.`));
         } catch (error) {
           console.error("Google OAuth error:", error);
           return done(error as Error);
@@ -103,8 +80,22 @@ export function setupGoogleAuth(app: Express) {
       failureRedirect: "/login?error=google_auth_failed",
     }),
     (req, res) => {
-      // Successful authentication - redirect to dashboard
-      res.redirect("/");
+      // Successful authentication - hydrate session with role and schoolId
+      const user = req.user as any;
+      if (user && req.session) {
+        req.session.userId = user.id;
+        req.session.role = user.role;
+        req.session.schoolId = user.schoolId;
+      }
+      
+      // Role-based redirect
+      if (user.role === 'super_admin') {
+        res.redirect("/super-admin/schools");
+      } else if (user.role === 'school_admin') {
+        res.redirect("/admin");
+      } else {
+        res.redirect("/dashboard");
+      }
     }
   );
 }
