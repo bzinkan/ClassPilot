@@ -20,6 +20,7 @@ const createSchoolSchema = z.object({
   maxLicenses: z.number().min(1).default(100),
   firstAdminEmail: z.string().min(1, "Admin email is required").email("Invalid email address"),
   firstAdminName: z.string().min(1, "Admin name is required"),
+  firstAdminPassword: z.string().min(6, "Password must be at least 6 characters").optional().or(z.literal("")),
 });
 
 type CreateSchoolForm = z.infer<typeof createSchoolSchema>;
@@ -37,6 +38,7 @@ export default function CreateSchool() {
       maxLicenses: 100,
       firstAdminEmail: "",
       firstAdminName: "",
+      firstAdminPassword: "",
     },
   });
 
@@ -51,7 +53,7 @@ export default function CreateSchool() {
       if (data.adminCreated) {
         toast({
           title: "School created successfully",
-          description: `Admin account created for ${data.adminEmail}. They should sign in with Google.`,
+          description: data.message || `Admin account created for ${data.adminEmail}`,
           duration: 8000,
         });
       } else {
@@ -221,6 +223,28 @@ export default function CreateSchool() {
                             />
                           </FormControl>
                           <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name="firstAdminPassword"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Password (Optional)</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="password"
+                              placeholder="Leave blank for Google OAuth only"
+                              data-testid="input-firstAdminPassword"
+                              {...field}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                          <p className="text-sm text-muted-foreground">
+                            If left blank, the admin can only sign in with Google. Add a password for email/password login as a fallback.
+                          </p>
                         </FormItem>
                       )}
                     />

@@ -22,6 +22,7 @@ import {
   insertSessionSchema,
   loginSchema,
   createTeacherSchema,
+  createSchoolRequestSchema, // Validation schema for creating schools
   normalizeEmail, // Email normalization helper
   type StudentStatus,
   type SignalMessage,
@@ -864,7 +865,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Create a new school
   app.post("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
     try {
-      const data = req.body;
+      // Validate request body
+      const validation = createSchoolRequestSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ 
+          error: "Invalid request data",
+          details: validation.error.errors.map(e => ({
+            field: e.path.join('.'),
+            message: e.message,
+          }))
+        });
+      }
+      
+      const data = validation.data;
       
       // Check if domain already exists
       const existing = await storage.getSchoolByDomain(data.domain);
@@ -880,13 +893,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         trialEndsAt: data.trialEndsAt ? new Date(data.trialEndsAt) : null,
       });
 
-      // If firstAdminEmail provided, create school admin user WITHOUT PASSWORD
-      // User will log in via Google OAuth using their school email domain
+      // If firstAdminEmail provided, create school admin user
+      // User can log in via Google OAuth or email/password (if password provided)
       if (data.firstAdminEmail) {
-        // Create user account without password - they'll use Google SSO
+        // Hash password if provided
+        let hashedPassword = null;
+        if (data.firstAdminPassword && data.firstAdminPassword.trim().length > 0) {
+          hashedPassword = await bcrypt.hash(data.firstAdminPassword, 10);
+        }
+        
         await storage.createUser({
           email: data.firstAdminEmail,
-          password: null, // No password - Google OAuth only
+          password: hashedPassword, // Hashed password or null for Google OAuth only
           role: 'school_admin',
           schoolId: school.id,
           displayName: data.firstAdminName || data.firstAdminEmail.split('@')[0],
@@ -897,7 +915,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           school,
           adminCreated: true,
           adminEmail: data.firstAdminEmail,
-          message: 'Admin account created. User should sign in with Google using their school email.',
+          message: hashedPassword 
+            ? 'Admin account created with password. User can sign in with Google or email/password.'
+            : 'Admin account created. User should sign in with Google using their school email.',
         });
       } else {
         res.json({ success: true, school });

@@ -74,6 +74,28 @@ export const createSchoolAdminSchema = z.object({
 });
 export type CreateSchoolAdmin = z.infer<typeof createSchoolAdminSchema>;
 
+// Schema for creating a new school (super admin only)
+export const createSchoolRequestSchema = z.object({
+  name: z.string().min(1, "School name is required"),
+  domain: z.string().min(1, "Domain is required").regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "Invalid domain format (e.g., school.org)"),
+  status: z.enum(["trial", "active", "suspended"]),
+  maxLicenses: z.number().min(1, "Must allow at least 1 license"),
+  trialEndsAt: z.string().optional(),
+  firstAdminEmail: z.string().email("Invalid admin email address").optional(),
+  firstAdminName: z.string().min(1, "Admin name is required").optional(),
+  firstAdminPassword: z.string().min(6, "Password must be at least 6 characters").optional().or(z.literal("")),
+}).superRefine((data, ctx) => {
+  // If firstAdminEmail is provided, firstAdminName must also be provided
+  if (data.firstAdminEmail && !data.firstAdminName) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Admin name is required when admin email is provided",
+      path: ['firstAdminName'],
+    });
+  }
+});
+export type CreateSchoolRequest = z.infer<typeof createSchoolRequestSchema>;
+
 // Device registration (Chromebooks)
 export const devices = pgTable("devices", {
   deviceId: varchar("device_id").primaryKey(),
