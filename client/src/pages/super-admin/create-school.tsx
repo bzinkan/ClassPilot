@@ -18,8 +18,8 @@ const createSchoolSchema = z.object({
   domain: z.string().min(1, "Domain is required").regex(/^[a-z0-9.-]+\.[a-z]{2,}$/, "Invalid domain format (e.g., school.org)"),
   status: z.enum(["trial", "active", "suspended"]),
   maxLicenses: z.number().min(1).default(100),
-  firstAdminEmail: z.string().email("Invalid email address").optional().or(z.literal("")),
-  firstAdminName: z.string().optional(),
+  firstAdminEmail: z.string().min(1, "Admin email is required").email("Invalid email address"),
+  firstAdminName: z.string().min(1, "Admin name is required"),
 });
 
 type CreateSchoolForm = z.infer<typeof createSchoolSchema>;
@@ -185,7 +185,7 @@ export default function CreateSchool() {
                 />
 
                 <div className="pt-4 border-t">
-                  <h3 className="font-semibold mb-4">First School Admin (Optional)</h3>
+                  <h3 className="font-semibold mb-4">First School Admin</h3>
 
                   <div className="space-y-4">
                     <FormField
