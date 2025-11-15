@@ -1445,18 +1445,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Student auto-registration with email (from extension using Chrome Identity API)
   app.post("/api/register-student", apiLimiter, async (req, res) => {
     try {
-      const { deviceId, deviceName, classId, schoolId = 'default-school', studentEmail, studentName } = req.body;
+      const { deviceId, deviceName, studentEmail, studentName } = req.body;
       
       // Validate required fields
       if (!studentEmail || !studentName) {
         return res.status(400).json({ error: "studentEmail and studentName are required" });
       }
       
+      // 🔑 DOMAIN-BASED SCHOOL ROUTING: Determine schoolId from email domain
+      const schoolInfo = await getSchoolFromEmail(studentEmail);
+      if (!schoolInfo) {
+        const domain = studentEmail.split('@')[1];
+        console.error('[register-student] No school found for domain:', domain);
+        return res.status(404).json({ 
+          error: `No school configured for domain: ${domain}`,
+          details: 'Please contact your administrator to set up your school in ClassPilot.'
+        });
+      }
+      
+      const { schoolId, schoolName } = schoolInfo;
+      console.log('[register-student] Student routing:', { email: studentEmail, schoolId, schoolName });
+      
       // Register or update device
       const deviceData = insertDeviceSchema.parse({
         deviceId,
         deviceName: deviceName || null,
-        classId,
+        classId: schoolId, // Use schoolId as classId for backward compatibility
         schoolId,
       });
       
@@ -1465,8 +1479,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         device = await storage.registerDevice(deviceData);
       }
       
-      // Check if student with this email already exists (across ALL devices)
-      let student = await storage.getStudentByEmail(studentEmail);
+      // Check if student with this email already exists in THIS school (multi-tenant safe)
+      const normalizedEmail = normalizeEmail(studentEmail);
+      let student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
       
       if (student) {
         // Student exists! Check if they switched devices
@@ -1478,16 +1493,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.log('Student already registered on this device:', studentEmail, 'studentId:', student.id);
         }
       } else {
-        // Create new student (first time seeing this email)
+        // Create new student (first time seeing this email in this school)
         const studentData = insertStudentSchema.parse({
           deviceId: deviceData.deviceId,
           studentName,
-          studentEmail,
+          studentEmail: normalizedEmail,
           gradeLevel: null, // Teacher can assign grade later
+          schoolId, // 🔑 Critical: Associate student with correct school
+          studentStatus: 'active',
         });
         
         student = await storage.createStudent(studentData);
-        console.log('New student auto-registered:', studentEmail, 'studentId:', student.id);
+        console.log('New student auto-registered:', studentEmail, 'in school:', schoolName, 'studentId:', student.id);
       }
       
       // Set this student as the active student for this device
@@ -1499,12 +1516,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         studentId: student.id,
         deviceId: deviceData.deviceId,
         schoolId: schoolId,
-        studentEmail: studentEmail,
+        studentEmail: normalizedEmail,
       });
       
-      console.log('✅ Generated studentToken for:', { studentId: student.id, deviceId: deviceData.deviceId });
+      console.log('✅ Generated studentToken for:', { studentId: student.id, deviceId: deviceData.deviceId, schoolId });
       
-      // Notify teachers
+      // Notify teachers in THIS school only
       broadcastToTeachers({
         type: 'student-registered',
         data: { device, student },
@@ -1513,7 +1530,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.json({ success: true, device, student, studentToken }); // 🔑 Return JWT token
     } catch (error) {
       console.error("Student registration error:", error);
-      res.status(400).json({ error: "Invalid request" });
+      res.status(400).json({ error: error instanceof Error ? error.message : "Invalid request" });
     }
   });
 
