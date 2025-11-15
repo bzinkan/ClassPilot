@@ -1406,10 +1406,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Device registration (from extension)
+  // Device registration (from extension) - DEPRECATED: Use /api/register-student instead
+  // This endpoint is kept for backward compatibility only
   app.post("/api/register", apiLimiter, async (req, res) => {
     try {
-      const { deviceId, deviceName, classId, schoolId = 'default-school' } = req.body;
+      const { deviceId, deviceName, classId, schoolId } = req.body;
+      
+      // Require schoolId - no defaults allowed (prevents default-school issues)
+      if (!schoolId) {
+        return res.status(400).json({ 
+          error: "schoolId is required. Use /api/register-student for automatic school routing." 
+        });
+      }
       
       // Validate device data
       const deviceData = insertDeviceSchema.parse({

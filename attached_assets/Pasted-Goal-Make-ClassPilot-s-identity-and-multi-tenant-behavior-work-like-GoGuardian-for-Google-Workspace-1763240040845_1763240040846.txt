@@ -1,0 +1,94 @@
+Goal: Make ClassPilot’s identity and multi-tenant behavior work like GoGuardian for Google Workspace schools.
+
+Core rules
+
+schoolId remains the only real isolation key.
+
+Every table row (users, students, devices, heartbeats, settings) has a schoolId.
+
+All queries in the dashboard and APIs must be scoped by the logged-in user’s schoolId from the session.
+
+The client (extension or frontend) must never choose or override schoolId.
+
+The schools.domain field is used the way GoGuardian uses Google Workspace domains:
+
+For routing → “Which school does this email belong to?”
+
+Not as an access control check by itself.
+
+Onboarding / admin side
+
+When we create a school in the admin panel, we store:
+
+id (schoolId, uuid)
+
+name
+
+domain (e.g. sfds.net)
+
+When a school admin logs into the web app (eventually with Google Sign-In), we tie their user to that schoolId.
+
+When that admin uploads a student roster CSV, all those students are created with that admin’s schoolId.
+
+Extension → backend behavior (this is where we want GoGuardian-like behavior)
+
+Remove the 'default-school' fallback in the extension for production. The extension should never hardcode or guess schoolId.
+
+The extension should:
+
+Get the logged-in Chrome user’s email.
+
+Send a request to the backend that includes this email (or a signed token containing it).
+
+On the backend, when we receive a heartbeat/hello from the extension:
+
+Parse the email’s domain (everything after @).
+
+Look up the school by that domain: SELECT * FROM schools WHERE domain = ?.
+
+If a school is found:
+
+Use that school’s id as schoolId for:
+
+finding/creating student
+
+finding/creating device
+
+creating heartbeat, etc.
+
+Try to match the student by email within that schoolId.
+If they were pre-loaded by roster, we’ll attach to that record. If not, optionally create a new student.
+
+If no school is found for that domain:
+
+Return a clear error like unknown_school_domain, and/or log it so we can configure that school’s domain correctly.
+
+Authentication & isolation:
+
+Logged-in dashboard users always have a schoolId in their session.
+
+All teacher/admin dashboard queries must be WHERE school_id = session.schoolId.
+
+We never trust any schoolId coming from the extension or the client. The server derives it from the email domain and DB.
+
+This is the behavior we want to mirror from GoGuardian/Securly:
+
+Identity comes from the managed Google account email.
+
+Domain maps that identity to the correct school record.
+
+schoolId is the hard boundary for all data and permissions.
+
+4. Answering your core worry in one sentence
+
+“I just want to do what others do in the industry such as GoGuardian.”
+
+Then you want:
+
+Google Workspace–based identity (student’s managed email)
+
+Domain → school mapping on the server
+
+SchoolId (orgId) as the only isolation key
+
+Extension never choosing its own school; it just sends email, server does the rest
