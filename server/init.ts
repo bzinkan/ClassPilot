@@ -2,13 +2,36 @@ import { storage } from "./storage";
 import bcrypt from "bcrypt";
 
 export async function initializeApp() {
-  // Create default admin account if none exists
+  // Create super admin account from environment variable if none exists
+  const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
+  
+  if (superAdminEmail) {
+    const existingSuperAdmin = await storage.getUserByEmail(superAdminEmail);
+    
+    if (!existingSuperAdmin) {
+      // Create super admin account without password (Google OAuth only)
+      await storage.createUser({
+        email: superAdminEmail,
+        password: null, // No password - Google OAuth only
+        role: "super_admin",
+        schoolId: null, // Super admins are not tied to any school
+        displayName: superAdminEmail.split('@')[0],
+      });
+      console.log(`✅ Created super admin account: ${superAdminEmail}`);
+      console.log("   Sign in at /login using 'Sign in with Google'");
+    }
+  } else {
+    console.log("⚠️  No SUPER_ADMIN_EMAIL set - super admin account not created");
+  }
+  
+  // Create default admin account if none exists (legacy - for backward compatibility)
   const existingAdmin = await storage.getUserByUsername("admin");
   
   if (!existingAdmin) {
     const hashedPassword = await bcrypt.hash("admin123", 10);
     await storage.createUser({
       username: "admin",
+      email: "admin@localhost",
       password: hashedPassword,
       role: "admin",
       schoolName: "Default School",
@@ -17,13 +40,14 @@ export async function initializeApp() {
     console.log("⚠️  IMPORTANT: Change this password in production!");
   }
   
-  // Create default teacher account if none exists
+  // Create default teacher account if none exists (legacy - for backward compatibility)
   const existingTeacher = await storage.getUserByUsername("teacher");
   
   if (!existingTeacher) {
     const hashedPassword = await bcrypt.hash("teacher123", 10);
     await storage.createUser({
       username: "teacher",
+      email: "teacher@localhost",
       password: hashedPassword,
       role: "teacher",
       schoolName: "Default School",
