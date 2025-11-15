@@ -48,11 +48,11 @@ export default function CreateSchool() {
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ['/api/super-admin/schools'] });
       
-      if (data.tempPassword) {
+      if (data.adminCreated) {
         toast({
           title: "School created successfully",
-          description: `Admin account created. Temporary password: ${data.tempPassword}`,
-          duration: 10000,
+          description: `Admin account created for ${data.adminEmail}. They should sign in with Google.`,
+          duration: 8000,
         });
       } else {
         toast({

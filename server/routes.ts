@@ -880,14 +880,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         trialEndsAt: data.trialEndsAt ? new Date(data.trialEndsAt) : null,
       });
 
-      // If firstAdminEmail provided, create school admin user
+      // If firstAdminEmail provided, create school admin user WITHOUT PASSWORD
+      // User will log in via Google OAuth using their school email domain
       if (data.firstAdminEmail) {
-        const tempPassword = Math.random().toString(36).slice(-10);
-        const hashedPassword = await bcrypt.hash(tempPassword, 10);
-        
+        // Create user account without password - they'll use Google SSO
         await storage.createUser({
           email: data.firstAdminEmail,
-          password: hashedPassword,
+          password: null, // No password - Google OAuth only
           role: 'school_admin',
           schoolId: school.id,
           displayName: data.firstAdminName || data.firstAdminEmail.split('@')[0],
@@ -898,7 +897,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           school,
           adminCreated: true,
           adminEmail: data.firstAdminEmail,
-          tempPassword, // Return temp password (should be sent via email in production)
+          message: 'Admin account created. User should sign in with Google using their school email.',
         });
       } else {
         res.json({ success: true, school });
