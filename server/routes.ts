@@ -363,13 +363,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         // Handle authentication
         if (message.type === 'auth') {
-          if (message.role === 'teacher') {
-            // Store teacher userId for permission checks
-            client.role = 'teacher';
-            client.userId = message.userId; // Store userId from auth message
-            client.authenticated = true;
-            console.log('[WebSocket] Teacher authenticated with userId:', client.userId);
-            ws.send(JSON.stringify({ type: 'auth-success', role: 'teacher' }));
+          if (message.role === 'teacher' || message.role === 'school_admin' || message.role === 'super_admin') {
+            // SECURITY: Look up the actual user role from database instead of trusting client
+            const userId = message.userId;
+            if (!userId) {
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'User ID required' }));
+              return;
+            }
+            
+            try {
+              const user = await storage.getUser(userId);
+              if (!user) {
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'User not found' }));
+                return;
+              }
+              
+              // Verify user is a staff member (not a student role)
+              if (!['teacher', 'school_admin', 'super_admin'].includes(user.role)) {
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'Invalid role' }));
+                return;
+              }
+              
+              // Authenticate with ACTUAL role from database
+              client.role = user.role; // Use database role, not client-provided role
+              client.userId = user.id;
+              client.authenticated = true;
+              console.log(`[WebSocket] Staff authenticated: ${user.role} (userId: ${client.userId})`);
+              ws.send(JSON.stringify({ type: 'auth-success', role: user.role })); // Send actual role
+            } catch (error) {
+              console.error('[WebSocket] Auth error:', error);
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'Authentication failed' }));
+              return;
+            }
           } else if (message.role === 'student' && message.deviceId) {
             client.role = 'student';
             client.deviceId = message.deviceId;
