@@ -45,6 +45,8 @@ export default function Login() {
       
       // Role-based routing
       const role = data.user?.role;
+      console.log('[Login] User role:', role, 'Full data:', data);
+      
       if (role === 'super_admin') {
         setLocation("/super-admin/schools");
       } else if (role === 'school_admin') {
