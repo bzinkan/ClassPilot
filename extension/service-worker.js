@@ -7,7 +7,6 @@ const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
 let CONFIG = {
   serverUrl: DEFAULT_SERVER_URL,
   heartbeatInterval: 10000, // 10 seconds
-  schoolId: 'default-school',
   deviceId: null,
   studentName: null,
   studentEmail: null,
@@ -60,7 +59,7 @@ async function ensureRegistered() {
       .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
     
     // Get or create IDs (including studentToken for consistent state)
-    let stored = await kv.get(['studentEmail', 'deviceId', 'schoolId', 'registered', 'lastRegisteredEmail', 'studentToken']);
+    let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);
     
     // Get student email from Chrome profile (managed devices)
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
@@ -89,20 +88,14 @@ async function ensureRegistered() {
       stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 11);
     }
     
-    // Set default schoolId if not present
-    if (!stored.schoolId) {
-      stored.schoolId = 'default-school';
-    }
-    
     // Save to storage
     await kv.set(stored);
     
-    // Update CONFIG (email is primary identity)
+    // Update CONFIG (email is primary identity - backend will determine schoolId from email domain)
     CONFIG.studentEmail = stored.studentEmail;
     CONFIG.studentName = stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail;
     CONFIG.deviceId = stored.deviceId;
-    CONFIG.schoolId = stored.schoolId;
-    CONFIG.classId = stored.schoolId; // Legacy compatibility
+    CONFIG.classId = 'auto'; // Backend determines this from email domain
     
     // ✅ JWT FIX: Load existing studentToken BEFORE deciding to skip registration
     // This prevents timing issues where service worker wakes up without token in memory
@@ -124,8 +117,6 @@ async function ensureRegistered() {
           body: JSON.stringify({
             deviceId: stored.deviceId,
             deviceName: null, // No device name needed
-            schoolId: stored.schoolId,
-            classId: stored.schoolId,
             studentEmail: stored.studentEmail,
             studentName: CONFIG.studentName,
           }),
@@ -176,7 +167,6 @@ async function ensureRegistered() {
     console.log('[Service Worker] Registration complete:', {
       email: stored.studentEmail,
       deviceId: stored.deviceId,
-      schoolId: stored.schoolId,
       registered: stored.registered || needsRegistration,
     });
     
@@ -519,7 +509,6 @@ async function registerDevice(deviceId, deviceName, classId) {
       body: JSON.stringify({
         deviceId,
         deviceName, // Device name instead of student name
-        schoolId: CONFIG.schoolId,
         classId,
       }),
     });
@@ -563,7 +552,6 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
       body: JSON.stringify({
         deviceId,
         deviceName,
-        schoolId: CONFIG.schoolId,
         classId,
         studentEmail,
         studentName,
@@ -666,9 +654,8 @@ async function sendHeartbeat() {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity (legacy fallback)
-      deviceId: CONFIG.deviceId,            // Internal device tracking (legacy fallback)
-      schoolId: CONFIG.schoolId,            // Multi-tenant support (legacy fallback)
+      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity - backend determines schoolId from domain
+      deviceId: CONFIG.deviceId,            // Internal device tracking
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
       favicon: favicon,
@@ -1618,9 +1605,8 @@ function connectWebSocket() {
         ws.send(JSON.stringify({
           type: 'auth',
           role: 'student',
-          studentEmail: CONFIG.studentEmail,  // 🟢 Primary identity (FIXED: was 'email')
+          studentEmail: CONFIG.studentEmail,  // 🟢 Primary identity - backend determines schoolId from domain
           deviceId: CONFIG.deviceId,          // Internal tracking
-          schoolId: CONFIG.schoolId,          // Multi-tenant support
         }));
         console.log('WebSocket auth sent for:', CONFIG.studentEmail);
       } else {
