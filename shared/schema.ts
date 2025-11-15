@@ -1,28 +1,76 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique, uniqueIndex, integer } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
-// Teacher/Admin user
-export const users = pgTable("users", {
+// Schools table - Multi-tenant support
+export const schools = pgTable("schools", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  username: text("username").notNull().unique(),
-  password: text("password").notNull(),
-  role: text("role").notNull().default("teacher"), // 'admin' or 'teacher'
-  schoolName: text("school_name").notNull().default("School"),
+  name: text("name").notNull(),
+  domain: text("domain").notNull().unique(), // Google Workspace domain (e.g., sfds.net)
+  status: text("status").notNull().default("trial"), // 'trial', 'active', 'suspended'
+  maxLicenses: integer("max_licenses").default(100), // Max student seats
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  trialEndsAt: timestamp("trial_ends_at"), // Nullable - when trial expires
 });
 
-export const insertUserSchema = createInsertSchema(users).omit({ id: true });
+export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, createdAt: true });
+export type InsertSchool = z.infer<typeof insertSchoolSchema>;
+export type School = typeof schools.$inferSelect;
+
+// Teacher/Admin/Super Admin user
+export const users = pgTable("users", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  email: text("email").notNull().unique(), // Primary login identifier
+  username: text("username").unique(), // Legacy field, kept for backward compatibility
+  password: text("password").notNull(),
+  role: text("role").notNull().default("teacher"), // 'super_admin', 'school_admin', or 'teacher'
+  schoolId: text("school_id"), // FK to schools.id - nullable for super_admin
+  displayName: text("display_name"), // User's display name
+  schoolName: text("school_name"), // DEPRECATED - kept for backward compatibility
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  lastLoginAt: timestamp("last_login_at"),
+});
+
+export const insertUserSchema = createInsertSchema(users).omit({ id: true, createdAt: true, lastLoginAt: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
+// Login schema - supports email/password
+export const loginSchema = z.object({
+  email: z.string().email("Invalid email address").optional(),
+  username: z.string().optional(), // Legacy support
+  password: z.string().min(1, "Password is required"),
+}).superRefine((data, ctx) => {
+  if (!data.email && !data.username) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either email or username is required",
+      path: ['email'],
+    });
+  }
+});
+export type LoginData = z.infer<typeof loginSchema>;
+
 // Schema for creating teacher accounts (admin-only)
 export const createTeacherSchema = z.object({
-  username: z.string().min(3, "Username must be at least 3 characters"),
+  email: z.string().email("Invalid email address"),
+  username: z.string().min(3, "Username must be at least 3 characters").optional(),
   password: z.string().min(6, "Password must be at least 6 characters"),
-  schoolName: z.string().optional(),
+  displayName: z.string().optional(),
+  schoolId: z.string(),
+  schoolName: z.string().optional(), // DEPRECATED
 });
 export type CreateTeacher = z.infer<typeof createTeacherSchema>;
+
+// Schema for creating school admin accounts (super admin only)
+export const createSchoolAdminSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  password: z.string().min(6, "Password must be at least 6 characters"),
+  displayName: z.string().optional(),
+  schoolId: z.string(),
+});
+export type CreateSchoolAdmin = z.infer<typeof createSchoolAdminSchema>;
 
 // Device registration (Chromebooks)
 export const devices = pgTable("devices", {
@@ -484,13 +532,6 @@ export const sessions = pgTable("sessions", {
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, createdAt: true, startTime: true });
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
-
-// Login request schema
-export const loginSchema = z.object({
-  username: z.string().min(1),
-  password: z.string().min(1),
-});
-export type LoginRequest = z.infer<typeof loginSchema>;
 
 // WebRTC signaling
 export interface SignalMessage {

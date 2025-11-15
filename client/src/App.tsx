@@ -13,6 +13,9 @@ import Admin from "@/pages/admin";
 import AdminClasses from "@/pages/admin-classes";
 import StudentsPage from "@/pages/students";
 import Roster from "@/pages/roster";
+import SchoolsList from "@/pages/super-admin/schools-list";
+import CreateSchool from "@/pages/super-admin/create-school";
+import SchoolDetail from "@/pages/super-admin/school-detail";
 
 function Router() {
   return (
@@ -25,6 +28,9 @@ function Router() {
       <Route path="/admin" component={Admin} />
       <Route path="/admin/classes" component={AdminClasses} />
       <Route path="/students" component={StudentsPage} />
+      <Route path="/super-admin/schools" component={SchoolsList} />
+      <Route path="/super-admin/schools/new" component={CreateSchool} />
+      <Route path="/super-admin/schools/:id" component={SchoolDetail} />
       <Route path="/class/:classId">
         {(params) => <Dashboard />}
       </Route>

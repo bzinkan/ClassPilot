@@ -215,15 +215,43 @@ function requireAuth(req: any, res: any, next: any) {
   }
 }
 
-// Admin middleware
+// Admin middleware - for school_admin or super_admin
 async function requireAdmin(req: any, res: any, next: any) {
   if (!req.session?.userId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   
   const user = await storage.getUser(req.session.userId);
-  if (!user || user.role !== 'admin') {
+  if (!user || (user.role !== 'admin' && user.role !== 'school_admin' && user.role !== 'super_admin')) {
     return res.status(403).json({ error: "Forbidden: Admin access required" });
+  }
+  
+  next();
+}
+
+// Super Admin middleware - for super_admin only
+async function requireSuperAdmin(req: any, res: any, next: any) {
+  if (!req.session?.userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  const user = await storage.getUser(req.session.userId);
+  if (!user || user.role !== 'super_admin') {
+    return res.status(403).json({ error: "Forbidden: Super Admin access required" });
+  }
+  
+  next();
+}
+
+// School Admin middleware - for school_admin or super_admin
+async function requireSchoolAdmin(req: any, res: any, next: any) {
+  if (!req.session?.userId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  
+  const user = await storage.getUser(req.session.userId);
+  if (!user || (user.role !== 'school_admin' && user.role !== 'super_admin')) {
+    return res.status(403).json({ error: "Forbidden: School Admin access required" });
   }
   
   next();
@@ -480,8 +508,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Authentication endpoints
   app.post("/api/login", async (req, res) => {
     try {
-      const { username, password } = loginSchema.parse(req.body);
-      const user = await storage.getUserByUsername(username);
+      const { email, username, password } = loginSchema.parse(req.body);
+      
+      // Try to find user by email (preferred) or username (legacy)
+      let user;
+      if (email) {
+        user = await storage.getUserByEmail(email);
+      } else if (username) {
+        user = await storage.getUserByUsername(username);
+      }
 
       if (!user) {
         return res.status(401).json({ error: "Invalid credentials" });
@@ -492,8 +527,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
+      // Set session data with role and schoolId
       req.session.userId = user.id;
-      res.json({ success: true, user: { id: user.id, username: user.username, role: user.role } });
+      req.session.role = user.role;
+      req.session.schoolId = user.schoolId ?? undefined;
+
+      res.json({ 
+        success: true, 
+        user: { 
+          id: user.id, 
+          email: user.email,
+          username: user.username, 
+          role: user.role,
+          schoolId: user.schoolId,
+          displayName: user.displayName
+        } 
+      });
     } catch (error) {
       console.error("Login error:", error);
       res.status(400).json({ error: "Invalid request" });
@@ -654,10 +703,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const data = createTeacherSchema.parse(req.body);
       
-      // Check if username already exists
-      const existing = await storage.getUserByUsername(data.username);
+      // Check if email already exists
+      const existing = await storage.getUserByEmail(data.email);
       if (existing) {
-        return res.status(400).json({ error: "Username already exists" });
+        return res.status(400).json({ error: "Email already exists" });
       }
 
       // Hash password
@@ -665,10 +714,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       // Create teacher
       const teacher = await storage.createUser({
+        email: data.email,
         username: data.username,
         password: hashedPassword,
         role: 'teacher',
-        schoolName: data.schoolName || 'School',
+        schoolId: data.schoolId,
+        displayName: data.displayName,
+        schoolName: data.schoolName,
       });
 
       res.json({ 
@@ -715,6 +767,213 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Delete teacher error:", error);
       res.status(500).json({ error: "Failed to delete teacher" });
+    }
+  });
+
+  // ====== SUPER ADMIN ROUTES ======
+  
+  // List all schools
+  app.get("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
+    try {
+      const schools = await storage.getAllSchools();
+      
+      // Get counts for each school
+      const schoolsWithCounts = await Promise.all(
+        schools.map(async (school) => {
+          const users = await storage.getUsersBySchool(school.id);
+          const students = (await storage.getAllStudents()).filter(s => s.schoolId === school.id);
+          const teachers = users.filter(u => u.role === 'teacher');
+          const admins = users.filter(u => u.role === 'school_admin');
+          
+          return {
+            ...school,
+            teacherCount: teachers.length,
+            studentCount: students.length,
+            adminCount: admins.length,
+          };
+        })
+      );
+      
+      res.json({ success: true, schools: schoolsWithCounts });
+    } catch (error) {
+      console.error("Get schools error:", error);
+      res.status(500).json({ error: "Failed to fetch schools" });
+    }
+  });
+
+  // Create a new school
+  app.post("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
+    try {
+      const data = req.body;
+      
+      // Check if domain already exists
+      const existing = await storage.getSchoolByDomain(data.domain);
+      if (existing) {
+        return res.status(400).json({ error: "School with this domain already exists" });
+      }
+
+      const school = await storage.createSchool({
+        name: data.name,
+        domain: data.domain,
+        status: data.status || 'trial',
+        maxLicenses: data.maxLicenses || 100,
+        trialEndsAt: data.trialEndsAt ? new Date(data.trialEndsAt) : null,
+      });
+
+      // If firstAdminEmail provided, create school admin user
+      if (data.firstAdminEmail) {
+        const tempPassword = Math.random().toString(36).slice(-10);
+        const hashedPassword = await bcrypt.hash(tempPassword, 10);
+        
+        await storage.createUser({
+          email: data.firstAdminEmail,
+          password: hashedPassword,
+          role: 'school_admin',
+          schoolId: school.id,
+          displayName: data.firstAdminName || data.firstAdminEmail.split('@')[0],
+        });
+
+        res.json({ 
+          success: true, 
+          school,
+          adminCreated: true,
+          adminEmail: data.firstAdminEmail,
+          tempPassword, // Return temp password (should be sent via email in production)
+        });
+      } else {
+        res.json({ success: true, school });
+      }
+    } catch (error) {
+      console.error("Create school error:", error);
+      res.status(500).json({ error: "Failed to create school" });
+    }
+  });
+
+  // Get school details
+  app.get("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const school = await storage.getSchool(id);
+      
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      const users = await storage.getUsersBySchool(id);
+      const students = (await storage.getAllStudents()).filter(s => s.schoolId === id);
+      
+      const admins = users.filter(u => u.role === 'school_admin').map(u => ({
+        id: u.id,
+        email: u.email,
+        displayName: u.displayName,
+        createdAt: u.createdAt,
+      }));
+      
+      const teachers = users.filter(u => u.role === 'teacher').map(u => ({
+        id: u.id,
+        email: u.email,
+        displayName: u.displayName,
+        createdAt: u.createdAt,
+      }));
+
+      res.json({ 
+        success: true, 
+        school: {
+          ...school,
+          teacherCount: teachers.length,
+          studentCount: students.length,
+          adminCount: admins.length,
+        },
+        admins,
+        teachers,
+      });
+    } catch (error) {
+      console.error("Get school error:", error);
+      res.status(500).json({ error: "Failed to fetch school" });
+    }
+  });
+
+  // Update school
+  app.patch("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const updates = req.body;
+
+      const school = await storage.updateSchool(id, updates);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true, school });
+    } catch (error) {
+      console.error("Update school error:", error);
+      res.status(500).json({ error: "Failed to update school" });
+    }
+  });
+
+  // Delete school
+  app.delete("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      // Check if school has any users
+      const users = await storage.getUsersBySchool(id);
+      if (users.length > 0) {
+        return res.status(400).json({ error: "Cannot delete school with existing users. Please remove all users first." });
+      }
+
+      const deleted = await storage.deleteSchool(id);
+      if (!deleted) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete school error:", error);
+      res.status(500).json({ error: "Failed to delete school" });
+    }
+  });
+
+  // Add admin to school
+  app.post("/api/super-admin/schools/:id/admins", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { email, displayName } = req.body;
+
+      const school = await storage.getSchool(id);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      // Check if user already exists
+      const existing = await storage.getUserByEmail(email);
+      if (existing) {
+        return res.status(400).json({ error: "User with this email already exists" });
+      }
+
+      const tempPassword = Math.random().toString(36).slice(-10);
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+      const admin = await storage.createUser({
+        email,
+        password: hashedPassword,
+        role: 'school_admin',
+        schoolId: id,
+        displayName: displayName || email.split('@')[0],
+      });
+
+      res.json({ 
+        success: true, 
+        admin: {
+          id: admin.id,
+          email: admin.email,
+          displayName: admin.displayName,
+        },
+        tempPassword, // Return temp password (should be sent via email in production)
+      });
+    } catch (error) {
+      console.error("Add admin error:", error);
+      res.status(500).json({ error: "Failed to add admin" });
     }
   });
 

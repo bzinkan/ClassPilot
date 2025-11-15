@@ -1,6 +1,8 @@
 import {
   type User,
   type InsertUser,
+  type School,
+  type InsertSchool,
   type Device,
   type InsertDevice,
   type Student,
@@ -39,6 +41,7 @@ import {
   type InsertCheckIn,
   type TabInfo, // 🆕 All-tabs tracking
   makeStatusKey,
+  schools,
   users,
   devices,
   students,
@@ -65,10 +68,21 @@ import { db } from "./db";
 import { eq, desc, lt, sql as drizzleSql, inArray } from "drizzle-orm";
 
 export interface IStorage {
+  // Schools
+  getSchool(id: string): Promise<School | undefined>;
+  getSchoolByDomain(domain: string): Promise<School | undefined>;
+  getAllSchools(): Promise<School[]>;
+  createSchool(school: InsertSchool): Promise<School>;
+  updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined>;
+  deleteSchool(id: string): Promise<boolean>;
+  
   // Users
   getUser(id: string): Promise<User | undefined>;
+  getUserByEmail(email: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
+  getUsersBySchool(schoolId: string): Promise<User[]>;
   createUser(user: InsertUser): Promise<User>;
+  updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined>;
   getAllUsers(): Promise<User[]>;
   deleteUser(id: string): Promise<boolean>;
 
@@ -197,6 +211,7 @@ export interface IStorage {
 }
 
 export class MemStorage implements IStorage {
+  private schools: Map<string, School>;
   private users: Map<string, User>;
   private devices: Map<string, Device>;
   private students: Map<string, Student>; // Keyed by student ID
@@ -215,6 +230,7 @@ export class MemStorage implements IStorage {
   private checkIns: CheckIn[];
 
   constructor() {
+    this.schools = new Map();
     this.users = new Map();
     this.devices = new Map();
     this.students = new Map();
@@ -248,9 +264,58 @@ export class MemStorage implements IStorage {
     return undefined;
   }
 
+  // Schools
+  async getSchool(id: string): Promise<School | undefined> {
+    return this.schools.get(id);
+  }
+
+  async getSchoolByDomain(domain: string): Promise<School | undefined> {
+    return Array.from(this.schools.values()).find(
+      (school) => school.domain.toLowerCase() === domain.toLowerCase()
+    );
+  }
+
+  async getAllSchools(): Promise<School[]> {
+    return Array.from(this.schools.values());
+  }
+
+  async createSchool(insertSchool: InsertSchool): Promise<School> {
+    const id = randomUUID();
+    const school: School = {
+      id,
+      name: insertSchool.name,
+      domain: insertSchool.domain,
+      status: insertSchool.status || 'trial',
+      maxLicenses: insertSchool.maxLicenses ?? 100,
+      createdAt: new Date(),
+      trialEndsAt: insertSchool.trialEndsAt ?? null,
+    };
+    this.schools.set(id, school);
+    return school;
+  }
+
+  async updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined> {
+    const school = this.schools.get(id);
+    if (!school) return undefined;
+    
+    Object.assign(school, updates);
+    this.schools.set(id, school);
+    return school;
+  }
+
+  async deleteSchool(id: string): Promise<boolean> {
+    return this.schools.delete(id);
+  }
+
   // Users
   async getUser(id: string): Promise<User | undefined> {
     return this.users.get(id);
+  }
+
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    return Array.from(this.users.values()).find(
+      (user) => user.email.toLowerCase() === email.toLowerCase()
+    );
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
@@ -259,15 +324,35 @@ export class MemStorage implements IStorage {
     );
   }
 
+  async getUsersBySchool(schoolId: string): Promise<User[]> {
+    return Array.from(this.users.values()).filter(
+      (user) => user.schoolId === schoolId
+    );
+  }
+
   async createUser(insertUser: InsertUser): Promise<User> {
     const id = randomUUID();
     const user: User = {
       id,
-      username: insertUser.username,
+      email: insertUser.email,
+      username: insertUser.username ?? null,
       password: insertUser.password,
       role: insertUser.role || 'teacher',
-      schoolName: insertUser.schoolName || 'School',
+      schoolId: insertUser.schoolId ?? null,
+      displayName: insertUser.displayName ?? null,
+      schoolName: insertUser.schoolName ?? null,
+      createdAt: new Date(),
+      lastLoginAt: null,
     };
+    this.users.set(id, user);
+    return user;
+  }
+
+  async updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined> {
+    const user = this.users.get(id);
+    if (!user) return undefined;
+    
+    Object.assign(user, updates);
     this.users.set(id, user);
     return user;
   }
@@ -1326,15 +1411,62 @@ export class DatabaseStorage implements IStorage {
     }
   }
 
+  // Schools
+  async getSchool(id: string): Promise<School | undefined> {
+    const [school] = await db.select().from(schools).where(eq(schools.id, id));
+    return school || undefined;
+  }
+
+  async getSchoolByDomain(domain: string): Promise<School | undefined> {
+    const [school] = await db.select().from(schools).where(eq(schools.domain, domain));
+    return school || undefined;
+  }
+
+  async getAllSchools(): Promise<School[]> {
+    return await db.select().from(schools);
+  }
+
+  async createSchool(insertSchool: InsertSchool): Promise<School> {
+    const [school] = await db
+      .insert(schools)
+      .values(insertSchool)
+      .returning();
+    return school;
+  }
+
+  async updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined> {
+    const [school] = await db
+      .update(schools)
+      .set(updates)
+      .where(eq(schools.id, id))
+      .returning();
+    return school || undefined;
+  }
+
+  async deleteSchool(id: string): Promise<boolean> {
+    const result = await db.delete(schools).where(eq(schools.id, id)).returning();
+    return result.length > 0;
+  }
+
   // Users
   async getUser(id: string): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user || undefined;
   }
 
+  async getUserByEmail(email: string): Promise<User | undefined> {
+    const [user] = await db.select().from(users).where(eq(users.email, email));
+    return user || undefined;
+  }
+
   async getUserByUsername(username: string): Promise<User | undefined> {
+    if (!username) return undefined;
     const [user] = await db.select().from(users).where(eq(users.username, username));
     return user || undefined;
+  }
+
+  async getUsersBySchool(schoolId: string): Promise<User[]> {
+    return await db.select().from(users).where(eq(users.schoolId, schoolId));
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {
@@ -1343,6 +1475,15 @@ export class DatabaseStorage implements IStorage {
       .values(insertUser)
       .returning();
     return user;
+  }
+
+  async updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined> {
+    const [user] = await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, id))
+      .returning();
+    return user || undefined;
   }
 
   async getAllUsers(): Promise<User[]> {
