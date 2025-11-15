@@ -23,10 +23,12 @@ export const users = pgTable("users", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   email: text("email").notNull().unique(), // Primary login identifier
   username: text("username").unique(), // Legacy field, kept for backward compatibility
-  password: text("password").notNull(),
+  password: text("password"), // Nullable - Google OAuth users won't have passwords
+  googleId: text("google_id").unique(), // Google OAuth ID for SSO users
   role: text("role").notNull().default("teacher"), // 'super_admin', 'school_admin', or 'teacher'
   schoolId: text("school_id"), // FK to schools.id - nullable for super_admin
   displayName: text("display_name"), // User's display name
+  profileImageUrl: text("profile_image_url"), // Profile photo from Google
   schoolName: text("school_name"), // DEPRECATED - kept for backward compatibility
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   lastLoginAt: timestamp("last_login_at"),
@@ -56,7 +58,7 @@ export type LoginData = z.infer<typeof loginSchema>;
 export const createTeacherSchema = z.object({
   email: z.string().email("Invalid email address"),
   username: z.string().min(3, "Username must be at least 3 characters").optional(),
-  password: z.string().min(6, "Password must be at least 6 characters"),
+  password: z.string().min(6, "Password must be at least 6 characters").optional(), // Optional for Google OAuth users
   displayName: z.string().optional(),
   schoolId: z.string(),
   schoolName: z.string().optional(), // DEPRECATED
@@ -66,7 +68,7 @@ export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 // Schema for creating school admin accounts (super admin only)
 export const createSchoolAdminSchema = z.object({
   email: z.string().email("Invalid email address"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
+  password: z.string().min(6, "Password must be at least 6 characters").optional(), // Optional for Google OAuth users
   displayName: z.string().optional(),
   schoolId: z.string(),
 });
