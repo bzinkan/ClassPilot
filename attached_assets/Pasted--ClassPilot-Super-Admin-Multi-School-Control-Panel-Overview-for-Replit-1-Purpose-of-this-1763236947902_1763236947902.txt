@@ -1,0 +1,295 @@
+# ClassPilot Super Admin / Multi‑School Control Panel — Overview for Replit
+
+## 1. Purpose of this page
+
+Build an **internal "Super Admin" area** that only I (the owner) can access. This is *not* for schools. It’s for managing:
+
+* Schools (tenants)
+* School domains
+* School‑level admins
+* Teacher accounts (optional from here)
+* Trial vs. paid status
+* License counts / limits
+
+This sits **above** the existing teacher/admin dashboards and controls what each school can see and do.
+
+---
+
+## 2. High‑level concept
+
+* Each **School** becomes a **tenant** in the database.
+* A School is primarily identified by its **Google Workspace email domain** (e.g. `sfds.net`, `myschool.org`).
+* Each **User** (teacher or school admin) belongs to exactly one School.
+* The existing ClassPilot web app continues to function, but:
+
+  * Staff log in with **email** (later Google SSO) instead of hardcoded `admin123`.
+  * Role + school membership are enforced on every request.
+* The **Super Admin panel** is only visible to a special internal role (`super_admin`) and lets me create/manage schools and school admins.
+
+---
+
+## 3. Roles and who uses what
+
+### 3.1 Roles
+
+1. **Super Admin** (me / owner)
+
+   * Can create schools
+   * Can view all schools
+   * Can add/remove school admins
+   * Can toggle trial/paid/disabled
+   * Can see basic usage stats per school
+
+2. **School Admin** (IT director / principal at a school)
+
+   * Belongs to exactly one School
+   * Manages teachers for their school
+   * (Optional later) Can manage settings for their own school (on/off features, etc.)
+
+3. **Teacher**
+
+   * Belongs to one School
+   * Uses ClassPilot classroom dashboard
+   * Only sees students and groups from their own School
+
+4. **Student**
+
+   * Does **not** log into the web app
+   * Identified by email via the Chrome extension + heartbeat
+   * Is tied to a School by email domain and by a `schoolId` in the DB
+
+### 3.2 Who sees which UI
+
+* **Super Admin** sees the **Super Admin Panel** (global view of all schools).
+* **School Admins** see a **School Admin Dashboard** scoped to their school only.
+* **Teachers** see the existing **Teacher Dashboard**, scoped to their school.
+* **Students** never hit the web app; they are API/extension‑only.
+
+---
+
+## 4. Data model (high‑level, not strict schema)
+
+We don’t need to implement the full DB here, but Replit should understand how things relate.
+
+### 4.1 `schools` table
+
+* `id` (UUID)
+* `name` (string) — e.g. "St. Francis de Sales School"
+* `domain` (string) — e.g. `sfds.net` (Google Workspace domain)
+* `status` (enum: `trial`, `active`, `suspended`)
+* `maxLicenses` (int) — number of student seats this school is allowed
+* `createdAt` (timestamp)
+* `trialEndsAt` (timestamp, nullable)
+
+### 4.2 `users` table
+
+* `id` (UUID)
+* `email` (string, unique)
+* `role` (enum: `super_admin`, `school_admin`, `teacher`)
+* `schoolId` (FK to `schools.id`, nullable for `super_admin`)
+* `displayName` (string)
+* `passwordHash` (string, for now; can later be replaced/augmented by Google SSO)
+* `createdAt`
+* `lastLoginAt`
+
+*Important:* `super_admin` users have `schoolId = null` and can see/manipulate all tenants.
+
+### 4.3 `students` table (already mostly exists, just clarify tenancy)
+
+* `id` (UUID)
+* `email` (string, unique per school)
+* `schoolId` (FK to `schools.id`)
+* Other existing fields (name, grade, device info, etc.)
+
+The **extension heartbeat** and login logic should always attach students to a single `schoolId` based on:
+
+1. Their email domain (matches `schools.domain`), and/or
+2. The roster/admin settings that already exist.
+
+---
+
+## 5. How login should work conceptually
+
+### 5.1 Staff (teachers + school admins)
+
+For now:
+
+* Login form = **Email + Password**
+* When a user logs in:
+
+  1. Look up user by email in `users`.
+  2. Verify password.
+  3. Load their `role` and `schoolId` into the session/JWT.
+  4. Redirect based on role:
+
+     * `super_admin` → Super Admin Panel
+     * `school_admin` → School Admin Dashboard
+     * `teacher` → Teacher Dashboard
+
+Later:
+
+* Replace/augment with **"Sign in with Google" (OAuth)**.
+* After OAuth, still map `email` → `user` → `role` → `schoolId`.
+
+### 5.2 Students
+
+* Students **do not** use this login form.
+* Students are recognized by the **Chrome extension** using their browser’s logged‑in Google Workspace email.
+* Extension heartbeats send student email + token → backend attaches them to the right `schoolId` and updates `students` + `student_status` tables.
+
+---
+
+## 6. Super Admin Panel — what Replit should build
+
+This is a separate section of the app (e.g. `/super-admin`) that requires:
+
+* User to be authenticated
+* User role to be `super_admin`
+
+### 6.1 Super Admin: Schools List Page
+
+**Route:** `/super-admin/schools`
+
+Shows a table listing all schools:
+
+* School name
+* Domain
+* Status (trial/active/suspended)
+* # of teachers
+* # of students (or just "Active students" count)
+* Trial end date (if any)
+* Actions: View, Edit, Disable
+
+Also includes a **"Create School"** button.
+
+### 6.2 Super Admin: Create School Page
+
+**Route:** `/super-admin/schools/new`
+
+Form fields:
+
+* School name
+* School domain (e.g. `myschool.org`)
+* Max licenses (optional for now)
+* Trial vs. paid
+* (Optional) Trial end date
+* First admin email (this will become a `school_admin` user)
+
+On submit:
+
+* Create a `schools` record.
+* Create a `users` record for the first admin:
+
+  * `email` = first admin email
+  * `role` = `school_admin`
+  * `schoolId` = newly created school
+  * Generate a random password (for now) or mark them for Google SSO usage later.
+
+We should surface that password somewhere temporarily, or send a "Set Password" link via email later.
+
+### 6.3 Super Admin: School Detail Page
+
+**Route:** `/super-admin/schools/:id`
+
+Sections on this page:
+
+* **School Info**
+
+  * Name
+  * Domain(s)
+  * Status (with toggle/dropdown)
+  * Trial / expiry info
+  * Max licenses
+
+* **Admins List**
+
+  * Table of `users` with role = `school_admin` for this school
+  * Button: "Add Admin" (by email)
+
+* **Teachers List (optional view)**
+
+  * Table of `users` with role = `teacher` for this school
+  * Count and maybe a link to a dedicated Teacher Management page
+
+* **Usage Snapshot (nice to have)**
+
+  * # of active students (based on recent heartbeats)
+  * # of active classrooms/sessions
+
+* **Actions**
+
+  * Suspend / re‑activate school
+  * Force logout all users (nice to have)
+
+### 6.4 Super Admin: Add Admin to School
+
+From the School Detail Page:
+
+* A simple form: email input
+* On submit:
+
+  * Create or update `users` record with `role = school_admin` and the correct `schoolId`.
+  * If new, generate a password (for now) or mark them for password set.
+
+---
+
+## 7. School Admin experience (school‑level dashboard)
+
+School admins **do not** see the Super Admin panel. They see a school‑scoped admin area.
+
+**Route:** `/admin` (or similar)
+
+When a `school_admin` logs in:
+
+* They are redirected to a School Admin Dashboard which is limited to:
+
+  * Their own `schoolId`
+
+Core things they should be able to do from there (even if some already exist in the UI):
+
+1. **Manage Teachers**
+
+   * List teachers (users with `role = teacher` and same `schoolId`)
+   * Add teacher (creates a new `users` row)
+   * Deactivate/activate teacher
+
+2. **View Students**
+
+   * List of students belonging to this school
+   * (even if creation is driven by extension heartbeats + rosters)
+
+3. **View Settings / License Info**
+
+   * How many students are active vs. max
+
+The important part for Replit: **school admins are fully scoped to their own `schoolId`.** They never see anything outside that.
+
+---
+
+## 8. How all of this ties into Canvas (for my side)
+
+I’m using this spec as the **source of truth in Canvas** so I can:
+
+* Easily copy/paste high‑level requirements into Replit tasks.
+* Keep track of how multi‑school / multi‑tenant architecture is supposed to work.
+* Iterate on the roles, flows, and DB fields without rewriting everything from scratch.
+
+What I need Replit to do based on this Canvas:
+
+1. **Implement the core tables** (`schools`, `users` with `role` and `schoolId`, etc.) aligned with this structure.
+2. **Add the Super Admin routes and pages** described above.
+3. **Wire login/session logic** so `role` and `schoolId` are always in the session.
+4. **Enforce tenant isolation** on all teacher/admin pages by filtering queries by `schoolId`.
+5. **Provide a safe entry point** for me as `super_admin` to:
+
+   * Create schools
+   * Attach domains
+   * Add admins
+
+Once this is in place, we’ll be ready for the next step: **swapping out password login with Google SSO** and syncing everything to Google Workspace more closely.
+
+---
+
+## 9. Summary for Replit (one‑paragraph version)
+
+> Build a Super Admin panel and underlying multi‑tenant structure for ClassPilot. A `school` is a tenant identified by its Google Workspace domain. Every `user` (teacher/admin) belongs to one `schoolId` and has a `role` (`super_admin`, `school_admin`, `teacher`). Add a protected `/super-admin` area where I, as `super_admin`, can create schools, assign domains, set trial/active status, and create school admin accounts by email. On login, staff users are routed based on `role` to either the Super Admin panel (global) or a school‑scoped dashboard where all data and actions are filtered by `schoolId`. Students never log into the web app; they are identified via the extension and attached to a school by email/domain. The goal is to mirror how GoGuardian/Securly handle multi‑school onboarding, but simplified for my current Express/Drizzle stack.
