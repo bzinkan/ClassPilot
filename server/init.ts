@@ -70,16 +70,34 @@ export async function initializeApp() {
   }
 
   // Migrate existing data: assign all students to the default teacher
+  // Only assign students that have NO teacher at all (don't overwrite existing assignments)
   const teacherUser = await storage.getUserByUsername("teacher");
   if (teacherUser) {
     const allStudents = await storage.getAllStudents();
-    const teacherStudentIds = await storage.getTeacherStudents(teacherUser.id);
     
-    // Assign any unassigned students to the default teacher
+    // Get all teachers to check existing assignments
+    const allUsers = await storage.getAllUsers();
+    const teacherIds = allUsers.filter(u => u.role === 'teacher').map(u => u.id);
+    
+    // Find students that have NO teacher at all
+    const studentsWithoutTeacher = [];
     for (const student of allStudents) {
-      if (!teacherStudentIds.includes(student.id)) {
-        await storage.assignStudentToTeacher(teacherUser.id, student.id);
+      let hasTeacher = false;
+      for (const teacherId of teacherIds) {
+        const teacherStudents = await storage.getTeacherStudents(teacherId);
+        if (teacherStudents.includes(student.id)) {
+          hasTeacher = true;
+          break;
+        }
       }
+      if (!hasTeacher) {
+        studentsWithoutTeacher.push(student);
+      }
+    }
+    
+    // Assign unowned students to the default teacher
+    for (const student of studentsWithoutTeacher) {
+      await storage.assignStudentToTeacher(teacherUser.id, student.id);
     }
     
     // Update existing flight paths without teacherId
@@ -98,8 +116,8 @@ export async function initializeApp() {
       await storage.updateStudentGroup(group.id, { teacherId: teacherUser.id });
     }
     
-    if (allStudents.length > 0 && teacherStudentIds.length === 0) {
-      console.log(`Migrated ${allStudents.length} students to default teacher`);
+    if (studentsWithoutTeacher.length > 0) {
+      console.log(`Assigned ${studentsWithoutTeacher.length} unowned students to default teacher`);
     }
     if (orphanedFlightPaths.length > 0) {
       console.log(`Migrated ${orphanedFlightPaths.length} flight paths to default teacher`);
