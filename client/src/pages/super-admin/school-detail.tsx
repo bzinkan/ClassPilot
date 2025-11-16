@@ -52,6 +52,9 @@ export default function SchoolDetail() {
   const [tempPassword, setTempPassword] = useState<string>("");
   const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
   const [passwordCopied, setPasswordCopied] = useState(false);
+  const [newAdminCredentialsDialogOpen, setNewAdminCredentialsDialogOpen] = useState(false);
+  const [newAdminCredentials, setNewAdminCredentials] = useState<{ email: string; displayName: string; tempPassword: string } | null>(null);
+  const [newAdminPasswordCopied, setNewAdminPasswordCopied] = useState(false);
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -68,17 +71,24 @@ export default function SchoolDetail() {
 
   const addAdminMutation = useMutation({
     mutationFn: async (data: { email: string; displayName: string }) => {
-      const result = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/admins`, data);
-      return result;
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/admins`, data);
+      return res.json();
     },
     onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: [`/api/super-admin/schools/${schoolId}`] });
       queryClient.invalidateQueries({ queryKey: ['/api/super-admin/schools'] });
       
+      // Store credentials and show dialog
+      setNewAdminCredentials({
+        email: data.admin.email,
+        displayName: data.admin.displayName,
+        tempPassword: data.tempPassword,
+      });
+      setNewAdminCredentialsDialogOpen(true);
+      
       toast({
         title: "Admin added successfully",
-        description: `Temporary password: ${data.tempPassword}`,
-        duration: 10000,
+        description: `New admin created: ${data.admin.displayName || data.admin.email}`,
       });
       
       setIsAddAdminOpen(false);
@@ -180,6 +190,14 @@ export default function SchoolDetail() {
     setTimeout(() => setPasswordCopied(false), 2000);
   };
 
+  const copyNewAdminPassword = () => {
+    if (newAdminCredentials) {
+      navigator.clipboard.writeText(newAdminCredentials.tempPassword);
+      setNewAdminPasswordCopied(true);
+      setTimeout(() => setNewAdminPasswordCopied(false), 2000);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center">
@@ -227,6 +245,14 @@ export default function SchoolDetail() {
             <p className="text-muted-foreground mt-2">{school.domain}</p>
           </div>
           <div className="flex gap-2">
+            <Button
+              variant="default"
+              onClick={() => setIsAddAdminOpen(true)}
+              data-testid="button-add-admin-header"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Add Admin
+            </Button>
             <Button
               variant="outline"
               onClick={() => impersonateMutation.mutate()}
@@ -300,7 +326,7 @@ export default function SchoolDetail() {
                 <CardTitle>School Admins</CardTitle>
                 <Dialog open={isAddAdminOpen} onOpenChange={setIsAddAdminOpen}>
                   <DialogTrigger asChild>
-                    <Button size="sm" data-testid="button-add-admin">
+                    <Button size="sm" data-testid="button-add-admin-card">
                       <Plus className="w-4 h-4 mr-2" />
                       Add Admin
                     </Button>
@@ -493,6 +519,67 @@ export default function SchoolDetail() {
                   setPasswordCopied(false);
                 }}
                 data-testid="button-close-reset-dialog-detail"
+              >
+                Done
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* New Admin Credentials Dialog */}
+        <Dialog open={newAdminCredentialsDialogOpen} onOpenChange={setNewAdminCredentialsDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Admin Account Created</DialogTitle>
+              <DialogDescription>
+                Share these credentials with the new school admin. They should change the password after their first login.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Admin: {newAdminCredentials?.displayName}</p>
+                <p className="text-sm text-muted-foreground">Email: {newAdminCredentials?.email}</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Email (Username)</Label>
+                <Input
+                  value={newAdminCredentials?.email || ""}
+                  readOnly
+                  className="font-mono"
+                  data-testid="input-new-admin-email"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Temporary Password</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={newAdminCredentials?.tempPassword || ""}
+                    readOnly
+                    className="font-mono"
+                    data-testid="input-new-admin-password"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={copyNewAdminPassword}
+                    data-testid="button-copy-new-admin-password"
+                  >
+                    {newAdminPasswordCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Click the copy button to copy the password to clipboard
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={() => {
+                  setNewAdminCredentialsDialogOpen(false);
+                  setNewAdminCredentials(null);
+                  setNewAdminPasswordCopied(false);
+                }}
+                data-testid="button-close-new-admin-dialog"
               >
                 Done
               </Button>
