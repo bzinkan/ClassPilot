@@ -65,16 +65,18 @@ import {
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
-import { eq, desc, lt, sql as drizzleSql, inArray } from "drizzle-orm";
+import { eq, desc, lt, sql as drizzleSql, inArray, isNull } from "drizzle-orm";
 
 export interface IStorage {
   // Schools
   getSchool(id: string): Promise<School | undefined>;
   getSchoolByDomain(domain: string): Promise<School | undefined>;
-  getAllSchools(): Promise<School[]>;
+  getAllSchools(includeDeleted?: boolean): Promise<School[]>;
   createSchool(school: InsertSchool): Promise<School>;
   updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined>;
   deleteSchool(id: string): Promise<boolean>;
+  softDeleteSchool(id: string): Promise<School | undefined>; // Soft delete (set deletedAt)
+  restoreSchool(id: string): Promise<School | undefined>; // Restore soft-deleted school (clear deletedAt)
   
   // Users
   getUser(id: string): Promise<User | undefined>;
@@ -275,8 +277,12 @@ export class MemStorage implements IStorage {
     );
   }
 
-  async getAllSchools(): Promise<School[]> {
-    return Array.from(this.schools.values());
+  async getAllSchools(includeDeleted = false): Promise<School[]> {
+    const allSchools = Array.from(this.schools.values());
+    if (includeDeleted) {
+      return allSchools;
+    }
+    return allSchools.filter(school => !school.deletedAt);
   }
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
@@ -289,6 +295,8 @@ export class MemStorage implements IStorage {
       maxLicenses: insertSchool.maxLicenses ?? 100,
       createdAt: new Date(),
       trialEndsAt: insertSchool.trialEndsAt ?? null,
+      deletedAt: null,
+      lastActivityAt: null,
     };
     this.schools.set(id, school);
     return school;
@@ -305,6 +313,24 @@ export class MemStorage implements IStorage {
 
   async deleteSchool(id: string): Promise<boolean> {
     return this.schools.delete(id);
+  }
+
+  async softDeleteSchool(id: string): Promise<School | undefined> {
+    const school = this.schools.get(id);
+    if (!school) return undefined;
+    
+    school.deletedAt = new Date();
+    this.schools.set(id, school);
+    return school;
+  }
+
+  async restoreSchool(id: string): Promise<School | undefined> {
+    const school = this.schools.get(id);
+    if (!school) return undefined;
+    
+    school.deletedAt = null;
+    this.schools.set(id, school);
+    return school;
   }
 
   // Users
@@ -1422,8 +1448,11 @@ export class DatabaseStorage implements IStorage {
     return school || undefined;
   }
 
-  async getAllSchools(): Promise<School[]> {
-    return await db.select().from(schools);
+  async getAllSchools(includeDeleted = false): Promise<School[]> {
+    if (includeDeleted) {
+      return await db.select().from(schools);
+    }
+    return await db.select().from(schools).where(isNull(schools.deletedAt));
   }
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
@@ -1446,6 +1475,24 @@ export class DatabaseStorage implements IStorage {
   async deleteSchool(id: string): Promise<boolean> {
     const result = await db.delete(schools).where(eq(schools.id, id)).returning();
     return result.length > 0;
+  }
+
+  async softDeleteSchool(id: string): Promise<School | undefined> {
+    const [school] = await db
+      .update(schools)
+      .set({ deletedAt: new Date() })
+      .where(eq(schools.id, id))
+      .returning();
+    return school || undefined;
+  }
+
+  async restoreSchool(id: string): Promise<School | undefined> {
+    const [school] = await db
+      .update(schools)
+      .set({ deletedAt: null })
+      .where(eq(schools.id, id))
+      .returning();
+    return school || undefined;
   }
 
   // Users

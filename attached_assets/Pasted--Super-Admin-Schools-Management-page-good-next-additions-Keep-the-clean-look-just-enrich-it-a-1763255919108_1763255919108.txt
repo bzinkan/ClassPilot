@@ -1,0 +1,207 @@
+. Super Admin “Schools Management” page – good next additions
+
+Keep the clean look, just enrich it a bit:
+
+A. Per-school actions (kebab menu + delete/archive)
+
+On each school card, add a 3-dot menu with actions like:
+
+Manage school (go to detailed school page)
+
+Impersonate admin (log in as that school’s admin for support)
+
+Suspend school (disable logins + extension control but keep data)
+
+Archive / Delete school (see delete flow below)
+
+Delete flow idea (industry-style & safe):
+
+Action in menu: “Delete School…”
+
+Open modal:
+
+Show school name + domain
+
+Show impact:
+
+“All admins, teachers, students, and session data will be deactivated.”
+
+“You’ll still be able to restore this school for 30 days.” (soft delete)
+
+Require text confirm:
+
+Input: “Type the school name to confirm.”
+
+Buttons: Cancel | Delete School
+
+In the DB, do a soft delete:
+
+schools.deletedAt timestamp
+
+Automatically:
+
+disable logins for users in that school
+
+stop extension connections for that school ID
+
+hide school by default in this view (with optional “Show archived” filter)
+
+Later you can add a separate “Archived” tab to restore if needed.
+
+B. More info on each card
+
+Right now you show:
+
+Domain
+
+Counts for admins/teachers/students
+
+Max Licenses
+
+Status badge (active/trial)
+
+Consider adding:
+
+Plan / tier: e.g., “Starter / Pro / Pilot”
+
+Renewal / trial end date: “Trial ends: Nov 30”
+
+Last active: “Last student activity: 2h ago” or “No activity yet”
+
+School ID (small, bottom corner) – useful when talking to IT
+
+This lets you quickly see which schools are actually using ClassPilot vs just existing in the DB.
+
+C. Top-of-page global controls
+
+Above/next to “Create School,” add:
+
+Search bar – filter by name, domain, or city
+
+Filter dropdowns:
+
+Status: Active / Trial / Suspended / Archived
+
+Plan: Free / Paid / Pilot
+
+Summary chips:
+
+Total schools: 2
+
+Active: 1 | Trial: 1
+
+Total licensed seats: 800 | In use: 3
+
+This makes it feel like a real “control center” instead of just a list.
+
+2. What should happen when you click a school card
+
+Your current page is a good overview. The real power can live inside each school’s detail view.
+
+When you click “St. Francis de Sales School”, send them to something like:
+
+Tabs for that school
+
+Overview (default)
+
+Domain, plan, trial/renewal date
+
+Key numbers: admins, teachers, students, active today, max licenses
+
+Setup checklist with progress (huge for onboarding):
+
+✅ School created
+
+🟡 Connect Google Workspace / verify domain
+
+🟡 Deploy extension to OU
+
+🔴 Import or sync students
+
+🔴 Invite teachers
+
+Each item has a small “View instructions” link
+
+Admins
+
+List admins (name, email, role: Owner/Support)
+
+Buttons:
+
+“Add admin” (by email)
+
+“Reset admin login link”
+
+“Remove admin”
+
+Teachers & Licenses
+
+Count of teachers vs allowed
+
+Quick actions:
+
+“Send teacher welcome email”
+
+“Export teacher list (.csv)”
+
+Roster & Sync
+
+Import section:
+
+“Upload CSV” button
+
+Status of last import: “Last CSV imported: Nov 12, 3:10 PM”
+
+Future: “Connect to Clever / ClassLink / Google Classroom” with a “Coming soon” badge.
+
+SSO & Security
+
+Config for:
+
+Google SSO on/off
+
+Workspace domain(s)
+
+Allowed login methods (SSO only vs email+password)
+
+Danger Zone (bottom of settings tab)
+
+Red box with:
+
+Suspend school (toggle) – immediately log out all users & stop live monitoring but keep data.
+
+Delete school button with the same confirmation flow as above.
+
+Short version: concrete next steps you can build now
+
+If you want a tight, practical v2 of this page without overbuilding:
+
+Add a 3-dot menu on each card with:
+
+“Manage school”
+
+“Suspend school”
+
+“Delete school…”
+
+Implement soft delete:
+
+Add deletedAt column to schools
+
+When deleting:
+
+Set deletedAt
+
+Disable all users in that school
+
+Stop accepting extension heartbeats for that school
+
+Filter out deletedAt IS NOT NULL from your main list by default.
+
+Add trial/renewal info + last activity on cards:
+
+trialEndsAt / renewalAt
+
+lastActivityAt from student heartbeats
+
+Add a simple search box and status filter above the cards.

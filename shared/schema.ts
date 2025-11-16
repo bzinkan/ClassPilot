@@ -12,6 +12,8 @@ export const schools = pgTable("schools", {
   maxLicenses: integer("max_licenses").default(100), // Max student seats
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   trialEndsAt: timestamp("trial_ends_at"), // Nullable - when trial expires
+  deletedAt: timestamp("deleted_at"), // Soft delete timestamp (null = active)
+  lastActivityAt: timestamp("last_activity_at"), // Last student activity timestamp
 });
 
 export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, createdAt: true });
