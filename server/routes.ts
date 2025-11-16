@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
-import session from "express-session";
+import { sessionMiddleware } from "./index";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import * as XLSX from "xlsx";
@@ -191,9 +191,9 @@ const heartbeatLimiter = rateLimit({
 // WebSocket clients
 interface WSClient {
   ws: WebSocket;
-  role: 'teacher' | 'student';
+  role: 'teacher' | 'school_admin' | 'super_admin' | 'student';
   deviceId?: string;
-  userId?: string; // For teachers - needed for permission checks
+  userId?: string; // For staff - needed for permission checks
   authenticated: boolean;
 }
 
@@ -202,7 +202,9 @@ const wsClients = new Map<WebSocket, WSClient>();
 function broadcastToTeachers(message: any) {
   const messageStr = JSON.stringify(message);
   wsClients.forEach((client, ws) => {
-    if (client.role === 'teacher' && client.authenticated && ws.readyState === WebSocket.OPEN) {
+    // Broadcast to all authenticated staff (teachers, school admins, super admins)
+    const isStaff = ['teacher', 'school_admin', 'super_admin'].includes(client.role);
+    if (isStaff && client.authenticated && ws.readyState === WebSocket.OPEN) {
       ws.send(messageStr);
     }
   });
@@ -344,10 +346,38 @@ async function checkIPAllowlist(req: any, res: any, next: any) {
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
-  // WebSocket server on /ws path
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  // WebSocket server with noServer mode for manual upgrade handling
+  const wss = new WebSocketServer({ noServer: true });
 
-  wss.on('connection', (ws) => {
+  // SECURITY: Handle WebSocket upgrade with session validation
+  httpServer.on('upgrade', (request, socket, head) => {
+    // SECURITY: Only handle WebSocket upgrades for /ws path
+    if (request.url !== '/ws') {
+      console.warn('[WebSocket] Rejected upgrade attempt for invalid path:', request.url);
+      socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // Parse session from cookies (for staff authentication)
+    // Note: For students (no session), this still allows connection but sessionUserId will be null
+    sessionMiddleware(request as any, {} as any, (err: any) => {
+      if (err) {
+        console.error('[WebSocket] Session middleware error:', err);
+        socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
+        socket.destroy();
+        return;
+      }
+
+      // Session is now available in request.session (if present)
+      // Students won't have sessions, which is expected
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        wss.emit('connection', ws, request);
+      });
+    });
+  });
+
+  wss.on('connection', (ws, req: any) => {
     const client: WSClient = {
       ws,
       role: 'student',
@@ -355,7 +385,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
     wsClients.set(ws, client);
 
-    console.log('WebSocket client connected');
+    // SECURITY: Extract session info if available (staff have sessions, students don't)
+    const sessionUserId = req.session?.userId || null;
+    const sessionRole = req.session?.role || null;
+    
+    console.log('WebSocket client connected', { 
+      hasSession: !!sessionUserId, 
+      sessionRole: sessionRole || 'none'
+    });
 
     ws.on('message', async (data) => {
       try {
@@ -364,35 +401,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Handle authentication
         if (message.type === 'auth') {
           if (message.role === 'teacher' || message.role === 'school_admin' || message.role === 'super_admin') {
-            // SECURITY: Look up the actual user role from database instead of trusting client
-            const userId = message.userId;
-            if (!userId) {
-              ws.send(JSON.stringify({ type: 'auth-error', message: 'User ID required' }));
+            // SECURITY FIX: Verify userId matches session instead of trusting client
+            // Staff must be logged in via HTTP session before connecting WebSocket
+            if (!sessionUserId) {
+              console.warn('[WebSocket] Staff auth attempt without valid session');
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'Session required. Please log in.' }));
+              ws.close();
+              return;
+            }
+            
+            // SECURITY: Reject if client-provided userId doesn't match session
+            const claimedUserId = message.userId;
+            if (claimedUserId !== sessionUserId) {
+              console.error('[WebSocket] SECURITY: userId mismatch!', {
+                claimed: claimedUserId,
+                session: sessionUserId
+              });
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'Authentication failed' }));
+              ws.close();
               return;
             }
             
             try {
-              const user = await storage.getUser(userId);
+              // Fetch user from database to get current role
+              const user = await storage.getUser(sessionUserId);
               if (!user) {
                 ws.send(JSON.stringify({ type: 'auth-error', message: 'User not found' }));
+                ws.close();
                 return;
               }
               
               // Verify user is a staff member (not a student role)
               if (!['teacher', 'school_admin', 'super_admin'].includes(user.role)) {
                 ws.send(JSON.stringify({ type: 'auth-error', message: 'Invalid role' }));
+                ws.close();
                 return;
               }
               
-              // Authenticate with ACTUAL role from database
-              client.role = user.role; // Use database role, not client-provided role
+              // Authenticate with ACTUAL role from database (not from client OR session)
+              client.role = user.role as 'teacher' | 'school_admin' | 'super_admin'; // Trust database only
               client.userId = user.id;
               client.authenticated = true;
               console.log(`[WebSocket] Staff authenticated: ${user.role} (userId: ${client.userId})`);
-              ws.send(JSON.stringify({ type: 'auth-success', role: user.role })); // Send actual role
+              ws.send(JSON.stringify({ type: 'auth-success', role: user.role }));
             } catch (error) {
               console.error('[WebSocket] Auth error:', error);
               ws.send(JSON.stringify({ type: 'auth-error', message: 'Authentication failed' }));
+              ws.close();
               return;
             }
           } else if (message.role === 'student' && message.deviceId) {

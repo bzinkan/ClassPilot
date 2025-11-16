@@ -66,22 +66,22 @@ const sessionStore = process.env.DATABASE_URL
   : undefined; // Use default MemoryStore in development if no DATABASE_URL
 
 // Session configuration
-app.use(
-  session({
-    name: 'classpilot_session',
-    store: sessionStore,
-    secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
-    resave: false,
-    saveUninitialized: false,
-    rolling: true, // Auto-renew session on activity to keep it alive
-    cookie: {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production", // true for HTTPS
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-    },
-  })
-);
+export const sessionMiddleware = session({
+  name: 'classpilot_session',
+  store: sessionStore,
+  secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
+  resave: false,
+  saveUninitialized: false,
+  rolling: true, // Auto-renew session on activity to keep it alive
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production", // true for HTTPS
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
+    maxAge: 24 * 60 * 60 * 1000, // 24 hours
+  },
+});
+
+app.use(sessionMiddleware);
 
 // Setup Google OAuth (must be after session middleware)
 setupGoogleAuth(app);

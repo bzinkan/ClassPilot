@@ -231,6 +231,14 @@ export default function Admin() {
         </div>
         <div className="flex items-center gap-2">
           <ThemeToggle />
+          <Button
+            variant="outline"
+            onClick={() => setLocation("/dashboard")}
+            data-testid="button-back-dashboard"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Back to Dashboard
+          </Button>
         </div>
       </div>
 
