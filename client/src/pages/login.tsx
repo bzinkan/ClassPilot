@@ -51,7 +51,7 @@ export default function Login() {
       if (role === 'super_admin') {
         setLocation("/super-admin/schools");
       } else if (role === 'school_admin') {
-        setLocation("/admin");
+        setLocation("/dashboard");
       } else {
         setLocation("/dashboard");
       }
