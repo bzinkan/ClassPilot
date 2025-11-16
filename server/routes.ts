@@ -843,7 +843,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Create teacher with admin's schoolId (enforce tenant isolation)
       const teacher = await storage.createUser({
         email: data.email,
-        username: data.username,
+        username: data.email, // Use email as username
         password: hashedPassword,
         role: 'teacher',
         schoolId: admin.schoolId, // Use admin's schoolId, not from request

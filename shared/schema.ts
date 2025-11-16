@@ -57,11 +57,12 @@ export type LoginData = z.infer<typeof loginSchema>;
 // Schema for creating teacher accounts (admin-only)
 export const createTeacherSchema = z.object({
   email: z.string().email("Invalid email address"),
-  username: z.string().min(3, "Username must be at least 3 characters").optional(),
-  password: z.string().min(6, "Password must be at least 6 characters").optional(), // Optional for Google OAuth users
-  displayName: z.string().optional(),
-  schoolId: z.string(),
-  schoolName: z.string().optional(), // DEPRECATED
+  displayName: z.string().min(2, "Name must be at least 2 characters"),
+  password: z.string().min(6, "Password must be at least 6 characters"),
+  schoolName: z.string().optional(),
+  // username and schoolId are optional - provided by backend from session
+  username: z.string().optional(),
+  schoolId: z.string().optional(),
 });
 export type CreateTeacher = z.infer<typeof createTeacherSchema>;
 
