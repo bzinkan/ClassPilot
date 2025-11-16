@@ -48,6 +48,7 @@ interface CurrentUser {
   username: string;
   role: string;
   schoolName: string;
+  impersonating?: boolean;
 }
 
 export default function Dashboard() {
@@ -718,6 +719,31 @@ export default function Dashboard() {
     },
   });
 
+  // Stop impersonating (for super admins)
+  const stopImpersonateMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest('POST', '/api/super-admin/stop-impersonate', {});
+      return res.json();
+    },
+    onSuccess: () => {
+      toast({
+        title: "Stopped Impersonating",
+        description: "Returned to your super admin account",
+      });
+      // Redirect to super admin schools page
+      setTimeout(() => {
+        window.location.href = "/super-admin/schools";
+      }, 500);
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
   // Remote control mutations
   const openTabMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
@@ -1060,6 +1086,18 @@ export default function Dashboard() {
                     </DropdownMenu>
                   )}
                 </>
+              )}
+              {currentUser?.impersonating && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => stopImpersonateMutation.mutate()}
+                  disabled={stopImpersonateMutation.isPending}
+                  data-testid="button-stop-impersonating"
+                >
+                  <UserCog className="h-4 w-4 mr-2" />
+                  Stop Impersonating
+                </Button>
               )}
               <Button
                 variant="outline"

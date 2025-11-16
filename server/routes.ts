@@ -787,6 +787,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           username: user.username,
           role: user.role,
           schoolName: user.schoolName,
+          impersonating: req.session.impersonating || false,
         },
       });
     } catch (error) {
