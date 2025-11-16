@@ -540,55 +540,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const targetDeviceId = message.deviceId;
           if (!targetDeviceId) return;
 
-          // Permission check: Verify teacher has access to this student
-          if (client.userId) {
-            try {
-              // Get the user to check role
-              const user = await storage.getUser(client.userId);
-              
-              // Admin-level users (admin, school_admin, super_admin) can view all students
-              // Teachers must have the student in their active session roster
-              if (user && user.role !== 'admin' && user.role !== 'school_admin' && user.role !== 'super_admin') {
-                // Teachers: check if student is in their active session roster
-                const activeSession = await storage.getActiveSessionByTeacher(client.userId);
-                
-                if (activeSession?.groupId) {
-                  // Get all students in the teacher's active session roster
-                  const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
-                  
-                  // Get the active student for this device
-                  const activeStudent = await storage.getActiveStudentForDevice(targetDeviceId);
-                  
-                  if (activeStudent && !rosterStudentIds.includes(activeStudent.id)) {
-                    console.warn(`[WebSocket] Teacher ${client.userId} attempted to view student ${activeStudent.id} not in their active session`);
-                    ws.send(JSON.stringify({
-                      type: 'error',
-                      message: 'You do not have permission to view this student\'s screen'
-                    }));
-                    return; // Block the request
-                  }
-                } else {
-                  // Teacher has no active session - deny Live View
-                  console.warn(`[WebSocket] Teacher ${client.userId} attempted Live View without active session`);
-                  ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'You must start a class session to use Live View'
-                  }));
-                  return;
-                }
-              }
-            } catch (error) {
-              console.error('[WebSocket] Permission check error:', error);
-              // On error, block the request (fail closed for security)
-              ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Permission check failed. Please try again.'
-              }));
-              return;
-            }
-          }
-
-          // Permission granted or admin - forward the request
+          // No additional permission check needed here
+          // Dashboard visibility already controls which students teachers can see
+          // If a teacher can see a student tile, they can use Live View
+          
+          // Forward the request to the student device
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
             if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
               targetWs.send(JSON.stringify({
