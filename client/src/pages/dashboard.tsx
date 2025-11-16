@@ -960,7 +960,7 @@ export default function Dashboard() {
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">ClassPilot</h1>
                 <p className="text-xs text-muted-foreground font-medium">
-                  {currentUser?.role === 'admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
+                  {currentUser?.role === 'school_admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
                 </p>
               </div>
             </div>
