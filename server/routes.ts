@@ -913,10 +913,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // ====== SUPER ADMIN ROUTES ======
   
-  // List all schools
+  // List all schools with search and filtering support
   app.get("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
     try {
-      const schools = await storage.getAllSchools();
+      const { search, status, includeDeleted } = req.query;
+      
+      // Get all schools (with deleted if requested)
+      let schools = await storage.getAllSchools(includeDeleted === 'true');
+      
+      // Apply search filter (name or domain)
+      if (search && typeof search === 'string') {
+        const searchLower = search.toLowerCase();
+        schools = schools.filter(school => 
+          school.name.toLowerCase().includes(searchLower) ||
+          school.domain.toLowerCase().includes(searchLower)
+        );
+      }
+      
+      // Apply status filter
+      if (status && typeof status === 'string') {
+        schools = schools.filter(school => school.status === status);
+      }
       
       // Get counts for each school
       const schoolsWithCounts = await Promise.all(
@@ -935,7 +952,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
         })
       );
       
-      res.json({ success: true, schools: schoolsWithCounts });
+      // Calculate summary stats
+      const summary = {
+        totalSchools: schoolsWithCounts.length,
+        activeSchools: schoolsWithCounts.filter(s => s.status === 'active' && !s.deletedAt).length,
+        trialSchools: schoolsWithCounts.filter(s => s.status === 'trial' && !s.deletedAt).length,
+        suspendedSchools: schoolsWithCounts.filter(s => s.status === 'suspended').length,
+        totalLicenses: schoolsWithCounts.reduce((sum, s) => sum + (s.maxLicenses || 0), 0),
+        totalStudents: schoolsWithCounts.reduce((sum, s) => sum + s.studentCount, 0),
+      };
+      
+      res.json({ success: true, schools: schoolsWithCounts, summary });
     } catch (error) {
       console.error("Get schools error:", error);
       res.status(500).json({ error: "Failed to fetch schools" });
