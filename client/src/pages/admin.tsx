@@ -43,6 +43,7 @@ function normalizeGrade(grade: string | null | undefined): string | null {
 }
 
 const createTeacherSchema = z.object({
+  displayName: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Invalid email address"),
   password: z.string().min(6, "Password must be at least 6 characters"),
   schoolName: z.string().optional(),
@@ -76,6 +77,7 @@ export default function Admin() {
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
     defaultValues: {
+      displayName: "",
       email: "",
       password: "",
       schoolName: "",
@@ -255,6 +257,22 @@ export default function Admin() {
           </CardHeader>
           <CardContent>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="displayName">Name</Label>
+                <Input
+                  id="displayName"
+                  data-testid="input-teacher-name"
+                  type="text"
+                  placeholder="e.g., John Smith"
+                  {...form.register("displayName")}
+                />
+                {form.formState.errors.displayName && (
+                  <p className="text-sm text-destructive">
+                    {form.formState.errors.displayName.message}
+                  </p>
+                )}
+              </div>
+
               <div className="space-y-2">
                 <Label htmlFor="email">Email</Label>
                 <Input
