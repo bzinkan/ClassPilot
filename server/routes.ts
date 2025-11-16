@@ -634,6 +634,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
+      if (!user.password) {
+        return res.status(401).json({ error: "This account uses Google OAuth. Please sign in with Google." });
+      }
+
       const valid = await bcrypt.compare(password, user.password);
       if (!valid) {
         return res.status(401).json({ error: "Invalid credentials" });
@@ -921,18 +925,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Get all schools (with deleted if requested)
       let schools = await storage.getAllSchools(includeDeleted === 'true');
       
-      // Apply search filter (name or domain)
-      if (search && typeof search === 'string') {
-        const searchLower = search.toLowerCase();
+      // Apply search filter (name or domain) - only if search is not empty
+      const searchTerm = typeof search === 'string' ? search.trim() : '';
+      if (searchTerm) {
+        const searchLower = searchTerm.toLowerCase();
         schools = schools.filter(school => 
           school.name.toLowerCase().includes(searchLower) ||
           school.domain.toLowerCase().includes(searchLower)
         );
       }
       
-      // Apply status filter
-      if (status && typeof status === 'string') {
-        schools = schools.filter(school => school.status === status);
+      // Apply status filter - only if status is not "all" or empty
+      const statusFilter = typeof status === 'string' ? status.trim() : '';
+      if (statusFilter && statusFilter !== 'all') {
+        schools = schools.filter(school => school.status === statusFilter);
       }
       
       // Get counts for each school
