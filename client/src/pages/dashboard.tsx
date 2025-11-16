@@ -422,7 +422,7 @@ export default function Dashboard() {
     }
     
     // Filter by gradeLevel field ONLY for admins (teachers use session-based filtering)
-    if (currentUser?.role === 'admin') {
+    if (currentUser?.role === 'school_admin') {
       return normalizeGrade(student.gradeLevel) === normalizeGrade(selectedGrade);
     }
     
@@ -1070,7 +1070,7 @@ export default function Dashboard() {
                 <Download className="h-4 w-4 mr-2" />
                 Export Excel
               </Button>
-              {currentUser?.role === 'admin' && (
+              {currentUser?.role === 'school_admin' && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -1092,7 +1092,7 @@ export default function Dashboard() {
                   <User className="h-5 w-5" />
                 </Button>
               )}
-              {currentUser?.role === 'admin' && (
+              {currentUser?.role === 'school_admin' && (
                 <>
                   <Button
                     variant="ghost"
@@ -1129,7 +1129,7 @@ export default function Dashboard() {
       {/* Main Content */}
       <main className="max-w-screen-2xl mx-auto px-6 py-8">
         {/* Remote Control Toolbar - only show if admin OR teacher with active session */}
-        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+        {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
           <RemoteControlToolbar 
             selectedStudentIds={selectedStudentIds}
             students={filteredStudents}
@@ -1142,7 +1142,7 @@ export default function Dashboard() {
         )}
         
         {/* Stats Cards - only show if admin OR teacher with active session */}
-        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+        {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
@@ -1192,7 +1192,7 @@ export default function Dashboard() {
         )}
 
         {/* Search Bar + Selection Controls - only show if admin OR teacher with active session */}
-        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+        {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
           <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
           <Input
             placeholder="Search student"
@@ -1259,7 +1259,7 @@ export default function Dashboard() {
         )}
 
         {/* Control Buttons - only show if admin OR teacher with active session */}
-        {(currentUser?.role === 'admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+        {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
           <div className="flex items-center gap-2 flex-wrap mb-8">
           <Button
             size="sm"
