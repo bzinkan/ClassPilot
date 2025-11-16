@@ -122,7 +122,8 @@ export default function SchoolsList() {
 
   const impersonateMutation = useMutation({
     mutationFn: async (schoolId: string) => {
-      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/impersonate`, {});
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/impersonate`, {});
+      return res.json();
     },
     onSuccess: (data: any) => {
       toast({
@@ -145,7 +146,8 @@ export default function SchoolsList() {
 
   const resetLoginMutation = useMutation({
     mutationFn: async (schoolId: string) => {
-      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/reset-login`, {});
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/reset-login`, {});
+      return res.json();
     },
     onSuccess: (data: any) => {
       setTempPassword(data.tempPassword);
