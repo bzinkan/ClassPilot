@@ -1070,26 +1070,54 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Delete school
+  // Soft delete school (sets deletedAt timestamp)
   app.delete("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
     try {
       const { id } = req.params;
       
-      // Check if school has any users
-      const users = await storage.getUsersBySchool(id);
-      if (users.length > 0) {
-        return res.status(400).json({ error: "Cannot delete school with existing users. Please remove all users first." });
-      }
-
-      const deleted = await storage.deleteSchool(id);
-      if (!deleted) {
+      const school = await storage.softDeleteSchool(id);
+      if (!school) {
         return res.status(404).json({ error: "School not found" });
       }
 
-      res.json({ success: true });
+      res.json({ success: true, school });
     } catch (error) {
-      console.error("Delete school error:", error);
+      console.error("Soft delete school error:", error);
       res.status(500).json({ error: "Failed to delete school" });
+    }
+  });
+
+  // Suspend school (sets status to 'suspended')
+  app.post("/api/super-admin/schools/:id/suspend", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      const school = await storage.updateSchool(id, { status: 'suspended' });
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true, school });
+    } catch (error) {
+      console.error("Suspend school error:", error);
+      res.status(500).json({ error: "Failed to suspend school" });
+    }
+  });
+
+  // Restore school (clears deletedAt timestamp)
+  app.post("/api/super-admin/schools/:id/restore", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      const school = await storage.restoreSchool(id);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true, school });
+    } catch (error) {
+      console.error("Restore school error:", error);
+      res.status(500).json({ error: "Failed to restore school" });
     }
   });
 
