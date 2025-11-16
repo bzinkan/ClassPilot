@@ -92,6 +92,8 @@ declare module "express-session" {
     userId: string;
     role: string;
     schoolId?: string;
+    impersonating?: boolean;
+    originalUserId?: string;
   }
 }
 
