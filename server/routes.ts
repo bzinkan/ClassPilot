@@ -1154,6 +1154,132 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Impersonate a school admin (for support purposes)
+  app.post("/api/super-admin/schools/:id/impersonate", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      const school = await storage.getSchool(id);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      // Find a school admin for this school
+      const users = await storage.getUsersBySchool(id);
+      const schoolAdmin = users.find(u => u.role === 'school_admin');
+      
+      if (!schoolAdmin) {
+        return res.status(404).json({ error: "No school admin found for this school" });
+      }
+
+      // Store original super admin ID for audit trail
+      const originalUserId = req.session.userId;
+      
+      console.log(`[IMPERSONATE] Super admin ${originalUserId} impersonating school admin ${schoolAdmin.id} for school ${school.name}`);
+
+      // Switch session to the school admin
+      req.session.userId = schoolAdmin.id;
+      req.session.role = schoolAdmin.role;
+      req.session.schoolId = schoolAdmin.schoolId ?? undefined;
+      req.session.impersonating = true;
+      req.session.originalUserId = originalUserId;
+
+      res.json({ 
+        success: true, 
+        message: `Now impersonating ${schoolAdmin.displayName || schoolAdmin.email}`,
+        admin: {
+          id: schoolAdmin.id,
+          email: schoolAdmin.email,
+          displayName: schoolAdmin.displayName,
+          schoolName: school.name,
+        }
+      });
+    } catch (error) {
+      console.error("Impersonate error:", error);
+      res.status(500).json({ error: "Failed to impersonate admin" });
+    }
+  });
+
+  // Stop impersonating and return to original super admin session
+  // Note: This endpoint must allow impersonating sessions (super admin currently acting as school admin)
+  app.post("/api/super-admin/stop-impersonate", async (req, res) => {
+    try {
+      if (!req.session.impersonating || !req.session.originalUserId) {
+        return res.status(400).json({ error: "Not currently impersonating" });
+      }
+
+      const originalUser = await storage.getUser(req.session.originalUserId);
+      if (!originalUser || originalUser.role !== 'super_admin') {
+        return res.status(403).json({ error: "Original session invalid" });
+      }
+
+      console.log(`[STOP IMPERSONATE] Returning to super admin ${originalUser.id}`);
+
+      // Restore original session
+      req.session.userId = originalUser.id;
+      req.session.role = originalUser.role;
+      req.session.schoolId = undefined;
+      req.session.impersonating = false;
+      delete req.session.originalUserId;
+
+      res.json({ success: true, message: "Stopped impersonating" });
+    } catch (error) {
+      console.error("Stop impersonate error:", error);
+      res.status(500).json({ error: "Failed to stop impersonating" });
+    }
+  });
+
+  // Reset login for school admin (generate temporary password)
+  app.post("/api/super-admin/schools/:id/reset-login", requireSuperAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { adminId } = req.body;
+      
+      const school = await storage.getSchool(id);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      // Get the specific admin or find any school admin
+      let admin;
+      if (adminId) {
+        admin = await storage.getUser(adminId);
+        if (!admin || admin.schoolId !== id || admin.role !== 'school_admin') {
+          return res.status(404).json({ error: "School admin not found" });
+        }
+      } else {
+        // Find first school admin for this school
+        const users = await storage.getUsersBySchool(id);
+        admin = users.find(u => u.role === 'school_admin');
+        if (!admin) {
+          return res.status(404).json({ error: "No school admin found for this school" });
+        }
+      }
+
+      // Generate temporary password
+      const tempPassword = Math.random().toString(36).slice(-10) + Math.random().toString(36).slice(-10);
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+      // Update admin's password
+      await storage.updateUser(admin.id, { password: hashedPassword });
+
+      console.log(`[RESET LOGIN] Super admin ${req.session.userId} reset password for ${admin.email} at school ${school.name}`);
+
+      res.json({ 
+        success: true, 
+        tempPassword,
+        admin: {
+          email: admin.email,
+          displayName: admin.displayName,
+        },
+        message: `Temporary password generated for ${admin.displayName || admin.email}`
+      });
+    } catch (error) {
+      console.error("Reset login error:", error);
+      res.status(500).json({ error: "Failed to reset login" });
+    }
+  });
+
   // Add admin to school
   app.post("/api/super-admin/schools/:id/admins", requireSuperAdmin, async (req, res) => {
     try {

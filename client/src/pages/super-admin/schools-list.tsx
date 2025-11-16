@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause } from "lucide-react";
+import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, UserCog, KeyRound, Copy, Check } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -46,6 +46,9 @@ export default function SchoolsList() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [schoolToDelete, setSchoolToDelete] = useState<School | null>(null);
   const [confirmText, setConfirmText] = useState("");
+  const [resetLoginDialogOpen, setResetLoginDialogOpen] = useState(false);
+  const [tempPassword, setTempPassword] = useState<string>("");
+  const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -116,6 +119,59 @@ export default function SchoolsList() {
       });
     },
   });
+
+  const impersonateMutation = useMutation({
+    mutationFn: async (schoolId: string) => {
+      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/impersonate`, {});
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Impersonating admin",
+        description: `Now logged in as ${data.admin.displayName || data.admin.email}`,
+      });
+      // Redirect to dashboard as the school admin
+      setTimeout(() => {
+        window.location.href = "/dashboard";
+      }, 500);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to impersonate",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const resetLoginMutation = useMutation({
+    mutationFn: async (schoolId: string) => {
+      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/reset-login`, {});
+    },
+    onSuccess: (data: any) => {
+      setTempPassword(data.tempPassword);
+      setResetAdminInfo(data.admin);
+      setResetLoginDialogOpen(true);
+      toast({
+        title: "Password reset successful",
+        description: `Temporary password generated for ${data.admin.displayName || data.admin.email}`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to reset login",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const [passwordCopied, setPasswordCopied] = useState(false);
+  
+  const copyPassword = () => {
+    navigator.clipboard.writeText(tempPassword);
+    setPasswordCopied(true);
+    setTimeout(() => setPasswordCopied(false), 2000);
+  };
 
   const getStatusBadge = (status: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive"> = {
@@ -269,6 +325,22 @@ export default function SchoolsList() {
                         Manage School
                       </DropdownMenuItem>
                       <DropdownMenuItem 
+                        onClick={() => impersonateMutation.mutate(school.id)}
+                        disabled={school.adminCount === 0}
+                        data-testid={`menu-impersonate-${school.id}`}
+                      >
+                        <UserCog className="w-4 h-4 mr-2" />
+                        Impersonate Admin
+                      </DropdownMenuItem>
+                      <DropdownMenuItem 
+                        onClick={() => resetLoginMutation.mutate(school.id)}
+                        disabled={school.adminCount === 0}
+                        data-testid={`menu-reset-login-${school.id}`}
+                      >
+                        <KeyRound className="w-4 h-4 mr-2" />
+                        Reset Admin Login
+                      </DropdownMenuItem>
+                      <DropdownMenuItem 
                         onClick={() => suspendMutation.mutate(school.id)}
                         disabled={school.status === 'suspended'}
                         data-testid={`menu-suspend-${school.id}`}
@@ -397,6 +469,59 @@ export default function SchoolsList() {
               data-testid="button-confirm-delete"
             >
               {deleteMutation.isPending ? "Deleting..." : "Delete School"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Reset Login Dialog */}
+      <Dialog open={resetLoginDialogOpen} onOpenChange={setResetLoginDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Temporary Password Generated</DialogTitle>
+            <DialogDescription>
+              Share this temporary password with the school admin. They should change it after logging in.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Admin: {resetAdminInfo?.displayName || resetAdminInfo?.email}</p>
+              <p className="text-sm text-muted-foreground">Email: {resetAdminInfo?.email}</p>
+            </div>
+            <div className="space-y-2">
+              <Label>Temporary Password</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={tempPassword}
+                  readOnly
+                  className="font-mono"
+                  data-testid="input-temp-password"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={copyPassword}
+                  data-testid="button-copy-password"
+                >
+                  {passwordCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Click the copy button to copy the password to clipboard
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                setResetLoginDialogOpen(false);
+                setTempPassword("");
+                setResetAdminInfo(null);
+                setPasswordCopied(false);
+              }}
+              data-testid="button-close-reset-dialog"
+            >
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>

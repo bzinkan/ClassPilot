@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Building2, Plus, Mail, User } from "lucide-react";
+import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check } from "lucide-react";
 
 interface School {
   id: string;
@@ -46,6 +46,12 @@ export default function SchoolDetail() {
   const [isAddAdminOpen, setIsAddAdminOpen] = useState(false);
   const [newAdminEmail, setNewAdminEmail] = useState("");
   const [newAdminName, setNewAdminName] = useState("");
+  const [isEditLicensesOpen, setIsEditLicensesOpen] = useState(false);
+  const [newMaxLicenses, setNewMaxLicenses] = useState(100);
+  const [resetLoginDialogOpen, setResetLoginDialogOpen] = useState(false);
+  const [tempPassword, setTempPassword] = useState<string>("");
+  const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
+  const [passwordCopied, setPasswordCopied] = useState(false);
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -91,6 +97,85 @@ export default function SchoolDetail() {
   const handleAddAdmin = () => {
     if (!newAdminEmail) return;
     addAdminMutation.mutate({ email: newAdminEmail, displayName: newAdminName });
+  };
+
+  const editLicensesMutation = useMutation({
+    mutationFn: async (maxLicenses: number) => {
+      return await apiRequest("PATCH", `/api/super-admin/schools/${schoolId}`, { maxLicenses });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/super-admin/schools/${schoolId}`] });
+      queryClient.invalidateQueries({ queryKey: ['/api/super-admin/schools'] });
+      
+      toast({
+        title: "License limit updated",
+        description: `Maximum licenses set to ${newMaxLicenses}`,
+      });
+      
+      setIsEditLicensesOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update license limit",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const handleEditLicenses = () => {
+    if (newMaxLicenses < 1) return;
+    editLicensesMutation.mutate(newMaxLicenses);
+  };
+
+  const impersonateMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/impersonate`, {});
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Impersonating admin",
+        description: `Now logged in as ${data.admin.displayName || data.admin.email}`,
+      });
+      setTimeout(() => {
+        window.location.href = "/dashboard";
+      }, 500);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to impersonate",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const resetLoginMutation = useMutation({
+    mutationFn: async () => {
+      return await apiRequest("POST", `/api/super-admin/schools/${schoolId}/reset-login`, {});
+    },
+    onSuccess: (data: any) => {
+      setTempPassword(data.tempPassword);
+      setResetAdminInfo(data.admin);
+      setResetLoginDialogOpen(true);
+      toast({
+        title: "Password reset successful",
+        description: `Temporary password generated for ${data.admin.displayName || data.admin.email}`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to reset login",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const copyPassword = () => {
+    navigator.clipboard.writeText(tempPassword);
+    setPasswordCopied(true);
+    setTimeout(() => setPasswordCopied(false), 2000);
   };
 
   if (isLoading) {
@@ -139,6 +224,26 @@ export default function SchoolDetail() {
             </div>
             <p className="text-muted-foreground mt-2">{school.domain}</p>
           </div>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              onClick={() => impersonateMutation.mutate()}
+              disabled={school.adminCount === 0 || impersonateMutation.isPending}
+              data-testid="button-impersonate-admin"
+            >
+              <UserCog className="w-4 h-4 mr-2" />
+              Impersonate Admin
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => resetLoginMutation.mutate()}
+              disabled={school.adminCount === 0 || resetLoginMutation.isPending}
+              data-testid="button-reset-login"
+            >
+              <KeyRound className="w-4 h-4 mr-2" />
+              Reset Admin Login
+            </Button>
+          </div>
         </div>
 
         <div className="grid gap-4 md:grid-cols-3 mb-6">
@@ -164,9 +269,24 @@ export default function SchoolDetail() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-bold">{school.studentCount}</div>
-              <p className="text-xs text-muted-foreground">
-                Max: {school.maxLicenses}
-              </p>
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-xs text-muted-foreground">
+                  Max: {school.maxLicenses}
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setNewMaxLicenses(school.maxLicenses);
+                    setIsEditLicensesOpen(true);
+                  }}
+                  className="h-6 px-2"
+                  data-testid="button-edit-licenses"
+                >
+                  <Edit className="w-3 h-3 mr-1" />
+                  Edit
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -280,6 +400,103 @@ export default function SchoolDetail() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Edit License Limits Dialog */}
+        <Dialog open={isEditLicensesOpen} onOpenChange={setIsEditLicensesOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Edit License Limit</DialogTitle>
+              <DialogDescription>
+                Set the maximum number of student licenses for this school
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="maxLicenses">Maximum Licenses</Label>
+                <Input
+                  id="maxLicenses"
+                  type="number"
+                  min="1"
+                  value={newMaxLicenses}
+                  onChange={(e) => setNewMaxLicenses(parseInt(e.target.value) || 0)}
+                  data-testid="input-max-licenses"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Current usage: {school?.studentCount} students
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setIsEditLicensesOpen(false)}
+                data-testid="button-cancel-edit-licenses"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleEditLicenses}
+                disabled={newMaxLicenses < 1 || editLicensesMutation.isPending}
+                data-testid="button-confirm-edit-licenses"
+              >
+                {editLicensesMutation.isPending ? "Updating..." : "Update Limit"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Reset Login Dialog */}
+        <Dialog open={resetLoginDialogOpen} onOpenChange={setResetLoginDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Temporary Password Generated</DialogTitle>
+              <DialogDescription>
+                Share this temporary password with the school admin. They should change it after logging in.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Admin: {resetAdminInfo?.displayName || resetAdminInfo?.email}</p>
+                <p className="text-sm text-muted-foreground">Email: {resetAdminInfo?.email}</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Temporary Password</Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={tempPassword}
+                    readOnly
+                    className="font-mono"
+                    data-testid="input-temp-password-detail"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={copyPassword}
+                    data-testid="button-copy-password-detail"
+                  >
+                    {passwordCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Click the copy button to copy the password to clipboard
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={() => {
+                  setResetLoginDialogOpen(false);
+                  setTempPassword("");
+                  setResetAdminInfo(null);
+                  setPasswordCopied(false);
+                }}
+                data-testid="button-close-reset-dialog-detail"
+              >
+                Done
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
