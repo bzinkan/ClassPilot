@@ -1,8 +1,23 @@
 import { useRef, useCallback } from 'react';
 
+// ICE servers configuration with Xirsys TURN fallback for restrictive networks
 const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' }
+  // STUN servers for NAT traversal
+  { urls: 'stun:us-turn7.xirsys.com' },
+  
+  // Xirsys TURN servers with multiple transport options
+  {
+    username: import.meta.env.VITE_TURN_USERNAME || '',
+    credential: import.meta.env.VITE_TURN_CREDENTIAL || '',
+    urls: [
+      'turn:us-turn7.xirsys.com:80?transport=udp',
+      'turn:us-turn7.xirsys.com:3478?transport=udp',
+      'turn:us-turn7.xirsys.com:80?transport=tcp',
+      'turn:us-turn7.xirsys.com:3478?transport=tcp',
+      'turns:us-turn7.xirsys.com:443?transport=tcp',
+      'turns:us-turn7.xirsys.com:5349?transport=tcp'
+    ]
+  }
 ];
 
 interface WebRTCConnection {
