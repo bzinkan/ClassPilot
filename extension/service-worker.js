@@ -31,20 +31,23 @@ const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
 const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
+// Heartbeat stays at 60s in ACTIVE mode (presence/lastSeen only).
 const HEARTBEAT_ACTIVE_MINUTES = 1;
 const HEARTBEAT_IDLE_MINUTES = 10;
+const OBSERVED_HEARTBEAT_SECONDS = 10;
+const NAVIGATION_DEBOUNCE_MS = 350;
 
 let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
 let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
 let wsReconnectBackoffMs = 5000;
-let navigationDebounceTimer = null;
-let pendingNavigationEvent = null;
-let lastLoggedUrl = null;
-let lastLoggedAt = 0;
+let navigationDebounceTimers = new Map();
+let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
 let settingsAlarmScheduled = false;
+let observedHeartbeatTimer = null;
+let observedByTeacher = false;
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -195,6 +198,33 @@ function scheduleHeartbeat(periodInMinutes) {
   }
 }
 
+function syncObservedHeartbeat(reason) {
+  if (trackingState === TRACKING_STATES.ACTIVE && observedByTeacher) {
+    if (!observedHeartbeatTimer) {
+      observedHeartbeatTimer = setInterval(() => {
+        sendHeartbeat();
+      }, OBSERVED_HEARTBEAT_SECONDS * 1000);
+      console.log(`[Heartbeat] Observed mode enabled (${reason})`);
+      sendHeartbeat();
+    }
+    return;
+  }
+
+  if (observedHeartbeatTimer) {
+    clearInterval(observedHeartbeatTimer);
+    observedHeartbeatTimer = null;
+    console.log(`[Heartbeat] Observed mode disabled (${reason})`);
+  }
+}
+
+function setObservedState(isObserved, reason) {
+  if (observedByTeacher === isObserved) {
+    return;
+  }
+  observedByTeacher = isObserved;
+  syncObservedHeartbeat(reason);
+}
+
 async function updateTrackingState(reason = 'state-check') {
   const nextState = determineTrackingState();
   if (trackingState === nextState) {
@@ -214,6 +244,8 @@ async function updateTrackingState(reason = 'state-check') {
     scheduleHeartbeat(null);
     disconnectWebSocket();
   }
+
+  syncObservedHeartbeat('tracking-state');
 }
 
 async function initializeAdaptiveTracking(reason) {
@@ -249,26 +281,21 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     return;
   }
 
-  pendingNavigationEvent = { eventType, url, title, metadata };
-  if (navigationDebounceTimer) {
-    clearTimeout(navigationDebounceTimer);
+  const key = `${eventType}:${metadata.tabId ?? 'unknown'}`;
+  pendingNavigationEvents.set(key, { eventType, url, title, metadata });
+
+  if (navigationDebounceTimers.has(key)) {
+    clearTimeout(navigationDebounceTimers.get(key));
   }
 
-  navigationDebounceTimer = setTimeout(async () => {
-    const event = pendingNavigationEvent;
-    pendingNavigationEvent = null;
-    navigationDebounceTimer = null;
+  navigationDebounceTimers.set(key, setTimeout(async () => {
+    const event = pendingNavigationEvents.get(key);
+    pendingNavigationEvents.delete(key);
+    navigationDebounceTimers.delete(key);
 
     if (!event || trackingState !== TRACKING_STATES.ACTIVE) {
       return;
     }
-
-    const now = Date.now();
-    if (event.url === lastLoggedUrl && now - lastLoggedAt < 5000) {
-      return;
-    }
-    lastLoggedUrl = event.url;
-    lastLoggedAt = now;
 
     if (!CONFIG.deviceId) return;
 
@@ -289,7 +316,7 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     } catch (error) {
       console.error('Event logging error:', error);
     }
-  }, 1000);
+  }, NAVIGATION_DEBOUNCE_MS));
 }
 
 // Email normalization: ensures consistent student identity
@@ -1553,6 +1580,7 @@ async function sendToOffscreen(message) {
 async function handleScreenShareRequest(mode = 'auto') {
   try {
     console.log('[WebRTC] Teacher requested screen share, mode:', mode);
+    setObservedState(true, 'teacher-request');
     
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
@@ -1604,6 +1632,7 @@ async function handleScreenShareRequest(mode = 'auto') {
 async function handleStopScreenShare() {
   try {
     console.log('[WebRTC] Teacher requested to stop screen share');
+    setObservedState(false, 'teacher-stop');
     
     // Tell offscreen to stop sharing and clean up
     const result = await sendToOffscreen({
@@ -1732,6 +1761,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'CONNECTION_FAILED') {
     console.log('[WebRTC] Connection failed, cleaning up');
     closeOffscreenDocument();
+    setObservedState(false, 'connection-failed');
     sendResponse({ success: true });
   }
   
@@ -1741,6 +1771,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       title: 'Screen Sharing Error',
       message: message.error || 'Failed to capture screen',
     });
+    setObservedState(false, 'capture-error');
     sendResponse({ success: true });
   }
   
@@ -1912,6 +1943,7 @@ function connectWebSocket() {
   ws.onclose = () => {
     console.log('WebSocket disconnected');
     ws = null; // Clear the reference
+    setObservedState(false, 'ws-closed');
     
     if (trackingState !== TRACKING_STATES.ACTIVE) {
       return;
@@ -1926,7 +1958,7 @@ function connectWebSocket() {
   };
 }
 
-// Tab change listener - send immediate heartbeat
+// Tab change listener - send immediate event (debounced)
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   if (trackingState !== TRACKING_STATES.ACTIVE) return;
   try {
@@ -1937,7 +1969,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
 });
 
-// Tab update listener - send heartbeat on URL/title change
+// Tab update listener - send event on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (trackingState !== TRACKING_STATES.ACTIVE) return;
   if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
