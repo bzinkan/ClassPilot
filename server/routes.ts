@@ -2706,12 +2706,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
 
   // Settings endpoints
-  app.get("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/settings", checkIPAllowlist, async (req, res) => {
     try {
+      const studentToken =
+        req.header("x-student-token") ||
+        (typeof req.query.studentToken === "string" ? req.query.studentToken : undefined);
+      const hasSession = Boolean(req.session?.userId);
+
+      if (!hasSession && !studentToken) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
       let settings = await storage.getSettings();
-      
-      // Create default settings if none exist
-      if (!settings) {
+
+      if (!settings && hasSession) {
         settings = await storage.upsertSettings({
           schoolId: process.env.SCHOOL_ID || "default-school",
           schoolName: "School",
@@ -2721,8 +2729,36 @@ export async function registerRoutes(app: Express): Promise<Server> {
           ipAllowlist: [],
         });
       }
-      
-      res.json(settings);
+
+      if (hasSession) {
+        return res.json(settings);
+      }
+
+      try {
+        const payload = verifyStudentToken(studentToken);
+        if (settings?.schoolId && payload.schoolId && settings.schoolId !== payload.schoolId) {
+          return res.status(403).json({ error: "Settings are not available for this school" });
+        }
+      } catch (error) {
+        if (error instanceof TokenExpiredError) {
+          return res.status(401).json({ error: "Student token expired" });
+        }
+        if (error instanceof InvalidTokenError) {
+          return res.status(403).json({ error: "Invalid student token" });
+        }
+        throw error;
+      }
+
+      const publicSettings = {
+        enableTrackingHours: settings?.enableTrackingHours ?? false,
+        trackingStartTime: settings?.trackingStartTime ?? "00:00",
+        trackingEndTime: settings?.trackingEndTime ?? "23:59",
+        trackingDays:
+          settings?.trackingDays ?? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        schoolTimezone: settings?.schoolTimezone ?? "America/New_York",
+      };
+
+      res.json(publicSettings);
     } catch (error) {
       console.error("Get settings error:", error);
       res.status(500).json({ error: "Internal server error" });
