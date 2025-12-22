@@ -6,7 +6,6 @@ const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
 
 let CONFIG = {
   serverUrl: DEFAULT_SERVER_URL,
-  heartbeatInterval: 10000, // 10 seconds
   deviceId: null,
   studentName: null,
   studentEmail: null,
@@ -16,8 +15,36 @@ let CONFIG = {
 };
 
 let ws = null;
-let backoffMs = 0; // Exponential backoff for heartbeat failures
 let cameraActive = false; // Track camera usage across all tabs
+
+// Adaptive tracking state machine
+// ACTIVE: within school hours and user active
+// IDLE: within school hours but user idle/locked
+// OFF: outside school hours (unless monitoring outside hours is allowed)
+const TRACKING_STATES = {
+  ACTIVE: 'ACTIVE',
+  IDLE: 'IDLE',
+  OFF: 'OFF',
+};
+
+const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
+const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
+const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
+const IDLE_DETECTION_SECONDS = 180;
+const HEARTBEAT_ACTIVE_MINUTES = 1;
+const HEARTBEAT_IDLE_MINUTES = 10;
+
+let trackingState = TRACKING_STATES.OFF;
+let idleState = 'active';
+let schoolSettings = null;
+let schoolSettingsFetchedAt = 0;
+let wsReconnectBackoffMs = 5000;
+let navigationDebounceTimer = null;
+let pendingNavigationEvent = null;
+let lastLoggedUrl = null;
+let lastLoggedAt = 0;
+let idleListenerReady = false;
+let settingsAlarmScheduled = false;
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -29,6 +56,251 @@ const kv = {
   get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
 };
+
+function isHttpUrl(url) {
+  return Boolean(url && /^https?:\/\//i.test(url));
+}
+
+function parseTimeToMinutes(timeString) {
+  if (!timeString) return null;
+  const [hours, minutes] = timeString.split(':').map(Number);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
+  return (hours * 60) + minutes;
+}
+
+function getZonedTimeParts(timeZone) {
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      weekday: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    });
+    const parts = formatter.formatToParts(new Date());
+    const lookup = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    return {
+      weekday: lookup.weekday,
+      hour: Number(lookup.hour),
+      minute: Number(lookup.minute),
+    };
+  } catch (error) {
+    console.warn('[School Hours] Invalid timezone, defaulting to local time:', error);
+    const now = new Date();
+    return {
+      weekday: now.toLocaleDateString('en-US', { weekday: 'short' }),
+      hour: now.getHours(),
+      minute: now.getMinutes(),
+    };
+  }
+}
+
+function weekdayToIso(weekday) {
+  const map = {
+    Mon: 1,
+    Tue: 2,
+    Wed: 3,
+    Thu: 4,
+    Fri: 5,
+    Sat: 6,
+    Sun: 7,
+  };
+  return map[weekday];
+}
+
+function isWithinSchoolHours(settings) {
+  if (!settings) return false;
+  const { timezone, schoolDays, startTime, endTime } = settings;
+  if (!timezone || !Array.isArray(schoolDays) || !startTime || !endTime) {
+    return false;
+  }
+
+  const timeParts = getZonedTimeParts(timezone);
+  const weekdayIso = weekdayToIso(timeParts.weekday);
+  const isSchoolDay = schoolDays.includes(weekdayIso) || (weekdayIso === 7 && schoolDays.includes(0));
+  if (!isSchoolDay) return false;
+
+  const startMinutes = parseTimeToMinutes(startTime);
+  const endMinutes = parseTimeToMinutes(endTime);
+  if (startMinutes === null || endMinutes === null) return false;
+
+  const currentMinutes = (timeParts.hour * 60) + timeParts.minute;
+  if (startMinutes === endMinutes) return true;
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  }
+  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+}
+
+async function loadCachedSchoolSettings() {
+  const stored = await kv.get([SCHOOL_SETTINGS_CACHE_KEY, SCHOOL_SETTINGS_FETCHED_AT_KEY]);
+  if (stored[SCHOOL_SETTINGS_CACHE_KEY]) {
+    schoolSettings = stored[SCHOOL_SETTINGS_CACHE_KEY];
+  }
+  if (stored[SCHOOL_SETTINGS_FETCHED_AT_KEY]) {
+    schoolSettingsFetchedAt = stored[SCHOOL_SETTINGS_FETCHED_AT_KEY];
+  }
+}
+
+async function refreshSchoolSettings({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && schoolSettingsFetchedAt && now - schoolSettingsFetchedAt < SETTINGS_FETCH_INTERVAL_MS) {
+    return schoolSettings;
+  }
+
+  try {
+    const response = await fetch(`${CONFIG.serverUrl}/api/school/settings`, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Settings fetch failed (${response.status})`);
+    }
+    const settings = await response.json();
+    schoolSettings = settings;
+    schoolSettingsFetchedAt = now;
+    await kv.set({
+      [SCHOOL_SETTINGS_CACHE_KEY]: settings,
+      [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
+    });
+    console.log('[School Hours] Settings updated:', settings);
+    return settings;
+  } catch (error) {
+    console.warn('[School Hours] Failed to fetch settings:', error);
+    return schoolSettings;
+  }
+}
+
+function determineTrackingState() {
+  const effectiveSettings = schoolSettings || { monitorOutsideHours: false };
+  // School hours enforcement is based solely on admin-configured settings.
+  const withinHours = isWithinSchoolHours(effectiveSettings);
+  const monitorOutsideHours = Boolean(effectiveSettings.monitorOutsideHours);
+
+  if (!withinHours && !monitorOutsideHours) {
+    return TRACKING_STATES.OFF;
+  }
+
+  if (idleState === 'idle' || idleState === 'locked') {
+    return TRACKING_STATES.IDLE;
+  }
+
+  return TRACKING_STATES.ACTIVE;
+}
+
+function disconnectWebSocket() {
+  chrome.alarms.clear('ws-reconnect');
+  if (ws) {
+    try {
+      ws.close();
+    } catch (error) {
+      console.warn('WebSocket close failed:', error);
+    }
+  }
+  ws = null;
+}
+
+function scheduleHeartbeat(periodInMinutes) {
+  chrome.alarms.clear('heartbeat');
+  if (periodInMinutes) {
+    chrome.alarms.create('heartbeat', { periodInMinutes });
+    sendHeartbeat();
+  }
+}
+
+async function updateTrackingState(reason = 'state-check') {
+  const nextState = determineTrackingState();
+  if (trackingState === nextState) {
+    return;
+  }
+
+  trackingState = nextState;
+  console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
+
+  if (trackingState === TRACKING_STATES.ACTIVE) {
+    scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
+    connectWebSocket();
+  } else if (trackingState === TRACKING_STATES.IDLE) {
+    scheduleHeartbeat(HEARTBEAT_IDLE_MINUTES);
+    disconnectWebSocket();
+  } else {
+    scheduleHeartbeat(null);
+    disconnectWebSocket();
+  }
+}
+
+async function initializeAdaptiveTracking(reason) {
+  await loadCachedSchoolSettings();
+  await refreshSchoolSettings({ force: false });
+
+  if (!idleListenerReady && chrome.idle) {
+    chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
+    chrome.idle.queryState(IDLE_DETECTION_SECONDS, (state) => {
+      idleState = state;
+      updateTrackingState('idle-initial'); // Idle behavior: switch states based on idle/locked signal.
+    });
+    chrome.idle.onStateChanged.addListener((state) => {
+      idleState = state;
+      updateTrackingState('idle-change'); // Idle behavior: switch states based on idle/locked signal.
+    });
+    idleListenerReady = true;
+  }
+
+  if (!settingsAlarmScheduled) {
+    chrome.alarms.create('settings-refresh', { periodInMinutes: 60 });
+    settingsAlarmScheduled = true;
+  }
+
+  updateTrackingState(reason);
+}
+
+function queueNavigationEvent(eventType, url, title, metadata = {}) {
+  if (trackingState !== TRACKING_STATES.ACTIVE) {
+    return;
+  }
+  if (!isHttpUrl(url)) {
+    return;
+  }
+
+  pendingNavigationEvent = { eventType, url, title, metadata };
+  if (navigationDebounceTimer) {
+    clearTimeout(navigationDebounceTimer);
+  }
+
+  navigationDebounceTimer = setTimeout(async () => {
+    const event = pendingNavigationEvent;
+    pendingNavigationEvent = null;
+    navigationDebounceTimer = null;
+
+    if (!event || trackingState !== TRACKING_STATES.ACTIVE) {
+      return;
+    }
+
+    const now = Date.now();
+    if (event.url === lastLoggedUrl && now - lastLoggedAt < 5000) {
+      return;
+    }
+    lastLoggedUrl = event.url;
+    lastLoggedAt = now;
+
+    if (!CONFIG.deviceId) return;
+
+    try {
+      await fetch(`${CONFIG.serverUrl}/api/event`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: CONFIG.deviceId,
+          eventType: event.eventType,
+          metadata: {
+            url: event.url,
+            title: event.title,
+            ...event.metadata,
+          },
+        }),
+      });
+    } catch (error) {
+      console.error('Event logging error:', error);
+    }
+  }, 1000);
+}
 
 // Email normalization: ensures consistent student identity
 function normalizeEmail(raw) {
@@ -182,16 +454,14 @@ async function ensureRegistered() {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
   ensureRegistered();
-  // Run health check immediately to ensure everything starts
-  setTimeout(() => healthCheck(), 2000);
+  setTimeout(() => initializeAdaptiveTracking('install'), 2000);
 });
 
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
     ensureRegistered();
-    // Run health check immediately to ensure everything starts
-    setTimeout(() => healthCheck(), 2000);
+    setTimeout(() => initializeAdaptiveTracking('startup'), 2000);
   });
 }
 
@@ -261,10 +531,10 @@ if (chrome.runtime.onStartup) {
     screenLocked: screenLocked
   });
   
-  // Run initial health check after a short delay to ensure everything starts
+  // Initialize adaptive tracking after state is restored
   setTimeout(() => {
-    console.log('[Service Worker] Running initial health check...');
-    healthCheck();
+    console.log('[Service Worker] Initializing adaptive tracking...');
+    initializeAdaptiveTracking('wake');
   }, 2000);
 })();
 
@@ -458,26 +728,10 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentT
   // Auto-detect logged-in user and register
   await autoDetectAndRegister();
   
-  // Start heartbeat if configured
+  // Initialize adaptive tracking once config is loaded
   if (CONFIG.deviceId) {
-    startHeartbeat();
-    connectWebSocket();
+    initializeAdaptiveTracking('config-loaded');
   }
-  
-  // Start health check alarm (runs every 60 seconds to ensure extension stays alive)
-  // This recovers from service worker restarts without manual reload
-  chrome.alarms.create('health-check', {
-    periodInMinutes: 1, // 60 seconds (Chrome minimum)
-  });
-  console.log('[Init] Health check alarm started');
-  
-  // Keep-alive alarm to prevent service worker termination
-  // Chrome terminates service workers after 30 seconds of inactivity
-  // This alarm pings every 25 seconds to keep it alive
-  chrome.alarms.create('keep-alive', {
-    periodInMinutes: 0.416666667, // 25 seconds (just under 30 second timeout)
-  });
-  console.log('[Init] Keep-alive alarm started');
 });
 
 // Generate unique device ID if not exists
@@ -579,9 +833,8 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
       activeStudentId: data.student?.id || null,
     });
     
-    // Start heartbeat and WebSocket
-    startHeartbeat();
-    connectWebSocket();
+    // Start adaptive tracking after registration
+    initializeAdaptiveTracking('student-registered');
     
     return data;
   } catch (error) {
@@ -592,6 +845,9 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 
 // Send heartbeat with current tab info
 async function sendHeartbeat() {
+  if (trackingState === TRACKING_STATES.OFF) {
+    return;
+  }
   // EMAIL-FIRST: Require email before sending heartbeats
   if (!CONFIG.studentEmail) {
     console.log('Skipping heartbeat - no studentEmail (dev mode or not logged in)');
@@ -665,6 +921,7 @@ async function sendHeartbeat() {
       activeFlightPathName: activeFlightPathName,
       isSharing: false,
       cameraActive: cameraActive,
+      status: trackingState.toLowerCase(),
     };
     
     // ✅ JWT AUTHENTICATION: Include studentToken if available (INDUSTRY STANDARD)
@@ -690,20 +947,11 @@ async function sendHeartbeat() {
       setTimeout(() => ensureRegistered(), 2000); // 2 second delay before re-registering
       return; // Skip rest of error handling
     } else if (response.status >= 500) {
-      // Server error - use exponential backoff
-      backoffMs = Math.min(60000, (backoffMs || 5000) * 2);
-      console.error('Heartbeat server error:', response.status, 'backing off', backoffMs, 'ms');
-      
-      // Schedule retry with backoff
-      chrome.alarms.create('heartbeat-retry', {
-        when: Date.now() + backoffMs + Math.floor(Math.random() * 1500),
-      });
-      
+      // Server error - log and wait for next scheduled heartbeat
+      console.error('Heartbeat server error:', response.status);
       chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
       chrome.action.setBadgeText({ text: '!' });
     } else if (response.ok) {
-      // Success - reset backoff
-      backoffMs = 0;
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
     } else {
@@ -715,108 +963,36 @@ async function sendHeartbeat() {
     
   } catch (error) {
     console.error('Heartbeat network error:', error);
-    // Network error - use backoff
-    backoffMs = Math.min(60000, (backoffMs || 5000) * 2);
-    chrome.alarms.create('heartbeat-retry', {
-      when: Date.now() + backoffMs + Math.floor(Math.random() * 1500),
-    });
     chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
     chrome.action.setBadgeText({ text: '!' });
   }
 }
 
-// Start periodic heartbeat using chrome.alarms (reliable in MV3 service workers)
-function startHeartbeat() {
-  // Clear any existing alarms
-  chrome.alarms.clear('heartbeat');
-  chrome.alarms.clear('heartbeat-retry');
-  
-  // Send immediate heartbeat
-  sendHeartbeat();
-  
-  // Schedule next heartbeat using 'when' (in milliseconds from epoch)
-  // Chrome alarms have a 1-minute minimum for periodInMinutes, so we use 'when' instead
-  scheduleNextHeartbeat();
-  console.log('Heartbeat started with chrome.alarms');
-}
-
-// Schedule next heartbeat
-function scheduleNextHeartbeat() {
-  chrome.alarms.create('heartbeat', {
-    when: Date.now() + CONFIG.heartbeatInterval,
-  });
-}
-
-// Stop heartbeat and WebSocket
-function stopHeartbeat() {
-  chrome.alarms.clear('heartbeat');
-  chrome.alarms.clear('heartbeat-retry');
-  chrome.alarms.clear('ws-reconnect'); // Also clear WebSocket reconnection alarm
-  chrome.alarms.clear('health-check');
-  console.log('Heartbeat stopped');
-}
-
-// Health check: ensures extension stays alive after service worker restarts
+// Health check: refreshes tracking state after service worker restarts
 async function healthCheck() {
   console.log('[Health Check] Running...');
-  
-  try {
-    // Check if we have a deviceId - if not, try to initialize
-    if (!CONFIG.deviceId) {
-      console.log('[Health Check] No deviceId found, loading from storage...');
-      const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail']);
-      
-      if (stored.config) {
-        CONFIG = { ...CONFIG, ...stored.config };
-      }
-      if (stored.deviceId) {
-        CONFIG.deviceId = stored.deviceId;
-      }
-      if (stored.activeStudentId) {
-        CONFIG.activeStudentId = stored.activeStudentId;
-      }
-      if (stored.studentEmail) {
-        CONFIG.studentEmail = stored.studentEmail;
-      }
-      
-      console.log('[Health Check] Loaded config:', CONFIG);
-    }
-    
-    // Only proceed if we have a deviceId
-    if (!CONFIG.deviceId) {
-      console.log('[Health Check] No deviceId - extension not yet configured');
-      return;
-    }
-    
-    // Check if heartbeat alarm is scheduled
-    const heartbeatAlarm = await chrome.alarms.get('heartbeat');
-    if (!heartbeatAlarm) {
-      console.log('[Health Check] Heartbeat not running, restarting...');
-      startHeartbeat();
-    }
-    
-    // Check WebSocket connection
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      console.log('[Health Check] WebSocket not connected, reconnecting...');
-      connectWebSocket();
-    }
-    
-    console.log('[Health Check] Complete - extension healthy');
-  } catch (error) {
-    console.error('[Health Check] Error:', error);
+  if (!CONFIG.deviceId) {
+    console.log('[Health Check] No deviceId - extension not yet configured');
+    return;
   }
+  await refreshSchoolSettings({ force: false });
+  updateTrackingState('health-check');
+
+  const heartbeatAlarm = await chrome.alarms.get('heartbeat');
+  if (trackingState === TRACKING_STATES.ACTIVE && !heartbeatAlarm) {
+    scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
+  } else if (trackingState === TRACKING_STATES.IDLE && !heartbeatAlarm) {
+    scheduleHeartbeat(HEARTBEAT_IDLE_MINUTES);
+  } else if (trackingState === TRACKING_STATES.OFF && heartbeatAlarm) {
+    scheduleHeartbeat(null);
+  }
+  console.log('[Health Check] Complete - tracking state checked');
 }
 
 // Alarm listener for heartbeat and WebSocket reconnection
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     sendHeartbeat();
-    // Reschedule next heartbeat (manual periodic behavior)
-    scheduleNextHeartbeat();
-  } else if (alarm.name === 'heartbeat-retry') {
-    // Retry after backoff
-    sendHeartbeat();
-    scheduleNextHeartbeat();
   } else if (alarm.name === 'ws-reconnect') {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
     console.log('WebSocket reconnection alarm triggered');
@@ -825,10 +1001,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
     healthCheck();
-  } else if (alarm.name === 'keep-alive') {
-    // Keep-alive ping to prevent service worker termination
-    // Just log to keep the service worker active
-    console.log('[Keep-Alive] Service worker alive at', new Date().toISOString());
+  } else if (alarm.name === 'settings-refresh') {
+    refreshSchoolSettings({ force: false }).then(() => {
+      updateTrackingState('settings-refresh');
+    });
   }
 });
 
@@ -1583,6 +1759,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Connect to WebSocket for signaling
 function connectWebSocket() {
+  if (trackingState !== TRACKING_STATES.ACTIVE) {
+    console.log('Skipping WebSocket - tracking state is not ACTIVE');
+    return;
+  }
   // EMAIL-FIRST: Require both email and deviceId for WebSocket
   if (!CONFIG.studentEmail || !CONFIG.deviceId) {
     console.log('Skipping WebSocket - missing email or deviceId');
@@ -1599,6 +1779,7 @@ function connectWebSocket() {
   
   ws.onopen = () => {
     console.log('WebSocket connected');
+    wsReconnectBackoffMs = 5000;
     // Authenticate as student with email as primary identity
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -1739,92 +1920,39 @@ function connectWebSocket() {
   };
   
   ws.onclose = () => {
-    console.log('WebSocket disconnected, will reconnect in 5s...');
+    console.log('WebSocket disconnected');
     ws = null; // Clear the reference
     
-    // Use chrome.alarms instead of setTimeout to ensure reconnection happens
-    // even if service worker is terminated
+    if (trackingState !== TRACKING_STATES.ACTIVE) {
+      return;
+    }
+
+    const delay = Math.min(wsReconnectBackoffMs, 120000);
+    console.log(`WebSocket will reconnect in ${Math.round(delay / 1000)}s...`);
     chrome.alarms.create('ws-reconnect', {
-      when: Date.now() + 5000, // 5 seconds from now
+      when: Date.now() + delay,
     });
+    wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 120000);
   };
 }
 
 // Tab change listener - send immediate heartbeat
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  // Log tab change event
-  if (CONFIG.deviceId) {
-    await sendHeartbeat();
-    
-    // Log the event
-    try {
-      await fetch(`${CONFIG.serverUrl}/api/event`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: CONFIG.deviceId,
-          eventType: 'tab_change',
-          metadata: { tabId: activeInfo.tabId },
-        }),
-      });
-    } catch (error) {
-      console.error('Event logging error:', error);
-    }
+  if (trackingState !== TRACKING_STATES.ACTIVE) return;
+  try {
+    const tab = await chrome.tabs.get(activeInfo.tabId);
+    queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
+  } catch (error) {
+    console.warn('Failed to read active tab info:', error);
   }
 });
 
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (CONFIG.deviceId && tab.active && (changeInfo.url || changeInfo.title)) {
-    await sendHeartbeat();
-    
-    // Log URL change event
-    if (changeInfo.url) {
-      try {
-        await fetch(`${CONFIG.serverUrl}/api/event`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            deviceId: CONFIG.deviceId,
-            eventType: 'url_change',
-            metadata: { 
-              url: changeInfo.url,
-              title: tab.title || 'No title',
-            },
-          }),
-        });
-      } catch (error) {
-        console.error('Event logging error:', error);
-      }
-    }
-  }
-});
-
-// Web Navigation listener - track all navigation events (including clicks)
-chrome.webNavigation.onCommitted.addListener(async (details) => {
-  if (!CONFIG.deviceId) return;
-  
-  // Only log main frame navigations (not iframes)
-  if (details.frameId !== 0) return;
-  
-  // Log navigation event with transition type
-  try {
-    await fetch(`${CONFIG.serverUrl}/api/event`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
-        eventType: 'navigation',
-        metadata: { 
-          url: details.url,
-          transitionType: details.transitionType,
-          transitionQualifiers: details.transitionQualifiers,
-          timestamp: details.timeStamp,
-        },
-      }),
-    });
-  } catch (error) {
-    console.error('Navigation event logging error:', error);
+  if (trackingState !== TRACKING_STATES.ACTIVE) return;
+  if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
+  if (changeInfo.url) {
+    queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
   }
 });
 
@@ -1833,8 +1961,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'register') {
     registerDevice(message.deviceId, message.deviceName, message.classId)
       .then(async (data) => {
-        startHeartbeat();
-        connectWebSocket();
+        initializeAdaptiveTracking('manual-register');
         
         // Refresh the current page to apply privacy banner
         try {
@@ -1865,9 +1992,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       CONFIG.serverUrl = newServerUrl;
       chrome.storage.local.set({ config: CONFIG }, () => {
         console.log('Server URL updated to:', newServerUrl);
-        // Restart heartbeat with new server URL
-        stopHeartbeat();
-        startHeartbeat();
+        // Refresh school settings and tracking state with new server URL
+        refreshSchoolSettings({ force: true }).then(() => {
+          updateTrackingState('server-url-update');
+        });
         sendResponse({ success: true });
       });
     } else {
