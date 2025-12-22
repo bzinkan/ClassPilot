@@ -61,75 +61,47 @@ function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
 }
 
-function parseTimeToMinutes(timeString) {
-  if (!timeString) return null;
-  const [hours, minutes] = timeString.split(':').map(Number);
-  if (Number.isNaN(hours) || Number.isNaN(minutes)) return null;
-  return (hours * 60) + minutes;
-}
+// Keep logic in sync with shared/utils.ts isWithinTrackingHours (server-side).
+function isWithinTrackingHours(
+  enableTrackingHours,
+  trackingStartTime,
+  trackingEndTime,
+  schoolTimezone,
+  trackingDays
+) {
+  if (!enableTrackingHours) {
+    return true;
+  }
 
-function getZonedTimeParts(timeZone) {
+  const startTime = trackingStartTime || '00:00';
+  const endTime = trackingEndTime || '23:59';
+  const timezone = schoolTimezone || 'America/New_York';
+  const activeDays = trackingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
   try {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone,
-      weekday: 'short',
+    const now = new Date();
+    const schoolDayName = now.toLocaleString('en-US', {
+      timeZone: timezone,
+      weekday: 'long',
+    });
+
+    if (!activeDays.includes(schoolDayName)) {
+      return false;
+    }
+
+    const schoolTimeString = now.toLocaleString('en-US', {
+      timeZone: timezone,
+      hour12: false,
       hour: '2-digit',
       minute: '2-digit',
-      hour12: false,
     });
-    const parts = formatter.formatToParts(new Date());
-    const lookup = Object.fromEntries(parts.map(part => [part.type, part.value]));
-    return {
-      weekday: lookup.weekday,
-      hour: Number(lookup.hour),
-      minute: Number(lookup.minute),
-    };
+
+    const currentTime = schoolTimeString.split(', ')[1] || schoolTimeString;
+    return currentTime >= startTime && currentTime <= endTime;
   } catch (error) {
-    console.warn('[School Hours] Invalid timezone, defaulting to local time:', error);
-    const now = new Date();
-    return {
-      weekday: now.toLocaleDateString('en-US', { weekday: 'short' }),
-      hour: now.getHours(),
-      minute: now.getMinutes(),
-    };
+    console.error('[School Hours] Error checking tracking hours:', error);
+    return true;
   }
-}
-
-function weekdayToIso(weekday) {
-  const map = {
-    Mon: 1,
-    Tue: 2,
-    Wed: 3,
-    Thu: 4,
-    Fri: 5,
-    Sat: 6,
-    Sun: 7,
-  };
-  return map[weekday];
-}
-
-function isWithinSchoolHours(settings) {
-  if (!settings) return false;
-  const { timezone, schoolDays, startTime, endTime } = settings;
-  if (!timezone || !Array.isArray(schoolDays) || !startTime || !endTime) {
-    return false;
-  }
-
-  const timeParts = getZonedTimeParts(timezone);
-  const weekdayIso = weekdayToIso(timeParts.weekday);
-  const isSchoolDay = schoolDays.includes(weekdayIso) || (weekdayIso === 7 && schoolDays.includes(0));
-  if (!isSchoolDay) return false;
-
-  const startMinutes = parseTimeToMinutes(startTime);
-  const endMinutes = parseTimeToMinutes(endTime);
-  if (startMinutes === null || endMinutes === null) return false;
-
-  const currentMinutes = (timeParts.hour * 60) + timeParts.minute;
-  if (startMinutes === endMinutes) return true;
-  if (startMinutes < endMinutes) {
-    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
-  }
-  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
 }
 
 async function loadCachedSchoolSettings() {
@@ -149,7 +121,17 @@ async function refreshSchoolSettings({ force = false } = {}) {
   }
 
   try {
-    const response = await fetch(`${CONFIG.serverUrl}/api/school/settings`, { cache: 'no-store' });
+    // Tracking hours are configured by admins via /api/settings in the ClassPilot admin UI
+    // (enableTrackingHours, trackingStartTime, trackingEndTime, trackingDays, schoolTimezone).
+    // Requires the "idle" permission in manifest.json to respect ACTIVE/IDLE states.
+    const headers = {};
+    if (CONFIG.studentToken) {
+      headers['x-student-token'] = CONFIG.studentToken;
+    }
+    const response = await fetch(`${CONFIG.serverUrl}/api/settings`, {
+      cache: 'no-store',
+      headers,
+    });
     if (!response.ok) {
       throw new Error(`Settings fetch failed (${response.status})`);
     }
@@ -164,17 +146,25 @@ async function refreshSchoolSettings({ force = false } = {}) {
     return settings;
   } catch (error) {
     console.warn('[School Hours] Failed to fetch settings:', error);
+    if (!schoolSettings) {
+      schoolSettings = { enableTrackingHours: false };
+    }
     return schoolSettings;
   }
 }
 
 function determineTrackingState() {
-  const effectiveSettings = schoolSettings || { monitorOutsideHours: false };
-  // School hours enforcement is based solely on admin-configured settings.
-  const withinHours = isWithinSchoolHours(effectiveSettings);
-  const monitorOutsideHours = Boolean(effectiveSettings.monitorOutsideHours);
+  const effectiveSettings = schoolSettings || { enableTrackingHours: false };
+  // School hours enforcement is based solely on admin-configured /api/settings values.
+  const withinHours = isWithinTrackingHours(
+    effectiveSettings.enableTrackingHours,
+    effectiveSettings.trackingStartTime,
+    effectiveSettings.trackingEndTime,
+    effectiveSettings.schoolTimezone,
+    effectiveSettings.trackingDays
+  );
 
-  if (!withinHours && !monitorOutsideHours) {
+  if (!withinHours) {
     return TRACKING_STATES.OFF;
   }
 
