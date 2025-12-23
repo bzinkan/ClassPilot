@@ -602,9 +602,9 @@ export default function AdminClasses() {
                           <SelectValue placeholder="Select a teacher" />
                         </SelectTrigger>
                         <SelectContent>
-                          {teachers.filter(t => t.role === 'teacher').map((teacher) => (
+                          {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((teacher) => (
                             <SelectItem key={teacher.id} value={teacher.id}>
-                              {teacher.username}
+                              {teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -757,9 +757,9 @@ export default function AdminClasses() {
                                           <SelectValue placeholder="Select teacher..." />
                                         </SelectTrigger>
                                         <SelectContent>
-                                          {teachers.filter(t => t.role === 'teacher').map((teacher) => (
+                                          {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((teacher) => (
                                             <SelectItem key={teacher.id} value={teacher.id}>
-                                              {teacher.username}
+                                              {teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
                                             </SelectItem>
                                           ))}
                                         </SelectContent>

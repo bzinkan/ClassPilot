@@ -783,9 +783,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Get only users from the same school
       const users = await storage.getUsersBySchool(admin.schoolId);
       
-      // Filter to only teachers and remove passwords
+      // Filter to teachers and school_admins (admins can also teach) and remove passwords
       const teachers = users
-        .filter(user => user.role === 'teacher')
+        .filter(user => user.role === 'teacher' || user.role === 'school_admin')
         .map(user => ({
           id: user.id,
           username: user.username,
@@ -2002,73 +2002,76 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const schoolStatuses = allStatuses.filter(s => schoolStudentIds.has(s.studentId));
       
       // Admins see all students from their school; teachers see only students in their active session
+      // School admins who also teach can start a session to filter to their class
       let filteredStatuses: typeof allStatuses;
-      if (user.role === 'admin' || user.role === 'school_admin') {
-        filteredStatuses = schoolStatuses;
-        console.log('Dashboard requested students (admin) - found:', filteredStatuses.length, 'students in school');
-      } else {
-        // Teachers: Only show students when they have an active session
-        const activeSession = await storage.getActiveSessionByTeacher(userId);
-        if (activeSession?.groupId) {
-          console.log('Teacher has active session for group:', activeSession.groupId);
+      
+      // Check if user has an active teaching session (applies to both teachers and school_admins)
+      const activeSession = await storage.getActiveSessionByTeacher(userId);
+      
+      if (activeSession?.groupId) {
+        // User has an active session - show only students in that session (teacher mode)
+        console.log('User has active session for group:', activeSession.groupId, '(role:', user.role, ')');
+        
+        // Get all students assigned to this session's group
+        const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
+        console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
+        
+        // Filter active statuses to only include students in this session's roster
+        filteredStatuses = allStatuses.filter(s => rosterStudentIds.includes(s.studentId));
+        console.log('  - Found', filteredStatuses.length, 'active students in session roster');
+        
+        // Find students in roster but not in active statuses (offline students)
+        const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
+        const offlineStudentIds = rosterStudentIds.filter(id => !activeStudentIds.has(id));
+        
+        if (offlineStudentIds.length > 0) {
+          console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
           
-          // Get all students assigned to this session's group
-          const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
-          console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
+          // Create offline placeholders for roster students not yet connected
+          const offlinePlaceholders = await Promise.all(
+            offlineStudentIds.map(async (studentId) => {
+              const student = await storage.getStudent(studentId);
+              if (!student) return null;
+              
+              const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
+              
+              return {
+                studentId: student.id,
+                deviceId: student.deviceId,
+                deviceName: device?.deviceName ?? undefined,
+                studentName: student.studentName,
+                classId: device?.classId || '',
+                gradeLevel: student.gradeLevel ?? undefined,
+                activeTabTitle: '',
+                activeTabUrl: '',
+                favicon: undefined,
+                lastSeenAt: 0,
+                isSharing: false,
+                screenLocked: false,
+                flightPathActive: false,
+                activeFlightPathName: undefined,
+                screenLockedSetAt: undefined,
+                cameraActive: false,
+                currentUrlDuration: undefined,
+                viewMode: 'url' as const,
+                status: 'offline' as const,
+              };
+            })
+          );
           
-          // Filter active statuses to only include students in this session's roster
-          filteredStatuses = allStatuses.filter(s => rosterStudentIds.includes(s.studentId));
-          console.log('  - Found', filteredStatuses.length, 'active students in session roster');
-          
-          // Find students in roster but not in active statuses (offline students)
-          const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
-          const offlineStudentIds = rosterStudentIds.filter(id => !activeStudentIds.has(id));
-          
-          if (offlineStudentIds.length > 0) {
-            console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
-            
-            // Create offline placeholders for roster students not yet connected
-            const offlinePlaceholders = await Promise.all(
-              offlineStudentIds.map(async (studentId) => {
-                const student = await storage.getStudent(studentId);
-                if (!student) return null;
-                
-                const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
-                
-                return {
-                  studentId: student.id,
-                  deviceId: student.deviceId,
-                  deviceName: device?.deviceName ?? undefined,
-                  studentName: student.studentName,
-                  classId: device?.classId || '',
-                  gradeLevel: student.gradeLevel ?? undefined,
-                  activeTabTitle: '',
-                  activeTabUrl: '',
-                  favicon: undefined,
-                  lastSeenAt: 0,
-                  isSharing: false,
-                  screenLocked: false,
-                  flightPathActive: false,
-                  activeFlightPathName: undefined,
-                  screenLockedSetAt: undefined,
-                  cameraActive: false,
-                  currentUrlDuration: undefined,
-                  viewMode: 'url' as const,
-                  status: 'offline' as const,
-                };
-              })
-            );
-            
-            // Filter out nulls and add to filtered statuses
-            const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
-            filteredStatuses = [...filteredStatuses, ...validPlaceholders];
-            console.log('  - Total students (active + offline):', filteredStatuses.length);
-          }
-        } else {
-          // No active session = no students shown (empty state)
-          filteredStatuses = [];
-          console.log('Teacher has no active session - showing empty state');
+          // Filter out nulls and add to filtered statuses
+          const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
+          filteredStatuses = [...filteredStatuses, ...validPlaceholders];
+          console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
+      } else if (user.role === 'admin' || user.role === 'school_admin') {
+        // Admin/school_admin without active session - show all students in school
+        filteredStatuses = schoolStatuses;
+        console.log('Dashboard requested students (admin mode) - found:', filteredStatuses.length, 'students in school');
+      } else {
+        // Teacher without active session - show empty (they need to start a session)
+        filteredStatuses = [];
+        console.log('Teacher has no active session - showing empty state');
       }
       
       filteredStatuses.forEach(s => {
@@ -2096,81 +2099,82 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const allAggregated = await storage.getAllStudentStatusesAggregated();
       
-      // Admins see all students; teachers see only students in their active session
+      // Check if user has an active teaching session (applies to both teachers and school_admins)
+      const activeSession = await storage.getActiveSessionByTeacher(userId);
+      
       let filteredStatuses: typeof allAggregated;
-      if (user.role === 'admin') {
-        filteredStatuses = allAggregated;
-        console.log('Dashboard requested aggregated students (admin) - found:', filteredStatuses.length, 'students');
-      } else {
-        // Teachers: Only show students when they have an active session
-        const activeSession = await storage.getActiveSessionByTeacher(userId);
-        if (activeSession?.groupId) {
-          console.log('Teacher has active session for group:', activeSession.groupId);
+      
+      if (activeSession?.groupId) {
+        // User has an active session - show only students in that session (teacher mode)
+        console.log('User has active session for group:', activeSession.groupId, '(role:', user.role, ')');
+        
+        // Get all students assigned to this session's group
+        const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
+        console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
+        
+        // Filter active statuses to only include students in this session's roster
+        filteredStatuses = allAggregated.filter(s => rosterStudentIds.includes(s.studentId));
+        console.log('  - Found', filteredStatuses.length, 'active students in session roster');
+        
+        // Find students in roster but not in active statuses (offline students)
+        const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
+        const offlineStudentIds = rosterStudentIds.filter(id => !activeStudentIds.has(id));
+        
+        if (offlineStudentIds.length > 0) {
+          console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
           
-          // Get all students assigned to this session's group
-          const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
-          console.log('  - Roster has', rosterStudentIds.length, 'students assigned');
-          
-          // Filter active statuses to only include students in this session's roster
-          filteredStatuses = allAggregated.filter(s => rosterStudentIds.includes(s.studentId));
-          console.log('  - Found', filteredStatuses.length, 'active students in session roster');
-          
-          // Find students in roster but not in active statuses (offline students)
-          const activeStudentIds = new Set(filteredStatuses.map(s => s.studentId));
-          const offlineStudentIds = rosterStudentIds.filter(id => !activeStudentIds.has(id));
-          
-          if (offlineStudentIds.length > 0) {
-            console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
-            
-            // Create offline placeholders for roster students not yet connected
-            const offlinePlaceholders = await Promise.all(
-              offlineStudentIds.map(async (studentId) => {
-                const student = await storage.getStudent(studentId);
-                if (!student) return null;
+          // Create offline placeholders for roster students not yet connected
+          const offlinePlaceholders = await Promise.all(
+            offlineStudentIds.map(async (studentId) => {
+              const student = await storage.getStudent(studentId);
+              if (!student) return null;
+              
+              const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
+              
+              return {
+                studentId: student.id,
+                studentEmail: student.studentEmail || undefined,
+                studentName: student.studentName,
+                classId: device?.classId || '',
+                gradeLevel: student.gradeLevel ?? undefined,
                 
-                const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
+                // Multi-device info
+                deviceCount: 0,
+                devices: [],
                 
-                return {
-                  studentId: student.id,
-                  studentEmail: student.studentEmail || undefined,
-                  studentName: student.studentName,
-                  classId: device?.classId || '',
-                  gradeLevel: student.gradeLevel ?? undefined,
-                  
-                  // Multi-device info
-                  deviceCount: 0,
-                  devices: [],
-                  
-                  // Aggregated status
-                  status: 'offline' as const,
-                  lastSeenAt: 0,
-                  
-                  // Primary device data (placeholder)
-                  primaryDeviceId: student.deviceId,
-                  activeTabTitle: '',
-                  activeTabUrl: '',
-                  favicon: undefined,
-                  isSharing: false,
-                  screenLocked: false,
-                  flightPathActive: false,
-                  activeFlightPathName: undefined,
-                  cameraActive: false,
-                  currentUrlDuration: undefined,
-                  viewMode: 'url' as const,
-                };
-              })
-            );
-            
-            // Filter out nulls and add to filtered statuses
-            const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
-            filteredStatuses = [...filteredStatuses, ...validPlaceholders];
-            console.log('  - Total students (active + offline):', filteredStatuses.length);
-          }
-        } else {
-          // No active session = no students shown (empty state)
-          filteredStatuses = [];
-          console.log('Teacher has no active session - showing empty dashboard');
+                // Aggregated status
+                status: 'offline' as const,
+                lastSeenAt: 0,
+                
+                // Primary device data (placeholder)
+                primaryDeviceId: student.deviceId,
+                activeTabTitle: '',
+                activeTabUrl: '',
+                favicon: undefined,
+                isSharing: false,
+                screenLocked: false,
+                flightPathActive: false,
+                activeFlightPathName: undefined,
+                cameraActive: false,
+                currentUrlDuration: undefined,
+                viewMode: 'url' as const,
+              };
+            })
+          );
+          
+          // Filter out nulls and add to filtered statuses
+          const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
+          filteredStatuses = [...filteredStatuses, ...validPlaceholders];
+          console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
+      } else if (user.role === 'admin' || user.role === 'school_admin') {
+        // Admin/school_admin without active session - show all students
+        filteredStatuses = allAggregated;
+        console.log('Dashboard requested aggregated students (admin mode) - found:', filteredStatuses.length, 'students');
+      } else {
+        // Teacher without active session - show empty (they need to start a session)
+        filteredStatuses = [];
+        console.log('Teacher has no active session - showing empty dashboard');
       }
       
       res.json(filteredStatuses);
