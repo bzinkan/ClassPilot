@@ -97,6 +97,9 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
 
 // Production server URL - can be overridden in extension settings
 const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
+const INJECTED_SERVER_URL = typeof globalThis.CLASSPILOT_SERVER_URL === 'string'
+  ? globalThis.CLASSPILOT_SERVER_URL
+  : '';
 
 let CONFIG = {
   serverUrl: DEFAULT_SERVER_URL,
@@ -158,6 +161,50 @@ const kv = {
 
 function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
+}
+
+function extractManagedValue(value) {
+  if (value && typeof value === 'object' && 'Value' in value) {
+    return value.Value;
+  }
+  return value;
+}
+
+async function resolveServerUrl() {
+  let managedConfig = {};
+  if (chrome.storage?.managed) {
+    try {
+      managedConfig = await new Promise(resolve => chrome.storage.managed.get(['serverUrl'], resolve));
+    } catch (error) {
+      console.warn('[Service Worker] Managed config read failed:', error);
+    }
+  }
+
+  const managedUrl = extractManagedValue(managedConfig?.serverUrl);
+  if (isHttpUrl(managedUrl)) {
+    return managedUrl;
+  }
+
+  let syncConfig = {};
+  if (chrome.storage?.sync) {
+    try {
+      syncConfig = await new Promise(resolve => chrome.storage.sync.get(['config'], resolve));
+    } catch (error) {
+      console.warn('[Service Worker] Sync config read failed:', error);
+    }
+  }
+
+  const localConfig = await chrome.storage.local.get(['config']);
+  const storedUrl = syncConfig?.config?.serverUrl || localConfig?.config?.serverUrl;
+  if (isHttpUrl(storedUrl)) {
+    return storedUrl;
+  }
+
+  if (isHttpUrl(INJECTED_SERVER_URL)) {
+    return INJECTED_SERVER_URL;
+  }
+
+  return DEFAULT_SERVER_URL;
 }
 
 // Keep logic in sync with shared/utils.ts isWithinTrackingHours (server-side).
@@ -449,10 +496,11 @@ async function ensureRegistered() {
   
   try {
     // Load config from server
-    const configUrl = `${DEFAULT_SERVER_URL}/api/client-config`;
+    const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
+    const configUrl = `${serverUrl}/api/client-config`;
     const serverConfig = await fetch(configUrl, { cache: 'no-store' })
       .then(r => r.json())
-      .catch(() => ({ baseUrl: DEFAULT_SERVER_URL }));
+      .catch(() => ({ baseUrl: serverUrl }));
     
     // Get or create IDs (including studentToken for consistent state)
     let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);
@@ -573,15 +621,21 @@ async function ensureRegistered() {
 // Run auto-registration on install and startup
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
-  ensureRegistered();
-  setTimeout(() => initializeAdaptiveTracking('install'), 2000);
+  resolveServerUrl().then((serverUrl) => {
+    CONFIG.serverUrl = serverUrl;
+    ensureRegistered();
+    setTimeout(() => initializeAdaptiveTracking('install'), 2000);
+  });
 });
 
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
-    ensureRegistered();
-    setTimeout(() => initializeAdaptiveTracking('startup'), 2000);
+    resolveServerUrl().then((serverUrl) => {
+      CONFIG.serverUrl = serverUrl;
+      ensureRegistered();
+      setTimeout(() => initializeAdaptiveTracking('startup'), 2000);
+    });
   });
 }
 
@@ -589,24 +643,15 @@ if (chrome.runtime.onStartup) {
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
-  await ensureRegistered();
-  
-  // MIGRATION: Clear any persisted serverUrl overrides from testing
-  // Force all extensions to use production URL (classpilot.replit.app)
   const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail', 'flightPathState', 'lockScreenState']);
-  if (stored.config?.serverUrl) {
-    console.log('[Service Worker] MIGRATION: Clearing persisted serverUrl override:', stored.config.serverUrl);
-    delete stored.config.serverUrl;
-    await chrome.storage.local.set({ config: stored.config });
-  }
-  
-  // Restore state from storage (but serverUrl now always uses DEFAULT_SERVER_URL)
+  const resolvedServerUrl = await resolveServerUrl();
+
+  // Restore state from storage (do not override resolved serverUrl)
   if (stored.config) {
     const { serverUrl, ...safeConfig } = stored.config;
     CONFIG = { ...CONFIG, ...safeConfig };
   }
-  // Always enforce production URL
-  CONFIG.serverUrl = DEFAULT_SERVER_URL;
+  CONFIG.serverUrl = resolvedServerUrl;
   if (stored.deviceId) {
     CONFIG.deviceId = stored.deviceId;
   }
@@ -650,6 +695,8 @@ if (chrome.runtime.onStartup) {
     flightPathActive: allowedDomains.length > 0,
     screenLocked: screenLocked
   });
+
+  await ensureRegistered();
   
   // Initialize adaptive tracking after state is restored
   setTimeout(() => {
@@ -817,37 +864,37 @@ async function autoDetectAndRegister() {
 
 // Load config from storage on startup
 chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentToken'], async (result) => {
+  const resolvedServerUrl = await resolveServerUrl();
+
   if (result.config) {
-    CONFIG = { ...CONFIG, ...result.config };
+    const { serverUrl, ...safeConfig } = result.config;
+    CONFIG = { ...CONFIG, ...safeConfig };
     console.log('Loaded config:', CONFIG);
   }
-  
-  // Ensure serverUrl is set (use stored config, or fall back to default production URL)
-  if (!CONFIG.serverUrl) {
-    CONFIG.serverUrl = DEFAULT_SERVER_URL;
-  }
+
+  CONFIG.serverUrl = resolvedServerUrl;
   console.log('Using server URL:', CONFIG.serverUrl);
-  
+
   // Load active student ID
   if (result.activeStudentId) {
     CONFIG.activeStudentId = result.activeStudentId;
     console.log('Loaded active student ID:', CONFIG.activeStudentId);
   }
-  
+
   // Load student email
   if (result.studentEmail) {
     CONFIG.studentEmail = result.studentEmail;
   }
-  
+
   // ✅ JWT AUTHENTICATION: Load studentToken from storage
   if (result.studentToken) {
     CONFIG.studentToken = result.studentToken;
     console.log('✅ [JWT] Loaded studentToken from storage');
   }
-  
+
   // Auto-detect logged-in user and register
   await autoDetectAndRegister();
-  
+
   // Initialize adaptive tracking once config is loaded
   if (CONFIG.deviceId) {
     initializeAdaptiveTracking('config-loaded');

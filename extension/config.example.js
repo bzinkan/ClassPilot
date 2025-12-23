@@ -4,3 +4,5 @@
 globalThis.SENTRY_DSN_EXTENSION = "";
 globalThis.SENTRY_ENV = "development";
 globalThis.SENTRY_DEV_MODE = false;
+// Optional: override the default server URL at build/package time.
+// globalThis.CLASSPILOT_SERVER_URL = "https://your-app.example.com";
