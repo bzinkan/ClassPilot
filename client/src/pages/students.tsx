@@ -164,6 +164,8 @@ function StudentsContent() {
   const [newStudentName, setNewStudentName] = useState("");
   const [newStudentEmail, setNewStudentEmail] = useState("");
   const [newStudentGrade, setNewStudentGrade] = useState("");
+  const [showAddGradeDialog, setShowAddGradeDialog] = useState(false);
+  const [manualGrades, setManualGrades] = useState<string[]>([]); // Manually added grade categories
 
   // Fetch all students (only runs for admins)
   const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
@@ -277,11 +279,27 @@ function StudentsContent() {
 
   const allStudents = studentsData?.students || [];
 
-  // Fixed grade levels K-8
-  const gradeButtons = ["K", "1", "2", "3", "4", "5", "6", "7", "8"];
+  // All possible grades for the Add Grade dialog (K-12)
+  const allPossibleGrades = ["K", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+  
+  // Get grades that have students (from imports)
+  const gradesWithStudents = Array.from(
+    new Set(
+      allStudents
+        .map(s => normalizeGrade(s.gradeLevel))
+        .filter((g): g is string => g !== null)
+    )
+  );
+  
+  // Combine imported grades with manually added grades (unique, sorted)
+  const activeGrades = Array.from(new Set([...gradesWithStudents, ...manualGrades])).sort((a, b) => {
+    if (a === "K") return -1;
+    if (b === "K") return 1;
+    return parseInt(a) - parseInt(b);
+  });
   
   // Get student counts per grade for badge display
-  const gradeStudentCounts = gradeButtons.reduce((acc, grade) => {
+  const gradeStudentCounts = activeGrades.reduce((acc, grade) => {
     acc[grade] = allStudents.filter(s => normalizeGrade(s.gradeLevel) === grade).length;
     return acc;
   }, {} as Record<string, number>);
@@ -301,6 +319,17 @@ function StudentsContent() {
     }
     return true;
   });
+  
+  // Handle adding a new grade category
+  const handleAddGrade = (grade: string) => {
+    if (!manualGrades.includes(grade) && !gradesWithStudents.includes(grade)) {
+      setManualGrades([...manualGrades, grade]);
+    }
+    setShowAddGradeDialog(false);
+  };
+  
+  // Get grades available to add (not already active)
+  const availableGradesToAdd = allPossibleGrades.filter(g => !activeGrades.includes(g));
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
@@ -939,42 +968,55 @@ function StudentsContent() {
                 {filteredStudents.length} student{filteredStudents.length !== 1 ? 's' : ''}{selectedGrade ? ` in Grade ${selectedGrade}` : ''}{searchQuery ? ` matching "${searchQuery}"` : ''}
               </CardDescription>
             </div>
-            <Button
-              onClick={() => setShowAddStudentDialog(true)}
-              data-testid="button-add-student"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              Add Student
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setShowAddGradeDialog(true)}
+                disabled={availableGradesToAdd.length === 0}
+                data-testid="button-add-grade"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Add Grade
+              </Button>
+              <Button
+                onClick={() => setShowAddStudentDialog(true)}
+                data-testid="button-add-student"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Add Student
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Grade Filter Buttons */}
-          <div className="space-y-3">
-            <Label className="text-sm font-medium">Filter by Grade</Label>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                variant={selectedGrade === "" ? "default" : "outline"}
-                size="sm"
-                onClick={() => setSelectedGrade("")}
-                data-testid="button-grade-all"
-              >
-                All ({allStudents.length})
-              </Button>
-              {gradeButtons.map((grade) => (
+          {/* Grade Filter Buttons - Only show if there are active grades */}
+          {activeGrades.length > 0 && (
+            <div className="space-y-3">
+              <Label className="text-sm font-medium">Filter by Grade</Label>
+              <div className="flex flex-wrap gap-2">
                 <Button
-                  key={grade}
-                  variant={selectedGrade === grade ? "default" : "outline"}
+                  variant={selectedGrade === "" ? "default" : "outline"}
                   size="sm"
-                  onClick={() => setSelectedGrade(grade)}
-                  data-testid={`button-grade-${grade}`}
+                  onClick={() => setSelectedGrade("")}
+                  data-testid="button-grade-all"
                 >
-                  {grade === "K" ? "K" : `${grade}${grade === "1" ? "st" : grade === "2" ? "nd" : grade === "3" ? "rd" : "th"}`}
-                  <span className="ml-1 text-xs opacity-70">({gradeStudentCounts[grade]})</span>
+                  All ({allStudents.length})
                 </Button>
-              ))}
+                {activeGrades.map((grade) => (
+                  <Button
+                    key={grade}
+                    variant={selectedGrade === grade ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setSelectedGrade(grade)}
+                    data-testid={`button-grade-${grade}`}
+                  >
+                    {grade === "K" ? "K" : `${grade}${grade === "1" ? "st" : grade === "2" ? "nd" : grade === "3" ? "rd" : "th"}`}
+                    <span className="ml-1 text-xs opacity-70">({gradeStudentCounts[grade] || 0})</span>
+                  </Button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Search Input */}
           <div className="relative">
@@ -1124,7 +1166,7 @@ function StudentsContent() {
             <div className="space-y-2">
               <Label htmlFor="gradeLevel">Grade Level</Label>
               <div className="flex flex-wrap gap-2">
-                {gradeButtons.map((grade) => (
+                {allPossibleGrades.map((grade) => (
                   <Button
                     key={grade}
                     type="button"
@@ -1158,6 +1200,41 @@ function StudentsContent() {
                     Add Student
                   </>
                 )}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Add Grade Dialog */}
+      <Dialog open={showAddGradeDialog} onOpenChange={setShowAddGradeDialog}>
+        <DialogContent data-testid="dialog-add-grade">
+          <DialogHeader>
+            <DialogTitle>Add Grade Level</DialogTitle>
+            <DialogDescription>
+              Select a grade level to add to your roster. Students can then be assigned to this grade.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <div className="grid grid-cols-4 gap-2">
+              {availableGradesToAdd.map((grade) => (
+                <Button
+                  key={grade}
+                  variant="outline"
+                  onClick={() => handleAddGrade(grade)}
+                  data-testid={`button-add-grade-${grade}`}
+                  className="h-12"
+                >
+                  {grade === "K" ? "Kindergarten" : `${grade}${grade === "1" ? "st" : grade === "2" ? "nd" : grade === "3" ? "rd" : "th"} Grade`}
+                </Button>
+              ))}
+            </div>
+            {availableGradesToAdd.length === 0 && (
+              <p className="text-center text-muted-foreground">All grade levels have been added.</p>
+            )}
+            <div className="flex justify-end">
+              <Button variant="outline" onClick={() => setShowAddGradeDialog(false)}>
+                Cancel
               </Button>
             </div>
           </div>
