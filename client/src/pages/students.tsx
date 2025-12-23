@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle } from "lucide-react";
+import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle, Plus, Search } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -159,6 +159,11 @@ function StudentsContent() {
   const [syncingCourseId, setSyncingCourseId] = useState<string | null>(null);
   const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false);
   const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
+  const [newStudentName, setNewStudentName] = useState("");
+  const [newStudentEmail, setNewStudentEmail] = useState("");
+  const [newStudentGrade, setNewStudentGrade] = useState("");
 
   // Fetch all students (only runs for admins)
   const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
@@ -272,23 +277,30 @@ function StudentsContent() {
 
   const allStudents = studentsData?.students || [];
 
-  // Get available grades from students
-  const availableGrades = Array.from(
-    new Set(
-      allStudents
-        .map(s => normalizeGrade(s.gradeLevel))
-        .filter((g): g is string => g !== null)
-    )
-  ).sort((a, b) => {
-    const numA = parseInt(a);
-    const numB = parseInt(b);
-    return isNaN(numA) || isNaN(numB) ? a.localeCompare(b) : numA - numB;
-  });
+  // Fixed grade levels K-8
+  const gradeButtons = ["K", "1", "2", "3", "4", "5", "6", "7", "8"];
+  
+  // Get student counts per grade for badge display
+  const gradeStudentCounts = gradeButtons.reduce((acc, grade) => {
+    acc[grade] = allStudents.filter(s => normalizeGrade(s.gradeLevel) === grade).length;
+    return acc;
+  }, {} as Record<string, number>);
 
-  // Filter students by selected grade
-  const filteredStudents = selectedGrade
-    ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === selectedGrade)
-    : allStudents;
+  // Filter students by selected grade and search query
+  const filteredStudents = allStudents.filter(student => {
+    // Grade filter
+    if (selectedGrade && normalizeGrade(student.gradeLevel) !== selectedGrade) {
+      return false;
+    }
+    // Search filter
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      const nameMatch = student.studentName?.toLowerCase().includes(query);
+      const emailMatch = student.studentEmail?.toLowerCase().includes(query);
+      return nameMatch || emailMatch;
+    }
+    return true;
+  });
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
@@ -339,6 +351,80 @@ function StudentsContent() {
       });
     },
   });
+
+  // Add student mutation
+  const addStudentMutation = useMutation({
+    mutationFn: async (data: { studentName: string; studentEmail: string; gradeLevel?: string }) => {
+      const res = await apiRequest("POST", "/api/students", data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      toast({
+        title: "Student Added",
+        description: "Student has been added to the roster",
+      });
+      setShowAddStudentDialog(false);
+      setNewStudentName("");
+      setNewStudentEmail("");
+      setNewStudentGrade("");
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to add student",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const handleAddStudent = () => {
+    const name = newStudentName.trim();
+    const email = newStudentEmail.trim();
+    
+    // Validate name
+    if (!name) {
+      toast({
+        title: "Validation Error",
+        description: "Student name is required",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Validate email
+    if (!email) {
+      toast({
+        title: "Validation Error",
+        description: "Email address is required",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Basic email format validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      toast({
+        title: "Validation Error",
+        description: "Please enter a valid email address",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    // Build mutation data with optional grade
+    const mutationData: { studentName: string; studentEmail: string; gradeLevel?: string } = {
+      studentName: name,
+      studentEmail: email,
+    };
+    
+    if (newStudentGrade) {
+      mutationData.gradeLevel = newStudentGrade;
+    }
+    
+    addStudentMutation.mutate(mutationData);
+  };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -846,35 +932,61 @@ function StudentsContent() {
       {/* Student Roster */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
               <CardTitle>Current Student Roster</CardTitle>
               <CardDescription>
-                {filteredStudents.length} student{filteredStudents.length !== 1 ? 's' : ''}
+                {filteredStudents.length} student{filteredStudents.length !== 1 ? 's' : ''}{selectedGrade ? ` in Grade ${selectedGrade}` : ''}{searchQuery ? ` matching "${searchQuery}"` : ''}
               </CardDescription>
             </div>
+            <Button
+              onClick={() => setShowAddStudentDialog(true)}
+              data-testid="button-add-student"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Add Student
+            </Button>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Grade Filter Tabs */}
-          {availableGrades.length > 0 && (
-            <Tabs value={selectedGrade} onValueChange={setSelectedGrade}>
-              <TabsList>
-                <TabsTrigger value="" data-testid="tab-all-grades">
-                  All Grades
-                </TabsTrigger>
-                {availableGrades.map((grade) => (
-                  <TabsTrigger 
-                    key={grade} 
-                    value={grade}
-                    data-testid={`tab-grade-${grade}`}
-                  >
-                    Grade {grade}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-          )}
+          {/* Grade Filter Buttons */}
+          <div className="space-y-3">
+            <Label className="text-sm font-medium">Filter by Grade</Label>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant={selectedGrade === "" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setSelectedGrade("")}
+                data-testid="button-grade-all"
+              >
+                All ({allStudents.length})
+              </Button>
+              {gradeButtons.map((grade) => (
+                <Button
+                  key={grade}
+                  variant={selectedGrade === grade ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setSelectedGrade(grade)}
+                  data-testid={`button-grade-${grade}`}
+                >
+                  {grade === "K" ? "K" : `${grade}${grade === "1" ? "st" : grade === "2" ? "nd" : grade === "3" ? "rd" : "th"}`}
+                  <span className="ml-1 text-xs opacity-70">({gradeStudentCounts[grade]})</span>
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {/* Search Input */}
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search students by name or email..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+              data-testid="input-search-students"
+            />
+          </div>
 
           {/* Student Table */}
           {isLoading ? (
@@ -970,6 +1082,87 @@ function StudentsContent() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Add Student Dialog */}
+      <Dialog open={showAddStudentDialog} onOpenChange={(open) => {
+        setShowAddStudentDialog(open);
+        if (!open) {
+          setNewStudentName("");
+          setNewStudentEmail("");
+          setNewStudentGrade("");
+        }
+      }}>
+        <DialogContent data-testid="dialog-add-student">
+          <DialogHeader>
+            <DialogTitle>Add New Student</DialogTitle>
+            <DialogDescription>
+              Manually add a student to your school roster
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <div className="space-y-2">
+              <Label htmlFor="studentName">Student Name *</Label>
+              <Input
+                id="studentName"
+                placeholder="Enter student's full name"
+                value={newStudentName}
+                onChange={(e) => setNewStudentName(e.target.value)}
+                data-testid="input-new-student-name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="studentEmail">Email Address *</Label>
+              <Input
+                id="studentEmail"
+                type="email"
+                placeholder="student@school.edu"
+                value={newStudentEmail}
+                onChange={(e) => setNewStudentEmail(e.target.value)}
+                data-testid="input-new-student-email"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="gradeLevel">Grade Level</Label>
+              <div className="flex flex-wrap gap-2">
+                {gradeButtons.map((grade) => (
+                  <Button
+                    key={grade}
+                    type="button"
+                    variant={newStudentGrade === grade ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setNewStudentGrade(grade)}
+                    data-testid={`button-select-grade-${grade}`}
+                  >
+                    {grade === "K" ? "K" : `${grade}${grade === "1" ? "st" : grade === "2" ? "nd" : grade === "3" ? "rd" : "th"}`}
+                  </Button>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-4">
+              <Button variant="outline" onClick={() => setShowAddStudentDialog(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleAddStudent}
+                disabled={addStudentMutation.isPending || !newStudentName.trim() || !newStudentEmail.trim()}
+                data-testid="button-submit-add-student"
+              >
+                {addStudentMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Adding...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Student
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

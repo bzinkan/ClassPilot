@@ -2709,6 +2709,67 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Create student (admin-only)
+  app.post("/api/students", checkIPAllowlist, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "Admin must be associated with a school" });
+      }
+
+      const { studentName, studentEmail, gradeLevel } = req.body;
+      
+      // Validate required fields
+      if (!studentName || typeof studentName !== 'string' || !studentName.trim()) {
+        return res.status(400).json({ error: "Student name is required" });
+      }
+      
+      if (!studentEmail || typeof studentEmail !== 'string' || !studentEmail.trim()) {
+        return res.status(400).json({ error: "Student email is required" });
+      }
+      
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      const normalizedEmail = studentEmail.trim().toLowerCase();
+      if (!emailRegex.test(normalizedEmail)) {
+        return res.status(400).json({ error: "Invalid email format" });
+      }
+      
+      // Efficient duplicate check using targeted lookup
+      const existingStudent = await storage.getStudentBySchoolEmail(user.schoolId, normalizedEmail);
+      if (existingStudent) {
+        return res.status(400).json({ error: "A student with this email already exists" });
+      }
+      
+      // Prepare insert data conforming to schema
+      const insertData: InsertStudent = {
+        studentName: studentName.trim(),
+        studentEmail: normalizedEmail,
+        gradeLevel: gradeLevel?.trim() || null,
+        schoolId: user.schoolId,
+        deviceId: null,
+        studentStatus: "offline",
+      };
+      
+      // Validate with zod schema
+      const validationResult = insertStudentSchema.safeParse(insertData);
+      if (!validationResult.success) {
+        return res.status(400).json({ 
+          error: "Validation failed", 
+          details: validationResult.error.issues 
+        });
+      }
+      
+      // Create the student
+      const student = await storage.createStudent(validationResult.data);
+      
+      res.json({ success: true, student });
+    } catch (error) {
+      console.error("Create student error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Delete student (admin-only)
   app.delete("/api/students/:studentId", checkIPAllowlist, requireAdmin, async (req, res) => {
     try {
