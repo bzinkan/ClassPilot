@@ -69,9 +69,11 @@ export default function StudentsPage() {
 
   const currentUser = currentUserData?.user;
 
-  // Redirect non-admin users
+  // Redirect non-admin users (allow admin, school_admin, and super_admin)
+  const isAdminRole = currentUser?.role === 'admin' || currentUser?.role === 'school_admin' || currentUser?.role === 'super_admin';
+  
   useEffect(() => {
-    if (!isLoadingUser && currentUser?.role !== 'admin') {
+    if (!isLoadingUser && !isAdminRole) {
       toast({
         title: "Access Denied",
         description: "This page is only accessible to administrators",
@@ -79,7 +81,7 @@ export default function StudentsPage() {
       });
       setLocation("/dashboard");
     }
-  }, [currentUser, isLoadingUser, setLocation, toast]);
+  }, [currentUser, isLoadingUser, isAdminRole, setLocation, toast]);
 
   // Show loading while checking auth
   if (isLoadingUser) {
@@ -93,7 +95,7 @@ export default function StudentsPage() {
   }
 
   // Don't render anything for non-admins
-  if (currentUser?.role !== 'admin') {
+  if (!isAdminRole) {
     return null;
   }
 
