@@ -5,10 +5,17 @@ import { storage } from "./storage";
 
 export function setupGoogleAuth(app: Express) {
   // Construct full callback URL for Google OAuth
-  const baseUrl = process.env.REPLIT_DEV_DOMAIN 
-    ? `https://${process.env.REPLIT_DEV_DOMAIN}` 
-    : 'http://localhost:5000';
+  const baseUrl =
+    process.env.PUBLIC_BASE_URL ??
+    (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:5000");
   const callbackURL = `${baseUrl}/auth/google/callback`;
+  const classroomScopes = [
+    "profile",
+    "email",
+    "https://www.googleapis.com/auth/classroom.courses.readonly",
+    "https://www.googleapis.com/auth/classroom.rosters.readonly",
+    "https://www.googleapis.com/auth/classroom.profile.emails",
+  ];
   
   console.log("Google OAuth callback URL:", callbackURL);
   
@@ -36,11 +43,22 @@ export function setupGoogleAuth(app: Express) {
 
           if (user) {
             // Always update Google ID and profile info to keep data fresh
-            user = await storage.updateUser(user.id, {
+            const updatedUser = await storage.updateUser(user.id, {
               googleId,
               profileImageUrl,
               displayName: displayName || user.displayName,
             });
+            if (!updatedUser) {
+              return done(new Error("Failed to update user from Google profile"));
+            }
+            user = updatedUser;
+            if (refreshToken) {
+              await storage.upsertGoogleOAuthTokens(user.id, {
+                refreshToken,
+                scope: classroomScopes.join(" "),
+                tokenType: "Bearer",
+              });
+            }
             return done(null, user);
           }
 
@@ -78,7 +96,9 @@ export function setupGoogleAuth(app: Express) {
   app.get(
     "/auth/google",
     passport.authenticate("google", {
-      scope: ["profile", "email"],
+      scope: classroomScopes,
+      accessType: "offline",
+      prompt: "consent",
     })
   );
 

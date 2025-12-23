@@ -9,6 +9,11 @@ import {
   type InsertStudent,
   type StudentStatus,
   type AggregatedStudentStatus,
+  type GoogleOAuthToken,
+  type InsertGoogleOAuthToken,
+  type ClassroomCourse,
+  type InsertClassroomCourse,
+  type InsertClassroomCourseStudent,
   type StudentSession,
   type InsertStudentSession,
   type Heartbeat,
@@ -45,6 +50,9 @@ import {
   users,
   devices,
   students,
+  googleOAuthTokens,
+  classroomCourses,
+  classroomCourseStudents,
   studentDevices, // PHASE 3: Student-device join table
   studentSessions, // SESSION-BASED TRACKING: Student sessions table
   heartbeats,
@@ -99,12 +107,25 @@ export interface IStorage {
   getStudent(studentId: string): Promise<Student | undefined>;
   getStudentByEmail(email: string): Promise<Student | undefined>;
   getStudentBySchoolEmail(schoolId: string, emailLc: string): Promise<Student | undefined>; // PHASE 3: Email-first lookup with multi-tenancy
+  getStudentBySchoolGoogleUserId(schoolId: string, googleUserId: string): Promise<Student | undefined>;
   getStudentsByDevice(deviceId: string): Promise<Student[]>;
   getAllStudents(): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
   upsertStudentDevice(studentId: string, deviceId: string): Promise<void>; // PHASE 3: Track student-device relationships
+
+  // Google OAuth tokens
+  getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined>;
+  upsertGoogleOAuthTokens(userId: string, token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">): Promise<GoogleOAuthToken>;
+
+  // Google Classroom roster sync
+  upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse>;
+  replaceCourseStudents(
+    schoolId: string,
+    courseId: string,
+    studentIdsWithMeta: Array<Pick<InsertClassroomCourseStudent, "studentId" | "googleUserId" | "studentEmailLc">>
+  ): Promise<number>;
 
   // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
   // Tracks "Student X is on Device Y RIGHT NOW"
@@ -222,6 +243,9 @@ export class MemStorage implements IStorage {
   private sessions: Map<string, StudentSession>; // Session-based tracking (industry standard)
   private heartbeats: Heartbeat[];
   private events: Event[];
+  private googleOAuthTokens: Map<string, GoogleOAuthToken>;
+  private classroomCourses: Map<string, ClassroomCourse>;
+  private classroomCourseStudents: Map<string, Array<Pick<InsertClassroomCourseStudent, "studentId" | "googleUserId" | "studentEmailLc">>>;
   private rosters: Map<string, Roster>;
   private settings: Settings | undefined;
   private teacherSettings: Map<string, TeacherSettings>;
@@ -241,6 +265,9 @@ export class MemStorage implements IStorage {
     this.sessions = new Map();
     this.heartbeats = [];
     this.events = [];
+    this.googleOAuthTokens = new Map();
+    this.classroomCourses = new Map();
+    this.classroomCourseStudents = new Map();
     this.rosters = new Map();
     this.teacherSettings = new Map();
     this.teacherStudents = [];
@@ -393,6 +420,30 @@ export class MemStorage implements IStorage {
     return this.users.delete(id);
   }
 
+  async getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined> {
+    return this.googleOAuthTokens.get(userId);
+  }
+
+  async upsertGoogleOAuthTokens(
+    userId: string,
+    token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">
+  ): Promise<GoogleOAuthToken> {
+    const existing = this.googleOAuthTokens.get(userId);
+    const now = new Date();
+    const saved: GoogleOAuthToken = {
+      id: existing?.id ?? randomUUID(),
+      userId,
+      refreshToken: token.refreshToken,
+      scope: token.scope ?? null,
+      tokenType: token.tokenType ?? null,
+      expiryDate: token.expiryDate ?? null,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
+    this.googleOAuthTokens.set(userId, saved);
+    return saved;
+  }
+
   // Devices
   async getDevice(deviceId: string): Promise<Device | undefined> {
     return this.devices.get(deviceId);
@@ -460,6 +511,11 @@ export class MemStorage implements IStorage {
       .find(s => s.schoolId === schoolId && s.emailLc === emailLc);
   }
 
+  async getStudentBySchoolGoogleUserId(schoolId: string, googleUserId: string): Promise<Student | undefined> {
+    return Array.from(this.students.values())
+      .find(s => s.schoolId === schoolId && s.googleUserId === googleUserId);
+  }
+
   async getStudentsByDevice(deviceId: string): Promise<Student[]> {
     return Array.from(this.students.values())
       .filter(s => s.deviceId === deviceId);
@@ -477,6 +533,7 @@ export class MemStorage implements IStorage {
       studentName: insertStudent.studentName,
       studentEmail: insertStudent.studentEmail ?? null,
       emailLc: insertStudent.emailLc ?? null, // Email normalization
+      googleUserId: insertStudent.googleUserId ?? null,
       gradeLevel: insertStudent.gradeLevel ?? null,
       schoolId: insertStudent.schoolId,
       studentStatus: insertStudent.studentStatus,
@@ -583,6 +640,36 @@ export class MemStorage implements IStorage {
     // For in-memory storage, student-device tracking is implicit via student.deviceId
     // No-op for now, but DrizzleStorage will update student_devices table
     return Promise.resolve();
+  }
+
+  async upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse> {
+    const key = `${course.schoolId}:${course.courseId}`;
+    const existing = this.classroomCourses.get(key);
+    const now = new Date();
+    const saved: ClassroomCourse = {
+      id: existing?.id ?? randomUUID(),
+      schoolId: course.schoolId,
+      courseId: course.courseId,
+      name: course.name,
+      section: course.section ?? null,
+      room: course.room ?? null,
+      descriptionHeading: course.descriptionHeading ?? null,
+      ownerId: course.ownerId ?? null,
+      lastSyncedAt: course.lastSyncedAt ?? now,
+      createdAt: existing?.createdAt ?? now,
+    };
+    this.classroomCourses.set(key, saved);
+    return saved;
+  }
+
+  async replaceCourseStudents(
+    schoolId: string,
+    courseId: string,
+    studentIdsWithMeta: Array<Pick<InsertClassroomCourseStudent, "studentId" | "googleUserId" | "studentEmailLc">>
+  ): Promise<number> {
+    const key = `${schoolId}:${courseId}`;
+    this.classroomCourseStudents.set(key, studentIdsWithMeta);
+    return studentIdsWithMeta.length;
   }
 
   // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING
@@ -1544,6 +1631,38 @@ export class DatabaseStorage implements IStorage {
     return result.length > 0;
   }
 
+  async getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined> {
+    const [token] = await db.select().from(googleOAuthTokens).where(eq(googleOAuthTokens.userId, userId));
+    return token || undefined;
+  }
+
+  async upsertGoogleOAuthTokens(
+    userId: string,
+    token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">
+  ): Promise<GoogleOAuthToken> {
+    const [saved] = await db
+      .insert(googleOAuthTokens)
+      .values({
+        userId,
+        refreshToken: token.refreshToken,
+        scope: token.scope ?? null,
+        tokenType: token.tokenType ?? null,
+        expiryDate: token.expiryDate ?? null,
+      })
+      .onConflictDoUpdate({
+        target: googleOAuthTokens.userId,
+        set: {
+          refreshToken: token.refreshToken,
+          scope: token.scope ?? null,
+          tokenType: token.tokenType ?? null,
+          expiryDate: token.expiryDate ?? null,
+          updatedAt: drizzleSql`now()`,
+        },
+      })
+      .returning();
+    return saved;
+  }
+
   // Devices
   async getDevice(deviceId: string): Promise<Device | undefined> {
     const [device] = await db.select().from(devices).where(eq(devices.deviceId, deviceId));
@@ -1650,6 +1769,14 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(students)
       .where(drizzleSql`${students.schoolId} = ${schoolId} AND ${students.emailLc} = ${emailLc}`);
+    return student || undefined;
+  }
+
+  async getStudentBySchoolGoogleUserId(schoolId: string, googleUserId: string): Promise<Student | undefined> {
+    const [student] = await db
+      .select()
+      .from(students)
+      .where(drizzleSql`${students.schoolId} = ${schoolId} AND ${students.googleUserId} = ${googleUserId}`);
     return student || undefined;
   }
 
@@ -1834,6 +1961,54 @@ export class DatabaseStorage implements IStorage {
           lastSeenAt: drizzleSql`now()`,
         },
       });
+  }
+
+  async upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse> {
+    const [saved] = await db
+      .insert(classroomCourses)
+      .values(course)
+      .onConflictDoUpdate({
+        target: [classroomCourses.schoolId, classroomCourses.courseId],
+        set: {
+          name: course.name,
+          section: course.section ?? null,
+          room: course.room ?? null,
+          descriptionHeading: course.descriptionHeading ?? null,
+          ownerId: course.ownerId ?? null,
+          lastSyncedAt: course.lastSyncedAt ?? drizzleSql`now()`,
+        },
+      })
+      .returning();
+    return saved;
+  }
+
+  async replaceCourseStudents(
+    schoolId: string,
+    courseId: string,
+    studentIdsWithMeta: Array<Pick<InsertClassroomCourseStudent, "studentId" | "googleUserId" | "studentEmailLc">>
+  ): Promise<number> {
+    await db
+      .delete(classroomCourseStudents)
+      .where(drizzleSql`${classroomCourseStudents.schoolId} = ${schoolId} AND ${classroomCourseStudents.courseId} = ${courseId}`);
+
+    if (studentIdsWithMeta.length === 0) {
+      return 0;
+    }
+
+    const rows = studentIdsWithMeta.map((entry) => ({
+      schoolId,
+      courseId,
+      studentId: entry.studentId,
+      googleUserId: entry.googleUserId ?? null,
+      studentEmailLc: entry.studentEmailLc ?? null,
+      lastSeenAt: new Date(),
+    }));
+
+    const inserted = await db
+      .insert(classroomCourseStudents)
+      .values(rows)
+      .returning({ id: classroomCourseStudents.id });
+    return inserted.length;
   }
 
   // Student Sessions - INDUSTRY STANDARD SESSION-BASED TRACKING (PostgreSQL)
