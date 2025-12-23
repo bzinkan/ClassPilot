@@ -2568,6 +2568,86 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // === Google Workspace Directory Routes ===
+
+  // List users from Google Workspace Admin Directory
+  app.get("/api/directory/users", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+
+      const { listDomainUsers } = await import("./directory");
+      const domain = req.query.domain as string | undefined;
+      const query = req.query.query as string | undefined;
+
+      const result = await listDomainUsers(user.id, domain, query);
+      res.json(result);
+    } catch (error: any) {
+      console.error("Directory users error:", error);
+      if (error.code === "NO_TOKENS") {
+        return res.status(403).json({ error: error.message, code: "NO_TOKENS" });
+      }
+      if (error.code === "INSUFFICIENT_PERMISSIONS") {
+        return res.status(403).json({ error: error.message, code: "INSUFFICIENT_PERMISSIONS" });
+      }
+      res.status(500).json({ error: error.message || "Failed to fetch users" });
+    }
+  });
+
+  // Import students from Google Workspace Directory
+  app.post("/api/directory/import", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+
+      const { importStudentsFromDirectory } = await import("./directory");
+      const { domain, orgUnitPath } = req.body;
+
+      const result = await importStudentsFromDirectory(user.id, user.schoolId, {
+        domain,
+        orgUnitPath,
+      });
+
+      res.json({
+        success: true,
+        imported: result.imported,
+        updated: result.updated,
+        skipped: result.skipped,
+        errors: result.errors,
+      });
+    } catch (error: any) {
+      console.error("Directory import error:", error);
+      if (error.code === "NO_TOKENS") {
+        return res.status(403).json({ error: error.message, code: "NO_TOKENS" });
+      }
+      if (error.code === "INSUFFICIENT_PERMISSIONS") {
+        return res.status(403).json({ error: error.message, code: "INSUFFICIENT_PERMISSIONS" });
+      }
+      res.status(500).json({ error: error.message || "Failed to import students" });
+    }
+  });
+
+  // Get organization units from Google Workspace
+  app.get("/api/directory/orgunits", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { getOrganizationUnits } = await import("./directory");
+      const orgUnits = await getOrganizationUnits(user.id);
+      res.json({ orgUnits });
+    } catch (error: any) {
+      console.error("Org units error:", error);
+      res.status(500).json({ error: error.message || "Failed to fetch org units" });
+    }
+  });
+
   // Update student information (student name, email, and grade level)
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {

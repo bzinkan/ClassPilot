@@ -14,6 +14,7 @@ export function setupGoogleAuth(app: Express) {
     "https://www.googleapis.com/auth/classroom.courses.readonly",
     "https://www.googleapis.com/auth/classroom.rosters.readonly",
     "https://www.googleapis.com/auth/classroom.profile.emails",
+    "https://www.googleapis.com/auth/admin.directory.user.readonly",
   ];
   
   console.log("Google OAuth callback URL:", callbackURL);
