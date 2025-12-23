@@ -73,19 +73,16 @@ The extension will now be force-installed on all Chromebooks in the selected org
 
 ## Configuration
 
-The extension connects to the server specified in `service-worker.js`:
+The extension resolves the server URL in this order:
 
-```javascript
-let CONFIG = {
-  serverUrl: 'https://your-server-url.replit.dev',
-  heartbeatInterval: 10000, // 10 seconds
-  schoolId: 'default-school',
-};
-```
+1. **Managed policy** (`chrome.storage.managed` → `serverUrl`)
+2. **Saved overrides** (`chrome.storage.sync` or `chrome.storage.local`)
+3. **Injected build-time value** (`globalThis.CLASSPILOT_SERVER_URL` from `config.js`)
+4. **Default** `https://classpilot.replit.app`
 
-Update the `serverUrl` to point to your deployed Replit application before deployment.
+For managed deployments, the Admin Console policy is the recommended source of truth. For custom builds, you can inject a URL in `extension/config.js` (copy from `config.example.js`).
 
-Sentry configuration lives in `extension/config.js`, which is ignored by git. If the file was previously tracked, remove it from the index with:
+Sentry configuration (and optional server URL injection) lives in `extension/config.js`, which is ignored by git. If the file was previously tracked, remove it from the index with:
 
 ```bash
 git rm --cached extension/config.js

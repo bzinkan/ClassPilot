@@ -1,9 +1,10 @@
-import type { Express } from "express";
+import type { Express, RequestHandler } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { storage } from "./storage";
+import { randomUUID } from "crypto";
+import { createClient, type RedisClientType } from "redis";
+import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
-import { sessionMiddleware } from "./index";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import * as XLSX from "xlsx";
@@ -55,7 +56,10 @@ function normalizeGradeLevel(grade: string | null | undefined): string | null {
 }
 
 // Helper function to extract domain from email and lookup school
-async function getSchoolFromEmail(email: string): Promise<{ schoolId: string; schoolName: string } | null> {
+async function getSchoolFromEmail(
+  storage: IStorage,
+  email: string
+): Promise<{ schoolId: string; schoolName: string } | null> {
   // Extract domain from email (part after @)
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail) {
@@ -86,6 +90,7 @@ async function getSchoolFromEmail(email: string): Promise<{ schoolId: string; sc
 // INDUSTRY STANDARD: Device identity (primary) → Email (student identity) → Sessions (active tracking)
 // Used by both heartbeat endpoint and WebSocket auth handler
 async function ensureStudentDeviceAssociation(
+  storage: IStorage,
   deviceId: string,
   studentEmail: string,
   schoolId: string
@@ -218,7 +223,21 @@ interface WSClient {
 
 const wsClients = new Map<WebSocket, WSClient>();
 
-function broadcastToTeachers(message: any) {
+type WsRedisTarget =
+  | { kind: "staff" }
+  | { kind: "students"; targetDeviceIds?: string[] }
+  | { kind: "device"; deviceId: string }
+  | { kind: "role"; role: WSClient["role"] };
+
+type WsRedisEnvelope = {
+  instanceId: string;
+  target: WsRedisTarget;
+  message: unknown;
+};
+
+let publishWsMessage: ((target: WsRedisTarget, message: unknown) => void) | null = null;
+
+function broadcastToTeachersLocal(message: any) {
   const messageStr = JSON.stringify(message);
   wsClients.forEach((client, ws) => {
     // Broadcast to all authenticated staff (teachers, school admins, super admins)
@@ -229,7 +248,7 @@ function broadcastToTeachers(message: any) {
   });
 }
 
-function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
+function broadcastToStudentsLocal(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
   const messageStr = JSON.stringify(message);
   let sentCount = 0;
   wsClients.forEach((client, ws) => {
@@ -250,7 +269,7 @@ function broadcastToStudents(message: any, filterFn?: (client: WSClient) => bool
   return sentCount;
 }
 
-function sendToDevice(deviceId: string, message: any) {
+function sendToDeviceLocal(deviceId: string, message: any) {
   const messageStr = JSON.stringify(message);
   wsClients.forEach((client, ws) => {
     if (client.deviceId === deviceId && client.authenticated && ws.readyState === WebSocket.OPEN) {
@@ -258,6 +277,40 @@ function sendToDevice(deviceId: string, message: any) {
     }
   });
 }
+
+function sendToRoleLocal(role: WSClient["role"], message: any) {
+  const messageStr = JSON.stringify(message);
+  wsClients.forEach((client, ws) => {
+    if (client.role === role && client.authenticated && ws.readyState === WebSocket.OPEN) {
+      ws.send(messageStr);
+    }
+  });
+}
+
+function broadcastToTeachers(message: any) {
+  broadcastToTeachersLocal(message);
+  publishWsMessage?.({ kind: "staff" }, message);
+}
+
+function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
+  const sentCount = broadcastToStudentsLocal(message, filterFn, targetDeviceIds);
+  if (!filterFn) {
+    publishWsMessage?.({ kind: "students", targetDeviceIds }, message);
+  }
+  return sentCount;
+}
+
+function sendToDevice(deviceId: string, message: any) {
+  sendToDeviceLocal(deviceId, message);
+  publishWsMessage?.({ kind: "device", deviceId }, message);
+}
+
+function sendToRole(role: WSClient["role"], message: any) {
+  sendToRoleLocal(role, message);
+  publishWsMessage?.({ kind: "role", role }, message);
+}
+
+let activeStorage: IStorage = defaultStorage;
 
 // Session middleware
 function requireAuth(req: any, res: any, next: any) {
@@ -274,7 +327,7 @@ async function requireAdmin(req: any, res: any, next: any) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   
-  const user = await storage.getUser(req.session.userId);
+  const user = await activeStorage.getUser(req.session.userId);
   if (!user || (user.role !== 'admin' && user.role !== 'school_admin' && user.role !== 'super_admin')) {
     return res.status(403).json({ error: "Forbidden: Admin access required" });
   }
@@ -288,7 +341,7 @@ async function requireSuperAdmin(req: any, res: any, next: any) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   
-  const user = await storage.getUser(req.session.userId);
+  const user = await activeStorage.getUser(req.session.userId);
   if (!user || user.role !== 'super_admin') {
     return res.status(403).json({ error: "Forbidden: Super Admin access required" });
   }
@@ -302,7 +355,7 @@ async function requireSchoolAdmin(req: any, res: any, next: any) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   
-  const user = await storage.getUser(req.session.userId);
+  const user = await activeStorage.getUser(req.session.userId);
   if (!user || (user.role !== 'school_admin' && user.role !== 'super_admin')) {
     return res.status(403).json({ error: "Forbidden: School Admin access required" });
   }
@@ -318,7 +371,7 @@ async function checkIPAllowlist(req: any, res: any, next: any) {
   }
 
   try {
-    const settings = await storage.getSettings();
+    const settings = await activeStorage.getSettings();
     
     // If no allowlist configured, allow all IPs
     if (!settings || !settings.ipAllowlist || settings.ipAllowlist.length === 0) {
@@ -362,11 +415,92 @@ async function checkIPAllowlist(req: any, res: any, next: any) {
   }
 }
 
-export async function registerRoutes(app: Express): Promise<Server> {
+export async function registerRoutes(
+  app: Express,
+  options: {
+    storage?: IStorage;
+    sessionMiddleware: RequestHandler;
+    enableBackgroundJobs?: boolean;
+  }
+): Promise<Server> {
+  const storage = options.storage ?? defaultStorage;
+  activeStorage = storage;
+  publishWsMessage = null;
+  const enableBackgroundJobs = options.enableBackgroundJobs !== false;
   const httpServer = createServer(app);
 
   // WebSocket server with noServer mode for manual upgrade handling
   const wss = new WebSocketServer({ noServer: true });
+  const redisUrl = process.env.REDIS_URL?.trim();
+  const redisInstanceId = randomUUID();
+  const redisChannel = "classpilot:ws:broadcast";
+  let redisPublisher: RedisClientType | null = null;
+  let redisSubscriber: RedisClientType | null = null;
+  let redisWarned = false;
+
+  const warnRedis = (error: unknown) => {
+    if (redisWarned) {
+      return;
+    }
+    redisWarned = true;
+    console.warn("[WebSocket] Redis pub/sub disabled; running single-instance mode.", error);
+  };
+
+  const deliverRedisMessage = (target: WsRedisTarget, message: unknown) => {
+    switch (target.kind) {
+      case "staff":
+        broadcastToTeachersLocal(message);
+        break;
+      case "students":
+        broadcastToStudentsLocal(message, undefined, target.targetDeviceIds);
+        break;
+      case "device":
+        sendToDeviceLocal(target.deviceId, message);
+        break;
+      case "role":
+        sendToRoleLocal(target.role, message);
+        break;
+    }
+  };
+
+  if (redisUrl) {
+    try {
+      redisPublisher = createClient({ url: redisUrl });
+      redisPublisher.on("error", warnRedis);
+      await redisPublisher.connect();
+
+      redisSubscriber = redisPublisher.duplicate();
+      redisSubscriber.on("error", warnRedis);
+      await redisSubscriber.connect();
+
+      await redisSubscriber.subscribe(redisChannel, (payload) => {
+        try {
+          const message = JSON.parse(payload) as WsRedisEnvelope;
+          if (!message || message.instanceId === redisInstanceId) {
+            return;
+          }
+          deliverRedisMessage(message.target, message.message);
+        } catch (error) {
+          warnRedis(error);
+        }
+      });
+
+      publishWsMessage = (target, message) => {
+        if (!redisPublisher) {
+          return;
+        }
+        const payload: WsRedisEnvelope = {
+          instanceId: redisInstanceId,
+          target,
+          message,
+        };
+        redisPublisher.publish(redisChannel, JSON.stringify(payload)).catch(warnRedis);
+      };
+    } catch (error) {
+      warnRedis(error);
+      publishWsMessage = null;
+    }
+  }
 
   // SECURITY: Handle WebSocket upgrade with session validation
   httpServer.on('upgrade', (request, socket, head) => {
@@ -380,7 +514,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     // Parse session from cookies (for staff authentication)
     // Note: For students (no session), this still allows connection but sessionUserId will be null
-    sessionMiddleware(request as any, {} as any, (err: any) => {
+    options.sessionMiddleware(request as any, {} as any, (err: any) => {
       if (err) {
         console.error('[WebSocket] Session middleware error:', err);
         socket.write('HTTP/1.1 500 Internal Server Error\r\n\r\n');
@@ -477,7 +611,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             // EMAIL-FIRST AUTO-PROVISIONING: If auth has email+schoolId, ensure student exists
             if (message.studentEmail && message.schoolId) {
               try {
-                await ensureStudentDeviceAssociation(message.deviceId, message.studentEmail, message.schoolId);
+                await ensureStudentDeviceAssociation(storage, message.deviceId, message.studentEmail, message.schoolId);
               } catch (error) {
                 console.error('[WebSocket] Email-first provisioning error:', error);
                 // Continue with auth even if provisioning fails
@@ -531,26 +665,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           console.log(`[WebSocket] Routing ${message.type} between clients`);
 
-          // Find the target client (student or teacher)
-          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
-            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
-              targetWs.send(JSON.stringify({
-                type: message.type,
-                from: client.role === 'teacher' ? 'teacher' : client.deviceId,
-                ...message
-              }));
-              console.log(`[WebSocket] Sent ${message.type} to student ${targetDeviceId}`);
-              break;
-            } else if (targetClient.role === 'teacher' && message.to === 'teacher') {
-              const payload = {
-                type: message.type,
-                from: client.deviceId,
-                ...message
-              };
-              targetWs.send(JSON.stringify(payload));
-              console.log(`[WebSocket] Sent ${message.type} to teacher`);
-              break;
-            }
+          if (targetDeviceId === 'teacher') {
+            const payload = {
+              type: message.type,
+              from: client.deviceId,
+              ...message
+            };
+            sendToRole('teacher', payload);
+            console.log(`[WebSocket] Sent ${message.type} to teacher`);
+          } else {
+            const payload = {
+              type: message.type,
+              from: client.role === 'teacher' ? 'teacher' : client.deviceId,
+              ...message
+            };
+            sendToDevice(targetDeviceId, payload);
+            console.log(`[WebSocket] Sent ${message.type} to student ${targetDeviceId}`);
           }
         }
 
@@ -564,15 +694,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // If a teacher can see a student tile, they can use Live View
           
           // Forward the request to the student device
-          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
-            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
-              targetWs.send(JSON.stringify({
-                type: 'request-stream',
-                from: 'teacher'
-              }));
-              break;
-            }
-          }
+          sendToDevice(targetDeviceId, {
+            type: 'request-stream',
+            from: 'teacher'
+          });
         }
 
         // Handle request to stop screen sharing from teacher to student
@@ -581,16 +706,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!targetDeviceId) return;
 
           console.log(`[WebSocket] Sending stop-share to ${targetDeviceId}`);
-          for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
-            if (targetClient.role === 'student' && targetClient.deviceId === targetDeviceId) {
-              targetWs.send(JSON.stringify({
-                type: 'stop-share',
-                from: 'teacher'
-              }));
-              console.log(`[WebSocket] Sent stop-share to ${targetDeviceId}`);
-              break;
-            }
-          }
+          sendToDevice(targetDeviceId, {
+            type: 'stop-share',
+            from: 'teacher'
+          });
+          console.log(`[WebSocket] Sent stop-share to ${targetDeviceId}`);
         }
 
       } catch (error) {
@@ -661,20 +781,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     req.session.destroy(() => {
       res.json({ success: true });
     });
-  });
-
-  // Client configuration endpoint (no auth required for Chrome Extension)
-  app.get("/api/client-config", async (req, res) => {
-    try {
-      // Always use production URL for Chrome Extension compatibility
-      const config = {
-        baseUrl: 'https://classpilot.replit.app',
-      };
-      res.json(config);
-    } catch (error) {
-      console.error('Client config error:', error);
-      res.status(500).json({ error: 'Failed to get client configuration' });
-    }
   });
 
   // Version endpoint for deployment verification
@@ -1740,7 +1846,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       // 🔑 DOMAIN-BASED SCHOOL ROUTING: Determine schoolId from email domain
-      const schoolInfo = await getSchoolFromEmail(studentEmail);
+      const schoolInfo = await getSchoolFromEmail(storage, studentEmail);
       if (!schoolInfo) {
         const domain = studentEmail.split('@')[1];
         console.error('[register-student] No school found for provided domain');
@@ -1865,7 +1971,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // Legacy mode (no JWT) - determine schoolId from email domain
         
         if (data.studentEmail) {
-          const schoolInfo = await getSchoolFromEmail(data.studentEmail);
+          const schoolInfo = await getSchoolFromEmail(storage, data.studentEmail);
           if (!schoolInfo) {
             const domain = data.studentEmail.split('@')[1];
             // Return 404 to indicate school not configured
@@ -1908,7 +2014,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // EMAIL-FIRST AUTO-PROVISIONING: If heartbeat has email+schoolId, ensure student exists
       if (data.studentEmail && data.schoolId) {
         try {
-          await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
+          await ensureStudentDeviceAssociation(storage, data.deviceId, data.studentEmail, data.schoolId);
         } catch (error) {
           console.error('[heartbeat] Email-first provisioning error:', error);
           // Continue to store heartbeat even if provisioning fails
@@ -4578,37 +4684,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Session expiration job (runs frequently for real-time accuracy)
-  setInterval(async () => {
-    try {
-      // Expire stale student sessions (not seen in 90 seconds)
-      const expiredSessions = await storage.expireStaleStudentSessions(90);
-      if (expiredSessions > 0) {
-        console.log(`[Session Cleanup] Expired ${expiredSessions} stale student sessions`);
-        // Notify teachers to update UI after session expiration
-        broadcastToTeachers({
-          type: 'student-update',
-        });
+  if (enableBackgroundJobs) {
+    // Session expiration job (runs frequently for real-time accuracy)
+    setInterval(async () => {
+      try {
+        // Expire stale student sessions (not seen in 90 seconds)
+        const expiredSessions = await storage.expireStaleStudentSessions(90);
+        if (expiredSessions > 0) {
+          console.log(`[Session Cleanup] Expired ${expiredSessions} stale student sessions`);
+          // Notify teachers to update UI after session expiration
+          broadcastToTeachers({
+            type: 'student-update',
+          });
+        }
+      } catch (error) {
+        console.error("[Session Cleanup] Error:", error);
       }
-    } catch (error) {
-      console.error("[Session Cleanup] Error:", error);
-    }
-  }, 60 * 1000); // Run every minute for real-time monitoring
-  
-  // Data cleanup cron (run periodically for old data)
-  setInterval(async () => {
-    try {
-      // Clean up old heartbeats based on retention settings
-      const settings = await storage.getSettings();
-      const retentionHours = parseInt(settings?.retentionHours || "24");
-      const deleted = await storage.cleanupOldHeartbeats(retentionHours);
-      if (deleted > 0) {
-        console.log(`[Data Cleanup] Cleaned up ${deleted} old heartbeats`);
+    }, 60 * 1000); // Run every minute for real-time monitoring
+
+    // Data cleanup cron (run periodically for old data)
+    setInterval(async () => {
+      try {
+        // Clean up old heartbeats based on retention settings
+        const settings = await storage.getSettings();
+        const retentionHours = parseInt(settings?.retentionHours || "24");
+        const deleted = await storage.cleanupOldHeartbeats(retentionHours);
+        if (deleted > 0) {
+          console.log(`[Data Cleanup] Cleaned up ${deleted} old heartbeats`);
+        }
+      } catch (error) {
+        console.error("[Data Cleanup] Error:", error);
       }
+    }, 60 * 60 * 1000); // Run every hour
+  }
+
+  httpServer.on("close", () => {
+    try {
+      void redisSubscriber?.disconnect();
+      void redisPublisher?.disconnect();
     } catch (error) {
-      console.error("[Data Cleanup] Error:", error);
+      warnRedis(error);
     }
-  }, 60 * 60 * 1000); // Run every hour
+  });
 
   return httpServer;
 }

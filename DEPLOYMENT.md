@@ -23,6 +23,7 @@ In your Replit project, configure the following secrets:
 | `STUDENT_TOKEN_SECRET` | 32+ byte random string | Required in production - signs student JWT tokens |
 | `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY` | 32-byte base64 key | Required in production - encrypts OAuth tokens |
 | `WS_SHARED_KEY` | Generate a strong random key | WebSocket authentication (optional) |
+| `REDIS_URL` | `redis://user:pass@host:6379` | Optional Redis pub/sub for multi-instance WebSockets |
 | `SCHOOL_ID` | Your school identifier (e.g., `lincoln-high`) | School identification |
 | `HEARTBEAT_MIN_PERSIST_SECONDS` | `15` (default) | Minimum seconds between persisted heartbeats per device |
 
@@ -70,16 +71,11 @@ Currently, the system supports one teacher account. To add more accounts, you ca
 ### 2.1 Update Extension Configuration
 
 1. Navigate to the `extension` directory
-2. Open `service-worker.js`
-3. Update the `CONFIG` object with your production URL:
+2. Prefer **managed policy** to set `serverUrl` (see below), or inject a build-time override in `extension/config.js`:
 
 ```javascript
-let CONFIG = {
-  serverUrl: 'https://your-app.replit.app', // Replace with your Replit URL
-  heartbeatInterval: 10000, // 10 seconds
-  schoolId: 'your-school-id', // Match the school ID from settings
-  // ...
-};
+// extension/config.js
+globalThis.CLASSPILOT_SERVER_URL = "https://your-app.replit.app";
 ```
 
 ### 2.2 Add Extension Icons
@@ -145,9 +141,9 @@ After uploading:
    - Leave as default (`<all_urls>`) for full monitoring
    - Or restrict to specific domains if needed
 
-### 3.3 Set Extension Policy (Optional)
+### 3.3 Set Extension Policy (Recommended)
 
-To pre-configure the server URL for students:
+To pre-configure the server URL for students (recommended):
 
 1. In the extension settings, click **Configure**
 2. Add the following JSON policy:
