@@ -122,12 +122,68 @@ export const students = pgTable("students", {
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   schoolId: text("school_id").notNull(), // Existing field in database
   emailLc: text("email_lc"), // Existing field - lowercase email for case-insensitive lookups
+  googleUserId: text("google_user_id"),
   studentStatus: text("student_status").notNull(), // Existing field in database
 });
 
 export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
+
+export const googleOAuthTokens = pgTable("google_oauth_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  userId: text("user_id").notNull(),
+  refreshToken: text("refresh_token").notNull(),
+  scope: text("scope"),
+  tokenType: text("token_type"),
+  expiryDate: timestamp("expiry_date"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  updatedAt: timestamp("updated_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueUserId: unique().on(table.userId),
+}));
+
+export const insertGoogleOAuthTokenSchema = createInsertSchema(googleOAuthTokens).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertGoogleOAuthToken = z.infer<typeof insertGoogleOAuthTokenSchema>;
+export type GoogleOAuthToken = typeof googleOAuthTokens.$inferSelect;
+
+export const classroomCourses = pgTable("classroom_courses", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  courseId: text("course_id").notNull(),
+  name: text("name").notNull(),
+  section: text("section"),
+  room: text("room"),
+  descriptionHeading: text("description_heading"),
+  ownerId: text("owner_id"),
+  lastSyncedAt: timestamp("last_synced_at").notNull().default(sql`now()`),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueSchoolCourse: unique().on(table.schoolId, table.courseId),
+}));
+
+export const insertClassroomCourseSchema = createInsertSchema(classroomCourses).omit({ id: true, createdAt: true });
+export type InsertClassroomCourse = z.infer<typeof insertClassroomCourseSchema>;
+export type ClassroomCourse = typeof classroomCourses.$inferSelect;
+
+export const classroomCourseStudents = pgTable("classroom_course_students", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  courseId: text("course_id").notNull(),
+  studentId: text("student_id").notNull(),
+  googleUserId: text("google_user_id"),
+  studentEmailLc: text("student_email_lc"),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  lastSeenAt: timestamp("last_seen_at").notNull().default(sql`now()`),
+}, (table) => ({
+  uniqueEnrollment: unique().on(table.schoolId, table.courseId, table.studentId),
+  schoolCourseIdx: index("classroom_course_students_school_course_idx").on(table.schoolId, table.courseId),
+  schoolStudentIdx: index("classroom_course_students_school_student_idx").on(table.schoolId, table.studentId),
+}));
+
+export const insertClassroomCourseStudentSchema = createInsertSchema(classroomCourseStudents).omit({ id: true, createdAt: true, lastSeenAt: true });
+export type InsertClassroomCourseStudent = z.infer<typeof insertClassroomCourseStudentSchema>;
+export type ClassroomCourseStudent = typeof classroomCourseStudents.$inferSelect;
 
 // Student-Device join table - Tracks which students use which devices (email-first multi-device support)
 export const studentDevices = pgTable("student_devices", {

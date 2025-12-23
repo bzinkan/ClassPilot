@@ -2364,6 +2364,139 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/roster/import-google", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+    const { google } = await import("googleapis");
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(403).json({ error: "User must be associated with a school" });
+      }
+
+      const tokens = await storage.getGoogleOAuthTokens(user.id);
+      if (!tokens?.refreshToken) {
+        return res.status(400).json({ error: "Google Classroom access not connected. Please re-authenticate with Google." });
+      }
+
+      const baseUrl =
+        process.env.PUBLIC_BASE_URL ??
+        (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:5000");
+      const redirectUri = `${baseUrl}/auth/google/callback`;
+
+      const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        redirectUri
+      );
+      oauth2Client.setCredentials({ refresh_token: tokens.refreshToken });
+      const classroom = google.classroom({ version: "v1", auth: oauth2Client });
+
+      const coursesResponse = await classroom.courses.list({
+        teacherId: "me",
+        courseStates: ["ACTIVE"],
+      });
+      const courses = coursesResponse.data.courses ?? [];
+
+      let coursesImported = 0;
+      let membershipsWritten = 0;
+      const studentIdsSeen = new Set<string>();
+
+      for (const course of courses) {
+        if (!course.id || !course.name) {
+          continue;
+        }
+
+        await storage.upsertClassroomCourse({
+          schoolId: user.schoolId,
+          courseId: course.id,
+          name: course.name,
+          section: course.section ?? null,
+          room: course.room ?? null,
+          descriptionHeading: course.descriptionHeading ?? null,
+          ownerId: course.ownerId ?? null,
+          lastSyncedAt: new Date(),
+        });
+        coursesImported += 1;
+
+        const courseStudentEntries: Array<{ studentId: string; googleUserId?: string | null; studentEmailLc?: string | null }> = [];
+        let pageToken: string | undefined;
+
+        do {
+          const studentsResponse = await classroom.courses.students.list({
+            courseId: course.id,
+            pageSize: 100,
+            pageToken,
+          });
+          const students = studentsResponse.data.students ?? [];
+
+          for (const student of students) {
+            const profile = student.profile;
+            const email = profile?.emailAddress;
+            if (!email) {
+              continue;
+            }
+            const emailLc = normalizeEmail(email);
+            const googleUserId = profile?.id ?? null;
+
+            let rosterStudent = await storage.getStudentBySchoolEmail(user.schoolId, emailLc);
+            if (!rosterStudent && googleUserId) {
+              rosterStudent = await storage.getStudentBySchoolGoogleUserId(user.schoolId, googleUserId);
+            }
+
+            let savedStudent: Awaited<ReturnType<typeof storage.updateStudent>> | undefined;
+            const studentName = profile?.name?.fullName ?? email;
+
+            if (rosterStudent) {
+              savedStudent = await storage.updateStudent(rosterStudent.id, {
+                studentName: studentName || rosterStudent.studentName,
+                studentEmail: email,
+                emailLc,
+                googleUserId: googleUserId ?? rosterStudent.googleUserId,
+              });
+            } else {
+              savedStudent = await storage.createStudent({
+                studentName,
+                studentEmail: email,
+                emailLc,
+                schoolId: user.schoolId,
+                studentStatus: "active",
+                googleUserId,
+              });
+            }
+
+            if (savedStudent) {
+              if (!studentIdsSeen.has(savedStudent.id)) {
+                studentIdsSeen.add(savedStudent.id);
+              }
+              courseStudentEntries.push({
+                studentId: savedStudent.id,
+                googleUserId,
+                studentEmailLc: emailLc,
+              });
+            }
+          }
+
+          pageToken = studentsResponse.data.nextPageToken ?? undefined;
+        } while (pageToken);
+
+        membershipsWritten += await storage.replaceCourseStudents(
+          user.schoolId,
+          course.id,
+          courseStudentEntries
+        );
+      }
+
+      res.json({
+        coursesImported,
+        studentsUpserted: studentIdsSeen.size,
+        membershipsWritten,
+      });
+    } catch (error) {
+      console.error("Google Classroom import error:", error);
+      const message = error instanceof Error ? error.message : "Google Classroom import failed";
+      res.status(502).json({ error: message });
+    }
+  });
+
   // Update student information (student name, email, and grade level)
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
     try {
