@@ -32,6 +32,7 @@ import {
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
+import { syncCourses, syncRoster } from "./classroom";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -2494,6 +2495,78 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.error("Google Classroom import error:", error);
       const message = error instanceof Error ? error.message : "Google Classroom import failed";
       res.status(502).json({ error: message });
+    }
+  });
+
+  // === Google Classroom Routes ===
+
+  // 1. List Courses (Syncs list from Google to DB)
+  app.get("/api/classroom/courses", requireAuth, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+
+      // Check if user has connected Google
+      const tokens = await storage.getGoogleOAuthTokens(user.id);
+      if (!tokens) {
+        return res.status(403).json({ error: "Google Classroom not connected", code: "NO_TOKENS" });
+      }
+
+      // Perform sync
+      const courses = await syncCourses(user.id, user.schoolId);
+      res.json(courses);
+    } catch (error: any) {
+      console.error("Classroom courses error:", error);
+      res.status(500).json({ error: error.message || "Failed to sync courses" });
+    }
+  });
+
+  // 2. Sync Roster for a specific course
+  app.post("/api/classroom/courses/:courseId/sync", requireAuth, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) return res.status(401).send();
+
+      const { courseId } = req.params;
+
+      // Sync the student list from Google
+      const students = await syncRoster(user.id, user.schoolId, courseId);
+
+      // Automatically create a ClassPilot group for this course
+      const course = await storage.getClassroomCourse(user.schoolId, courseId);
+
+      if (course) {
+        // Check if group exists for this teacher with this name
+        const groups = await storage.getGroupsByTeacher(user.id);
+        let group = groups.find(g => g.name === course.name);
+
+        if (!group) {
+          group = await storage.createGroup({
+            teacherId: user.id,
+            schoolId: user.schoolId,
+            name: course.name,
+            groupType: "admin_class",
+            description: `Imported from Google Classroom: ${course.section || ""}`,
+          });
+        }
+
+        // Add students to the ClassPilot group
+        for (const s of students) {
+          // We ignore errors here in case student is already in the group
+          try {
+            await storage.assignStudentToGroup(group.id, s.studentId);
+          } catch (e) {
+            // Continue if assignment exists
+          }
+        }
+      }
+
+      res.json({ success: true, count: students.length });
+    } catch (error: any) {
+      console.error("Classroom roster sync error:", error);
+      res.status(500).json({ error: error.message });
     }
   });
 

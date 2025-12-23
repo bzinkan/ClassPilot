@@ -121,6 +121,7 @@ export interface IStorage {
 
   // Google Classroom roster sync
   upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse>;
+  getClassroomCourse(schoolId: string, courseId: string): Promise<ClassroomCourse | undefined>;
   replaceCourseStudents(
     schoolId: string,
     courseId: string,
@@ -660,6 +661,11 @@ export class MemStorage implements IStorage {
     };
     this.classroomCourses.set(key, saved);
     return saved;
+  }
+
+  async getClassroomCourse(schoolId: string, courseId: string): Promise<ClassroomCourse | undefined> {
+    const key = `${schoolId}:${courseId}`;
+    return this.classroomCourses.get(key);
   }
 
   async replaceCourseStudents(
@@ -1980,6 +1986,15 @@ export class DatabaseStorage implements IStorage {
       })
       .returning();
     return saved;
+  }
+
+  async getClassroomCourse(schoolId: string, courseId: string): Promise<ClassroomCourse | undefined> {
+    const [course] = await db
+      .select()
+      .from(classroomCourses)
+      .where(drizzleSql`${classroomCourses.schoolId} = ${schoolId} AND ${classroomCourses.courseId} = ${courseId}`)
+      .limit(1);
+    return course;
   }
 
   async replaceCourseStudents(
