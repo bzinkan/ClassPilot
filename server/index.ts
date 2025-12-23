@@ -5,7 +5,6 @@ import { Pool } from "@neondatabase/serverless";
 import cors from "cors";
 import passport from "passport";
 import * as Sentry from "@sentry/node";
-import * as SentryExpress from "@sentry/express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
@@ -118,9 +117,7 @@ const app = express();
 // CRITICAL: Trust proxy for Replit Deployments
 app.set('trust proxy', 1);
 
-if (SENTRY_DSN_SERVER) {
-  app.use(SentryExpress.requestHandler());
-}
+// Sentry v8: Express request handling is automatic via init()
 
 // CORS configuration for chrome-extension and cross-origin requests
 const allowlist = (process.env.CORS_ALLOWLIST || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -267,7 +264,7 @@ if (process.env.NODE_ENV !== "production") {
   const server = await registerRoutes(app);
 
   if (SENTRY_DSN_SERVER) {
-    app.use(SentryExpress.errorHandler());
+    Sentry.setupExpressErrorHandler(app);
   }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
