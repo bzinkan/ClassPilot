@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet } from "lucide-react";
+import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2 } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -28,6 +28,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { EditStudentDialog } from "@/components/edit-student-dialog";
 
 interface CurrentUser {
@@ -55,6 +62,20 @@ interface Student {
 
 interface StudentsResponse {
   students: Student[];
+}
+
+interface GoogleClassroomCourse {
+  id: string;
+  name: string;
+  section: string | null;
+  room: string | null;
+  descriptionHeading: string | null;
+  ownerId: string | null;
+  lastSyncedAt: string | null;
+}
+
+interface ClassroomCoursesResponse {
+  courses: GoogleClassroomCourse[];
 }
 
 // Admin Guard Wrapper - Only checks auth, doesn't run any queries/mutations
@@ -112,10 +133,49 @@ function StudentsContent() {
   const [importResults, setImportResults] = useState<any>(null);
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [deletingStudent, setDeletingStudent] = useState<Student | null>(null);
+  const [showClassroomDialog, setShowClassroomDialog] = useState(false);
+  const [syncingCourseId, setSyncingCourseId] = useState<string | null>(null);
 
   // Fetch all students (only runs for admins)
   const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
     queryKey: ["/api/admin/teacher-students"],
+  });
+
+  // Fetch Google Classroom courses (only when dialog is open)
+  const { data: classroomData, isLoading: isLoadingCourses, error: classroomError, refetch: refetchCourses } = useQuery<ClassroomCoursesResponse>({
+    queryKey: ["/api/classroom/courses"],
+    enabled: showClassroomDialog,
+  });
+
+  const classroomCourses = classroomData?.courses || [];
+  const classroomNotConnected = (classroomError as any)?.code === "NO_TOKENS";
+
+  // Sync Google Classroom roster mutation
+  const syncClassroomMutation = useMutation({
+    mutationFn: async (courseId: string) => {
+      setSyncingCourseId(courseId);
+      const res = await apiRequest("POST", `/api/classroom/courses/${courseId}/sync`, {});
+      return res.json();
+    },
+    onSuccess: async (data) => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      await queryClient.invalidateQueries({ queryKey: ["/api/classroom/courses"] });
+      toast({
+        title: "Import Complete",
+        description: `Imported ${data.studentsImported || 0} students from Google Classroom`,
+      });
+      setSyncingCourseId(null);
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Sync Failed",
+        description: error.message,
+      });
+      setSyncingCourseId(null);
+    },
   });
 
   const allStudents = studentsData?.students || [];
@@ -384,6 +444,133 @@ function StudentsContent() {
           )}
         </CardContent>
       </Card>
+
+      {/* Google Classroom Import Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <GraduationCap className="h-5 w-5" />
+            Import from Google Classroom
+          </CardTitle>
+          <CardDescription>
+            Sync student rosters directly from your Google Classroom courses
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            onClick={() => setShowClassroomDialog(true)}
+            data-testid="button-open-classroom-import"
+          >
+            <GraduationCap className="h-4 w-4 mr-2" />
+            Import from Google Classroom
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Google Classroom Import Dialog */}
+      <Dialog open={showClassroomDialog} onOpenChange={setShowClassroomDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <GraduationCap className="h-5 w-5" />
+              Import from Google Classroom
+            </DialogTitle>
+            <DialogDescription>
+              Select a course to import its student roster into ClassPilot
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {isLoadingCourses ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                <span className="text-muted-foreground">Loading courses...</span>
+              </div>
+            ) : classroomNotConnected ? (
+              <div className="text-center py-8 space-y-4">
+                <p className="text-muted-foreground">
+                  Google Classroom is not connected. Please sign out and sign back in with Google, 
+                  making sure to grant Google Classroom access permissions.
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => window.location.href = "/auth/google"}
+                  data-testid="button-reconnect-google"
+                >
+                  Reconnect Google Account
+                </Button>
+              </div>
+            ) : classroomCourses.length === 0 ? (
+              <div className="text-center py-8 space-y-2">
+                <p className="text-muted-foreground">No courses found in your Google Classroom account.</p>
+                <Button
+                  variant="outline"
+                  onClick={() => refetchCourses()}
+                  data-testid="button-refresh-courses"
+                >
+                  <RefreshCw className="h-4 w-4 mr-2" />
+                  Refresh Courses
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between mb-4">
+                  <p className="text-sm text-muted-foreground">
+                    Found {classroomCourses.length} course{classroomCourses.length !== 1 ? 's' : ''}
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => refetchCourses()}
+                    data-testid="button-refresh-courses"
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh
+                  </Button>
+                </div>
+                <div className="border rounded-md divide-y max-h-96 overflow-auto">
+                  {classroomCourses.map((course) => (
+                    <div
+                      key={course.id}
+                      className="flex items-center justify-between p-4 hover-elevate"
+                      data-testid={`row-course-${course.id}`}
+                    >
+                      <div className="space-y-1">
+                        <p className="font-medium">{course.name}</p>
+                        {course.section && (
+                          <p className="text-sm text-muted-foreground">{course.section}</p>
+                        )}
+                        {course.lastSyncedAt && (
+                          <p className="text-xs text-muted-foreground">
+                            Last synced: {new Date(course.lastSyncedAt).toLocaleDateString()}
+                          </p>
+                        )}
+                      </div>
+                      <Button
+                        onClick={() => syncClassroomMutation.mutate(course.id)}
+                        disabled={syncingCourseId !== null}
+                        data-testid={`button-sync-course-${course.id}`}
+                      >
+                        {syncingCourseId === course.id ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Importing...
+                          </>
+                        ) : (
+                          <>
+                            <Users className="h-4 w-4 mr-2" />
+                            Import Students
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Student Roster */}
       <Card>
