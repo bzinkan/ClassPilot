@@ -1,6 +1,98 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
+importScripts('config.js');
+importScripts('vendor/sentry.browser.min.js');
+
+const SENTRY_DSN_EXTENSION = globalThis.SENTRY_DSN_EXTENSION || '';
+const SENTRY_DEV_MODE = globalThis.SENTRY_DEV_MODE === true;
+let devExceptionSent = false;
+
+const SENTRY_SENSITIVE_KEY_REGEX = /(email|student|name)/i;
+const SENTRY_URL_KEY_REGEX = /url/i;
+const SENTRY_EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const SENTRY_URL_REGEX = /https?:\/\/\S+/i;
+
+function sanitizeSentryUrl(value) {
+  if (typeof value !== 'string') return undefined;
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (error) {
+    const withoutQuery = value.split('?')[0];
+    if (withoutQuery && withoutQuery !== value) {
+      return withoutQuery;
+    }
+    return '[redacted]';
+  }
+}
+
+function scrubSentryString(value, key) {
+  if (SENTRY_EMAIL_REGEX.test(value)) {
+    return '[redacted]';
+  }
+  if (SENTRY_URL_REGEX.test(value)) {
+    return sanitizeSentryUrl(value);
+  }
+  if (key && SENTRY_SENSITIVE_KEY_REGEX.test(key)) {
+    return '[redacted]';
+  }
+  if (key && SENTRY_URL_KEY_REGEX.test(key)) {
+    return sanitizeSentryUrl(value);
+  }
+  return value;
+}
+
+function scrubSentryData(value, key) {
+  if (typeof value === 'string') {
+    return scrubSentryString(value, key);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => scrubSentryData(item, key));
+  }
+  if (value && typeof value === 'object') {
+    const cleaned = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      cleaned[childKey] = scrubSentryData(childValue, childKey);
+    }
+    return cleaned;
+  }
+  return value;
+}
+
+if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENTRY_DSN_EXTENSION) {
+  globalThis.Sentry.init({
+    dsn: SENTRY_DSN_EXTENSION,
+    tracesSampleRate: 0,
+    sendDefaultPii: false,
+    beforeSend(event) {
+      if (event.request?.url) {
+        event.request.url = sanitizeSentryUrl(event.request.url);
+      }
+      if (event.request) {
+        delete event.request.headers;
+        delete event.request.cookies;
+        delete event.request.query_string;
+      }
+      if (event.breadcrumbs) {
+        event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
+          ...crumb,
+          message: crumb.message ? scrubSentryString(crumb.message, 'message') : crumb.message,
+          data: crumb.data ? scrubSentryData(crumb.data) : crumb.data,
+        }));
+      }
+      if (event.extra) {
+        event.extra = scrubSentryData(event.extra);
+      }
+      if (event.tags) {
+        event.tags = scrubSentryData(event.tags);
+      }
+      return event;
+    },
+  });
+  globalThis.__classpilotSentryInitialized = true;
+}
+
 // Production server URL - can be overridden in extension settings
 const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
 
@@ -194,7 +286,18 @@ function scheduleHeartbeat(periodInMinutes) {
   chrome.alarms.clear('heartbeat');
   if (periodInMinutes) {
     chrome.alarms.create('heartbeat', { periodInMinutes });
-    sendHeartbeat();
+    safeSendHeartbeat('schedule');
+  }
+}
+
+async function safeSendHeartbeat(reason) {
+  try {
+    await sendHeartbeat();
+  } catch (error) {
+    if (globalThis.Sentry?.captureException) {
+      globalThis.Sentry.captureException(error);
+    }
+    console.error(`[Heartbeat] Failed (${reason}):`, error);
   }
 }
 
@@ -202,10 +305,10 @@ function syncObservedHeartbeat(reason) {
   if (trackingState === TRACKING_STATES.ACTIVE && observedByTeacher) {
     if (!observedHeartbeatTimer) {
       observedHeartbeatTimer = setInterval(() => {
-        sendHeartbeat();
+        safeSendHeartbeat('observed-interval');
       }, OBSERVED_HEARTBEAT_SECONDS * 1000);
       console.log(`[Heartbeat] Observed mode enabled (${reason})`);
-      sendHeartbeat();
+      safeSendHeartbeat('observed-start');
     }
     return;
   }
@@ -979,9 +1082,13 @@ async function sendHeartbeat() {
     }
     
   } catch (error) {
+    if (globalThis.Sentry?.captureException) {
+      globalThis.Sentry.captureException(error);
+    }
     console.error('Heartbeat network error:', error);
     chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
     chrome.action.setBadgeText({ text: '!' });
+    throw error;
   }
 }
 
@@ -1009,7 +1116,7 @@ async function healthCheck() {
 // Alarm listener for heartbeat and WebSocket reconnection
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
-    sendHeartbeat();
+    safeSendHeartbeat('alarm');
   } else if (alarm.name === 'ws-reconnect') {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
     console.log('WebSocket reconnection alarm triggered');
@@ -1980,6 +2087,25 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'dev-throw') {
+    if (!SENTRY_DEV_MODE) {
+      sendResponse({ success: false, error: 'Sentry dev mode is disabled' });
+      return true;
+    }
+    if (devExceptionSent) {
+      sendResponse({ success: false, error: 'Sentry dev exception already sent' });
+      return true;
+    }
+    devExceptionSent = true;
+    const error = new Error('Sentry dev test error (extension)');
+    if (globalThis.Sentry?.captureException) {
+      globalThis.Sentry.captureException(error);
+    }
+    console.warn('[Sentry] Dev exception captured for verification.');
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (message.type === 'register') {
     registerDevice(message.deviceId, message.deviceName, message.classId)
       .then(async (data) => {
@@ -2034,7 +2160,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('Student changed:', previousStudentId, '->', message.studentId);
     
     // Send immediate heartbeat with new studentId
-    sendHeartbeat();
+    safeSendHeartbeat('student-changed');
     
     // Log student_switched event
     if (CONFIG.deviceId) {
@@ -2065,7 +2191,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[Service Worker] Camera status updated:', cameraActive);
     
     // Send immediate heartbeat with camera status
-    sendHeartbeat();
+    safeSendHeartbeat('camera-status');
     
     sendResponse({ success: true });
     return true;
