@@ -1,3 +1,4 @@
+-- IDs are stored as uuid in Postgres but modeled as strings in the app layer.
 CREATE TABLE IF NOT EXISTS google_oauth_tokens (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id text NOT NULL,

@@ -1,5 +1,6 @@
 import { google } from "googleapis";
 import { storage } from "./storage";
+import { getBaseUrl } from "./config/baseUrl";
 
 // Helper to get an authenticated Classroom client for a user
 export async function getClassroomClient(userId: string) {
@@ -14,7 +15,7 @@ export async function getClassroomClient(userId: string) {
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     // Ensure this matches the callback URL in your googleAuth.ts
-    `${process.env.PUBLIC_BASE_URL || "http://localhost:5000"}/auth/google/callback`
+    `${getBaseUrl()}/auth/google/callback`
   );
 
   // 3. Set credentials

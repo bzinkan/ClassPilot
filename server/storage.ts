@@ -74,6 +74,20 @@ import {
 import { randomUUID } from "crypto";
 import { db } from "./db";
 import { eq, desc, lt, sql as drizzleSql, inArray, isNull } from "drizzle-orm";
+import { decryptSecret, encryptSecret } from "./security/crypto";
+
+type GoogleOAuthTokenUpsert = Pick<InsertGoogleOAuthToken, "scope" | "tokenType" | "expiryDate"> & {
+  refreshToken?: string | null;
+};
+
+const ENCRYPTED_SECRET_PARTS = 3;
+
+function isEncryptedSecret(value?: string | null): value is string {
+  if (!value) return false;
+  const parts = value.split(".");
+  if (parts.length !== ENCRYPTED_SECRET_PARTS) return false;
+  return parts.every((part) => part.length > 0);
+}
 
 export interface IStorage {
   // Schools
@@ -117,7 +131,7 @@ export interface IStorage {
 
   // Google OAuth tokens
   getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined>;
-  upsertGoogleOAuthTokens(userId: string, token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">): Promise<GoogleOAuthToken>;
+  upsertGoogleOAuthTokens(userId: string, token: GoogleOAuthTokenUpsert): Promise<GoogleOAuthToken>;
 
   // Google Classroom roster sync
   upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse>;
@@ -422,19 +436,39 @@ export class MemStorage implements IStorage {
   }
 
   async getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined> {
-    return this.googleOAuthTokens.get(userId);
+    const token = this.googleOAuthTokens.get(userId);
+    if (!token) return undefined;
+
+    const refreshToken = isEncryptedSecret(token.refreshToken)
+      ? decryptSecret(token.refreshToken)
+      : token.refreshToken;
+
+    return { ...token, refreshToken };
   }
 
   async upsertGoogleOAuthTokens(
     userId: string,
-    token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">
+    token: GoogleOAuthTokenUpsert
   ): Promise<GoogleOAuthToken> {
     const existing = this.googleOAuthTokens.get(userId);
     const now = new Date();
+    const existingRefreshToken = existing?.refreshToken ?? null;
+    const hasEncryptedToken = isEncryptedSecret(existingRefreshToken);
+    const providedRefreshToken = token.refreshToken ?? undefined;
+    const refreshTokenToStore = providedRefreshToken
+      ? encryptSecret(providedRefreshToken)
+      : existingRefreshToken
+        ? (hasEncryptedToken ? existingRefreshToken : encryptSecret(existingRefreshToken))
+        : null;
+
+    if (!refreshTokenToStore) {
+      throw new Error("Refresh token is required to store Google OAuth credentials.");
+    }
+
     const saved: GoogleOAuthToken = {
       id: existing?.id ?? randomUUID(),
       userId,
-      refreshToken: token.refreshToken,
+      refreshToken: refreshTokenToStore,
       scope: token.scope ?? null,
       tokenType: token.tokenType ?? null,
       expiryDate: token.expiryDate ?? null,
@@ -1639,34 +1673,60 @@ export class DatabaseStorage implements IStorage {
 
   async getGoogleOAuthTokens(userId: string): Promise<GoogleOAuthToken | undefined> {
     const [token] = await db.select().from(googleOAuthTokens).where(eq(googleOAuthTokens.userId, userId));
-    return token || undefined;
+    if (!token) return undefined;
+    const refreshToken = isEncryptedSecret(token.refreshToken)
+      ? decryptSecret(token.refreshToken)
+      : token.refreshToken;
+    return { ...token, refreshToken };
   }
 
   async upsertGoogleOAuthTokens(
     userId: string,
-    token: Pick<InsertGoogleOAuthToken, "refreshToken" | "scope" | "tokenType" | "expiryDate">
+    token: GoogleOAuthTokenUpsert
   ): Promise<GoogleOAuthToken> {
+    const [existing] = await db.select().from(googleOAuthTokens).where(eq(googleOAuthTokens.userId, userId));
+    const existingRefreshToken = existing?.refreshToken ?? null;
+    const hasEncryptedToken = isEncryptedSecret(existingRefreshToken);
+    const providedRefreshToken = token.refreshToken ?? undefined;
+    const refreshTokenToStore = providedRefreshToken
+      ? encryptSecret(providedRefreshToken)
+      : existingRefreshToken
+        ? (hasEncryptedToken ? existingRefreshToken : encryptSecret(existingRefreshToken))
+        : null;
+
+    if (!refreshTokenToStore) {
+      throw new Error("Refresh token is required to store Google OAuth credentials.");
+    }
+
+    const updateSet: Partial<InsertGoogleOAuthToken> & { updatedAt: unknown } = {
+      scope: token.scope ?? null,
+      tokenType: token.tokenType ?? null,
+      expiryDate: token.expiryDate ?? null,
+      updatedAt: drizzleSql`now()`,
+    };
+
+    if (providedRefreshToken || (existingRefreshToken && !hasEncryptedToken)) {
+      updateSet.refreshToken = refreshTokenToStore;
+    }
+
     const [saved] = await db
       .insert(googleOAuthTokens)
       .values({
         userId,
-        refreshToken: token.refreshToken,
+        refreshToken: refreshTokenToStore,
         scope: token.scope ?? null,
         tokenType: token.tokenType ?? null,
         expiryDate: token.expiryDate ?? null,
       })
       .onConflictDoUpdate({
         target: googleOAuthTokens.userId,
-        set: {
-          refreshToken: token.refreshToken,
-          scope: token.scope ?? null,
-          tokenType: token.tokenType ?? null,
-          expiryDate: token.expiryDate ?? null,
-          updatedAt: drizzleSql`now()`,
-        },
+        set: updateSet,
       })
       .returning();
-    return saved;
+    const refreshToken = isEncryptedSecret(saved.refreshToken)
+      ? decryptSecret(saved.refreshToken)
+      : saved.refreshToken;
+    return { ...saved, refreshToken };
   }
 
   // Devices
