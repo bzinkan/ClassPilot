@@ -9,6 +9,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import { initializeApp } from "./init";
 import { setupGoogleAuth } from "./googleAuth";
+import { getRequiredSecret } from "./util/env";
 
 const SENTRY_DSN_SERVER = process.env.SENTRY_DSN_SERVER;
 const SENTRY_SENSITIVE_KEY_REGEX = /(email|student|name)/i;
@@ -160,10 +161,15 @@ const sessionStore = process.env.DATABASE_URL
   : undefined; // Use default MemoryStore in development if no DATABASE_URL
 
 // Session configuration
+const sessionSecret = getRequiredSecret("SESSION_SECRET", {
+  minBytes: 32,
+  devLogMessage: "[auth] Generated dev SESSION_SECRET",
+});
+
 export const sessionMiddleware = session({
   name: 'classpilot_session',
   store: sessionStore,
-  secret: process.env.SESSION_SECRET || "classroom-screen-awareness-secret",
+  secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
   rolling: true, // Auto-renew session on activity to keep it alive
@@ -217,27 +223,11 @@ app.get('/client-config.json', (req, res) => {
 app.use((req, res, next) => {
   const start = Date.now();
   const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
 
   res.on("finish", () => {
     const duration = Date.now() - start;
     if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
-      }
-
-      if (logLine.length > 80) {
-        logLine = logLine.slice(0, 79) + "…";
-      }
-
-      log(logLine);
+      log(`${req.method} ${path} ${res.statusCode} in ${duration}ms`);
     }
   });
 
