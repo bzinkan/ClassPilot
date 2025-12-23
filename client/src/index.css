@@ -238,7 +238,7 @@
   }
 
   body {
-    @apply font-sans antialiased bg-background text-foreground;
+    @apply font-sans antialiased text-foreground bg-mesh-gradient min-h-screen selection:bg-primary/20;
   }
 
   /* Custom status colors */
@@ -384,5 +384,45 @@
   .border.active-elevate-2:not(.no-active-interaction-elevate)::after,
   .border.hover-elevate:not(.no-hover-interaction-elevate)::after {
     inset: -1px;
+  }
+
+  /* The "Mesh" Background Gradient */
+  .bg-mesh-gradient {
+    background-color: hsl(var(--background));
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(252, 82%, 94%, 1) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(220, 80%, 94%, 1) 0, transparent 50%), 
+      radial-gradient(at 100% 100%, hsla(280, 50%, 96%, 1) 0, transparent 50%);
+  }
+
+  .dark .bg-mesh-gradient {
+    background-color: hsl(var(--background));
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(252, 82%, 15%, 0.5) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(220, 80%, 15%, 0.5) 0, transparent 50%);
+  }
+
+  /* Glassmorphism Utilities */
+  .glass-panel {
+    @apply bg-white/70 dark:bg-black/40 backdrop-blur-xl border border-white/40 dark:border-white/10 shadow-sm;
+  }
+
+  .glass-card {
+    @apply bg-white/60 dark:bg-slate-900/60 backdrop-blur-lg border border-white/50 dark:border-white/10 shadow-xl shadow-indigo-500/5 transition-all duration-300;
+  }
+
+  /* Glow Animations */
+  .animate-glow-pulse-red {
+    animation: glow-pulse-red 2s infinite;
+  }
+
+  @keyframes glow-pulse-red {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); border-color: rgba(239, 68, 68, 0.8); }
+    70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); border-color: rgba(239, 68, 68, 0.4); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); border-color: rgba(239, 68, 68, 0.8); }
+  }
+
+  .status-dot {
+    @apply h-2.5 w-2.5 rounded-full shadow-[0_0_8px] transition-all duration-500;
   }
 }
