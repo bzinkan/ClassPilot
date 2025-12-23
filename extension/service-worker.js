@@ -5,6 +5,7 @@ importScripts('config.js');
 importScripts('vendor/sentry.browser.min.js');
 
 const SENTRY_DSN_EXTENSION = globalThis.SENTRY_DSN_EXTENSION || '';
+const SENTRY_ENV = globalThis.SENTRY_ENV || 'development';
 const SENTRY_DEV_MODE = globalThis.SENTRY_DEV_MODE === true;
 let devExceptionSent = false;
 
@@ -63,6 +64,7 @@ function scrubSentryData(value, key) {
 if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENTRY_DSN_EXTENSION) {
   globalThis.Sentry.init({
     dsn: SENTRY_DSN_EXTENSION,
+    environment: SENTRY_ENV,
     tracesSampleRate: 0,
     sendDefaultPii: false,
     beforeSend(event) {

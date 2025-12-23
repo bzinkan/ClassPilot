@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique, uniqueIndex, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, varchar, timestamp, boolean, jsonb, index, unique, uniqueIndex, integer, uuid } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -130,8 +130,9 @@ export const insertStudentSchema = createInsertSchema(students).omit({ id: true,
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
 export type Student = typeof students.$inferSelect;
 
+// IDs are stored as uuid in Postgres but represented as strings in the app.
 export const googleOAuthTokens = pgTable("google_oauth_tokens", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  id: uuid("id").defaultRandom().primaryKey(),
   userId: text("user_id").notNull(),
   refreshToken: text("refresh_token").notNull(),
   scope: text("scope"),
@@ -148,7 +149,7 @@ export type InsertGoogleOAuthToken = z.infer<typeof insertGoogleOAuthTokenSchema
 export type GoogleOAuthToken = typeof googleOAuthTokens.$inferSelect;
 
 export const classroomCourses = pgTable("classroom_courses", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  id: uuid("id").defaultRandom().primaryKey(),
   schoolId: text("school_id").notNull(),
   courseId: text("course_id").notNull(),
   name: text("name").notNull(),
@@ -167,7 +168,7 @@ export type InsertClassroomCourse = z.infer<typeof insertClassroomCourseSchema>;
 export type ClassroomCourse = typeof classroomCourses.$inferSelect;
 
 export const classroomCourseStudents = pgTable("classroom_course_students", {
-  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  id: uuid("id").defaultRandom().primaryKey(),
   schoolId: text("school_id").notNull(),
   courseId: text("course_id").notNull(),
   studentId: text("student_id").notNull(),

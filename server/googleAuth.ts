@@ -2,12 +2,11 @@ import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import type { Express } from "express";
 import { storage } from "./storage";
+import { getBaseUrl } from "./config/baseUrl";
 
 export function setupGoogleAuth(app: Express) {
   // Construct full callback URL for Google OAuth
-  const baseUrl =
-    process.env.PUBLIC_BASE_URL ??
-    (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:5000");
+  const baseUrl = getBaseUrl();
   const callbackURL = `${baseUrl}/auth/google/callback`;
   const classroomScopes = [
     "profile",

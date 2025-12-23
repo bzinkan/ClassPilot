@@ -85,6 +85,12 @@ let CONFIG = {
 
 Update the `serverUrl` to point to your deployed Replit application before deployment.
 
+Sentry configuration lives in `extension/config.js`, which is ignored by git. If the file was previously tracked, remove it from the index with:
+
+```bash
+git rm --cached extension/config.js
+```
+
 ## Privacy & Transparency
 
 ### What's Monitored (Automatically)

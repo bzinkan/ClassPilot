@@ -33,6 +33,7 @@ import {
 import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
+import { getBaseUrl } from "./config/baseUrl";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -2378,10 +2379,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "Google Classroom access not connected. Please re-authenticate with Google." });
       }
 
-      const baseUrl =
-        process.env.PUBLIC_BASE_URL ??
-        (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}` : "http://localhost:5000");
-      const redirectUri = `${baseUrl}/auth/google/callback`;
+      const redirectUri = `${getBaseUrl()}/auth/google/callback`;
 
       const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
