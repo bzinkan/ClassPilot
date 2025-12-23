@@ -6,7 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2 } from "lucide-react";
+import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -78,6 +78,28 @@ interface ClassroomCoursesResponse {
   courses: GoogleClassroomCourse[];
 }
 
+interface DirectoryUser {
+  id: string;
+  email: string;
+  name: string;
+  orgUnitPath?: string;
+  isAdmin?: boolean;
+  suspended?: boolean;
+}
+
+interface DirectoryUsersResponse {
+  users: DirectoryUser[];
+  nextPageToken?: string;
+}
+
+interface DirectoryImportResult {
+  success: boolean;
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+}
+
 // Admin Guard Wrapper - Only checks auth, doesn't run any queries/mutations
 export default function StudentsPage() {
   const [, setLocation] = useLocation();
@@ -135,6 +157,8 @@ function StudentsContent() {
   const [deletingStudent, setDeletingStudent] = useState<Student | null>(null);
   const [showClassroomDialog, setShowClassroomDialog] = useState(false);
   const [syncingCourseId, setSyncingCourseId] = useState<string | null>(null);
+  const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false);
+  const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
 
   // Fetch all students (only runs for admins)
   const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
@@ -148,7 +172,22 @@ function StudentsContent() {
   });
 
   const classroomCourses = classroomData?.courses || [];
-  const classroomNotConnected = (classroomError as any)?.code === "NO_TOKENS";
+  
+  // Parse error code from classroom error
+  const classroomNotConnected = (() => {
+    if (!classroomError) return false;
+    const errorMessage = (classroomError as Error).message || "";
+    try {
+      const jsonMatch = errorMessage.match(/\{.*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return parsed.code === "NO_TOKENS";
+      }
+    } catch {
+      return errorMessage.includes("NO_TOKENS");
+    }
+    return false;
+  })();
 
   // Sync Google Classroom roster mutation
   const syncClassroomMutation = useMutation({
@@ -175,6 +214,59 @@ function StudentsContent() {
         description: error.message,
       });
       setSyncingCourseId(null);
+    },
+  });
+
+  // Fetch Google Workspace Directory users (only when dialog is open)
+  const { data: directoryData, isLoading: isLoadingDirectory, error: directoryError, refetch: refetchDirectory } = useQuery<DirectoryUsersResponse>({
+    queryKey: ["/api/directory/users"],
+    enabled: showWorkspaceDialog,
+  });
+
+  const directoryUsers = directoryData?.users || [];
+  
+  // Parse error codes from the error message (format: "403: {\"error\":\"...\",\"code\":\"...\"}")
+  const getDirectoryErrorCode = (): string | null => {
+    if (!directoryError) return null;
+    const errorMessage = (directoryError as Error).message || "";
+    try {
+      const jsonMatch = errorMessage.match(/\{.*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return parsed.code || null;
+      }
+    } catch {
+      // Not JSON, check for keywords
+      if (errorMessage.includes("NO_TOKENS")) return "NO_TOKENS";
+      if (errorMessage.includes("INSUFFICIENT_PERMISSIONS")) return "INSUFFICIENT_PERMISSIONS";
+    }
+    return null;
+  };
+  
+  const directoryErrorCode = getDirectoryErrorCode();
+  const directoryNotConnected = directoryErrorCode === "NO_TOKENS";
+  const directoryNoPermission = directoryErrorCode === "INSUFFICIENT_PERMISSIONS";
+
+  // Import from Google Workspace Directory mutation
+  const importDirectoryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/directory/import", {});
+      return res.json();
+    },
+    onSuccess: async (data: DirectoryImportResult) => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"], exact: false });
+      setWorkspaceImportResult(data);
+      toast({
+        title: "Import Complete",
+        description: `Imported ${data.imported} new students, updated ${data.updated} existing`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Import Failed",
+        description: error.message,
+      });
     },
   });
 
@@ -565,6 +657,185 @@ function StudentsContent() {
                       </Button>
                     </div>
                   ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Google Workspace Import Card */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Building2 className="h-5 w-5" />
+            Import from Google Workspace
+          </CardTitle>
+          <CardDescription>
+            Import all students from your school's Google Workspace domain (requires admin access)
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            onClick={() => setShowWorkspaceDialog(true)}
+            data-testid="button-open-workspace-import"
+          >
+            <Building2 className="h-4 w-4 mr-2" />
+            Import from Google Workspace
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Google Workspace Import Dialog */}
+      <Dialog open={showWorkspaceDialog} onOpenChange={(open) => {
+        setShowWorkspaceDialog(open);
+        if (!open) setWorkspaceImportResult(null);
+      }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5" />
+              Import from Google Workspace
+            </DialogTitle>
+            <DialogDescription>
+              Import all students from your school's Google Workspace domain
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {isLoadingDirectory ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                <span className="text-muted-foreground">Loading users from Google Workspace...</span>
+              </div>
+            ) : directoryNotConnected ? (
+              <div className="text-center py-8 space-y-4">
+                <p className="text-muted-foreground">
+                  Google Workspace is not connected. Please sign out and sign back in with Google.
+                </p>
+                <Button
+                  variant="outline"
+                  onClick={() => window.location.href = "/auth/google"}
+                  data-testid="button-reconnect-google-workspace"
+                >
+                  Reconnect Google Account
+                </Button>
+              </div>
+            ) : directoryNoPermission ? (
+              <div className="text-center py-8 space-y-4">
+                <div className="flex items-center justify-center gap-2 text-yellow-600">
+                  <AlertCircle className="h-5 w-5" />
+                  <span className="font-medium">Admin Access Required</span>
+                </div>
+                <p className="text-muted-foreground">
+                  This feature requires Google Workspace administrator privileges. 
+                  Your Google account must have admin access to your school's domain to import users directly.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Alternatively, use the Google Classroom import or CSV upload options above.
+                </p>
+              </div>
+            ) : workspaceImportResult ? (
+              <div className="space-y-4">
+                <div className="p-4 border rounded-md space-y-3">
+                  <p className="font-medium">Import Results:</p>
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <p className="text-muted-foreground">Imported</p>
+                      <p className="text-2xl font-bold text-green-600">{workspaceImportResult.imported}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Updated</p>
+                      <p className="text-2xl font-bold text-blue-600">{workspaceImportResult.updated}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Skipped</p>
+                      <p className="text-2xl font-bold text-gray-600">{workspaceImportResult.skipped}</p>
+                    </div>
+                  </div>
+                  {workspaceImportResult.errors.length > 0 && (
+                    <div className="mt-3 p-3 bg-destructive/10 rounded-md">
+                      <p className="font-medium text-destructive mb-2">Errors:</p>
+                      <ul className="list-disc list-inside text-sm text-destructive space-y-1">
+                        {workspaceImportResult.errors.slice(0, 10).map((error, i) => (
+                          <li key={i}>{error}</li>
+                        ))}
+                        {workspaceImportResult.errors.length > 10 && (
+                          <li>...and {workspaceImportResult.errors.length - 10} more</li>
+                        )}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-end">
+                  <Button onClick={() => setShowWorkspaceDialog(false)}>
+                    Done
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    Found {directoryUsers.length} user{directoryUsers.length !== 1 ? 's' : ''} in your domain
+                  </p>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => refetchDirectory()}
+                    data-testid="button-refresh-directory"
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Refresh
+                  </Button>
+                </div>
+
+                {directoryUsers.length > 0 && (
+                  <div className="border rounded-md divide-y max-h-64 overflow-auto">
+                    {directoryUsers.slice(0, 20).map((user) => (
+                      <div
+                        key={user.id}
+                        className="flex items-center justify-between p-3 text-sm"
+                        data-testid={`row-user-${user.id}`}
+                      >
+                        <div>
+                          <p className="font-medium">{user.name}</p>
+                          <p className="text-muted-foreground text-xs">{user.email}</p>
+                        </div>
+                        {user.orgUnitPath && (
+                          <span className="text-xs text-muted-foreground">{user.orgUnitPath}</span>
+                        )}
+                      </div>
+                    ))}
+                    {directoryUsers.length > 20 && (
+                      <div className="p-3 text-sm text-center text-muted-foreground">
+                        ...and {directoryUsers.length - 20} more users
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setShowWorkspaceDialog(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={() => importDirectoryMutation.mutate()}
+                    disabled={importDirectoryMutation.isPending || directoryUsers.length === 0}
+                    data-testid="button-import-workspace-users"
+                  >
+                    {importDirectoryMutation.isPending ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        Importing...
+                      </>
+                    ) : (
+                      <>
+                        <Users className="h-4 w-4 mr-2" />
+                        Import {directoryUsers.length} Students
+                      </>
+                    )}
+                  </Button>
                 </div>
               </div>
             )}
