@@ -12,17 +12,23 @@ function getEncryptionKey(): Buffer {
     );
   }
 
-  const base64Key = Buffer.from(rawKey, "base64");
+  // Debug: Log key info (not the actual key!)
+  console.log(`[Crypto] Key length: ${rawKey.length} chars, trimmed: ${rawKey.trim().length} chars`);
+
+  const trimmedKey = rawKey.trim();
+  const base64Key = Buffer.from(trimmedKey, "base64");
+  console.log(`[Crypto] Decoded base64 length: ${base64Key.length} bytes`);
+  
   if (base64Key.length === KEY_BYTES) {
     return base64Key;
   }
 
-  const rawKeyBuffer = Buffer.from(rawKey);
+  const rawKeyBuffer = Buffer.from(trimmedKey);
   if (rawKeyBuffer.length === KEY_BYTES) {
     return rawKeyBuffer;
   }
 
-  throw new Error(`${ENCRYPTION_KEY_ENV} must be 32 bytes (base64 recommended).`);
+  throw new Error(`${ENCRYPTION_KEY_ENV} must be 32 bytes (base64 recommended). Got ${base64Key.length} bytes from base64, ${rawKeyBuffer.length} bytes raw.`);
 }
 
 export function encryptSecret(plaintext: string): string {
