@@ -128,7 +128,7 @@ const IDLE_DETECTION_SECONDS = 180;
 // Heartbeat stays at 60s in ACTIVE mode (presence/lastSeen only).
 const HEARTBEAT_ACTIVE_MINUTES = 1;
 const HEARTBEAT_IDLE_MINUTES = 10;
-const OBSERVED_HEARTBEAT_SECONDS = 10;
+const OBSERVED_HEARTBEAT_SECONDS = 20;
 const NAVIGATION_DEBOUNCE_MS = 350;
 
 let trackingState = TRACKING_STATES.OFF;
@@ -142,6 +142,8 @@ let idleListenerReady = false;
 let settingsAlarmScheduled = false;
 let observedHeartbeatTimer = null;
 let observedByTeacher = false;
+let lastObservedSignature = null;
+let lastObservedSentAt = 0;
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -294,7 +296,7 @@ function scheduleHeartbeat(periodInMinutes) {
 
 async function safeSendHeartbeat(reason) {
   try {
-    await sendHeartbeat();
+    await sendHeartbeat(reason);
   } catch (error) {
     if (globalThis.Sentry?.captureException) {
       globalThis.Sentry.captureException(error);
@@ -463,7 +465,7 @@ async function ensureRegistered() {
         );
         if (profile?.email) {
           stored.studentEmail = normalizeEmail(profile.email);
-          console.log('[Service Worker] Auto-detected email:', stored.studentEmail);
+          console.log('[Service Worker] Auto-detected email');
         }
       } catch (err) {
         console.log('[Service Worker] Could not get profile info:', err);
@@ -504,7 +506,7 @@ async function ensureRegistered() {
     
     if (needsRegistration) {
       try {
-        console.log('[Service Worker] Registering student with server:', stored.studentEmail);
+        console.log('[Service Worker] Registering student with server');
         const response = await fetch(`${CONFIG.serverUrl}/api/register-student`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -522,7 +524,7 @@ async function ensureRegistered() {
         }
         
         const data = await response.json();
-        console.log('[Service Worker] Student registered successfully:', data);
+        console.log('[Service Worker] Student registered successfully');
         
         // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
         if (data.studentToken) {
@@ -555,14 +557,10 @@ async function ensureRegistered() {
         }, 5000); // 5 second delay before retry
       }
     } else if (stored.studentEmail) {
-      console.log('[Service Worker] Already registered:', stored.studentEmail);
+      console.log('[Service Worker] Already registered');
     }
     
-    console.log('[Service Worker] Registration complete:', {
-      email: stored.studentEmail,
-      deviceId: stored.deviceId,
-      registered: stored.registered || needsRegistration,
-    });
+    console.log('[Service Worker] Registration complete');
     
     return stored;
   } catch (error) {
@@ -966,7 +964,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 }
 
 // Send heartbeat with current tab info
-async function sendHeartbeat() {
+async function sendHeartbeat(reason = 'manual') {
   if (trackingState === TRACKING_STATES.OFF) {
     return;
   }
@@ -994,6 +992,7 @@ async function sendHeartbeat() {
     // IMPORTANT: Use empty strings instead of null for Zod schema validation
     let activeTabUrl = '';
     let activeTabTitle = '';
+    let activeTabId = null;
     let favicon = null;
     
     // Only report tab if we have exactly one active tab with HTTP URL
@@ -1004,6 +1003,7 @@ async function sendHeartbeat() {
       if (activeTab.url && activeTab.url.startsWith('http')) {
         activeTabUrl = activeTab.url;
         activeTabTitle = activeTab.title || '';
+        activeTabId = activeTab.id ?? null;
         favicon = activeTab.favIconUrl || null;
       }
       // Otherwise keep empty strings (Chrome internal page = no monitored activity)
@@ -1013,6 +1013,18 @@ async function sendHeartbeat() {
     }
     // If tabs.length === 0, keep empty strings
     
+    const isObservedHeartbeat = reason.startsWith('observed');
+    const now = Date.now();
+    const observedSignature = `${activeTabUrl}|${activeTabTitle}|${activeTabId ?? 'none'}`;
+
+    if (
+      isObservedHeartbeat &&
+      observedSignature === lastObservedSignature &&
+      now - lastObservedSentAt < OBSERVED_HEARTBEAT_SECONDS * 1000
+    ) {
+      return;
+    }
+
     // Collect ALL open tabs for teacher dashboard
     let allOpenTabs = [];
     try {
@@ -1049,9 +1061,14 @@ async function sendHeartbeat() {
     // ✅ JWT AUTHENTICATION: Include studentToken if available (INDUSTRY STANDARD)
     if (CONFIG.studentToken) {
       heartbeatData.studentToken = CONFIG.studentToken;
-      console.log('Sending JWT-authenticated heartbeat for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId);
+      console.log('Sending JWT-authenticated heartbeat');
     } else {
-      console.log('⚠️  Sending legacy heartbeat (no JWT) for email:', CONFIG.studentEmail, '| deviceId:', CONFIG.deviceId);
+      console.log('⚠️  Sending legacy heartbeat (no JWT)');
+    }
+
+    if (isObservedHeartbeat) {
+      lastObservedSignature = observedSignature;
+      lastObservedSentAt = now;
     }
     
     const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
@@ -1919,7 +1936,7 @@ function connectWebSocket() {
           studentEmail: CONFIG.studentEmail,  // 🟢 Primary identity - backend determines schoolId from domain
           deviceId: CONFIG.deviceId,          // Internal tracking
         }));
-        console.log('WebSocket auth sent for:', CONFIG.studentEmail);
+        console.log('WebSocket auth sent');
       } else {
         console.warn('WebSocket not ready yet, will retry on next connection');
       }

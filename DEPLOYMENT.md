@@ -19,13 +19,26 @@ In your Replit project, configure the following secrets:
 
 | Secret Name | Value | Purpose |
 |------------|-------|---------|
-| `SESSION_SECRET` | (auto-generated) | Already configured - used for session encryption |
+| `SESSION_SECRET` | 32+ byte random string | Required in production - used for session encryption |
+| `STUDENT_TOKEN_SECRET` | 32+ byte random string | Required in production - signs student JWT tokens |
+| `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY` | 32-byte base64 key | Required in production - encrypts OAuth tokens |
 | `WS_SHARED_KEY` | Generate a strong random key | WebSocket authentication (optional) |
 | `SCHOOL_ID` | Your school identifier (e.g., `lincoln-high`) | School identification |
+| `HEARTBEAT_MIN_PERSIST_SECONDS` | `15` (default) | Minimum seconds between persisted heartbeats per device |
 
 To generate a strong key for `WS_SHARED_KEY`:
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+To generate secrets for `SESSION_SECRET` or `STUDENT_TOKEN_SECRET`:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+```
+
+To generate `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY`:
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 ```
 
 ### 1.2 Deploy to Production

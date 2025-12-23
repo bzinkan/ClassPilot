@@ -1,11 +1,11 @@
 import jwt from 'jsonwebtoken';
+import { getRequiredSecret } from './util/env';
 
 // JWT Secret - MUST be set in environment variables for production
-const JWT_SECRET = process.env.STUDENT_TOKEN_SECRET || 'dev-secret-change-in-production';
-
-if (!process.env.STUDENT_TOKEN_SECRET) {
-  console.warn('⚠️  STUDENT_TOKEN_SECRET not set - using dev secret. SET THIS IN PRODUCTION!');
-}
+const JWT_SECRET = getRequiredSecret('STUDENT_TOKEN_SECRET', {
+  minBytes: 32,
+  devLogMessage: '[auth] Generated dev STUDENT_TOKEN_SECRET',
+});
 
 // Token expiration: 7 days (industry standard for classroom apps)
 const TOKEN_EXPIRY = '7d';

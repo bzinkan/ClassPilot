@@ -59,26 +59,23 @@ async function getSchoolFromEmail(email: string): Promise<{ schoolId: string; sc
   // Extract domain from email (part after @)
   const normalizedEmail = normalizeEmail(email);
   if (!normalizedEmail) {
-    console.error('[getSchoolFromEmail] Invalid email:', email);
+    console.error('[getSchoolFromEmail] Invalid email supplied');
     return null;
   }
   
   const domain = normalizedEmail.split('@')[1];
   if (!domain) {
-    console.error('[getSchoolFromEmail] No domain found in email:', normalizedEmail);
+    console.error('[getSchoolFromEmail] No domain found in email');
     return null;
   }
-  
-  console.log('[getSchoolFromEmail] Looking up school for domain:', domain);
   
   // Look up school by domain
   const school = await storage.getSchoolByDomain(domain);
   if (!school) {
-    console.warn('[getSchoolFromEmail] No school found for domain:', domain);
+    console.warn('[getSchoolFromEmail] No school found for provided domain');
     return null;
   }
   
-  console.log('[getSchoolFromEmail] Found school:', school.id, school.name);
   return {
     schoolId: school.id,
     schoolName: school.name,
@@ -93,79 +90,44 @@ async function ensureStudentDeviceAssociation(
   studentEmail: string,
   schoolId: string
 ): Promise<any> {
-  console.log('📍 [ensureStudentDeviceAssociation] START:', { deviceId, studentEmail, schoolId });
-  
   // Normalize email for consistent lookups
   const normalizedEmail = normalizeEmail(studentEmail);
-  console.log('📍 [ensureStudentDeviceAssociation] Normalized email:', normalizedEmail);
-  
+
   // DEVICE-FIRST: Look up student by email (email = student identity, device = stable ID)
   let student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
-  console.log('📍 [ensureStudentDeviceAssociation] Student lookup result:', student ? `Found: ${student.id}` : 'Not found');
-  
+
   if (student) {
-    // Found existing student (from CSV import or previous auto-provision)
-    console.log('Session-based: Found student', student.studentEmail, 'for device', deviceId);
-    console.log('📍 [ensureStudentDeviceAssociation] Current student deviceId:', student.deviceId);
-    
     // Update student's current deviceId if changed (tracks most recent device)
     if (student.deviceId !== deviceId) {
-      console.log('📍 [ensureStudentDeviceAssociation] Updating deviceId:', student.deviceId, '→', deviceId);
       await storage.updateStudent(student.id, { deviceId });
-      console.log('Session-based: Updated student device', student.id, ':', student.deviceId, '→', deviceId);
-    } else {
-      console.log('📍 [ensureStudentDeviceAssociation] DeviceId unchanged, skipping update');
     }
-    
+
     // Track historical student-device relationship
-    console.log('📍 [ensureStudentDeviceAssociation] Upserting student-device relationship');
     await storage.upsertStudentDevice(student.id, deviceId);
-    
+
     // Start or update session (automatically handles device switches and evictions)
-    console.log('📍 [ensureStudentDeviceAssociation] Starting student session');
-    const session = await storage.startStudentSession(student.id, deviceId);
-    console.log('Session-based: Started/updated session', session.id, 'for student', student.id, 'on device', deviceId);
-    console.log('📍 [ensureStudentDeviceAssociation] Session created:', {
-      sessionId: session.id,
-      studentId: session.studentId,
-      deviceId: session.deviceId,
-      isActive: session.isActive,
-      startedAt: session.startedAt
-    });
-    
+    await storage.startStudentSession(student.id, deviceId);
+
     return student;
-  } else {
-    // Student not found - auto-provision placeholder record
-    console.log('Session-based: Auto-provisioning student for email', normalizedEmail);
-    console.log('📍 [ensureStudentDeviceAssociation] Creating new student record');
-    
-    const newStudent = await storage.createStudent({
-      deviceId,
-      studentName: normalizedEmail.split('@')[0], // Use email prefix as placeholder
-      studentEmail: normalizedEmail,
-      gradeLevel: null,
-      schoolId,
-      studentStatus: 'active',
-    });
-    console.log('📍 [ensureStudentDeviceAssociation] New student created:', newStudent.id);
-    
-    // Track historical student-device relationship
-    console.log('📍 [ensureStudentDeviceAssociation] Upserting student-device relationship for new student');
-    await storage.upsertStudentDevice(newStudent.id, deviceId);
-    
-    // Start session for new student
-    console.log('📍 [ensureStudentDeviceAssociation] Starting session for new student');
-    const session = await storage.startStudentSession(newStudent.id, deviceId);
-    console.log('Session-based: Auto-provisioned student', newStudent.id, 'and started session', session.id);
-    console.log('📍 [ensureStudentDeviceAssociation] New student session created:', {
-      sessionId: session.id,
-      studentId: session.studentId,
-      deviceId: session.deviceId,
-      isActive: session.isActive
-    });
-    
-    return newStudent;
   }
+
+  // Student not found - auto-provision placeholder record
+  const newStudent = await storage.createStudent({
+    deviceId,
+    studentName: normalizedEmail.split('@')[0], // Use email prefix as placeholder
+    studentEmail: normalizedEmail,
+    gradeLevel: null,
+    schoolId,
+    studentStatus: 'active',
+  });
+
+  // Track historical student-device relationship
+  await storage.upsertStudentDevice(newStudent.id, deviceId);
+
+  // Start session for new student
+  await storage.startStudentSession(newStudent.id, deviceId);
+
+  return newStudent;
 }
 
 // Rate limiters
@@ -177,18 +139,73 @@ const apiLimiter = rateLimit({
 });
 
 // Per-device heartbeat rate limiter (critical for production)
-// Increased limit to 1000/min to prevent rate limiting issues with Chrome Extensions
 const heartbeatLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute window
-  max: 1000, // 1000 requests per minute per device (extensions send ~6/min, but allow headroom for retries)
+  max: 120, // 120 requests per minute per device (~2/sec)
   keyGenerator: (req) => {
-    const { deviceId } = req.body || {};
-    return `heartbeat:${deviceId || 'unknown'}`;
+    const deviceId = typeof req.body?.deviceId === "string" ? req.body.deviceId.trim() : "";
+    if (deviceId) {
+      return `heartbeat:${deviceId}`;
+    }
+    return `heartbeat-ip:${req.ip}`;
   },
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
+  handler: (req, res, _next, options) => {
+    res.status(options.statusCode).json({
+      error: "Too many heartbeat requests",
+      retryAfterMs: req.rateLimit?.resetTime
+        ? Math.max(0, req.rateLimit.resetTime.getTime() - Date.now())
+        : undefined,
+    });
+  },
 });
+
+const HEARTBEAT_MIN_PERSIST_SECONDS = (() => {
+  const rawValue = process.env.HEARTBEAT_MIN_PERSIST_SECONDS;
+  const parsed = rawValue ? Number.parseInt(rawValue, 10) : 15;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 15;
+  }
+  return parsed;
+})();
+
+const HEARTBEAT_PERSIST_MIN_MS = HEARTBEAT_MIN_PERSIST_SECONDS * 1000;
+const heartbeatLastPersistedAt = new Map<string, number>();
+
+const HEARTBEAT_QUEUE_MAX = 500;
+const heartbeatPersistQueue: Array<() => Promise<void>> = [];
+let heartbeatQueueActive = false;
+
+async function processHeartbeatQueue() {
+  if (heartbeatQueueActive) {
+    return;
+  }
+  heartbeatQueueActive = true;
+  while (heartbeatPersistQueue.length > 0) {
+    const task = heartbeatPersistQueue.shift();
+    if (!task) {
+      continue;
+    }
+    try {
+      await task();
+    } catch (error) {
+      console.error("[heartbeat] Persist error:", error);
+    }
+  }
+  heartbeatQueueActive = false;
+}
+
+function enqueueHeartbeatPersist(task: () => Promise<void>): boolean {
+  if (heartbeatPersistQueue.length >= HEARTBEAT_QUEUE_MAX) {
+    console.warn("[heartbeat] Persist queue full; dropping heartbeat.");
+    return false;
+  }
+  heartbeatPersistQueue.push(task);
+  void processHeartbeatQueue();
+  return true;
+}
 
 // WebSocket clients
 interface WSClient {
@@ -512,7 +529,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          console.log(`[WebSocket] Routing ${message.type} from ${client.deviceId} to ${targetDeviceId}`);
+          console.log(`[WebSocket] Routing ${message.type} between clients`);
 
           // Find the target client (student or teacher)
           for (const [targetWs, targetClient] of Array.from(wsClients.entries())) {
@@ -531,7 +548,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 ...message
               };
               targetWs.send(JSON.stringify(payload));
-              console.log(`[WebSocket] Sent ${message.type} to teacher with from=${client.deviceId}`);
+              console.log(`[WebSocket] Sent ${message.type} to teacher`);
               break;
             }
           }
@@ -1726,7 +1743,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const schoolInfo = await getSchoolFromEmail(studentEmail);
       if (!schoolInfo) {
         const domain = studentEmail.split('@')[1];
-        console.error('[register-student] No school found for domain:', domain);
+        console.error('[register-student] No school found for provided domain');
         return res.status(404).json({ 
           error: `No school configured for domain: ${domain}`,
           details: 'Please contact your administrator to set up your school in ClassPilot.'
@@ -1734,7 +1751,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       
       const { schoolId, schoolName } = schoolInfo;
-      console.log('[register-student] Student routing:', { email: studentEmail, schoolId, schoolName });
+      console.log('[register-student] Student routing resolved');
       
       // Register or update device
       const deviceData = insertDeviceSchema.parse({
@@ -1756,11 +1773,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (student) {
         // Student exists! Check if they switched devices
         if (student.deviceId !== deviceData.deviceId) {
-          console.log('Student switched devices:', studentEmail, 'from', student.deviceId, 'to', deviceData.deviceId);
+          console.log('Student switched devices');
           // Update student's device to the new one
           student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
         } else {
-          console.log('Student already registered on this device:', studentEmail, 'studentId:', student.id);
+          console.log('Student already registered on this device');
         }
       } else {
         // Create new student (first time seeing this email in this school)
@@ -1774,12 +1791,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         
         student = await storage.createStudent(studentData);
-        console.log('New student auto-registered:', studentEmail, 'in school:', schoolName, 'studentId:', student.id);
+        console.log('New student auto-registered');
       }
       
       // Set this student as the active student for this device
       await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
-      console.log('Set active student for device:', deviceData.deviceId, '→', student.id);
+      console.log('Set active student for device');
       
       // ✅ JWT AUTHENTICATION: Generate studentToken for industry-standard authentication
       const studentToken = createStudentToken({
@@ -1789,7 +1806,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         studentEmail: normalizedEmail,
       });
       
-      console.log('✅ Generated studentToken for:', { studentId: student.id, deviceId: deviceData.deviceId, schoolId });
+      console.log('✅ Generated studentToken');
       
       // Notify teachers in THIS school only
       broadcastToTeachers({
@@ -1811,7 +1828,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const result = heartbeatRequestSchema.safeParse(req.body);
       
       if (!result.success) {
-        console.warn('Invalid heartbeat data:', result.error.format(), req.body);
+        console.warn('Invalid heartbeat data received');
         // Return 204 even on validation failure to prevent extension from retrying
         return res.sendStatus(204);
       }
@@ -1824,7 +1841,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (studentToken) {
         try {
           const payload = verifyStudentToken(studentToken);
-          console.log('✅ JWT verified:', { studentId: payload.studentId, deviceId: payload.deviceId, schoolId: payload.schoolId });
           
           // Override heartbeat data with authenticated values from JWT
           // This prevents tampering with studentId, deviceId, or schoolId
@@ -1847,13 +1863,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } else {
         // Legacy mode (no JWT) - determine schoolId from email domain
-        console.log('⚠️  Legacy heartbeat (no JWT) - using email domain for school lookup');
         
         if (data.studentEmail) {
           const schoolInfo = await getSchoolFromEmail(data.studentEmail);
           if (!schoolInfo) {
             const domain = data.studentEmail.split('@')[1];
-            console.error('[heartbeat] No school found for domain:', domain);
             // Return 404 to indicate school not configured
             return res.status(404).json({ 
               error: `No school configured for domain: ${domain}`,
@@ -1862,14 +1876,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
           
           data.schoolId = schoolInfo.schoolId;
-          console.log('[heartbeat] Legacy mode - determined schoolId from email:', { email: data.studentEmail, schoolId: data.schoolId });
         } else {
-          console.error('[heartbeat] Legacy heartbeat missing email - cannot determine schoolId');
+          console.error('[heartbeat] Legacy heartbeat missing email');
           return res.status(400).json({ error: 'Student email is required' });
         }
       }
-      
-      console.log('Heartbeat received:', { deviceId: data.deviceId, studentId: data.studentId, email: data.studentEmail, url: data.activeTabUrl?.substring(0, 50), tabCount: allOpenTabs?.length || 0, authenticated: !!studentToken });
       
       // Check if tracking hours are enforced (timezone-aware)
       const settings = await storage.getSettings();
@@ -1880,57 +1891,51 @@ export async function registerRoutes(app: Express): Promise<Server> {
         settings?.schoolTimezone,
         settings?.trackingDays
       )) {
-        console.log('Heartbeat rejected - outside school tracking hours/days');
         // Return 204 to prevent extension from retrying, but don't store heartbeat
         return res.sendStatus(204);
       }
       
+      const deviceKey = data.deviceId;
+      const now = Date.now();
+      const lastPersistedAt = deviceKey ? heartbeatLastPersistedAt.get(deviceKey) : undefined;
+      const shouldPersist =
+        !deviceKey || !lastPersistedAt || now - lastPersistedAt >= HEARTBEAT_PERSIST_MIN_MS;
+
+      if (!shouldPersist) {
+        return res.status(200).json({ ok: true, persisted: false });
+      }
+
       // EMAIL-FIRST AUTO-PROVISIONING: If heartbeat has email+schoolId, ensure student exists
       if (data.studentEmail && data.schoolId) {
-        console.log('🔄 [HEARTBEAT] Starting ensureStudentDeviceAssociation for:', {
-          deviceId: data.deviceId,
-          email: data.studentEmail,
-          schoolId: data.schoolId
-        });
         try {
-          const result = await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
-          console.log('✅ [HEARTBEAT] ensureStudentDeviceAssociation completed:', {
-            studentId: result.id,
-            deviceId: result.deviceId,
-            email: result.studentEmail
-          });
+          await ensureStudentDeviceAssociation(data.deviceId, data.studentEmail, data.schoolId);
         } catch (error) {
-          console.error('❌ [HEARTBEAT] Email-first provisioning ERROR:', error);
-          console.error('❌ [HEARTBEAT] Stack:', error instanceof Error ? error.stack : 'No stack');
+          console.error('[heartbeat] Email-first provisioning error:', error);
           // Continue to store heartbeat even if provisioning fails
         }
-      } else {
-        console.warn('⚠️ [HEARTBEAT] Missing email or schoolId:', {
-          hasEmail: !!data.studentEmail,
-          hasSchoolId: !!data.schoolId,
-          deviceId: data.deviceId
-        });
       }
-      
-      // Store heartbeat asynchronously - don't block the response
-      storage.addHeartbeat(data, allOpenTabs)
-        .then(() => {
-          // Notify teachers of update (non-blocking)
-          broadcastToTeachers({
-            type: 'student-update',
-            deviceId: data.deviceId,
-          });
-        })
-        .catch((error) => {
-          // Log but don't fail - we already responded to client
-          console.error("Heartbeat storage error:", error, "deviceId:", data.deviceId);
+
+      if (deviceKey) {
+        heartbeatLastPersistedAt.set(deviceKey, now);
+      }
+
+      const persisted = enqueueHeartbeatPersist(async () => {
+        await storage.addHeartbeat(data, allOpenTabs);
+        // Notify teachers of update (non-blocking)
+        broadcastToTeachers({
+          type: 'student-update',
+          deviceId: data.deviceId,
         });
-      
-      // Always return success immediately
-      return res.sendStatus(204);
+      });
+
+      if (!persisted && deviceKey) {
+        heartbeatLastPersistedAt.delete(deviceKey);
+      }
+
+      return res.status(200).json({ ok: true, persisted });
     } catch (error) {
       // Final safety net - never throw
-      console.error("Heartbeat uncaught error:", error, req.body);
+      console.error("Heartbeat uncaught error:", error);
       return res.sendStatus(204);
     }
   });
@@ -1962,7 +1967,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         })
         .catch((error) => {
           // Log but don't fail - we already responded to client
-          console.error("Event storage error:", error, "deviceId:", data.deviceId);
+          console.error("Event storage error:", error);
         });
 
       // Always return success immediately

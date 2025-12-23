@@ -1,24 +1,31 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { isProduction } from "../util/env";
 
 const ENCRYPTION_KEY_ENV = "GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY";
 const IV_BYTES = 12;
 const KEY_BYTES = 32;
+const DEV_WARNING =
+  "[crypto] Using ephemeral dev encryption key; tokens will not decrypt across restarts.";
+const GENERATE_KEY_MESSAGE =
+  `Generate a 32-byte key with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`;
 
-function getEncryptionKey(): Buffer {
-  const rawKey = process.env[ENCRYPTION_KEY_ENV];
-  if (!rawKey) {
-    throw new Error(
-      `Missing ${ENCRYPTION_KEY_ENV}. Generate one with: node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
-    );
+let cachedKey: Buffer | null = null;
+let warnedEphemeralKey = false;
+
+function warnEphemeralKey() {
+  if (!warnedEphemeralKey) {
+    console.warn(DEV_WARNING);
+    warnedEphemeralKey = true;
+  }
+}
+
+function parseEncryptionKey(rawKey: string): Buffer | null {
+  const trimmedKey = rawKey.trim();
+  if (!trimmedKey) {
+    return null;
   }
 
-  // Debug: Log key info (not the actual key!)
-  console.log(`[Crypto] Key length: ${rawKey.length} chars, trimmed: ${rawKey.trim().length} chars`);
-
-  const trimmedKey = rawKey.trim();
   const base64Key = Buffer.from(trimmedKey, "base64");
-  console.log(`[Crypto] Decoded base64 length: ${base64Key.length} bytes`);
-  
   if (base64Key.length === KEY_BYTES) {
     return base64Key;
   }
@@ -28,7 +35,41 @@ function getEncryptionKey(): Buffer {
     return rawKeyBuffer;
   }
 
-  throw new Error(`${ENCRYPTION_KEY_ENV} must be 32 bytes (base64 recommended). Got ${base64Key.length} bytes from base64, ${rawKeyBuffer.length} bytes raw.`);
+  return null;
+}
+
+function getEncryptionKey(): Buffer {
+  if (cachedKey) {
+    return cachedKey;
+  }
+
+  const rawKey = process.env[ENCRYPTION_KEY_ENV];
+
+  if (rawKey) {
+    const parsedKey = parseEncryptionKey(rawKey);
+    if (parsedKey) {
+      cachedKey = parsedKey;
+      return parsedKey;
+    }
+
+    if (isProduction()) {
+      throw new Error(
+        `${ENCRYPTION_KEY_ENV} must be 32 bytes. ${GENERATE_KEY_MESSAGE}`
+      );
+    }
+
+    warnEphemeralKey();
+    cachedKey = randomBytes(KEY_BYTES);
+    return cachedKey;
+  }
+
+  if (isProduction()) {
+    throw new Error(`Missing ${ENCRYPTION_KEY_ENV}. ${GENERATE_KEY_MESSAGE}`);
+  }
+
+  warnEphemeralKey();
+  cachedKey = randomBytes(KEY_BYTES);
+  return cachedKey;
 }
 
 export function encryptSecret(plaintext: string): string {
