@@ -136,6 +136,9 @@ export interface IStorage {
   // Google Classroom roster sync
   upsertClassroomCourse(course: InsertClassroomCourse): Promise<ClassroomCourse>;
   getClassroomCourse(schoolId: string, courseId: string): Promise<ClassroomCourse | undefined>;
+  getClassroomCoursesForSchool(schoolId: string): Promise<ClassroomCourse[]>;
+  getClassroomCourseStudentCount(schoolId: string, courseId: string): Promise<number>;
+  getClassroomCourseStudentIds(schoolId: string, courseId: string): Promise<string[]>;
   replaceCourseStudents(
     schoolId: string,
     courseId: string,
@@ -700,6 +703,22 @@ export class MemStorage implements IStorage {
   async getClassroomCourse(schoolId: string, courseId: string): Promise<ClassroomCourse | undefined> {
     const key = `${schoolId}:${courseId}`;
     return this.classroomCourses.get(key);
+  }
+
+  async getClassroomCoursesForSchool(schoolId: string): Promise<ClassroomCourse[]> {
+    return Array.from(this.classroomCourses.values()).filter(c => c.schoolId === schoolId);
+  }
+
+  async getClassroomCourseStudentCount(schoolId: string, courseId: string): Promise<number> {
+    const key = `${schoolId}:${courseId}`;
+    const students = this.classroomCourseStudents.get(key);
+    return students?.length || 0;
+  }
+
+  async getClassroomCourseStudentIds(schoolId: string, courseId: string): Promise<string[]> {
+    const key = `${schoolId}:${courseId}`;
+    const students = this.classroomCourseStudents.get(key);
+    return students?.map(s => s.studentId) || [];
   }
 
   async replaceCourseStudents(
@@ -2055,6 +2074,30 @@ export class DatabaseStorage implements IStorage {
       .where(drizzleSql`${classroomCourses.schoolId} = ${schoolId} AND ${classroomCourses.courseId} = ${courseId}`)
       .limit(1);
     return course;
+  }
+
+  async getClassroomCoursesForSchool(schoolId: string): Promise<ClassroomCourse[]> {
+    return await db
+      .select()
+      .from(classroomCourses)
+      .where(eq(classroomCourses.schoolId, schoolId))
+      .orderBy(classroomCourses.name);
+  }
+
+  async getClassroomCourseStudentCount(schoolId: string, courseId: string): Promise<number> {
+    const result = await db
+      .select({ count: drizzleSql<number>`count(*)` })
+      .from(classroomCourseStudents)
+      .where(drizzleSql`${classroomCourseStudents.schoolId} = ${schoolId} AND ${classroomCourseStudents.courseId} = ${courseId}`);
+    return result[0]?.count || 0;
+  }
+
+  async getClassroomCourseStudentIds(schoolId: string, courseId: string): Promise<string[]> {
+    const rows = await db
+      .select({ studentId: classroomCourseStudents.studentId })
+      .from(classroomCourseStudents)
+      .where(drizzleSql`${classroomCourseStudents.schoolId} = ${schoolId} AND ${classroomCourseStudents.courseId} = ${courseId}`);
+    return rows.map(r => r.studentId);
   }
 
   async replaceCourseStudents(

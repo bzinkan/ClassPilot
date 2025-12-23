@@ -2568,6 +2568,125 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Get classroom courses for admin preview (with teacher info and student counts)
+  app.get("/api/admin/classroom/courses-preview", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+
+      // Get all classroom courses for this school
+      const courses = await storage.getClassroomCoursesForSchool(user.schoolId);
+      
+      // Get all teachers in the school to match by googleId
+      const schoolUsers = await storage.getUsersBySchool(user.schoolId);
+      const teachersByGoogleId = new Map<string, { id: string; displayName: string | null; email: string }>();
+      for (const u of schoolUsers) {
+        if (u.googleId && (u.role === "teacher" || u.role === "school_admin")) {
+          teachersByGoogleId.set(u.googleId, { id: u.id, displayName: u.displayName, email: u.email });
+        }
+      }
+      
+      // Get existing ClassPilot classes to check for duplicates
+      const allGroups = await storage.getGroupsBySchool(user.schoolId);
+      const existingClassNames = new Set(allGroups.map(g => g.name.toLowerCase()));
+
+      // Build preview with student counts and teacher info
+      const coursesPreview = await Promise.all(courses.map(async (course) => {
+        const studentCount = await storage.getClassroomCourseStudentCount(user.schoolId, course.courseId);
+        const teacher = course.ownerId ? teachersByGoogleId.get(course.ownerId) : undefined;
+        const alreadyExists = existingClassNames.has(course.name.toLowerCase());
+        
+        return {
+          courseId: course.courseId,
+          name: course.name,
+          section: course.section,
+          room: course.room,
+          studentCount,
+          teacher: teacher ? {
+            id: teacher.id,
+            displayName: teacher.displayName,
+            email: teacher.email,
+          } : null,
+          teacherGoogleId: course.ownerId,
+          alreadyExists,
+          lastSyncedAt: course.lastSyncedAt,
+        };
+      }));
+
+      res.json(coursesPreview);
+    } catch (error: any) {
+      console.error("Classroom courses preview error:", error);
+      res.status(500).json({ error: error.message || "Failed to get courses preview" });
+    }
+  });
+
+  // Create a ClassPilot class from a Google Classroom course (admin action)
+  app.post("/api/admin/classroom/create-class", requireAuth, requireAdmin, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+
+      const { courseId, teacherId, gradeLevel } = req.body;
+      if (!courseId || !teacherId) {
+        return res.status(400).json({ error: "courseId and teacherId are required" });
+      }
+
+      // Get the course details
+      const course = await storage.getClassroomCourse(user.schoolId, courseId);
+      if (!course) {
+        return res.status(404).json({ error: "Course not found" });
+      }
+
+      // Verify teacher exists and belongs to this school
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher || teacher.schoolId !== user.schoolId) {
+        return res.status(400).json({ error: "Invalid teacher" });
+      }
+
+      // Check if a class with this name already exists for this teacher
+      const existingGroups = await storage.getGroupsByTeacher(teacherId);
+      const existingGroup = existingGroups.find(g => g.name.toLowerCase() === course.name.toLowerCase());
+      if (existingGroup) {
+        return res.status(409).json({ error: "A class with this name already exists for this teacher" });
+      }
+
+      // Create the ClassPilot class
+      const newGroup = await storage.createGroup({
+        teacherId,
+        schoolId: user.schoolId,
+        name: course.name,
+        groupType: "admin_class",
+        gradeLevel: gradeLevel || null,
+        description: `Imported from Google Classroom${course.section ? `: ${course.section}` : ""}`,
+      });
+
+      // Get student IDs from the classroom course and assign them to the group
+      const studentIds = await storage.getClassroomCourseStudentIds(user.schoolId, courseId);
+      let assignedCount = 0;
+      for (const studentId of studentIds) {
+        try {
+          await storage.assignStudentToGroup(newGroup.id, studentId);
+          assignedCount++;
+        } catch (e) {
+          // Continue if assignment already exists or fails
+        }
+      }
+
+      res.json({
+        success: true,
+        group: newGroup,
+        studentsAssigned: assignedCount,
+      });
+    } catch (error: any) {
+      console.error("Create class from classroom error:", error);
+      res.status(500).json({ error: error.message || "Failed to create class" });
+    }
+  });
+
   // === Google Workspace Directory Routes ===
 
   // List users from Google Workspace Admin Directory

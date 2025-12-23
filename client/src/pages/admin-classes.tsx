@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight, X } from "lucide-react";
+import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight, X, Cloud, Check, RefreshCw } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -85,6 +85,22 @@ interface TeachersResponse {
 
 interface StudentsResponse {
   students: Student[];
+}
+
+interface ClassroomCoursePreview {
+  courseId: string;
+  name: string;
+  section: string | null;
+  room: string | null;
+  studentCount: number;
+  teacher: {
+    id: string;
+    displayName: string | null;
+    email: string;
+  } | null;
+  teacherGoogleId: string | null;
+  alreadyExists: boolean;
+  lastSyncedAt: string;
 }
 
 interface ClassCardProps {
@@ -255,6 +271,9 @@ export default function AdminClasses() {
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [selectedClassId, setSelectedClassId] = useState<string>("");
   const [expandedClasses, setExpandedClasses] = useState<Set<string>>(new Set());
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
+  const [selectedCourses, setSelectedCourses] = useState<Set<string>>(new Set());
+  const [courseTeacherOverrides, setCourseTeacherOverrides] = useState<Map<string, string>>(new Map());
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -282,6 +301,11 @@ export default function AdminClasses() {
 
   const { data: settings } = useQuery<Settings>({
     queryKey: ["/api/settings"],
+  });
+
+  const { data: classroomCourses = [], isLoading: isLoadingCourses, refetch: refetchCourses } = useQuery<ClassroomCoursePreview[]>({
+    queryKey: ["/api/admin/classroom/courses-preview"],
+    enabled: syncDialogOpen,
   });
 
   const teachers = teachersData?.teachers || [];
@@ -394,6 +418,42 @@ export default function AdminClasses() {
     },
   });
 
+  // Create class from Google Classroom course mutation
+  const createFromClassroomMutation = useMutation({
+    mutationFn: async (course: ClassroomCoursePreview) => {
+      const overrideTeacherId = courseTeacherOverrides.get(course.courseId);
+      const teacherId = overrideTeacherId || course.teacher?.id;
+      if (!teacherId) {
+        throw new Error("No teacher assigned to this course. Please select a teacher.");
+      }
+      const res = await apiRequest("POST", "/api/admin/classroom/create-class", {
+        courseId: course.courseId,
+        teacherId,
+      });
+      return res.json();
+    },
+    onSuccess: async (_, course) => {
+      await queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      await refetchCourses();
+      setSelectedCourses((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(course.courseId);
+        return newSet;
+      });
+      toast({
+        title: "Class Created",
+        description: `"${course.name}" has been imported from Google Classroom`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
   const onSubmit = (data: CreateClassForm) => {
     createClassMutation.mutate(data);
   };
@@ -433,6 +493,41 @@ export default function AdminClasses() {
 
   const clearAllSelections = () => {
     setSelectedStudents(new Set());
+  };
+
+  const toggleCourseSelection = (courseId: string) => {
+    setSelectedCourses((prev) => {
+      const newSet = new Set(prev);
+      if (newSet.has(courseId)) {
+        newSet.delete(courseId);
+      } else {
+        newSet.add(courseId);
+      }
+      return newSet;
+    });
+  };
+
+  const importableCoursesCount = classroomCourses.filter(c => !c.alreadyExists && (c.teacher || courseTeacherOverrides.has(c.courseId))).length;
+
+  const handleImportSelectedCourses = async () => {
+    const coursesToImport = classroomCourses.filter(
+      c => selectedCourses.has(c.courseId) && !c.alreadyExists && (c.teacher || courseTeacherOverrides.has(c.courseId))
+    );
+    for (const course of coursesToImport) {
+      createFromClassroomMutation.mutate(course);
+    }
+  };
+
+  const setTeacherOverride = (courseId: string, teacherId: string) => {
+    setCourseTeacherOverrides((prev) => {
+      const newMap = new Map(prev);
+      if (teacherId) {
+        newMap.set(courseId, teacherId);
+      } else {
+        newMap.delete(courseId);
+      }
+      return newMap;
+    });
   };
 
   return (
@@ -558,6 +653,151 @@ export default function AdminClasses() {
                       {createClassMutation.isPending ? "Creating..." : "Create Class"}
                     </Button>
                   </form>
+                </DialogContent>
+              </Dialog>
+
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-background px-2 text-muted-foreground">or</span>
+                </div>
+              </div>
+
+              <Dialog open={syncDialogOpen} onOpenChange={(open) => {
+                setSyncDialogOpen(open);
+                if (!open) {
+                  setSelectedCourses(new Set());
+                  setCourseTeacherOverrides(new Map());
+                }
+              }}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" className="w-full" data-testid="button-sync-classroom">
+                    <Cloud className="h-4 w-4 mr-2" />
+                    Sync from Google Classroom
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+                  <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2">
+                      <Cloud className="h-5 w-5" />
+                      Import from Google Classroom
+                    </DialogTitle>
+                    <DialogDescription>
+                      Select courses to import as ClassPilot classes. Students will be automatically assigned.
+                    </DialogDescription>
+                  </DialogHeader>
+
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm text-muted-foreground">
+                        {isLoadingCourses ? "Loading courses..." : `${importableCoursesCount} courses available to import`}
+                      </p>
+                      <Button 
+                        variant="ghost" 
+                        size="sm"
+                        onClick={() => refetchCourses()}
+                        disabled={isLoadingCourses}
+                        data-testid="button-refresh-courses"
+                      >
+                        <RefreshCw className={`h-4 w-4 ${isLoadingCourses ? 'animate-spin' : ''}`} />
+                      </Button>
+                    </div>
+
+                    {isLoadingCourses ? (
+                      <div className="py-8 text-center text-muted-foreground">
+                        Loading Google Classroom courses...
+                      </div>
+                    ) : classroomCourses.length === 0 ? (
+                      <div className="py-8 text-center text-muted-foreground">
+                        No Google Classroom courses found. Make sure teachers have synced their courses.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {classroomCourses.map((course) => {
+                          const hasTeacher = course.teacher || courseTeacherOverrides.has(course.courseId);
+                          const isDisabled = course.alreadyExists;
+                          const isSelected = selectedCourses.has(course.courseId);
+                          const overrideTeacherId = courseTeacherOverrides.get(course.courseId);
+                          return (
+                            <div
+                              key={course.courseId}
+                              className={`flex items-center gap-3 p-3 rounded-lg border ${
+                                isDisabled ? 'opacity-60 bg-muted/50' : 'hover-elevate'
+                              } ${isSelected ? 'border-primary bg-primary/5' : ''}`}
+                              data-testid={`course-row-${course.courseId}`}
+                            >
+                              <Checkbox
+                                checked={isSelected}
+                                disabled={isDisabled || !hasTeacher}
+                                onCheckedChange={() => !isDisabled && hasTeacher && toggleCourseSelection(course.courseId)}
+                                data-testid={`checkbox-course-${course.courseId}`}
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <p className="font-medium truncate">{course.name}</p>
+                                  {course.alreadyExists && (
+                                    <span className="text-xs bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 px-2 py-0.5 rounded-full flex items-center gap-1">
+                                      <Check className="h-3 w-3" />
+                                      Already exists
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-sm text-muted-foreground flex items-center gap-2 flex-wrap">
+                                  {course.teacher ? (
+                                    <span>{course.teacher.displayName || course.teacher.email}</span>
+                                  ) : (
+                                    <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                      <Select
+                                        value={overrideTeacherId || ""}
+                                        onValueChange={(val) => setTeacherOverride(course.courseId, val)}
+                                      >
+                                        <SelectTrigger className="h-7 w-[180px] text-xs" data-testid={`select-teacher-override-${course.courseId}`}>
+                                          <SelectValue placeholder="Select teacher..." />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                          {teachers.filter(t => t.role === 'teacher').map((teacher) => (
+                                            <SelectItem key={teacher.id} value={teacher.id}>
+                                              {teacher.username}
+                                            </SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
+                                      {!overrideTeacherId && (
+                                        <span className="text-amber-600 dark:text-amber-400 text-xs">No matching teacher</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {course.section && <span>• {course.section}</span>}
+                                </div>
+                              </div>
+                              <div className="text-sm text-muted-foreground whitespace-nowrap">
+                                {course.studentCount} students
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  <DialogFooter className="mt-4">
+                    <Button
+                      variant="outline"
+                      onClick={() => setSyncDialogOpen(false)}
+                      data-testid="button-cancel-sync"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleImportSelectedCourses}
+                      disabled={selectedCourses.size === 0 || createFromClassroomMutation.isPending}
+                      data-testid="button-import-courses"
+                    >
+                      {createFromClassroomMutation.isPending ? "Importing..." : `Import ${selectedCourses.size} Course(s)`}
+                    </Button>
+                  </DialogFooter>
                 </DialogContent>
               </Dialog>
             </CardContent>
