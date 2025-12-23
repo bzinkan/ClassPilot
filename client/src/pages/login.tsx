@@ -70,15 +70,15 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
+    <div className="min-h-screen flex items-center justify-center p-4">
       <Card className="w-full max-w-md">
         <CardHeader className="space-y-3 text-center">
           <div className="flex justify-center mb-2">
-            <div className="h-12 w-12 rounded-lg bg-primary flex items-center justify-center">
-              <Monitor className="h-7 w-7 text-primary-foreground" />
+            <div className="h-14 w-14 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg">
+              <Monitor className="h-8 w-8 text-primary-foreground" />
             </div>
           </div>
-          <CardTitle className="text-2xl font-semibold">Teacher Login</CardTitle>
+          <CardTitle className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">ClassPilot</CardTitle>
           <CardDescription>
             Sign in to access your classroom monitoring dashboard
           </CardDescription>

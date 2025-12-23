@@ -976,7 +976,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen">
       {/* Header */}
-      <header className="sticky top-0 z-40 border-b border-border bg-background/80 backdrop-blur-xl supports-[backdrop-filter]:bg-background/80 shadow-sm">
+      <header className="sticky top-0 z-40 glass-panel border-b border-white/20">
         <div className="max-w-screen-2xl mx-auto px-6 py-4">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -1181,7 +1181,7 @@ export default function Dashboard() {
         
         {/* Stats Cards - only show if admin OR teacher with active session */}
         {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-6 mb-8">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
             <div className="flex items-center gap-4">
               <div className="h-14 w-14 rounded-xl bg-green-500 flex items-center justify-center shadow-md">
@@ -1304,7 +1304,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => setShowOpenTabDialog(true)}
             data-testid="button-open-tab"
-            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
+            className="text-blue-600 dark:text-blue-400"
           >
             <MonitorPlay className="h-4 w-4 mr-2" />
             Open Tab
@@ -1315,7 +1315,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => setShowCloseTabsDialog(true)}
             data-testid="button-close-tabs"
-            className="bg-blue-50 dark:bg-blue-950/30 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40"
+            className="text-blue-600 dark:text-blue-400"
           >
             <TabletSmartphone className="h-4 w-4 mr-2" />
             Close Tabs
@@ -1327,7 +1327,7 @@ export default function Dashboard() {
             onClick={handleLockScreen}
             disabled={lockScreenMutation.isPending}
             data-testid="button-lock-screen"
-            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            className="text-amber-600 dark:text-amber-400"
           >
             <Lock className="h-4 w-4 mr-2" />
             Lock Screen
@@ -1339,7 +1339,7 @@ export default function Dashboard() {
             onClick={handleUnlockScreen}
             disabled={unlockScreenMutation.isPending}
             data-testid="button-unlock-screen"
-            className="bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/40"
+            className="text-amber-600 dark:text-amber-400"
           >
             <Unlock className="h-4 w-4 mr-2" />
             Unlock Screen
@@ -1350,7 +1350,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => setShowApplyFlightPathDialog(true)}
             data-testid="button-apply-flight-path"
-            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+            className="text-purple-600 dark:text-purple-400"
           >
             <Layers className="h-4 w-4 mr-2" />
             Apply Flight Path
@@ -1361,7 +1361,7 @@ export default function Dashboard() {
             variant="outline"
             onClick={() => setShowFlightPathViewerDialog(true)}
             data-testid="button-flight-path"
-            className="bg-purple-50 dark:bg-purple-950/30 border-purple-200 dark:border-purple-800 text-purple-700 dark:text-purple-400 hover:bg-purple-100 dark:hover:bg-purple-900/40"
+            className="text-purple-600 dark:text-purple-400"
           >
             <Route className="h-4 w-4 mr-2" />
             Flight Path

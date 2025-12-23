@@ -531,7 +531,8 @@ export default function AdminClasses() {
   };
 
   return (
-    <div className="container mx-auto p-6 max-w-7xl space-y-6">
+    <div className="min-h-screen">
+      <div className="container mx-auto p-6 max-w-7xl space-y-6">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <Button
@@ -543,8 +544,8 @@ export default function AdminClasses() {
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
-            <h1 className="text-3xl font-bold">Class Management</h1>
-            <p className="text-muted-foreground">Create and manage class rosters for teachers</p>
+            <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">Class Management</h1>
+            <p className="text-muted-foreground text-sm">Create and manage class rosters for teachers</p>
           </div>
         </div>
         <ThemeToggle />
@@ -995,6 +996,7 @@ export default function AdminClasses() {
             </Button>
           </CardContent>
         </Card>
+      </div>
       </div>
     </div>
   );
