@@ -798,7 +798,7 @@ export async function registerRoutes(
       }
 
       // Get only users from the same school
-      const users = await storage.getUsersBySchool(admin.schoolId);
+      const users = await storage.getUsersBySchool(req.session.schoolId!);
       
       // Filter to teachers and school_admins (admins can also teach) and remove passwords
       const teachers = users
@@ -2470,6 +2470,7 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Google Classroom access not connected. Please re-authenticate with Google." });
       }
 
+      const sessionSchoolId = req.session.schoolId!;
       const redirectUri = `${getBaseUrl()}/auth/google/callback`;
 
       const oauth2Client = new google.auth.OAuth2(
@@ -2527,9 +2528,9 @@ export async function registerRoutes(
             const emailLc = normalizeEmail(email);
             const googleUserId = profile?.id ?? null;
 
-            let rosterStudent = await storage.getStudentBySchoolEmail(user.schoolId, emailLc);
+            let rosterStudent = await storage.getStudentBySchoolEmail(sessionSchoolId, emailLc);
             if (!rosterStudent && googleUserId) {
-              rosterStudent = await storage.getStudentBySchoolGoogleUserId(user.schoolId, googleUserId);
+              rosterStudent = await storage.getStudentBySchoolGoogleUserId(sessionSchoolId, googleUserId);
             }
 
             let savedStudent: Awaited<ReturnType<typeof storage.updateStudent>> | undefined;
@@ -2547,7 +2548,7 @@ export async function registerRoutes(
                 studentName,
                 studentEmail: email,
                 emailLc,
-                schoolId: user.schoolId,
+                schoolId: sessionSchoolId,
                 studentStatus: "active",
                 googleUserId,
               });
@@ -2569,7 +2570,7 @@ export async function registerRoutes(
         } while (pageToken);
 
         membershipsWritten += await storage.replaceCourseStudents(
-          user.schoolId,
+          sessionSchoolId,
           course.id,
           courseStudentEntries
         );
@@ -3036,11 +3037,11 @@ export async function registerRoutes(
   app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
-      const device = await storage.getDevice(deviceId);
-      if (!device) {
+      const existingDevice = await storage.getDevice(deviceId);
+      if (!existingDevice) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+      if (!assertSameSchool(req.session.schoolId, existingDevice.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
       
@@ -3057,19 +3058,19 @@ export async function registerRoutes(
         return res.status(400).json({ error: "No fields to update" });
       }
       
-      const device = await storage.updateDevice(deviceId, updates);
+      const updatedDevice = await storage.updateDevice(deviceId, updates);
       
-      if (!device) {
+      if (!updatedDevice) {
         return res.status(404).json({ error: "Device not found" });
       }
       
       // Broadcast update to teachers
       broadcastToTeachers({
         type: 'device-update',
-        deviceId: device.deviceId,
+        deviceId: updatedDevice.deviceId,
       });
       
-      res.json({ success: true, device });
+      res.json({ success: true, device: updatedDevice });
     } catch (error) {
       console.error("Update device error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4169,10 +4170,11 @@ export async function registerRoutes(
       // For now, we'll accept JSON data
       const data = insertRosterSchema.parse(req.body);
       const devices = await storage.getAllDevices();
+      const deviceIds = data.deviceIds ?? [];
       const schoolDeviceIds = new Set(
         devices.filter(device => device.schoolId === req.session.schoolId).map(device => device.deviceId)
       );
-      const invalidDeviceId = data.deviceIds.find(deviceId => !schoolDeviceIds.has(deviceId));
+      const invalidDeviceId = deviceIds.find(deviceId => !schoolDeviceIds.has(deviceId));
       if (invalidDeviceId) {
         return res.status(403).json({ error: "Forbidden" });
       }
