@@ -87,7 +87,7 @@ if (SENTRY_DSN_SERVER) {
         event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
           ...crumb,
           message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
-          data: crumb.data ? scrubSentryData(crumb.data) : crumb.data,
+          data: crumb.data ? (scrubSentryData(crumb.data) as Record<string, unknown>) : crumb.data,
         }));
       }
       return event;
@@ -221,23 +221,6 @@ export async function createApp(options: AppOptions = {}) {
 
   // Setup Google OAuth (must be after session middleware)
   setupGoogleAuth(app);
-
-  // Extend session type
-  declare module "express-session" {
-    interface SessionData {
-      userId: string;
-      role: string;
-      schoolId?: string;
-      impersonating?: boolean;
-      originalUserId?: string;
-    }
-  }
-
-  declare module "http" {
-    interface IncomingMessage {
-      rawBody: unknown;
-    }
-  }
 
   // Parse JSON with size limit to prevent memory issues
   app.use(

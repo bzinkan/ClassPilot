@@ -82,13 +82,18 @@ export default function RosterPage() {
     : students.filter(s => normalizeGrade(s.gradeLevel) === normalizeGrade(selectedGrade));
 
   // Get devices that have students in the selected grade
-  const deviceIdsWithFilteredStudents = new Set(filteredStudents.map(s => s.deviceId));
+  const deviceIdsWithFilteredStudents = new Set(
+    filteredStudents.map((student) => student.deviceId).filter((id): id is string => Boolean(id))
+  );
   const filteredDevices = selectedGrade === "All"
     ? devices
     : devices.filter(d => deviceIdsWithFilteredStudents.has(d.deviceId));
 
   // Group students by deviceId
   const studentsByDevice = filteredStudents.reduce((acc, student) => {
+    if (!student.deviceId) {
+      return acc;
+    }
     if (!acc[student.deviceId]) {
       acc[student.deviceId] = [];
     }

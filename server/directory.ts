@@ -1,6 +1,5 @@
 import { google } from "googleapis";
 import { storage } from "./storage";
-import { decryptTokens } from "./security/crypto";
 
 interface DirectoryUser {
   id: string;
@@ -10,6 +9,14 @@ interface DirectoryUser {
   isAdmin?: boolean;
   suspended?: boolean;
 }
+
+type GoogleRefreshTokens = {
+  access_token?: string | null;
+  refresh_token?: string | null;
+  expiry_date?: number | null;
+  token_type?: string | null;
+  scope?: string | null;
+};
 
 interface DirectoryUsersResponse {
   users: DirectoryUser[];
@@ -24,28 +31,25 @@ async function getAuthClient(userId: string) {
     throw error;
   }
 
-  const decrypted = decryptTokens(tokens);
-
   const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET
   );
 
   oauth2Client.setCredentials({
-    access_token: decrypted.accessToken,
-    refresh_token: decrypted.refreshToken,
-    token_type: decrypted.tokenType,
-    expiry_date: decrypted.expiresAt ? new Date(decrypted.expiresAt).getTime() : undefined,
+    refresh_token: tokens.refreshToken,
+    token_type: tokens.tokenType ?? "Bearer",
+    scope: tokens.scope ?? undefined,
+    expiry_date: tokens.expiryDate ? tokens.expiryDate.getTime() : undefined,
   });
 
-  oauth2Client.on("tokens", async (newTokens) => {
+  oauth2Client.on("tokens", async (newTokens: GoogleRefreshTokens) => {
     try {
       await storage.upsertGoogleOAuthTokens(userId, {
-        accessToken: newTokens.access_token || undefined,
-        refreshToken: newTokens.refresh_token || decrypted.refreshToken,
-        expiresAt: newTokens.expiry_date ? new Date(newTokens.expiry_date) : undefined,
-        tokenType: newTokens.token_type || "Bearer",
-        scope: decrypted.scope,
+        refreshToken: newTokens.refresh_token || tokens.refreshToken,
+        expiryDate: newTokens.expiry_date ? new Date(newTokens.expiry_date) : tokens.expiryDate ?? undefined,
+        tokenType: newTokens.token_type || tokens.tokenType || "Bearer",
+        scope: tokens.scope ?? undefined,
       });
     } catch (err) {
       console.error("Failed to save refreshed tokens:", err);
@@ -172,7 +176,10 @@ export async function importStudentsFromDirectory(
 
     for (const user of activeUsers) {
       try {
-        const existingStudent = await storage.getStudentByEmail(user.email, schoolId);
+        const existingStudent = await storage.getStudentBySchoolEmail(
+          schoolId,
+          user.email.toLowerCase()
+        );
 
         if (existingStudent) {
           await storage.updateStudent(existingStudent.id, {
@@ -184,6 +191,8 @@ export async function importStudentsFromDirectory(
             studentEmail: user.email,
             studentName: user.name,
             schoolId,
+            studentStatus: "active",
+            emailLc: user.email.toLowerCase(),
           });
           result.imported++;
         }
