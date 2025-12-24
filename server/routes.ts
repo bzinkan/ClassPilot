@@ -73,6 +73,13 @@ function normalizeGradeLevel(grade: string | null | undefined): string | null {
   return normalized;
 }
 
+// Dev-only sanity check to verify tenant scoping in settings routes.
+function logSettingsSchoolId(schoolId: string) {
+  if (process.env.NODE_ENV !== "production") {
+    console.info(`[settings] Handling /api/settings for schoolId=${schoolId}`);
+  }
+}
+
 // Helper function to extract domain from email and lookup school
 async function getSchoolFromEmail(
   storage: IStorage,
@@ -280,7 +287,12 @@ async function checkIPAllowlist(req: any, res: any, next: any) {
   }
 
   try {
-    const settings = await activeStorage.getSettings();
+    const schoolId = res.locals.schoolId ?? req.session?.schoolId;
+    if (!schoolId) {
+      return next();
+    }
+
+    const settings = await activeStorage.getSettingsBySchoolId(schoolId);
     
     // If no allowlist configured, allow all IPs
     if (!settings || !settings.ipAllowlist || settings.ipAllowlist.length === 0) {
@@ -540,7 +552,7 @@ export async function registerRoutes(
             
             // Get school settings and send maxTabsPerStudent to extension
             try {
-              const settings = await storage.getSettings();
+              const settings = await storage.ensureSettingsForSchool(schoolId);
               // Always send maxTabsPerStudent (including null for unlimited)
               // Parse the value if it exists, otherwise use null
               let maxTabs: number | null = null;
@@ -2077,7 +2089,8 @@ export async function registerRoutes(
       }
       
       // Check if tracking hours are enforced (timezone-aware)
-      const settings = await storage.getSettings();
+      const schoolId = data.schoolId ?? sessionSchoolId;
+      const settings = await storage.ensureSettingsForSchool(schoolId);
       if (!isWithinTrackingHours(
         settings?.enableTrackingHours,
         settings?.trackingStartTime,
@@ -3453,23 +3466,8 @@ export async function registerRoutes(
   app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      let settings = await storage.getSettings();
-
-      if (!settings) {
-        settings = await storage.upsertSettings({
-          schoolId: sessionSchoolId,
-          schoolName: "School",
-          wsSharedKey: process.env.WS_SHARED_KEY || "change-this-key",
-          retentionHours: "24",
-          blockedDomains: [],
-          ipAllowlist: [],
-        });
-      }
-
-      if (settings && !assertSameSchool(sessionSchoolId, settings.schoolId)) {
-        return res.status(404).json({ error: "Settings not found" });
-      }
-
+      logSettingsSchoolId(sessionSchoolId);
+      const settings = await storage.ensureSettingsForSchool(sessionSchoolId);
       res.json(settings);
     } catch (error) {
       console.error("Get settings error:", error);
@@ -3480,11 +3478,13 @@ export async function registerRoutes(
   app.post("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      logSettingsSchoolId(sessionSchoolId);
       const data = insertSettingsSchema.parse({
         ...req.body,
         schoolId: sessionSchoolId,
       });
-      const settings = await storage.upsertSettings(data);
+      const { schoolId: _ignoredSchoolId, ...payload } = data;
+      const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
       res.json(settings);
     } catch (error) {
       console.error("Update settings error:", error);
@@ -3494,19 +3494,15 @@ export async function registerRoutes(
 
   app.patch("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const currentSettings = await storage.getSettings();
-      if (!currentSettings) {
-        return res.status(404).json({ error: "Settings not found" });
-      }
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      if (!assertSameSchool(sessionSchoolId, currentSettings.schoolId)) {
-        return res.status(404).json({ error: "Settings not found" });
-      }
+      logSettingsSchoolId(sessionSchoolId);
+      const currentSettings = await storage.ensureSettingsForSchool(sessionSchoolId);
 
       // Merge current settings with request body for partial update
       const updatedData = { ...currentSettings, ...req.body, schoolId: currentSettings.schoolId };
       const data = insertSettingsSchema.parse(updatedData);
-      const settings = await storage.upsertSettings(data);
+      const { schoolId: _ignoredSchoolId, ...payload } = data;
+      const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
       res.json(settings);
     } catch (error) {
       console.error("Update settings error:", error);
@@ -3646,7 +3642,7 @@ export async function registerRoutes(
   });
 
   // Dashboard Tabs endpoints - User-customizable filter tabs
-  app.get("/api/teacher/dashboard-tabs", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/teacher/dashboard-tabs", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3657,7 +3653,8 @@ export async function registerRoutes(
       
       // Auto-generate default grade-level tabs if none exist
       if (tabs.length === 0) {
-        const settings = await storage.getSettings();
+        const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+        const settings = await storage.ensureSettingsForSchool(sessionSchoolId);
         const gradeLevels = settings?.gradeLevels || ["6", "7", "8", "9", "10", "11", "12"];
         
         // Create "All Grades" tab first
@@ -5005,8 +5002,15 @@ export async function registerRoutes(
     setInterval(async () => {
       try {
         // Clean up old heartbeats based on retention settings
-        const settings = await storage.getSettings();
-        const retentionHours = parseInt(settings?.retentionHours || "24");
+        const schools = await storage.getAllSchools(true);
+        let retentionHours = 24;
+        for (const school of schools) {
+          const settings = await storage.getSettingsBySchoolId(school.id);
+          const parsedRetention = parseInt(settings?.retentionHours || "24");
+          if (!Number.isNaN(parsedRetention)) {
+            retentionHours = Math.max(retentionHours, parsedRetention);
+          }
+        }
         const deleted = await storage.cleanupOldHeartbeats(retentionHours);
         if (deleted > 0) {
           console.log(`[Data Cleanup] Cleaned up ${deleted} old heartbeats`);

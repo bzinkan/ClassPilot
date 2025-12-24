@@ -17,6 +17,7 @@ export function createTestStorage() {
   const students = new Map<string, any>();
   const devices = new Map<string, any>();
   const schools = new Map<string, any>();
+  const settingsBySchool = new Map<string, any>();
 
   return {
     users,
@@ -108,11 +109,57 @@ export function createTestStorage() {
     async getUserByUsername(username: string) {
       return Array.from(users.values()).find((user) => user.username === username);
     },
-    async getSettings() {
-      return {
-        enableTrackingHours: false,
+    async getSettingsBySchoolId(schoolId: string) {
+      return settingsBySchool.get(schoolId) ?? null;
+    },
+    async ensureSettingsForSchool(schoolId: string) {
+      const existing = settingsBySchool.get(schoolId);
+      if (existing) {
+        return existing;
+      }
+      const settings = {
+        id: `settings-${settingsBySchool.size + 1}`,
+        schoolId,
+        schoolName: schools.get(schoolId)?.name ?? "Test School",
+        wsSharedKey: "test-key",
+        retentionHours: "24",
+        blockedDomains: [],
+        allowedDomains: [],
+        ipAllowlist: [],
+        gradeLevels: ["6", "7", "8", "9", "10", "11", "12"],
         maxTabsPerStudent: null,
+        activeFlightPathId: null,
+        enableTrackingHours: false,
+        trackingStartTime: "08:00",
+        trackingEndTime: "15:00",
+        schoolTimezone: "America/New_York",
+        trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
       };
+      settingsBySchool.set(schoolId, settings);
+      return settings;
+    },
+    async upsertSettingsForSchool(schoolId: string, input: Partial<any>) {
+      const existing = settingsBySchool.get(schoolId);
+      const settings = {
+        id: existing?.id ?? `settings-${settingsBySchool.size + 1}`,
+        schoolId,
+        schoolName: input.schoolName ?? existing?.schoolName ?? schools.get(schoolId)?.name ?? "Test School",
+        wsSharedKey: input.wsSharedKey ?? existing?.wsSharedKey ?? "test-key",
+        retentionHours: input.retentionHours ?? existing?.retentionHours ?? "24",
+        blockedDomains: input.blockedDomains ?? existing?.blockedDomains ?? [],
+        allowedDomains: input.allowedDomains ?? existing?.allowedDomains ?? [],
+        ipAllowlist: input.ipAllowlist ?? existing?.ipAllowlist ?? [],
+        gradeLevels: input.gradeLevels ?? existing?.gradeLevels ?? ["6", "7", "8", "9", "10", "11", "12"],
+        maxTabsPerStudent: input.maxTabsPerStudent ?? existing?.maxTabsPerStudent ?? null,
+        activeFlightPathId: input.activeFlightPathId ?? existing?.activeFlightPathId ?? null,
+        enableTrackingHours: input.enableTrackingHours ?? existing?.enableTrackingHours ?? false,
+        trackingStartTime: input.trackingStartTime ?? existing?.trackingStartTime ?? "08:00",
+        trackingEndTime: input.trackingEndTime ?? existing?.trackingEndTime ?? "15:00",
+        schoolTimezone: input.schoolTimezone ?? existing?.schoolTimezone ?? "America/New_York",
+        trackingDays: input.trackingDays ?? existing?.trackingDays ?? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+      };
+      settingsBySchool.set(schoolId, settings);
+      return settings;
     },
     async getSchool(id: string) {
       return schools.get(id);
