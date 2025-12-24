@@ -6,11 +6,18 @@ import { createTestApp } from "./testUtils";
 describe("heartbeat endpoint", () => {
   let app: ReturnType<typeof request>;
   let server: Awaited<ReturnType<typeof createTestApp>>["server"];
+  let agent: request.SuperAgentTest;
 
   beforeAll(async () => {
     const created = await createTestApp();
     app = request(created.app);
+    agent = request.agent(created.app);
     server = created.server;
+    await created.storage.seedUser({ password: "testpass123" });
+    await agent.post("/api/login").send({
+      email: "teacher@classpilot.test",
+      password: "testpass123",
+    });
   });
 
   afterAll(() => {
@@ -24,7 +31,7 @@ describe("heartbeat endpoint", () => {
       schoolId: "school-1",
     });
 
-    const response = await app.post("/api/heartbeat").send({
+    const response = await agent.post("/api/heartbeat").send({
       deviceId: "device-1",
       studentId: "student-1",
       schoolId: "school-1",

@@ -34,6 +34,7 @@ import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidToken
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
 import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
+import { assertSameSchool, requireAuth, requireRole, requireSchoolContext } from "./middleware/authz";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -299,56 +300,9 @@ function sendToRole(role: WSClient["role"], message: any) {
 
 let activeStorage: IStorage = defaultStorage;
 
-// Session middleware
-function requireAuth(req: any, res: any, next: any) {
-  if (req.session?.userId) {
-    next();
-  } else {
-    res.status(401).json({ error: "Unauthorized" });
-  }
-}
-
-// Admin middleware - for school_admin or super_admin
-async function requireAdmin(req: any, res: any, next: any) {
-  if (!req.session?.userId) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  
-  const user = await activeStorage.getUser(req.session.userId);
-  if (!user || (user.role !== 'admin' && user.role !== 'school_admin' && user.role !== 'super_admin')) {
-    return res.status(403).json({ error: "Forbidden: Admin access required" });
-  }
-  
-  next();
-}
-
-// Super Admin middleware - for super_admin only
-async function requireSuperAdmin(req: any, res: any, next: any) {
-  if (!req.session?.userId) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  
-  const user = await activeStorage.getUser(req.session.userId);
-  if (!user || user.role !== 'super_admin') {
-    return res.status(403).json({ error: "Forbidden: Super Admin access required" });
-  }
-  
-  next();
-}
-
-// School Admin middleware - for school_admin or super_admin
-async function requireSchoolAdmin(req: any, res: any, next: any) {
-  if (!req.session?.userId) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  
-  const user = await activeStorage.getUser(req.session.userId);
-  if (!user || (user.role !== 'school_admin' && user.role !== 'super_admin')) {
-    return res.status(403).json({ error: "Forbidden: School Admin access required" });
-  }
-  
-  next();
-}
+const requireTeacherRole = requireRole("teacher", "school_admin", "super_admin");
+const requireAdminRole = requireRole("school_admin", "super_admin");
+const requireSuperAdminRole = requireRole("super_admin");
 
 // IP allowlist middleware (only enforced in production)
 async function checkIPAllowlist(req: any, res: any, next: any) {
@@ -743,7 +697,7 @@ export async function registerRoutes(
   });
 
   // Debug endpoint for production troubleshooting (admin only)
-  app.get("/api/debug/student-status", requireAdmin, async (req, res) => {
+  app.get("/api/debug/student-status", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const { email } = req.query;
       
@@ -752,8 +706,7 @@ export async function registerRoutes(
       }
       
       const normalizedEmail = normalizeEmail(email);
-      const settings = await storage.getSettings();
-      const schoolId = settings?.schoolId || 'default-school';
+      const schoolId = req.session.schoolId!;
       
       // Get student by email
       const student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
@@ -834,12 +787,14 @@ export async function registerRoutes(
   });
 
   // Admin routes for managing teachers
-  app.get("/api/admin/teachers", requireAdmin, async (req, res) => {
+  app.get("/api/admin/teachers", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      // Get the admin's school ID from session
       const admin = await storage.getUser(req.session.userId!);
-      if (!admin || !admin.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       // Get only users from the same school
@@ -863,12 +818,14 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/admin/teachers", requireAdmin, async (req, res) => {
+  app.post("/api/admin/teachers", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      // Get the admin's school ID from session
       const admin = await storage.getUser(req.session.userId!);
-      if (!admin || !admin.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const data = createTeacherSchema.parse(req.body);
@@ -915,14 +872,15 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/admin/teachers/:id", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/teachers/:id", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
-      
-      // Get the admin's school ID from session
       const admin = await storage.getUser(req.session.userId!);
-      if (!admin || !admin.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       // Don't allow deleting yourself
@@ -937,8 +895,8 @@ export async function registerRoutes(
       }
       
       // Verify the teacher belongs to the same school (tenant isolation)
-      if (user.schoolId !== admin.schoolId) {
-        return res.status(403).json({ error: "Cannot delete teachers from other schools" });
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       if (user.role === 'admin' || user.role === 'school_admin') {
@@ -956,7 +914,7 @@ export async function registerRoutes(
   // ====== SUPER ADMIN ROUTES ======
   
   // List all schools with search and filtering support
-  app.get("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
+  app.get("/api/super-admin/schools", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { search, status, includeDeleted } = req.query;
       
@@ -1014,7 +972,7 @@ export async function registerRoutes(
   });
 
   // Create a new school
-  app.post("/api/super-admin/schools", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       // Validate request body
       const validation = createSchoolRequestSchema.safeParse(req.body);
@@ -1080,7 +1038,7 @@ export async function registerRoutes(
   });
 
   // Get school details
-  app.get("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+  app.get("/api/super-admin/schools/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       const school = await storage.getSchool(id);
@@ -1124,7 +1082,7 @@ export async function registerRoutes(
   });
 
   // Update school
-  app.patch("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+  app.patch("/api/super-admin/schools/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       const updates = req.body;
@@ -1142,7 +1100,7 @@ export async function registerRoutes(
   });
 
   // Soft delete school (sets deletedAt timestamp)
-  app.delete("/api/super-admin/schools/:id", requireSuperAdmin, async (req, res) => {
+  app.delete("/api/super-admin/schools/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       
@@ -1159,7 +1117,7 @@ export async function registerRoutes(
   });
 
   // Suspend school (sets status to 'suspended')
-  app.post("/api/super-admin/schools/:id/suspend", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools/:id/suspend", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       
@@ -1176,7 +1134,7 @@ export async function registerRoutes(
   });
 
   // Restore school (clears deletedAt timestamp)
-  app.post("/api/super-admin/schools/:id/restore", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools/:id/restore", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       
@@ -1193,7 +1151,7 @@ export async function registerRoutes(
   });
 
   // Impersonate a school admin (for support purposes)
-  app.post("/api/super-admin/schools/:id/impersonate", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools/:id/impersonate", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       
@@ -1268,7 +1226,7 @@ export async function registerRoutes(
   });
 
   // Reset login for school admin (generate temporary password)
-  app.post("/api/super-admin/schools/:id/reset-login", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools/:id/reset-login", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       const { adminId } = req.body;
@@ -1319,7 +1277,7 @@ export async function registerRoutes(
   });
 
   // Add admin to school
-  app.post("/api/super-admin/schools/:id/admins", requireSuperAdmin, async (req, res) => {
+  app.post("/api/super-admin/schools/:id/admins", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       const { email, displayName } = req.body;
@@ -1362,18 +1320,14 @@ export async function registerRoutes(
   });
 
   // Admin: Get all teacher-student assignments
-  app.get("/api/admin/teacher-students", requireAdmin, async (req, res) => {
+  app.get("/api/admin/teacher-students", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      // Get the admin's school ID from session
-      const admin = await storage.getUser(req.session.userId!);
-      if (!admin || !admin.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       // Get only users and students from the same school (tenant isolation)
-      const users = await storage.getUsersBySchool(admin.schoolId);
+      const users = await storage.getUsersBySchool(sessionSchoolId);
       const allStudents = await storage.getAllStudents();
-      const students = allStudents.filter(s => s.schoolId === admin.schoolId);
+      const students = allStudents.filter(s => s.schoolId === sessionSchoolId);
       
       // Get assignments for each teacher
       const teachers = users.filter(user => user.role === 'teacher');
@@ -1413,13 +1367,9 @@ export async function registerRoutes(
   });
 
   // Admin: Assign students to a teacher
-  app.post("/api/admin/teacher-students/:teacherId", requireAdmin, async (req, res) => {
+  app.post("/api/admin/teacher-students/:teacherId", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      // Get the admin's school ID from session
-      const admin = await storage.getUser(req.session.userId!);
-      if (!admin || !admin.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       const { teacherId } = req.params;
       const { studentIds } = req.body;
@@ -1434,16 +1384,16 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Teacher not found" });
       }
       
-      if (teacher.schoolId !== admin.schoolId) {
-        return res.status(403).json({ error: "Cannot assign students to teachers from other schools" });
+      if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       // Verify all students belong to same school (tenant isolation)
       const allStudents = await storage.getAllStudents();
       for (const studentId of studentIds) {
         const student = allStudents.find(s => s.id === studentId);
-        if (student && student.schoolId !== admin.schoolId) {
-          return res.status(403).json({ error: "Cannot assign students from other schools" });
+        if (student && !assertSameSchool(sessionSchoolId, student.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
         }
       }
       
@@ -1477,9 +1427,26 @@ export async function registerRoutes(
   });
 
   // Admin: Remove a student from a teacher
-  app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAdmin, async (req, res) => {
+  app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const { teacherId, studentId } = req.params;
+      const sessionSchoolId = req.session.schoolId!;
+
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher) {
+        return res.status(404).json({ error: "Teacher not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       
       const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
       
@@ -1495,18 +1462,23 @@ export async function registerRoutes(
   });
 
   // Admin: Clean up all student data
-  app.post("/api/admin/cleanup-students", requireAdmin, async (req, res) => {
+  app.post("/api/admin/cleanup-students", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       // Delete all students (student assignments)
       const allStudents = await storage.getAllStudents();
       for (const student of allStudents) {
-        await storage.deleteStudent(student.id);
+        if (assertSameSchool(sessionSchoolId, student.schoolId)) {
+          await storage.deleteStudent(student.id);
+        }
       }
       
       // Delete all devices
       const allDevices = await storage.getAllDevices();
       for (const device of allDevices) {
-        await storage.deleteDevice(device.deviceId);
+        if (assertSameSchool(sessionSchoolId, device.schoolId)) {
+          await storage.deleteDevice(device.deviceId);
+        }
       }
       
       // Notify all connected teachers
@@ -1522,13 +1494,11 @@ export async function registerRoutes(
   });
 
   // Admin: Migrate existing teacher_students to groups system
-  app.post("/api/admin/migrate-to-groups", requireAdmin, async (req, res) => {
+  app.post("/api/admin/migrate-to-groups", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      // Get all teachers and settings
-      const allUsers = await storage.getAllUsers();
-      const allTeachers = allUsers.filter(user => user.role === 'teacher');
-      const settings = await storage.getSettings();
-      const schoolId = settings?.schoolId || 'default-school';
+      const sessionSchoolId = req.session.schoolId!;
+      // Get all teachers in this school
+      const allTeachers = (await storage.getUsersBySchool(sessionSchoolId)).filter(user => user.role === 'teacher');
       
       let groupsCreated = 0;
       let studentsAssigned = 0;
@@ -1547,7 +1517,7 @@ export async function registerRoutes(
         if (!defaultGroup) {
           defaultGroup = await storage.createGroup({
             teacherId: teacher.id,
-            schoolId,
+            schoolId: sessionSchoolId,
             name: 'All Students',
             description: 'Default group containing all assigned students',
           });
@@ -1580,9 +1550,10 @@ export async function registerRoutes(
   });
 
   // Admin: Bulk import students from CSV or Excel
-  app.post("/api/admin/bulk-import", requireAdmin, async (req, res) => {
+  app.post("/api/admin/bulk-import", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const { fileContent, fileType } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       if (!fileContent) {
         return res.status(400).json({ error: "File content is required" });
@@ -1602,9 +1573,7 @@ export async function registerRoutes(
       }
 
       // Get settings for schoolId and deviceId generation
-      const settings = await storage.getSettings();
-      const schoolId = settings?.schoolId || 'default-school';
-      const allGroups = await storage.getAllGroups();
+      const allGroups = (await storage.getAllGroups()).filter(group => assertSameSchool(sessionSchoolId, group.schoolId));
 
       const results = {
         total: data.length,
@@ -1650,7 +1619,8 @@ export async function registerRoutes(
 
           // Check if student already exists by email
           const allStudents = await storage.getAllStudents();
-          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase());
+          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase()
+            && s.schoolId === sessionSchoolId);
 
           if (student) {
             // Update existing student's name and grade if different
@@ -1676,7 +1646,7 @@ export async function registerRoutes(
                 deviceId: placeholderDeviceId,
                 deviceName: `Pending: ${name}`,
                 classId: 'pending',
-                schoolId,
+                schoolId: sessionSchoolId,
               });
             }
 
@@ -1686,7 +1656,7 @@ export async function registerRoutes(
               studentEmail: email,
               emailLc: normalizeEmail(email), // Normalized: lowercase + strip +tags
               gradeLevel: normalizedGrade,
-              schoolId,
+              schoolId: sessionSchoolId,
               studentStatus: "active", // Default status for CSV imports
             });
             results.created++;
@@ -1732,15 +1702,19 @@ export async function registerRoutes(
 
   // Device registration (from extension) - DEPRECATED: Use /api/register-student instead
   // This endpoint is kept for backward compatibility only
-  app.post("/api/register", apiLimiter, async (req, res) => {
+  app.post("/api/register", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, classId, schoolId } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       // Require schoolId - no defaults allowed (prevents default-school issues)
       if (!schoolId) {
         return res.status(400).json({ 
           error: "schoolId is required. Use /api/register-student for automatic school routing." 
         });
+      }
+      if (!assertSameSchool(sessionSchoolId, schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       // Validate device data
@@ -1775,9 +1749,10 @@ export async function registerRoutes(
   });
 
   // Student auto-registration with email (from extension using Chrome Identity API)
-  app.post("/api/register-student", apiLimiter, async (req, res) => {
+  app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, studentEmail, studentName } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       // Validate required fields
       if (!studentEmail || !studentName) {
@@ -1796,6 +1771,9 @@ export async function registerRoutes(
       }
       
       const { schoolId, schoolName } = schoolInfo;
+      if (!assertSameSchool(sessionSchoolId, schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       console.log('[register-student] Student routing resolved');
       
       // Register or update device
@@ -1867,8 +1845,9 @@ export async function registerRoutes(
   });
 
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
-  app.post("/api/heartbeat", heartbeatLimiter, async (req, res) => {
+  app.post("/api/heartbeat", heartbeatLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       // Validate input with heartbeatRequestSchema (includes allOpenTabs)
       const result = heartbeatRequestSchema.safeParse(req.body);
       
@@ -1964,6 +1943,10 @@ export async function registerRoutes(
         heartbeatLastPersistedAt.set(deviceKey, now);
       }
 
+      if (!assertSameSchool(sessionSchoolId, data.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       const persisted = enqueueHeartbeatPersist(async () => {
         await storage.addHeartbeat(data, allOpenTabs);
         // Notify teachers of update (non-blocking)
@@ -1986,8 +1969,9 @@ export async function registerRoutes(
   });
 
   // Event logging endpoint (from extension) - bulletproof, never returns 500
-  app.post("/api/event", apiLimiter, async (req, res) => {
+  app.post("/api/event", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       // Validate input with safe parse
       const result = insertEventSchema.safeParse(req.body);
       
@@ -1998,6 +1982,24 @@ export async function registerRoutes(
       }
       
       const data = result.data;
+
+      const device = await storage.getDevice(data.deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (data.studentId) {
+        const student = await storage.getStudent(data.studentId);
+        if (!student) {
+          return res.status(404).json({ error: "Student not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
       
       // Store event asynchronously - don't block the response
       storage.addEvent(data)
@@ -2025,27 +2027,19 @@ export async function registerRoutes(
   });
 
   // Get all student statuses (for dashboard)
-  app.get("/api/students", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-      
-      // Enforce tenant isolation: only show students from user's school
-      if (!user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const allStatuses = await storage.getAllStudentStatuses();
       const allStudents = await storage.getAllStudents();
       const schoolStudentIds = new Set(
-        allStudents.filter(s => s.schoolId === user.schoolId).map(s => s.id)
+        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.id)
       );
       
       // Filter to only students from the same school (tenant isolation)
@@ -2059,8 +2053,15 @@ export async function registerRoutes(
       const activeSession = await storage.getActiveSessionByTeacher(userId);
       
       if (activeSession?.groupId) {
+        const group = await storage.getGroup(activeSession.groupId);
+        if (!group) {
+          return res.status(404).json({ error: "Group not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
         // User has an active session - show only students in that session (teacher mode)
-        console.log('User has active session for group:', activeSession.groupId, '(role:', user.role, ')');
+        console.log('User has active session for group:', activeSession.groupId, '(role:', sessionRole, ')');
         
         // Get all students assigned to this session's group
         const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
@@ -2114,7 +2115,7 @@ export async function registerRoutes(
           filteredStatuses = [...filteredStatuses, ...validPlaceholders];
           console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
-      } else if (user.role === 'admin' || user.role === 'school_admin') {
+      } else if (sessionRole === 'school_admin' || sessionRole === 'super_admin') {
         // Admin/school_admin without active session - show all students in school
         filteredStatuses = schoolStatuses;
         console.log('Dashboard requested students (admin mode) - found:', filteredStatuses.length, 'students in school');
@@ -2135,19 +2136,19 @@ export async function registerRoutes(
   });
 
   // Get aggregated student statuses (one per student, grouped by email)
-  app.get("/api/students-aggregated", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/students-aggregated", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-      
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       const allAggregated = await storage.getAllStudentStatusesAggregated();
+      const allStudents = await storage.getAllStudents();
+      const schoolStudentIds = new Set(
+        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.id)
+      );
       
       // Check if user has an active teaching session (applies to both teachers and school_admins)
       const activeSession = await storage.getActiveSessionByTeacher(userId);
@@ -2155,8 +2156,15 @@ export async function registerRoutes(
       let filteredStatuses: typeof allAggregated;
       
       if (activeSession?.groupId) {
+        const group = await storage.getGroup(activeSession.groupId);
+        if (!group) {
+          return res.status(404).json({ error: "Group not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
         // User has an active session - show only students in that session (teacher mode)
-        console.log('User has active session for group:', activeSession.groupId, '(role:', user.role, ')');
+        console.log('User has active session for group:', activeSession.groupId, '(role:', sessionRole, ')');
         
         // Get all students assigned to this session's group
         const rosterStudentIds = await storage.getGroupStudents(activeSession.groupId);
@@ -2217,9 +2225,9 @@ export async function registerRoutes(
           filteredStatuses = [...filteredStatuses, ...validPlaceholders];
           console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
-      } else if (user.role === 'admin' || user.role === 'school_admin') {
+      } else if (sessionRole === 'school_admin' || sessionRole === 'super_admin') {
         // Admin/school_admin without active session - show all students
-        filteredStatuses = allAggregated;
+        filteredStatuses = allAggregated.filter(s => schoolStudentIds.has(s.studentId));
         console.log('Dashboard requested aggregated students (admin mode) - found:', filteredStatuses.length, 'students');
       } else {
         // Teacher without active session - show empty (they need to start a session)
@@ -2227,6 +2235,10 @@ export async function registerRoutes(
         console.log('Teacher has no active session - showing empty dashboard');
       }
       
+      if (activeSession?.groupId) {
+        filteredStatuses = filteredStatuses.filter(s => schoolStudentIds.has(s.studentId));
+      }
+
       res.json(filteredStatuses);
     } catch (error) {
       console.error("Error fetching aggregated students:", error);
@@ -2235,9 +2247,16 @@ export async function registerRoutes(
   });
 
   // Get students assigned to a specific device (for extension popup)
-  app.get("/api/device/:deviceId/students", apiLimiter, async (req, res) => {
+  app.get("/api/device/:deviceId/students", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const students = await storage.getStudentsByDevice(deviceId);
       const activeStudent = await storage.getActiveStudentForDevice(deviceId);
       
@@ -2252,16 +2271,27 @@ export async function registerRoutes(
   });
 
   // Set active student for a device (from extension)
-  app.post("/api/device/:deviceId/active-student", apiLimiter, async (req, res) => {
+  app.post("/api/device/:deviceId/active-student", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const { studentId } = req.body;
+
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       
       // Verify student exists and belongs to this device
       if (studentId) {
         const student = await storage.getStudent(studentId);
         if (!student || student.deviceId !== deviceId) {
           return res.status(400).json({ error: "Invalid student for this device" });
+        }
+        if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
         }
       }
       
@@ -2285,16 +2315,13 @@ export async function registerRoutes(
   });
 
   // Get all persisted students from database (for roster management)
-  app.get("/api/roster/students", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/roster/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       // Enforce tenant isolation: only show students from user's school
       const allStudents = await storage.getAllStudents();
-      const students = allStudents.filter(s => s.schoolId === user.schoolId);
+      const students = allStudents.filter(s => s.schoolId === sessionSchoolId);
       res.json(students);
     } catch (error) {
       console.error("Get roster students error:", error);
@@ -2303,18 +2330,15 @@ export async function registerRoutes(
   });
 
   // Get all devices from database (for roster management)
-  app.get("/api/roster/devices", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/roster/devices", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       // Enforce tenant isolation: only show devices that have students from user's school
       const allDevices = await storage.getAllDevices();
       const allStudents = await storage.getAllStudents();
       const schoolStudentDeviceIds = new Set(
-        allStudents.filter(s => s.schoolId === user.schoolId).map(s => s.deviceId)
+        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.deviceId)
       );
       
       const devices = allDevices.filter(d => schoolStudentDeviceIds.has(d.deviceId));
@@ -2326,12 +2350,9 @@ export async function registerRoutes(
   });
 
   // Create student manually (for roster management)
-  app.post("/api/roster/student", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/roster/student", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       const { studentName, deviceId, gradeLevel } = req.body;
       
@@ -2348,13 +2369,16 @@ export async function registerRoutes(
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       
       // Enforce tenant isolation: create student with user's schoolId
       const studentData = insertStudentSchema.parse({
         deviceId,
         studentName,
         gradeLevel: normalizeGradeLevel(gradeLevel),
-        schoolId: user.schoolId, // Enforce tenant isolation
+        schoolId: sessionSchoolId, // Enforce tenant isolation
       });
       
       const student = await storage.createStudent(studentData);
@@ -2373,9 +2397,10 @@ export async function registerRoutes(
   });
 
   // Bulk create students
-  app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { students: studentsData } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       if (!Array.isArray(studentsData) || studentsData.length === 0) {
         return res.status(400).json({ error: "Students array is required" });
@@ -2386,10 +2411,19 @@ export async function registerRoutes(
       
       for (const studentInput of studentsData) {
         try {
+          const device = await storage.getDevice(studentInput.deviceId);
+          if (!device) {
+            throw new Error("Device not found");
+          }
+          if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+            throw new Error("Forbidden");
+          }
+
           const studentData = insertStudentSchema.parse({
             deviceId: studentInput.deviceId,
             studentName: studentInput.studentName,
             gradeLevel: normalizeGradeLevel(studentInput.gradeLevel),
+            schoolId: sessionSchoolId,
           });
           
           const student = await storage.createStudent(studentData);
@@ -2420,12 +2454,15 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/roster/import-google", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/roster/import-google", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     const { google } = await import("googleapis");
     try {
       const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
+      if (!user) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const tokens = await storage.getGoogleOAuthTokens(user.id);
@@ -2459,7 +2496,7 @@ export async function registerRoutes(
         }
 
         await storage.upsertClassroomCourse({
-          schoolId: user.schoolId,
+          schoolId: req.session.schoolId!,
           courseId: course.id,
           name: course.name,
           section: course.section ?? null,
@@ -2623,13 +2660,16 @@ export async function registerRoutes(
   });
 
   // Get classroom courses for admin preview (with teacher info and student counts)
-  app.get("/api/admin/classroom/courses-preview", requireAuth, requireAdmin, async (req, res) => {
+  app.get("/api/admin/classroom/courses-preview", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
-      const schoolId = user.schoolId;
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const schoolId = req.session.schoolId!;
 
       // Get all classroom courses for this school
       const courses = await storage.getClassroomCoursesForSchool(schoolId);
@@ -2678,11 +2718,14 @@ export async function registerRoutes(
   });
 
   // Create a ClassPilot class from a Google Classroom course (admin action)
-  app.post("/api/admin/classroom/create-class", requireAuth, requireAdmin, async (req, res) => {
+  app.post("/api/admin/classroom/create-class", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
+      }
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const { courseId, teacherId, gradeLevel } = req.body;
@@ -2745,11 +2788,14 @@ export async function registerRoutes(
   // === Google Workspace Directory Routes ===
 
   // List users from Google Workspace Admin Directory
-  app.get("/api/directory/users", requireAuth, requireAdmin, async (req, res) => {
+  app.get("/api/directory/users", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
+      }
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const { listDomainUsers } = await import("./directory");
@@ -2771,11 +2817,14 @@ export async function registerRoutes(
   });
 
   // Import students from Google Workspace Directory
-  app.post("/api/directory/import", requireAuth, requireAdmin, async (req, res) => {
+  app.post("/api/directory/import", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
+      }
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const { importStudentsFromDirectory } = await import("./directory");
@@ -2806,11 +2855,14 @@ export async function registerRoutes(
   });
 
   // Get organization units from Google Workspace
-  app.get("/api/directory/orgunits", requireAuth, requireAdmin, async (req, res) => {
+  app.get("/api/directory/orgunits", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user) {
         return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
       const { getOrganizationUnits } = await import("./directory");
@@ -2823,13 +2875,9 @@ export async function registerRoutes(
   });
 
   // Update student information (student name, email, and grade level)
-  app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
-
+      const sessionSchoolId = req.session.schoolId!;
       const { studentId } = req.params;
       
       // Verify student exists and belongs to same school (tenant isolation)
@@ -2838,8 +2886,8 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Student not found" });
       }
       
-      if (existingStudent.schoolId !== user.schoolId) {
-        return res.status(403).json({ error: "Cannot update students from other schools" });
+      if (!assertSameSchool(sessionSchoolId, existingStudent.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const updates: Partial<InsertStudent> = {};
@@ -2884,12 +2932,9 @@ export async function registerRoutes(
   });
 
   // Create student (admin-only)
-  app.post("/api/students", checkIPAllowlist, requireAdmin, async (req, res) => {
+  app.post("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       const { studentName, studentEmail, gradeLevel } = req.body;
       
@@ -2910,7 +2955,7 @@ export async function registerRoutes(
       }
       
       // Efficient duplicate check using targeted lookup
-      const existingStudent = await storage.getStudentBySchoolEmail(user.schoolId, normalizedEmail);
+      const existingStudent = await storage.getStudentBySchoolEmail(sessionSchoolId, normalizedEmail);
       if (existingStudent) {
         return res.status(400).json({ error: "A student with this email already exists" });
       }
@@ -2920,7 +2965,7 @@ export async function registerRoutes(
         studentName: studentName.trim(),
         studentEmail: normalizedEmail,
         gradeLevel: gradeLevel?.trim() || null,
-        schoolId: user.schoolId,
+        schoolId: sessionSchoolId,
         deviceId: null,
         studentStatus: "offline",
       };
@@ -2945,12 +2990,9 @@ export async function registerRoutes(
   });
 
   // Delete student (admin-only)
-  app.delete("/api/students/:studentId", checkIPAllowlist, requireAdmin, async (req, res) => {
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "Admin must be associated with a school" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
 
       const { studentId } = req.params;
       
@@ -2966,8 +3008,8 @@ export async function registerRoutes(
       }
       
       // Verify student belongs to same school (tenant isolation)
-      if (student.schoolId !== user.schoolId) {
-        return res.status(403).json({ error: "Cannot delete students from other schools" });
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const deleted = await storage.deleteStudent(studentId);
@@ -2991,27 +3033,15 @@ export async function registerRoutes(
   });
 
   // Update device information (device name and class assignment)
-  app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
-
       const { deviceId } = req.params;
-      
-      // Enforce tenant isolation: verify device has students from user's school
-      const allStudents = await storage.getAllStudents();
-      const deviceStudents = allStudents.filter(s => s.deviceId === deviceId);
-      
-      if (deviceStudents.length === 0) {
-        return res.status(404).json({ error: "Device not found or has no students" });
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
       }
-      
-      // Check if any student on this device belongs to the user's school
-      const hasSchoolStudent = deviceStudents.some(s => s.schoolId === user.schoolId);
-      if (!hasSchoolStudent) {
-        return res.status(403).json({ error: "Cannot update devices from other schools" });
+      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const updates: Partial<Omit<InsertDevice, 'deviceId'>> = {};
@@ -3047,12 +3077,16 @@ export async function registerRoutes(
   });
 
   // Delete student assignment
-  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { studentId } = req.params;
+      const sessionSchoolId = req.session.schoolId!;
       
       // Get student info before deleting for broadcast
       const student = await storage.getStudent(studentId);
+      if (student && !assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const deviceId = student?.deviceId;
       
       const deleted = await storage.deleteStudent(studentId);
@@ -3077,25 +3111,15 @@ export async function registerRoutes(
   });
 
   // Delete device and all its student assignments
-  app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
-      const user = await storage.getUser(req.session.userId!);
-      if (!user || !user.schoolId) {
-        return res.status(403).json({ error: "User must be associated with a school" });
-      }
-
       const { deviceId } = req.params;
-      
-      // Enforce tenant isolation: verify device has students from user's school
-      const allStudents = await storage.getAllStudents();
-      const deviceStudents = allStudents.filter(s => s.deviceId === deviceId);
-      
-      if (deviceStudents.length > 0) {
-        // Check if any student on this device belongs to the user's school
-        const hasSchoolStudent = deviceStudents.some(s => s.schoolId === user.schoolId);
-        if (!hasSchoolStudent) {
-          return res.status(403).json({ error: "Cannot delete devices from other schools" });
-        }
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const deleted = await storage.deleteDevice(deviceId);
@@ -3118,11 +3142,19 @@ export async function registerRoutes(
   });
 
   // Get heartbeat history for a specific device
-  app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const limit = parseInt(req.query.limit as string) || 1000; // Fetch more history to show more sessions
       
+      const device = await storage.getDevice(deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
       const heartbeats = await storage.getHeartbeatsByDevice(deviceId, limit);
       res.json(heartbeats);
     } catch (error) {
@@ -3132,10 +3164,21 @@ export async function registerRoutes(
   });
 
   // Get website duration analytics for a student or all students
-  app.get("/api/student-analytics/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/student-analytics/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const { studentId } = req.params;
       const isAllStudents = studentId === "all";
+      const sessionSchoolId = req.session.schoolId!;
+
+      if (!isAllStudents) {
+        const student = await storage.getStudent(studentId);
+        if (!student) {
+          return res.status(404).json({ error: "Student not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
       
       // Get heartbeats for the last 24 hours (or custom range)
       const allHeartbeats = await storage.getAllHeartbeats();
@@ -3146,7 +3189,7 @@ export async function registerRoutes(
         const timestamp = new Date(hb.timestamp).getTime();
         if (timestamp < cutoffTime) return false;
         
-        if (isAllStudents) return true;
+        if (isAllStudents) return hb.schoolId === sessionSchoolId;
         return hb.studentId === studentId;
       });
       
@@ -3225,22 +3268,14 @@ export async function registerRoutes(
 
 
   // Settings endpoints
-  app.get("/api/settings", checkIPAllowlist, async (req, res) => {
+  app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      const studentToken =
-        req.header("x-student-token") ||
-        (typeof req.query.studentToken === "string" ? req.query.studentToken : undefined);
-      const hasSession = Boolean(req.session?.userId);
-
-      if (!hasSession && !studentToken) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-
+      const sessionSchoolId = req.session.schoolId!;
       let settings = await storage.getSettings();
 
-      if (!settings && hasSession) {
+      if (!settings) {
         settings = await storage.upsertSettings({
-          schoolId: process.env.SCHOOL_ID || "default-school",
+          schoolId: sessionSchoolId,
           schoolName: "School",
           wsSharedKey: process.env.WS_SHARED_KEY || "change-this-key",
           retentionHours: "24",
@@ -3249,47 +3284,23 @@ export async function registerRoutes(
         });
       }
 
-      if (hasSession) {
-        return res.json(settings);
+      if (settings && !assertSameSchool(sessionSchoolId, settings.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
 
-      try {
-        if (!studentToken) {
-          return res.status(401).json({ error: "Unauthorized" });
-        }
-        const payload = verifyStudentToken(studentToken);
-        if (settings?.schoolId && payload.schoolId && settings.schoolId !== payload.schoolId) {
-          return res.status(403).json({ error: "Settings are not available for this school" });
-        }
-      } catch (error) {
-        if (error instanceof TokenExpiredError) {
-          return res.status(401).json({ error: "Student token expired" });
-        }
-        if (error instanceof InvalidTokenError) {
-          return res.status(403).json({ error: "Invalid student token" });
-        }
-        throw error;
-      }
-
-      const publicSettings = {
-        enableTrackingHours: settings?.enableTrackingHours ?? false,
-        trackingStartTime: settings?.trackingStartTime ?? "00:00",
-        trackingEndTime: settings?.trackingEndTime ?? "23:59",
-        trackingDays:
-          settings?.trackingDays ?? ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-        schoolTimezone: settings?.schoolTimezone ?? "America/New_York",
-      };
-
-      res.json(publicSettings);
+      res.json(settings);
     } catch (error) {
       console.error("Get settings error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      const data = insertSettingsSchema.parse(req.body);
+      const data = insertSettingsSchema.parse({
+        ...req.body,
+        schoolId: req.session.schoolId,
+      });
       const settings = await storage.upsertSettings(data);
       res.json(settings);
     } catch (error) {
@@ -3298,15 +3309,18 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.patch("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       const currentSettings = await storage.getSettings();
       if (!currentSettings) {
         return res.status(404).json({ error: "Settings not found" });
       }
+      if (!assertSameSchool(req.session.schoolId, currentSettings.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
 
       // Merge current settings with request body for partial update
-      const updatedData = { ...currentSettings, ...req.body };
+      const updatedData = { ...currentSettings, ...req.body, schoolId: currentSettings.schoolId };
       const data = insertSettingsSchema.parse(updatedData);
       const settings = await storage.upsertSettings(data);
       res.json(settings);
@@ -3317,11 +3331,19 @@ export async function registerRoutes(
   });
 
   // Teacher Settings endpoints
-  app.get("/api/teacher/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const teacherSettings = await storage.getTeacherSettings(teacherId);
@@ -3332,11 +3354,19 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/teacher/settings", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const data = { ...req.body, teacherId };
@@ -3349,25 +3379,33 @@ export async function registerRoutes(
   });
 
   // Teacher-Student assignment endpoints
-  app.get("/api/teacher/students", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/teacher/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const teacher = await storage.getUser(teacherId);
+      if (!teacher) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const studentIds = await storage.getTeacherStudents(teacherId);
       const students = await Promise.all(
         studentIds.map(id => storage.getStudent(id))
       );
-      res.json(students.filter(s => s !== undefined));
+      res.json(students.filter(s => s !== undefined && assertSameSchool(req.session.schoolId, s.schoolId)));
     } catch (error) {
       console.error("Get teacher students error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post("/api/teacher/students/:studentId/assign", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/teacher/students/:studentId/assign", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3375,6 +3413,13 @@ export async function registerRoutes(
       }
       
       const { studentId } = req.params;
+      const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const assignment = await storage.assignStudentToTeacher(teacherId, studentId);
       res.json(assignment);
     } catch (error) {
@@ -3383,7 +3428,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/teacher/students/:studentId/unassign", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/teacher/students/:studentId/unassign", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3391,6 +3436,13 @@ export async function registerRoutes(
       }
       
       const { studentId } = req.params;
+      const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
       
       if (success) {
@@ -3521,49 +3573,39 @@ export async function registerRoutes(
   });
 
   // Groups (Class Rosters) endpoints
-  app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-      
-      // Admins see all groups; teachers see only their own
-      if (user.role === 'admin') {
-        const allGroups = await storage.getAllGroups();
-        return res.json(allGroups);
-      }
-      
-      const groups = await storage.getGroupsByTeacher(userId);
-      res.json(groups);
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
+      const groups =
+        sessionRole === "school_admin" || sessionRole === "super_admin"
+          ? await storage.getGroupsBySchool(sessionSchoolId)
+          : await storage.getGroupsByTeacher(userId);
+      res.json(groups.filter(group => assertSameSchool(sessionSchoolId, group.schoolId)));
     } catch (error) {
       console.error("Get groups error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       // Determine target teacherId
       let targetTeacherId = req.body.teacherId;
       
       // If not admin, force teacherId to be current user
-      if (user.role !== 'admin') {
+      if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin') {
         targetTeacherId = userId;
       }
       
@@ -3574,11 +3616,22 @@ export async function registerRoutes(
       
       // Set default groupType if not provided
       const groupType = req.body.groupType || 
-        (user.role === 'admin' ? 'admin_class' : 'teacher_created');
+        (sessionRole === 'school_admin' || sessionRole === 'super_admin' ? 'admin_class' : 'teacher_created');
+
+      if (targetTeacherId) {
+        const targetTeacher = await storage.getUser(targetTeacherId);
+        if (!targetTeacher) {
+          return res.status(404).json({ error: "Teacher not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, targetTeacher.schoolId)) {
+          return res.status(403).json({ error: "Forbidden" });
+        }
+      }
       
       const data = insertGroupSchema.parse({ 
         ...req.body, 
         teacherId: targetTeacherId,
+        schoolId: sessionSchoolId,
         groupType 
       });
       const group = await storage.createGroup(data);
@@ -3589,17 +3642,14 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { id } = req.params;
       
@@ -3609,11 +3659,15 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Group not found" });
       }
       
-      if (user.role !== 'admin' && existingGroup.teacherId !== userId) {
+      if (!assertSameSchool(sessionSchoolId, existingGroup.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (sessionRole !== "school_admin" && sessionRole !== "super_admin" && existingGroup.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
-      const group = await storage.updateGroup(id, req.body);
+      const group = await storage.updateGroup(id, { ...req.body, schoolId: existingGroup.schoolId });
       res.json(group);
     } catch (error) {
       console.error("Update group error:", error);
@@ -3621,17 +3675,14 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { id } = req.params;
       
@@ -3641,7 +3692,11 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Group not found" });
       }
       
-      if (user.role !== 'admin' && existingGroup.teacherId !== userId) {
+      if (!assertSameSchool(sessionSchoolId, existingGroup.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (sessionRole !== "school_admin" && sessionRole !== "super_admin" && existingGroup.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
@@ -3654,61 +3709,67 @@ export async function registerRoutes(
   });
 
   // Group students endpoints
-  app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId } = req.params;
-      
-      // Get user to check role
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
       
       // Verify ownership - admins can view any group, teachers only their own
       const group = await storage.getGroup(groupId);
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (user.role !== 'admin' && group.teacherId !== userId) {
+      if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
       }
       
       const studentIds = await storage.getGroupStudents(groupId);
       const students = await Promise.all(studentIds.map(id => storage.getStudent(id)));
-      res.json(students.filter(s => s !== undefined));
+      res.json(students.filter(s => s !== undefined && assertSameSchool(sessionSchoolId, s.schoolId)));
     } catch (error) {
       console.error("Get group students error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId, studentId } = req.params;
-      
-      // Get user to check role
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
       
       // Verify ownership - admins can manage any group, teachers only their own
       const group = await storage.getGroup(groupId);
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (user.role !== 'admin' && group.teacherId !== userId) {
+      if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
+      }
+
+      const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const assignment = await storage.assignStudentToGroup(groupId, studentId);
@@ -3719,28 +3780,35 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId, studentId } = req.params;
-      
-      // Get user to check role
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
       
       // Verify ownership - admins can manage any group, teachers only their own
       const group = await storage.getGroup(groupId);
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (user.role !== 'admin' && group.teacherId !== userId) {
+      if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
+      }
+
+      const student = await storage.getStudent(studentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       
       const success = await storage.unassignStudentFromGroup(groupId, studentId);
@@ -3817,7 +3885,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/sessions/all", checkIPAllowlist, requireAdmin, async (req, res) => {
+  app.get("/api/sessions/all", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
       // Admin-only endpoint to view all active sessions school-wide
       const sessions = await storage.getActiveSessions();
@@ -3829,24 +3897,21 @@ export async function registerRoutes(
   });
 
   // Flight Paths CRUD endpoints
-  app.get("/api/flight-paths", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-      
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       const allFlightPaths = await storage.getAllFlightPaths();
       
       // Admins see all flight paths; teachers see only their own + school-wide defaults
-      const filteredFlightPaths = user.role === 'admin'
-        ? allFlightPaths
-        : allFlightPaths.filter(fp => fp.teacherId === userId || fp.teacherId === null);
+      const filteredFlightPaths = (sessionRole === "school_admin" || sessionRole === "super_admin")
+        ? allFlightPaths.filter(fp => assertSameSchool(sessionSchoolId, fp.schoolId))
+        : allFlightPaths.filter(fp => (fp.teacherId === userId || fp.teacherId === null)
+          && assertSameSchool(sessionSchoolId, fp.schoolId));
       
       res.json(filteredFlightPaths);
     } catch (error) {
@@ -3855,11 +3920,14 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/flight-paths/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const flightPath = await storage.getFlightPath(req.params.id);
       if (!flightPath) {
         return res.status(404).json({ error: "Flight Path not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, flightPath.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       res.json(flightPath);
     } catch (error) {
@@ -3868,12 +3936,13 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/flight-paths", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = req.session.schoolId!;
       
       // Make schoolId optional for teacher-scoped Flight Paths
       const flightPathSchema = insertFlightPathSchema.extend({
@@ -3881,14 +3950,10 @@ export async function registerRoutes(
       });
       const data = flightPathSchema.parse(req.body);
       
-      // Get the default school ID from settings if not provided
-      const settings = await storage.getSettings();
-      const schoolId = data.schoolId || settings?.schoolId || 'default-school';
-      
       // Ensure blockedDomains defaults to empty array if not provided
       const flightPath = await storage.createFlightPath({
         ...data,
-        schoolId,
+        schoolId: sessionSchoolId,
         teacherId: data.teacherId ?? teacherId,
         blockedDomains: data.blockedDomains ?? []
       });
@@ -3899,7 +3964,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const updates = insertFlightPathSchema.partial().parse(req.body);
       
@@ -3909,7 +3974,15 @@ export async function registerRoutes(
         updates.blockedDomains = [];
       }
       
-      const flightPath = await storage.updateFlightPath(req.params.id, updates);
+      const existing = await storage.getFlightPath(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Flight Path not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const flightPath = await storage.updateFlightPath(req.params.id, { ...updates, schoolId: existing.schoolId });
       if (!flightPath) {
         return res.status(404).json({ error: "Flight Path not found" });
       }
@@ -3920,8 +3993,15 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/flight-paths/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const existing = await storage.getFlightPath(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Flight Path not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const success = await storage.deleteFlightPath(req.params.id);
       if (!success) {
         return res.status(404).json({ error: "Flight Path not found" });
@@ -3934,24 +4014,21 @@ export async function registerRoutes(
   });
 
   // Student Groups CRUD endpoints
-  app.get("/api/groups", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
-      const user = await storage.getUser(userId);
-      if (!user) {
-        return res.status(401).json({ error: "Unauthorized" });
-      }
-      
+      const sessionSchoolId = req.session.schoolId!;
+      const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       const allGroups = await storage.getAllStudentGroups();
       
       // Admins see all groups; teachers see only their own + school-wide defaults
-      const filteredGroups = user.role === 'admin'
-        ? allGroups
-        : allGroups.filter(group => group.teacherId === userId || group.teacherId === null);
+      const filteredGroups = (sessionRole === "school_admin" || sessionRole === "super_admin")
+        ? allGroups.filter(group => assertSameSchool(sessionSchoolId, group.schoolId))
+        : allGroups.filter(group => (group.teacherId === userId || group.teacherId === null)
+          && assertSameSchool(sessionSchoolId, group.schoolId));
       
       res.json(filteredGroups);
     } catch (error) {
@@ -3960,11 +4037,14 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const group = await storage.getStudentGroup(req.params.id);
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, group.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
       }
       res.json(group);
     } catch (error) {
@@ -3973,7 +4053,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/groups", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3983,7 +4063,8 @@ export async function registerRoutes(
       const data = insertStudentGroupSchema.parse(req.body);
       const group = await storage.createStudentGroup({
         ...data,
-        teacherId: data.teacherId ?? teacherId
+        teacherId: data.teacherId ?? teacherId,
+        schoolId: req.session.schoolId!,
       });
       res.json(group);
     } catch (error) {
@@ -3992,10 +4073,17 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const updates = insertStudentGroupSchema.partial().parse(req.body);
-      const group = await storage.updateStudentGroup(req.params.id, updates);
+      const existing = await storage.getStudentGroup(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const group = await storage.updateStudentGroup(req.params.id, { ...updates, schoolId: existing.schoolId });
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
@@ -4006,8 +4094,15 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const existing = await storage.getStudentGroup(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const success = await storage.deleteStudentGroup(req.params.id);
       if (!success) {
         return res.status(404).json({ error: "Group not found" });
@@ -4020,10 +4115,14 @@ export async function registerRoutes(
   });
 
   // Get all rosters/classes
-  app.get("/api/rosters", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       const rosters = await storage.getAllRosters();
-      res.json(rosters);
+      const devices = await storage.getAllDevices();
+      const schoolDeviceIds = new Set(devices.filter(d => d.schoolId === sessionSchoolId).map(d => d.deviceId));
+      const filtered = rosters.filter(roster => roster.deviceIds.some(deviceId => schoolDeviceIds.has(deviceId)));
+      res.json(filtered);
     } catch (error) {
       console.error("Get rosters error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4031,7 +4130,7 @@ export async function registerRoutes(
   });
 
   // Create or update a roster/class
-  app.post("/api/rosters", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { className, classId } = req.body;
       
@@ -4064,11 +4163,19 @@ export async function registerRoutes(
   });
 
   // Roster upload endpoint
-  app.post("/api/roster/upload", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/roster/upload", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       // In a real implementation, this would parse the CSV file
       // For now, we'll accept JSON data
       const data = insertRosterSchema.parse(req.body);
+      const devices = await storage.getAllDevices();
+      const schoolDeviceIds = new Set(
+        devices.filter(device => device.schoolId === req.session.schoolId).map(device => device.deviceId)
+      );
+      const invalidDeviceId = data.deviceIds.find(deviceId => !schoolDeviceIds.has(deviceId));
+      if (invalidDeviceId) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       const roster = await storage.upsertRoster(data);
       res.json({ success: true, roster });
     } catch (error) {
@@ -4078,8 +4185,9 @@ export async function registerRoutes(
   });
 
   // Export activity Excel endpoint with date range filtering
-  app.get("/api/export/activity", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/export/activity", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
       const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
       
@@ -4088,11 +4196,13 @@ export async function registerRoutes(
       const filteredHeartbeats = allHeartbeats.filter(hb => {
         const timestamp = new Date(hb.timestamp);
         return timestamp >= startDate && timestamp <= endDate;
-      });
+      }).filter(hb => hb.schoolId === sessionSchoolId);
       
       // Get all students to map deviceId to studentName
       const students = await storage.getAllStudents();
-      const studentMap = new Map(students.map(s => [s.deviceId, s.studentName]));
+      const studentMap = new Map(
+        students.filter(s => s.schoolId === sessionSchoolId).map(s => [s.deviceId, s.studentName])
+      );
       
       // Calculate URL sessions with duration for each device
       const deviceSessions = groupSessionsByDevice(filteredHeartbeats);
@@ -4152,16 +4262,18 @@ export async function registerRoutes(
   });
 
   // Legacy export endpoint (for backward compatibility)
-  app.get("/api/export/csv", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/export/csv", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
+      const sessionSchoolId = req.session.schoolId!;
       const students = await storage.getAllStudents();
       const statuses = await storage.getAllStudentStatuses();
+      const schoolStudents = students.filter(student => student.schoolId === sessionSchoolId);
       
       // Generate CSV
       let csv = "Device ID,Student Name,Class ID,Last Active Tab,Last URL,Last Seen,Status\n";
       
       statuses.forEach(status => {
-        const student = students.find(s => s.deviceId === status.deviceId);
+        const student = schoolStudents.find(s => s.deviceId === status.deviceId);
         if (student) {
           csv += `"${status.deviceId}","${status.studentName}","${status.classId}","${status.activeTabTitle}","${status.activeTabUrl}","${new Date(status.lastSeenAt).toISOString()}","${status.status}"\n`;
         }
@@ -4465,9 +4577,10 @@ export async function registerRoutes(
   });
   
   // Apply Flight Path
-  app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { flightPathId, allowedDomains, targetDeviceIds } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       if (!flightPathId || !allowedDomains || !Array.isArray(allowedDomains)) {
         return res.status(400).json({ error: "Flight Path ID and allowed domains are required" });
@@ -4476,6 +4589,12 @@ export async function registerRoutes(
       // Fetch flight path details to get the flight path name
       const flightPath = await storage.getFlightPath(flightPathId);
       const flightPathName = flightPath?.flightPathName || 'Unknown Flight Path';
+      if (!flightPath) {
+        return res.status(404).json({ error: "Flight Path not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, flightPath.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
       
       const sentCount = broadcastToStudents({
         type: 'remote-control',
@@ -4500,9 +4619,10 @@ export async function registerRoutes(
   });
   
   // Remove Flight Path
-  app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { targetDeviceIds } = req.body;
+      const sessionSchoolId = req.session.schoolId!;
       
       if (!targetDeviceIds || !Array.isArray(targetDeviceIds) || targetDeviceIds.length === 0) {
         return res.status(400).json({ error: "Target device IDs are required" });
@@ -4522,6 +4642,9 @@ export async function registerRoutes(
       for (const deviceId of targetDeviceIds) {
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
+          if (!assertSameSchool(sessionSchoolId, activeStudent.schoolId)) {
+            return res.status(403).json({ error: "Forbidden" });
+          }
           removedStudentIds.add(activeStudent.id);
           const status = await storage.getStudentStatus(activeStudent.id);
           if (status) {
