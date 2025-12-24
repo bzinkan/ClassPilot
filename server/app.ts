@@ -84,11 +84,20 @@ if (SENTRY_DSN_SERVER) {
         event.tags = scrubSentryData(event.tags) as Record<string, string>;
       }
       if (event.breadcrumbs) {
-        event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
-          ...crumb,
-          message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
-          data: crumb.data ? (scrubSentryData(crumb.data) as Record<string, unknown>) : crumb.data,
-        }));
+        event.breadcrumbs = event.breadcrumbs.map((crumb) => {
+          const scrubbed = crumb.data ? scrubSentryData(crumb.data) : undefined;
+
+          const safeData =
+            scrubbed && typeof scrubbed === "object" && !Array.isArray(scrubbed)
+              ? (scrubbed as Record<string, unknown>)
+              : undefined;
+
+          return {
+            ...crumb,
+            message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
+            data: safeData,
+          };
+        });
       }
       return event;
     },
