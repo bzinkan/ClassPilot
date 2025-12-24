@@ -1,15 +1,93 @@
-import { Pool, neonConfig } from '@neondatabase/serverless';
-import { drizzle } from 'drizzle-orm/neon-serverless';
+import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
+import { drizzle as neonDrizzle } from 'drizzle-orm/neon-serverless';
 import ws from "ws";
 import * as schema from "@shared/schema";
 
 neonConfig.webSocketConstructor = ws;
 
-if (!process.env.DATABASE_URL) {
+const isTest = process.env.NODE_ENV === "test";
+
+if (!process.env.DATABASE_URL && !isTest) {
   throw new Error(
     "DATABASE_URL must be set. Did you forget to provision a database?",
   );
 }
 
-export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-export const db = drizzle({ client: pool, schema });
+type PoolLike = {
+  query: (query: string, params?: any[]) => Promise<{ rows?: any[] }>;
+};
+
+let pool: PoolLike;
+let db: ReturnType<typeof neonDrizzle> | ReturnType<typeof nodeDrizzle>;
+
+if (isTest) {
+  pool = createTestSessionPool();
+  db = {} as ReturnType<typeof neonDrizzle>;
+} else {
+  pool = new NeonPool({ connectionString: process.env.DATABASE_URL });
+  db = neonDrizzle({ client: pool, schema });
+}
+
+export { pool, db };
+
+function createTestSessionPool(): PoolLike {
+  const sessions = new Map<string, { sess: unknown; expire: number }>();
+  let tableExists = false;
+
+  return {
+    async query(query, params = []) {
+      const normalized = query.trim().toLowerCase();
+
+      if (normalized.startsWith("select to_regclass")) {
+        return { rows: [{ to_regclass: tableExists ? "session" : null }] };
+      }
+
+      if (normalized.startsWith("create table")) {
+        tableExists = true;
+        return { rows: [] };
+      }
+
+      if (normalized.startsWith("select sess from")) {
+        const [sid, currentTimestamp] = params;
+        const record = sessions.get(String(sid));
+        if (!record || record.expire < Number(currentTimestamp)) {
+          return { rows: [] };
+        }
+        return { rows: [{ sess: record.sess }] };
+      }
+
+      if (normalized.startsWith("insert into")) {
+        const [sess, expire, sid] = params;
+        sessions.set(String(sid), { sess, expire: Number(expire) });
+        return { rows: [{ sid }] };
+      }
+
+      if (normalized.startsWith("update")) {
+        const [expire, sid] = params;
+        const record = sessions.get(String(sid));
+        if (record) {
+          record.expire = Number(expire);
+        }
+        return { rows: [{ sid }] };
+      }
+
+      if (normalized.startsWith("delete from")) {
+        if (normalized.includes("where sid")) {
+          const [sid] = params;
+          sessions.delete(String(sid));
+        } else {
+          const [timestamp] = params;
+          const cutoff = Number(timestamp);
+          for (const [sid, record] of sessions.entries()) {
+            if (record.expire < cutoff) {
+              sessions.delete(sid);
+            }
+          }
+        }
+        return { rows: [] };
+      }
+
+      return { rows: [] };
+    },
+  };
+}
