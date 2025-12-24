@@ -75,7 +75,7 @@ export const requireActiveSchool = (
     return next();
   }
 
-  const schoolId = res.locals.schoolId ?? req.session.schoolId;
+  const schoolId = req.session.schoolId;
   if (!schoolId) {
     return res.status(400).json({ error: "School context required" });
   }
@@ -89,6 +89,7 @@ export const requireActiveSchool = (
 
   if (
     req.session.schoolSessionVersion !== undefined
+    && school.schoolSessionVersion !== undefined
     && req.session.schoolSessionVersion !== school.schoolSessionVersion
   ) {
     return req.session.destroy(() => {
