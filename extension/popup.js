@@ -12,6 +12,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // ALWAYS show main view with auto-detected info (no manual registration)
     showMainView(config);
+    updateLicenseBanner();
   });
   
   // Load and display messages
@@ -21,6 +22,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === 'local' && changes.messages) {
       loadMessages();
+    }
+    if (namespace === 'local' && (changes.licenseActive || changes.planStatus)) {
+      updateLicenseBanner();
     }
   });
 });
@@ -68,6 +72,24 @@ function updateStatus() {
   // Update last update time
   const now = new Date();
   document.getElementById('last-update').textContent = now.toLocaleTimeString();
+}
+
+async function updateLicenseBanner() {
+  const stored = await chrome.storage.local.get(['licenseActive', 'planStatus']);
+  const bannerTitle = document.getElementById('license-banner-title');
+  const bannerText = document.getElementById('license-banner-text');
+  if (!bannerTitle || !bannerText) {
+    return;
+  }
+
+  if (stored.licenseActive === false) {
+    const planStatus = stored.planStatus ? ` (planStatus=${stored.planStatus})` : '';
+    bannerTitle.textContent = 'Monitoring Disabled';
+    bannerText.textContent = `ClassPilot disabled: school license inactive${planStatus}.`;
+  } else {
+    bannerTitle.textContent = 'Monitoring Active';
+    bannerText.textContent = 'Your tab titles and URLs are shared with your teacher as permitted by school policy.';
+  }
 }
 
 async function loadStudents(deviceId) {

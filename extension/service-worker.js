@@ -133,6 +133,7 @@ const HEARTBEAT_ACTIVE_MINUTES = 1;
 const HEARTBEAT_IDLE_MINUTES = 10;
 const OBSERVED_HEARTBEAT_SECONDS = 20;
 const NAVIGATION_DEBOUNCE_MS = 350;
+const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
 let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
@@ -147,6 +148,7 @@ let observedHeartbeatTimer = null;
 let observedByTeacher = false;
 let lastObservedSignature = null;
 let lastObservedSentAt = 0;
+let licenseActive = true;
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -168,6 +170,87 @@ function extractManagedValue(value) {
     return value.Value;
   }
   return value;
+}
+
+function scheduleLicenseCheck() {
+  const periodInMinutes = LICENSE_CHECK_INTERVAL_MS / 60000;
+  chrome.alarms.create('license-check', { periodInMinutes });
+}
+
+function notifyLicenseState(message) {
+  chrome.tabs.query({}, (tabs) => {
+    tabs.forEach((tab) => {
+      if (!tab.id) return;
+      chrome.tabs.sendMessage(tab.id, message).catch(() => null);
+    });
+  });
+}
+
+async function disableForInactiveLicense(planStatus) {
+  if (!licenseActive) {
+    await kv.set({ licenseActive: false, planStatus });
+    return;
+  }
+
+  licenseActive = false;
+  trackingState = TRACKING_STATES.OFF;
+  if (observedHeartbeatTimer) {
+    clearInterval(observedHeartbeatTimer);
+    observedHeartbeatTimer = null;
+  }
+  scheduleHeartbeat(null);
+  disconnectWebSocket();
+  chrome.alarms.clear('ws-reconnect');
+  chrome.alarms.clear('health-check');
+  chrome.alarms.clear('settings-refresh');
+  settingsAlarmScheduled = false;
+  chrome.action.setBadgeText({ text: 'OFF' });
+
+  await kv.set({ licenseActive: false, planStatus, licenseDisabledAt: Date.now() });
+  notifyLicenseState({ type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus });
+}
+
+async function checkLicenseStatus(reason = 'manual') {
+  if (!CONFIG.serverUrl) {
+    return;
+  }
+
+  try {
+    const response = await fetch(`${CONFIG.serverUrl}/api/school/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        studentToken: CONFIG.studentToken || null,
+        studentEmail: CONFIG.studentEmail || null,
+      }),
+    });
+
+    if (response.status === 402 || response.status === 403) {
+      const data = await response.json().catch(() => ({}));
+      await disableForInactiveLicense(data.planStatus);
+      return;
+    }
+
+    if (!response.ok) {
+      return;
+    }
+
+    const data = await response.json();
+    if (!data.schoolActive) {
+      await disableForInactiveLicense(data.planStatus);
+      return;
+    }
+
+    const wasInactive = !licenseActive;
+    licenseActive = true;
+    await kv.set({ licenseActive: true, planStatus: data.planStatus });
+    if (wasInactive) {
+      notifyLicenseState({ type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: data.planStatus });
+      initializeAdaptiveTracking(`license-active:${reason}`);
+    }
+  } catch (error) {
+    console.warn('[License] Status check failed:', error);
+  }
 }
 
 async function resolveServerUrl() {
@@ -402,6 +485,16 @@ function setObservedState(isObserved, reason) {
 }
 
 async function updateTrackingState(reason = 'state-check') {
+  if (!licenseActive) {
+    if (trackingState !== TRACKING_STATES.OFF) {
+      trackingState = TRACKING_STATES.OFF;
+      scheduleHeartbeat(null);
+      disconnectWebSocket();
+      syncObservedHeartbeat('license-inactive');
+    }
+    return;
+  }
+
   const nextState = determineTrackingState();
   if (trackingState === nextState) {
     return;
@@ -450,7 +543,7 @@ async function initializeAdaptiveTracking(reason) {
 }
 
 function queueNavigationEvent(eventType, url, title, metadata = {}) {
-  if (trackingState !== TRACKING_STATES.ACTIVE) {
+  if (!licenseActive || trackingState !== TRACKING_STATES.ACTIVE) {
     return;
   }
   if (!isHttpUrl(url)) {
@@ -476,7 +569,7 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     if (!CONFIG.deviceId) return;
 
     try {
-      await fetch(`${CONFIG.serverUrl}/api/event`, {
+      const response = await fetch(`${CONFIG.serverUrl}/api/event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -489,6 +582,10 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
           },
         }),
       });
+      if (response.status === 402) {
+        const data = await response.json().catch(() => ({}));
+        await disableForInactiveLicense(data.planStatus);
+      }
     } catch (error) {
       console.error('Event logging error:', error);
     }
@@ -628,6 +725,8 @@ async function ensureRegistered() {
     }
     
     console.log('[Service Worker] Registration complete');
+
+    await checkLicenseStatus('registration');
     
     return stored;
   } catch (error) {
@@ -642,6 +741,7 @@ chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
   resolveServerUrl().then((serverUrl) => {
     CONFIG.serverUrl = serverUrl;
+    scheduleLicenseCheck();
     ensureRegistered();
     setTimeout(() => initializeAdaptiveTracking('install'), 2000);
   });
@@ -652,6 +752,7 @@ if (chrome.runtime.onStartup) {
     console.log('[Service Worker] Browser started');
     resolveServerUrl().then((serverUrl) => {
       CONFIG.serverUrl = serverUrl;
+      scheduleLicenseCheck();
       ensureRegistered();
       setTimeout(() => initializeAdaptiveTracking('startup'), 2000);
     });
@@ -662,7 +763,16 @@ if (chrome.runtime.onStartup) {
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
-  const stored = await chrome.storage.local.get(['deviceId', 'config', 'activeStudentId', 'studentEmail', 'flightPathState', 'lockScreenState']);
+  const stored = await chrome.storage.local.get([
+    'deviceId',
+    'config',
+    'activeStudentId',
+    'studentEmail',
+    'flightPathState',
+    'lockScreenState',
+    'licenseActive',
+    'planStatus',
+  ]);
   const resolvedServerUrl = await resolveServerUrl();
 
   // Restore state from storage (do not override resolved serverUrl)
@@ -671,6 +781,7 @@ if (chrome.runtime.onStartup) {
     CONFIG = { ...CONFIG, ...safeConfig };
   }
   CONFIG.serverUrl = resolvedServerUrl;
+  scheduleLicenseCheck();
   if (stored.deviceId) {
     CONFIG.deviceId = stored.deviceId;
   }
@@ -714,6 +825,10 @@ if (chrome.runtime.onStartup) {
     flightPathActive: allowedDomains.length > 0,
     screenLocked: screenLocked
   });
+
+  if (stored.licenseActive === false) {
+    await disableForInactiveLicense(stored.planStatus);
+  }
 
   await ensureRegistered();
   
@@ -1031,6 +1146,9 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 
 // Send heartbeat with current tab info
 async function sendHeartbeat(reason = 'manual') {
+  if (!licenseActive) {
+    return;
+  }
   if (trackingState === TRACKING_STATES.OFF) {
     return;
   }
@@ -1143,7 +1261,11 @@ async function sendHeartbeat(reason = 'manual') {
       body: JSON.stringify(heartbeatData),
     });
     
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 402) {
+      const data = await response.json().catch(() => ({}));
+      await disableForInactiveLicense(data.planStatus);
+      return;
+    } else if (response.status === 401 || response.status === 403) {
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });
@@ -1214,6 +1336,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     refreshSchoolSettings({ force: false }).then(() => {
       updateTrackingState('settings-refresh');
     });
+  } else if (alarm.name === 'license-check') {
+    checkLicenseStatus('alarm');
   }
 });
 
@@ -2248,7 +2372,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     safeSendHeartbeat('student-changed');
     
     // Log student_switched event
-    if (CONFIG.deviceId) {
+    if (licenseActive && CONFIG.deviceId) {
       fetch(`${CONFIG.serverUrl}/api/event`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2261,6 +2385,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             timestamp: new Date().toISOString(),
           },
         }),
+      }).then(async (response) => {
+        if (response.status === 402) {
+          const data = await response.json().catch(() => ({}));
+          await disableForInactiveLicense(data.planStatus);
+        }
       }).catch(error => {
         console.error('Error logging student_switched event:', error);
       });

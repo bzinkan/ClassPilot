@@ -33,7 +33,14 @@ import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidToken
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
 import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
-import { assertSameSchool, requireAuth, requireRole, requireSchoolContext } from "./middleware/authz";
+import {
+  assertSameSchool,
+  isSchoolLicenseActive,
+  requireActiveSchool,
+  requireAuth,
+  requireRole,
+  requireSchoolContext,
+} from "./middleware/authz";
 import { parseCsv, stringifyCsv } from "./util/csv";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
@@ -371,6 +378,7 @@ export async function registerRoutes(
   publishWsMessage = null;
   const enableBackgroundJobs = options.enableBackgroundJobs !== false;
   const httpServer = createServer(app);
+  const requireActiveSchoolMiddleware = requireActiveSchool(storage);
 
   // WebSocket server with noServer mode for manual upgrade handling
   const wss = new WebSocketServer({ noServer: true });
@@ -650,10 +658,27 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Invalid credentials" });
       }
 
+      let schoolSessionVersion: number | undefined;
+      if (user.schoolId) {
+        const school = await storage.getSchool(user.schoolId);
+        if (!school || school.deletedAt) {
+          return res.status(401).json({ error: "School not found" });
+        }
+        if (!isSchoolLicenseActive(school)) {
+          return res.status(402).json({
+            error: "School license inactive",
+            planStatus: school.planStatus,
+            schoolActive: false,
+          });
+        }
+        schoolSessionVersion = school.schoolSessionVersion;
+      }
+
       // Set session data with role and schoolId
       req.session.userId = user.id;
       req.session.role = user.role;
       req.session.schoolId = user.schoolId ?? undefined;
+      req.session.schoolSessionVersion = schoolSessionVersion;
 
       res.json({ 
         success: true, 
@@ -698,8 +723,51 @@ export async function registerRoutes(
     }
   });
 
+  app.post("/api/school/status", async (req, res) => {
+    try {
+      const { studentToken, studentEmail } = req.body ?? {};
+      let schoolId: string | undefined;
+
+      if (req.session?.schoolId) {
+        schoolId = req.session.schoolId;
+      } else if (studentToken) {
+        try {
+          const payload = verifyStudentToken(studentToken);
+          schoolId = payload.schoolId;
+        } catch (error) {
+          return res.status(401).json({ error: "Invalid token" });
+        }
+      } else if (studentEmail) {
+        const schoolInfo = await getSchoolFromEmail(storage, studentEmail);
+        schoolId = schoolInfo?.schoolId;
+      }
+
+      if (!schoolId) {
+        return res.status(400).json({ error: "School context required" });
+      }
+
+      const school = await storage.getSchool(schoolId);
+      if (!school) {
+        return res.status(404).json({ schoolActive: false });
+      }
+
+      const schoolActive = isSchoolLicenseActive(school);
+
+      return res.json({
+        schoolId,
+        schoolActive,
+        planStatus: school.planStatus,
+        status: school.status,
+        schoolSessionVersion: school.schoolSessionVersion,
+      });
+    } catch (error) {
+      console.error("School status error:", error);
+      return res.status(500).json({ error: "Failed to load school status" });
+    }
+  });
+
   // Debug endpoint for production troubleshooting (admin only)
-  app.get("/api/debug/student-status", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/debug/student-status", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { email } = req.query;
       
@@ -789,7 +857,7 @@ export async function registerRoutes(
   });
 
   // Admin routes for managing teachers
-  app.get("/api/admin/teachers", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/admin/teachers", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const admin = await storage.getUser(req.session.userId!);
       if (!admin) {
@@ -820,7 +888,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/admin/teachers", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/teachers", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const admin = await storage.getUser(req.session.userId!);
       if (!admin) {
@@ -875,7 +943,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/admin/teachers/:id", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.delete("/api/admin/teachers/:id", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { id } = req.params;
       const admin = await storage.getUser(req.session.userId!);
@@ -1090,9 +1158,34 @@ export async function registerRoutes(
       const { id } = req.params;
       const updates = req.body;
 
-      const school = await storage.updateSchool(id, updates);
+      const existingSchool = await storage.getSchool(id);
+      if (!existingSchool) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      let school = await storage.updateSchool(id, updates);
       if (!school) {
         return res.status(404).json({ error: "School not found" });
+      }
+
+      if (updates.status === "suspended") {
+        const refreshed = await storage.setSchoolActiveState(id, {
+          isActive: false,
+          planStatus: "canceled",
+          disabledReason: "suspended",
+        });
+        if (refreshed) {
+          school = refreshed;
+        }
+      } else if (existingSchool.status === "suspended" && updates.status && updates.status !== "suspended") {
+        const refreshed = await storage.setSchoolActiveState(id, {
+          isActive: true,
+          planStatus: "active",
+          disabledReason: null,
+        });
+        if (refreshed) {
+          school = refreshed;
+        }
       }
 
       res.json({ success: true, school });
@@ -1124,15 +1217,44 @@ export async function registerRoutes(
     try {
       const { id } = req.params;
       
-      const school = await storage.updateSchool(id, { status: 'suspended' });
+      let school = await storage.updateSchool(id, { status: 'suspended' });
       if (!school) {
         return res.status(404).json({ error: "School not found" });
+      }
+
+      const refreshed = await storage.setSchoolActiveState(id, {
+        isActive: false,
+        planStatus: "canceled",
+        disabledReason: "suspended",
+      });
+      if (refreshed) {
+        school = refreshed;
       }
 
       res.json({ success: true, school });
     } catch (error) {
       console.error("Suspend school error:", error);
       res.status(500).json({ error: "Failed to suspend school" });
+    }
+  });
+
+  app.patch("/api/super-admin/schools/:id/deactivate", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const school = await storage.setSchoolActiveState(id, {
+        isActive: false,
+        planStatus: "canceled",
+        disabledReason: "manual",
+      });
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true, school });
+    } catch (error) {
+      console.error("Deactivate school error:", error);
+      res.status(500).json({ error: "Failed to deactivate school" });
     }
   });
 
@@ -1323,7 +1445,7 @@ export async function registerRoutes(
   });
 
   // Admin: Get all teacher-student assignments
-  app.get("/api/admin/teacher-students", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/admin/teacher-students", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -1370,7 +1492,7 @@ export async function registerRoutes(
   });
 
   // Admin: Assign students to a teacher
-  app.post("/api/admin/teacher-students/:teacherId", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/teacher-students/:teacherId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -1430,7 +1552,7 @@ export async function registerRoutes(
   });
 
   // Admin: Remove a student from a teacher
-  app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { teacherId, studentId } = req.params;
       const sessionSchoolId = req.session.schoolId!;
@@ -1465,7 +1587,7 @@ export async function registerRoutes(
   });
 
   // Admin: Clean up all student data
-  app.post("/api/admin/cleanup-students", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/cleanup-students", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       // Delete all students (student assignments)
@@ -1497,7 +1619,7 @@ export async function registerRoutes(
   });
 
   // Admin: Migrate existing teacher_students to groups system
-  app.post("/api/admin/migrate-to-groups", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/migrate-to-groups", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       // Get all teachers in this school
@@ -1553,7 +1675,7 @@ export async function registerRoutes(
   });
 
   // Admin: Bulk import students from CSV
-  app.post("/api/admin/bulk-import", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/bulk-import", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { fileContent } = req.body;
       const sessionSchoolId = req.session.schoolId!;
@@ -1708,7 +1830,7 @@ export async function registerRoutes(
 
   // Device registration (from extension) - DEPRECATED: Use /api/register-student instead
   // This endpoint is kept for backward compatibility only
-  app.post("/api/register", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/register", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, classId, schoolId } = req.body;
       const sessionSchoolId = req.session.schoolId!;
@@ -1755,7 +1877,7 @@ export async function registerRoutes(
   });
 
   // Student auto-registration with email (from extension using Chrome Identity API)
-  app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, studentEmail, studentName } = req.body;
       const sessionSchoolId = req.session.schoolId!;
@@ -1851,7 +1973,7 @@ export async function registerRoutes(
   });
 
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
-  app.post("/api/heartbeat", heartbeatLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/heartbeat", heartbeatLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       // Validate input with heartbeatRequestSchema (includes allOpenTabs)
@@ -1909,6 +2031,20 @@ export async function registerRoutes(
         } else {
           console.error('[heartbeat] Legacy heartbeat missing email');
           return res.status(400).json({ error: 'Student email is required' });
+        }
+      }
+
+      if (data.schoolId) {
+        const school = await storage.getSchool(data.schoolId);
+        if (!school) {
+          return res.status(404).json({ error: "School not found" });
+        }
+        if (!isSchoolLicenseActive(school)) {
+          return res.status(402).json({
+            error: "School license inactive",
+            planStatus: school.planStatus,
+            schoolActive: false,
+          });
         }
       }
       
@@ -1975,7 +2111,7 @@ export async function registerRoutes(
   });
 
   // Event logging endpoint (from extension) - bulletproof, never returns 500
-  app.post("/api/event", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/event", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       // Validate input with safe parse
@@ -1992,6 +2128,17 @@ export async function registerRoutes(
       const device = await storage.getDevice(data.deviceId);
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
+      }
+      const school = await storage.getSchool(device.schoolId);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+      if (!isSchoolLicenseActive(school)) {
+        return res.status(402).json({
+          error: "School license inactive",
+          planStatus: school.planStatus,
+          schoolActive: false,
+        });
       }
       if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
@@ -2033,7 +2180,7 @@ export async function registerRoutes(
   });
 
   // Get all student statuses (for dashboard)
-  app.get("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -2142,7 +2289,7 @@ export async function registerRoutes(
   });
 
   // Get aggregated student statuses (one per student, grouped by email)
-  app.get("/api/students-aggregated", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/students-aggregated", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -2253,7 +2400,7 @@ export async function registerRoutes(
   });
 
   // Get students assigned to a specific device (for extension popup)
-  app.get("/api/device/:deviceId/students", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/device/:deviceId/students", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const device = await storage.getDevice(deviceId);
@@ -2277,7 +2424,7 @@ export async function registerRoutes(
   });
 
   // Set active student for a device (from extension)
-  app.post("/api/device/:deviceId/active-student", apiLimiter, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/device/:deviceId/active-student", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const { studentId } = req.body;
@@ -2321,7 +2468,7 @@ export async function registerRoutes(
   });
 
   // Get all persisted students from database (for roster management)
-  app.get("/api/roster/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/roster/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -2336,7 +2483,7 @@ export async function registerRoutes(
   });
 
   // Get all devices from database (for roster management)
-  app.get("/api/roster/devices", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/roster/devices", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -2356,7 +2503,7 @@ export async function registerRoutes(
   });
 
   // Create student manually (for roster management)
-  app.post("/api/roster/student", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/roster/student", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -2403,7 +2550,7 @@ export async function registerRoutes(
   });
 
   // Bulk create students
-  app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { students: studentsData } = req.body;
       const sessionSchoolId = req.session.schoolId!;
@@ -2460,7 +2607,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/roster/import-google", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/roster/import-google", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     const { google } = await import("googleapis");
     try {
       const user = await storage.getUser(req.session.userId!);
@@ -2669,7 +2816,7 @@ export async function registerRoutes(
   });
 
   // Get classroom courses for admin preview (with teacher info and student counts)
-  app.get("/api/admin/classroom/courses-preview", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/admin/classroom/courses-preview", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
@@ -2727,7 +2874,7 @@ export async function registerRoutes(
   });
 
   // Create a ClassPilot class from a Google Classroom course (admin action)
-  app.post("/api/admin/classroom/create-class", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/admin/classroom/create-class", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
@@ -2798,7 +2945,7 @@ export async function registerRoutes(
   // === Google Workspace Directory Routes ===
 
   // List users from Google Workspace Admin Directory
-  app.get("/api/directory/users", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/directory/users", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
@@ -2827,7 +2974,7 @@ export async function registerRoutes(
   });
 
   // Import students from Google Workspace Directory
-  app.post("/api/directory/import", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/directory/import", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) {
@@ -2866,7 +3013,7 @@ export async function registerRoutes(
   });
 
   // Get organization units from Google Workspace
-  app.get("/api/directory/orgunits", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/directory/orgunits", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user) {
@@ -2886,7 +3033,7 @@ export async function registerRoutes(
   });
 
   // Update student information (student name, email, and grade level)
-  app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       const { studentId } = req.params;
@@ -2943,7 +3090,7 @@ export async function registerRoutes(
   });
 
   // Create student (admin-only)
-  app.post("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -3001,7 +3148,7 @@ export async function registerRoutes(
   });
 
   // Delete student (admin-only)
-  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
 
@@ -3044,7 +3191,7 @@ export async function registerRoutes(
   });
 
   // Update device information (device name and class assignment)
-  app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.patch("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const existingDevice = await storage.getDevice(deviceId);
@@ -3088,7 +3235,7 @@ export async function registerRoutes(
   });
 
   // Delete student assignment
-  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { studentId } = req.params;
       const sessionSchoolId = req.session.schoolId!;
@@ -3122,7 +3269,7 @@ export async function registerRoutes(
   });
 
   // Delete device and all its student assignments
-  app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const device = await storage.getDevice(deviceId);
@@ -3153,7 +3300,7 @@ export async function registerRoutes(
   });
 
   // Get heartbeat history for a specific device
-  app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/heartbeats/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId } = req.params;
       const limit = parseInt(req.query.limit as string) || 1000; // Fetch more history to show more sessions
@@ -3175,7 +3322,7 @@ export async function registerRoutes(
   });
 
   // Get website duration analytics for a student or all students
-  app.get("/api/student-analytics/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/student-analytics/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { studentId } = req.params;
       const isAllStudents = studentId === "all";
@@ -3279,7 +3426,7 @@ export async function registerRoutes(
 
 
   // Settings endpoints
-  app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       let settings = await storage.getSettings();
@@ -3306,7 +3453,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.post("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const data = insertSettingsSchema.parse({
         ...req.body,
@@ -3320,7 +3467,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.patch("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const currentSettings = await storage.getSettings();
       if (!currentSettings) {
@@ -3342,7 +3489,7 @@ export async function registerRoutes(
   });
 
   // Teacher Settings endpoints
-  app.get("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3365,7 +3512,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/teacher/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3390,7 +3537,7 @@ export async function registerRoutes(
   });
 
   // Teacher-Student assignment endpoints
-  app.get("/api/teacher/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/teacher/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3416,7 +3563,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/teacher/students/:studentId/assign", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/teacher/students/:studentId/assign", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3439,7 +3586,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/teacher/students/:studentId/unassign", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/teacher/students/:studentId/unassign", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3584,7 +3731,7 @@ export async function registerRoutes(
   });
 
   // Groups (Class Rosters) endpoints
-  app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3603,7 +3750,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/teacher/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3653,7 +3800,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.patch("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3686,7 +3833,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/teacher/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3720,7 +3867,7 @@ export async function registerRoutes(
   });
 
   // Group students endpoints
-  app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/groups/:groupId/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3752,7 +3899,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3791,7 +3938,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/groups/:groupId/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3896,7 +4043,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/sessions/all", checkIPAllowlist, requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
+  app.get("/api/sessions/all", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       // Admin-only endpoint to view all active sessions school-wide
       const sessions = await storage.getActiveSessions();
@@ -3908,7 +4055,7 @@ export async function registerRoutes(
   });
 
   // Flight Paths CRUD endpoints
-  app.get("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -3931,7 +4078,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const flightPath = await storage.getFlightPath(req.params.id);
       if (!flightPath) {
@@ -3947,7 +4094,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/flight-paths", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -3975,7 +4122,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.patch("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const updates = insertFlightPathSchema.partial().parse(req.body);
       
@@ -4004,7 +4151,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/flight-paths/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const existing = await storage.getFlightPath(req.params.id);
       if (!existing) {
@@ -4025,7 +4172,7 @@ export async function registerRoutes(
   });
 
   // Student Groups CRUD endpoints
-  app.get("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {
@@ -4048,7 +4195,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const group = await storage.getStudentGroup(req.params.id);
       if (!group) {
@@ -4064,7 +4211,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/groups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -4084,7 +4231,7 @@ export async function registerRoutes(
     }
   });
 
-  app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const updates = insertStudentGroupSchema.partial().parse(req.body);
       const existing = await storage.getStudentGroup(req.params.id);
@@ -4105,7 +4252,7 @@ export async function registerRoutes(
     }
   });
 
-  app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const existing = await storage.getStudentGroup(req.params.id);
       if (!existing) {
@@ -4126,7 +4273,7 @@ export async function registerRoutes(
   });
 
   // Get all rosters/classes
-  app.get("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       const rosters = await storage.getAllRosters();
@@ -4141,7 +4288,7 @@ export async function registerRoutes(
   });
 
   // Create or update a roster/class
-  app.post("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { className, classId } = req.body;
       
@@ -4174,7 +4321,7 @@ export async function registerRoutes(
   });
 
   // Roster upload endpoint
-  app.post("/api/roster/upload", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.post("/api/roster/upload", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       // In a real implementation, this would parse the CSV file
       // For now, we'll accept JSON data
@@ -4197,7 +4344,7 @@ export async function registerRoutes(
   });
 
   // Export activity CSV endpoint with date range filtering
-  app.get("/api/export/activity", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/export/activity", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -4267,7 +4414,7 @@ export async function registerRoutes(
   });
 
   // Legacy export endpoint (for backward compatibility)
-  app.get("/api/export/csv", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
+  app.get("/api/export/csv", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
       const students = await storage.getAllStudents();
@@ -4601,7 +4748,7 @@ export async function registerRoutes(
   });
   
   // Apply Flight Path
-  app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { flightPathId, allowedDomains, targetDeviceIds } = req.body;
       const sessionSchoolId = req.session.schoolId!;
@@ -4643,7 +4790,7 @@ export async function registerRoutes(
   });
   
   // Remove Flight Path
-  app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, apiLimiter, async (req, res) => {
+  app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { targetDeviceIds } = req.body;
       const sessionSchoolId = req.session.schoolId!;

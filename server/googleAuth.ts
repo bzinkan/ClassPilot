@@ -3,6 +3,7 @@ import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import type { Express } from "express";
 import { storage } from "./storage";
 import { getBaseUrl } from "./config/baseUrl";
+import { isSchoolLicenseActive } from "./middleware/authz";
 
 export function setupGoogleAuth(app: Express) {
   // ⛔ Skip Google OAuth entirely during tests/CI (prevents missing clientID crashes)
@@ -133,7 +134,7 @@ export function setupGoogleAuth(app: Express) {
     passport.authenticate("google", {
       failureRedirect: "/login?error=google_auth_failed",
     }),
-    (req, res) => {
+    async (req, res) => {
       // Successful authentication - hydrate session with role and schoolId
       const user = req.user as any;
 
@@ -141,6 +142,16 @@ export function setupGoogleAuth(app: Express) {
         req.session.userId = user.id;
         req.session.role = user.role;
         req.session.schoolId = user.schoolId;
+
+        if (user.schoolId) {
+          const school = await storage.getSchool(user.schoolId);
+          if (!school || !isSchoolLicenseActive(school)) {
+            return req.session.destroy(() => {
+              res.redirect("/login?error=school_inactive");
+            });
+          }
+          req.session.schoolSessionVersion = school.schoolSessionVersion;
+        }
       }
 
       // Role-based redirect
