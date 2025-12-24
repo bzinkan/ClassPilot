@@ -146,7 +146,7 @@ export async function createApp(options: AppOptions = {}) {
             includeSubDomains: true,
           }
         : false,
-      contentSecurityPolicy: {
+      contentSecurityPolicy: isProduction() ? {
         useDefaults: false,
         directives: {
           defaultSrc: ["'self'"],
@@ -158,9 +158,9 @@ export async function createApp(options: AppOptions = {}) {
           styleSrc: ["'self'", "'unsafe-inline'"],
           scriptSrc: ["'self'"],
           connectSrc: ["'self'", "https:", "wss:"],
-          upgradeInsecureRequests: isProduction() ? [] : null,
+          upgradeInsecureRequests: [],
         },
-      },
+      } : false,
     })
   );
 
