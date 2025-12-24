@@ -1,6 +1,6 @@
 import type { Express, RequestHandler } from "express";
 import { createServer, type Server } from "http";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
 import rateLimit, { type Options } from "express-rate-limit";
@@ -33,6 +33,17 @@ import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidToken
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
 import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
+import {
+  authenticateWsClient,
+  broadcastToStudentsLocal,
+  broadcastToTeachersLocal,
+  closeSocketsForSchool,
+  registerWsClient,
+  removeWsClient,
+  sendToDeviceLocal,
+  sendToRoleLocal,
+} from "./ws-broadcast";
+import type { WSClient } from "./ws-broadcast";
 import {
   assertSameSchool,
   isSchoolLicenseActive,
@@ -221,90 +232,38 @@ function enqueueHeartbeatPersist(task: () => Promise<void>): boolean {
   return true;
 }
 
-// WebSocket clients
-interface WSClient {
-  ws: WebSocket;
-  role: 'teacher' | 'school_admin' | 'super_admin' | 'student';
-  deviceId?: string;
-  userId?: string; // For staff - needed for permission checks
-  authenticated: boolean;
-}
-
-const wsClients = new Map<WebSocket, WSClient>();
-
 let publishWsMessage: ((target: WsRedisTarget, message: unknown) => void) | null = null;
 
-function broadcastToTeachersLocal(message: any) {
-  const messageStr = JSON.stringify(message);
-  wsClients.forEach((client, ws) => {
-    // Broadcast to all authenticated staff (teachers, school admins, super admins)
-    const isStaff = ['teacher', 'school_admin', 'super_admin'].includes(client.role);
-    if (isStaff && client.authenticated && ws.readyState === WebSocket.OPEN) {
-      ws.send(messageStr);
-    }
-  });
+function broadcastToTeachers(schoolId: string, message: any) {
+  broadcastToTeachersLocal(schoolId, message);
+  publishWsMessage?.({ kind: "staff", schoolId }, message);
 }
 
-function broadcastToStudentsLocal(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
-  const messageStr = JSON.stringify(message);
-  let sentCount = 0;
-  wsClients.forEach((client, ws) => {
-    if (client.role === 'student' && client.authenticated && ws.readyState === WebSocket.OPEN) {
-      // If targetDeviceIds is specified, only send to those devices
-      if (targetDeviceIds && targetDeviceIds.length > 0) {
-        if (!targetDeviceIds.includes(client.deviceId || '')) {
-          return;
-        }
-      }
-      // Apply additional filter function if provided
-      if (!filterFn || filterFn(client)) {
-        ws.send(messageStr);
-        sentCount++;
-      }
-    }
-  });
-  return sentCount;
-}
-
-function sendToDeviceLocal(deviceId: string, message: any) {
-  const messageStr = JSON.stringify(message);
-  wsClients.forEach((client, ws) => {
-    if (client.deviceId === deviceId && client.authenticated && ws.readyState === WebSocket.OPEN) {
-      ws.send(messageStr);
-    }
-  });
-}
-
-function sendToRoleLocal(role: WSClient["role"], message: any) {
-  const messageStr = JSON.stringify(message);
-  wsClients.forEach((client, ws) => {
-    if (client.role === role && client.authenticated && ws.readyState === WebSocket.OPEN) {
-      ws.send(messageStr);
-    }
-  });
-}
-
-function broadcastToTeachers(message: any) {
-  broadcastToTeachersLocal(message);
-  publishWsMessage?.({ kind: "staff" }, message);
-}
-
-function broadcastToStudents(message: any, filterFn?: (client: WSClient) => boolean, targetDeviceIds?: string[]): number {
-  const sentCount = broadcastToStudentsLocal(message, filterFn, targetDeviceIds);
+function broadcastToStudents(
+  schoolId: string,
+  message: any,
+  filterFn?: (client: WSClient) => boolean,
+  targetDeviceIds?: string[]
+): number {
+  const sentCount = broadcastToStudentsLocal(schoolId, message, filterFn, targetDeviceIds);
   if (!filterFn) {
-    publishWsMessage?.({ kind: "students", targetDeviceIds }, message);
+    publishWsMessage?.({ kind: "students", schoolId, targetDeviceIds }, message);
   }
   return sentCount;
 }
 
-function sendToDevice(deviceId: string, message: any) {
-  sendToDeviceLocal(deviceId, message);
-  publishWsMessage?.({ kind: "device", deviceId }, message);
+function sendToDevice(schoolId: string, deviceId: string, message: any) {
+  sendToDeviceLocal(schoolId, deviceId, message);
+  publishWsMessage?.({ kind: "device", schoolId, deviceId }, message);
 }
 
-function sendToRole(role: WSClient["role"], message: any) {
-  sendToRoleLocal(role, message);
-  publishWsMessage?.({ kind: "role", role }, message);
+function sendToRole(
+  schoolId: string,
+  role: "teacher" | "school_admin" | "super_admin" | "student",
+  message: any
+) {
+  sendToRoleLocal(schoolId, role, message);
+  publishWsMessage?.({ kind: "role", schoolId, role }, message);
 }
 
 let activeStorage: IStorage = defaultStorage;
@@ -386,16 +345,16 @@ export async function registerRoutes(
   const deliverRedisMessage = (target: WsRedisTarget, message: unknown) => {
     switch (target.kind) {
       case "staff":
-        broadcastToTeachersLocal(message);
+        broadcastToTeachersLocal(target.schoolId, message);
         break;
       case "students":
-        broadcastToStudentsLocal(message, undefined, target.targetDeviceIds);
+        broadcastToStudentsLocal(target.schoolId, message, undefined, target.targetDeviceIds);
         break;
       case "device":
-        sendToDeviceLocal(target.deviceId, message);
+        sendToDeviceLocal(target.schoolId, target.deviceId, message);
         break;
       case "role":
-        sendToRoleLocal(target.role, message);
+        sendToRoleLocal(target.schoolId, target.role, message);
         break;
     }
   };
@@ -434,12 +393,7 @@ export async function registerRoutes(
   });
 
   wss.on('connection', (ws, req: any) => {
-    const client: WSClient = {
-      ws,
-      role: 'student',
-      authenticated: false,
-    };
-    wsClients.set(ws, client);
+    const client = registerWsClient(ws);
 
     // SECURITY: Extract session info if available (staff have sessions, students don't)
     const sessionUserId = req.session?.userId || null;
@@ -486,6 +440,23 @@ export async function registerRoutes(
                 ws.close();
                 return;
               }
+              const sessionSchoolId = req.session?.schoolId;
+              if (!sessionSchoolId) {
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'School context required' }));
+                ws.close();
+                return;
+              }
+              if (user.schoolId && !assertSameSchool(sessionSchoolId, user.schoolId)) {
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'Authentication failed' }));
+                ws.close();
+                return;
+              }
+              const school = await storage.getSchool(sessionSchoolId);
+              if (!school || !isSchoolLicenseActive(school)) {
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'School inactive' }));
+                ws.close();
+                return;
+              }
               
               // Verify user is a staff member (not a student role)
               if (!['teacher', 'school_admin', 'super_admin'].includes(user.role)) {
@@ -495,9 +466,11 @@ export async function registerRoutes(
               }
               
               // Authenticate with ACTUAL role from database (not from client OR session)
-              client.role = user.role as 'teacher' | 'school_admin' | 'super_admin'; // Trust database only
-              client.userId = user.id;
-              client.authenticated = true;
+              authenticateWsClient(ws, {
+                role: user.role as 'teacher' | 'school_admin' | 'super_admin',
+                userId: user.id,
+                schoolId: sessionSchoolId,
+              });
               console.log(`[WebSocket] Staff authenticated: ${user.role} (userId: ${client.userId})`);
               ws.send(JSON.stringify({ type: 'auth-success', role: user.role }));
             } catch (error) {
@@ -507,14 +480,55 @@ export async function registerRoutes(
               return;
             }
           } else if (message.role === 'student' && message.deviceId) {
-            client.role = 'student';
-            client.deviceId = message.deviceId;
-            client.authenticated = true;
+            let schoolId: string | undefined;
+            let studentEmail: string | undefined;
+            let deviceId = message.deviceId as string;
+
+            if (message.studentToken) {
+              try {
+                const payload = verifyStudentToken(message.studentToken);
+                schoolId = payload.schoolId;
+                studentEmail = payload.studentEmail ?? undefined;
+                deviceId = payload.deviceId;
+              } catch (error) {
+                if (error instanceof TokenExpiredError) {
+                  ws.send(JSON.stringify({ type: 'auth-error', message: 'Token expired, please re-register' }));
+                  ws.close();
+                  return;
+                }
+                ws.send(JSON.stringify({ type: 'auth-error', message: 'Invalid token' }));
+                ws.close();
+                return;
+              }
+            } else if (message.studentEmail) {
+              studentEmail = message.studentEmail;
+              const schoolInfo = await getSchoolFromEmail(storage, studentEmail);
+              schoolId = schoolInfo?.schoolId;
+            }
+
+            if (!schoolId) {
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'School context required' }));
+              ws.close();
+              return;
+            }
+
+            const school = await storage.getSchool(schoolId);
+            if (!school || !isSchoolLicenseActive(school)) {
+              ws.send(JSON.stringify({ type: 'auth-error', message: 'School inactive' }));
+              ws.close();
+              return;
+            }
+
+            authenticateWsClient(ws, {
+              role: 'student',
+              deviceId,
+              schoolId,
+            });
             
             // EMAIL-FIRST AUTO-PROVISIONING: If auth has email+schoolId, ensure student exists
-            if (message.studentEmail && message.schoolId) {
+            if (studentEmail && schoolId) {
               try {
-                await ensureStudentDeviceAssociation(storage, message.deviceId, message.studentEmail, message.schoolId);
+                await ensureStudentDeviceAssociation(storage, deviceId, studentEmail, schoolId);
               } catch (error) {
                 console.error('[WebSocket] Email-first provisioning error:', error);
                 // Continue with auth even if provisioning fails
@@ -574,7 +588,9 @@ export async function registerRoutes(
               from: client.deviceId,
               ...message
             };
-            sendToRole('teacher', payload);
+            if (client.schoolId) {
+              sendToRole(client.schoolId, 'teacher', payload);
+            }
             console.log(`[WebSocket] Sent ${message.type} to teacher`);
           } else {
             const payload = {
@@ -582,7 +598,9 @@ export async function registerRoutes(
               from: client.role === 'teacher' ? 'teacher' : client.deviceId,
               ...message
             };
-            sendToDevice(targetDeviceId, payload);
+            if (client.schoolId) {
+              sendToDevice(client.schoolId, targetDeviceId, payload);
+            }
             console.log(`[WebSocket] Sent ${message.type} to student ${targetDeviceId}`);
           }
         }
@@ -597,10 +615,12 @@ export async function registerRoutes(
           // If a teacher can see a student tile, they can use Live View
           
           // Forward the request to the student device
-          sendToDevice(targetDeviceId, {
-            type: 'request-stream',
-            from: 'teacher'
-          });
+          if (client.schoolId) {
+            sendToDevice(client.schoolId, targetDeviceId, {
+              type: 'request-stream',
+              from: 'teacher'
+            });
+          }
         }
 
         // Handle request to stop screen sharing from teacher to student
@@ -609,10 +629,12 @@ export async function registerRoutes(
           if (!targetDeviceId) return;
 
           console.log(`[WebSocket] Sending stop-share to ${targetDeviceId}`);
-          sendToDevice(targetDeviceId, {
-            type: 'stop-share',
-            from: 'teacher'
-          });
+          if (client.schoolId) {
+            sendToDevice(client.schoolId, targetDeviceId, {
+              type: 'stop-share',
+              from: 'teacher'
+            });
+          }
           console.log(`[WebSocket] Sent stop-share to ${targetDeviceId}`);
         }
 
@@ -622,13 +644,13 @@ export async function registerRoutes(
     });
 
     ws.on('close', () => {
-      wsClients.delete(ws);
+      removeWsClient(ws);
       console.log('WebSocket client disconnected');
     });
 
     ws.on('error', (error) => {
       console.error('WebSocket error:', error);
-      wsClients.delete(ws);
+      removeWsClient(ws);
     });
   });
 
@@ -776,7 +798,7 @@ export async function registerRoutes(
       }
       
       const normalizedEmail = normalizeEmail(email);
-      const schoolId = req.session.schoolId!;
+      const schoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Get student by email
       const student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
@@ -794,7 +816,7 @@ export async function registerRoutes(
       const activeSession = await storage.findActiveStudentSession(student.id);
       
       // Get recent heartbeats
-      const allHeartbeats = await storage.getAllHeartbeats();
+      const allHeartbeats = await storage.getHeartbeatsBySchool(schoolId);
       const recentHeartbeats = allHeartbeats
         .filter(hb => hb.studentEmail === normalizedEmail)
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
@@ -863,12 +885,13 @@ export async function registerRoutes(
       if (!admin) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(404).json({ error: "User not found" });
       }
 
       // Get only users from the same school
-      const users = await storage.getUsersBySchool(req.session.schoolId!);
+      const users = await storage.getUsersBySchool(sessionSchoolId);
       
       // Filter to teachers and school_admins (admins can also teach) and remove passwords
       const teachers = users
@@ -894,10 +917,11 @@ export async function registerRoutes(
       if (!admin) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(404).json({ error: "User not found" });
       }
-      const schoolId = req.session.schoolId!;
+      const schoolId = sessionSchoolId;
 
       const data = createTeacherSchema.parse(req.body);
       
@@ -950,8 +974,9 @@ export async function registerRoutes(
       if (!admin) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(404).json({ error: "User not found" });
       }
       
       // Don't allow deleting yourself
@@ -966,8 +991,8 @@ export async function registerRoutes(
       }
       
       // Verify the teacher belongs to the same school (tenant isolation)
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
+        return res.status(404).json({ error: "Teacher not found" });
       }
       
       if (user.role === 'admin' || user.role === 'school_admin') {
@@ -1012,7 +1037,7 @@ export async function registerRoutes(
       const schoolsWithCounts = await Promise.all(
         schools.map(async (school) => {
           const users = await storage.getUsersBySchool(school.id);
-          const students = (await storage.getAllStudents()).filter(s => s.schoolId === school.id);
+          const students = await storage.getStudentsBySchool(school.id);
           const teachers = users.filter(u => u.role === 'teacher');
           const admins = users.filter(u => u.role === 'school_admin');
           
@@ -1119,7 +1144,7 @@ export async function registerRoutes(
       }
 
       const users = await storage.getUsersBySchool(id);
-      const students = (await storage.getAllStudents()).filter(s => s.schoolId === id);
+      const students = await storage.getStudentsBySchool(id);
       
       const admins = users.filter(u => u.role === 'school_admin').map(u => ({
         id: u.id,
@@ -1177,6 +1202,7 @@ export async function registerRoutes(
         if (refreshed) {
           school = refreshed;
         }
+        closeSocketsForSchool(id);
       } else if (existingSchool.status === "suspended" && updates.status && updates.status !== "suspended") {
         const refreshed = await storage.setSchoolActiveState(id, {
           isActive: true,
@@ -1230,6 +1256,7 @@ export async function registerRoutes(
       if (refreshed) {
         school = refreshed;
       }
+      closeSocketsForSchool(id);
 
       res.json({ success: true, school });
     } catch (error) {
@@ -1250,6 +1277,7 @@ export async function registerRoutes(
       if (!school) {
         return res.status(404).json({ error: "School not found" });
       }
+      closeSocketsForSchool(id);
 
       res.json({ success: true, school });
     } catch (error) {
@@ -1447,12 +1475,11 @@ export async function registerRoutes(
   // Admin: Get all teacher-student assignments
   app.get("/api/admin/teacher-students", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       // Get only users and students from the same school (tenant isolation)
       const users = await storage.getUsersBySchool(sessionSchoolId);
-      const allStudents = await storage.getAllStudents();
-      const students = allStudents.filter(s => s.schoolId === sessionSchoolId);
+      const students = await storage.getStudentsBySchool(sessionSchoolId);
       
       // Get assignments for each teacher
       const teachers = users.filter(user => user.role === 'teacher');
@@ -1494,7 +1521,7 @@ export async function registerRoutes(
   // Admin: Assign students to a teacher
   app.post("/api/admin/teacher-students/:teacherId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       const { teacherId } = req.params;
       const { studentIds } = req.body;
@@ -1510,15 +1537,18 @@ export async function registerRoutes(
       }
       
       if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Teacher not found" });
       }
       
       // Verify all students belong to same school (tenant isolation)
-      const allStudents = await storage.getAllStudents();
+      const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
       for (const studentId of studentIds) {
         const student = allStudents.find(s => s.id === studentId);
-        if (student && !assertSameSchool(sessionSchoolId, student.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+        if (!student) {
+          return res.status(404).json({ error: "Student not found" });
+        }
+        if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+          return res.status(404).json({ error: "Student not found" });
         }
       }
       
@@ -1555,14 +1585,14 @@ export async function registerRoutes(
   app.delete("/api/admin/teacher-students/:teacherId/:studentId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { teacherId, studentId } = req.params;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       const teacher = await storage.getUser(teacherId);
       if (!teacher) {
         return res.status(404).json({ error: "Teacher not found" });
       }
       if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Teacher not found" });
       }
 
       const student = await storage.getStudent(studentId);
@@ -1570,7 +1600,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Student not found" });
       }
       if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
@@ -1589,25 +1619,21 @@ export async function registerRoutes(
   // Admin: Clean up all student data
   app.post("/api/admin/cleanup-students", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       // Delete all students (student assignments)
-      const allStudents = await storage.getAllStudents();
+      const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
       for (const student of allStudents) {
-        if (assertSameSchool(sessionSchoolId, student.schoolId)) {
-          await storage.deleteStudent(student.id);
-        }
+        await storage.deleteStudent(student.id);
       }
       
       // Delete all devices
-      const allDevices = await storage.getAllDevices();
+      const allDevices = await storage.getDevicesBySchool(sessionSchoolId);
       for (const device of allDevices) {
-        if (assertSameSchool(sessionSchoolId, device.schoolId)) {
-          await storage.deleteDevice(device.deviceId);
-        }
+        await storage.deleteDevice(device.deviceId);
       }
       
       // Notify all connected teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'students-cleared',
       });
       
@@ -1621,7 +1647,7 @@ export async function registerRoutes(
   // Admin: Migrate existing teacher_students to groups system
   app.post("/api/admin/migrate-to-groups", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       // Get all teachers in this school
       const allTeachers = (await storage.getUsersBySchool(sessionSchoolId)).filter(user => user.role === 'teacher');
       
@@ -1678,7 +1704,7 @@ export async function registerRoutes(
   app.post("/api/admin/bulk-import", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       const { fileContent } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!fileContent || typeof fileContent !== "string") {
         return res.status(400).json({ error: "CSV file content is required" });
@@ -1701,7 +1727,7 @@ export async function registerRoutes(
       }
 
       // Get settings for schoolId and deviceId generation
-      const allGroups = (await storage.getAllGroups()).filter(group => assertSameSchool(sessionSchoolId, group.schoolId));
+      const allGroups = await storage.getGroupsBySchool(sessionSchoolId);
 
       const results = {
         total: data.length,
@@ -1746,9 +1772,8 @@ export async function registerRoutes(
           const normalizedGrade = normalizeGradeLevel(grade) || null;
 
           // Check if student already exists by email
-          const allStudents = await storage.getAllStudents();
-          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase()
-            && s.schoolId === sessionSchoolId);
+          const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
+          let student = allStudents.find(s => s.studentEmail?.toLowerCase() === email.toLowerCase());
 
           if (student) {
             // Update existing student's name and grade if different
@@ -1813,7 +1838,7 @@ export async function registerRoutes(
       }
 
       // Notify all connected teachers of the update
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'students-updated',
       });
 
@@ -1833,7 +1858,7 @@ export async function registerRoutes(
   app.post("/api/register", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, classId, schoolId } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Require schoolId - no defaults allowed (prevents default-school issues)
       if (!schoolId) {
@@ -1857,14 +1882,14 @@ export async function registerRoutes(
       const existing = await storage.getDevice(deviceData.deviceId);
       if (existing) {
         // Return existing device with its assigned students
-        const students = await storage.getStudentsByDevice(deviceData.deviceId);
+        const students = await storage.getStudentsByDevice(sessionSchoolId, deviceData.deviceId);
         return res.json({ success: true, device: existing, students });
       }
 
       const device = await storage.registerDevice(deviceData);
       
       // Notify teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'device-registered',
         data: device,
       });
@@ -1880,7 +1905,7 @@ export async function registerRoutes(
   app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, studentEmail, studentName } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Validate required fields
       if (!studentEmail || !studentName) {
@@ -1960,7 +1985,7 @@ export async function registerRoutes(
       console.log('✅ Generated studentToken');
       
       // Notify teachers in THIS school only
-      broadcastToTeachers({
+      broadcastToTeachers(schoolId, {
         type: 'student-registered',
         data: { device, student },
       });
@@ -1975,7 +2000,7 @@ export async function registerRoutes(
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/heartbeat", heartbeatLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       // Validate input with heartbeatRequestSchema (includes allOpenTabs)
       const result = heartbeatRequestSchema.safeParse(req.body);
       
@@ -2092,10 +2117,12 @@ export async function registerRoutes(
       const persisted = enqueueHeartbeatPersist(async () => {
         await storage.addHeartbeat(data, allOpenTabs);
         // Notify teachers of update (non-blocking)
-        broadcastToTeachers({
-          type: 'student-update',
-          deviceId: data.deviceId,
-        });
+        if (data.schoolId) {
+          broadcastToTeachers(data.schoolId, {
+            type: 'student-update',
+            deviceId: data.deviceId,
+          });
+        }
       });
 
       if (!persisted && deviceKey) {
@@ -2113,7 +2140,7 @@ export async function registerRoutes(
   // Event logging endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/event", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       // Validate input with safe parse
       const result = insertEventSchema.safeParse(req.body);
       
@@ -2141,7 +2168,7 @@ export async function registerRoutes(
         });
       }
       if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Device not found" });
       }
 
       if (data.studentId) {
@@ -2150,7 +2177,7 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Student not found" });
         }
         if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(404).json({ error: "Student not found" });
         }
       }
       
@@ -2159,7 +2186,7 @@ export async function registerRoutes(
         .then((event) => {
           // Notify teachers of important events (non-blocking)
           if (['consent_granted', 'consent_revoked', 'blocked_domain', 'navigation', 'url_change'].includes(data.eventType)) {
-            broadcastToTeachers({
+            broadcastToTeachers(sessionSchoolId, {
               type: 'student-event',
               data: event,
             });
@@ -2186,17 +2213,11 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
-      const allStatuses = await storage.getAllStudentStatuses();
-      const allStudents = await storage.getAllStudents();
-      const schoolStudentIds = new Set(
-        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.id)
-      );
-      
-      // Filter to only students from the same school (tenant isolation)
-      const schoolStatuses = allStatuses.filter(s => schoolStudentIds.has(s.studentId));
+      const allStatuses = await storage.getStudentStatusesBySchool(sessionSchoolId);
+      const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
       
       // Admins see all students from their school; teachers see only students in their active session
       // School admins who also teach can start a session to filter to their class
@@ -2211,7 +2232,7 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Group not found" });
         }
         if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(404).json({ error: "Group not found" });
         }
         // User has an active session - show only students in that session (teacher mode)
         console.log('User has active session for group:', activeSession.groupId, '(role:', sessionRole, ')');
@@ -2235,7 +2256,7 @@ export async function registerRoutes(
           const offlinePlaceholders = await Promise.all(
             offlineStudentIds.map(async (studentId) => {
               const student = await storage.getStudent(studentId);
-              if (!student) return null;
+              if (!student || !assertSameSchool(sessionSchoolId, student.schoolId)) return null;
               
               const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
               
@@ -2270,7 +2291,7 @@ export async function registerRoutes(
         }
       } else if (sessionRole === 'school_admin' || sessionRole === 'super_admin') {
         // Admin/school_admin without active session - show all students in school
-        filteredStatuses = schoolStatuses;
+        filteredStatuses = allStatuses;
         console.log('Dashboard requested students (admin mode) - found:', filteredStatuses.length, 'students in school');
       } else {
         // Teacher without active session - show empty (they need to start a session)
@@ -2295,13 +2316,10 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
-      const allAggregated = await storage.getAllStudentStatusesAggregated();
-      const allStudents = await storage.getAllStudents();
-      const schoolStudentIds = new Set(
-        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.id)
-      );
+      const allAggregated = await storage.getStudentStatusesAggregatedBySchool(sessionSchoolId);
+      const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
       
       // Check if user has an active teaching session (applies to both teachers and school_admins)
       const activeSession = await storage.getActiveSessionByTeacher(userId);
@@ -2314,7 +2332,7 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Group not found" });
         }
         if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(404).json({ error: "Group not found" });
         }
         // User has an active session - show only students in that session (teacher mode)
         console.log('User has active session for group:', activeSession.groupId, '(role:', sessionRole, ')');
@@ -2338,7 +2356,7 @@ export async function registerRoutes(
           const offlinePlaceholders = await Promise.all(
             offlineStudentIds.map(async (studentId) => {
               const student = await storage.getStudent(studentId);
-              if (!student) return null;
+              if (!student || !assertSameSchool(sessionSchoolId, student.schoolId)) return null;
               
               const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
               
@@ -2380,7 +2398,7 @@ export async function registerRoutes(
         }
       } else if (sessionRole === 'school_admin' || sessionRole === 'super_admin') {
         // Admin/school_admin without active session - show all students
-        filteredStatuses = allAggregated.filter(s => schoolStudentIds.has(s.studentId));
+        filteredStatuses = allAggregated;
         console.log('Dashboard requested aggregated students (admin mode) - found:', filteredStatuses.length, 'students');
       } else {
         // Teacher without active session - show empty (they need to start a session)
@@ -2388,10 +2406,6 @@ export async function registerRoutes(
         console.log('Teacher has no active session - showing empty dashboard');
       }
       
-      if (activeSession?.groupId) {
-        filteredStatuses = filteredStatuses.filter(s => schoolStudentIds.has(s.studentId));
-      }
-
       res.json(filteredStatuses);
     } catch (error) {
       console.error("Error fetching aggregated students:", error);
@@ -2407,10 +2421,11 @@ export async function registerRoutes(
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(404).json({ error: "Device not found" });
       }
-      const students = await storage.getStudentsByDevice(deviceId);
+      const students = await storage.getStudentsByDevice(sessionSchoolId, deviceId);
       const activeStudent = await storage.getActiveStudentForDevice(deviceId);
       
       res.json({ 
@@ -2433,8 +2448,9 @@ export async function registerRoutes(
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(404).json({ error: "Device not found" });
       }
       
       // Verify student exists and belongs to this device
@@ -2443,8 +2459,8 @@ export async function registerRoutes(
         if (!student || student.deviceId !== deviceId) {
           return res.status(400).json({ error: "Invalid student for this device" });
         }
-        if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+        if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+          return res.status(404).json({ error: "Student not found" });
         }
       }
       
@@ -2470,11 +2486,10 @@ export async function registerRoutes(
   // Get all persisted students from database (for roster management)
   app.get("/api/roster/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       // Enforce tenant isolation: only show students from user's school
-      const allStudents = await storage.getAllStudents();
-      const students = allStudents.filter(s => s.schoolId === sessionSchoolId);
+      const students = await storage.getStudentsBySchool(sessionSchoolId);
       res.json(students);
     } catch (error) {
       console.error("Get roster students error:", error);
@@ -2485,14 +2500,12 @@ export async function registerRoutes(
   // Get all devices from database (for roster management)
   app.get("/api/roster/devices", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       // Enforce tenant isolation: only show devices that have students from user's school
-      const allDevices = await storage.getAllDevices();
-      const allStudents = await storage.getAllStudents();
-      const schoolStudentDeviceIds = new Set(
-        allStudents.filter(s => s.schoolId === sessionSchoolId).map(s => s.deviceId)
-      );
+      const allDevices = await storage.getDevicesBySchool(sessionSchoolId);
+      const allStudents = await storage.getStudentsBySchool(sessionSchoolId);
+      const schoolStudentDeviceIds = new Set(allStudents.map(s => s.deviceId));
       
       const devices = allDevices.filter(d => schoolStudentDeviceIds.has(d.deviceId));
       res.json(devices);
@@ -2505,7 +2518,7 @@ export async function registerRoutes(
   // Create student manually (for roster management)
   app.post("/api/roster/student", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       const { studentName, deviceId, gradeLevel } = req.body;
       
@@ -2523,7 +2536,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Device not found" });
       }
       if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Device not found" });
       }
       
       // Enforce tenant isolation: create student with user's schoolId
@@ -2537,7 +2550,7 @@ export async function registerRoutes(
       const student = await storage.createStudent(studentData);
       
       // Broadcast update to teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
         deviceId: student.deviceId,
       });
@@ -2553,7 +2566,7 @@ export async function registerRoutes(
   app.post("/api/roster/bulk", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { students: studentsData } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!Array.isArray(studentsData) || studentsData.length === 0) {
         return res.status(400).json({ error: "Students array is required" });
@@ -2569,7 +2582,7 @@ export async function registerRoutes(
             throw new Error("Device not found");
           }
           if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
-            throw new Error("Forbidden");
+            throw new Error("Device not found");
           }
 
           const studentData = insertStudentSchema.parse({
@@ -2590,7 +2603,7 @@ export async function registerRoutes(
       }
       
       // Broadcast update to teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
         deviceId: 'bulk-update',
       });
@@ -2614,7 +2627,8 @@ export async function registerRoutes(
       if (!user) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2623,7 +2637,6 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Google Classroom access not connected. Please re-authenticate with Google." });
       }
 
-      const sessionSchoolId = req.session.schoolId!;
       const redirectUri = `${getBaseUrl()}/auth/google/callback`;
 
       const oauth2Client = new google.auth.OAuth2(
@@ -2650,7 +2663,7 @@ export async function registerRoutes(
         }
 
         await storage.upsertClassroomCourse({
-          schoolId: req.session.schoolId!,
+          schoolId: sessionSchoolId,
           courseId: course.id,
           name: course.name,
           section: course.section ?? null,
@@ -2822,10 +2835,11 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const schoolId = req.session.schoolId!;
+      const schoolId = sessionSchoolId;
 
       // Get all classroom courses for this school
       const courses = await storage.getClassroomCoursesForSchool(schoolId);
@@ -2880,10 +2894,11 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const schoolId = req.session.schoolId!;
+      const schoolId = sessionSchoolId;
 
       const { courseId, teacherId, gradeLevel } = req.body;
       if (!courseId || !teacherId) {
@@ -2951,7 +2966,8 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -2980,10 +2996,11 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
-      const schoolId = req.session.schoolId!;
+      const schoolId = sessionSchoolId;
 
       const { importStudentsFromDirectory } = await import("./directory");
       const { domain, orgUnitPath } = req.body;
@@ -3019,7 +3036,8 @@ export async function registerRoutes(
       if (!user) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
 
@@ -3035,7 +3053,7 @@ export async function registerRoutes(
   // Update student information (student name, email, and grade level)
   app.patch("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const { studentId } = req.params;
       
       // Verify student exists and belongs to same school (tenant isolation)
@@ -3045,7 +3063,7 @@ export async function registerRoutes(
       }
       
       if (!assertSameSchool(sessionSchoolId, existingStudent.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       const updates: Partial<InsertStudent> = {};
@@ -3077,7 +3095,7 @@ export async function registerRoutes(
       }
       
       // Broadcast update to teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
         deviceId: student.deviceId,
       });
@@ -3092,7 +3110,7 @@ export async function registerRoutes(
   // Create student (admin-only)
   app.post("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       const { studentName, studentEmail, gradeLevel } = req.body;
       
@@ -3150,7 +3168,7 @@ export async function registerRoutes(
   // Delete student (admin-only)
   app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       const { studentId } = req.params;
       
@@ -3167,7 +3185,7 @@ export async function registerRoutes(
       
       // Verify student belongs to same school (tenant isolation)
       if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       const deleted = await storage.deleteStudent(studentId);
@@ -3178,7 +3196,7 @@ export async function registerRoutes(
       
       // Broadcast update to teachers using student's actual device ID (if available)
       // This triggers dashboard refresh to remove deleted student
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
         deviceId: student?.deviceId || studentId,
       });
@@ -3198,8 +3216,9 @@ export async function registerRoutes(
       if (!existingDevice) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, existingDevice.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existingDevice.schoolId)) {
+        return res.status(404).json({ error: "Device not found" });
       }
       
       const updates: Partial<Omit<InsertDevice, 'deviceId'>> = {};
@@ -3222,7 +3241,7 @@ export async function registerRoutes(
       }
       
       // Broadcast update to teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'device-update',
         deviceId: updatedDevice.deviceId,
       });
@@ -3238,12 +3257,12 @@ export async function registerRoutes(
   app.delete("/api/students/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { studentId } = req.params;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Get student info before deleting for broadcast
       const student = await storage.getStudent(studentId);
       if (student && !assertSameSchool(sessionSchoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       const deviceId = student?.deviceId;
       
@@ -3255,7 +3274,7 @@ export async function registerRoutes(
       
       // Broadcast update to teachers
       if (deviceId) {
-        broadcastToTeachers({
+        broadcastToTeachers(sessionSchoolId, {
           type: 'student-update',
           deviceId,
         });
@@ -3276,8 +3295,9 @@ export async function registerRoutes(
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(404).json({ error: "Device not found" });
       }
       
       const deleted = await storage.deleteDevice(deviceId);
@@ -3287,7 +3307,7 @@ export async function registerRoutes(
       }
       
       // Broadcast update to teachers
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'device-deleted',
         deviceId,
       });
@@ -3309,8 +3329,9 @@ export async function registerRoutes(
       if (!device) {
         return res.status(404).json({ error: "Device not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, device.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, device.schoolId)) {
+        return res.status(404).json({ error: "Device not found" });
       }
 
       const heartbeats = await storage.getHeartbeatsByDevice(deviceId, limit);
@@ -3326,7 +3347,7 @@ export async function registerRoutes(
     try {
       const { studentId } = req.params;
       const isAllStudents = studentId === "all";
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
 
       if (!isAllStudents) {
         const student = await storage.getStudent(studentId);
@@ -3334,12 +3355,12 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Student not found" });
         }
         if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(404).json({ error: "Student not found" });
         }
       }
       
       // Get heartbeats for the last 24 hours (or custom range)
-      const allHeartbeats = await storage.getAllHeartbeats();
+      const allHeartbeats = await storage.getHeartbeatsBySchool(sessionSchoolId);
       const cutoffTime = Date.now() - (24 * 60 * 60 * 1000); // 24 hours ago
       
       // Filter heartbeats by student and time range
@@ -3428,7 +3449,7 @@ export async function registerRoutes(
   // Settings endpoints
   app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       let settings = await storage.getSettings();
 
       if (!settings) {
@@ -3443,7 +3464,7 @@ export async function registerRoutes(
       }
 
       if (settings && !assertSameSchool(sessionSchoolId, settings.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Settings not found" });
       }
 
       res.json(settings);
@@ -3455,9 +3476,10 @@ export async function registerRoutes(
 
   app.post("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const data = insertSettingsSchema.parse({
         ...req.body,
-        schoolId: req.session.schoolId,
+        schoolId: sessionSchoolId,
       });
       const settings = await storage.upsertSettings(data);
       res.json(settings);
@@ -3473,8 +3495,9 @@ export async function registerRoutes(
       if (!currentSettings) {
         return res.status(404).json({ error: "Settings not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, currentSettings.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, currentSettings.schoolId)) {
+        return res.status(404).json({ error: "Settings not found" });
       }
 
       // Merge current settings with request body for partial update
@@ -3500,8 +3523,9 @@ export async function registerRoutes(
       if (!teacher) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
+        return res.status(404).json({ error: "Teacher not found" });
       }
       
       const teacherSettings = await storage.getTeacherSettings(teacherId);
@@ -3523,8 +3547,9 @@ export async function registerRoutes(
       if (!teacher) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
+        return res.status(404).json({ error: "Teacher not found" });
       }
       
       const data = { ...req.body, teacherId };
@@ -3548,15 +3573,16 @@ export async function registerRoutes(
       if (!teacher) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      if (!assertSameSchool(req.session.schoolId, teacher.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, teacher.schoolId)) {
+        return res.status(404).json({ error: "Teacher not found" });
       }
       
       const studentIds = await storage.getTeacherStudents(teacherId);
       const students = await Promise.all(
         studentIds.map(id => storage.getStudent(id))
       );
-      res.json(students.filter(s => s !== undefined && assertSameSchool(req.session.schoolId, s.schoolId)));
+      res.json(students.filter(s => s !== undefined && assertSameSchool(sessionSchoolId, s.schoolId)));
     } catch (error) {
       console.error("Get teacher students error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -3575,8 +3601,9 @@ export async function registerRoutes(
       if (!student) {
         return res.status(404).json({ error: "Student not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(404).json({ error: "Student not found" });
       }
       const assignment = await storage.assignStudentToTeacher(teacherId, studentId);
       res.json(assignment);
@@ -3598,8 +3625,9 @@ export async function registerRoutes(
       if (!student) {
         return res.status(404).json({ error: "Student not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+        return res.status(404).json({ error: "Student not found" });
       }
       const success = await storage.unassignStudentFromTeacher(teacherId, studentId);
       
@@ -3737,7 +3765,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       const groups =
         sessionRole === "school_admin" || sessionRole === "super_admin"
@@ -3756,7 +3784,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       // Determine target teacherId
@@ -3782,7 +3810,7 @@ export async function registerRoutes(
           return res.status(404).json({ error: "Teacher not found" });
         }
         if (!assertSameSchool(sessionSchoolId, targetTeacher.schoolId)) {
-          return res.status(403).json({ error: "Forbidden" });
+          return res.status(404).json({ error: "Teacher not found" });
         }
       }
       
@@ -3806,7 +3834,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { id } = req.params;
@@ -3818,7 +3846,7 @@ export async function registerRoutes(
       }
       
       if (!assertSameSchool(sessionSchoolId, existingGroup.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Group not found" });
       }
 
       if (sessionRole !== "school_admin" && sessionRole !== "super_admin" && existingGroup.teacherId !== userId) {
@@ -3839,7 +3867,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { id } = req.params;
@@ -3851,7 +3879,7 @@ export async function registerRoutes(
       }
       
       if (!assertSameSchool(sessionSchoolId, existingGroup.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Group not found" });
       }
 
       if (sessionRole !== "school_admin" && sessionRole !== "super_admin" && existingGroup.teacherId !== userId) {
@@ -3873,7 +3901,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId } = req.params;
@@ -3884,7 +3912,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Group not found" });
       }
       if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Group not found" });
       }
       if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
@@ -3905,7 +3933,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId, studentId } = req.params;
@@ -3916,7 +3944,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Group not found" });
       }
       if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Group not found" });
       }
       if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
@@ -3927,7 +3955,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Student not found" });
       }
       if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       const assignment = await storage.assignStudentToGroup(groupId, studentId);
@@ -3944,7 +3972,7 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
       
       const { groupId, studentId } = req.params;
@@ -3955,7 +3983,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Group not found" });
       }
       if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Group not found" });
       }
       if (sessionRole !== 'school_admin' && sessionRole !== 'super_admin' && group.teacherId !== userId) {
         return res.status(404).json({ error: "Group not found" });
@@ -3966,7 +3994,7 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Student not found" });
       }
       if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Student not found" });
       }
       
       const success = await storage.unassignStudentFromGroup(groupId, studentId);
@@ -3978,18 +4006,22 @@ export async function registerRoutes(
   });
 
   // Session endpoints
-  app.post("/api/sessions/start", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/sessions/start", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       const { groupId } = req.body;
       
       // Verify group ownership
       const group = await storage.getGroup(groupId);
       if (!group || group.teacherId !== teacherId) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
         return res.status(404).json({ error: "Group not found" });
       }
       
@@ -4008,7 +4040,7 @@ export async function registerRoutes(
     }
   });
 
-  app.post("/api/sessions/end", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.post("/api/sessions/end", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -4028,7 +4060,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/sessions/active", checkIPAllowlist, requireAuth, async (req, res) => {
+  app.get("/api/sessions/active", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
       if (!teacherId) {
@@ -4046,7 +4078,8 @@ export async function registerRoutes(
   app.get("/api/sessions/all", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {
       // Admin-only endpoint to view all active sessions school-wide
-      const sessions = await storage.getActiveSessions();
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      const sessions = await storage.getActiveSessions(sessionSchoolId);
       res.json(sessions);
     } catch (error) {
       console.error("Get all sessions error:", error);
@@ -4061,15 +4094,14 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
-      const allFlightPaths = await storage.getAllFlightPaths();
+      const allFlightPaths = await storage.getFlightPathsBySchool(sessionSchoolId);
       
       // Admins see all flight paths; teachers see only their own + school-wide defaults
       const filteredFlightPaths = (sessionRole === "school_admin" || sessionRole === "super_admin")
-        ? allFlightPaths.filter(fp => assertSameSchool(sessionSchoolId, fp.schoolId))
-        : allFlightPaths.filter(fp => (fp.teacherId === userId || fp.teacherId === null)
-          && assertSameSchool(sessionSchoolId, fp.schoolId));
+        ? allFlightPaths
+        : allFlightPaths.filter(fp => fp.teacherId === userId || fp.teacherId === null);
       
       res.json(filteredFlightPaths);
     } catch (error) {
@@ -4084,8 +4116,9 @@ export async function registerRoutes(
       if (!flightPath) {
         return res.status(404).json({ error: "Flight Path not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, flightPath.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, flightPath.schoolId)) {
+        return res.status(404).json({ error: "Flight Path not found" });
       }
       res.json(flightPath);
     } catch (error) {
@@ -4100,7 +4133,7 @@ export async function registerRoutes(
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Make schoolId optional for teacher-scoped Flight Paths
       const flightPathSchema = insertFlightPathSchema.extend({
@@ -4136,8 +4169,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ error: "Flight Path not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Flight Path not found" });
       }
 
       const flightPath = await storage.updateFlightPath(req.params.id, { ...updates, schoolId: existing.schoolId });
@@ -4157,8 +4191,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ error: "Flight Path not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Flight Path not found" });
       }
       const success = await storage.deleteFlightPath(req.params.id);
       if (!success) {
@@ -4178,15 +4213,14 @@ export async function registerRoutes(
       if (!userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const sessionRole = req.session.role === "admin" ? "school_admin" : req.session.role;
-      const allGroups = await storage.getAllStudentGroups();
+      const allGroups = await storage.getStudentGroupsBySchool(sessionSchoolId);
       
       // Admins see all groups; teachers see only their own + school-wide defaults
       const filteredGroups = (sessionRole === "school_admin" || sessionRole === "super_admin")
-        ? allGroups.filter(group => assertSameSchool(sessionSchoolId, group.schoolId))
-        : allGroups.filter(group => (group.teacherId === userId || group.teacherId === null)
-          && assertSameSchool(sessionSchoolId, group.schoolId));
+        ? allGroups
+        : allGroups.filter(group => group.teacherId === userId || group.teacherId === null);
       
       res.json(filteredGroups);
     } catch (error) {
@@ -4201,8 +4235,9 @@ export async function registerRoutes(
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, group.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, group.schoolId)) {
+        return res.status(404).json({ error: "Group not found" });
       }
       res.json(group);
     } catch (error) {
@@ -4222,7 +4257,7 @@ export async function registerRoutes(
       const group = await storage.createStudentGroup({
         ...data,
         teacherId: data.teacherId ?? teacherId,
-        schoolId: req.session.schoolId!,
+        schoolId: res.locals.schoolId ?? req.session.schoolId!,
       });
       res.json(group);
     } catch (error) {
@@ -4238,8 +4273,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Group not found" });
       }
       const group = await storage.updateStudentGroup(req.params.id, { ...updates, schoolId: existing.schoolId });
       if (!group) {
@@ -4258,8 +4294,9 @@ export async function registerRoutes(
       if (!existing) {
         return res.status(404).json({ error: "Group not found" });
       }
-      if (!assertSameSchool(req.session.schoolId, existing.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Group not found" });
       }
       const success = await storage.deleteStudentGroup(req.params.id);
       if (!success) {
@@ -4275,10 +4312,10 @@ export async function registerRoutes(
   // Get all rosters/classes
   app.get("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
-      const rosters = await storage.getAllRosters();
-      const devices = await storage.getAllDevices();
-      const schoolDeviceIds = new Set(devices.filter(d => d.schoolId === sessionSchoolId).map(d => d.deviceId));
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      const rosters = await storage.getRostersBySchool(sessionSchoolId);
+      const devices = await storage.getDevicesBySchool(sessionSchoolId);
+      const schoolDeviceIds = new Set(devices.map(d => d.deviceId));
       const filtered = rosters.filter(roster => roster.deviceIds.some(deviceId => schoolDeviceIds.has(deviceId)));
       res.json(filtered);
     } catch (error) {
@@ -4291,6 +4328,7 @@ export async function registerRoutes(
   app.post("/api/rosters", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { className, classId } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!className || typeof className !== 'string') {
         return res.status(400).json({ error: "Class name is required" });
@@ -4303,9 +4341,13 @@ export async function registerRoutes(
       // Check for duplicate classId
       const existing = await storage.getRoster(classId);
       if (existing) {
-        return res.status(400).json({ error: "A class with this name already exists" });
+        const devices = await storage.getDevicesBySchool(sessionSchoolId);
+        const schoolDeviceIds = new Set(devices.map(d => d.deviceId));
+        const belongsToSchool = existing.deviceIds.some(deviceId => schoolDeviceIds.has(deviceId));
+        if (belongsToSchool) {
+          return res.status(400).json({ error: "A class with this name already exists" });
+        }
       }
-      
       const rosterData: InsertRoster = {
         classId,
         className,
@@ -4325,15 +4367,21 @@ export async function registerRoutes(
     try {
       // In a real implementation, this would parse the CSV file
       // For now, we'll accept JSON data
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const data = insertRosterSchema.parse(req.body);
-      const devices = await storage.getAllDevices();
+      const devices = await storage.getDevicesBySchool(sessionSchoolId);
       const deviceIds = data.deviceIds ?? [];
-      const schoolDeviceIds = new Set(
-        devices.filter(device => device.schoolId === req.session.schoolId).map(device => device.deviceId)
-      );
+      const schoolDeviceIds = new Set(devices.map(device => device.deviceId));
       const invalidDeviceId = deviceIds.find(deviceId => !schoolDeviceIds.has(deviceId));
       if (invalidDeviceId) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Device not found" });
+      }
+      const existingRoster = await storage.getRoster(data.classId);
+      if (existingRoster) {
+        const belongsToSchool = existingRoster.deviceIds.some(deviceId => schoolDeviceIds.has(deviceId));
+        if (!belongsToSchool) {
+          return res.status(404).json({ error: "Roster not found" });
+        }
       }
       const roster = await storage.upsertRoster(data);
       res.json({ success: true, roster });
@@ -4346,22 +4394,20 @@ export async function registerRoutes(
   // Export activity CSV endpoint with date range filtering
   app.get("/api/export/activity", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const startDate = req.query.startDate ? new Date(req.query.startDate as string) : new Date(Date.now() - 24 * 60 * 60 * 1000);
       const endDate = req.query.endDate ? new Date(req.query.endDate as string) : new Date();
       
       // Get all heartbeats within date range
-      const allHeartbeats = await storage.getAllHeartbeats();
+      const allHeartbeats = await storage.getHeartbeatsBySchool(sessionSchoolId);
       const filteredHeartbeats = allHeartbeats.filter(hb => {
         const timestamp = new Date(hb.timestamp);
         return timestamp >= startDate && timestamp <= endDate;
-      }).filter(hb => hb.schoolId === sessionSchoolId);
+      });
       
       // Get all students to map deviceId to studentName
-      const students = await storage.getAllStudents();
-      const studentMap = new Map(
-        students.filter(s => s.schoolId === sessionSchoolId).map(s => [s.deviceId, s.studentName])
-      );
+      const students = await storage.getStudentsBySchool(sessionSchoolId);
+      const studentMap = new Map(students.map(s => [s.deviceId, s.studentName]));
       
       // Calculate URL sessions with duration for each device
       const deviceSessions = groupSessionsByDevice(filteredHeartbeats);
@@ -4416,10 +4462,9 @@ export async function registerRoutes(
   // Legacy export endpoint (for backward compatibility)
   app.get("/api/export/csv", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const sessionSchoolId = req.session.schoolId!;
-      const students = await storage.getAllStudents();
-      const statuses = await storage.getAllStudentStatuses();
-      const schoolStudents = students.filter(student => student.schoolId === sessionSchoolId);
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      const schoolStudents = await storage.getStudentsBySchool(sessionSchoolId);
+      const statuses = await storage.getStudentStatusesBySchool(sessionSchoolId);
       
       const columns = [
         "Device ID",
@@ -4462,16 +4507,17 @@ export async function registerRoutes(
   // Remote Control API Routes (Phase 1: GoGuardian-style features)
   
   // Open Tab - Push URL to all students or specific students
-  app.post("/api/remote/open-tab", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/open-tab", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { url, targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!url) {
         return res.status(400).json({ error: "URL is required" });
       }
       
       // Broadcast to targeted students or all students
-      const sentCount = broadcastToStudents({
+      const sentCount = broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'open-tab',
@@ -4500,9 +4546,10 @@ export async function registerRoutes(
   });
   
   // Close Tabs - Close all or specific tabs
-  app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/close-tabs", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { closeAll, pattern, specificUrls, allowedDomains, targetDeviceIds, tabsToClose } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       // Reject if new paradigm is mixed with old parameters
       if (tabsToClose && (specificUrls || targetDeviceIds || closeAll || pattern || allowedDomains)) {
@@ -4554,7 +4601,7 @@ export async function registerRoutes(
         
         // Send per-device close commands
         tabsByDevice.forEach((urls, deviceId) => {
-          const count = broadcastToStudents({
+          const count = broadcastToStudents(sessionSchoolId, {
             type: 'remote-control',
             command: {
               type: 'close-tab',
@@ -4570,7 +4617,7 @@ export async function registerRoutes(
       else {
         console.warn('[DEPRECATED] close-tabs using specificUrls+targetDeviceIds is deprecated. Use tabsToClose instead.');
         
-        sentCount = broadcastToStudents({
+        sentCount = broadcastToStudents(sessionSchoolId, {
           type: 'remote-control',
           command: {
             type: 'close-tab',
@@ -4595,16 +4642,17 @@ export async function registerRoutes(
   });
   
   // Lock Screens - Lock students to specific URL or current URL
-  app.post("/api/remote/lock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/lock-screen", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { url, targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!url) {
         return res.status(400).json({ error: "URL is required" });
       }
       
       // Send "CURRENT_URL" to extension to lock to whatever student is currently viewing
-      broadcastToStudents({
+      broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'lock-screen',
@@ -4615,7 +4663,7 @@ export async function registerRoutes(
       // Immediately update StudentStatus for instant UI feedback
       const deviceIdsToUpdate = targetDeviceIds && targetDeviceIds.length > 0 
         ? targetDeviceIds 
-        : (await storage.getAllDevices()).map(d => d.deviceId);
+        : (await storage.getDevicesBySchool(sessionSchoolId)).map(d => d.deviceId);
       
       const now = Date.now();
       const lockedStudentIds = new Set<string>();
@@ -4624,7 +4672,7 @@ export async function registerRoutes(
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         const studentsToUpdate = activeStudent 
           ? [activeStudent]
-          : await storage.getStudentsByDevice(deviceId);
+          : await storage.getStudentsByDevice(sessionSchoolId, deviceId);
         
         for (const student of studentsToUpdate) {
           lockedStudentIds.add(student.id);
@@ -4659,7 +4707,7 @@ export async function registerRoutes(
       }
       
       // Notify teachers to update UI immediately
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
       });
       
@@ -4674,11 +4722,12 @@ export async function registerRoutes(
   });
   
   // Unlock Screens
-  app.post("/api/remote/unlock-screen", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/unlock-screen", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
-      broadcastToStudents({
+      broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'unlock-screen',
@@ -4689,7 +4738,7 @@ export async function registerRoutes(
       // Immediately update StudentStatus for instant UI feedback
       const deviceIdsToUpdate = targetDeviceIds && targetDeviceIds.length > 0 
         ? targetDeviceIds 
-        : (await storage.getAllDevices()).map(d => d.deviceId);
+        : (await storage.getDevicesBySchool(sessionSchoolId)).map(d => d.deviceId);
       
       const now = Date.now();
       const unlockedStudentIds = new Set<string>();
@@ -4698,7 +4747,7 @@ export async function registerRoutes(
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         const studentsToUpdate = activeStudent 
           ? [activeStudent]
-          : await storage.getStudentsByDevice(deviceId);
+          : await storage.getStudentsByDevice(sessionSchoolId, deviceId);
         
         for (const student of studentsToUpdate) {
           unlockedStudentIds.add(student.id);
@@ -4733,7 +4782,7 @@ export async function registerRoutes(
       }
       
       // Notify teachers to update UI immediately
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
       });
       
@@ -4751,7 +4800,7 @@ export async function registerRoutes(
   app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { flightPathId, allowedDomains, targetDeviceIds } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!flightPathId || !allowedDomains || !Array.isArray(allowedDomains)) {
         return res.status(400).json({ error: "Flight Path ID and allowed domains are required" });
@@ -4764,10 +4813,10 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Flight Path not found" });
       }
       if (!assertSameSchool(sessionSchoolId, flightPath.schoolId)) {
-        return res.status(403).json({ error: "Forbidden" });
+        return res.status(404).json({ error: "Flight Path not found" });
       }
       
-      const sentCount = broadcastToStudents({
+      const sentCount = broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'apply-flight-path',
@@ -4793,13 +4842,13 @@ export async function registerRoutes(
   app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { targetDeviceIds } = req.body;
-      const sessionSchoolId = req.session.schoolId!;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!targetDeviceIds || !Array.isArray(targetDeviceIds) || targetDeviceIds.length === 0) {
         return res.status(400).json({ error: "Target device IDs are required" });
       }
       
-      broadcastToStudents({
+      broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'remove-flight-path',
@@ -4814,7 +4863,7 @@ export async function registerRoutes(
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
           if (!assertSameSchool(sessionSchoolId, activeStudent.schoolId)) {
-            return res.status(403).json({ error: "Forbidden" });
+            return res.status(404).json({ error: "Student not found" });
           }
           removedStudentIds.add(activeStudent.id);
           const status = await storage.getStudentStatus(activeStudent.id);
@@ -4828,7 +4877,7 @@ export async function registerRoutes(
       }
       
       // Notify teachers to update UI immediately
-      broadcastToTeachers({
+      broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
       });
       
@@ -4841,11 +4890,12 @@ export async function registerRoutes(
   });
   
   // Limit Tabs
-  app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/remote/limit-tabs", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { maxTabs } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
-      broadcastToStudents({
+      broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
           type: 'limit-tabs',
@@ -4861,13 +4911,14 @@ export async function registerRoutes(
   });
   
   // Send Chat Message
-  app.post("/api/chat/send", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/chat/send", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { message, toDeviceId } = req.body;
       
       if (!req.session?.userId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       const user = await storage.getUser(req.session.userId);
       
@@ -4883,11 +4934,15 @@ export async function registerRoutes(
       };
       
       if (toDeviceId) {
+        const device = await storage.getDevice(toDeviceId);
+        if (!device || !assertSameSchool(sessionSchoolId, device.schoolId)) {
+          return res.status(404).json({ error: "Device not found" });
+        }
         // Send to specific device
-        sendToDevice(toDeviceId, chatMessage);
+        sendToDevice(sessionSchoolId, toDeviceId, chatMessage);
       } else {
         // Broadcast to all
-        broadcastToStudents(chatMessage);
+        broadcastToStudents(sessionSchoolId, chatMessage);
       }
       
       res.json({ success: true });
@@ -4899,15 +4954,16 @@ export async function registerRoutes(
   
   
   // Send Check-in Request
-  app.post("/api/checkin/request", checkIPAllowlist, requireAuth, apiLimiter, async (req, res) => {
+  app.post("/api/checkin/request", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
       const { question, options } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       
       if (!question || !options || !Array.isArray(options)) {
         return res.status(400).json({ error: "Question and options are required" });
       }
       
-      broadcastToStudents({
+      broadcastToStudents(sessionSchoolId, {
         type: 'check-in-request',
         question,
         options,
@@ -4930,8 +4986,11 @@ export async function registerRoutes(
         if (expiredSessions > 0) {
           console.log(`[Session Cleanup] Expired ${expiredSessions} stale student sessions`);
           // Notify teachers to update UI after session expiration
-          broadcastToTeachers({
-            type: 'student-update',
+          const schools = await storage.getAllSchools(true);
+          schools.forEach((school) => {
+            broadcastToTeachers(school.id, {
+              type: 'student-update',
+            });
           });
         }
       } catch (error) {

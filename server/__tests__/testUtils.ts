@@ -185,6 +185,9 @@ export function createTestStorage() {
     async getDevice(deviceId: string) {
       return devices.get(deviceId);
     },
+    async getDevicesBySchool(schoolId: string) {
+      return Array.from(devices.values()).filter((device) => device.schoolId === schoolId);
+    },
     async updateDevice(deviceId: string, updates: Partial<any>) {
       const device = devices.get(deviceId);
       if (!device) {
@@ -194,11 +197,43 @@ export function createTestStorage() {
       devices.set(deviceId, updated);
       return updated;
     },
+    async getStudentsBySchool(schoolId: string) {
+      return Array.from(students.values()).filter((student) => student.schoolId === schoolId);
+    },
+    async getStudentsByDevice(schoolId: string, deviceId: string) {
+      return Array.from(students.values()).filter(
+        (student) => student.schoolId === schoolId && student.deviceId === deviceId
+      );
+    },
+    async getStudentStatusesBySchool(_schoolId: string) {
+      return [];
+    },
+    async getStudentStatusesAggregatedBySchool(_schoolId: string) {
+      return [];
+    },
     async addHeartbeat() {
       return { id: "hb-1" };
     },
+    async getHeartbeatsBySchool(_schoolId: string) {
+      return [];
+    },
     async expireStaleStudentSessions() {
       return 0;
+    },
+    async getActiveSessions(_schoolId: string) {
+      return [];
+    },
+    async getSessionsBySchool(_schoolId: string) {
+      return [];
+    },
+    async getFlightPathsBySchool(_schoolId: string) {
+      return [];
+    },
+    async getStudentGroupsBySchool(_schoolId: string) {
+      return [];
+    },
+    async getRostersBySchool(_schoolId: string) {
+      return [];
     },
     async cleanupOldHeartbeats() {
       return 0;

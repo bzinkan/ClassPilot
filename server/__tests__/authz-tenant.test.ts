@@ -15,6 +15,14 @@ describe("tenant isolation guards", () => {
     storage = created.storage;
     await storage.seedSchool({ id: "school-1", domain: "classpilot.test" });
     await storage.seedUser({ password: "testpass123", schoolId: "school-1", role: "teacher" });
+    await storage.seedSchool({ id: "school-2", domain: "classpilot-2.test" });
+    await storage.seedUser({
+      id: "user-2",
+      email: "teacher2@classpilot.test",
+      password: "testpass456",
+      schoolId: "school-2",
+      role: "teacher",
+    });
     await storage.seedStudent({ id: "student-2", schoolId: "school-2" });
     await storage.seedDevice({ deviceId: "device-2", schoolId: "school-2" });
     agent = request.agent(created.app);
@@ -34,7 +42,7 @@ describe("tenant isolation guards", () => {
       studentName: "Nope",
     });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
   });
 
   it("blocks cross-school device updates", async () => {
@@ -42,7 +50,26 @@ describe("tenant isolation guards", () => {
       deviceName: "Nope",
     });
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
+  });
+
+  it("deactivating one school does not block another school's access", async () => {
+    const agentB = request.agent(app);
+
+    await agentB.post("/api/login").send({
+      email: "teacher2@classpilot.test",
+      password: "testpass456",
+    });
+
+    await storage.updateSchool("school-1", { isActive: false, planStatus: "canceled" });
+
+    const schoolAResponse = await agent.get("/api/students");
+    expect(schoolAResponse.status).toBe(402);
+
+    const schoolBResponse = await agentB.get("/api/students");
+    expect(schoolBResponse.status).toBe(200);
+
+    await storage.updateSchool("school-1", { isActive: true, planStatus: "active" });
   });
 
   it("blocks inactive schools and invalidates session", async () => {

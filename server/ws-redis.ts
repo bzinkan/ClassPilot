@@ -3,10 +3,10 @@ import { createClient, type RedisClientType } from "redis";
 import { getOptionalEnv } from "./util/env";
 
 export type WsRedisTarget =
-  | { kind: "staff" }
-  | { kind: "students"; targetDeviceIds?: string[] }
-  | { kind: "device"; deviceId: string }
-  | { kind: "role"; role: "teacher" | "school_admin" | "super_admin" | "student" };
+  | { kind: "staff"; schoolId: string }
+  | { kind: "students"; schoolId: string; targetDeviceIds?: string[] }
+  | { kind: "device"; schoolId: string; deviceId: string }
+  | { kind: "role"; schoolId: string; role: "teacher" | "school_admin" | "super_admin" | "student" };
 
 type WsRedisEnvelope = {
   instanceId: string;

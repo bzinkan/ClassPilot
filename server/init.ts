@@ -73,10 +73,16 @@ export async function initializeApp() {
   // Only assign students that have NO teacher at all (don't overwrite existing assignments)
   const teacherUser = await storage.getUserByUsername("teacher");
   if (teacherUser) {
-    const allStudents = await storage.getAllStudents();
+    const settings = existingSettings ?? await storage.getSettings();
+    const defaultSchoolId = teacherUser.schoolId ?? settings?.schoolId;
+    if (!defaultSchoolId) {
+      return;
+    }
+
+    const allStudents = await storage.getStudentsBySchool(defaultSchoolId);
     
     // Get all teachers to check existing assignments
-    const allUsers = await storage.getAllUsers();
+    const allUsers = await storage.getUsersBySchool(defaultSchoolId);
     const teacherIds = allUsers.filter(u => u.role === 'teacher').map(u => u.id);
     
     // Find students that have NO teacher at all
@@ -101,7 +107,7 @@ export async function initializeApp() {
     }
     
     // Update existing flight paths without teacherId
-    const allFlightPaths = await storage.getAllFlightPaths();
+    const allFlightPaths = await storage.getFlightPathsBySchool(defaultSchoolId);
     const orphanedFlightPaths = allFlightPaths.filter(fp => fp.teacherId === null && !fp.isDefault);
     
     for (const fp of orphanedFlightPaths) {
@@ -109,7 +115,7 @@ export async function initializeApp() {
     }
     
     // Update existing student groups without teacherId
-    const allGroups = await storage.getAllStudentGroups();
+    const allGroups = await storage.getStudentGroupsBySchool(defaultSchoolId);
     const orphanedGroups = allGroups.filter(g => g.teacherId === null);
     
     for (const group of orphanedGroups) {
