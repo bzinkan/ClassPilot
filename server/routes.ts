@@ -2210,7 +2210,7 @@ export async function registerRoutes(
   });
 
   // Get all student statuses (for dashboard)
-  app.get("/api/students", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+  app.get("/api/students", checkIPAllowlist, requireAuth, requireActiveSchoolMiddleware, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const userId = req.session?.userId;
       if (!userId) {

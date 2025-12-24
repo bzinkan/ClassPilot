@@ -75,9 +75,9 @@ export const requireActiveSchool = (
     return next();
   }
 
-  const schoolId = res.locals.schoolId ?? req.session.schoolId;
+  const schoolId = req.session.schoolId;
   if (!schoolId) {
-    return res.status(400).json({ error: "School context required" });
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
   const school = await storage.getSchool(schoolId);
