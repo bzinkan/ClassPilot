@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, UserCog, KeyRound, Copy, Check } from "lucide-react";
+import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -115,6 +115,26 @@ export default function SchoolsList() {
       toast({
         variant: "destructive",
         title: "Failed to suspend school",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const unsuspendMutation = useMutation({
+    mutationFn: async (schoolId: string) => {
+      return await apiRequest("PATCH", `/api/super-admin/schools/${schoolId}`, { status: "active" });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/super-admin/schools'] });
+      toast({
+        title: "School activated",
+        description: "The school has been reactivated",
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to activate school",
         description: error.message || "An error occurred",
       });
     },
@@ -342,14 +362,23 @@ export default function SchoolsList() {
                         <KeyRound className="w-4 h-4 mr-2" />
                         Reset Admin Login
                       </DropdownMenuItem>
-                      <DropdownMenuItem 
-                        onClick={() => suspendMutation.mutate(school.id)}
-                        disabled={school.status === 'suspended'}
-                        data-testid={`menu-suspend-${school.id}`}
-                      >
-                        <Pause className="w-4 h-4 mr-2" />
-                        Suspend School
-                      </DropdownMenuItem>
+                      {school.status === 'suspended' ? (
+                        <DropdownMenuItem 
+                          onClick={() => unsuspendMutation.mutate(school.id)}
+                          data-testid={`menu-activate-${school.id}`}
+                        >
+                          <Play className="w-4 h-4 mr-2" />
+                          Activate School
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem 
+                          onClick={() => suspendMutation.mutate(school.id)}
+                          data-testid={`menu-suspend-${school.id}`}
+                        >
+                          <Pause className="w-4 h-4 mr-2" />
+                          Suspend School
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuItem 
                         onClick={() => handleDeleteSchool(school)}
                         className="text-destructive"
