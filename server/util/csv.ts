@@ -90,7 +90,7 @@ export const parseCsv = (text: string, options: ParseCsvOptions): Record<string,
         return canonical;
       });
 
-      const missingRequired = [...requiredNormalized].filter((required) => !seen.has(required));
+      const missingRequired = Array.from(requiredNormalized).filter((required) => !seen.has(required));
       if (missingRequired.length > 0) {
         const missingNames = requiredHeaders.filter((header) => missingRequired.includes(normalizeHeader(header)));
         throw new Error(`CSV is missing required headers: ${missingNames.join(", ")}`);
