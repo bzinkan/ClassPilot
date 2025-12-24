@@ -1108,7 +1108,7 @@ export default function Dashboard() {
                 data-testid="button-export-excel"
               >
                 <Download className="h-4 w-4 mr-2" />
-                Export Excel
+                Export CSV
               </Button>
               {currentUser?.role === 'school_admin' && (
                 <Button
@@ -1441,7 +1441,7 @@ export default function Dashboard() {
           <DialogHeader>
             <DialogTitle>Export Activity Report</DialogTitle>
             <DialogDescription>
-              Select a date range to export student activity data as Excel (.xlsx)
+              Select a date range to export student activity data as CSV (.csv)
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">

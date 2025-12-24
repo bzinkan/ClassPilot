@@ -5,7 +5,6 @@ import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
 import rateLimit, { type Options } from "express-rate-limit";
 import { z } from "zod";
-import * as XLSX from "xlsx";
 import {
   insertDeviceSchema,
   insertStudentSchema,
@@ -35,6 +34,7 @@ import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
 import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
 import { assertSameSchool, requireAuth, requireRole, requireSchoolContext } from "./middleware/authz";
+import { parseCsv, stringifyCsv } from "./util/csv";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -1552,24 +1552,27 @@ export async function registerRoutes(
     }
   });
 
-  // Admin: Bulk import students from CSV or Excel
+  // Admin: Bulk import students from CSV
   app.post("/api/admin/bulk-import", requireAuth, requireSchoolContext, requireAdminRole, async (req, res) => {
     try {
-      const { fileContent, fileType } = req.body;
+      const { fileContent } = req.body;
       const sessionSchoolId = req.session.schoolId!;
       
-      if (!fileContent) {
-        return res.status(400).json({ error: "File content is required" });
+      if (!fileContent || typeof fileContent !== "string") {
+        return res.status(400).json({ error: "CSV file content is required" });
       }
 
-      // Parse file content using XLSX (supports both CSV and Excel)
-      // For CSV: fileContent is a string, use type: 'string'
-      // For Excel: fileContent is base64, use type: 'base64'
-      const readType = fileType === 'excel' ? 'base64' : 'string';
-      const workbook = XLSX.read(fileContent, { type: readType });
-      const sheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[sheetName];
-      const data = XLSX.utils.sheet_to_json(worksheet) as any[];
+      let data: Record<string, string>[];
+      try {
+        data = parseCsv(fileContent, {
+          requiredHeaders: ["Email", "Name"],
+          optionalHeaders: ["Grade", "Class"],
+        });
+      } catch (error) {
+        return res.status(400).json({
+          error: error instanceof Error ? error.message : "Invalid CSV file",
+        });
+      }
 
       if (data.length === 0) {
         return res.status(400).json({ error: "File is empty" });
@@ -1593,11 +1596,11 @@ export async function registerRoutes(
         const rowNum = i + 2; // Account for header row and 0-indexing
 
         try {
-          // Extract and validate fields (case-insensitive column names)
-          const email = (row.Email || row.email || row.EMAIL || '').trim();
-          const name = (row.Name || row.name || row.NAME || row.StudentName || row.studentName || '').trim();
-          const grade = (row.Grade || row.grade || row.GRADE || row.GradeLevel || row.gradeLevel || '').toString().trim();
-          const className = (row.Class || row.class || row.CLASS || row.ClassName || row.className || '').trim();
+          // Extract and validate fields
+          const email = row.Email?.trim() ?? "";
+          const name = row.Name?.trim() ?? "";
+          const grade = row.Grade?.trim() ?? "";
+          const className = row.Class?.trim() ?? "";
 
           // Validate required fields
           if (!email) {
@@ -4193,7 +4196,7 @@ export async function registerRoutes(
     }
   });
 
-  // Export activity Excel endpoint with date range filtering
+  // Export activity CSV endpoint with date range filtering
   app.get("/api/export/activity", checkIPAllowlist, requireAuth, requireSchoolContext, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = req.session.schoolId!;
@@ -4216,8 +4219,8 @@ export async function registerRoutes(
       // Calculate URL sessions with duration for each device
       const deviceSessions = groupSessionsByDevice(filteredHeartbeats);
       
-      // Prepare data for Excel with duration information
-      const data: any[] = [];
+      // Prepare data for CSV with duration information
+      const data: Record<string, string | number>[] = [];
       Array.from(deviceSessions.entries()).forEach(([deviceId, sessions]) => {
         sessions.forEach(session => {
           data.push({
@@ -4241,29 +4244,22 @@ export async function registerRoutes(
         return new Date(a['Start Time']).getTime() - new Date(b['Start Time']).getTime();
       });
       
-      // Create workbook and worksheet
-      const worksheet = XLSX.utils.json_to_sheet(data);
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'Activity Report');
-      
-      // Set column widths for better readability
-      worksheet['!cols'] = [
-        { wch: 15 }, // Device ID
-        { wch: 20 }, // Student Name
-        { wch: 20 }, // Start Time
-        { wch: 20 }, // End Time
-        { wch: 12 }, // Duration
-        { wch: 12 }, // Duration (seconds)
-        { wch: 50 }, // URL
-        { wch: 40 }  // Tab Title
+      const columns = [
+        'Device ID',
+        'Student Name',
+        'Start Time',
+        'End Time',
+        'Duration',
+        'Duration (seconds)',
+        'URL',
+        'Tab Title',
       ];
-      
-      // Generate Excel file buffer
-      const excelBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-      
-      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-      res.setHeader('Content-Disposition', `attachment; filename=activity-export-${new Date().toISOString().split('T')[0]}.xlsx`);
-      res.send(excelBuffer);
+
+      const csv = stringifyCsv(data, columns);
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename=activity-export-${new Date().toISOString().split('T')[0]}.csv`);
+      res.send(csv);
     } catch (error) {
       console.error("Export activity error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -4278,17 +4274,36 @@ export async function registerRoutes(
       const statuses = await storage.getAllStudentStatuses();
       const schoolStudents = students.filter(student => student.schoolId === sessionSchoolId);
       
-      // Generate CSV
-      let csv = "Device ID,Student Name,Class ID,Last Active Tab,Last URL,Last Seen,Status\n";
-      
-      statuses.forEach(status => {
-        const student = schoolStudents.find(s => s.deviceId === status.deviceId);
-        if (student) {
-          csv += `"${status.deviceId}","${status.studentName}","${status.classId}","${status.activeTabTitle}","${status.activeTabUrl}","${new Date(status.lastSeenAt).toISOString()}","${status.status}"\n`;
+      const columns = [
+        "Device ID",
+        "Student Name",
+        "Class ID",
+        "Last Active Tab",
+        "Last URL",
+        "Last Seen",
+        "Status",
+      ];
+
+      const data = statuses.flatMap((status) => {
+        const student = schoolStudents.find((s) => s.deviceId === status.deviceId);
+        if (!student) {
+          return [];
         }
+
+        return [{
+          "Device ID": status.deviceId,
+          "Student Name": status.studentName,
+          "Class ID": status.classId,
+          "Last Active Tab": status.activeTabTitle,
+          "Last URL": status.activeTabUrl,
+          "Last Seen": new Date(status.lastSeenAt).toISOString(),
+          "Status": status.status,
+        }];
       });
-      
-      res.setHeader('Content-Type', 'text/csv');
+
+      const csv = stringifyCsv(data, columns);
+
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
       res.setHeader('Content-Disposition', 'attachment; filename=activity-export.csv');
       res.send(csv);
     } catch (error) {
