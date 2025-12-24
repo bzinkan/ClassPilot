@@ -1,8 +1,6 @@
 import type { Express, RequestHandler } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { randomUUID } from "crypto";
-import { createClient, type RedisClientType } from "redis";
 import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
 import rateLimit from "express-rate-limit";
@@ -35,6 +33,7 @@ import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@s
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
+import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -222,18 +221,6 @@ interface WSClient {
 }
 
 const wsClients = new Map<WebSocket, WSClient>();
-
-type WsRedisTarget =
-  | { kind: "staff" }
-  | { kind: "students"; targetDeviceIds?: string[] }
-  | { kind: "device"; deviceId: string }
-  | { kind: "role"; role: WSClient["role"] };
-
-type WsRedisEnvelope = {
-  instanceId: string;
-  target: WsRedisTarget;
-  message: unknown;
-};
 
 let publishWsMessage: ((target: WsRedisTarget, message: unknown) => void) | null = null;
 
@@ -431,20 +418,6 @@ export async function registerRoutes(
 
   // WebSocket server with noServer mode for manual upgrade handling
   const wss = new WebSocketServer({ noServer: true });
-  const redisUrl = process.env.REDIS_URL?.trim();
-  const redisInstanceId = randomUUID();
-  const redisChannel = "classpilot:ws:broadcast";
-  let redisPublisher: RedisClientType | null = null;
-  let redisSubscriber: RedisClientType | null = null;
-  let redisWarned = false;
-
-  const warnRedis = (error: unknown) => {
-    if (redisWarned) {
-      return;
-    }
-    redisWarned = true;
-    console.warn("[WebSocket] Redis pub/sub disabled; running single-instance mode.", error);
-  };
 
   const deliverRedisMessage = (target: WsRedisTarget, message: unknown) => {
     switch (target.kind) {
@@ -463,44 +436,10 @@ export async function registerRoutes(
     }
   };
 
-  if (redisUrl) {
-    try {
-      redisPublisher = createClient({ url: redisUrl });
-      redisPublisher.on("error", warnRedis);
-      await redisPublisher.connect();
-
-      redisSubscriber = redisPublisher.duplicate();
-      redisSubscriber.on("error", warnRedis);
-      await redisSubscriber.connect();
-
-      await redisSubscriber.subscribe(redisChannel, (payload) => {
-        try {
-          const message = JSON.parse(payload) as WsRedisEnvelope;
-          if (!message || message.instanceId === redisInstanceId) {
-            return;
-          }
-          deliverRedisMessage(message.target, message.message);
-        } catch (error) {
-          warnRedis(error);
-        }
-      });
-
-      publishWsMessage = (target, message) => {
-        if (!redisPublisher) {
-          return;
-        }
-        const payload: WsRedisEnvelope = {
-          instanceId: redisInstanceId,
-          target,
-          message,
-        };
-        redisPublisher.publish(redisChannel, JSON.stringify(payload)).catch(warnRedis);
-      };
-    } catch (error) {
-      warnRedis(error);
-      publishWsMessage = null;
-    }
-  }
+  publishWsMessage = (target, message) => {
+    void publishWS(target, message);
+  };
+  void subscribeWS(deliverRedisMessage);
 
   // SECURITY: Handle WebSocket upgrade with session validation
   httpServer.on('upgrade', (request, socket, head) => {
@@ -4717,15 +4656,6 @@ export async function registerRoutes(
       }
     }, 60 * 60 * 1000); // Run every hour
   }
-
-  httpServer.on("close", () => {
-    try {
-      void redisSubscriber?.disconnect();
-      void redisPublisher?.disconnect();
-    } catch (error) {
-      warnRedis(error);
-    }
-  });
 
   return httpServer;
 }

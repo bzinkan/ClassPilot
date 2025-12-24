@@ -127,27 +127,25 @@ export async function createApp(options: AppOptions = {}) {
       frameguard: { action: "sameorigin" },
       noSniff: true,
       referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-      hsts: isProduction(),
+      hsts: isProduction()
+        ? {
+            maxAge: 15552000,
+            includeSubDomains: true,
+          }
+        : false,
       contentSecurityPolicy: {
-        useDefaults: true,
+        useDefaults: false,
         directives: {
           defaultSrc: ["'self'"],
-          scriptSrc: ["'self'", ...(isProduction() ? [] : ["'unsafe-eval'"])],
-          styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
-          fontSrc: ["'self'", "https://fonts.gstatic.com", "data:"],
-          imgSrc: ["'self'", "data:", "blob:"],
-          connectSrc: [
-            "'self'",
-            "https://accounts.google.com",
-            "https://oauth2.googleapis.com",
-            "https://www.googleapis.com",
-            "wss:",
-            "ws:",
-          ],
-          frameSrc: ["'self'", "https://accounts.google.com"],
-          formAction: ["'self'", "https://accounts.google.com"],
-          objectSrc: ["'none'"],
           baseUri: ["'self'"],
+          frameAncestors: ["'self'"],
+          objectSrc: ["'none'"],
+          imgSrc: ["'self'", "data:", "https:"],
+          fontSrc: ["'self'", "data:", "https:"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          scriptSrc: ["'self'"],
+          connectSrc: ["'self'", "https:", "wss:"],
+          upgradeInsecureRequests: isProduction() ? [] : null,
         },
       },
     })
