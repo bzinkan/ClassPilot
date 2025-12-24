@@ -569,18 +569,22 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     if (!CONFIG.deviceId) return;
 
     try {
-      const response = await fetch(`${CONFIG.serverUrl}/api/event`, {
+      const headers = buildDeviceAuthHeaders();
+      const payload = {
+        deviceId: CONFIG.deviceId,
+        eventType: event.eventType,
+        metadata: {
+          url: event.url,
+          title: event.title,
+          ...event.metadata,
+        },
+      };
+      attachLegacyStudentToken(payload, headers);
+
+      const response = await fetch(`${CONFIG.serverUrl}/api/device/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: CONFIG.deviceId,
-          eventType: event.eventType,
-          metadata: {
-            url: event.url,
-            title: event.title,
-            ...event.metadata,
-          },
-        }),
+        headers,
+        body: JSON.stringify(payload),
       });
       if (response.status === 402) {
         const data = await response.json().catch(() => ({}));
@@ -590,6 +594,20 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
       console.error('Event logging error:', error);
     }
   }, NAVIGATION_DEBOUNCE_MS));
+}
+
+function buildDeviceAuthHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (CONFIG.studentToken) {
+    headers.Authorization = `Bearer ${CONFIG.studentToken}`;
+  }
+  return headers;
+}
+
+function attachLegacyStudentToken(payload, headers) {
+  if (CONFIG.studentToken && !headers.Authorization) {
+    payload.studentToken = CONFIG.studentToken;
+  }
 }
 
 // Email normalization: ensures consistent student identity
@@ -1242,9 +1260,9 @@ async function sendHeartbeat(reason = 'manual') {
       status: trackingState.toLowerCase(),
     };
     
-    // ✅ JWT AUTHENTICATION: Include studentToken if available (INDUSTRY STANDARD)
-    if (CONFIG.studentToken) {
-      heartbeatData.studentToken = CONFIG.studentToken;
+    const headers = buildDeviceAuthHeaders();
+    attachLegacyStudentToken(heartbeatData, headers);
+    if (headers.Authorization) {
       console.log('Sending JWT-authenticated heartbeat');
     } else {
       console.log('⚠️  Sending legacy heartbeat (no JWT)');
@@ -1255,9 +1273,9 @@ async function sendHeartbeat(reason = 'manual') {
       lastObservedSentAt = now;
     }
     
-    const response = await fetch(`${CONFIG.serverUrl}/api/heartbeat`, {
+    const response = await fetch(`${CONFIG.serverUrl}/api/device/heartbeat`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(heartbeatData),
     });
     
@@ -2373,18 +2391,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     // Log student_switched event
     if (licenseActive && CONFIG.deviceId) {
-      fetch(`${CONFIG.serverUrl}/api/event`, {
+      const headers = buildDeviceAuthHeaders();
+      const payload = {
+        deviceId: CONFIG.deviceId,
+        eventType: 'student_switched',
+        metadata: { 
+          previousStudentId,
+          newStudentId: message.studentId,
+          timestamp: new Date().toISOString(),
+        },
+      };
+      attachLegacyStudentToken(payload, headers);
+
+      fetch(`${CONFIG.serverUrl}/api/device/event`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId: CONFIG.deviceId,
-          eventType: 'student_switched',
-          metadata: { 
-            previousStudentId,
-            newStudentId: message.studentId,
-            timestamp: new Date().toISOString(),
-          },
-        }),
+        headers,
+        body: JSON.stringify(payload),
       }).then(async (response) => {
         if (response.status === 402) {
           const data = await response.json().catch(() => ({}));

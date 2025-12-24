@@ -47,4 +47,29 @@ describe("heartbeat endpoint", () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ ok: true });
   });
+
+  it("accepts a device heartbeat without a staff session", async () => {
+    const studentToken = createStudentToken({
+      studentId: "student-2",
+      deviceId: "device-2",
+      schoolId: "school-1",
+    });
+
+    const response = await app.post("/api/device/heartbeat")
+      .set("Authorization", `Bearer ${studentToken}`)
+      .send({
+        deviceId: "device-2",
+        studentId: "student-2",
+        schoolId: "school-1",
+        activeTabTitle: "Unit Test",
+        activeTabUrl: "https://example.com",
+        isSharing: false,
+        screenLocked: false,
+        flightPathActive: false,
+        cameraActive: false,
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true });
+  });
 });
