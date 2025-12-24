@@ -315,7 +315,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
       if (!student.primaryDeviceId) {
-        return Promise.resolve();
+        throw new Error("Student does not have a primary device assigned.");
       }
       return await apiRequest("POST", "/api/remote/unlock-screen", {
         targetDeviceIds: [student.primaryDeviceId]
