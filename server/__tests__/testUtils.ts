@@ -211,6 +211,9 @@ export function createTestStorage() {
     async getStudentStatusesAggregatedBySchool(_schoolId: string) {
       return [];
     },
+    async getActiveSessionByTeacher(_teacherId: string) {
+      return undefined;
+    },
     async addHeartbeat() {
       return { id: "hb-1" };
     },
