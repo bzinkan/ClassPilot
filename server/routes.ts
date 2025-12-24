@@ -827,6 +827,7 @@ export async function registerRoutes(
       if (!assertSameSchool(req.session.schoolId, admin.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const schoolId = req.session.schoolId!;
 
       const data = createTeacherSchema.parse(req.body);
       
@@ -845,7 +846,7 @@ export async function registerRoutes(
         username: data.email, // Use email as username
         password: hashedPassword,
         role: 'teacher',
-        schoolId: admin.schoolId, // Use admin's schoolId, not from request
+        schoolId, // Use admin's schoolId, not from request
         displayName: data.displayName,
         schoolName: admin.schoolName || data.schoolName,
       });
@@ -2597,6 +2598,7 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
+      const schoolId = req.session.schoolId!;
 
       // Check if user has connected Google
       const tokens = await storage.getGoogleOAuthTokens(user.id);
@@ -2605,7 +2607,7 @@ export async function registerRoutes(
       }
 
       // Perform sync
-      const courses = await syncCourses(user.id, user.schoolId);
+      const courses = await syncCourses(user.id, schoolId);
       res.json(courses);
     } catch (error: any) {
       console.error("Classroom courses error:", error);
@@ -2618,14 +2620,15 @@ export async function registerRoutes(
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user || !user.schoolId) return res.status(401).send();
+      const schoolId = req.session.schoolId!;
 
       const { courseId } = req.params;
 
       // Sync the student list from Google
-      const students = await syncRoster(user.id, user.schoolId, courseId);
+      const students = await syncRoster(user.id, schoolId, courseId);
 
       // Automatically create a ClassPilot group for this course
-      const course = await storage.getClassroomCourse(user.schoolId, courseId);
+      const course = await storage.getClassroomCourse(schoolId, courseId);
 
       if (course) {
         // Check if group exists for this teacher with this name
@@ -2635,7 +2638,7 @@ export async function registerRoutes(
         if (!group) {
           group = await storage.createGroup({
             teacherId: user.id,
-            schoolId: user.schoolId,
+            schoolId,
             name: course.name,
             groupType: "admin_class",
             description: `Imported from Google Classroom: ${course.section || ""}`,
@@ -2728,6 +2731,7 @@ export async function registerRoutes(
       if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const schoolId = req.session.schoolId!;
 
       const { courseId, teacherId, gradeLevel } = req.body;
       if (!courseId || !teacherId) {
@@ -2735,7 +2739,7 @@ export async function registerRoutes(
       }
 
       // Get the course details
-      const course = await storage.getClassroomCourse(user.schoolId, courseId);
+      const course = await storage.getClassroomCourse(schoolId, courseId);
       if (!course) {
         return res.status(404).json({ error: "Course not found" });
       }
@@ -2756,7 +2760,7 @@ export async function registerRoutes(
       // Create the ClassPilot class
       const newGroup = await storage.createGroup({
         teacherId,
-        schoolId: user.schoolId,
+        schoolId,
         name: course.name,
         groupType: "admin_class",
         gradeLevel: gradeLevel || null,
@@ -2764,7 +2768,7 @@ export async function registerRoutes(
       });
 
       // Get student IDs from the classroom course and assign them to the group
-      const studentIds = await storage.getClassroomCourseStudentIds(user.schoolId, courseId);
+      const studentIds = await storage.getClassroomCourseStudentIds(schoolId, courseId);
       let assignedCount = 0;
       for (const studentId of studentIds) {
         try {
@@ -2827,11 +2831,12 @@ export async function registerRoutes(
       if (!assertSameSchool(req.session.schoolId, user.schoolId)) {
         return res.status(403).json({ error: "Forbidden" });
       }
+      const schoolId = req.session.schoolId!;
 
       const { importStudentsFromDirectory } = await import("./directory");
       const { domain, orgUnitPath } = req.body;
 
-      const result = await importStudentsFromDirectory(user.id, user.schoolId, {
+      const result = await importStudentsFromDirectory(user.id, schoolId, {
         domain,
         orgUnitPath,
       });
