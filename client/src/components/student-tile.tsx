@@ -288,7 +288,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         throw new Error("No active tab to lock to");
       }
       if (!student.primaryDeviceId) {
-        return Promise.resolve();
+        throw new Error("Student does not have a primary device assigned.");
       }
       return await apiRequest("POST", "/api/remote/lock-screen", {
         url: student.activeTabUrl,
