@@ -80,6 +80,10 @@ type GoogleOAuthTokenUpsert = Pick<InsertGoogleOAuthToken, "scope" | "tokenType"
   refreshToken?: string | null;
 };
 
+type GoogleOAuthTokenUpdateSet = Partial<
+  Pick<typeof googleOAuthTokens.$inferInsert, "scope" | "tokenType" | "expiryDate" | "refreshToken">
+> & { updatedAt: Date };
+
 const ENCRYPTED_SECRET_PARTS = 3;
 
 function isEncryptedSecret(value?: string | null): value is string {
@@ -87,6 +91,13 @@ function isEncryptedSecret(value?: string | null): value is string {
   const parts = value.split(".");
   if (parts.length !== ENCRYPTED_SECRET_PARTS) return false;
   return parts.every((part) => part.length > 0);
+}
+
+function normalizeExpiryDate(value: GoogleOAuthTokenUpsert["expiryDate"]): Date | undefined {
+  if (!value) return undefined;
+  if (value instanceof Date) return value;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
 export interface IStorage {
@@ -202,6 +213,7 @@ export interface IStorage {
 
   // Groups (Class Rosters)
   getGroup(id: string): Promise<Group | undefined>;
+  getGroupsBySchool(schoolId: string): Promise<Group[]>;
   getGroupsByTeacher(teacherId: string): Promise<Group[]>;
   getAllGroups(): Promise<Group[]>;
   createGroup(group: InsertGroup): Promise<Group>;
@@ -1444,6 +1456,10 @@ export class MemStorage implements IStorage {
     return undefined;
   }
 
+  async getGroupsBySchool(schoolId: string): Promise<Group[]> {
+    return [];
+  }
+
   async getGroupsByTeacher(teacherId: string): Promise<Group[]> {
     return [];
   }
@@ -1712,16 +1728,17 @@ export class DatabaseStorage implements IStorage {
       : existingRefreshToken
         ? (hasEncryptedToken ? existingRefreshToken : encryptSecret(existingRefreshToken))
         : null;
+    const expiryDate = normalizeExpiryDate(token.expiryDate);
 
     if (!refreshTokenToStore) {
       throw new Error("Refresh token is required to store Google OAuth credentials.");
     }
 
-    const updateSet: Partial<InsertGoogleOAuthToken> & { updatedAt: unknown } = {
-      scope: token.scope ?? null,
-      tokenType: token.tokenType ?? null,
-      expiryDate: token.expiryDate ?? null,
-      updatedAt: drizzleSql`now()`,
+    const updateSet: GoogleOAuthTokenUpdateSet = {
+      scope: token.scope ?? undefined,
+      tokenType: token.tokenType ?? undefined,
+      expiryDate,
+      updatedAt: new Date(),
     };
 
     if (providedRefreshToken || (existingRefreshToken && !hasEncryptedToken)) {
@@ -1733,9 +1750,9 @@ export class DatabaseStorage implements IStorage {
       .values({
         userId,
         refreshToken: refreshTokenToStore,
-        scope: token.scope ?? null,
-        tokenType: token.tokenType ?? null,
-        expiryDate: token.expiryDate ?? null,
+        scope: token.scope ?? undefined,
+        tokenType: token.tokenType ?? undefined,
+        expiryDate,
       })
       .onConflictDoUpdate({
         target: googleOAuthTokens.userId,
@@ -2884,6 +2901,14 @@ export class DatabaseStorage implements IStorage {
       .from(groups)
       .where(eq(groups.id, id));
     return group || undefined;
+  }
+
+  async getGroupsBySchool(schoolId: string): Promise<Group[]> {
+    return await db
+      .select()
+      .from(groups)
+      .where(eq(groups.schoolId, schoolId))
+      .orderBy(groups.createdAt);
   }
 
   async getGroupsByTeacher(teacherId: string): Promise<Group[]> {

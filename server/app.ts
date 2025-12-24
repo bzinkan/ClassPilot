@@ -87,7 +87,7 @@ if (SENTRY_DSN_SERVER) {
         event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
           ...crumb,
           message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
-          data: crumb.data ? scrubSentryData(crumb.data) : crumb.data,
+          data: crumb.data ? (scrubSentryData(crumb.data) as Record<string, unknown>) : crumb.data,
         }));
       }
       return event;

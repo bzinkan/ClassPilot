@@ -437,7 +437,7 @@ export default function Dashboard() {
       const matchesSearch = 
         (student.studentName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.studentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        student.classId.toLowerCase().includes(searchQuery.toLowerCase());
+        (student.classId ?? '').toLowerCase().includes(searchQuery.toLowerCase());
       
       return matchesSearch;
     })
@@ -467,7 +467,9 @@ export default function Dashboard() {
       if (selectedStudentIds.has(student.studentId)) {
         // Add all devices for this student
         student.devices.forEach(device => {
-          deviceIds.push(device.deviceId);
+          if (device.deviceId) {
+            deviceIds.push(device.deviceId);
+          }
         });
         // Also add primary device if it exists and isn't in the devices array
         if (student.primaryDeviceId && !deviceIds.includes(student.primaryDeviceId)) {
@@ -1399,21 +1401,26 @@ export default function Dashboard() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 2xl:grid-cols-6 gap-6">
-            {filteredStudents.map((student) => (
-              <StudentTile
-                key={`${student.studentId}-${tileRevisions[student.primaryDeviceId] ?? 0}`}
-                student={student}
-                onClick={() => setSelectedStudent(student)}
-                blockedDomains={settings?.blockedDomains || []}
-                isOffTask={isStudentOffTask(student)}
-                isSelected={selectedStudentIds.has(student.studentId)}
-                onToggleSelect={() => toggleStudentSelection(student.studentId)}
-                liveStream={liveStreams.get(student.primaryDeviceId) || null}
-                onStartLiveView={() => handleStartLiveView(student.primaryDeviceId)}
-                onStopLiveView={() => handleStopLiveView(student.primaryDeviceId)}
-                onEndLiveRefresh={() => refreshTile(student.primaryDeviceId)}
-              />
-            ))}
+            {filteredStudents.map((student) => {
+              const primaryDeviceId = student.primaryDeviceId ?? undefined;
+              const tileRevision = primaryDeviceId ? tileRevisions[primaryDeviceId] ?? 0 : 0;
+
+              return (
+                <StudentTile
+                  key={`${student.studentId}-${primaryDeviceId ?? "no-device"}-${tileRevision}`}
+                  student={student}
+                  onClick={() => setSelectedStudent(student)}
+                  blockedDomains={settings?.blockedDomains || []}
+                  isOffTask={isStudentOffTask(student)}
+                  isSelected={selectedStudentIds.has(student.studentId)}
+                  onToggleSelect={() => toggleStudentSelection(student.studentId)}
+                  liveStream={primaryDeviceId ? liveStreams.get(primaryDeviceId) || null : null}
+                  onStartLiveView={primaryDeviceId ? () => handleStartLiveView(primaryDeviceId) : undefined}
+                  onStopLiveView={primaryDeviceId ? () => handleStopLiveView(primaryDeviceId) : undefined}
+                  onEndLiveRefresh={primaryDeviceId ? () => refreshTile(primaryDeviceId) : undefined}
+                />
+              );
+            })}
           </div>
         )}
       </main>
@@ -1776,58 +1783,62 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {students.map((student) => (
-                  <tr key={student.studentId} className="border-b" data-testid={`row-student-${student.studentId}`}>
-                    <td className="p-2 text-sm">{student.studentName}</td>
-                    <td className="p-2">
-                      {student.flightPathActive && student.activeFlightPathName ? (
-                        <Badge variant="secondary" className="text-xs" data-testid={`badge-flight-path-${student.studentId}`}>
-                          {student.activeFlightPathName}
+                {students.map((student) => {
+                  const primaryDeviceId = student.primaryDeviceId ?? undefined;
+
+                  return (
+                    <tr key={student.studentId} className="border-b" data-testid={`row-student-${student.studentId}`}>
+                      <td className="p-2 text-sm">{student.studentName}</td>
+                      <td className="p-2">
+                        {student.flightPathActive && student.activeFlightPathName ? (
+                          <Badge variant="secondary" className="text-xs" data-testid={`badge-flight-path-${student.studentId}`}>
+                            {student.activeFlightPathName}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">No flight path</span>
+                        )}
+                      </td>
+                      <td className="p-2">
+                        <Badge 
+                          variant={student.status === 'online' ? 'default' : student.status === 'idle' ? 'secondary' : 'outline'}
+                          className="text-xs"
+                          data-testid={`badge-status-${student.studentId}`}
+                        >
+                          {student.status}
                         </Badge>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No flight path</span>
-                      )}
-                    </td>
-                    <td className="p-2">
-                      <Badge 
-                        variant={student.status === 'online' ? 'default' : student.status === 'idle' ? 'secondary' : 'outline'}
-                        className="text-xs"
-                        data-testid={`badge-status-${student.studentId}`}
-                      >
-                        {student.status}
-                      </Badge>
-                    </td>
-                    <td className="p-2">
-                      {student.flightPathActive && student.primaryDeviceId ? (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => handleRemoveFlightPath(student.primaryDeviceId)}
-                          disabled={removeFlightPathMutation.isPending}
-                          data-testid={`button-remove-flight-path-${student.studentId}`}
-                          className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
-                        >
-                          <X className="h-3 w-3 mr-1" />
-                          Remove
-                        </Button>
-                      ) : student.screenLocked && student.primaryDeviceId ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => unlockScreenMutation.mutate([student.primaryDeviceId])}
-                          disabled={unlockScreenMutation.isPending}
-                          data-testid={`button-unlock-screen-${student.studentId}`}
-                          className="h-7 px-2 text-xs"
-                        >
-                          <Unlock className="h-3 w-3 mr-1" />
-                          Unlock
-                        </Button>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td className="p-2">
+                        {student.flightPathActive && primaryDeviceId ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => handleRemoveFlightPath(primaryDeviceId)}
+                            disabled={removeFlightPathMutation.isPending}
+                            data-testid={`button-remove-flight-path-${student.studentId}`}
+                            className="h-7 px-2 text-xs text-destructive hover:text-destructive hover:bg-destructive/10"
+                          >
+                            <X className="h-3 w-3 mr-1" />
+                            Remove
+                          </Button>
+                        ) : student.screenLocked && primaryDeviceId ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => unlockScreenMutation.mutate([primaryDeviceId])}
+                            disabled={unlockScreenMutation.isPending}
+                            data-testid={`button-unlock-screen-${student.studentId}`}
+                            className="h-7 px-2 text-xs"
+                          >
+                            <Unlock className="h-3 w-3 mr-1" />
+                            Unlock
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
                 {students.length === 0 && (
                   <tr>
                     <td colSpan={4} className="p-4 text-center text-sm text-muted-foreground">

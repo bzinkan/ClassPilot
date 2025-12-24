@@ -40,7 +40,22 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { Student, Settings } from "@shared/schema";
+import type { Device, Student, Settings } from "@shared/schema";
+
+type RosterFormData = {
+  deviceId: string;
+  deviceName: string;
+  studentName: string;
+  classId: string;
+  gradeLevel: string;
+};
+
+type RosterStudentUpdate = {
+  studentName?: string;
+  deviceName?: string | null;
+  classId?: string;
+  gradeLevel?: string | null;
+};
 
 export function RosterManagement() {
   const { toast } = useToast();
@@ -48,7 +63,7 @@ export function RosterManagement() {
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<RosterFormData>({
     deviceId: "",
     deviceName: "",
     studentName: "",
@@ -61,16 +76,21 @@ export function RosterManagement() {
     queryKey: ['/api/roster/students'],
   });
 
+  const { data: devices = [] } = useQuery<Device[]>({
+    queryKey: ['/api/roster/devices'],
+  });
+
   // Fetch settings to get available grade levels
   const { data: settings } = useQuery<Settings>({
     queryKey: ['/api/settings'],
   });
 
   const availableGrades = settings?.gradeLevels || ['6', '7', '8', '9', '10', '11', '12'];
+  const deviceById = new Map(devices.map((device) => [device.deviceId, device]));
 
   // Add student mutation
   const addStudentMutation = useMutation({
-    mutationFn: async (data: typeof formData) => {
+    mutationFn: async (data: RosterFormData) => {
       return await apiRequest("POST", "/api/roster/student", data);
     },
     onSuccess: () => {
@@ -94,7 +114,7 @@ export function RosterManagement() {
 
   // Edit student mutation
   const editStudentMutation = useMutation({
-    mutationFn: async ({ deviceId, updates }: { deviceId: string; updates: Partial<typeof formData> }) => {
+    mutationFn: async ({ deviceId, updates }: { deviceId: string; updates: RosterStudentUpdate }) => {
       return await apiRequest("PATCH", `/api/students/${deviceId}`, updates);
     },
     onSuccess: () => {
@@ -164,12 +184,14 @@ export function RosterManagement() {
   };
 
   const handleEdit = (student: Student) => {
+    const deviceId = student.deviceId ?? "";
+    const device = deviceId ? deviceById.get(deviceId) : undefined;
     setSelectedStudent(student);
     setFormData({
-      deviceId: student.deviceId,
-      deviceName: student.deviceName || "",
+      deviceId,
+      deviceName: device?.deviceName || "",
       studentName: student.studentName,
-      classId: student.classId,
+      classId: device?.classId || "",
       gradeLevel: student.gradeLevel || "",
     });
     setShowEditDialog(true);
@@ -178,14 +200,25 @@ export function RosterManagement() {
   const handleSaveEdit = () => {
     if (!selectedStudent) return;
     
-    const updates: Partial<typeof formData> = {};
+    if (!selectedStudent.deviceId) {
+      toast({
+        variant: "destructive",
+        title: "Missing device ID",
+        description: "This student does not have a device assigned.",
+      });
+      return;
+    }
+    const selectedDevice = deviceById.get(selectedStudent.deviceId);
+    const currentDeviceName = selectedDevice?.deviceName || "";
+    const currentClassId = selectedDevice?.classId || "";
+    const updates: RosterStudentUpdate = {};
     if (formData.studentName !== selectedStudent.studentName) {
       updates.studentName = formData.studentName;
     }
-    if (formData.deviceName !== (selectedStudent.deviceName || "")) {
+    if (formData.deviceName !== currentDeviceName) {
       updates.deviceName = formData.deviceName || null;
     }
-    if (formData.classId !== selectedStudent.classId) {
+    if (formData.classId !== currentClassId) {
       updates.classId = formData.classId;
     }
     if (formData.gradeLevel !== (selectedStudent.gradeLevel || "")) {
@@ -211,6 +244,14 @@ export function RosterManagement() {
 
   const confirmDelete = () => {
     if (!selectedStudent) return;
+    if (!selectedStudent.deviceId) {
+      toast({
+        variant: "destructive",
+        title: "Missing device ID",
+        description: "This student does not have a device assigned.",
+      });
+      return;
+    }
     deleteStudentMutation.mutate(selectedStudent.deviceId);
   };
 
@@ -263,9 +304,9 @@ export function RosterManagement() {
                 {students.map((student) => (
                   <TableRow key={student.deviceId} data-testid={`row-student-${student.deviceId}`}>
                     <TableCell className="font-medium">{student.studentName}</TableCell>
-                    <TableCell className="font-mono text-sm">{student.deviceId}</TableCell>
-                    <TableCell>{student.deviceName || "—"}</TableCell>
-                    <TableCell>{student.classId}</TableCell>
+                    <TableCell className="font-mono text-sm">{student.deviceId ?? "—"}</TableCell>
+                    <TableCell>{student.deviceId ? deviceById.get(student.deviceId)?.deviceName || "—" : "—"}</TableCell>
+                    <TableCell>{student.deviceId ? deviceById.get(student.deviceId)?.classId || "—" : "—"}</TableCell>
                     <TableCell>{student.gradeLevel || "—"}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
