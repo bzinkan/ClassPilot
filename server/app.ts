@@ -222,23 +222,6 @@ export async function createApp(options: AppOptions = {}) {
   // Setup Google OAuth (must be after session middleware)
   setupGoogleAuth(app);
 
-  // Extend session type
-  declare module "express-session" {
-    interface SessionData {
-      userId: string;
-      role: string;
-      schoolId?: string;
-      impersonating?: boolean;
-      originalUserId?: string;
-    }
-  }
-
-  declare module "http" {
-    interface IncomingMessage {
-      rawBody: unknown;
-    }
-  }
-
   // Parse JSON with size limit to prevent memory issues
   app.use(
     express.json({
