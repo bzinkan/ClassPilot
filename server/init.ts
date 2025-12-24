@@ -57,12 +57,12 @@ export async function initializeApp() {
   }
 
   // Create default settings
-  const existingSettings = await storage.getSettings();
+  const defaultSchoolId = process.env.SCHOOL_ID || "default-school";
+  const existingSettings = await storage.getSettingsBySchoolId(defaultSchoolId);
   if (!existingSettings) {
-    await storage.upsertSettings({
-      schoolId: process.env.SCHOOL_ID || "default-school",
+    await storage.upsertSettingsForSchool(defaultSchoolId, {
       schoolName: "Default School",
-      wsSharedKey: process.env.WS_SHARED_KEY || "change-this-websocket-key",
+      wsSharedKey: process.env.WS_SHARED_KEY || "change-this-key",
       retentionHours: "24",
       blockedDomains: [],
     });
@@ -73,16 +73,13 @@ export async function initializeApp() {
   // Only assign students that have NO teacher at all (don't overwrite existing assignments)
   const teacherUser = await storage.getUserByUsername("teacher");
   if (teacherUser) {
-    const settings = existingSettings ?? await storage.getSettings();
-    const defaultSchoolId = teacherUser.schoolId ?? settings?.schoolId;
-    if (!defaultSchoolId) {
-      return;
-    }
+    const settings = existingSettings ?? await storage.getSettingsBySchoolId(defaultSchoolId);
+    const teacherSchoolId = teacherUser.schoolId ?? settings?.schoolId ?? defaultSchoolId;
 
-    const allStudents = await storage.getStudentsBySchool(defaultSchoolId);
+    const allStudents = await storage.getStudentsBySchool(teacherSchoolId);
     
     // Get all teachers to check existing assignments
-    const allUsers = await storage.getUsersBySchool(defaultSchoolId);
+    const allUsers = await storage.getUsersBySchool(teacherSchoolId);
     const teacherIds = allUsers.filter(u => u.role === 'teacher').map(u => u.id);
     
     // Find students that have NO teacher at all
@@ -107,7 +104,7 @@ export async function initializeApp() {
     }
     
     // Update existing flight paths without teacherId
-    const allFlightPaths = await storage.getFlightPathsBySchool(defaultSchoolId);
+    const allFlightPaths = await storage.getFlightPathsBySchool(teacherSchoolId);
     const orphanedFlightPaths = allFlightPaths.filter(fp => fp.teacherId === null && !fp.isDefault);
     
     for (const fp of orphanedFlightPaths) {
@@ -115,7 +112,7 @@ export async function initializeApp() {
     }
     
     // Update existing student groups without teacherId
-    const allGroups = await storage.getStudentGroupsBySchool(defaultSchoolId);
+    const allGroups = await storage.getStudentGroupsBySchool(teacherSchoolId);
     const orphanedGroups = allGroups.filter(g => g.teacherId === null);
     
     for (const group of orphanedGroups) {

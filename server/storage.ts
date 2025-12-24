@@ -85,6 +85,7 @@ type GoogleOAuthTokenUpdateSet = Partial<
 > & { updatedAt: Date };
 
 const ENCRYPTED_SECRET_PARTS = 3;
+type SettingsUpsertInput = Partial<InsertSettings>;
 
 function isEncryptedSecret(value?: string | null): value is string {
   if (!value) return false;
@@ -98,6 +99,34 @@ function normalizeExpiryDate(value: GoogleOAuthTokenUpsert["expiryDate"]): Date 
   if (value instanceof Date) return value;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+function buildDefaultSettingsInput({
+  schoolId,
+  schoolName,
+  wsSharedKey,
+}: {
+  schoolId: string;
+  schoolName?: string | null;
+  wsSharedKey?: string | null;
+}): Omit<Settings, "id"> {
+  return {
+    schoolId,
+    schoolName: schoolName ?? "School",
+    wsSharedKey: wsSharedKey ?? process.env.WS_SHARED_KEY ?? "change-this-key",
+    retentionHours: "24",
+    blockedDomains: [],
+    allowedDomains: [],
+    ipAllowlist: [],
+    gradeLevels: ["6", "7", "8", "9", "10", "11", "12"],
+    maxTabsPerStudent: null,
+    activeFlightPathId: null,
+    enableTrackingHours: false,
+    trackingStartTime: "08:00",
+    trackingEndTime: "15:00",
+    schoolTimezone: "America/New_York",
+    trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+  };
 }
 
 export interface IStorage {
@@ -196,8 +225,9 @@ export interface IStorage {
   upsertRoster(roster: InsertRoster): Promise<Roster>;
 
   // Settings
-  getSettings(): Promise<Settings | undefined>;
-  upsertSettings(settings: InsertSettings): Promise<Settings>;
+  getSettingsBySchoolId(schoolId: string): Promise<Settings | null>;
+  upsertSettingsForSchool(schoolId: string, input: SettingsUpsertInput): Promise<Settings>;
+  ensureSettingsForSchool(schoolId: string): Promise<Settings>;
 
   // Teacher Settings
   getTeacherSettings(teacherId: string): Promise<TeacherSettings | undefined>;
@@ -281,7 +311,7 @@ export class MemStorage implements IStorage {
   private classroomCourses: Map<string, ClassroomCourse>;
   private classroomCourseStudents: Map<string, Array<Pick<InsertClassroomCourseStudent, "studentId" | "googleUserId" | "studentEmailLc">>>;
   private rosters: Map<string, Roster>;
-  private settings: Settings | undefined;
+  private settingsBySchool: Map<string, Settings>;
   private teacherSettings: Map<string, TeacherSettings>;
   private teacherStudents: TeacherStudent[];
   private flightPaths: Map<string, FlightPath>;
@@ -303,6 +333,7 @@ export class MemStorage implements IStorage {
     this.classroomCourses = new Map();
     this.classroomCourseStudents = new Map();
     this.rosters = new Map();
+    this.settingsBySchool = new Map();
     this.teacherSettings = new Map();
     this.teacherStudents = [];
     this.flightPaths = new Map();
@@ -1274,31 +1305,52 @@ export class MemStorage implements IStorage {
   }
 
   // Settings
-  async getSettings(): Promise<Settings | undefined> {
-    return this.settings;
+  async getSettingsBySchoolId(schoolId: string): Promise<Settings | null> {
+    return this.settingsBySchool.get(schoolId) ?? null;
   }
 
-  async upsertSettings(insertSettings: InsertSettings): Promise<Settings> {
+  async ensureSettingsForSchool(schoolId: string): Promise<Settings> {
+    const existing = await this.getSettingsBySchoolId(schoolId);
+    if (existing) {
+      return existing;
+    }
+    const schoolName = this.schools.get(schoolId)?.name;
+    const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
     const settings: Settings = {
-      id: this.settings?.id || randomUUID(),
-      schoolId: insertSettings.schoolId,
-      schoolName: insertSettings.schoolName,
-      wsSharedKey: insertSettings.wsSharedKey,
-      retentionHours: insertSettings.retentionHours ?? "24",
-      blockedDomains: insertSettings.blockedDomains ?? null,
-      allowedDomains: insertSettings.allowedDomains ?? null,
-      ipAllowlist: insertSettings.ipAllowlist ?? null,
-      gradeLevels: insertSettings.gradeLevels ?? null,
-      maxTabsPerStudent: insertSettings.maxTabsPerStudent ?? null,
-      activeFlightPathId: insertSettings.activeFlightPathId ?? null,
-      enableTrackingHours: insertSettings.enableTrackingHours ?? false,
-      trackingStartTime: insertSettings.trackingStartTime ?? "08:00",
-      trackingEndTime: insertSettings.trackingEndTime ?? "15:00",
-      schoolTimezone: insertSettings.schoolTimezone ?? "America/New_York",
-      trackingDays: insertSettings.trackingDays ?? null,
+      id: randomUUID(),
+      ...defaults,
     };
-    this.settings = settings;
+    this.settingsBySchool.set(schoolId, settings);
     return settings;
+  }
+
+  async upsertSettingsForSchool(schoolId: string, input: SettingsUpsertInput): Promise<Settings> {
+    const existing = await this.getSettingsBySchoolId(schoolId);
+    const sanitizedInput = Object.fromEntries(
+      Object.entries(input).filter(([, value]) => value !== undefined)
+    ) as SettingsUpsertInput;
+    const schoolName = input.schoolName ?? this.schools.get(schoolId)?.name;
+    const defaults = buildDefaultSettingsInput({
+      schoolId,
+      schoolName,
+      wsSharedKey: input.wsSharedKey,
+    });
+    const settings: Settings = {
+      id: existing?.id ?? randomUUID(),
+      ...defaults,
+      ...sanitizedInput,
+      schoolId,
+    };
+    this.settingsBySchool.set(schoolId, settings);
+    return settings;
+  }
+
+  async getSettings(): Promise<Settings | undefined> {
+    throw new Error("Unscoped settings are forbidden. Use getSettingsBySchoolId(schoolId).");
+  }
+
+  async upsertSettings(_insertSettings: InsertSettings): Promise<Settings> {
+    throw new Error("Unscoped settings are forbidden. Use upsertSettingsForSchool(schoolId, input).");
   }
 
   // Teacher Settings
@@ -1617,6 +1669,15 @@ export class DatabaseStorage implements IStorage {
       return fn(deviceId);
     }
     return undefined;
+  }
+
+  private async getSchoolNameForSettings(schoolId: string): Promise<string | null> {
+    const [school] = await db
+      .select({ name: schools.name })
+      .from(schools)
+      .where(eq(schools.id, schoolId))
+      .limit(1);
+    return school?.name ?? null;
   }
 
   // Rehydrate studentStatuses from database on startup
@@ -2778,28 +2839,68 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Settings
-  async getSettings(): Promise<Settings | undefined> {
-    const [setting] = await db.select().from(settings).limit(1);
-    return setting || undefined;
+  async getSettingsBySchoolId(schoolId: string): Promise<Settings | null> {
+    const [setting] = await db
+      .select()
+      .from(settings)
+      .where(eq(settings.schoolId, schoolId))
+      .limit(1);
+    return setting || null;
   }
 
-  async upsertSettings(insertSettings: InsertSettings): Promise<Settings> {
-    const existing = await this.getSettings();
-    
+  async ensureSettingsForSchool(schoolId: string): Promise<Settings> {
+    const existing = await this.getSettingsBySchoolId(schoolId);
     if (existing) {
-      const [updated] = await db
-        .update(settings)
-        .set(insertSettings)
-        .where(eq(settings.id, existing.id))
-        .returning();
-      return updated;
-    } else {
-      const [created] = await db
-        .insert(settings)
-        .values(insertSettings)
-        .returning();
+      return existing;
+    }
+    const schoolName = await this.getSchoolNameForSettings(schoolId);
+    const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
+    const [created] = await db
+      .insert(settings)
+      .values(defaults)
+      .onConflictDoNothing()
+      .returning();
+    if (created) {
       return created;
     }
+    const fallback = await this.getSettingsBySchoolId(schoolId);
+    if (!fallback) {
+      throw new Error(`Failed to ensure settings for schoolId=${schoolId}`);
+    }
+    return fallback;
+  }
+
+  async upsertSettingsForSchool(schoolId: string, input: SettingsUpsertInput): Promise<Settings> {
+    const sanitizedInput = Object.fromEntries(
+      Object.entries(input).filter(([, value]) => value !== undefined)
+    ) as SettingsUpsertInput;
+    const schoolName = sanitizedInput.schoolName ?? await this.getSchoolNameForSettings(schoolId);
+    const defaults = buildDefaultSettingsInput({
+      schoolId,
+      schoolName,
+      wsSharedKey: sanitizedInput.wsSharedKey,
+    });
+    const { schoolId: _ignoredSchoolId, ...updateInput } = sanitizedInput;
+    const updateSet = Object.fromEntries(
+      Object.entries(updateInput).filter(([, value]) => value !== undefined)
+    );
+    const [result] = await db
+      .insert(settings)
+      .values({ ...defaults, ...sanitizedInput, schoolId })
+      .onConflictDoUpdate({
+        target: settings.schoolId,
+        set: updateSet,
+      })
+      .returning();
+    return result;
+  }
+
+  async getSettings(): Promise<Settings | undefined> {
+    throw new Error("Unscoped settings are forbidden. Use getSettingsBySchoolId(schoolId).");
+  }
+
+  async upsertSettings(_insertSettings: InsertSettings): Promise<Settings> {
+    throw new Error("Unscoped settings are forbidden. Use upsertSettingsForSchool(schoolId, input).");
   }
 
   // Teacher Settings
