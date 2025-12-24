@@ -8,9 +8,13 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "client", "src"),
       "@shared": path.resolve(__dirname, "shared"),
+      "@server": path.resolve(__dirname, "server"),
     },
   },
   test: {
     environment: "node",
+    include: ["server/__tests__/**/*.test.ts"],
+    globals: true,
+    setupFiles: ["./server/__tests__/testUtils.ts"],
   },
 });
