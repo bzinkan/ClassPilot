@@ -4236,7 +4236,7 @@ export async function registerRoutes(
       // Sort by device ID and start time
       data.sort((a, b) => {
         if (a['Device ID'] !== b['Device ID']) {
-          return a['Device ID'].localeCompare(b['Device ID']);
+          return String(a['Device ID']).localeCompare(String(b['Device ID']));
         }
         return new Date(a['Start Time']).getTime() - new Date(b['Start Time']).getTime();
       });

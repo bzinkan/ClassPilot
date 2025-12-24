@@ -11,22 +11,6 @@ import { getRequiredSecret, isProduction } from "./util/env";
 import { buildClientConfig } from "./config/clientConfig";
 import { type IStorage, storage as defaultStorage } from "./storage";
 
-declare module "express-session" {
-  interface SessionData {
-    userId: string;
-    role: string;
-    schoolId?: string;
-    impersonating?: boolean;
-    originalUserId?: string;
-  }
-}
-
-declare module "http" {
-  interface IncomingMessage {
-    rawBody: unknown;
-  }
-}
-
 const SENTRY_DSN_SERVER = process.env.SENTRY_DSN_SERVER;
 const SENTRY_SENSITIVE_KEY_REGEX = /(email|student|name)/i;
 const SENTRY_URL_KEY_REGEX = /url/i;
@@ -256,7 +240,7 @@ export async function createApp(options: AppOptions = {}) {
     express.json({
       limit: "12kb", // Prevent large payload attacks
       verify: (req, _res, buf) => {
-        // rawBody is declared via server/types/global.d.ts
+        // rawBody is declared via server/types/express.d.ts
         req.rawBody = buf;
       },
     })
