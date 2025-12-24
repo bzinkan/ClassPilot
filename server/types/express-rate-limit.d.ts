@@ -1,13 +1,9 @@
 import "express";
 
-declare module "express" {
+declare module "express-serve-static-core" {
   interface Request {
     rateLimit?: {
-      limit: number;
-      remaining: number;
       resetTime?: Date;
     };
   }
 }
-
-export {};
