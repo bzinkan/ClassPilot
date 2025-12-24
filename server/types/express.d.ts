@@ -11,6 +11,7 @@ declare module "express-session" {
     impersonatedUserId?: string;
     impersonating?: boolean;
     originalUserId?: string;
+    schoolSessionVersion?: number;
   }
 }
 

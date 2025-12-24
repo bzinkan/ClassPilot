@@ -20,6 +20,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'get-camera-status') {
     sendResponse({ cameraActive: cameraActive });
   }
+
+  if (message.type === 'CLASSPILOT_LICENSE_INACTIVE') {
+    showLicenseBanner(message.planStatus);
+  }
+
+  if (message.type === 'CLASSPILOT_LICENSE_ACTIVE') {
+    removeLicenseBanner();
+  }
   
   return true;
 });
@@ -78,6 +86,40 @@ function updateCameraStatus(isActive) {
       // Ignore errors if extension context is invalidated
       console.log('[ClassPilot] Could not notify service worker:', err);
     });
+  }
+}
+
+function showLicenseBanner(planStatus) {
+  const existingBanner = document.getElementById('classpilot-license-banner');
+  const statusText = planStatus ? ` (planStatus=${planStatus})` : '';
+
+  if (existingBanner) {
+    existingBanner.textContent = `ClassPilot disabled: school license inactive${statusText}`;
+    return;
+  }
+
+  const banner = document.createElement('div');
+  banner.id = 'classpilot-license-banner';
+  banner.textContent = `ClassPilot disabled: school license inactive${statusText}`;
+  banner.style.position = 'fixed';
+  banner.style.top = '0';
+  banner.style.left = '0';
+  banner.style.right = '0';
+  banner.style.zIndex = '2147483647';
+  banner.style.background = '#fee2e2';
+  banner.style.color = '#7f1d1d';
+  banner.style.fontSize = '14px';
+  banner.style.fontWeight = '600';
+  banner.style.padding = '10px 16px';
+  banner.style.textAlign = 'center';
+  banner.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
+  document.body.appendChild(banner);
+}
+
+function removeLicenseBanner() {
+  const existingBanner = document.getElementById('classpilot-license-banner');
+  if (existingBanner) {
+    existingBanner.remove();
   }
 }
 

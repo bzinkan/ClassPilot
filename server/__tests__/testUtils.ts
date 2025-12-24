@@ -16,6 +16,7 @@ export function createTestStorage() {
   const users = new Map<string, any>();
   const students = new Map<string, any>();
   const devices = new Map<string, any>();
+  const schools = new Map<string, any>();
 
   return {
     users,
@@ -33,7 +34,47 @@ export function createTestStorage() {
         displayName: overrides?.displayName ?? "Test Teacher",
       };
       users.set(user.id, user);
+      if (user.schoolId && !schools.has(user.schoolId)) {
+        schools.set(user.schoolId, {
+          id: user.schoolId,
+          name: overrides?.schoolName ?? "Test School",
+          domain: overrides?.schoolDomain ?? "classpilot.test",
+          status: "active",
+          isActive: true,
+          planStatus: "active",
+          stripeSubscriptionId: null,
+          disabledAt: null,
+          disabledReason: null,
+          schoolSessionVersion: 1,
+          maxLicenses: 100,
+          createdAt: new Date(),
+          trialEndsAt: null,
+          deletedAt: null,
+          lastActivityAt: null,
+        });
+      }
       return user;
+    },
+    async seedSchool(overrides?: Partial<any>) {
+      const school = {
+        id: overrides?.id ?? `school-${schools.size + 1}`,
+        name: overrides?.name ?? "Test School",
+        domain: overrides?.domain ?? `school${schools.size + 1}.test`,
+        status: overrides?.status ?? "active",
+        isActive: overrides?.isActive ?? true,
+        planStatus: overrides?.planStatus ?? "active",
+        stripeSubscriptionId: overrides?.stripeSubscriptionId ?? null,
+        disabledAt: overrides?.disabledAt ?? null,
+        disabledReason: overrides?.disabledReason ?? null,
+        schoolSessionVersion: overrides?.schoolSessionVersion ?? 1,
+        maxLicenses: overrides?.maxLicenses ?? 100,
+        createdAt: overrides?.createdAt ?? new Date(),
+        trialEndsAt: overrides?.trialEndsAt ?? null,
+        deletedAt: overrides?.deletedAt ?? null,
+        lastActivityAt: overrides?.lastActivityAt ?? null,
+      };
+      schools.set(school.id, school);
+      return school;
     },
     async seedStudent(overrides?: Partial<any>) {
       const student = {
@@ -72,6 +113,62 @@ export function createTestStorage() {
         enableTrackingHours: false,
         maxTabsPerStudent: null,
       };
+    },
+    async getSchool(id: string) {
+      return schools.get(id);
+    },
+    async getSchoolByDomain(domain: string) {
+      return Array.from(schools.values()).find((school) => school.domain === domain);
+    },
+    async updateSchool(id: string, updates: Partial<any>) {
+      const school = schools.get(id);
+      if (!school) {
+        return undefined;
+      }
+      const updated = { ...school, ...updates };
+      schools.set(id, updated);
+      return updated;
+    },
+    async bumpSchoolSessionVersion(id: string) {
+      const school = schools.get(id);
+      if (!school) {
+        return 0;
+      }
+      school.schoolSessionVersion = (school.schoolSessionVersion ?? 1) + 1;
+      schools.set(id, school);
+      return school.schoolSessionVersion;
+    },
+    async setSchoolActiveState(id: string, state: { isActive?: boolean; planStatus?: string; disabledReason?: string | null }) {
+      const school = schools.get(id);
+      if (!school) {
+        return undefined;
+      }
+      const nextIsActive = state.isActive ?? school.isActive;
+      const nextPlanStatus = state.planStatus ?? school.planStatus;
+      const isDeactivating =
+        (school.isActive && nextIsActive === false)
+        || (school.planStatus !== "canceled" && nextPlanStatus === "canceled");
+      const isReactivating =
+        (!school.isActive && nextIsActive === true)
+        || (school.planStatus === "canceled" && nextPlanStatus !== "canceled");
+
+      school.isActive = nextIsActive;
+      school.planStatus = nextPlanStatus;
+
+      if (isDeactivating) {
+        school.disabledAt = new Date();
+        school.disabledReason = state.disabledReason ?? school.disabledReason ?? null;
+        school.schoolSessionVersion = (school.schoolSessionVersion ?? 1) + 1;
+      } else if (isReactivating) {
+        school.disabledAt = null;
+        school.disabledReason = null;
+        school.schoolSessionVersion = (school.schoolSessionVersion ?? 1) + 1;
+      } else if (state.disabledReason !== undefined) {
+        school.disabledReason = state.disabledReason;
+      }
+
+      schools.set(id, school);
+      return school;
     },
     async getStudent(id: string) {
       return students.get(id);

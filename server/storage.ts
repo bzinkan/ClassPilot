@@ -107,6 +107,11 @@ export interface IStorage {
   getAllSchools(includeDeleted?: boolean): Promise<School[]>;
   createSchool(school: InsertSchool): Promise<School>;
   updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined>;
+  bumpSchoolSessionVersion(schoolId: string): Promise<number>;
+  setSchoolActiveState(
+    schoolId: string,
+    state: { isActive?: boolean; planStatus?: string; disabledReason?: string | null }
+  ): Promise<School | undefined>;
   deleteSchool(id: string): Promise<boolean>;
   softDeleteSchool(id: string): Promise<School | undefined>; // Soft delete (set deletedAt)
   restoreSchool(id: string): Promise<School | undefined>; // Restore soft-deleted school (clear deletedAt)
@@ -344,11 +349,21 @@ export class MemStorage implements IStorage {
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
     const id = randomUUID();
+    const status = insertSchool.status || "trial";
+    const planStatus = insertSchool.planStatus
+      ?? (status === "trial" ? "trialing" : status === "suspended" ? "canceled" : "active");
+    const isActive = insertSchool.isActive ?? status !== "suspended";
     const school: School = {
       id,
       name: insertSchool.name,
       domain: insertSchool.domain,
-      status: insertSchool.status || 'trial',
+      status,
+      isActive,
+      planStatus,
+      stripeSubscriptionId: insertSchool.stripeSubscriptionId ?? null,
+      disabledAt: insertSchool.disabledAt ?? null,
+      disabledReason: insertSchool.disabledReason ?? null,
+      schoolSessionVersion: insertSchool.schoolSessionVersion ?? 1,
       maxLicenses: insertSchool.maxLicenses ?? 100,
       createdAt: new Date(),
       trialEndsAt: insertSchool.trialEndsAt ?? null,
@@ -365,6 +380,50 @@ export class MemStorage implements IStorage {
     
     Object.assign(school, updates);
     this.schools.set(id, school);
+    return school;
+  }
+
+  async bumpSchoolSessionVersion(schoolId: string): Promise<number> {
+    const school = this.schools.get(schoolId);
+    if (!school) return 0;
+    const nextVersion = (school.schoolSessionVersion ?? 1) + 1;
+    school.schoolSessionVersion = nextVersion;
+    this.schools.set(schoolId, school);
+    return nextVersion;
+  }
+
+  async setSchoolActiveState(
+    schoolId: string,
+    state: { isActive?: boolean; planStatus?: string; disabledReason?: string | null }
+  ): Promise<School | undefined> {
+    const school = this.schools.get(schoolId);
+    if (!school) return undefined;
+
+    const nextIsActive = state.isActive ?? school.isActive;
+    const nextPlanStatus = state.planStatus ?? school.planStatus;
+    const isDeactivating =
+      (school.isActive && nextIsActive === false)
+      || (school.planStatus !== "canceled" && nextPlanStatus === "canceled");
+    const isReactivating =
+      (!school.isActive && nextIsActive === true)
+      || (school.planStatus === "canceled" && nextPlanStatus !== "canceled");
+
+    school.isActive = nextIsActive;
+    school.planStatus = nextPlanStatus;
+
+    if (isDeactivating) {
+      school.disabledAt = new Date();
+      school.disabledReason = state.disabledReason ?? school.disabledReason ?? null;
+      await this.bumpSchoolSessionVersion(schoolId);
+    } else if (isReactivating) {
+      school.disabledAt = null;
+      school.disabledReason = null;
+      await this.bumpSchoolSessionVersion(schoolId);
+    } else if (state.disabledReason !== undefined) {
+      school.disabledReason = state.disabledReason;
+    }
+
+    this.schools.set(schoolId, school);
     return school;
   }
 
@@ -1620,9 +1679,19 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
+    const status = insertSchool.status ?? "trial";
+    const planStatus = insertSchool.planStatus
+      ?? (status === "trial" ? "trialing" : status === "suspended" ? "canceled" : "active");
+    const isActive = insertSchool.isActive ?? status !== "suspended";
     const [school] = await db
       .insert(schools)
-      .values(insertSchool)
+      .values({
+        ...insertSchool,
+        status,
+        isActive,
+        planStatus,
+        schoolSessionVersion: insertSchool.schoolSessionVersion ?? 1,
+      })
       .returning();
     return school;
   }
@@ -1634,6 +1703,54 @@ export class DatabaseStorage implements IStorage {
       .where(eq(schools.id, id))
       .returning();
     return school || undefined;
+  }
+
+  async bumpSchoolSessionVersion(schoolId: string): Promise<number> {
+    const [school] = await db
+      .update(schools)
+      .set({ schoolSessionVersion: drizzleSql`${schools.schoolSessionVersion} + 1` })
+      .where(eq(schools.id, schoolId))
+      .returning();
+    return school?.schoolSessionVersion ?? 0;
+  }
+
+  async setSchoolActiveState(
+    schoolId: string,
+    state: { isActive?: boolean; planStatus?: string; disabledReason?: string | null }
+  ): Promise<School | undefined> {
+    const school = await this.getSchool(schoolId);
+    if (!school) return undefined;
+
+    const nextIsActive = state.isActive ?? school.isActive;
+    const nextPlanStatus = state.planStatus ?? school.planStatus;
+    const isDeactivating =
+      (school.isActive && nextIsActive === false)
+      || (school.planStatus !== "canceled" && nextPlanStatus === "canceled");
+    const isReactivating =
+      (!school.isActive && nextIsActive === true)
+      || (school.planStatus === "canceled" && nextPlanStatus !== "canceled");
+
+    const updates: Partial<InsertSchool> = {
+      isActive: nextIsActive,
+      planStatus: nextPlanStatus,
+    };
+
+    if (isDeactivating) {
+      updates.disabledAt = new Date();
+      updates.disabledReason = state.disabledReason ?? school.disabledReason ?? null;
+    } else if (isReactivating) {
+      updates.disabledAt = null;
+      updates.disabledReason = null;
+    } else if (state.disabledReason !== undefined) {
+      updates.disabledReason = state.disabledReason;
+    }
+
+    const updated = await this.updateSchool(schoolId, updates);
+    if (updated && (isDeactivating || isReactivating)) {
+      await this.bumpSchoolSessionVersion(schoolId);
+      return await this.getSchool(schoolId);
+    }
+    return updated;
   }
 
   async deleteSchool(id: string): Promise<boolean> {
