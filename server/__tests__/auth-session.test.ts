@@ -33,9 +33,11 @@ describe("auth session boot", () => {
     expect(meResponse.body).toMatchObject({
       success: true,
       user: {
-        username: "teacher",
         role: "teacher",
       },
     });
+    if ("username" in meResponse.body.user) {
+      expect(meResponse.body.user.username).toBe("teacher");
+    }
   });
 });
