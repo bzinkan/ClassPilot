@@ -53,6 +53,7 @@ import {
   requireSchoolContext,
 } from "./middleware/authz";
 import { parseCsv, stringifyCsv } from "./util/csv";
+import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -934,11 +935,21 @@ export async function registerRoutes(
       }
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
-        return res.status(404).json({ error: "User not found" });
+        return res.status(403).json({ error: "Forbidden" });
       }
       const schoolId = sessionSchoolId;
 
       const data = createTeacherSchema.parse(req.body);
+
+      if (data.schoolId && data.schoolId !== schoolId) {
+        return res.status(403).json({ error: "Cannot create users for another school" });
+      }
+
+      const school = await storage.getSchool(schoolId);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+      assertEmailMatchesDomain(data.email, school.domain);
       
       // Check if email already exists
       const existing = await storage.getUserByEmail(data.email);
@@ -976,6 +987,8 @@ export async function registerRoutes(
       if (error.errors) {
         // Zod validation error
         res.status(400).json({ error: error.errors[0].message });
+      } else if (error instanceof EmailDomainError) {
+        res.status(error.status).json({ error: error.message });
       } else {
         res.status(500).json({ error: "Failed to create teacher" });
       }
@@ -1116,6 +1129,7 @@ export async function registerRoutes(
       // If firstAdminEmail provided, create school admin user
       // User can log in via Google OAuth or email/password (if password provided)
       if (data.firstAdminEmail) {
+        assertEmailMatchesDomain(data.firstAdminEmail, data.domain);
         // Hash password if provided
         let hashedPassword = null;
         if (data.firstAdminPassword && data.firstAdminPassword.trim().length > 0) {
@@ -1144,6 +1158,9 @@ export async function registerRoutes(
       }
     } catch (error) {
       console.error("Create school error:", error);
+      if (error instanceof EmailDomainError) {
+        return res.status(error.status).json({ error: error.message });
+      }
       res.status(500).json({ error: "Failed to create school" });
     }
   });
@@ -1461,6 +1478,8 @@ export async function registerRoutes(
         return res.status(400).json({ error: "User with this email already exists" });
       }
 
+      assertEmailMatchesDomain(email, school.domain);
+
       const tempPassword = Math.random().toString(36).slice(-10);
       const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
@@ -1483,6 +1502,9 @@ export async function registerRoutes(
       });
     } catch (error) {
       console.error("Add admin error:", error);
+      if (error instanceof EmailDomainError) {
+        return res.status(error.status).json({ error: error.message });
+      }
       res.status(500).json({ error: "Failed to add admin" });
     }
   });

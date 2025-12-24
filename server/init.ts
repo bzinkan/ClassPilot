@@ -2,6 +2,19 @@ import { storage } from "./storage";
 import bcrypt from "bcrypt";
 
 export async function initializeApp() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const seedDemoUsersEnv = process.env.SEED_DEMO_USERS;
+  const seedDemoUsers = seedDemoUsersEnv === "true";
+  const shouldSeedDemoUsers = !isProduction && (seedDemoUsers || seedDemoUsersEnv === undefined);
+
+  if (isProduction && seedDemoUsers) {
+    console.warn("⚠️  SEED_DEMO_USERS=true ignored in production - demo users will not be created.");
+  }
+
+  if (shouldSeedDemoUsers) {
+    console.log("🔧 Seeding demo users (non-production environment).");
+  }
+
   // Create super admin account from environment variable if none exists
   const superAdminEmail = process.env.SUPER_ADMIN_EMAIL;
   
@@ -24,36 +37,38 @@ export async function initializeApp() {
     console.log("⚠️  No SUPER_ADMIN_EMAIL set - super admin account not created");
   }
   
-  // Create default admin account if none exists (legacy - for backward compatibility)
-  const existingAdmin = await storage.getUserByUsername("admin");
-  
-  if (!existingAdmin) {
-    const hashedPassword = await bcrypt.hash("admin123", 10);
-    await storage.createUser({
-      username: "admin",
-      email: "admin@localhost",
-      password: hashedPassword,
-      role: "admin",
-      schoolName: "Default School",
-    });
-    console.log("Created default admin account: username='admin', password='admin123'");
-    console.log("⚠️  IMPORTANT: Change this password in production!");
-  }
-  
-  // Create default teacher account if none exists (legacy - for backward compatibility)
-  const existingTeacher = await storage.getUserByUsername("teacher");
-  
-  if (!existingTeacher) {
-    const hashedPassword = await bcrypt.hash("teacher123", 10);
-    await storage.createUser({
-      username: "teacher",
-      email: "teacher@localhost",
-      password: hashedPassword,
-      role: "teacher",
-      schoolName: "Default School",
-    });
-    console.log("Created default teacher account: username='teacher', password='teacher123'");
-    console.log("⚠️  IMPORTANT: Change this password in production!");
+  if (shouldSeedDemoUsers) {
+    // Create default admin account if none exists (legacy - for backward compatibility)
+    const existingAdmin = await storage.getUserByUsername("admin");
+    
+    if (!existingAdmin) {
+      const hashedPassword = await bcrypt.hash("admin123", 10);
+      await storage.createUser({
+        username: "admin",
+        email: "admin@localhost",
+        password: hashedPassword,
+        role: "admin",
+        schoolName: "Default School",
+      });
+      console.log("Created default admin account: username='admin', password='admin123'");
+      console.log("⚠️  IMPORTANT: Change this password in production!");
+    }
+    
+    // Create default teacher account if none exists (legacy - for backward compatibility)
+    const existingTeacher = await storage.getUserByUsername("teacher");
+    
+    if (!existingTeacher) {
+      const hashedPassword = await bcrypt.hash("teacher123", 10);
+      await storage.createUser({
+        username: "teacher",
+        email: "teacher@localhost",
+        password: hashedPassword,
+        role: "teacher",
+        schoolName: "Default School",
+      });
+      console.log("Created default teacher account: username='teacher', password='teacher123'");
+      console.log("⚠️  IMPORTANT: Change this password in production!");
+    }
   }
 
   // Create default settings
