@@ -73,14 +73,19 @@ describe("tenant isolation guards", () => {
   });
 
   it("blocks inactive schools and invalidates session", async () => {
+    const inactiveAgent = request.agent(app);
+    await inactiveAgent.post("/api/login").send({
+      email: "teacher@classpilot.test",
+      password: "testpass123",
+    });
     await storage.updateSchool("school-1", { isActive: false, planStatus: "canceled" });
 
-    const response = await agent.get("/api/students");
+    const response = await inactiveAgent.get("/api/students");
 
     expect(response.status).toBe(402);
     expect(response.body).toMatchObject({ error: "School license inactive" });
 
-    const followUp = await agent.get("/api/me");
+    const followUp = await inactiveAgent.get("/api/me");
     expect(followUp.status).toBe(401);
 
     await storage.updateSchool("school-1", { isActive: true, planStatus: "active" });
