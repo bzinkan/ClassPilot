@@ -230,7 +230,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     }
     
     // Update device name if changed
-    if (newDeviceName !== (student.deviceName || '')) {
+    if (student.primaryDeviceId && newDeviceName !== (student.deviceName || '')) {
       updateDeviceMutation.mutate({
         deviceId: student.primaryDeviceId,
         deviceName: newDeviceName
@@ -681,7 +681,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   }
                 }}
                 title={liveStream ? "Stop live view" : "Start live view"}
-                data-testid={`button-live-view-${student.primaryDeviceId}`}
+                data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
               >
                 <Monitor className="h-3.5 w-3.5 mr-1" />
                 {liveStream ? "Stop" : "View"}
@@ -693,7 +693,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
       {/* Edit Student Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId}`}>
+        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId ?? "unknown-device"}`}>
           <DialogHeader>
             <DialogTitle>Edit Student Information</DialogTitle>
             <DialogDescription>
@@ -705,7 +705,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-id">Device ID (Read-only)</Label>
               <Input
                 id="device-id"
-                value={student.primaryDeviceId}
+                value={student.primaryDeviceId ?? ""}
                 disabled
                 className="font-mono text-sm"
               />
@@ -714,7 +714,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-name">Device Name (Optional)</Label>
               <Input
                 id="device-name"
-                data-testid={`input-edit-device-name-${student.primaryDeviceId}`}
+                data-testid={`input-edit-device-name-${student.primaryDeviceId ?? "unknown-device"}`}
                 value={newDeviceName}
                 onChange={(e) => setNewDeviceName(e.target.value)}
                 placeholder="e.g., 6th chromebook 1"
@@ -729,7 +729,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="student-name">Student Name</Label>
               <Input
                 id="student-name"
-                data-testid={`input-edit-student-name-${student.primaryDeviceId}`}
+                data-testid={`input-edit-student-name-${student.primaryDeviceId ?? "unknown-device"}`}
                 value={newStudentName}
                 onChange={(e) => setNewStudentName(e.target.value)}
                 placeholder="e.g., Lucy Garcia"
@@ -788,7 +788,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       {/* Video Portal for enlarged view */}
       {expanded && liveStream && (
         <VideoPortal
-          studentName={student.studentName || student.deviceName || student.primaryDeviceId}
+          studentName={student.studentName || student.deviceName || student.primaryDeviceId || "Unknown student"}
           onClose={handleCollapse}
         />
       )}

@@ -2629,12 +2629,13 @@ export async function registerRoutes(
       if (!user || !user.schoolId) {
         return res.status(400).json({ error: "User must belong to a school" });
       }
+      const schoolId = user.schoolId;
 
       // Get all classroom courses for this school
-      const courses = await storage.getClassroomCoursesForSchool(user.schoolId);
+      const courses = await storage.getClassroomCoursesForSchool(schoolId);
       
       // Get all teachers in the school to match by googleId
-      const schoolUsers = await storage.getUsersBySchool(user.schoolId);
+      const schoolUsers = await storage.getUsersBySchool(schoolId);
       const teachersByGoogleId = new Map<string, { id: string; displayName: string | null; email: string }>();
       for (const u of schoolUsers) {
         if (u.googleId && (u.role === "teacher" || u.role === "school_admin")) {
@@ -2643,12 +2644,12 @@ export async function registerRoutes(
       }
       
       // Get existing ClassPilot classes to check for duplicates
-      const allGroups = await storage.getGroupsBySchool(user.schoolId);
+      const allGroups = await storage.getGroupsBySchool(schoolId);
       const existingClassNames = new Set(allGroups.map(g => g.name.toLowerCase()));
 
       // Build preview with student counts and teacher info
       const coursesPreview = await Promise.all(courses.map(async (course) => {
-        const studentCount = await storage.getClassroomCourseStudentCount(user.schoolId, course.courseId);
+        const studentCount = await storage.getClassroomCourseStudentCount(schoolId, course.courseId);
         const teacher = course.ownerId ? teachersByGoogleId.get(course.ownerId) : undefined;
         const alreadyExists = existingClassNames.has(course.name.toLowerCase());
         
@@ -3253,6 +3254,9 @@ export async function registerRoutes(
       }
 
       try {
+        if (!studentToken) {
+          return res.status(401).json({ error: "Unauthorized" });
+        }
         const payload = verifyStudentToken(studentToken);
         if (settings?.schoolId && payload.schoolId && settings.schoolId !== payload.schoolId) {
           return res.status(403).json({ error: "Settings are not available for this school" });

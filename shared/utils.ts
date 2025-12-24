@@ -35,7 +35,7 @@ export function calculateURLSessions(
   for (let i = 0; i < sorted.length; i++) {
     const heartbeat = sorted[i];
     const currentTime = new Date(heartbeat.timestamp);
-    const currentUrl = heartbeat.activeTabUrl;
+    const currentUrl = heartbeat.activeTabUrl ?? "unknown";
 
     if (!currentSession || currentSession.url !== currentUrl) {
       // Start new session
@@ -45,7 +45,7 @@ export function calculateURLSessions(
 
       currentSession = {
         url: currentUrl,
-        title: heartbeat.activeTabTitle,
+        title: heartbeat.activeTabTitle ?? "Unknown",
         favicon: heartbeat.favicon || undefined,
         startTime: currentTime,
         endTime: currentTime,
