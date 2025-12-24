@@ -103,13 +103,13 @@ export const requireActiveSchool = (
   }
 
   if (!isSchoolLicenseActive(school)) {
-    return req.session.destroy(() => {
-      res.status(402).json({
-        error: "School license inactive",
-        planStatus: school.planStatus,
-        schoolActive: false,
-      });
+    res.status(402).json({
+      error: "School license inactive",
+      planStatus: school.planStatus,
+      schoolActive: false,
     });
+    req.session.destroy(() => {});
+    return;
   }
 
   return next();
