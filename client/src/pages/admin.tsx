@@ -510,7 +510,7 @@ export default function Admin() {
               <strong>Student Roster:</strong> Centralized management of all student records.
             </p>
             <ul className="text-sm space-y-1 list-disc list-inside text-muted-foreground">
-              <li>Import students via CSV or Excel files</li>
+              <li>Import students via CSV files</li>
               <li>Edit student information (name, email, grade)</li>
               <li>Delete student records</li>
               <li>Filter students by grade level</li>

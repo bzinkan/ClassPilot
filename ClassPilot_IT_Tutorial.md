@@ -214,7 +214,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 **Configurable Data Retention:**
 - Set retention period (7, 30, 60, 90 days, or indefinite)
 - Automatic cleanup of old activity logs
-- Excel export before deletion
+- CSV export before deletion
 
 **Privacy Features:**
 - All-tabs data stored in-memory only (not persisted)

@@ -486,7 +486,7 @@ Access via **Settings → Data Retention**
 1. Go to Data Retention settings
 2. Click "Export Data"
 3. Select date range
-4. Download Excel (.xlsx) file
+4. Download CSV (.csv) file
 5. Contains all activity data in spreadsheet format
 
 ### What Data is Collected

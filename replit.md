@@ -37,14 +37,14 @@ The system is built with a full-stack architecture:
 -   **Student Data Analytics**: Interactive pie chart visualization of website visit durations.
 -   **Student History Tracking**: Comprehensive tabbed interface in the student detail drawer, including "Screens" (current activity and recent browsing sessions) and "History" (filterable activity timeline).
 -   **Admin System**: Manages teacher accounts.
--   **Data Retention**: Configurable data retention with automatic cleanup and Excel export.
+-   **Data Retention**: Configurable data retention with automatic cleanup and CSV export.
 -   **School Tracking Hours**: Privacy-focused feature allowing administrators to configure monitoring times.
 -   **Remote Classroom Control**: Features include Open Tab, Close Tabs, Lock Screen, Unlock Screen, Apply Flight Paths, Student Groups, and Tab Limiting, all with per-student targeting.
 -   **Teacher-Specific Settings (Multi-Tenancy)**: Supports multiple teachers with isolated resources (Flight Paths, Student Groups, settings) and student assignments.
 -   **Session-Based Classroom Management**: Teachers create class groups/rosters and start/end daily class sessions to filter the dashboard view. All students in an active session's roster appear, including offline students.
 -   **Admin Class Management**: Administrators can create official class rosters, assign teachers, and manage students with full CRUD operations.
 -   **CSV Bulk Student Import**: Administrators can upload CSV files to import multiple students, matching by email, assigning to classes, and providing detailed import results.
--   **Admin Student Roster Management**: Dedicated `/students` page for admin-only student roster management, including CSV/Excel bulk import, dynamic grade filtering, student table view, and edit/delete functionalities.
+-   **Admin Student Roster Management**: Dedicated `/students` page for admin-only student roster management, including CSV bulk import, dynamic grade filtering, student table view, and edit/delete functionalities.
 
 ### System Design Choices
 -   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, minimal data collection.

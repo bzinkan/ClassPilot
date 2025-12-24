@@ -333,8 +333,8 @@ function StudentsContent() {
 
   // Bulk import mutation
   const bulkImportMutation = useMutation({
-    mutationFn: async ({ fileContent, fileType }: { fileContent: string; fileType: 'csv' | 'excel' }) => {
-      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent, fileType });
+    mutationFn: async ({ fileContent }: { fileContent: string }) => {
+      const res = await apiRequest("POST", "/api/admin/bulk-import", { fileContent });
       return res.json();
     },
     onSuccess: async (data) => {
@@ -474,46 +474,8 @@ function StudentsContent() {
     }
 
     try {
-      const fileExtension = csvFile.name.split('.').pop()?.toLowerCase();
-      const isExcel = fileExtension === 'xlsx' || fileExtension === 'xls';
-      
-      let fileContent: string;
-      const fileType: 'csv' | 'excel' = isExcel ? 'excel' : 'csv';
-      
-      if (isExcel) {
-        // Use ArrayBuffer for Excel files
-        fileContent = await new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = reader.result;
-            
-            if (!(result instanceof ArrayBuffer)) {
-              reject(new Error("Failed to read file as ArrayBuffer"));
-              return;
-            }
-            
-            // Convert ArrayBuffer to base64
-            const bytes = new Uint8Array(result);
-            if (bytes.length === 0) {
-              reject(new Error("File is empty"));
-              return;
-            }
-            
-            const binaryString = Array.from(bytes)
-              .map(byte => String.fromCharCode(byte))
-              .join('');
-            const base64 = btoa(binaryString);
-            resolve(base64);
-          };
-          reader.onerror = () => reject(new Error("Failed to read file"));
-          reader.readAsArrayBuffer(csvFile);
-        });
-      } else {
-        // Read CSV as text
-        fileContent = await csvFile.text();
-      }
-      
-      bulkImportMutation.mutate({ fileContent, fileType });
+      const fileContent = await csvFile.text();
+      bulkImportMutation.mutate({ fileContent });
     } catch (error) {
       toast({
         variant: "destructive",
@@ -567,17 +529,17 @@ function StudentsContent() {
             Bulk Import Students
           </CardTitle>
           <CardDescription>
-            Upload a CSV or Excel file to import multiple students at once
+            Upload a CSV (.csv) file to import multiple students at once
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="csv-upload">CSV or Excel File</Label>
+            <Label htmlFor="csv-upload">CSV File</Label>
             <div className="flex gap-2">
               <Input
                 id="csv-upload"
                 type="file"
-                accept=".csv,.xlsx,.xls"
+                accept=".csv"
                 onChange={handleFileUpload}
                 data-testid="input-csv-upload"
               />
@@ -595,7 +557,7 @@ function StudentsContent() {
                 data-testid="button-download-template"
               >
                 <Download className="h-4 w-4 mr-2" />
-                Download Template
+                Download CSV Template
               </Button>
             </div>
           </div>
