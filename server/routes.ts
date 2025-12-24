@@ -48,10 +48,12 @@ import {
   assertSameSchool,
   isSchoolLicenseActive,
   requireActiveSchool,
+  requireActiveSchoolForDevice,
   requireAuth,
   requireRole,
   requireSchoolContext,
 } from "./middleware/authz";
+import { requireDeviceAuth } from "./middleware/requireDeviceAuth";
 import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 
@@ -351,6 +353,7 @@ export async function registerRoutes(
   const enableBackgroundJobs = options.enableBackgroundJobs !== false;
   const httpServer = createServer(app);
   const requireActiveSchoolMiddleware = requireActiveSchool(storage);
+  const requireActiveSchoolDeviceMiddleware = requireActiveSchoolForDevice(storage);
 
   // WebSocket server with noServer mode for manual upgrade handling
   const wss = new WebSocketServer({ noServer: true });
@@ -2034,6 +2037,95 @@ export async function registerRoutes(
     }
   });
 
+  // Device heartbeat endpoint (from extension) - JWT-authenticated, no staff session required
+  app.post("/api/device/heartbeat", heartbeatLimiter, requireDeviceAuth, requireActiveSchoolDeviceMiddleware, async (req, res) => {
+    try {
+      const authSchoolId = res.locals.schoolId as string | undefined;
+      const authStudentId = res.locals.studentId as string | undefined;
+      const authDeviceId = res.locals.deviceId as string | undefined;
+
+      if (!authSchoolId || !authStudentId || !authDeviceId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const payloadForValidation = {
+        ...req.body,
+        studentId: authStudentId,
+        deviceId: authDeviceId,
+        schoolId: authSchoolId,
+      };
+
+      const result = heartbeatRequestSchema.safeParse(payloadForValidation);
+
+      if (!result.success) {
+        console.warn("Invalid heartbeat data received");
+        return res.sendStatus(204);
+      }
+
+      const fullData = result.data;
+      const { allOpenTabs, ...data } = fullData;
+
+      data.studentId = authStudentId;
+      data.deviceId = authDeviceId;
+      data.schoolId = authSchoolId;
+      if (res.locals.studentEmail) {
+        data.studentEmail = res.locals.studentEmail;
+      }
+
+      const settings = await storage.ensureSettingsForSchool(data.schoolId);
+      if (!isWithinTrackingHours(
+        settings?.enableTrackingHours,
+        settings?.trackingStartTime,
+        settings?.trackingEndTime,
+        settings?.schoolTimezone,
+        settings?.trackingDays
+      )) {
+        return res.sendStatus(204);
+      }
+
+      const deviceKey = data.deviceId;
+      const now = Date.now();
+      const lastPersistedAt = deviceKey ? heartbeatLastPersistedAt.get(deviceKey) : undefined;
+      const shouldPersist =
+        !deviceKey || !lastPersistedAt || now - lastPersistedAt >= HEARTBEAT_PERSIST_MIN_MS;
+
+      if (!shouldPersist) {
+        return res.status(200).json({ ok: true, persisted: false });
+      }
+
+      if (data.studentEmail && data.schoolId) {
+        try {
+          await ensureStudentDeviceAssociation(storage, data.deviceId, data.studentEmail, data.schoolId);
+        } catch (error) {
+          console.error("[heartbeat] Email-first provisioning error:", error);
+        }
+      }
+
+      if (deviceKey) {
+        heartbeatLastPersistedAt.set(deviceKey, now);
+      }
+
+      const persisted = enqueueHeartbeatPersist(async () => {
+        await storage.addHeartbeat(data, allOpenTabs);
+        if (data.schoolId) {
+          broadcastToTeachers(data.schoolId, {
+            type: "student-update",
+            deviceId: data.deviceId,
+          });
+        }
+      });
+
+      if (!persisted && deviceKey) {
+        heartbeatLastPersistedAt.delete(deviceKey);
+      }
+
+      return res.status(200).json({ ok: true, persisted });
+    } catch (error) {
+      console.error("Heartbeat uncaught error:", error);
+      return res.sendStatus(204);
+    }
+  });
+
   // Heartbeat endpoint (from extension) - bulletproof, never returns 500
   app.post("/api/heartbeat", heartbeatLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
@@ -2171,6 +2263,71 @@ export async function registerRoutes(
     } catch (error) {
       // Final safety net - never throw
       console.error("Heartbeat uncaught error:", error);
+      return res.sendStatus(204);
+    }
+  });
+
+  // Device event logging endpoint (from extension) - JWT-authenticated, no staff session required
+  app.post("/api/device/event", apiLimiter, requireDeviceAuth, requireActiveSchoolDeviceMiddleware, async (req, res) => {
+    try {
+      const authSchoolId = res.locals.schoolId as string | undefined;
+      const authStudentId = res.locals.studentId as string | undefined;
+      const authDeviceId = res.locals.deviceId as string | undefined;
+
+      if (!authSchoolId || !authDeviceId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const payloadForValidation = {
+        ...req.body,
+        deviceId: authDeviceId,
+        studentId: authStudentId,
+      };
+
+      const result = insertEventSchema.safeParse(payloadForValidation);
+
+      if (!result.success) {
+        console.warn("Invalid event data:", result.error.format(), req.body);
+        return res.sendStatus(204);
+      }
+
+      const data = result.data;
+      data.deviceId = authDeviceId;
+      if (authStudentId) {
+        data.studentId = authStudentId;
+      }
+
+      const device = await storage.getDevice(data.deviceId);
+      if (!device) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+      if (device.schoolId !== authSchoolId) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+
+      if (data.studentId) {
+        const student = await storage.getStudent(data.studentId);
+        if (!student || student.schoolId !== authSchoolId) {
+          return res.status(404).json({ error: "Student not found" });
+        }
+      }
+
+      storage.addEvent(data)
+        .then((event) => {
+          if (authSchoolId && ['consent_granted', 'consent_revoked', 'blocked_domain', 'navigation', 'url_change'].includes(data.eventType)) {
+            broadcastToTeachers(authSchoolId, {
+              type: "student-event",
+              data: event,
+            });
+          }
+        })
+        .catch((error) => {
+          console.error("Event storage error:", error);
+        });
+
+      return res.sendStatus(204);
+    } catch (error) {
+      console.error("Event uncaught error:", error, req.body);
       return res.sendStatus(204);
     }
   });

@@ -116,6 +116,37 @@ export const requireActiveSchool = (
   return next();
 };
 
+export const requireActiveSchoolForDevice = (
+  storage: IStorage,
+  opts?: { allowInactive?: boolean }
+): RequestHandler => async (_req, res, next) => {
+  const schoolId = res.locals.schoolId;
+  if (!schoolId) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const school = await storage.getSchool(schoolId);
+  if (!school || school.deletedAt) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  if (opts?.allowInactive) {
+    res.locals.school = school;
+    res.locals.schoolActive = isSchoolLicenseActive(school);
+    return next();
+  }
+
+  if (!isSchoolLicenseActive(school)) {
+    return res.status(402).json({
+      error: "School license inactive",
+      planStatus: school.planStatus,
+      schoolActive: false,
+    });
+  }
+
+  return next();
+};
+
 export function assertSameSchool(sessionSchoolId?: string | null, resourceSchoolId?: string | null): boolean {
   if (!sessionSchoolId || !resourceSchoolId || sessionSchoolId !== resourceSchoolId) {
     return false;
