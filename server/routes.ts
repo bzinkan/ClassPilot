@@ -3,7 +3,7 @@ import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
-import rateLimit from "express-rate-limit";
+import rateLimit, { type Options } from "express-rate-limit";
 import { z } from "zod";
 import * as XLSX from "xlsx";
 import {
@@ -151,8 +151,10 @@ const heartbeatLimiter = rateLimit({
     if (deviceId) {
       return `heartbeat:${deviceId}`;
     }
-    return `heartbeat-ip:${req.ip}`;
+    // Fallback to a constant key when no deviceId - all non-device requests share same bucket
+    return "heartbeat:no-device";
   },
+  validate: false,
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
