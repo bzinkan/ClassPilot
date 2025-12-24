@@ -690,14 +690,15 @@ export class MemStorage implements IStorage {
         status.statusKey = newKey;
         this.studentStatuses.set(newKey, status);
       }
-    } else {
-      // DeviceId didn't change, just update fields
-      const statusKey = makeStatusKey(studentId, student.deviceId);
-      const status = this.studentStatuses.get(statusKey);
-      if (status) {
-        if (updates.studentName) {
-          status.studentName = updates.studentName;
-        }
+      } else {
+        // DeviceId didn't change, just update fields
+        const statusKey = makeStatusKey(studentId, student.deviceId);
+        const status = this.studentStatuses.get(statusKey);
+        if (status) {
+          status.schoolId = student.schoolId;
+          if (updates.studentName) {
+            status.studentName = updates.studentName;
+          }
         if (updates.gradeLevel !== undefined) {
           status.gradeLevel = updates.gradeLevel ?? undefined;
         }
@@ -920,7 +921,10 @@ export class MemStorage implements IStorage {
   }
 
   async getStudentStatusesBySchool(schoolId: string): Promise<StudentStatus[]> {
-    const statuses = Array.from(this.studentStatuses.values()).filter((status) => status.schoolId === schoolId);
+    const statuses = Array.from(this.studentStatuses.values()).filter((status) => {
+      if (!status.schoolId) return false;
+      return status.schoolId === schoolId;
+    });
     
     return statuses.map(status => ({
       ...status,
@@ -1081,6 +1085,7 @@ export class MemStorage implements IStorage {
         if (student) {
           const device = this.devices.get(heartbeat.deviceId);
           status = {
+            schoolId: heartbeat.schoolId ?? student.schoolId ?? undefined,
             studentId: student.id,
             deviceId: heartbeat.deviceId, // Use heartbeat's deviceId (current device)
             deviceName: device?.deviceName ?? undefined,
@@ -1108,6 +1113,9 @@ export class MemStorage implements IStorage {
       } else {
         // Update existing status
         const now = Date.now();
+        if (heartbeat.schoolId) {
+          status.schoolId = heartbeat.schoolId;
+        }
         status.activeTabTitle = heartbeat.activeTabTitle || "";
         status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;
@@ -1643,6 +1651,7 @@ export class DatabaseStorage implements IStorage {
         
         const statusKey = makeStatusKey(student.id, student.deviceId);
         const status: StudentStatus = {
+          schoolId: student.schoolId,
           studentId: student.id,
           deviceId: student.deviceId,
           deviceName: device?.deviceName ?? undefined,
@@ -2042,6 +2051,7 @@ export class DatabaseStorage implements IStorage {
       
       const statusKey = makeStatusKey(student.id, student.deviceId);
       const status: StudentStatus = {
+        schoolId: student.schoolId,
         studentId: student.id,
         deviceId: student.deviceId,
         deviceName: device?.deviceName ?? undefined,
@@ -2104,6 +2114,7 @@ export class DatabaseStorage implements IStorage {
         }
         
         // Update other fields
+        status.schoolId = student.schoolId;
         if (updates.studentName) {
           status.studentName = updates.studentName;
         }
@@ -2402,7 +2413,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getStudentStatusesBySchool(schoolId: string): Promise<StudentStatus[]> {
-    const statuses = Array.from(this.studentStatuses.values()).filter((status) => status.schoolId === schoolId);
+    const statuses = Array.from(this.studentStatuses.values()).filter((status) => {
+      if (!status.schoolId) return false;
+      return status.schoolId === schoolId;
+    });
     
     return statuses.map(status => ({
       ...status,
@@ -2562,6 +2576,7 @@ export class DatabaseStorage implements IStorage {
         if (student) {
           const device = await this.getDevice(heartbeat.deviceId);
           status = {
+            schoolId: heartbeat.schoolId ?? student.schoolId ?? undefined,
             studentId: student.id,
             deviceId: heartbeat.deviceId, // Use heartbeat's deviceId (current device)
             deviceName: device?.deviceName ?? undefined,
@@ -2589,6 +2604,9 @@ export class DatabaseStorage implements IStorage {
       } else {
         // Update existing status
         const now = Date.now();
+        if (heartbeat.schoolId) {
+          status.schoolId = heartbeat.schoolId;
+        }
         status.activeTabTitle = heartbeat.activeTabTitle || "";
         status.activeTabUrl = heartbeat.activeTabUrl || "";
         status.favicon = heartbeat.favicon ?? undefined;

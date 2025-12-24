@@ -501,9 +501,12 @@ export async function registerRoutes(
                 return;
               }
             } else if (message.studentEmail) {
-              studentEmail = message.studentEmail;
-              const schoolInfo = await getSchoolFromEmail(storage, studentEmail);
-              schoolId = schoolInfo?.schoolId;
+              const email = message.studentEmail;
+              if (email) {
+                studentEmail = email;
+                const schoolInfo = await getSchoolFromEmail(storage, email);
+                schoolId = schoolInfo?.schoolId;
+              }
             }
 
             if (!schoolId) {

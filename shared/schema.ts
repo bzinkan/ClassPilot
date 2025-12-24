@@ -251,6 +251,7 @@ export interface TabInfo {
 
 // Real-time status tracking (in-memory, not persisted)
 export interface StudentStatus {
+  schoolId?: string; // tenant context for in-memory realtime statuses
   studentId: string;
   deviceId?: string | null; // NULLABLE: Email-first students may not have deviceId yet
   deviceName?: string;
