@@ -24,6 +24,7 @@ In your Replit project, configure the following secrets:
 | `GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY` | 32-byte base64 key | Required in production - encrypts OAuth tokens |
 | `WS_SHARED_KEY` | Generate a strong random key | WebSocket authentication (optional) |
 | `REDIS_URL` | `redis://user:pass@host:6379` | Optional Redis pub/sub for multi-instance WebSockets |
+| `REDIS_PREFIX` | `classpilot` | Optional Redis channel prefix for WebSocket fanout |
 | `SCHOOL_ID` | Your school identifier (e.g., `lincoln-high`) | School identification |
 | `HEARTBEAT_MIN_PERSIST_SECONDS` | `15` (default) | Minimum seconds between persisted heartbeats per device |
 
@@ -71,7 +72,7 @@ Currently, the system supports one teacher account. To add more accounts, you ca
 ### 2.1 Update Extension Configuration
 
 1. Navigate to the `extension` directory
-2. Prefer **managed policy** to set `serverUrl` (see below), or inject a build-time override in `extension/config.js`:
+2. Prefer **managed policy** to set `serverUrl` (see below). Alternatively, inject a build-time override in `extension/config.js`:
 
 ```javascript
 // extension/config.js

@@ -195,7 +195,7 @@ async function resolveServerUrl() {
   }
 
   const localConfig = await chrome.storage.local.get(['config']);
-  const storedUrl = syncConfig?.config?.serverUrl || localConfig?.config?.serverUrl;
+  const storedUrl = localConfig?.config?.serverUrl || syncConfig?.config?.serverUrl;
   if (isHttpUrl(storedUrl)) {
     return storedUrl;
   }
@@ -205,6 +205,28 @@ async function resolveServerUrl() {
   }
 
   return DEFAULT_SERVER_URL;
+}
+
+async function fetchClientConfig(serverUrl) {
+  const primaryUrl = `${serverUrl}/api/client-config`;
+  const fallbackUrl = `${serverUrl}/client-config.json`;
+
+  try {
+    const response = await fetch(primaryUrl, { cache: 'no-store' });
+    if (response.ok) {
+      return await response.json();
+    }
+    if (response.status === 404) {
+      const fallbackResponse = await fetch(fallbackUrl, { cache: 'no-store' });
+      if (fallbackResponse.ok) {
+        return await fallbackResponse.json();
+      }
+    }
+  } catch (error) {
+    console.warn('[Service Worker] Failed to fetch client config:', error);
+  }
+
+  return { baseUrl: serverUrl };
 }
 
 // Keep logic in sync with shared/utils.ts isWithinTrackingHours (server-side).
@@ -497,10 +519,7 @@ async function ensureRegistered() {
   try {
     // Load config from server
     const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
-    const configUrl = `${serverUrl}/api/client-config`;
-    const serverConfig = await fetch(configUrl, { cache: 'no-store' })
-      .then(r => r.json())
-      .catch(() => ({ baseUrl: serverUrl }));
+    await fetchClientConfig(serverUrl);
     
     // Get or create IDs (including studentToken for consistent state)
     let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);

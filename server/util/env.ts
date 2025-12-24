@@ -6,6 +6,11 @@ export function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
+export function getOptionalEnv(name: string): string | undefined {
+  const value = process.env[name]?.trim();
+  return value || undefined;
+}
+
 export function getRequiredSecret(
   name: string,
   options?: {
