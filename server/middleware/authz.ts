@@ -25,10 +25,18 @@ export const requireSchoolContext: RequestHandler = (req, res, next) => {
   if (!req.session?.userId) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+  if (req.session.role === "super_admin") {
+    return next();
+  }
   if (!req.session?.schoolId) {
     return res.status(400).json({ error: "School context required" });
   }
+  res.locals.schoolId = req.session.schoolId;
   return next();
+};
+
+export const requireTenantSchool: RequestHandler = (req, res, next) => {
+  return requireSchoolContext(req, res, next);
 };
 
 export const requireRole = (...roles: Array<Exclude<SessionRole, "admin">>): RequestHandler => {
@@ -63,11 +71,16 @@ export const requireActiveSchool = (
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  if (req.session.role === "super_admin" || !req.session.schoolId) {
+  if (req.session.role === "super_admin") {
     return next();
   }
 
-  const school = await storage.getSchool(req.session.schoolId);
+  const schoolId = res.locals.schoolId ?? req.session.schoolId;
+  if (!schoolId) {
+    return res.status(400).json({ error: "School context required" });
+  }
+
+  const school = await storage.getSchool(schoolId);
   if (!school || school.deletedAt) {
     return req.session.destroy(() => {
       res.status(401).json({ error: "Unauthorized" });

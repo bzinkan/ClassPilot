@@ -128,7 +128,7 @@ export interface IStorage {
 
   // Devices (Chromebooks)
   getDevice(deviceId: string): Promise<Device | undefined>;
-  getAllDevices(): Promise<Device[]>;
+  getDevicesBySchool(schoolId: string): Promise<Device[]>;
   registerDevice(device: InsertDevice): Promise<Device>;
   updateDevice(deviceId: string, updates: Partial<Omit<InsertDevice, 'deviceId'>>): Promise<Device | undefined>;
   deleteDevice(deviceId: string): Promise<boolean>;
@@ -138,8 +138,8 @@ export interface IStorage {
   getStudentByEmail(email: string): Promise<Student | undefined>;
   getStudentBySchoolEmail(schoolId: string, emailLc: string): Promise<Student | undefined>; // PHASE 3: Email-first lookup with multi-tenancy
   getStudentBySchoolGoogleUserId(schoolId: string, googleUserId: string): Promise<Student | undefined>;
-  getStudentsByDevice(deviceId: string): Promise<Student[]>;
-  getAllStudents(): Promise<Student[]>;
+  getStudentsByDevice(schoolId: string, deviceId: string): Promise<Student[]>;
+  getStudentsBySchool(schoolId: string): Promise<Student[]>;
   createStudent(student: InsertStudent): Promise<Student>;
   updateStudent(studentId: string, updates: Partial<InsertStudent>): Promise<Student | undefined>;
   deleteStudent(studentId: string): Promise<boolean>;
@@ -172,8 +172,8 @@ export interface IStorage {
 
   // Student Status (in-memory tracking - per student, not device)
   getStudentStatus(studentId: string): Promise<StudentStatus | undefined>;
-  getAllStudentStatuses(): Promise<StudentStatus[]>;
-  getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]>; // One entry per student
+  getStudentStatusesBySchool(schoolId: string): Promise<StudentStatus[]>;
+  getStudentStatusesAggregatedBySchool(schoolId: string): Promise<AggregatedStudentStatus[]>; // One entry per student
   updateStudentStatus(status: StudentStatus): Promise<void>;
   getActiveStudentForDevice(deviceId: string): Promise<Student | undefined>;
   setActiveStudentForDevice(deviceId: string, studentId: string | null): Promise<void>;
@@ -182,7 +182,7 @@ export interface IStorage {
   addHeartbeat(heartbeat: InsertHeartbeat, allOpenTabs?: TabInfo[]): Promise<Heartbeat>;
   getHeartbeatsByDevice(deviceId: string, limit?: number): Promise<Heartbeat[]>;
   getHeartbeatsByStudent(studentId: string, limit?: number): Promise<Heartbeat[]>;
-  getAllHeartbeats(): Promise<Heartbeat[]>;
+  getHeartbeatsBySchool(schoolId: string): Promise<Heartbeat[]>;
   cleanupOldHeartbeats(retentionHours: number): Promise<number>;
 
   // Events
@@ -192,7 +192,7 @@ export interface IStorage {
 
   // Rosters
   getRoster(classId: string): Promise<Roster | undefined>;
-  getAllRosters(): Promise<Roster[]>;
+  getRostersBySchool(schoolId: string): Promise<Roster[]>;
   upsertRoster(roster: InsertRoster): Promise<Roster>;
 
   // Settings
@@ -220,7 +220,6 @@ export interface IStorage {
   getGroup(id: string): Promise<Group | undefined>;
   getGroupsBySchool(schoolId: string): Promise<Group[]>;
   getGroupsByTeacher(teacherId: string): Promise<Group[]>;
-  getAllGroups(): Promise<Group[]>;
   createGroup(group: InsertGroup): Promise<Group>;
   updateGroup(id: string, updates: Partial<InsertGroup>): Promise<Group | undefined>;
   deleteGroup(id: string): Promise<boolean>;
@@ -234,14 +233,14 @@ export interface IStorage {
   // Sessions
   getSession(id: string): Promise<Session | undefined>;
   getActiveSessionByTeacher(teacherId: string): Promise<Session | undefined>;
-  getActiveSessions(): Promise<Session[]>; // All currently active sessions
-  getAllSessions(): Promise<Session[]>;
+  getActiveSessions(schoolId: string): Promise<Session[]>; // All currently active sessions
+  getSessionsBySchool(schoolId: string): Promise<Session[]>;
   startSession(session: InsertSession): Promise<Session>;
   endSession(sessionId: string): Promise<Session | undefined>;
 
   // Flight Paths (teacher-scoped)
   getFlightPath(id: string): Promise<FlightPath | undefined>;
-  getAllFlightPaths(): Promise<FlightPath[]>;
+  getFlightPathsBySchool(schoolId: string): Promise<FlightPath[]>;
   getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]>; // Teacher-specific flight paths
   createFlightPath(flightPath: InsertFlightPath): Promise<FlightPath>;
   updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined>;
@@ -249,7 +248,7 @@ export interface IStorage {
 
   // Student Groups (teacher-scoped)
   getStudentGroup(id: string): Promise<StudentGroup | undefined>;
-  getAllStudentGroups(): Promise<StudentGroup[]>;
+  getStudentGroupsBySchool(schoolId: string): Promise<StudentGroup[]>;
   getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]>; // Teacher-specific groups
   createStudentGroup(group: InsertStudentGroup): Promise<StudentGroup>;
   updateStudentGroup(id: string, updates: Partial<InsertStudentGroup>): Promise<StudentGroup | undefined>;
@@ -558,8 +557,8 @@ export class MemStorage implements IStorage {
     return this.devices.get(deviceId);
   }
 
-  async getAllDevices(): Promise<Device[]> {
-    return Array.from(this.devices.values());
+  async getDevicesBySchool(schoolId: string): Promise<Device[]> {
+    return Array.from(this.devices.values()).filter((device) => device.schoolId === schoolId);
   }
 
   async registerDevice(insertDevice: InsertDevice): Promise<Device> {
@@ -625,13 +624,13 @@ export class MemStorage implements IStorage {
       .find(s => s.schoolId === schoolId && s.googleUserId === googleUserId);
   }
 
-  async getStudentsByDevice(deviceId: string): Promise<Student[]> {
+  async getStudentsByDevice(schoolId: string, deviceId: string): Promise<Student[]> {
     return Array.from(this.students.values())
-      .filter(s => s.deviceId === deviceId);
+      .filter(s => s.deviceId === deviceId && s.schoolId === schoolId);
   }
 
-  async getAllStudents(): Promise<Student[]> {
-    return Array.from(this.students.values());
+  async getStudentsBySchool(schoolId: string): Promise<Student[]> {
+    return Array.from(this.students.values()).filter((student) => student.schoolId === schoolId);
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
@@ -920,8 +919,8 @@ export class MemStorage implements IStorage {
     };
   }
 
-  async getAllStudentStatuses(): Promise<StudentStatus[]> {
-    const statuses = Array.from(this.studentStatuses.values());
+  async getStudentStatusesBySchool(schoolId: string): Promise<StudentStatus[]> {
+    const statuses = Array.from(this.studentStatuses.values()).filter((status) => status.schoolId === schoolId);
     
     return statuses.map(status => ({
       ...status,
@@ -929,8 +928,8 @@ export class MemStorage implements IStorage {
     }));
   }
 
-  async getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]> {
-    const allStatuses = await this.getAllStudentStatuses();
+  async getStudentStatusesAggregatedBySchool(schoolId: string): Promise<AggregatedStudentStatus[]> {
+    const allStatuses = await this.getStudentStatusesBySchool(schoolId);
     
     // Group statuses by studentId
     const statusesByStudent = new Map<string, StudentStatus[]>();
@@ -1194,8 +1193,9 @@ export class MemStorage implements IStorage {
       .slice(0, limit);
   }
 
-  async getAllHeartbeats(): Promise<Heartbeat[]> {
+  async getHeartbeatsBySchool(schoolId: string): Promise<Heartbeat[]> {
     return this.heartbeats
+      .filter(h => h.schoolId === schoolId)
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
   }
 
@@ -1241,8 +1241,15 @@ export class MemStorage implements IStorage {
     return this.rosters.get(classId);
   }
 
-  async getAllRosters(): Promise<Roster[]> {
-    return Array.from(this.rosters.values());
+  async getRostersBySchool(schoolId: string): Promise<Roster[]> {
+    const schoolDeviceIds = new Set(
+      Array.from(this.devices.values())
+        .filter((device) => device.schoolId === schoolId)
+        .map((device) => device.deviceId)
+    );
+    return Array.from(this.rosters.values()).filter((roster) =>
+      roster.deviceIds.some((deviceId) => schoolDeviceIds.has(deviceId))
+    );
   }
 
   async upsertRoster(insertRoster: InsertRoster): Promise<Roster> {
@@ -1347,8 +1354,8 @@ export class MemStorage implements IStorage {
     return this.flightPaths.get(id);
   }
 
-  async getAllFlightPaths(): Promise<FlightPath[]> {
-    return Array.from(this.flightPaths.values());
+  async getFlightPathsBySchool(schoolId: string): Promise<FlightPath[]> {
+    return Array.from(this.flightPaths.values()).filter((flightPath) => flightPath.schoolId === schoolId);
   }
 
   async getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]> {
@@ -1395,8 +1402,8 @@ export class MemStorage implements IStorage {
     return this.studentGroups.get(id);
   }
 
-  async getAllStudentGroups(): Promise<StudentGroup[]> {
-    return Array.from(this.studentGroups.values());
+  async getStudentGroupsBySchool(schoolId: string): Promise<StudentGroup[]> {
+    return Array.from(this.studentGroups.values()).filter((group) => group.schoolId === schoolId);
   }
 
   async getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]> {
@@ -1523,10 +1530,6 @@ export class MemStorage implements IStorage {
     return [];
   }
 
-  async getAllGroups(): Promise<Group[]> {
-    return [];
-  }
-
   async createGroup(group: InsertGroup): Promise<Group> {
     throw new Error("Groups not supported in memory storage");
   }
@@ -1565,11 +1568,11 @@ export class MemStorage implements IStorage {
     return undefined;
   }
 
-  async getActiveSessions(): Promise<Session[]> {
+  async getActiveSessions(schoolId: string): Promise<Session[]> {
     return [];
   }
 
-  async getAllSessions(): Promise<Session[]> {
+  async getSessionsBySchool(schoolId: string): Promise<Session[]> {
     return [];
   }
 
@@ -1610,53 +1613,56 @@ export class DatabaseStorage implements IStorage {
 
   // Rehydrate studentStatuses from database on startup
   async rehydrateStatuses(): Promise<void> {
-    // Get all students with their device info
-    const allStudents = await this.getAllStudents();
-    const allDevices = await this.getAllDevices();
-    const deviceMap = new Map(allDevices.map(d => [d.deviceId, d]));
-    
-    for (const student of allStudents) {
-      // Skip students without deviceId (email-only students)
-      if (!student.deviceId) continue;
+    const allSchools = await this.getAllSchools(true);
+
+    for (const school of allSchools) {
+      const allStudents = await this.getStudentsBySchool(school.id);
+      const allDevices = await this.getDevicesBySchool(school.id);
+      const deviceMap = new Map(allDevices.map(d => [d.deviceId, d]));
       
-      const device = deviceMap.get(student.deviceId);
-      
-      // Get most recent heartbeat for this student to restore actual last seen time
-      const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
-      const lastHeartbeat = recentHeartbeats[0];
-      
-      // Only create status if we have a real heartbeat (no epoch timestamps)
-      if (!lastHeartbeat) {
-        console.log(`Skipping status creation for student ${student.id} - no heartbeats yet`);
-        continue;
+      for (const student of allStudents) {
+        // Skip students without deviceId (email-only students)
+        if (!student.deviceId) continue;
+        
+        const device = deviceMap.get(student.deviceId);
+        
+        // Get most recent heartbeat for this student to restore actual last seen time
+        const recentHeartbeats = await this.getHeartbeatsByStudent(student.id, 1);
+        const lastHeartbeat = recentHeartbeats[0];
+        
+        // Only create status if we have a real heartbeat (no epoch timestamps)
+        if (!lastHeartbeat) {
+          console.log(`Skipping status creation for student ${student.id} - no heartbeats yet`);
+          continue;
+        }
+        
+        const lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
+        const activeTabTitle = lastHeartbeat.activeTabTitle;
+        const activeTabUrl = lastHeartbeat.activeTabUrl;
+        const favicon = lastHeartbeat.favicon || undefined;
+        
+        const statusKey = makeStatusKey(student.id, student.deviceId);
+        const status: StudentStatus = {
+          studentId: student.id,
+          deviceId: student.deviceId,
+          deviceName: device?.deviceName ?? undefined,
+          studentName: student.studentName,
+          classId: device?.classId || '',
+          gradeLevel: student.gradeLevel ?? undefined,
+          activeTabTitle: activeTabTitle || "",
+          activeTabUrl: activeTabUrl || "",
+          favicon,
+          lastSeenAt,
+          isSharing: false,
+          screenLocked: false,
+          flightPathActive: false,
+          activeFlightPathName: undefined,
+          cameraActive: false,
+          status: this.calculateStatus(lastSeenAt),
+          statusKey,
+        };
+        this.studentStatuses.set(statusKey, status);
       }
-      
-      const lastSeenAt = new Date(lastHeartbeat.timestamp).getTime();
-      const activeTabTitle = lastHeartbeat.activeTabTitle;
-      const activeTabUrl = lastHeartbeat.activeTabUrl;
-      const favicon = lastHeartbeat.favicon || undefined;
-      
-      const statusKey = makeStatusKey(student.id, student.deviceId);
-      const status: StudentStatus = {
-        studentId: student.id,
-        deviceId: student.deviceId,
-        deviceName: device?.deviceName ?? undefined,
-        studentName: student.studentName,
-        classId: device?.classId || '',
-        gradeLevel: student.gradeLevel ?? undefined,
-        activeTabTitle: activeTabTitle || "",
-        activeTabUrl: activeTabUrl || "",
-        favicon,
-        lastSeenAt,
-        isSharing: false,
-        screenLocked: false,
-        flightPathActive: false,
-        activeFlightPathName: undefined,
-        cameraActive: false,
-        status: this.calculateStatus(lastSeenAt),
-        statusKey,
-      };
-      this.studentStatuses.set(statusKey, status);
     }
   }
 
@@ -1888,8 +1894,8 @@ export class DatabaseStorage implements IStorage {
     return device || undefined;
   }
 
-  async getAllDevices(): Promise<Device[]> {
-    return await db.select().from(devices);
+  async getDevicesBySchool(schoolId: string): Promise<Device[]> {
+    return await db.select().from(devices).where(eq(devices.schoolId, schoolId));
   }
 
   async registerDevice(insertDevice: InsertDevice): Promise<Device> {
@@ -1920,7 +1926,7 @@ export class DatabaseStorage implements IStorage {
     if (!device) return undefined;
     
     // Update statuses for all students on this device (using composite keys)
-    const studentsOnDevice = await this.getStudentsByDevice(deviceId);
+    const studentsOnDevice = await this.getStudentsByDevice(device.schoolId, deviceId);
     for (const student of studentsOnDevice) {
       const statusKey = makeStatusKey(student.id, deviceId);
       const status = this.studentStatuses.get(statusKey);
@@ -1940,7 +1946,11 @@ export class DatabaseStorage implements IStorage {
 
   async deleteDevice(deviceId: string): Promise<boolean> {
     // Get all students on this device
-    const studentsOnDevice = await this.getStudentsByDevice(deviceId);
+    const existingDevice = await this.getDevice(deviceId);
+    if (!existingDevice) {
+      return false;
+    }
+    const studentsOnDevice = await this.getStudentsByDevice(existingDevice.schoolId, deviceId);
     const studentIds = studentsOnDevice.map(s => s.id);
     
     // Delete heartbeats for this device
@@ -1999,12 +2009,15 @@ export class DatabaseStorage implements IStorage {
     return student || undefined;
   }
 
-  async getStudentsByDevice(deviceId: string): Promise<Student[]> {
-    return await db.select().from(students).where(eq(students.deviceId, deviceId));
+  async getStudentsByDevice(schoolId: string, deviceId: string): Promise<Student[]> {
+    return await db
+      .select()
+      .from(students)
+      .where(drizzleSql`${students.schoolId} = ${schoolId} AND ${students.deviceId} = ${deviceId}`);
   }
 
-  async getAllStudents(): Promise<Student[]> {
-    return await db.select().from(students);
+  async getStudentsBySchool(schoolId: string): Promise<Student[]> {
+    return await db.select().from(students).where(eq(students.schoolId, schoolId));
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
@@ -2388,8 +2401,8 @@ export class DatabaseStorage implements IStorage {
     };
   }
 
-  async getAllStudentStatuses(): Promise<StudentStatus[]> {
-    const statuses = Array.from(this.studentStatuses.values());
+  async getStudentStatusesBySchool(schoolId: string): Promise<StudentStatus[]> {
+    const statuses = Array.from(this.studentStatuses.values()).filter((status) => status.schoolId === schoolId);
     
     return statuses.map(status => ({
       ...status,
@@ -2397,8 +2410,8 @@ export class DatabaseStorage implements IStorage {
     }));
   }
 
-  async getAllStudentStatusesAggregated(): Promise<AggregatedStudentStatus[]> {
-    const allStatuses = await this.getAllStudentStatuses();
+  async getStudentStatusesAggregatedBySchool(schoolId: string): Promise<AggregatedStudentStatus[]> {
+    const allStatuses = await this.getStudentStatusesBySchool(schoolId);
     
     // Group statuses by studentId
     const statusesByStudent = new Map<string, StudentStatus[]>();
@@ -2667,10 +2680,11 @@ export class DatabaseStorage implements IStorage {
       .limit(limit);
   }
 
-  async getAllHeartbeats(): Promise<Heartbeat[]> {
+  async getHeartbeatsBySchool(schoolId: string): Promise<Heartbeat[]> {
     return await db
       .select()
       .from(heartbeats)
+      .where(eq(heartbeats.schoolId, schoolId))
       .orderBy(desc(heartbeats.timestamp));
   }
 
@@ -2716,8 +2730,14 @@ export class DatabaseStorage implements IStorage {
     return roster || undefined;
   }
 
-  async getAllRosters(): Promise<Roster[]> {
-    return await db.select().from(rosters);
+  async getRostersBySchool(schoolId: string): Promise<Roster[]> {
+    const schoolDevices = await db
+      .select({ deviceId: devices.deviceId })
+      .from(devices)
+      .where(eq(devices.schoolId, schoolId));
+    const schoolDeviceIds = new Set(schoolDevices.map((device) => device.deviceId));
+    const allRosters = await db.select().from(rosters);
+    return allRosters.filter((roster) => roster.deviceIds.some((deviceId) => schoolDeviceIds.has(deviceId)));
   }
 
   async upsertRoster(insertRoster: InsertRoster): Promise<Roster> {
@@ -2846,8 +2866,8 @@ export class DatabaseStorage implements IStorage {
     return flightPath || undefined;
   }
 
-  async getAllFlightPaths(): Promise<FlightPath[]> {
-    return await db.select().from(flightPaths);
+  async getFlightPathsBySchool(schoolId: string): Promise<FlightPath[]> {
+    return await db.select().from(flightPaths).where(eq(flightPaths.schoolId, schoolId));
   }
 
   async getFlightPathsByTeacher(teacherId: string): Promise<FlightPath[]> {
@@ -2885,8 +2905,8 @@ export class DatabaseStorage implements IStorage {
     return group || undefined;
   }
 
-  async getAllStudentGroups(): Promise<StudentGroup[]> {
-    return await db.select().from(studentGroups);
+  async getStudentGroupsBySchool(schoolId: string): Promise<StudentGroup[]> {
+    return await db.select().from(studentGroups).where(eq(studentGroups.schoolId, schoolId));
   }
 
   async getStudentGroupsByTeacher(teacherId: string): Promise<StudentGroup[]> {
@@ -3036,10 +3056,6 @@ export class DatabaseStorage implements IStorage {
       .orderBy(groups.createdAt);
   }
 
-  async getAllGroups(): Promise<Group[]> {
-    return await db.select().from(groups).orderBy(groups.createdAt);
-  }
-
   async createGroup(insertGroup: InsertGroup): Promise<Group> {
     const [created] = await db
       .insert(groups)
@@ -3116,19 +3132,24 @@ export class DatabaseStorage implements IStorage {
     return session || undefined;
   }
 
-  async getActiveSessions(): Promise<Session[]> {
-    return await db
-      .select()
+  async getActiveSessions(schoolId: string): Promise<Session[]> {
+    const rows = await db
+      .select({ sessions })
       .from(sessions)
-      .where(drizzleSql`${sessions.endTime} IS NULL`)
+      .innerJoin(groups, eq(groups.id, sessions.groupId))
+      .where(drizzleSql`${sessions.endTime} IS NULL AND ${groups.schoolId} = ${schoolId}`)
       .orderBy(desc(sessions.startTime));
+    return rows.map((row) => row.sessions);
   }
 
-  async getAllSessions(): Promise<Session[]> {
-    return await db
-      .select()
+  async getSessionsBySchool(schoolId: string): Promise<Session[]> {
+    const rows = await db
+      .select({ sessions })
       .from(sessions)
+      .innerJoin(groups, eq(groups.id, sessions.groupId))
+      .where(eq(groups.schoolId, schoolId))
       .orderBy(desc(sessions.startTime));
+    return rows.map((row) => row.sessions);
   }
 
   async startSession(insertSession: InsertSession): Promise<Session> {
