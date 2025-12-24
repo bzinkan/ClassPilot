@@ -200,7 +200,8 @@ export function RosterManagement() {
   const handleSaveEdit = () => {
     if (!selectedStudent) return;
     
-    if (!selectedStudent.deviceId) {
+    const deviceId = selectedStudent.deviceId;
+    if (!deviceId) {
       toast({
         variant: "destructive",
         title: "Missing device ID",
@@ -208,7 +209,7 @@ export function RosterManagement() {
       });
       return;
     }
-    const selectedDevice = deviceById.get(selectedStudent.deviceId);
+    const selectedDevice = deviceById.get(deviceId);
     const currentDeviceName = selectedDevice?.deviceName || "";
     const currentClassId = selectedDevice?.classId || "";
     const updates: RosterStudentUpdate = {};
@@ -234,7 +235,7 @@ export function RosterManagement() {
       return;
     }
     
-    editStudentMutation.mutate({ deviceId: selectedStudent.deviceId, updates });
+    editStudentMutation.mutate({ deviceId, updates });
   };
 
   const handleDelete = (student: Student) => {
@@ -244,7 +245,8 @@ export function RosterManagement() {
 
   const confirmDelete = () => {
     if (!selectedStudent) return;
-    if (!selectedStudent.deviceId) {
+    const deviceId = selectedStudent.deviceId;
+    if (!deviceId) {
       toast({
         variant: "destructive",
         title: "Missing device ID",
@@ -252,7 +254,7 @@ export function RosterManagement() {
       });
       return;
     }
-    deleteStudentMutation.mutate(selectedStudent.deviceId);
+    deleteStudentMutation.mutate(deviceId);
   };
 
   return (
@@ -302,7 +304,7 @@ export function RosterManagement() {
               </TableHeader>
               <TableBody>
                 {students.map((student) => (
-                  <TableRow key={student.deviceId} data-testid={`row-student-${student.deviceId}`}>
+                  <TableRow key={student.id} data-testid={`row-student-${student.id}`}>
                     <TableCell className="font-medium">{student.studentName}</TableCell>
                     <TableCell className="font-mono text-sm">{student.deviceId ?? "—"}</TableCell>
                     <TableCell>{student.deviceId ? deviceById.get(student.deviceId)?.deviceName || "—" : "—"}</TableCell>
@@ -314,7 +316,7 @@ export function RosterManagement() {
                           size="sm"
                           variant="ghost"
                           onClick={() => handleEdit(student)}
-                          data-testid={`button-edit-${student.deviceId}`}
+                          data-testid={`button-edit-${student.id}`}
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -322,7 +324,7 @@ export function RosterManagement() {
                           size="sm"
                           variant="ghost"
                           onClick={() => handleDelete(student)}
-                          data-testid={`button-delete-${student.deviceId}`}
+                          data-testid={`button-delete-${student.id}`}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>

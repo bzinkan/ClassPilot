@@ -76,7 +76,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
-  const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
+  const [newDeviceName, setNewDeviceName] = useState(student.deviceName ?? '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const [expanded, setExpanded] = useState(false);
   const { toast } = useToast();
@@ -213,7 +213,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setNewStudentName(student.studentName || '');
-    setNewDeviceName(student.deviceName || '');
+    setNewDeviceName(student.deviceName ?? '');
     setNewGradeLevel(student.gradeLevel || '');
     setEditDialogOpen(true);
   };
@@ -230,7 +230,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     }
     
     // Update device name if changed
-    if (student.primaryDeviceId && newDeviceName !== (student.deviceName || '')) {
+    if (student.primaryDeviceId && newDeviceName !== (student.deviceName ?? '')) {
       updateDeviceMutation.mutate({
         deviceId: student.primaryDeviceId,
         deviceName: newDeviceName
@@ -265,6 +265,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unblock mutation for flight path
   const unblockForClassMutation = useMutation({
     mutationFn: async () => {
+      if (!student.primaryDeviceId) {
+        return Promise.resolve();
+      }
       return await apiRequest("POST", "/api/remote/unlock-screen", {
         targetDeviceIds: [student.primaryDeviceId]
       });
@@ -283,6 +286,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     mutationFn: async () => {
       if (!student.activeTabUrl) {
         throw new Error("No active tab to lock to");
+      }
+      if (!student.primaryDeviceId) {
+        return Promise.resolve();
       }
       return await apiRequest("POST", "/api/remote/lock-screen", {
         url: student.activeTabUrl,
@@ -308,6 +314,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unlock screen mutation
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
+      if (!student.primaryDeviceId) {
+        return Promise.resolve();
+      }
       return await apiRequest("POST", "/api/remote/unlock-screen", {
         targetDeviceIds: [student.primaryDeviceId]
       });

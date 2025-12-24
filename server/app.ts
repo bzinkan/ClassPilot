@@ -63,6 +63,10 @@ function scrubSentryData(value: unknown, key?: string): unknown {
   return value;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 if (SENTRY_DSN_SERVER) {
   Sentry.init({
     dsn: SENTRY_DSN_SERVER,
@@ -84,11 +88,14 @@ if (SENTRY_DSN_SERVER) {
         event.tags = scrubSentryData(event.tags) as Record<string, string>;
       }
       if (event.breadcrumbs) {
-        event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
-          ...crumb,
-          message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
-          data: crumb.data ? (scrubSentryData(crumb.data) as Record<string, unknown>) : crumb.data,
-        }));
+        event.breadcrumbs = event.breadcrumbs.map((crumb) => {
+          const scrubbedData = crumb.data ? scrubSentryData(crumb.data) : undefined;
+          return {
+            ...crumb,
+            message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
+            data: isPlainObject(scrubbedData) ? scrubbedData : undefined,
+          };
+        });
       }
       return event;
     },
