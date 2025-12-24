@@ -79,6 +79,10 @@ function scrubSentryData(value: unknown, key?: string): unknown {
   return value;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 if (SENTRY_DSN_SERVER) {
   Sentry.init({
     dsn: SENTRY_DSN_SERVER,
@@ -100,11 +104,20 @@ if (SENTRY_DSN_SERVER) {
         event.tags = scrubSentryData(event.tags) as Record<string, string>;
       }
       if (event.breadcrumbs) {
-        event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
-          ...crumb,
-          message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
-          data: crumb.data ? scrubSentryData(crumb.data) : crumb.data,
-        }));
+        event.breadcrumbs = event.breadcrumbs.map((crumb) => {
+          const scrubbed = crumb.data ? scrubSentryData(crumb.data) : undefined;
+
+          const safeData =
+            scrubbed && typeof scrubbed === "object" && !Array.isArray(scrubbed)
+              ? (scrubbed as Record<string, unknown>)
+              : undefined;
+
+          return {
+            ...crumb,
+            message: crumb.message ? scrubSentryString(crumb.message, "message") : crumb.message,
+            data: safeData,
+          };
+        });
       }
       return event;
     },
@@ -243,6 +256,7 @@ export async function createApp(options: AppOptions = {}) {
     express.json({
       limit: "12kb", // Prevent large payload attacks
       verify: (req, _res, buf) => {
+        // rawBody is declared via server/types/global.d.ts
         req.rawBody = buf;
       },
     })

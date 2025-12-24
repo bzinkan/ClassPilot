@@ -16,4 +16,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+        env:
+          NODE_ENV: test
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          STUDENT_TOKEN_SECRET: ${{ secrets.STUDENT_TOKEN_SECRET }}
+          GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY: ${{ secrets.GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
       - run: npm run test
+        env:
+          NODE_ENV: test
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          STUDENT_TOKEN_SECRET: ${{ secrets.STUDENT_TOKEN_SECRET }}
+          GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY: ${{ secrets.GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}

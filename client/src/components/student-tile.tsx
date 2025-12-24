@@ -76,7 +76,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [newStudentName, setNewStudentName] = useState(student.studentName || '');
-  const [newDeviceName, setNewDeviceName] = useState(student.deviceName || '');
+  const [newDeviceName, setNewDeviceName] = useState(student.deviceName ?? '');
   const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const [expanded, setExpanded] = useState(false);
   const { toast } = useToast();
@@ -213,7 +213,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const handleEditClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setNewStudentName(student.studentName || '');
-    setNewDeviceName(student.deviceName || '');
+    setNewDeviceName(student.deviceName ?? '');
     setNewGradeLevel(student.gradeLevel || '');
     setEditDialogOpen(true);
   };
@@ -230,7 +230,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     }
     
     // Update device name if changed
-    if (newDeviceName !== (student.deviceName || '')) {
+    if (student.primaryDeviceId && newDeviceName !== (student.deviceName ?? '')) {
       updateDeviceMutation.mutate({
         deviceId: student.primaryDeviceId,
         deviceName: newDeviceName
@@ -265,6 +265,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unblock mutation for flight path
   const unblockForClassMutation = useMutation({
     mutationFn: async () => {
+      if (!student.primaryDeviceId) {
+        throw new Error("Student does not have a primary device assigned.");
+      }
       return await apiRequest("POST", "/api/remote/unlock-screen", {
         targetDeviceIds: [student.primaryDeviceId]
       });
@@ -283,6 +286,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
     mutationFn: async () => {
       if (!student.activeTabUrl) {
         throw new Error("No active tab to lock to");
+      }
+      if (!student.primaryDeviceId) {
+        throw new Error("Student does not have a primary device assigned.");
       }
       return await apiRequest("POST", "/api/remote/lock-screen", {
         url: student.activeTabUrl,
@@ -308,6 +314,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   // Unlock screen mutation
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
+      if (!student.primaryDeviceId) {
+        throw new Error("Student does not have a primary device assigned.");
+      }
       return await apiRequest("POST", "/api/remote/unlock-screen", {
         targetDeviceIds: [student.primaryDeviceId]
       });
@@ -681,7 +690,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   }
                 }}
                 title={liveStream ? "Stop live view" : "Start live view"}
-                data-testid={`button-live-view-${student.primaryDeviceId}`}
+                data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
               >
                 <Monitor className="h-3.5 w-3.5 mr-1" />
                 {liveStream ? "Stop" : "View"}
@@ -693,7 +702,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
       {/* Edit Student Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId}`}>
+        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId ?? "unknown-device"}`}>
           <DialogHeader>
             <DialogTitle>Edit Student Information</DialogTitle>
             <DialogDescription>
@@ -705,7 +714,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-id">Device ID (Read-only)</Label>
               <Input
                 id="device-id"
-                value={student.primaryDeviceId}
+                value={student.primaryDeviceId ?? ""}
                 disabled
                 className="font-mono text-sm"
               />
@@ -714,7 +723,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="device-name">Device Name (Optional)</Label>
               <Input
                 id="device-name"
-                data-testid={`input-edit-device-name-${student.primaryDeviceId}`}
+                data-testid={`input-edit-device-name-${student.primaryDeviceId ?? "unknown-device"}`}
                 value={newDeviceName}
                 onChange={(e) => setNewDeviceName(e.target.value)}
                 placeholder="e.g., 6th chromebook 1"
@@ -729,7 +738,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               <Label htmlFor="student-name">Student Name</Label>
               <Input
                 id="student-name"
-                data-testid={`input-edit-student-name-${student.primaryDeviceId}`}
+                data-testid={`input-edit-student-name-${student.primaryDeviceId ?? "unknown-device"}`}
                 value={newStudentName}
                 onChange={(e) => setNewStudentName(e.target.value)}
                 placeholder="e.g., Lucy Garcia"
@@ -788,7 +797,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       {/* Video Portal for enlarged view */}
       {expanded && liveStream && (
         <VideoPortal
-          studentName={student.studentName || student.deviceName || student.primaryDeviceId}
+          studentName={student.studentName || student.deviceName || student.primaryDeviceId || "Unknown student"}
           onClose={handleCollapse}
         />
       )}

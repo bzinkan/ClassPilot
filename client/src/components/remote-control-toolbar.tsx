@@ -334,7 +334,9 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
       if (selectedStudentIds.has(student.studentId)) {
         // Add all devices for this student
         student.devices.forEach(device => {
-          deviceIds.push(device.deviceId);
+          if (device.deviceId) {
+            deviceIds.push(device.deviceId);
+          }
         });
         // Also add primary device if it exists and isn't in the devices array
         if (student.primaryDeviceId && !deviceIds.includes(student.primaryDeviceId)) {

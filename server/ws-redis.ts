@@ -83,7 +83,7 @@ export async function subscribeWS(
 
   subscribed = true;
   try {
-    await redisSubscriber.subscribe(redisChannel, (payload) => {
+    await redisSubscriber.subscribe(redisChannel, (payload: string) => {
       try {
         const message = JSON.parse(payload) as WsRedisEnvelope;
         if (!message || message.instanceId === instanceId) {

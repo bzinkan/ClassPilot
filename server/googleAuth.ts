@@ -5,9 +5,19 @@ import { storage } from "./storage";
 import { getBaseUrl } from "./config/baseUrl";
 
 export function setupGoogleAuth(app: Express) {
+  // ⛔ Skip Google OAuth entirely during tests/CI (prevents missing clientID crashes)
+  if (process.env.NODE_ENV === "test" || process.env.VITEST) {
+    return;
+  }
+
+  // Read required env vars safely (no non-null assertions)
+  const clientID = process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
   // Construct full callback URL for Google OAuth
   const baseUrl = getBaseUrl();
   const callbackURL = `${baseUrl}/auth/google/callback`;
+
   const classroomScopes = [
     "profile",
     "email",
@@ -16,16 +26,24 @@ export function setupGoogleAuth(app: Express) {
     "https://www.googleapis.com/auth/classroom.profile.emails",
     "https://www.googleapis.com/auth/admin.directory.user.readonly",
   ];
-  
+
+  // ⛔ If not configured (local dev / misconfigured env), skip setup instead of crashing
+  if (!clientID || !clientSecret || !callbackURL) {
+    console.warn(
+      "[googleAuth] Missing GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or callback URL; skipping Google OAuth setup."
+    );
+    return;
+  }
+
   console.log("Google OAuth callback URL:", callbackURL);
-  
+
   // Google OAuth Strategy
   passport.use(
     new GoogleStrategy(
       {
-        clientID: process.env.GOOGLE_CLIENT_ID!,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
-        callbackURL: callbackURL,
+        clientID,
+        clientSecret,
+        callbackURL,
       },
       async (accessToken, refreshToken, profile, done) => {
         try {
@@ -48,10 +66,13 @@ export function setupGoogleAuth(app: Express) {
               profileImageUrl,
               displayName: displayName || user.displayName,
             });
+
             if (!updatedUser) {
               return done(new Error("Failed to update user from Google profile"));
             }
+
             user = updatedUser;
+
             if (refreshToken) {
               await storage.upsertGoogleOAuthTokens(user.id, {
                 refreshToken,
@@ -59,12 +80,17 @@ export function setupGoogleAuth(app: Express) {
                 tokenType: "Bearer",
               });
             }
+
             return done(null, user);
           }
 
           // User does not exist - REJECT auto-provisioning for security
           // Only pre-created users (by school admin/super admin) can log in
-          return done(new Error(`Your account isn't set up yet. Ask your school administrator to create your account first, then sign in with Google.`));
+          return done(
+            new Error(
+              `Your account isn't set up yet. Ask your school administrator to create your account first, then sign in with Google.`
+            )
+          );
         } catch (error) {
           console.error("Google OAuth error:", error);
           return done(error as Error);
@@ -110,16 +136,17 @@ export function setupGoogleAuth(app: Express) {
     (req, res) => {
       // Successful authentication - hydrate session with role and schoolId
       const user = req.user as any;
+
       if (user && req.session) {
         req.session.userId = user.id;
         req.session.role = user.role;
         req.session.schoolId = user.schoolId;
       }
-      
+
       // Role-based redirect
-      if (user.role === 'super_admin') {
+      if (user.role === "super_admin") {
         res.redirect("/super-admin/schools");
-      } else if (user.role === 'school_admin') {
+      } else if (user.role === "school_admin") {
         res.redirect("/admin");
       } else {
         res.redirect("/dashboard");

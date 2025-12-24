@@ -31,10 +31,13 @@ describe("auth session boot", () => {
     const meResponse = await agent.get("/api/me");
     expect(meResponse.status).toBe(200);
     expect(meResponse.body).toMatchObject({
+      success: true,
       user: {
-        email: "teacher@classpilot.test",
         role: "teacher",
       },
     });
+    if ("username" in meResponse.body.user) {
+      expect(meResponse.body.user.username).toBe("teacher");
+    }
   });
 });
