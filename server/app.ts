@@ -240,7 +240,7 @@ export async function createApp(options: AppOptions = {}) {
     express.json({
       limit: "12kb", // Prevent large payload attacks
       verify: (req, _res, buf) => {
-        // rawBody is declared via server/types/global.d.ts
+        // rawBody is declared via server/types/express.d.ts
         req.rawBody = buf;
       },
     })
