@@ -1979,6 +1979,12 @@ export async function registerRoutes(
           }
 
         } catch (error: any) {
+          if (isLicenseLimitError(error)) {
+            return res.status(409).json({
+              ...buildLicenseLimitResponse(error),
+              results,
+            });
+          }
           results.errors.push(`Row ${rowNum}: ${error.message || 'Unknown error'}`);
         }
       }
@@ -2139,6 +2145,9 @@ export async function registerRoutes(
       res.json({ success: true, device, student, studentToken }); // 🔑 Return JWT token
     } catch (error) {
       console.error("Student registration error:", error);
+      if (isLicenseLimitError(error)) {
+        return res.status(409).json(buildLicenseLimitResponse(error));
+      }
       res.status(400).json({ error: error instanceof Error ? error.message : "Invalid request" });
     }
   });
@@ -3054,14 +3063,26 @@ export async function registerRoutes(
                 googleUserId: googleUserId ?? rosterStudent.googleUserId,
               });
             } else {
-              savedStudent = await storage.createStudent({
-                studentName,
-                studentEmail: email,
-                emailLc,
-                schoolId: sessionSchoolId,
-                studentStatus: "active",
-                googleUserId,
-              });
+              try {
+                savedStudent = await storage.createStudent({
+                  studentName,
+                  studentEmail: email,
+                  emailLc,
+                  schoolId: sessionSchoolId,
+                  studentStatus: "active",
+                  googleUserId,
+                });
+              } catch (error) {
+                if (isLicenseLimitError(error)) {
+                  return res.status(409).json({
+                    ...buildLicenseLimitResponse(error),
+                    coursesImported,
+                    studentsUpserted: studentIdsSeen.size,
+                    membershipsWritten,
+                  });
+                }
+                throw error;
+              }
             }
 
             if (savedStudent) {
@@ -3505,6 +3526,9 @@ export async function registerRoutes(
       res.json({ success: true, student });
     } catch (error) {
       console.error("Create student error:", error);
+      if (isLicenseLimitError(error)) {
+        return res.status(409).json(buildLicenseLimitResponse(error));
+      }
       res.status(500).json({ error: "Internal server error" });
     }
   });

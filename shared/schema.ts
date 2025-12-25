@@ -18,6 +18,7 @@ export const schools = pgTable("schools", {
   disabledReason: text("disabled_reason"),
   schoolSessionVersion: integer("school_session_version").notNull().default(1),
   maxLicenses: integer("max_licenses").default(100), // Max student seats
+  usedLicenses: integer("used_licenses").notNull().default(0),
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
   trialEndsAt: timestamp("trial_ends_at"), // Nullable - when trial expires
   deletedAt: timestamp("deleted_at"), // Soft delete timestamp (null = active)

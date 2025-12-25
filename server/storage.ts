@@ -397,6 +397,7 @@ export class MemStorage implements IStorage {
       disabledReason: insertSchool.disabledReason ?? null,
       schoolSessionVersion: insertSchool.schoolSessionVersion ?? 1,
       maxLicenses: insertSchool.maxLicenses ?? 100,
+      usedLicenses: 0,
       createdAt: new Date(),
       trialEndsAt: insertSchool.trialEndsAt ?? null,
       deletedAt: null,
@@ -616,6 +617,7 @@ export class MemStorage implements IStorage {
   }
 
   async deleteDevice(deviceId: string): Promise<boolean> {
+    const existingDevice = this.devices.get(deviceId);
     const existed = this.devices.has(deviceId);
     this.devices.delete(deviceId);
     
@@ -625,6 +627,13 @@ export class MemStorage implements IStorage {
     for (const student of studentsToDelete) {
       this.students.delete(student.id);
       this.studentStatuses.delete(student.id);
+    }
+    if (studentsToDelete.length > 0 && existingDevice) {
+      const school = this.schools.get(existingDevice.schoolId);
+      if (school) {
+        school.usedLicenses = Math.max((school.usedLicenses ?? 0) - studentsToDelete.length, 0);
+        this.schools.set(school.id, school);
+      }
     }
     
     // Clear active student mapping
@@ -681,6 +690,12 @@ export class MemStorage implements IStorage {
       createdAt: new Date(),
     };
     this.students.set(id, student);
+
+    const school = this.schools.get(insertStudent.schoolId);
+    if (school) {
+      school.usedLicenses = (school.usedLicenses ?? 0) + 1;
+      this.schools.set(school.id, school);
+    }
     
     // Status will be created when first heartbeat arrives (no epoch timestamps)
     console.log(`Created student ${id} - status will be initialized on first heartbeat`);
@@ -747,6 +762,11 @@ export class MemStorage implements IStorage {
     if (!student) return false;
     
     const existed = this.students.delete(studentId);
+    const school = this.schools.get(student.schoolId);
+    if (school) {
+      school.usedLicenses = Math.max((school.usedLicenses ?? 0) - 1, 0);
+      this.schools.set(school.id, school);
+    }
     // Delete status using composite key
     const statusKey = makeStatusKey(studentId, student.deviceId);
     this.studentStatuses.delete(statusKey);
@@ -2035,6 +2055,10 @@ export class DatabaseStorage implements IStorage {
     // Delete all students on this device
     if (studentIds.length > 0) {
       await db.delete(students).where(inArray(students.id, studentIds));
+      await db
+        .update(schools)
+        .set({ usedLicenses: drizzleSql`GREATEST(${schools.usedLicenses} - ${studentIds.length}, 0)` })
+        .where(eq(schools.id, existingDevice.schoolId));
       
       // Remove from in-memory status maps using composite keys
       for (const student of studentsOnDevice) {
@@ -2093,32 +2117,49 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(students).where(eq(students.schoolId, schoolId));
   }
 
-  private async getStudentCountForSchool(schoolId: string): Promise<number> {
-    const [result] = await db
-      .select({ count: drizzleSql<number>`count(*)` })
-      .from(students)
-      .where(eq(students.schoolId, schoolId));
-    return Number(result?.count ?? 0);
-  }
-
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
-    const school = await this.getSchool(insertStudent.schoolId);
-    const maxLicenses = school?.maxLicenses ?? 0;
-    if (maxLicenses > 0) {
-      const currentCount = await this.getStudentCountForSchool(insertStudent.schoolId);
-      if (currentCount >= maxLicenses) {
-        const error = new Error("LICENSE_LIMIT_REACHED");
-        (error as Error & { code: string; maxLicenses: number; currentCount: number }).code = "LICENSE_LIMIT_REACHED";
-        (error as Error & { maxLicenses: number }).maxLicenses = maxLicenses;
-        (error as Error & { currentCount: number }).currentCount = currentCount;
-        throw error;
-      }
-    }
+    const student = await db.transaction(async (tx) => {
+      const [school] = await tx
+        .select({ maxLicenses: schools.maxLicenses, usedLicenses: schools.usedLicenses })
+        .from(schools)
+        .where(eq(schools.id, insertStudent.schoolId));
 
-    const [student] = await db
-      .insert(students)
-      .values(insertStudent)
-      .returning();
+      const maxLicenses = school?.maxLicenses ?? 0;
+      const currentCount = school?.usedLicenses ?? 0;
+
+      if (maxLicenses > 0) {
+        const reservation = await tx
+          .update(schools)
+          .set({ usedLicenses: drizzleSql`${schools.usedLicenses} + 1` })
+          .where(drizzleSql`${schools.id} = ${insertStudent.schoolId} AND ${schools.maxLicenses} > 0 AND ${schools.usedLicenses} < ${schools.maxLicenses}`)
+          .returning({ usedLicenses: schools.usedLicenses, maxLicenses: schools.maxLicenses });
+
+        if (!reservation[0]) {
+          const [latestSchool] = await tx
+            .select({ maxLicenses: schools.maxLicenses, usedLicenses: schools.usedLicenses })
+            .from(schools)
+            .where(eq(schools.id, insertStudent.schoolId));
+
+          const error = new Error("LICENSE_LIMIT_REACHED");
+          (error as Error & { code: string; maxLicenses: number; currentCount: number }).code = "LICENSE_LIMIT_REACHED";
+          (error as Error & { maxLicenses: number }).maxLicenses = latestSchool?.maxLicenses ?? maxLicenses;
+          (error as Error & { currentCount: number }).currentCount = latestSchool?.usedLicenses ?? currentCount;
+          throw error;
+        }
+      } else if (school) {
+        await tx
+          .update(schools)
+          .set({ usedLicenses: drizzleSql`${schools.usedLicenses} + 1` })
+          .where(eq(schools.id, insertStudent.schoolId));
+      }
+
+      const [createdStudent] = await tx
+        .insert(students)
+        .values(insertStudent)
+        .returning();
+
+      return createdStudent;
+    });
     
     // Get device info for this student (only if deviceId exists)
     const device = student.deviceId ? await this.getDevice(student.deviceId) : undefined;
@@ -2254,6 +2295,13 @@ export class DatabaseStorage implements IStorage {
       .delete(students)
       .where(eq(students.id, studentId))
       .returning();
+
+    if (deletedStudent) {
+      await db
+        .update(schools)
+        .set({ usedLicenses: drizzleSql`GREATEST(${schools.usedLicenses} - 1, 0)` })
+        .where(eq(schools.id, deletedStudent.schoolId));
+    }
     
     // Remove from in-memory status map using composite key
     if (student) {
