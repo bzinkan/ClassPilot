@@ -2316,7 +2316,7 @@ export class DatabaseStorage implements IStorage {
       .select({ studentId: classroomCourseStudents.studentId })
       .from(classroomCourseStudents)
       .where(drizzleSql`${classroomCourseStudents.schoolId} = ${schoolId} AND ${classroomCourseStudents.courseId} = ${courseId}`);
-    return rows.map(r => r.studentId);
+    return rows.map((row: { studentId: string }) => row.studentId);
   }
 
   async replaceCourseStudents(
@@ -2814,9 +2814,11 @@ export class DatabaseStorage implements IStorage {
       .select({ deviceId: devices.deviceId })
       .from(devices)
       .where(eq(devices.schoolId, schoolId));
-    const schoolDeviceIds = new Set(schoolDevices.map((device) => device.deviceId));
+    const schoolDeviceIds = new Set(schoolDevices.map((device: { deviceId: string }) => device.deviceId));
     const allRosters = await db.select().from(rosters);
-    return allRosters.filter((roster) => roster.deviceIds.some((deviceId) => schoolDeviceIds.has(deviceId)));
+    return allRosters.filter((roster: Roster) =>
+      roster.deviceIds.some((deviceId: string) => schoolDeviceIds.has(deviceId))
+    );
   }
 
   async upsertRoster(insertRoster: InsertRoster): Promise<Roster> {
@@ -2968,7 +2970,7 @@ export class DatabaseStorage implements IStorage {
       .select({ studentId: teacherStudents.studentId })
       .from(teacherStudents)
       .where(eq(teacherStudents.teacherId, teacherId));
-    return results.map((r) => r.studentId);
+    return results.map((row: { studentId: string }) => row.studentId);
   }
 
   async getStudentTeachers(studentId: string): Promise<string[]> {
@@ -2976,7 +2978,7 @@ export class DatabaseStorage implements IStorage {
       .select({ teacherId: teacherStudents.teacherId })
       .from(teacherStudents)
       .where(eq(teacherStudents.studentId, studentId));
-    return results.map((r) => r.teacherId);
+    return results.map((row: { teacherId: string }) => row.teacherId);
   }
 
   // Flight Paths
@@ -3203,7 +3205,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(groupStudents)
       .where(eq(groupStudents.groupId, groupId));
-    return results.map(r => r.studentId);
+    return results.map((row: { studentId: string }) => row.studentId);
   }
 
   async assignStudentToGroup(groupId: string, studentId: string): Promise<GroupStudent> {
@@ -3228,7 +3230,7 @@ export class DatabaseStorage implements IStorage {
       .select()
       .from(groupStudents)
       .where(eq(groupStudents.studentId, studentId));
-    return results.map(r => r.groupId);
+    return results.map((row: { groupId: string }) => row.groupId);
   }
 
   // Sessions
@@ -3258,7 +3260,7 @@ export class DatabaseStorage implements IStorage {
       .innerJoin(groups, eq(groups.id, sessions.groupId))
       .where(drizzleSql`${sessions.endTime} IS NULL AND ${groups.schoolId} = ${schoolId}`)
       .orderBy(desc(sessions.startTime));
-    return rows.map((row) => row.sessions);
+    return rows.map((row: { sessions: Session }) => row.sessions);
   }
 
   async getSessionsBySchool(schoolId: string): Promise<Session[]> {
@@ -3268,7 +3270,7 @@ export class DatabaseStorage implements IStorage {
       .innerJoin(groups, eq(groups.id, sessions.groupId))
       .where(eq(groups.schoolId, schoolId))
       .orderBy(desc(sessions.startTime));
-    return rows.map((row) => row.sessions);
+    return rows.map((row: { sessions: Session }) => row.sessions);
   }
 
   async startSession(insertSession: InsertSession): Promise<Session> {
