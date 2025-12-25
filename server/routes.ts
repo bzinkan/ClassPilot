@@ -874,7 +874,7 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/me", requireAuth, async (req, res) => {
+  app.get("/api/me", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, async (req, res) => {
     try {
       const user = await storage.getUser(req.session.userId!);
       if (!user) {

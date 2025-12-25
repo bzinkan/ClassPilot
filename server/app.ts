@@ -203,14 +203,16 @@ export async function createApp(options: AppOptions = {}) {
   );
 
   // Session store configuration
+  const useMemoryStore = process.env.NODE_ENV === "test";
   const PgStore = connectPgSimple(session);
-  const pgPool = new PgPool({
-    connectionString: process.env.DATABASE_URL,
-  });
-  const sessionStore = new PgStore({
-    pool: pgPool,
-    createTableIfMissing: true,
-  });
+  const sessionStore = useMemoryStore
+    ? new session.MemoryStore()
+    : new PgStore({
+      pool: new PgPool({
+        connectionString: process.env.DATABASE_URL,
+      }),
+      createTableIfMissing: true,
+    });
 
   // Session configuration
   const sessionSecret = getRequiredSecret("SESSION_SECRET", {
@@ -302,6 +304,9 @@ export async function createApp(options: AppOptions = {}) {
   }
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    if (res.headersSent) {
+      return _next(err);
+    }
     const status = err.status || err.statusCode || 500;
     const safeMessage = status >= 500 ? "Internal Server Error" : err.message || "Request failed";
 
