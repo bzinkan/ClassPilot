@@ -1284,6 +1284,11 @@ async function sendHeartbeat(reason = 'manual') {
       await disableForInactiveLicense(data.planStatus);
       return;
     } else if (response.status === 401 || response.status === 403) {
+      const data = await response.json().catch(() => ({}));
+      if (data?.error === "school_not_entitled") {
+        await disableForInactiveLicense(data.planStatus);
+        return;
+      }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });

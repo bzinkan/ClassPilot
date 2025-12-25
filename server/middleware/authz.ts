@@ -1,6 +1,7 @@
 import type { RequestHandler } from "express";
 import type { School } from "@shared/schema";
 import type { IStorage } from "../storage";
+import { isSchoolEntitled } from "../util/entitlements";
 
 type SessionRole = "teacher" | "school_admin" | "super_admin" | "admin";
 const SESSION_COOKIE_NAME = "classpilot_session";
@@ -74,10 +75,9 @@ export const requireRole = (...roles: Array<Exclude<SessionRole, "admin">>): Req
 export function isSchoolLicenseActive(school?: School | null): boolean {
   return Boolean(
     school
-    && school.isActive === true
     && school.status !== "suspended"
-    && school.planStatus !== "canceled"
     && !school.deletedAt
+    && isSchoolEntitled(school)
   );
 }
 
@@ -121,13 +121,11 @@ export const requireActiveSchool = (
     return next();
   }
 
-  if (!isSchoolLicenseActive(school)) {
+  res.locals.school = school;
+
+  if (!isSchoolEntitled(school)) {
     return destroyStaffSession(req, res, () => {
-      res.status(402).json({
-        error: "School license inactive",
-        planStatus: school.planStatus,
-        schoolActive: false,
-      });
+      res.status(401).json({ error: "school_not_entitled" });
     });
   }
 
@@ -154,12 +152,10 @@ export const requireActiveSchoolForDevice = (
     return next();
   }
 
-  if (!isSchoolLicenseActive(school)) {
-    return res.status(402).json({
-      error: "School license inactive",
-      planStatus: school.planStatus,
-      schoolActive: false,
-    });
+  res.locals.school = school;
+
+  if (!isSchoolEntitled(school)) {
+    return res.status(403).json({ error: "school_not_entitled" });
   }
 
   return next();

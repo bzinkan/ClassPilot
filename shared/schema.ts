@@ -10,7 +10,9 @@ export const schools = pgTable("schools", {
   domain: text("domain").notNull().unique(), // Google Workspace domain (e.g., sfds.net)
   status: text("status").notNull().default("trial"), // 'trial', 'active', 'suspended'
   isActive: boolean("is_active").notNull().default(true),
-  planStatus: text("plan_status").notNull().default("active"), // active | trialing | past_due | canceled
+  planTier: text("plan_tier").notNull().default("trial"), // trial | basic | pro | enterprise
+  planStatus: text("plan_status").notNull().default("active"), // active | past_due | canceled
+  activeUntil: timestamp("active_until"), // Nullable - when plan entitlement expires
   stripeSubscriptionId: text("stripe_subscription_id"),
   disabledAt: timestamp("disabled_at"),
   disabledReason: text("disabled_reason"),
