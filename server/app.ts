@@ -205,14 +205,17 @@ export async function createApp(options: AppOptions = {}) {
   // Session store configuration
   const useMemoryStore = process.env.NODE_ENV === "test";
   const PgStore = connectPgSimple(session);
+  const sessionPool = useMemoryStore
+    ? undefined
+    : new PgPool({
+        connectionString: process.env.DATABASE_URL,
+      });
   const sessionStore = useMemoryStore
     ? new session.MemoryStore()
     : new PgStore({
-      pool: new PgPool({
-        connectionString: process.env.DATABASE_URL,
-      }),
-      createTableIfMissing: true,
-    });
+        pool: sessionPool,
+        createTableIfMissing: true,
+      });
 
   // Session configuration
   const sessionSecret = getRequiredSecret("SESSION_SECRET", {
@@ -221,7 +224,7 @@ export async function createApp(options: AppOptions = {}) {
   });
 
   const sessionOptions = {
-    name: "classpilot_session",
+    name: "classpilot.sid",
     store: sessionStore,
     secret: sessionSecret,
     resave: false,
@@ -231,7 +234,7 @@ export async function createApp(options: AppOptions = {}) {
       httpOnly: true,
       secure: isProduction(), // true for HTTPS
       sameSite: "lax",
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      maxAge: 12 * 60 * 60 * 1000, // 12 hours
     },
   } satisfies SessionOptions;
 
@@ -242,7 +245,7 @@ export async function createApp(options: AppOptions = {}) {
   app.use(sessionMiddleware);
 
   if (isProduction()) {
-    console.log("prod session: trust proxy=1 secureCookies=true store=pg");
+    console.log("prod session: trustProxy=1 secureCookie=true store=pg");
   }
 
   // Setup Google OAuth (must be after session middleware)
