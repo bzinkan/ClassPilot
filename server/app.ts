@@ -197,6 +197,11 @@ export async function createApp(options: AppOptions = {}) {
           return cb(null, true);
         }
 
+        // Allow custom domain
+        if (origin.includes("classpilot.net")) {
+          return cb(null, true);
+        }
+
         // Reject others
         cb(new Error("CORS blocked"));
       },
