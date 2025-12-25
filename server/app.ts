@@ -197,9 +197,17 @@ export async function createApp(options: AppOptions = {}) {
           return cb(null, true);
         }
 
-        // Allow custom domain
-        if (origin.includes("classpilot.net")) {
-          return cb(null, true);
+        // Allow custom domain from PUBLIC_BASE_URL
+        const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
+        if (publicBaseUrl) {
+          try {
+            const customDomain = new URL(publicBaseUrl).hostname;
+            if (origin.includes(customDomain)) {
+              return cb(null, true);
+            }
+          } catch (e) {
+            // Invalid URL, skip
+          }
         }
 
         // Reject others
