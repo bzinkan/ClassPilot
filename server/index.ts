@@ -19,7 +19,11 @@ import { setupVite, serveStatic, log } from "./vite";
   if (app.get("env") === "development") {
     await setupVite(app, server);
   } else {
+    console.log("[production] Setting up static file serving...");
+    console.log("[production] import.meta.dirname:", import.meta.dirname);
+    console.log("[production] Expected public path:", import.meta.dirname + "/public");
     serveStatic(app);
+    console.log("[production] Static file serving configured successfully");
   }
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
