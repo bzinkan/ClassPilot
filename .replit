@@ -45,3 +45,8 @@ waitForPort = 5000
 
 [agent]
 integrations = ["javascript_websocket:1.0.0"]
+
+[userenv]
+
+[userenv.production]
+PUBLIC_BASE_URL = "https://classpilot.replit.app"
