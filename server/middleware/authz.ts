@@ -3,6 +3,24 @@ import type { School } from "@shared/schema";
 import type { IStorage } from "../storage";
 
 type SessionRole = "teacher" | "school_admin" | "super_admin" | "admin";
+const SESSION_COOKIE_NAME = "classpilot_session";
+
+function destroyStaffSession(req: Parameters<RequestHandler>[0], res: Parameters<RequestHandler>[1], onComplete: () => void) {
+  const finalize = () => {
+    if (res.headersSent) {
+      return;
+    }
+    res.clearCookie(SESSION_COOKIE_NAME);
+    onComplete();
+  };
+  if (!req.session) {
+    finalize();
+    return;
+  }
+  req.session.destroy(() => {
+    finalize();
+  });
+}
 
 function normalizeRole(role?: SessionRole | null): Exclude<SessionRole, "admin"> | undefined {
   if (!role) {
@@ -82,7 +100,7 @@ export const requireActiveSchool = (
 
   const school = await storage.getSchool(schoolId);
   if (!school || school.deletedAt) {
-    return req.session.destroy(() => {
+    return destroyStaffSession(req, res, () => {
       res.status(401).json({ error: "Unauthorized" });
     });
   }
@@ -92,7 +110,7 @@ export const requireActiveSchool = (
     && school.schoolSessionVersion !== undefined
     && req.session.schoolSessionVersion !== school.schoolSessionVersion
   ) {
-    return req.session.destroy(() => {
+    return destroyStaffSession(req, res, () => {
       res.status(401).json({ error: "Session invalidated" });
     });
   }
@@ -104,13 +122,13 @@ export const requireActiveSchool = (
   }
 
   if (!isSchoolLicenseActive(school)) {
-    res.status(402).json({
-      error: "School license inactive",
-      planStatus: school.planStatus,
-      schoolActive: false,
+    return destroyStaffSession(req, res, () => {
+      res.status(402).json({
+        error: "School license inactive",
+        planStatus: school.planStatus,
+        schoolActive: false,
+      });
     });
-    req.session.destroy(() => {});
-    return;
   }
 
   return next();
