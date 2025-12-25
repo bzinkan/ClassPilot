@@ -1,4 +1,4 @@
-import type { Express, RequestHandler } from "express";
+import type { Express, Request, RequestHandler } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer } from "ws";
 import { storage as defaultStorage, type IStorage } from "./storage";
@@ -54,6 +54,7 @@ import {
   requireSchoolContext,
 } from "./middleware/authz";
 import { requireDeviceAuth } from "./middleware/requireDeviceAuth";
+import { deviceRateLimit } from "./middleware/deviceRateLimit";
 import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 
@@ -208,6 +209,10 @@ const HEARTBEAT_MIN_PERSIST_SECONDS = (() => {
 
 const HEARTBEAT_PERSIST_MIN_MS = HEARTBEAT_MIN_PERSIST_SECONDS * 1000;
 const heartbeatLastPersistedAt = new Map<string, number>();
+const heartbeatLastAcceptedAt = new Map<string, number>();
+const heartbeatLastFullPayloadAt = new Map<string, number>();
+const DEVICE_HEARTBEAT_MIN_INTERVAL_MS = 8_000;
+const HEARTBEAT_FULL_PAYLOAD_MIN_MS = 30_000;
 
 const HEARTBEAT_QUEUE_MAX = 500;
 const heartbeatPersistQueue: Array<() => Promise<void>> = [];
@@ -274,6 +279,38 @@ function sendToRole(
 ) {
   sendToRoleLocal(schoolId, role, message);
   publishWsMessage?.({ kind: "role", schoolId, role }, message);
+}
+
+function isFullHeartbeatPayload(req: Request): boolean {
+  const headerValue = req.headers["x-heartbeat-full"];
+  const normalizedHeader = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  if (normalizedHeader && ["1", "true", "yes"].includes(normalizedHeader.toLowerCase())) {
+    return true;
+  }
+
+  const body = req.body as Record<string, unknown> | undefined;
+  if (!body) {
+    return false;
+  }
+
+  const flag = body.fullPayload === true || body.fullHeartbeat === true;
+  const hasAllOpenTabs = Array.isArray(body.allOpenTabs) && body.allOpenTabs.length > 0;
+  const hasTabs = Array.isArray(body.tabs) && body.tabs.length > 0;
+  const hasUrls = Array.isArray(body.urls) && body.urls.length > 0;
+
+  return Boolean(flag || hasAllOpenTabs || hasTabs || hasUrls);
+}
+
+function stripHeavyHeartbeatFields(body: Record<string, unknown> | undefined) {
+  if (!body) {
+    return {};
+  }
+  const sanitized = { ...body };
+  delete sanitized.allOpenTabs;
+  delete sanitized.tabs;
+  delete sanitized.urls;
+  delete sanitized.openTabs;
+  return sanitized;
 }
 
 let activeStorage: IStorage = defaultStorage;
@@ -2038,7 +2075,7 @@ export async function registerRoutes(
   });
 
   // Device heartbeat endpoint (from extension) - JWT-authenticated, no staff session required
-  app.post("/api/device/heartbeat", heartbeatLimiter, requireDeviceAuth, requireActiveSchoolDeviceMiddleware, async (req, res) => {
+  app.post("/api/device/heartbeat", requireDeviceAuth, requireActiveSchoolDeviceMiddleware, deviceRateLimit, async (req, res) => {
     try {
       const authSchoolId = res.locals.schoolId as string | undefined;
       const authStudentId = res.locals.studentId as string | undefined;
@@ -2048,8 +2085,23 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
+      const now = Date.now();
+      const deviceKey = authDeviceId;
+
+      const lastAcceptedAt = deviceKey ? heartbeatLastAcceptedAt.get(deviceKey) : undefined;
+      if (deviceKey && lastAcceptedAt && now - lastAcceptedAt < DEVICE_HEARTBEAT_MIN_INTERVAL_MS) {
+        return res.sendStatus(204);
+      }
+
+      const fullPayloadRequested = isFullHeartbeatPayload(req);
+      const lastFullPayloadAt = deviceKey ? heartbeatLastFullPayloadAt.get(deviceKey) : undefined;
+      const allowFullPayload = !fullPayloadRequested
+        || !lastFullPayloadAt
+        || now - lastFullPayloadAt >= HEARTBEAT_FULL_PAYLOAD_MIN_MS;
+      const dropHeavyPayload = fullPayloadRequested && !allowFullPayload;
+
       const payloadForValidation = {
-        ...req.body,
+        ...(dropHeavyPayload ? stripHeavyHeartbeatFields(req.body) : req.body ?? {}),
         studentId: authStudentId,
         deviceId: authDeviceId,
         schoolId: authSchoolId,
@@ -2072,6 +2124,13 @@ export async function registerRoutes(
         data.studentEmail = res.locals.studentEmail;
       }
 
+      if (deviceKey) {
+        heartbeatLastAcceptedAt.set(deviceKey, now);
+      }
+      if (fullPayloadRequested && allowFullPayload && deviceKey) {
+        heartbeatLastFullPayloadAt.set(deviceKey, now);
+      }
+
       const settings = await storage.ensureSettingsForSchool(data.schoolId);
       if (!isWithinTrackingHours(
         settings?.enableTrackingHours,
@@ -2083,14 +2142,12 @@ export async function registerRoutes(
         return res.sendStatus(204);
       }
 
-      const deviceKey = data.deviceId;
-      const now = Date.now();
       const lastPersistedAt = deviceKey ? heartbeatLastPersistedAt.get(deviceKey) : undefined;
       const shouldPersist =
         !deviceKey || !lastPersistedAt || now - lastPersistedAt >= HEARTBEAT_PERSIST_MIN_MS;
 
       if (!shouldPersist) {
-        return res.status(200).json({ ok: true, persisted: false });
+        return res.sendStatus(204);
       }
 
       if (data.studentEmail && data.schoolId) {
@@ -2117,6 +2174,10 @@ export async function registerRoutes(
 
       if (!persisted && deviceKey) {
         heartbeatLastPersistedAt.delete(deviceKey);
+      }
+
+      if (dropHeavyPayload) {
+        return res.sendStatus(204);
       }
 
       return res.status(200).json({ ok: true, persisted });
