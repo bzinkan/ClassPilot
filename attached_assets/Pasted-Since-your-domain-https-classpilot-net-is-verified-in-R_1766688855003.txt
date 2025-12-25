@@ -1,0 +1,34 @@
+Since your domain https://classpilot.net is verified in Replit but still isn't loading, the issue is likely a technical "handshake" between Replit's edge network and your app's configuration.
+
+Here is the checklist of what you need to do next to bridge the gap between the verified domain and your live app:
+
+1. Trigger an SSL Reset
+Even if a domain is verified, Replit sometimes fails to automatically "bind" the SSL certificate (the https:// part) to the live deployment.
+
+The Fix: Go to your Deployments tab, find your custom domain, delete it, and then immediately add it back.
+
+Why: This force-refreshes Replit's load balancer and re-triggers the SSL certificate request. It often solves the "Verified but 404/Connection Reset" issue instantly.
+
+2. Update Your App's Internal URL
+Your code likely doesn't know it has a new "identity." Since the .replit.app domain works, the server is likely still listening for requests from that specific origin.
+
+Update Secrets: Go to the Tools -> Secrets (Environment Variables) in Replit.
+
+Key: PUBLIC_BASE_URL (or whatever variable your baseUrl.ts uses).
+
+Value: Change it from https://classpilot.replit.app to https://classpilot.net.
+
+Restart: You must Restart your Repl (and potentially Redeploy) for this secret to take effect.
+
+3. Check for "CNAME Flattening" or Proxying
+If you are using Cloudflare, ensure the "Proxy status" (the orange cloud) is turned OFF (set to "DNS Only" or Grey Cloud).
+
+The Conflict: Replit manages its own SSL certificates via Let's Encrypt. If Cloudflare is also trying to proxy the traffic, the two "walls" of security can conflict, causing the site to never load even though the DNS records are "correct".
+
+4. Wait for Propagation (If under 1 hour)
+Although Replit says it is verified, it can take up to 60 minutes for the global routing tables to point to the specific Replit server hosting your project. If it has been less than an hour, this might just be a matter of patience.
+
+Critical Step for your Chrome Extension
+Your Chrome extension is currently "talking" to the old URL. Even if you get the website working on classpilot.net, your student devices will still be sending data to classpilot.replit.app.
+
+You must update the serverUrl in your extension's config.js or managed policy and re-publish/re-distribute the extension.
