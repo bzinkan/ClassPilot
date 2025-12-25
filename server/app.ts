@@ -1,6 +1,7 @@
 import express, { type Request, Response, NextFunction } from "express";
 import session, { type SessionOptions } from "express-session";
 import connectPgSimple from "connect-pg-simple";
+import { Pool as PgPool } from "pg";
 import cors from "cors";
 import helmet from "helmet";
 import * as Sentry from "@sentry/node";
@@ -8,7 +9,6 @@ import { registerRoutes } from "./routes";
 import { setupGoogleAuth } from "./googleAuth";
 import { getRequiredSecret, isProduction } from "./util/env";
 import { buildClientConfig } from "./config/clientConfig";
-import { pool } from "./db";
 import { type IStorage, storage as defaultStorage } from "./storage";
 
 const SENTRY_DSN_SERVER = process.env.SENTRY_DSN_SERVER;
@@ -204,8 +204,11 @@ export async function createApp(options: AppOptions = {}) {
 
   // Session store configuration
   const PgStore = connectPgSimple(session);
+  const pgPool = new PgPool({
+    connectionString: process.env.DATABASE_URL,
+  });
   const sessionStore = new PgStore({
-    pool,
+    pool: pgPool,
     createTableIfMissing: true,
   });
 
