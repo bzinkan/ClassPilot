@@ -7,6 +7,7 @@ describe("tenant isolation guards", () => {
   let app: Awaited<ReturnType<typeof createTestApp>>["app"];
   let agent: request.SuperAgentTest;
   let storage: Awaited<ReturnType<typeof createTestApp>>["storage"];
+  let csrfToken: string;
 
   beforeAll(async () => {
     const created = await createTestApp();
@@ -31,6 +32,9 @@ describe("tenant isolation guards", () => {
       email: "teacher@classpilot.test",
       password: "testpass123",
     });
+
+    const csrfResponse = await agent.get("/api/csrf");
+    csrfToken = csrfResponse.body.csrfToken;
   });
 
   afterAll(() => {
@@ -38,17 +42,23 @@ describe("tenant isolation guards", () => {
   });
 
   it("blocks cross-school student updates", async () => {
-    const response = await agent.patch("/api/students/student-2").send({
-      studentName: "Nope",
-    });
+    const response = await agent
+      .patch("/api/students/student-2")
+      .set("X-CSRF-Token", csrfToken)
+      .send({
+        studentName: "Nope",
+      });
 
     expect(response.status).toBe(404);
   });
 
   it("blocks cross-school device updates", async () => {
-    const response = await agent.patch("/api/devices/device-2").send({
-      deviceName: "Nope",
-    });
+    const response = await agent
+      .patch("/api/devices/device-2")
+      .set("X-CSRF-Token", csrfToken)
+      .send({
+        deviceName: "Nope",
+      });
 
     expect(response.status).toBe(404);
   });
