@@ -25,8 +25,10 @@ import {
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
+  type InsertSchool,
   type InsertStudent,
   type InsertDevice,
+  type School,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
@@ -57,6 +59,7 @@ import { requireDeviceAuth } from "./middleware/requireDeviceAuth";
 import { deviceRateLimit } from "./middleware/deviceRateLimit";
 import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
+import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 
 // Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -1293,6 +1296,49 @@ export async function registerRoutes(
     }
   });
 
+  // Update school plan (manual entitlement controls)
+  app.patch("/api/super-admin/schools/:schoolId/plan", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { schoolId } = req.params;
+      const planUpdateSchema = z.object({
+        planTier: z.enum(PLAN_TIER_ORDER).optional(),
+        planStatus: z.enum(PLAN_STATUS_VALUES).optional(),
+        activeUntil: z.union([z.string().datetime(), z.null()]).optional(),
+      });
+
+      const validation = planUpdateSchema.safeParse(req.body);
+      if (!validation.success) {
+        return res.status(400).json({ error: "Invalid plan update" });
+      }
+
+      const existingSchool = await storage.getSchool(schoolId);
+      if (!existingSchool) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      const updates: Partial<InsertSchool> = {};
+      if (validation.data.planTier) {
+        updates.planTier = validation.data.planTier;
+      }
+      if (validation.data.planStatus) {
+        updates.planStatus = validation.data.planStatus;
+      }
+      if (validation.data.activeUntil !== undefined) {
+        updates.activeUntil = validation.data.activeUntil ? new Date(validation.data.activeUntil) : null;
+      }
+
+      const updated = await storage.updateSchool(schoolId, updates);
+      if (!updated) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      res.json({ success: true, school: updated });
+    } catch (error) {
+      console.error("Update school plan error:", error);
+      res.status(500).json({ error: "Failed to update school plan" });
+    }
+  });
+
   // Soft delete school (sets deletedAt timestamp)
   app.delete("/api/super-admin/schools/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
@@ -2087,17 +2133,19 @@ export async function registerRoutes(
 
       const now = Date.now();
       const deviceKey = authDeviceId;
+      const school = res.locals.school as School | undefined;
 
       const lastAcceptedAt = deviceKey ? heartbeatLastAcceptedAt.get(deviceKey) : undefined;
       if (deviceKey && lastAcceptedAt && now - lastAcceptedAt < DEVICE_HEARTBEAT_MIN_INTERVAL_MS) {
         return res.sendStatus(204);
       }
 
+      const allowTierFullPayload = assertTierAtLeast(school, "pro");
       const fullPayloadRequested = isFullHeartbeatPayload(req);
       const lastFullPayloadAt = deviceKey ? heartbeatLastFullPayloadAt.get(deviceKey) : undefined;
-      const allowFullPayload = !fullPayloadRequested
+      const allowFullPayload = allowTierFullPayload && (!fullPayloadRequested
         || !lastFullPayloadAt
-        || now - lastFullPayloadAt >= HEARTBEAT_FULL_PAYLOAD_MIN_MS;
+        || now - lastFullPayloadAt >= HEARTBEAT_FULL_PAYLOAD_MIN_MS);
       const dropHeavyPayload = fullPayloadRequested && !allowFullPayload;
 
       const payloadForValidation = {

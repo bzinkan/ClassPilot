@@ -64,7 +64,8 @@ describe("tenant isolation guards", () => {
     await storage.updateSchool("school-1", { isActive: false, planStatus: "canceled" });
 
     const schoolAResponse = await agent.get("/api/students");
-    expect(schoolAResponse.status).toBe(402);
+    expect(schoolAResponse.status).toBe(401);
+    expect(schoolAResponse.body).toMatchObject({ error: "school_not_entitled" });
 
     const schoolBResponse = await agentB.get("/api/students");
     expect(schoolBResponse.status).toBe(200);
@@ -72,7 +73,7 @@ describe("tenant isolation guards", () => {
     await storage.updateSchool("school-1", { isActive: true, planStatus: "active" });
   });
 
-  it("blocks inactive schools and invalidates session", async () => {
+  it("blocks inactive schools on /api/me and invalidates session", async () => {
     const inactiveAgent = request.agent(app);
     await inactiveAgent.post("/api/login").send({
       email: "teacher@classpilot.test",
@@ -80,10 +81,10 @@ describe("tenant isolation guards", () => {
     });
     await storage.updateSchool("school-1", { isActive: false, planStatus: "canceled" });
 
-    const response = await inactiveAgent.get("/api/students");
+    const response = await inactiveAgent.get("/api/me");
 
-    expect(response.status).toBe(402);
-    expect(response.body).toMatchObject({ error: "School license inactive" });
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({ error: "school_not_entitled" });
 
     const followUp = await inactiveAgent.get("/api/me");
     expect(followUp.status).toBe(401);

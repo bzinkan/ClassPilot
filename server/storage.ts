@@ -380,8 +380,8 @@ export class MemStorage implements IStorage {
   async createSchool(insertSchool: InsertSchool): Promise<School> {
     const id = randomUUID();
     const status = insertSchool.status || "trial";
-    const planStatus = insertSchool.planStatus
-      ?? (status === "trial" ? "trialing" : status === "suspended" ? "canceled" : "active");
+    const planStatus = insertSchool.planStatus ?? "active";
+    const planTier = insertSchool.planTier ?? "trial";
     const isActive = insertSchool.isActive ?? status !== "suspended";
     const school: School = {
       id,
@@ -389,7 +389,9 @@ export class MemStorage implements IStorage {
       domain: insertSchool.domain,
       status,
       isActive,
+      planTier,
       planStatus,
+      activeUntil: insertSchool.activeUntil ?? null,
       stripeSubscriptionId: insertSchool.stripeSubscriptionId ?? null,
       disabledAt: insertSchool.disabledAt ?? null,
       disabledReason: insertSchool.disabledReason ?? null,
@@ -1756,8 +1758,8 @@ export class DatabaseStorage implements IStorage {
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
     const status = insertSchool.status ?? "trial";
-    const planStatus = insertSchool.planStatus
-      ?? (status === "trial" ? "trialing" : status === "suspended" ? "canceled" : "active");
+    const planStatus = insertSchool.planStatus ?? "active";
+    const planTier = insertSchool.planTier ?? "trial";
     const isActive = insertSchool.isActive ?? status !== "suspended";
     const [school] = await db
       .insert(schools)
@@ -1766,6 +1768,7 @@ export class DatabaseStorage implements IStorage {
         status,
         isActive,
         planStatus,
+        planTier,
         schoolSessionVersion: insertSchool.schoolSessionVersion ?? 1,
       })
       .returning();
