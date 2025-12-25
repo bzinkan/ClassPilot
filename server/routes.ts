@@ -118,6 +118,21 @@ async function getSchoolFromEmail(
   };
 }
 
+type LicenseLimitError = Error & { code: "LICENSE_LIMIT_REACHED"; maxLicenses: number; currentCount: number };
+
+function isLicenseLimitError(error: unknown): error is LicenseLimitError {
+  return error instanceof Error && (error as LicenseLimitError).code === "LICENSE_LIMIT_REACHED";
+}
+
+function buildLicenseLimitResponse(error: LicenseLimitError) {
+  return {
+    code: "LICENSE_LIMIT_REACHED",
+    error: `Student limit reached for this school (${error.maxLicenses}).`,
+    maxLicenses: error.maxLicenses,
+    currentCount: error.currentCount,
+  };
+}
+
 // SESSION-BASED: Helper to ensure student-device association exists
 // INDUSTRY STANDARD: Device identity (primary) → Email (student identity) → Sessions (active tracking)
 // Used by both heartbeat endpoint and WebSocket auth handler
@@ -2870,6 +2885,9 @@ export async function registerRoutes(
       res.json({ success: true, student });
     } catch (error) {
       console.error("Create student error:", error);
+      if (isLicenseLimitError(error)) {
+        return res.status(409).json(buildLicenseLimitResponse(error));
+      }
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -2907,6 +2925,20 @@ export async function registerRoutes(
           const student = await storage.createStudent(studentData);
           createdStudents.push(student);
         } catch (error) {
+          if (isLicenseLimitError(error)) {
+            if (createdStudents.length > 0) {
+              broadcastToTeachers(sessionSchoolId, {
+                type: 'student-update',
+                deviceId: 'bulk-update',
+              });
+            }
+            return res.status(409).json({
+              ...buildLicenseLimitResponse(error),
+              created: createdStudents.length,
+              students: createdStudents,
+              errors: errors.length > 0 ? errors : undefined,
+            });
+          }
           errors.push({
             deviceId: studentInput.deviceId,
             error: error instanceof Error ? error.message : "Failed to create student"

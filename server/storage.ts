@@ -2093,7 +2093,28 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(students).where(eq(students.schoolId, schoolId));
   }
 
+  private async getStudentCountForSchool(schoolId: string): Promise<number> {
+    const [result] = await db
+      .select({ count: drizzleSql<number>`count(*)` })
+      .from(students)
+      .where(eq(students.schoolId, schoolId));
+    return Number(result?.count ?? 0);
+  }
+
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
+    const school = await this.getSchool(insertStudent.schoolId);
+    const maxLicenses = school?.maxLicenses ?? 0;
+    if (maxLicenses > 0) {
+      const currentCount = await this.getStudentCountForSchool(insertStudent.schoolId);
+      if (currentCount >= maxLicenses) {
+        const error = new Error("LICENSE_LIMIT_REACHED");
+        (error as Error & { code: string; maxLicenses: number; currentCount: number }).code = "LICENSE_LIMIT_REACHED";
+        (error as Error & { maxLicenses: number }).maxLicenses = maxLicenses;
+        (error as Error & { currentCount: number }).currentCount = currentCount;
+        throw error;
+      }
+    }
+
     const [student] = await db
       .insert(students)
       .values(insertStudent)
