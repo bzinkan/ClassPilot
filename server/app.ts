@@ -1,7 +1,6 @@
 import express, { type Request, Response, NextFunction } from "express";
-import session from "express-session";
+import session, { type SessionOptions } from "express-session";
 import connectPgSimple from "connect-pg-simple";
-import { Pool } from "@neondatabase/serverless";
 import cors from "cors";
 import helmet from "helmet";
 import * as Sentry from "@sentry/node";
@@ -9,6 +8,7 @@ import { registerRoutes } from "./routes";
 import { setupGoogleAuth } from "./googleAuth";
 import { getRequiredSecret, isProduction } from "./util/env";
 import { buildClientConfig } from "./config/clientConfig";
+import { pool } from "./db";
 import { type IStorage, storage as defaultStorage } from "./storage";
 
 const SENTRY_DSN_SERVER = process.env.SENTRY_DSN_SERVER;
@@ -133,7 +133,9 @@ export async function createApp(options: AppOptions = {}) {
   const app = express();
 
   // CRITICAL: Trust proxy for Replit Deployments
-  app.set("trust proxy", 1);
+  if (isProduction()) {
+    app.set("trust proxy", 1);
+  }
 
   app.use(
     helmet({
@@ -202,12 +204,10 @@ export async function createApp(options: AppOptions = {}) {
 
   // Session store configuration
   const PgStore = connectPgSimple(session);
-  const sessionStore = process.env.DATABASE_URL
-    ? new PgStore({
-        pool: new Pool({ connectionString: process.env.DATABASE_URL }),
-        createTableIfMissing: true,
-      })
-    : undefined; // Use default MemoryStore in development if no DATABASE_URL
+  const sessionStore = new PgStore({
+    pool,
+    createTableIfMissing: true,
+  });
 
   // Session configuration
   const sessionSecret = getRequiredSecret("SESSION_SECRET", {
@@ -215,7 +215,7 @@ export async function createApp(options: AppOptions = {}) {
     devLogMessage: "[auth] Generated dev SESSION_SECRET",
   });
 
-  const sessionMiddleware = session({
+  const sessionOptions = {
     name: "classpilot_session",
     store: sessionStore,
     secret: sessionSecret,
@@ -224,13 +224,21 @@ export async function createApp(options: AppOptions = {}) {
     rolling: true, // Auto-renew session on activity to keep it alive
     cookie: {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production", // true for HTTPS
-      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // 'none' allows chrome-extension
+      secure: isProduction(), // true for HTTPS
+      sameSite: "lax",
       maxAge: 24 * 60 * 60 * 1000, // 24 hours
     },
-  });
+  } satisfies SessionOptions;
+
+  const sessionMiddleware = session(sessionOptions);
+
+  app.set("session-cookie-options", sessionOptions.cookie);
 
   app.use(sessionMiddleware);
+
+  if (isProduction()) {
+    console.log("prod session: trust proxy=1 secureCookies=true store=pg");
+  }
 
   // Setup Google OAuth (must be after session middleware)
   setupGoogleAuth(app);
