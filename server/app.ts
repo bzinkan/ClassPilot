@@ -386,6 +386,7 @@ export async function createApp(options: AppOptions = {}) {
     const status = err.status || err.statusCode || 500;
     const safeMessage = status >= 500 ? "Internal Server Error" : err.message || "Request failed";
 
+    console.error(`[error-handler] ${_req.method} ${_req.path} - ${status}: ${err.message || err}`);
     res.status(status).json({ message: safeMessage });
   });
 
