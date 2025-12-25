@@ -17,15 +17,17 @@ type PoolLike = {
   query: (query: string, params?: any[]) => Promise<{ rows?: any[] }>;
 };
 
-let pool: PoolLike;
-let db: ReturnType<typeof neonDrizzle> | ReturnType<typeof nodeDrizzle>;
+type DbClient = ReturnType<typeof neonDrizzle>;
+
+let pool: PoolLike | NeonPool;
+let db: DbClient;
 
 if (isTest) {
   pool = createTestSessionPool();
-  db = {} as ReturnType<typeof neonDrizzle>;
+  db = {} as DbClient;
 } else {
   pool = new NeonPool({ connectionString: process.env.DATABASE_URL });
-  db = neonDrizzle({ client: pool, schema });
+  db = neonDrizzle(pool, { schema });
 }
 
 export { pool, db };
@@ -78,11 +80,11 @@ function createTestSessionPool(): PoolLike {
         } else {
           const [timestamp] = params;
           const cutoff = Number(timestamp);
-          for (const [sid, record] of sessions.entries()) {
+          sessions.forEach((record, sid) => {
             if (record.expire < cutoff) {
               sessions.delete(sid);
             }
-          }
+          });
         }
         return { rows: [] };
       }
