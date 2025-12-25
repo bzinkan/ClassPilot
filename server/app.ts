@@ -207,11 +207,24 @@ export async function createApp(options: AppOptions = {}) {
   // Session store configuration
   const useMemoryStore = process.env.NODE_ENV === "test";
   const PgStore = connectPgSimple(session);
+  if (isProduction()) {
+    getRequiredSecret("DATABASE_URL", { minBytes: 1 });
+  }
   const sessionPool = useMemoryStore
     ? undefined
     : new PgPool({
         connectionString: process.env.DATABASE_URL,
       });
+  if (sessionPool && process.env.NODE_ENV !== "test") {
+    try {
+      await sessionPool.query("SELECT 1");
+      console.log("[db] session store connectivity ok");
+    } catch (error) {
+      console.error("[db] session store connectivity failed", error);
+      throw error;
+    }
+  }
+
   const sessionStore = useMemoryStore
     ? new session.MemoryStore()
     : new PgStore({
@@ -337,8 +350,26 @@ export async function createApp(options: AppOptions = {}) {
     enableBackgroundJobs: options.enableBackgroundJobs,
   });
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     if (err?.code === "EBADCSRFTOKEN") {
+      const userAgent = typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : undefined;
+      const csrfMetadata = {
+        method: req.method,
+        path: req.originalUrl.split("?")[0],
+        userId: req.session?.userId,
+        schoolId: req.session?.schoolId,
+        ip: req.ip,
+        userAgent: userAgent ? userAgent.slice(0, 200) : undefined,
+      };
+
+      console.warn("[security] Invalid CSRF token", csrfMetadata);
+      if (SENTRY_DSN_SERVER) {
+        Sentry.withScope((scope) => {
+          scope.setLevel("warning");
+          scope.setExtras(csrfMetadata);
+          Sentry.captureMessage("Invalid CSRF token");
+        });
+      }
       return res.status(403).json({ error: "Invalid CSRF token" });
     }
     return next(err);
