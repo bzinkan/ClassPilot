@@ -1,7 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
 import session, { type SessionOptions } from "express-session";
 import connectPgSimple from "connect-pg-simple";
-import { Pool as PgPool } from "pg";
+import pg from "pg";
+const { Pool: PgPool } = pg;
 import cors from "cors";
 import helmet from "helmet";
 import csurf from "csurf";
