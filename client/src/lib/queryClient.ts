@@ -7,19 +7,60 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+let csrfToken: string | null = null;
+let csrfTokenPromise: Promise<string> | null = null;
+
+function isMutatingMethod(method: string) {
+  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+}
+
+async function getCsrfToken(): Promise<string> {
+  if (csrfToken) {
+    return csrfToken;
+  }
+  if (!csrfTokenPromise) {
+    csrfTokenPromise = (async () => {
+      const res = await fetch("/api/csrf", {
+        credentials: "include",
+      });
+      await throwIfResNotOk(res);
+      const data = (await res.json()) as { csrfToken?: string };
+      if (!data.csrfToken) {
+        throw new Error("Missing CSRF token");
+      }
+      csrfToken = data.csrfToken;
+      return data.csrfToken;
+    })().finally(() => {
+      csrfTokenPromise = null;
+    });
+  }
+  return csrfTokenPromise;
+}
+
 export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
+  const headers = new Headers(data ? { "Content-Type": "application/json" } : undefined);
+  if (isMutatingMethod(method)) {
+    const token = await getCsrfToken();
+    headers.set("X-CSRF-Token", token);
+  }
   const res = await fetch(url, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers,
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
 
+  if (res.status === 403) {
+    csrfToken = null;
+  }
   await throwIfResNotOk(res);
+  if (res.ok && method.toUpperCase() === "POST" && url === "/api/logout") {
+    csrfToken = null;
+  }
   return res;
 }
 

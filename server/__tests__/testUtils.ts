@@ -16,6 +16,8 @@ export function createTestStorage() {
   const users = new Map<string, any>();
   const students = new Map<string, any>();
   const devices = new Map<string, any>();
+  const groups = new Map<string, any>();
+  const sessions = new Map<string, any>();
   const schools = new Map<string, any>();
   const settingsBySchool = new Map<string, any>();
 
@@ -251,6 +253,85 @@ export function createTestStorage() {
     async getStudentsBySchool(schoolId: string) {
       return Array.from(students.values()).filter((student) => student.schoolId === schoolId);
     },
+    async getGroup(id: string) {
+      return groups.get(id);
+    },
+    async getGroupsBySchool(schoolId: string) {
+      return Array.from(groups.values()).filter((group) => group.schoolId === schoolId);
+    },
+    async getGroupsByTeacher(teacherId: string) {
+      return Array.from(groups.values()).filter((group) => group.teacherId === teacherId);
+    },
+    async createGroup(group: any) {
+      const created = {
+        id: group.id ?? `group-${groups.size + 1}`,
+        schoolId: group.schoolId,
+        teacherId: group.teacherId,
+        name: group.name,
+        description: group.description ?? null,
+        periodLabel: group.periodLabel ?? null,
+        gradeLevel: group.gradeLevel ?? null,
+        groupType: group.groupType ?? "teacher_created",
+        parentGroupId: group.parentGroupId ?? null,
+        createdAt: new Date(),
+      };
+      groups.set(created.id, created);
+      return created;
+    },
+    async updateGroup(id: string, updates: Partial<any>) {
+      const existing = groups.get(id);
+      if (!existing) {
+        return undefined;
+      }
+      const updated = { ...existing, ...updates };
+      groups.set(id, updated);
+      return updated;
+    },
+    async deleteGroup(id: string) {
+      return groups.delete(id);
+    },
+    async getSession(id: string) {
+      return sessions.get(id);
+    },
+    async getActiveSessionByTeacher(teacherId: string) {
+      return Array.from(sessions.values()).find(
+        (session) => session.teacherId === teacherId && session.endTime === null
+      );
+    },
+    async getActiveSessions(schoolId: string) {
+      const activeSessions = Array.from(sessions.values()).filter((session) => session.endTime === null);
+      return activeSessions.filter((session) => {
+        const group = groups.get(session.groupId);
+        return group?.schoolId === schoolId;
+      });
+    },
+    async getSessionsBySchool(schoolId: string) {
+      return Array.from(sessions.values()).filter((session) => {
+        const group = groups.get(session.groupId);
+        return group?.schoolId === schoolId;
+      });
+    },
+    async startSession(session: any) {
+      const created = {
+        id: session.id ?? `session-${sessions.size + 1}`,
+        groupId: session.groupId,
+        teacherId: session.teacherId,
+        startTime: new Date(),
+        endTime: null,
+        createdAt: new Date(),
+      };
+      sessions.set(created.id, created);
+      return created;
+    },
+    async endSession(sessionId: string) {
+      const existing = sessions.get(sessionId);
+      if (!existing) {
+        return undefined;
+      }
+      const updated = { ...existing, endTime: new Date() };
+      sessions.set(sessionId, updated);
+      return updated;
+    },
     async getStudentsByDevice(schoolId: string, deviceId: string) {
       return Array.from(students.values()).filter(
         (student) => student.schoolId === schoolId && student.deviceId === deviceId
@@ -262,9 +343,6 @@ export function createTestStorage() {
     async getStudentStatusesAggregatedBySchool(_schoolId: string) {
       return [];
     },
-    async getActiveSessionByTeacher(_teacherId: string) {
-      return undefined;
-    },
     async addHeartbeat() {
       return { id: "hb-1" };
     },
@@ -273,12 +351,6 @@ export function createTestStorage() {
     },
     async expireStaleStudentSessions() {
       return 0;
-    },
-    async getActiveSessions(_schoolId: string) {
-      return [];
-    },
-    async getSessionsBySchool(_schoolId: string) {
-      return [];
     },
     async getFlightPathsBySchool(_schoolId: string) {
       return [];

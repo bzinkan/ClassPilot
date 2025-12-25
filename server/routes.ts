@@ -422,9 +422,17 @@ export async function registerRoutes(
 
   // SECURITY: Handle WebSocket upgrade with session validation
   httpServer.on('upgrade', (request, socket, head) => {
+    const rawUrl = request.url ?? "/";
+    let pathname = rawUrl;
+    try {
+      pathname = new URL(rawUrl, "http://localhost").pathname;
+    } catch (error) {
+      console.warn("[WebSocket] Failed to parse upgrade URL:", error);
+    }
+
     // SECURITY: Only handle WebSocket upgrades for /ws path
-    if (request.url !== '/ws') {
-      console.warn('[WebSocket] Rejected upgrade attempt for invalid path:', request.url);
+    if (pathname !== "/ws" && pathname !== "/ws/") {
+      console.warn("[WebSocket] Rejected upgrade attempt for invalid path:", pathname);
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
       return;

@@ -7,6 +7,7 @@ describe("heartbeat endpoint", () => {
   let app: ReturnType<typeof request>;
   let server: Awaited<ReturnType<typeof createTestApp>>["server"];
   let agent: request.SuperAgentTest;
+  let csrfToken: string;
 
   beforeAll(async () => {
     const created = await createTestApp();
@@ -18,6 +19,9 @@ describe("heartbeat endpoint", () => {
       email: "teacher@classpilot.test",
       password: "testpass123",
     });
+
+    const csrfResponse = await agent.get("/api/csrf");
+    csrfToken = csrfResponse.body.csrfToken;
   });
 
   afterAll(() => {
@@ -31,18 +35,21 @@ describe("heartbeat endpoint", () => {
       schoolId: "school-1",
     });
 
-    const response = await agent.post("/api/heartbeat").send({
-      deviceId: "device-1",
-      studentId: "student-1",
-      schoolId: "school-1",
-      activeTabTitle: "Unit Test",
-      activeTabUrl: "https://example.com",
-      isSharing: false,
-      screenLocked: false,
-      flightPathActive: false,
-      cameraActive: false,
-      studentToken,
-    });
+    const response = await agent
+      .post("/api/heartbeat")
+      .set("X-CSRF-Token", csrfToken)
+      .send({
+        deviceId: "device-1",
+        studentId: "student-1",
+        schoolId: "school-1",
+        activeTabTitle: "Unit Test",
+        activeTabUrl: "https://example.com",
+        isSharing: false,
+        screenLocked: false,
+        flightPathActive: false,
+        cameraActive: false,
+        studentToken,
+      });
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ ok: true });

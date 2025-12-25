@@ -4,6 +4,7 @@ import connectPgSimple from "connect-pg-simple";
 import { Pool as PgPool } from "pg";
 import cors from "cors";
 import helmet from "helmet";
+import csurf from "csurf";
 import * as Sentry from "@sentry/node";
 import { registerRoutes } from "./routes";
 import { setupGoogleAuth } from "./googleAuth";
@@ -263,6 +264,30 @@ export async function createApp(options: AppOptions = {}) {
   );
   app.use(express.urlencoded({ extended: false, limit: "12kb" }));
 
+  const csrfProtection = csurf();
+  const csrfExcludedPaths = new Set(["/api/login"]);
+  const isMutatingMethod = (method: string) => !["GET", "HEAD", "OPTIONS"].includes(method);
+
+  app.use((req, res, next) => {
+    if (!req.path.startsWith("/api")) {
+      return next();
+    }
+    if (!isMutatingMethod(req.method)) {
+      return next();
+    }
+    if (!req.session?.userId) {
+      return next();
+    }
+    if (csrfExcludedPaths.has(req.path)) {
+      return next();
+    }
+    const authHeader = req.headers.authorization;
+    if (typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
+      return next();
+    }
+    return csrfProtection(req, res, next);
+  });
+
   app.get("/health", (_req, res) => {
     res.json({ ok: true });
   });
@@ -296,10 +321,26 @@ export async function createApp(options: AppOptions = {}) {
     });
   }
 
+  app.get("/api/csrf", (req, res, next) => {
+    if (!req.session?.userId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+    return csrfProtection(req, res, next);
+  }, (req, res) => {
+    res.json({ csrfToken: req.csrfToken() });
+  });
+
   const server = await registerRoutes(app, {
     storage: options.storage ?? defaultStorage,
     sessionMiddleware,
     enableBackgroundJobs: options.enableBackgroundJobs,
+  });
+
+  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+    if (err?.code === "EBADCSRFTOKEN") {
+      return res.status(403).json({ error: "Invalid CSRF token" });
+    }
+    return next(err);
   });
 
   if (SENTRY_DSN_SERVER) {
