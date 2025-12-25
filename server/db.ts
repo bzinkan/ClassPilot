@@ -1,5 +1,5 @@
-import { Pool as NeonPool, neonConfig } from '@neondatabase/serverless';
-import { drizzle as neonDrizzle } from 'drizzle-orm/neon-serverless';
+import { Pool as NeonPool, neon, neonConfig } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/neon-http";
 import ws from "ws";
 import * as schema from "@shared/schema";
 
@@ -17,15 +17,16 @@ type PoolLike = {
   query: (query: string, params?: any[]) => Promise<{ rows?: any[] }>;
 };
 
-let pool: PoolLike;
-let db: ReturnType<typeof neonDrizzle> | ReturnType<typeof nodeDrizzle>;
+let pool: NeonPool;
+let db: ReturnType<typeof drizzle>;
 
 if (isTest) {
-  pool = createTestSessionPool();
-  db = {} as ReturnType<typeof neonDrizzle>;
+  pool = createTestSessionPool() as unknown as NeonPool;
+  db = {} as ReturnType<typeof drizzle>;
 } else {
   pool = new NeonPool({ connectionString: process.env.DATABASE_URL });
-  db = neonDrizzle({ client: pool, schema });
+  const client = neon(process.env.DATABASE_URL!);
+  db = drizzle(client, { schema });
 }
 
 export { pool, db };
@@ -78,11 +79,11 @@ function createTestSessionPool(): PoolLike {
         } else {
           const [timestamp] = params;
           const cutoff = Number(timestamp);
-          for (const [sid, record] of sessions.entries()) {
+          sessions.forEach((record, sid) => {
             if (record.expire < cutoff) {
               sessions.delete(sid);
             }
-          }
+          });
         }
         return { rows: [] };
       }
