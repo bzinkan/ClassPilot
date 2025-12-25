@@ -1,0 +1,140 @@
+2025-12-25T18:29:25Z info: Deployment: eb3883b8-b0eb-4b99-804d-630f6824b7f2
+2025-12-25T18:29:25Z info: Build: 6d8b00cb-d166-45dd-b98a-0d26e74f7d99
+2025-12-25T18:29:25Z info: Running Security Scan
+2025-12-25T18:29:34Z info: Security Scan Complete
+2025-12-25T18:29:34Z info: Connecting to builder
+2025-12-25T18:29:34Z info: Builder connected
+2025-12-25T18:29:34Z info: Installing packages
+2025-12-25T18:29:35Z info: Starting Build
+
+> rest-express@1.0.0 build
+> vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist
+
+
+vite v5.4.21 building for production...
+
+transforming...
+
+Browserslist: browsers data (caniuse-lite) is 14 months old. Please run:
+  npx update-browserslist-db@latest
+  Why you should do it regularly: https://github.com/browserslist/update-db#readme
+
+
+A PostCSS plugin did not pass the `from` option to `postcss.parse`. This may cause imported assets to be incorrectly transformed. If you've recently added a PostCSS plugin that raised this warning, please contact the package author to fix the issue.
+
+✓ 3381 modules transformed.
+
+rendering chunks...
+
+computing gzip size...
+
+../dist/public/index.html                     0.98 kB │ gzip:   0.54 kB
+../dist/public/assets/index-x2p9fZGr.css     93.39 kB │ gzip:  14.88 kB
+../dist/public/assets/index-DitKEETN.js   1,147.79 kB │ gzip: 314.91 kB
+
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 15.83s
+
+
+  dist/index.js  352.9kb
+
+⚡ Done in 154ms
+
+npm notice
+npm notice New major version of npm available! 10.8.2 -> 11.7.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v11.7.0
+npm notice To update run: npm install -g npm@11.7.0
+npm notice
+
+2025-12-25T18:29:55Z info: Pushing pid1 binary layer...
+2025-12-25T18:29:57Z info: Created pid1 binary layer
+2025-12-25T18:30:05Z info: Pushing Repl layer...
+2025-12-25T18:30:05Z info: Pushing hosting layer...
+2025-12-25T18:30:05Z info: Retrieved cached nix layer
+2025-12-25T18:30:06Z info: Created hosting layer
+2025-12-25T18:30:41Z info: Created Repl layer
+2025-12-25T18:30:43Z info: Pushed image manifest
+2025-12-25T18:30:44Z info: Pushed soci index manifest
+2025-12-25T18:30:47Z info: Creating Autoscale service
+forwarding local port 5000 to external port 80 (mapped as 1104)
+> NODE_ENV=production node dist/index.js
+metasidecar: loaded enterprise status from environment is_enterprise=false
+starting up user application
+> rest-express@1.0.0 start
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+[db] session store connectivity ok
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+6:31:17 PM [express] serving on port 5000
+prod session: trustProxy=1 secureCookie=true store=pg
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+Google OAuth callback URL: https://classpilot.net/auth/google/callback
+Assigned 4 unowned students to default teacher
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 2ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 0ms
+POST /api/register-student 401 in 2ms
+POST /api/register-student 401 in 1ms
+POST /api/register-student 401 in 1ms
+2025-12-25T18:31:22Z info: upsertCloudRunService completed
+2025-12-25T18:31:22Z info: Waiting for service to be ready
+2025-12-25T18:31:25Z info: Deployment successful
