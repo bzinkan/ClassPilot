@@ -1,8 +1,12 @@
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
+import { requireEnv } from "./util/requireEnv";
 
 export async function initializeApp() {
   const isProduction = process.env.NODE_ENV === "production";
+  const wsSharedKey = isProduction
+    ? requireEnv("WS_SHARED_KEY")
+    : (process.env.WS_SHARED_KEY || "change-this-key");
   const seedDemoUsersEnv = process.env.SEED_DEMO_USERS;
   const seedDemoUsers = seedDemoUsersEnv === "true";
   const shouldSeedDemoUsers = !isProduction && (seedDemoUsers || seedDemoUsersEnv === undefined);
@@ -77,7 +81,7 @@ export async function initializeApp() {
   if (!existingSettings) {
     await storage.upsertSettingsForSchool(defaultSchoolId, {
       schoolName: "Default School",
-      wsSharedKey: process.env.WS_SHARED_KEY || "change-this-key",
+      wsSharedKey,
       retentionHours: "24",
       blockedDomains: [],
     });
