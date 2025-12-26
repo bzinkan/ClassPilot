@@ -89,6 +89,10 @@ function logSettingsSchoolId(schoolId: string) {
   }
 }
 
+const resetUserPasswordSchema = z.object({
+  password: z.string().min(12, "Password must be at least 12 characters"),
+});
+
 // Helper function to extract domain from email and lookup school
 async function getSchoolFromEmail(
   storage: IStorage,
