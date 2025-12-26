@@ -1125,6 +1125,9 @@ export async function registerRoutes(
       if (!user || !assertSameSchool(sessionSchoolId, user.schoolId)) {
         return res.status(404).json({ error: "User not found" });
       }
+      if (user.role === 'school_admin' || user.role === 'super_admin') {
+        return res.status(403).json({ error: "Cannot reset password for an admin account" });
+      }
 
       const hashedPassword = await bcrypt.hash(data.password, 10);
       await storage.updateUser(userId, { password: hashedPassword });
