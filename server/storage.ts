@@ -126,6 +126,7 @@ function buildDefaultSettingsInput({
     trackingEndTime: "15:00",
     schoolTimezone: "America/New_York",
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+    afterHoursMode: "off",
   };
 }
 

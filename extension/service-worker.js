@@ -149,6 +149,8 @@ let observedByTeacher = false;
 let lastObservedSignature = null;
 let lastObservedSentAt = 0;
 let licenseActive = true;
+let offHoursNetworkPaused = false;
+let isScheduleHardOff = false;
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -406,6 +408,7 @@ async function refreshSchoolSettings({ force = false } = {}) {
 
 function determineTrackingState() {
   const effectiveSettings = schoolSettings || { enableTrackingHours: false };
+  const afterHoursMode = effectiveSettings.afterHoursMode || 'off';
   // School hours enforcement is based solely on admin-configured /api/settings values.
   const withinHours = isWithinTrackingHours(
     effectiveSettings.enableTrackingHours,
@@ -416,7 +419,13 @@ function determineTrackingState() {
   );
 
   if (!withinHours) {
-    return TRACKING_STATES.OFF;
+    if (afterHoursMode === 'off') {
+      isScheduleHardOff = true;
+      return TRACKING_STATES.OFF;
+    }
+    isScheduleHardOff = false;
+  } else {
+    isScheduleHardOff = false;
   }
 
   if (idleState === 'idle' || idleState === 'locked') {
@@ -444,6 +453,42 @@ function scheduleHeartbeat(periodInMinutes) {
     chrome.alarms.create('heartbeat', { periodInMinutes });
     safeSendHeartbeat('schedule');
   }
+}
+
+function clearNetworkAlarms() {
+  chrome.alarms.clear('settings-refresh');
+  chrome.alarms.clear('license-check');
+  chrome.alarms.clear('ws-reconnect');
+  chrome.alarms.clear('health-check');
+  chrome.alarms.clear('heartbeat');
+  settingsAlarmScheduled = false;
+}
+
+function pauseNetworkForOffHours(reason) {
+  if (offHoursNetworkPaused) {
+    return;
+  }
+  console.log(`[Network] Pausing off-hours traffic (${reason})`);
+  clearNetworkAlarms();
+  scheduleHeartbeat(null);
+  disconnectWebSocket();
+  chrome.alarms.create('wake-up', { periodInMinutes: 5 });
+  offHoursNetworkPaused = true;
+}
+
+async function resumeNetworkAfterOffHours(reason) {
+  if (!offHoursNetworkPaused) {
+    return;
+  }
+  console.log(`[Network] Resuming traffic (${reason})`);
+  chrome.alarms.clear('wake-up');
+  chrome.alarms.create('settings-refresh', { periodInMinutes: 60 });
+  settingsAlarmScheduled = true;
+  scheduleLicenseCheck();
+  offHoursNetworkPaused = false;
+  await refreshSchoolSettings({ force: true });
+  await checkLicenseStatus('resume');
+  await updateTrackingState('resume');
 }
 
 async function safeSendHeartbeat(reason) {
@@ -496,6 +541,21 @@ async function updateTrackingState(reason = 'state-check') {
   }
 
   const nextState = determineTrackingState();
+  if (nextState === TRACKING_STATES.OFF && isScheduleHardOff) {
+    if (trackingState !== nextState) {
+      trackingState = nextState;
+      console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
+    }
+    pauseNetworkForOffHours(reason);
+    syncObservedHeartbeat('tracking-state');
+    return;
+  }
+
+  if (offHoursNetworkPaused) {
+    await resumeNetworkAfterOffHours(reason);
+    return;
+  }
+
   if (trackingState === nextState) {
     return;
   }
@@ -1355,6 +1415,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
     healthCheck();
+  } else if (alarm.name === 'wake-up') {
+    loadCachedSchoolSettings().then(() => {
+      updateTrackingState('wake-up');
+    });
   } else if (alarm.name === 'settings-refresh') {
     refreshSchoolSettings({ force: false }).then(() => {
       updateTrackingState('settings-refresh');

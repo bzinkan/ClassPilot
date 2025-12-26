@@ -73,6 +73,10 @@ export default function Admin() {
   const [trackingEndTime, setTrackingEndTime] = useState("15:00");
   const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
   const [trackingDays, setTrackingDays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+  const [afterHoursMode, setAfterHoursMode] = useState<"off" | "limited" | "full">("off");
+  const [initialAfterHoursMode, setInitialAfterHoursMode] = useState<"off" | "limited" | "full">("off");
+  const [afterHoursConfirmOpen, setAfterHoursConfirmOpen] = useState(false);
+  const [tracking247ConfirmOpen, setTracking247ConfirmOpen] = useState(false);
 
   const form = useForm<CreateTeacherForm>({
     resolver: zodResolver(createTeacherSchema),
@@ -173,10 +177,12 @@ export default function Admin() {
         trackingEndTime,
         schoolTimezone,
         trackingDays,
+        afterHoursMode,
       });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
+      setInitialAfterHoursMode(afterHoursMode);
       toast({
         title: "Tracking hours updated",
         description: "School tracking hours have been configured successfully.",
@@ -199,6 +205,9 @@ export default function Admin() {
       setTrackingEndTime(settings.trackingEndTime || "15:00");
       setSchoolTimezone(settings.schoolTimezone || "America/New_York");
       setTrackingDays(settings.trackingDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+      const mode = (settings.afterHoursMode as "off" | "limited" | "full") || "off";
+      setAfterHoursMode(mode);
+      setInitialAfterHoursMode(mode);
     }
   }, [settings]);
 
@@ -215,6 +224,32 @@ export default function Admin() {
     if (teacherToDelete) {
       deleteTeacherMutation.mutate(teacherToDelete.id);
     }
+  };
+
+  const is247 =
+    enableTrackingHours
+    && trackingDays.length === 7
+    && trackingStartTime === "00:00"
+    && (trackingEndTime === "23:59" || trackingEndTime === "24:00");
+  const needsAfterHoursConfirm = initialAfterHoursMode === "off" && afterHoursMode !== "off";
+  const afterHoursHelperText =
+    afterHoursMode === "off"
+      ? "No monitoring outside school hours. Extension stops all network activity so the system can sleep and reduce cost."
+      : "After-hours monitoring increases server traffic and storage and may increase plan cost.";
+
+  const handleSaveTrackingHours = ({
+    skipAfterHoursConfirm = false,
+    skip247Confirm = false,
+  }: { skipAfterHoursConfirm?: boolean; skip247Confirm?: boolean } = {}) => {
+    if (needsAfterHoursConfirm && !skipAfterHoursConfirm) {
+      setAfterHoursConfirmOpen(true);
+      return;
+    }
+    if (is247 && !skip247Confirm) {
+      setTracking247ConfirmOpen(true);
+      return;
+    }
+    updateTrackingHoursMutation.mutate();
   };
 
   const teachers = teachersData?.teachers || [];
@@ -480,11 +515,49 @@ export default function Admin() {
                   Select which days of the week student activity should be tracked. Deselect weekends or holidays to pause monitoring.
                 </p>
               </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="afterHoursMode">Outside School Hours</Label>
+                <Select
+                  value={afterHoursMode}
+                  onValueChange={(value) => setAfterHoursMode(value as "off" | "limited" | "full")}
+                >
+                  <SelectTrigger id="afterHoursMode" data-testid="select-after-hours-mode">
+                    <SelectValue placeholder="Select after-hours mode" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="off">Off (recommended)</SelectItem>
+                    <SelectItem value="limited">Limited (may increase cost)</SelectItem>
+                    <SelectItem value="full">Full (highest cost)</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {afterHoursHelperText}
+                </p>
+              </div>
+
+              {afterHoursMode !== "off" && (
+                <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+                  <AlertTriangle className="mt-0.5 h-4 w-4" />
+                  <span>
+                    After-hours monitoring increases server traffic and storage. This may increase your plan cost.
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {is247 && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+              <AlertTriangle className="mt-0.5 h-4 w-4" />
+              <span>
+                You are enabling 24/7 monitoring. This may significantly increase traffic and cost.
+              </span>
             </div>
           )}
 
           <Button
-            onClick={() => updateTrackingHoursMutation.mutate()}
+            onClick={() => handleSaveTrackingHours()}
             disabled={updateTrackingHoursMutation.isPending}
             data-testid="button-save-tracking-hours"
             className="w-full"
@@ -675,6 +748,50 @@ export default function Admin() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Yes, Clear All Data
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={afterHoursConfirmOpen} onOpenChange={setAfterHoursConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable after-hours monitoring?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will allow monitoring outside school hours and may increase cost due to additional device traffic and storage.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setAfterHoursConfirmOpen(false);
+                handleSaveTrackingHours({ skipAfterHoursConfirm: true });
+              }}
+            >
+              Enable
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={tracking247ConfirmOpen} onOpenChange={setTracking247ConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable 24/7 monitoring?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This may significantly increase traffic and cost. Continue?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setTracking247ConfirmOpen(false);
+                handleSaveTrackingHours({ skip247Confirm: true });
+              }}
+            >
+              Continue
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

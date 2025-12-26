@@ -534,6 +534,7 @@ export const settings = pgTable("settings", {
   trackingEndTime: text("tracking_end_time").default("15:00"), // School end time (24-hour format, e.g., "15:00")
   schoolTimezone: text("school_timezone").default("America/New_York"), // School timezone (IANA format, e.g., "America/New_York")
   trackingDays: text("tracking_days").array().default(sql`'{Monday,Tuesday,Wednesday,Thursday,Friday}'::text[]`), // Days of the week when tracking is active
+  afterHoursMode: text("after_hours_mode").notNull().default("off").$type<"off" | "limited" | "full">(),
 });
 
 export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
