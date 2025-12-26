@@ -30,7 +30,7 @@ import {
   type InsertDevice,
   type School,
 } from "@shared/schema";
-import { groupSessionsByDevice, formatDuration, isWithinTrackingHours } from "@shared/utils";
+import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@shared/utils";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
@@ -2163,6 +2163,11 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
+      const settings = await storage.ensureSettingsForSchool(authSchoolId);
+      if (!isTrackingAllowedNow(settings)) {
+        return res.sendStatus(204);
+      }
+
       const now = Date.now();
       const deviceKey = authDeviceId;
       const school = res.locals.school as School | undefined;
@@ -2211,14 +2216,7 @@ export async function registerRoutes(
         heartbeatLastFullPayloadAt.set(deviceKey, now);
       }
 
-      const settings = await storage.ensureSettingsForSchool(data.schoolId);
-      if (!isWithinTrackingHours(
-        settings?.enableTrackingHours,
-        settings?.trackingStartTime,
-        settings?.trackingEndTime,
-        settings?.schoolTimezone,
-        settings?.trackingDays
-      )) {
+      if (!isTrackingAllowedNow(settings)) {
         return res.sendStatus(204);
       }
 
@@ -2346,13 +2344,7 @@ export async function registerRoutes(
       // Check if tracking hours are enforced (timezone-aware)
       const schoolId = data.schoolId ?? sessionSchoolId;
       const settings = await storage.ensureSettingsForSchool(schoolId);
-      if (!isWithinTrackingHours(
-        settings?.enableTrackingHours,
-        settings?.trackingStartTime,
-        settings?.trackingEndTime,
-        settings?.schoolTimezone,
-        settings?.trackingDays
-      )) {
+      if (!isTrackingAllowedNow(settings)) {
         // Return 204 to prevent extension from retrying, but don't store heartbeat
         return res.sendStatus(204);
       }
@@ -2417,6 +2409,11 @@ export async function registerRoutes(
 
       if (!authSchoolId || !authDeviceId) {
         return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const settings = await storage.ensureSettingsForSchool(authSchoolId);
+      if (!isTrackingAllowedNow(settings)) {
+        return res.sendStatus(204);
       }
 
       const payloadForValidation = {

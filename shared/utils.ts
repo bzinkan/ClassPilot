@@ -1,4 +1,14 @@
-import type { Heartbeat } from './schema';
+import type { Heartbeat, Settings } from './schema';
+
+type TrackingScheduleSettings = Pick<
+  Settings,
+  | "enableTrackingHours"
+  | "trackingStartTime"
+  | "trackingEndTime"
+  | "schoolTimezone"
+  | "trackingDays"
+  | "afterHoursMode"
+>;
 
 export interface URLSession {
   url: string;
@@ -241,4 +251,39 @@ export function isWithinTrackingHours(
     // On error, default to allowing tracking (fail open for usability)
     return true;
   }
+}
+
+/**
+ * Determine whether tracking is allowed based on school hours and after-hours mode.
+ * Fails closed when tracking hours are enabled but schedule values are missing.
+ */
+export function isTrackingAllowedNow(settings: TrackingScheduleSettings): boolean {
+  if (!settings.enableTrackingHours) {
+    return true;
+  }
+
+  const hasSchedule =
+    Boolean(settings.trackingStartTime)
+    && Boolean(settings.trackingEndTime)
+    && Boolean(settings.schoolTimezone)
+    && Array.isArray(settings.trackingDays)
+    && settings.trackingDays.length > 0;
+
+  if (!hasSchedule) {
+    return settings.afterHoursMode !== "off";
+  }
+
+  const within = isWithinTrackingHours(
+    settings.enableTrackingHours,
+    settings.trackingStartTime,
+    settings.trackingEndTime,
+    settings.schoolTimezone,
+    settings.trackingDays
+  );
+
+  if (within) {
+    return true;
+  }
+
+  return settings.afterHoursMode !== "off";
 }
