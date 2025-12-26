@@ -86,7 +86,7 @@ type GoogleOAuthTokenUpdateSet = Partial<
 > & { updatedAt: Date };
 
 const ENCRYPTED_SECRET_PARTS = 3;
-type SettingsUpsertInput = Partial<InsertSettings>;
+type SettingsUpsertInput = Partial<typeof settings.$inferInsert>;
 
 function isEncryptedSecret(value?: string | null): value is string {
   if (!value) return false;
@@ -127,7 +127,30 @@ function buildDefaultSettingsInput({
     trackingEndTime: "15:00",
     schoolTimezone: "America/New_York",
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-    afterHoursMode: "off" as const,
+    afterHoursMode: "off" as Settings["afterHoursMode"],
+  };
+}
+
+function normalizeSettings(input: Settings): Settings;
+function normalizeSettings<T extends Partial<Settings>>(
+  input: T
+): T & {
+  allowedDomains: string[] | null;
+  blockedDomains: string[] | null;
+  ipAllowlist: string[] | null;
+  gradeLevels: string[] | null;
+  trackingDays: string[] | null;
+  afterHoursMode: Settings["afterHoursMode"];
+};
+function normalizeSettings<T extends Partial<Settings>>(input: T) {
+  return {
+    ...input,
+    allowedDomains: input.allowedDomains ?? null,
+    blockedDomains: input.blockedDomains ?? null,
+    ipAllowlist: input.ipAllowlist ?? null,
+    gradeLevels: input.gradeLevels ?? null,
+    trackingDays: input.trackingDays ?? null,
+    afterHoursMode: (input.afterHoursMode ?? "off") as Settings["afterHoursMode"],
   };
 }
 
@@ -2951,9 +2974,10 @@ export class DatabaseStorage implements IStorage {
     }
     const schoolName = await this.getSchoolNameForSettings(schoolId);
     const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
+    const insertValues: typeof settings.$inferInsert = normalizeSettings(defaults);
     const [created] = await db
       .insert(settings)
-      .values(defaults)
+      .values(insertValues)
       .onConflictDoNothing()
       .returning();
     if (created) {
@@ -2995,7 +3019,7 @@ export class DatabaseStorage implements IStorage {
       .values(insertValues)
       .onConflictDoUpdate({
         target: settings.schoolId,
-        set: updateSet,
+        set: normalizeSettings(updateSet) as typeof settings.$inferInsert,
       })
       .returning();
     return result;
