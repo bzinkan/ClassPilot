@@ -78,6 +78,9 @@ export default function Dashboard() {
   const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
   const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   // Track selected tabs by composite key: "studentId|deviceId|url"
   const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
@@ -117,6 +120,10 @@ export default function Dashboard() {
   });
 
   const currentUser = currentUserData?.user;
+
+  const { data: accountSecurity } = useQuery<{ hasPassword: boolean }>({
+    queryKey: ['/api/account/security'],
+  });
 
   // Fetch active session and groups
   const { data: activeSession } = useQuery<Session | null>({
@@ -746,6 +753,66 @@ export default function Dashboard() {
     },
   });
 
+  const changePasswordMutation = useMutation({
+    mutationFn: async (payload: { currentPassword?: string; newPassword: string }) => {
+      const res = await apiRequest('POST', '/api/account/password', payload);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['/api/account/security'] });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      toast({
+        title: "Password updated",
+        description: "Your password has been updated successfully.",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Password update failed",
+        description: error.message,
+      });
+    },
+  });
+
+  const handleChangePassword = () => {
+    const hasPassword = accountSecurity?.hasPassword ?? false;
+
+    if (hasPassword && !currentPassword) {
+      toast({
+        variant: "destructive",
+        title: "Current password required",
+        description: "Please enter your current password to continue.",
+      });
+      return;
+    }
+
+    if (newPassword.length < 10) {
+      toast({
+        variant: "destructive",
+        title: "Password too short",
+        description: "New password must be at least 10 characters.",
+      });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      toast({
+        variant: "destructive",
+        title: "Passwords do not match",
+        description: "Please make sure the new passwords match.",
+      });
+      return;
+    }
+
+    changePasswordMutation.mutate({
+      currentPassword: hasPassword ? currentPassword : undefined,
+      newPassword,
+    });
+  };
+
   // Remote control mutations
   const openTabMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
@@ -1230,6 +1297,68 @@ export default function Dashboard() {
           </div>
           </div>
         )}
+
+        <section className="mb-8">
+          <div className="rounded-xl border border-slate-200/70 dark:border-slate-800 bg-white/90 dark:bg-slate-950/40 p-6 shadow-sm">
+            <div className="flex items-center gap-2">
+              <Lock className="h-5 w-5 text-slate-600 dark:text-slate-300" />
+              <h2 className="text-lg font-semibold">Account Security</h2>
+            </div>
+            <p className="text-sm text-muted-foreground mt-2">
+              Manage your password for optional email and password login.
+            </p>
+            {!accountSecurity ? (
+              <p className="text-sm text-muted-foreground mt-4">Loading account security...</p>
+            ) : (
+              <>
+                <div className="mt-6 grid gap-4 md:grid-cols-2">
+                  {accountSecurity.hasPassword ? (
+                    <div className="space-y-2">
+                      <Label htmlFor="current-password">Current Password</Label>
+                      <Input
+                        id="current-password"
+                        type="password"
+                        value={currentPassword}
+                        onChange={(event) => setCurrentPassword(event.target.value)}
+                        placeholder="Enter current password"
+                      />
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground md:col-span-2">
+                      Set a password to enable optional email and password sign-in in addition to Google.
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <Label htmlFor="new-password">New Password</Label>
+                    <Input
+                      id="new-password"
+                      type="password"
+                      value={newPassword}
+                      onChange={(event) => setNewPassword(event.target.value)}
+                      placeholder="Enter new password"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="confirm-password">Confirm New Password</Label>
+                    <Input
+                      id="confirm-password"
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(event) => setConfirmPassword(event.target.value)}
+                      placeholder="Confirm new password"
+                    />
+                  </div>
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <Button onClick={handleChangePassword} disabled={changePasswordMutation.isPending}>
+                    {changePasswordMutation.isPending ? "Updating..." : "Update Password"}
+                  </Button>
+                  <span className="text-xs text-muted-foreground">Minimum 10 characters.</span>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
 
         {/* Search Bar + Selection Controls - only show if admin OR teacher with active session */}
         {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (

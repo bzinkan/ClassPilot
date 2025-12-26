@@ -93,6 +93,11 @@ const resetUserPasswordSchema = z.object({
   password: z.string().min(12, "Password must be at least 12 characters"),
 });
 
+const accountPasswordSchema = z.object({
+  currentPassword: z.string().min(1).optional(),
+  newPassword: z.string().min(10, "Password must be at least 10 characters"),
+});
+
 // Helper function to extract domain from email and lookup school
 async function getSchoolFromEmail(
   storage: IStorage,
@@ -969,6 +974,51 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Get user error:", error);
       res.status(500).json({ error: "Failed to fetch user" });
+    }
+  });
+
+  app.get("/api/account/security", requireAuth, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      res.json({ hasPassword: Boolean(user.password) });
+    } catch (error) {
+      console.error("Account security error:", error);
+      res.status(500).json({ error: "Failed to fetch account security" });
+    }
+  });
+
+  app.post("/api/account/password", requireAuth, async (req, res) => {
+    try {
+      const { currentPassword, newPassword } = accountPasswordSchema.parse(req.body);
+      const user = await storage.getUser(req.session.userId!);
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      if (user.password) {
+        if (!currentPassword) {
+          return res.status(400).json({ error: "Current password is required." });
+        }
+        const matches = await bcrypt.compare(currentPassword, user.password);
+        if (!matches) {
+          return res.status(400).json({ error: "Current password is incorrect." });
+        }
+      }
+
+      const hashedPassword = await bcrypt.hash(newPassword, 10);
+      await storage.updateUser(user.id, { password: hashedPassword });
+
+      res.json({ ok: true });
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        return res.status(400).json({ error: error.errors[0]?.message ?? "Invalid request" });
+      }
+      console.error("Account password error:", error);
+      res.status(500).json({ error: "Failed to update password" });
     }
   });
 
