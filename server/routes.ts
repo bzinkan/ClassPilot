@@ -88,6 +88,10 @@ function logSettingsSchoolId(schoolId: string) {
   }
 }
 
+const resetUserPasswordSchema = z.object({
+  password: z.string().min(6, "Password must be at least 6 characters"),
+});
+
 // Helper function to extract domain from email and lookup school
 async function getSchoolFromEmail(
   storage: IStorage,
@@ -336,6 +340,7 @@ let activeStorage: IStorage = defaultStorage;
 
 const requireTeacherRole = requireRole("teacher", "school_admin", "super_admin");
 const requireAdminRole = requireRole("school_admin", "super_admin");
+const requireSchoolAdminRole = requireRole("school_admin");
 const requireSuperAdminRole = requireRole("super_admin");
 
 // IP allowlist middleware (only enforced in production)
@@ -1099,6 +1104,39 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete teacher error:", error);
       res.status(500).json({ error: "Failed to delete teacher" });
+    }
+  });
+
+  app.post("/api/admin/users/:userId/password", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const { userId } = req.params;
+      const data = resetUserPasswordSchema.parse(req.body);
+
+      const user = await storage.getUser(userId);
+      if (!user || !assertSameSchool(sessionSchoolId, user.schoolId)) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const hashedPassword = await bcrypt.hash(data.password, 10);
+      await storage.updateUser(userId, { password: hashedPassword });
+
+      res.json({ success: true });
+    } catch (error: any) {
+      console.error("Reset user password error:", error);
+      if (error.errors) {
+        res.status(400).json({ error: error.errors[0].message });
+      } else {
+        res.status(500).json({ error: "Failed to reset user password" });
+      }
     }
   });
 
