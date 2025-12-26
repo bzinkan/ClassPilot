@@ -127,6 +127,30 @@ export function createTestStorage() {
     async getUserByUsername(username: string) {
       return Array.from(users.values()).find((user) => user.username === username);
     },
+    async getUsersBySchool(schoolId: string) {
+      return Array.from(users.values()).filter((user) => user.schoolId === schoolId);
+    },
+    async createUser(user: any) {
+      const created = {
+        id: user.id ?? `user-${users.size + 1}`,
+        email: user.email,
+        username: user.username ?? user.email,
+        password: user.password ?? null,
+        googleId: user.googleId ?? null,
+        role: user.role ?? "teacher",
+        schoolId: user.schoolId ?? null,
+        displayName: user.displayName ?? null,
+        profileImageUrl: user.profileImageUrl ?? null,
+        schoolName: user.schoolName ?? null,
+        createdAt: new Date(),
+        lastLoginAt: null,
+      };
+      users.set(created.id, created);
+      return created;
+    },
+    async deleteUser(id: string) {
+      return users.delete(id);
+    },
     async getSettingsBySchoolId(schoolId: string) {
       return settingsBySchool.get(schoolId) ?? null;
     },

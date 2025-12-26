@@ -22,14 +22,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -39,6 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
 import type { Settings, Session, Group } from "@shared/schema";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
@@ -50,43 +44,36 @@ function normalizeGrade(grade: string | null | undefined): string | null {
   return trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
 }
 
-const createTeacherSchema = z.object({
-  displayName: z.string().min(2, "Name must be at least 2 characters"),
+const createStaffSchema = z.object({
+  name: z.string().optional(),
   email: z.string().email("Invalid email address"),
-  password: z.string().min(6, "Password must be at least 6 characters"),
-  schoolName: z.string().optional(),
+  role: z.enum(["teacher", "school_admin"]),
+  password: z.string().optional(),
 });
 
-const resetPasswordSchema = z.object({
-  newPassword: z.string().min(10, "Password must be at least 10 characters"),
-  confirmPassword: z.string().min(10, "Password must be at least 10 characters"),
-}).refine((data) => data.newPassword === data.confirmPassword, {
-  message: "Passwords do not match",
-  path: ["confirmPassword"],
-});
+type CreateStaffForm = z.infer<typeof createStaffSchema>;
 
-type CreateTeacherForm = z.infer<typeof createTeacherSchema>;
-type ResetPasswordForm = z.infer<typeof resetPasswordSchema>;
-
-interface Teacher {
+interface StaffUser {
   id: string;
-  username: string;
-  role: string;
-  schoolName: string;
+  email: string;
+  displayName?: string | null;
+  role: "teacher" | "school_admin";
+  schoolName?: string | null;
 }
 
-interface TeachersResponse {
-  teachers: Teacher[];
+interface StaffResponse {
+  users: StaffUser[];
 }
 
 export default function Admin() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [teacherToDelete, setTeacherToDelete] = useState<Teacher | null>(null);
-  const [resetDialogOpen, setResetDialogOpen] = useState(false);
-  const [teacherToReset, setTeacherToReset] = useState<Teacher | null>(null);
+  const [staffToDelete, setStaffToDelete] = useState<StaffUser | null>(null);
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [staffToEdit, setStaffToEdit] = useState<StaffUser | null>(null);
+  const [selectedRole, setSelectedRole] = useState<"teacher" | "school_admin">("teacher");
   const [enableTrackingHours, setEnableTrackingHours] = useState(false);
   const [trackingStartTime, setTrackingStartTime] = useState("08:00");
   const [trackingEndTime, setTrackingEndTime] = useState("15:00");
@@ -97,26 +84,18 @@ export default function Admin() {
   const [afterHoursConfirmOpen, setAfterHoursConfirmOpen] = useState(false);
   const [tracking247ConfirmOpen, setTracking247ConfirmOpen] = useState(false);
 
-  const form = useForm<CreateTeacherForm>({
-    resolver: zodResolver(createTeacherSchema),
+  const form = useForm<CreateStaffForm>({
+    resolver: zodResolver(createStaffSchema),
     defaultValues: {
-      displayName: "",
+      name: "",
       email: "",
+      role: "teacher",
       password: "",
-      schoolName: "",
     },
   });
 
-  const resetPasswordForm = useForm<ResetPasswordForm>({
-    resolver: zodResolver(resetPasswordSchema),
-    defaultValues: {
-      newPassword: "",
-      confirmPassword: "",
-    },
-  });
-
-  const { data: teachersData, isLoading } = useQuery<TeachersResponse>({
-    queryKey: ["/api/admin/teachers"],
+  const { data: staffData, isLoading } = useQuery<StaffResponse>({
+    queryKey: ["/api/admin/users"],
   });
 
   const { data: settings } = useQuery<Settings>({
@@ -132,69 +111,108 @@ export default function Admin() {
     queryKey: ["/api/teacher/groups"],
   });
 
-  const createTeacherMutation = useMutation({
-    mutationFn: async (data: CreateTeacherForm) => {
-      return await apiRequest("POST", "/api/admin/teachers", data);
+  const getFriendlyErrorMessage = (error: unknown) => {
+    if (!error) return "";
+    const message = error instanceof Error ? error.message : String(error);
+    const jsonMatch = message.match(/\{.*\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.error) {
+          return parsed.error as string;
+        }
+      } catch {
+        return message;
+      }
+    }
+    return message;
+  };
+
+  const createStaffMutation = useMutation({
+    mutationFn: async (data: CreateStaffForm) => {
+      const payload = {
+        email: data.email,
+        role: data.role,
+        name: data.name?.trim() ? data.name.trim() : undefined,
+        password: data.password?.trim() ? data.password : null,
+      };
+      return await apiRequest("POST", "/api/admin/users", payload);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
       form.reset();
       toast({
-        title: "Teacher created",
-        description: "The teacher account has been created successfully.",
+        title: "Staff member added",
+        description: "The staff account has been created successfully.",
       });
     },
     onError: (error: any) => {
       toast({
         variant: "destructive",
-        title: "Failed to create teacher",
+        title: "Failed to add staff",
         description: error.message || "An error occurred",
       });
     },
   });
 
-  const deleteTeacherMutation = useMutation({
+  const deleteStaffMutation = useMutation({
     mutationFn: async (id: string) => {
-      return await apiRequest("DELETE", `/api/admin/teachers/${id}`);
+      return await apiRequest("DELETE", `/api/admin/users/${id}`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
       toast({
-        title: "Teacher deleted",
-        description: "The teacher account has been deleted successfully.",
+        title: "Staff account deleted",
+        description: "The staff account has been deleted successfully.",
       });
       setDeleteDialogOpen(false);
-      setTeacherToDelete(null);
+      setStaffToDelete(null);
     },
     onError: (error: any) => {
+      const message = getFriendlyErrorMessage(error);
+      if (message.includes("last school admin")) {
+        toast({
+          title: "Action blocked",
+          description: message,
+        });
+        return;
+      }
       toast({
         variant: "destructive",
-        title: "Failed to delete teacher",
-        description: error.message || "An error occurred",
+        title: "Failed to delete staff",
+        description: message || "An error occurred",
       });
     },
   });
 
-  const resetPasswordMutation = useMutation({
-    mutationFn: async (payload: { userId: string; newPassword: string }) => {
-      return await apiRequest("POST", `/api/admin/users/${payload.userId}/password`, {
-        newPassword: payload.newPassword,
+  const updateStaffMutation = useMutation({
+    mutationFn: async (payload: { userId: string; role: "teacher" | "school_admin" }) => {
+      return await apiRequest("PATCH", `/api/admin/users/${payload.userId}`, {
+        role: payload.role,
       });
     },
     onSuccess: () => {
       toast({
-        title: "Password reset",
-        description: "The teacher password has been updated successfully.",
+        title: "Staff updated",
+        description: "The staff role has been updated successfully.",
       });
-      setResetDialogOpen(false);
-      setTeacherToReset(null);
-      resetPasswordForm.reset();
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      setEditDialogOpen(false);
+      setStaffToEdit(null);
     },
     onError: (error: any) => {
+      const message = getFriendlyErrorMessage(error);
+      if (message.includes("last school admin")) {
+        toast({
+          title: "Action blocked",
+          description: message,
+        });
+        return;
+      }
       toast({
         variant: "destructive",
-        title: "Failed to reset password",
-        description: error.message || "An error occurred",
+        title: "Failed to update staff",
+        description: message || "An error occurred",
       });
     },
   });
@@ -262,32 +280,32 @@ export default function Admin() {
     }
   }, [settings]);
 
-  const onSubmit = (data: CreateTeacherForm) => {
-    createTeacherMutation.mutate(data);
+  const onSubmit = (data: CreateStaffForm) => {
+    createStaffMutation.mutate(data);
   };
 
-  const handleDeleteClick = (teacher: Teacher) => {
-    setTeacherToDelete(teacher);
+  const handleDeleteClick = (staff: StaffUser) => {
+    setStaffToDelete(staff);
     setDeleteDialogOpen(true);
   };
 
-  const handleResetClick = (teacher: Teacher) => {
-    setTeacherToReset(teacher);
-    setResetDialogOpen(true);
-    resetPasswordForm.reset();
+  const handleEditClick = (staff: StaffUser) => {
+    setStaffToEdit(staff);
+    setSelectedRole(staff.role);
+    setEditDialogOpen(true);
   };
 
   const handleDeleteConfirm = () => {
-    if (teacherToDelete) {
-      deleteTeacherMutation.mutate(teacherToDelete.id);
+    if (staffToDelete) {
+      deleteStaffMutation.mutate(staffToDelete.id);
     }
   };
 
-  const handleResetSubmit = (data: ResetPasswordForm) => {
-    if (!teacherToReset) {
+  const handleEditSubmit = () => {
+    if (!staffToEdit) {
       return;
     }
-    resetPasswordMutation.mutate({ userId: teacherToReset.id, newPassword: data.newPassword });
+    updateStaffMutation.mutate({ userId: staffToEdit.id, role: selectedRole });
   };
 
   const is247 =
@@ -316,7 +334,7 @@ export default function Admin() {
     updateTrackingHoursMutation.mutate();
   };
 
-  const teachers = teachersData?.teachers || [];
+  const staff = staffData?.users || [];
 
   return (
     <div className="container mx-auto p-6 max-w-6xl space-y-6">
@@ -327,7 +345,7 @@ export default function Admin() {
           </div>
           <div>
             <h1 className="text-3xl font-semibold">Admin Dashboard</h1>
-            <p className="text-muted-foreground">Manage teacher accounts for your school</p>
+            <p className="text-muted-foreground">Manage staff accounts for your school</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -348,26 +366,26 @@ export default function Admin() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <UserPlus className="h-5 w-5" />
-              Create Teacher Account
+              Add Staff
             </CardTitle>
             <CardDescription>
-              Add a new teacher to the system
+              Add a teacher or school admin to your school
             </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="displayName">Name</Label>
+                <Label htmlFor="name">Name (Optional)</Label>
                 <Input
-                  id="displayName"
-                  data-testid="input-teacher-name"
+                  id="name"
+                  data-testid="input-staff-name"
                   type="text"
                   placeholder="e.g., John Smith"
-                  {...form.register("displayName")}
+                  {...form.register("name")}
                 />
-                {form.formState.errors.displayName && (
+                {form.formState.errors.name && (
                   <p className="text-sm text-destructive">
-                    {form.formState.errors.displayName.message}
+                    {form.formState.errors.name.message}
                   </p>
                 )}
               </div>
@@ -376,7 +394,7 @@ export default function Admin() {
                 <Label htmlFor="email">Email</Label>
                 <Input
                   id="email"
-                  data-testid="input-teacher-email"
+                  data-testid="input-staff-email"
                   type="email"
                   placeholder="e.g., john.smith@school.edu"
                   {...form.register("email")}
@@ -389,12 +407,29 @@ export default function Admin() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
+                <Label htmlFor="role">Role</Label>
+                <Select
+                  value={form.watch("role")}
+                  onValueChange={(value) => form.setValue("role", value as "teacher" | "school_admin")}
+                >
+                  <SelectTrigger id="role" data-testid="select-staff-role">
+                    <SelectValue placeholder="Select role" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="teacher">Teacher</SelectItem>
+                    <SelectItem value="school_admin">School Admin</SelectItem>
+                  </SelectContent>
+                </Select>
+                <input type="hidden" {...form.register("role")} />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="password">Temp Password (Optional)</Label>
                 <Input
                   id="password"
-                  data-testid="input-teacher-password"
+                  data-testid="input-staff-password"
                   type="password"
-                  placeholder="At least 6 characters"
+                  placeholder="Leave blank for Google-only login"
                   {...form.register("password")}
                 />
                 {form.formState.errors.password && (
@@ -404,24 +439,13 @@ export default function Admin() {
                 )}
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="schoolName">School Name (Optional)</Label>
-                <Input
-                  id="schoolName"
-                  data-testid="input-teacher-school"
-                  type="text"
-                  placeholder="e.g., Lincoln High School"
-                  {...form.register("schoolName")}
-                />
-              </div>
-
               <Button
                 type="submit"
-                data-testid="button-create-teacher"
+                data-testid="button-create-staff"
                 className="w-full"
-                disabled={createTeacherMutation.isPending}
+                disabled={createStaffMutation.isPending}
               >
-                {createTeacherMutation.isPending ? "Creating..." : "Create Teacher Account"}
+                {createStaffMutation.isPending ? "Adding..." : "Add Staff"}
               </Button>
             </form>
           </CardContent>
@@ -429,59 +453,58 @@ export default function Admin() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Teacher Accounts</CardTitle>
+            <CardTitle>Staff Accounts</CardTitle>
             <CardDescription>
-              {teachers.length} {teachers.length === 1 ? "teacher" : "teachers"} in the system
+              {staff.length} {staff.length === 1 ? "staff member" : "staff members"} in the system
             </CardDescription>
           </CardHeader>
           <CardContent>
             {isLoading ? (
               <div className="text-center py-8 text-muted-foreground">
-                Loading teachers...
+                Loading staff...
               </div>
-            ) : teachers.length === 0 ? (
+            ) : staff.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
-                No teachers yet. Create one to get started!
+                No staff yet. Add a staff member to get started!
               </div>
             ) : (
               <div className="space-y-2">
-                {teachers.map((teacher: Teacher) => (
+                {staff.map((member: StaffUser) => (
                   <div
-                    key={teacher.id}
-                    data-testid={`teacher-row-${teacher.id}`}
+                    key={member.id}
+                    data-testid={`staff-row-${member.id}`}
                     className="flex items-center justify-between p-3 rounded-lg border hover-elevate"
                   >
                     <div>
-                      <p className="font-medium" data-testid={`teacher-username-${teacher.id}`}>
-                        {teacher.username}
+                      <p className="font-medium" data-testid={`staff-name-${member.id}`}>
+                        {member.displayName || member.email}
                       </p>
-                      <p className="text-sm text-muted-foreground">
-                        {teacher.role === 'admin' ? '👑 Admin' : '👤 Teacher'} • {teacher.schoolName}
-                      </p>
+                      <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
+                        <Badge variant={member.role === "school_admin" ? "default" : "secondary"}>
+                          {member.role === "school_admin" ? "School Admin" : "Teacher"}
+                        </Badge>
+                        <span>{member.schoolName}</span>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      {teacher.role === "teacher" && (
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          data-testid={`button-reset-password-${teacher.id}`}
-                          onClick={() => handleResetClick(teacher)}
-                          disabled={resetPasswordMutation.isPending}
-                        >
-                          Reset Password
-                        </Button>
-                      )}
-                      {teacher.role !== 'admin' && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          data-testid={`button-delete-${teacher.id}`}
-                          onClick={() => handleDeleteClick(teacher)}
-                          disabled={deleteTeacherMutation.isPending}
-                        >
-                          <Trash2 className="h-4 w-4 text-destructive" />
-                        </Button>
-                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid={`button-edit-${member.id}`}
+                        onClick={() => handleEditClick(member)}
+                        disabled={updateStaffMutation.isPending}
+                      >
+                        Edit Role
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        data-testid={`button-delete-${member.id}`}
+                        onClick={() => handleDeleteClick(member)}
+                        disabled={deleteStaffMutation.isPending}
+                      >
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
                     </div>
                   </div>
                 ))}
@@ -727,7 +750,7 @@ export default function Admin() {
           ) : (
             <div className="space-y-2">
               {activeSessions.map((session) => {
-                const teacher = teachers.find(t => t.id === session.teacherId);
+                const teacher = staff.find(t => t.id === session.teacherId);
                 const group = allGroups.find(g => g.id === session.groupId);
                 return (
                   <div
@@ -740,7 +763,7 @@ export default function Admin() {
                       <div>
                         <p className="font-medium">{group?.name || 'Unknown Group'}</p>
                         <p className="text-sm text-muted-foreground">
-                          {teacher?.username || 'Unknown Teacher'} • Started {new Date(session.startTime).toLocaleTimeString()}
+                          {teacher?.displayName || teacher?.email || 'Unknown Teacher'} • Started {new Date(session.startTime).toLocaleTimeString()}
                         </p>
                       </div>
                     </div>
@@ -788,74 +811,53 @@ export default function Admin() {
       </Card>
 
       <Dialog
-        open={resetDialogOpen}
+        open={editDialogOpen}
         onOpenChange={(open) => {
-          setResetDialogOpen(open);
+          setEditDialogOpen(open);
           if (!open) {
-            setTeacherToReset(null);
-            resetPasswordForm.reset();
+            setStaffToEdit(null);
           }
         }}
       >
-        <DialogContent data-testid="dialog-reset-password">
+        <DialogContent data-testid="dialog-edit-role">
           <DialogHeader>
-            <DialogTitle>Reset Teacher Password</DialogTitle>
+            <DialogTitle>Edit Role</DialogTitle>
             <DialogDescription>
-              Set a new password for <strong>{teacherToReset?.username}</strong>. Share it securely with the teacher.
+              Update the role for <strong>{staffToEdit?.displayName || staffToEdit?.email}</strong>.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={resetPasswordForm.handleSubmit(handleResetSubmit)} className="space-y-4">
+          <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="newPassword">New Password</Label>
-              <Input
-                id="newPassword"
-                type="password"
-                data-testid="input-reset-password"
-                {...resetPasswordForm.register("newPassword")}
-              />
-              {resetPasswordForm.formState.errors.newPassword && (
-                <p className="text-sm text-destructive">
-                  {resetPasswordForm.formState.errors.newPassword.message}
-                </p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="confirmPassword">Confirm Password</Label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                data-testid="input-reset-password-confirm"
-                {...resetPasswordForm.register("confirmPassword")}
-              />
-              {resetPasswordForm.formState.errors.confirmPassword && (
-                <p className="text-sm text-destructive">
-                  {resetPasswordForm.formState.errors.confirmPassword.message}
-                </p>
-              )}
+              <Label htmlFor="edit-role">Role</Label>
+              <Select value={selectedRole} onValueChange={(value) => setSelectedRole(value as \"teacher\" | \"school_admin\")}>
+                <SelectTrigger id="edit-role" data-testid="select-edit-role">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="teacher">Teacher</SelectItem>
+                  <SelectItem value="school_admin">School Admin</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setResetDialogOpen(false)}
-              >
+              <Button type="button" variant="outline" onClick={() => setEditDialogOpen(false)}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={resetPasswordMutation.isPending}>
-                {resetPasswordMutation.isPending ? "Resetting..." : "Reset Password"}
+              <Button type="button" onClick={handleEditSubmit} disabled={updateStaffMutation.isPending}>
+                {updateStaffMutation.isPending ? "Saving..." : "Save"}
               </Button>
             </DialogFooter>
-          </form>
+          </div>
         </DialogContent>
       </Dialog>
 
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Teacher Account</AlertDialogTitle>
+            <AlertDialogTitle>Delete Staff Account</AlertDialogTitle>
             <AlertDialogDescription>
               Are you sure you want to delete the account for{" "}
-              <strong>{teacherToDelete?.username}</strong>? This action cannot be undone.
+              <strong>{staffToDelete?.displayName || staffToDelete?.email}</strong>? This action cannot be undone.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

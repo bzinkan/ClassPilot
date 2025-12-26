@@ -98,6 +98,18 @@ const accountPasswordSchema = z.object({
   newPassword: z.string().min(10, "Password must be at least 10 characters"),
 });
 
+const adminUserCreateSchema = z.object({
+  email: z.string().email("Invalid email address"),
+  role: z.enum(["teacher", "school_admin"]),
+  name: z.string().min(1, "Name is required").optional(),
+  password: z.string().nullable().optional(),
+});
+
+const adminUserUpdateSchema = z.object({
+  role: z.enum(["teacher", "school_admin"]).optional(),
+  name: z.string().min(1, "Name is required").optional(),
+});
+
 // Helper function to extract domain from email and lookup school
 async function getSchoolFromEmail(
   storage: IStorage,
@@ -142,6 +154,11 @@ function buildLicenseLimitResponse(error: LicenseLimitError) {
     maxLicenses: error.maxLicenses,
     currentCount: error.currentCount,
   };
+}
+
+async function countSchoolAdmins(storage: IStorage, schoolId: string): Promise<number> {
+  const users = await storage.getUsersBySchool(schoolId);
+  return users.filter((user) => user.role === "school_admin").length;
 }
 
 // SESSION-BASED: Helper to ensure student-device association exists
@@ -1019,6 +1036,187 @@ export async function registerRoutes(
       }
       console.error("Account password error:", error);
       res.status(500).json({ error: "Failed to update password" });
+    }
+  });
+
+  // Admin routes for managing staff
+  app.get("/api/admin/users", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const users = await storage.getUsersBySchool(sessionSchoolId);
+      const staff = users
+        .filter((user) => user.role === "teacher" || user.role === "school_admin")
+        .map((user) => ({
+          id: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          role: user.role,
+          schoolName: user.schoolName,
+        }));
+
+      res.json({ success: true, users: staff });
+    } catch (error) {
+      console.error("Get admin users error:", error);
+      res.status(500).json({ error: "Failed to fetch users" });
+    }
+  });
+
+  app.post("/api/admin/users", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const schoolId = sessionSchoolId;
+      const data = adminUserCreateSchema.parse(req.body);
+
+      const school = await storage.getSchool(schoolId);
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+      assertEmailMatchesDomain(data.email, school.domain);
+
+      const normalizedEmail = normalizeEmail(data.email) ?? data.email;
+      const existing = await storage.getUserByEmail(normalizedEmail);
+      if (existing) {
+        return res.status(400).json({ error: "Email already exists" });
+      }
+
+      let password: string | null = null;
+      if (data.password && data.password.trim().length > 0) {
+        password = await bcrypt.hash(data.password, 10);
+      }
+
+      const created = await storage.createUser({
+        email: normalizedEmail,
+        username: normalizedEmail,
+        password,
+        role: data.role,
+        schoolId,
+        displayName: data.name ?? null,
+        schoolName: admin.schoolName ?? school.name,
+      });
+
+      res.json({
+        success: true,
+        user: {
+          id: created.id,
+          email: created.email,
+          displayName: created.displayName,
+          role: created.role,
+          schoolName: created.schoolName,
+        },
+      });
+    } catch (error: any) {
+      console.error("Create admin user error:", error);
+      if (error.errors) {
+        res.status(400).json({ error: error.errors[0].message });
+      } else if (error instanceof EmailDomainError) {
+        res.status(error.status).json({ error: error.message });
+      } else {
+        res.status(500).json({ error: "Failed to create user" });
+      }
+    }
+  });
+
+  app.patch("/api/admin/users/:userId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, targetUser.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const data = adminUserUpdateSchema.parse(req.body);
+      const nextRole = data.role ?? targetUser.role;
+      if (targetUser.role === "school_admin" && nextRole === "teacher") {
+        const adminCount = await countSchoolAdmins(storage, sessionSchoolId);
+        if (adminCount <= 1) {
+          return res.status(400).json({ error: "Cannot demote the last school admin" });
+        }
+      }
+
+      const updated = await storage.updateUser(userId, {
+        role: data.role,
+        displayName: data.name ?? undefined,
+      });
+
+      res.json({
+        success: true,
+        user: {
+          id: updated?.id ?? targetUser.id,
+          email: updated?.email ?? targetUser.email,
+          displayName: updated?.displayName ?? targetUser.displayName,
+          role: updated?.role ?? targetUser.role,
+          schoolName: updated?.schoolName ?? targetUser.schoolName,
+        },
+      });
+    } catch (error: any) {
+      console.error("Update admin user error:", error);
+      if (error.errors) {
+        res.status(400).json({ error: error.errors[0].message });
+      } else {
+        res.status(500).json({ error: "Failed to update user" });
+      }
+    }
+  });
+
+  app.delete("/api/admin/users/:userId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, targetUser.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      if (targetUser.role === "school_admin") {
+        const adminCount = await countSchoolAdmins(storage, sessionSchoolId);
+        if (adminCount <= 1) {
+          return res.status(400).json({ error: "Cannot delete the last school admin" });
+        }
+      }
+
+      await storage.deleteUser(userId);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete admin user error:", error);
+      res.status(500).json({ error: "Failed to delete user" });
     }
   });
 
