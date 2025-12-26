@@ -111,7 +111,7 @@ function buildDefaultSettingsInput({
   schoolName?: string | null;
   wsSharedKey?: string | null;
 }): InsertSettings {
-  const base: InsertSettings = {
+  return {
     schoolId,
     schoolName: schoolName ?? "School",
     wsSharedKey: wsSharedKey ?? process.env.WS_SHARED_KEY ?? "change-this-key",
@@ -129,7 +129,23 @@ function buildDefaultSettingsInput({
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
     afterHoursMode: "off" as const,
   };
-  return base;
+}
+
+type AfterHoursMode = Settings["afterHoursMode"];
+
+function normalizeSettingsForInsert(
+  input: Partial<Settings> & Pick<Settings, "schoolId" | "schoolName" | "wsSharedKey">
+): typeof settings.$inferInsert {
+  return {
+    ...input,
+    allowedDomains: input.allowedDomains ?? null,
+    blockedDomains: input.blockedDomains ?? null,
+    ipAllowlist: input.ipAllowlist ?? null,
+    gradeLevels: input.gradeLevels ?? null,
+    trackingDays: input.trackingDays ?? null,
+    retentionHours: input.retentionHours ?? "24",
+    afterHoursMode: (input.afterHoursMode ?? "off") as AfterHoursMode,
+  };
 }
 
 export interface IStorage {
@@ -1341,10 +1357,10 @@ export class MemStorage implements IStorage {
     }
     const schoolName = this.schools.get(schoolId)?.name;
     const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
-    const settings: Settings = {
+    const settings = normalizeSettingsForInsert({
       id: randomUUID(),
       ...defaults,
-    };
+    }) as Settings;
     this.settingsBySchool.set(schoolId, settings);
     return settings;
   }
@@ -1365,10 +1381,10 @@ export class MemStorage implements IStorage {
       ...sanitizedInput,
       schoolId,
     });
-    const settings: Settings = {
+    const settings = normalizeSettingsForInsert({
       id: existing?.id ?? randomUUID(),
       ...parsed,
-    };
+    }) as Settings;
     this.settingsBySchool.set(schoolId, settings);
     return settings;
   }
@@ -2951,6 +2967,7 @@ export class DatabaseStorage implements IStorage {
   }
 
   async upsertSettingsForSchool(schoolId: string, input: SettingsUpsertInput): Promise<Settings> {
+    const existing = await this.getSettingsBySchoolId(schoolId);
     const sanitizedInput = Object.fromEntries(
       Object.entries(input).filter(([, value]) => value !== undefined)
     ) as SettingsUpsertInput;
@@ -2969,9 +2986,13 @@ export class DatabaseStorage implements IStorage {
       ...sanitizedInput,
       schoolId,
     });
+    const insertValues = normalizeSettingsForInsert({
+      id: existing?.id ?? randomUUID(),
+      ...parsed,
+    });
     const [result] = await db
       .insert(settings)
-      .values(parsed)
+      .values(insertValues)
       .onConflictDoUpdate({
         target: settings.schoolId,
         set: updateSet,
