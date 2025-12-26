@@ -111,6 +111,15 @@ export function createTestStorage() {
     async getUser(id: string) {
       return users.get(id);
     },
+    async updateUser(id: string, updates: Partial<any>) {
+      const user = users.get(id);
+      if (!user) {
+        return undefined;
+      }
+      const updated = { ...user, ...updates };
+      users.set(id, updated);
+      return updated;
+    },
     async getUserByEmail(email: string) {
       return Array.from(users.values()).find((user) => user.email === email);
     },

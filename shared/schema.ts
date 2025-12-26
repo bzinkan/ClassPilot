@@ -86,6 +86,11 @@ export const createSchoolAdminSchema = z.object({
 });
 export type CreateSchoolAdmin = z.infer<typeof createSchoolAdminSchema>;
 
+export const adminResetPasswordSchema = z.object({
+  newPassword: z.string().min(10, "Password must be at least 10 characters"),
+});
+export type AdminResetPassword = z.infer<typeof adminResetPasswordSchema>;
+
 // Schema for creating a new school (super admin only)
 export const createSchoolRequestSchema = z.object({
   name: z.string().min(1, "School name is required"),
