@@ -13,6 +13,7 @@ import {
   insertEventSchema,
   insertRosterSchema,
   insertSettingsSchema,
+  settings as settingsTable,
   insertFlightPathSchema,
   insertStudentGroupSchema,
   insertDashboardTabSchema,
@@ -3831,7 +3832,7 @@ export async function registerRoutes(
       const data = insertSettingsSchema.parse({
         ...req.body,
         schoolId: sessionSchoolId,
-      });
+      }) as typeof settingsTable.$inferInsert;
       const { schoolId: _ignoredSchoolId, ...payload } = data;
       const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
       res.json(settings);
@@ -3849,7 +3850,7 @@ export async function registerRoutes(
 
       // Merge current settings with request body for partial update
       const updatedData = { ...currentSettings, ...req.body, schoolId: currentSettings.schoolId };
-      const data = insertSettingsSchema.parse(updatedData);
+      const data = insertSettingsSchema.parse(updatedData) as typeof settingsTable.$inferInsert;
       const { schoolId: _ignoredSchoolId, ...payload } = data;
       const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
       res.json(settings);
