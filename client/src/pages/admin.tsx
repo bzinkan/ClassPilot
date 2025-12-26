@@ -829,7 +829,12 @@ export default function Admin() {
           <div className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="edit-role">Role</Label>
-              <Select value={selectedRole} onValueChange={(value) => setSelectedRole(value as \"teacher\" | \"school_admin\")}>
+              <Select
+                value={selectedRole}
+                onValueChange={(value) =>
+                  setSelectedRole(value as "teacher" | "school_admin")
+                }
+              >
                 <SelectTrigger id="edit-role" data-testid="select-edit-role">
                   <SelectValue placeholder="Select role" />
                 </SelectTrigger>
