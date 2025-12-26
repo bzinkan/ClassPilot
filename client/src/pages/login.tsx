@@ -44,14 +44,14 @@ export default function Login() {
         description: "Welcome to ClassPilot",
       });
       
-      // Role-based routing
+      // Role-based routing (must match Google OAuth redirects in googleAuth.ts)
       const role = data.user?.role;
       console.log('[Login] User role:', role, 'Full data:', data);
       
       if (role === 'super_admin') {
         setLocation("/super-admin/schools");
       } else if (role === 'school_admin') {
-        setLocation("/dashboard");
+        setLocation("/admin");  // School admins go to admin panel, not teacher dashboard
       } else {
         setLocation("/dashboard");
       }
