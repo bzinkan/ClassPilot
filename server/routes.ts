@@ -337,7 +337,7 @@ let activeStorage: IStorage = defaultStorage;
 
 const requireTeacherRole = requireRole("teacher", "school_admin", "super_admin");
 const requireAdminRole = requireRole("school_admin", "super_admin");
-const requireSchoolAdminRole = requireRole("school_admin");
+const requireSchoolAdminRole = requireRole("school_admin", "super_admin");
 const requireSuperAdminRole = requireRole("super_admin");
 
 // IP allowlist middleware (only enforced in production)
