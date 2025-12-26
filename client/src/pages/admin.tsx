@@ -23,6 +23,14 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -49,7 +57,16 @@ const createTeacherSchema = z.object({
   schoolName: z.string().optional(),
 });
 
+const resetPasswordSchema = z.object({
+  newPassword: z.string().min(10, "Password must be at least 10 characters"),
+  confirmPassword: z.string().min(10, "Password must be at least 10 characters"),
+}).refine((data) => data.newPassword === data.confirmPassword, {
+  message: "Passwords do not match",
+  path: ["confirmPassword"],
+});
+
 type CreateTeacherForm = z.infer<typeof createTeacherSchema>;
+type ResetPasswordForm = z.infer<typeof resetPasswordSchema>;
 
 interface Teacher {
   id: string;
@@ -67,6 +84,8 @@ export default function Admin() {
   const { toast } = useToast();
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [teacherToDelete, setTeacherToDelete] = useState<Teacher | null>(null);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [teacherToReset, setTeacherToReset] = useState<Teacher | null>(null);
   const [cleanupDialogOpen, setCleanupDialogOpen] = useState(false);
   const [enableTrackingHours, setEnableTrackingHours] = useState(false);
   const [trackingStartTime, setTrackingStartTime] = useState("08:00");
@@ -85,6 +104,14 @@ export default function Admin() {
       email: "",
       password: "",
       schoolName: "",
+    },
+  });
+
+  const resetPasswordForm = useForm<ResetPasswordForm>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: {
+      newPassword: "",
+      confirmPassword: "",
     },
   });
 
@@ -143,6 +170,30 @@ export default function Admin() {
       toast({
         variant: "destructive",
         title: "Failed to delete teacher",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const resetPasswordMutation = useMutation({
+    mutationFn: async (payload: { userId: string; newPassword: string }) => {
+      return await apiRequest("POST", `/api/admin/users/${payload.userId}/password`, {
+        newPassword: payload.newPassword,
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Password reset",
+        description: "The teacher password has been updated successfully.",
+      });
+      setResetDialogOpen(false);
+      setTeacherToReset(null);
+      resetPasswordForm.reset();
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to reset password",
         description: error.message || "An error occurred",
       });
     },
@@ -220,10 +271,23 @@ export default function Admin() {
     setDeleteDialogOpen(true);
   };
 
+  const handleResetClick = (teacher: Teacher) => {
+    setTeacherToReset(teacher);
+    setResetDialogOpen(true);
+    resetPasswordForm.reset();
+  };
+
   const handleDeleteConfirm = () => {
     if (teacherToDelete) {
       deleteTeacherMutation.mutate(teacherToDelete.id);
     }
+  };
+
+  const handleResetSubmit = (data: ResetPasswordForm) => {
+    if (!teacherToReset) {
+      return;
+    }
+    resetPasswordMutation.mutate({ userId: teacherToReset.id, newPassword: data.newPassword });
   };
 
   const is247 =
@@ -395,17 +459,30 @@ export default function Admin() {
                         {teacher.role === 'admin' ? '👑 Admin' : '👤 Teacher'} • {teacher.schoolName}
                       </p>
                     </div>
-                    {teacher.role !== 'admin' && (
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        data-testid={`button-delete-${teacher.id}`}
-                        onClick={() => handleDeleteClick(teacher)}
-                        disabled={deleteTeacherMutation.isPending}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {teacher.role === "teacher" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          data-testid={`button-reset-password-${teacher.id}`}
+                          onClick={() => handleResetClick(teacher)}
+                          disabled={resetPasswordMutation.isPending}
+                        >
+                          Reset Password
+                        </Button>
+                      )}
+                      {teacher.role !== 'admin' && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          data-testid={`button-delete-${teacher.id}`}
+                          onClick={() => handleDeleteClick(teacher)}
+                          disabled={deleteTeacherMutation.isPending}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -709,6 +786,68 @@ export default function Admin() {
           </Button>
         </CardContent>
       </Card>
+
+      <Dialog
+        open={resetDialogOpen}
+        onOpenChange={(open) => {
+          setResetDialogOpen(open);
+          if (!open) {
+            setTeacherToReset(null);
+            resetPasswordForm.reset();
+          }
+        }}
+      >
+        <DialogContent data-testid="dialog-reset-password">
+          <DialogHeader>
+            <DialogTitle>Reset Teacher Password</DialogTitle>
+            <DialogDescription>
+              Set a new password for <strong>{teacherToReset?.username}</strong>. Share it securely with the teacher.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={resetPasswordForm.handleSubmit(handleResetSubmit)} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="newPassword">New Password</Label>
+              <Input
+                id="newPassword"
+                type="password"
+                data-testid="input-reset-password"
+                {...resetPasswordForm.register("newPassword")}
+              />
+              {resetPasswordForm.formState.errors.newPassword && (
+                <p className="text-sm text-destructive">
+                  {resetPasswordForm.formState.errors.newPassword.message}
+                </p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="confirmPassword">Confirm Password</Label>
+              <Input
+                id="confirmPassword"
+                type="password"
+                data-testid="input-reset-password-confirm"
+                {...resetPasswordForm.register("confirmPassword")}
+              />
+              {resetPasswordForm.formState.errors.confirmPassword && (
+                <p className="text-sm text-destructive">
+                  {resetPasswordForm.formState.errors.confirmPassword.message}
+                </p>
+              )}
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setResetDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" disabled={resetPasswordMutation.isPending}>
+                {resetPasswordMutation.isPending ? "Resetting..." : "Reset Password"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
         <AlertDialogContent>

@@ -21,6 +21,7 @@ import {
   insertSessionSchema,
   loginSchema,
   createTeacherSchema,
+  adminResetPasswordSchema,
   createSchoolRequestSchema, // Validation schema for creating schools
   normalizeEmail, // Email normalization helper
   type StudentStatus,
@@ -336,6 +337,7 @@ let activeStorage: IStorage = defaultStorage;
 
 const requireTeacherRole = requireRole("teacher", "school_admin", "super_admin");
 const requireAdminRole = requireRole("school_admin", "super_admin");
+const requireSchoolAdminRole = requireRole("school_admin");
 const requireSuperAdminRole = requireRole("super_admin");
 
 // IP allowlist middleware (only enforced in production)
@@ -1099,6 +1101,42 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete teacher error:", error);
       res.status(500).json({ error: "Failed to delete teacher" });
+    }
+  });
+
+  app.post("/api/admin/users/:userId/password", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const admin = await storage.getUser(req.session.userId!);
+      if (!admin) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, admin.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const data = adminResetPasswordSchema.parse(req.body);
+
+      const targetUser = await storage.getUser(userId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+      if (!assertSameSchool(sessionSchoolId, targetUser.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const hashedPassword = await bcrypt.hash(data.newPassword, 10);
+      await storage.updateUser(userId, { password: hashedPassword });
+
+      res.json({ ok: true });
+    } catch (error: any) {
+      if (error.errors) {
+        res.status(400).json({ error: error.errors[0].message });
+      } else {
+        console.error("Admin reset password error:", error);
+        res.status(500).json({ error: "Failed to reset password" });
+      }
     }
   });
 
