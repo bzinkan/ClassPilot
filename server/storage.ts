@@ -85,7 +85,7 @@ type GoogleOAuthTokenUpdateSet = Partial<
 > & { updatedAt: Date };
 
 const ENCRYPTED_SECRET_PARTS = 3;
-type SettingsUpsertInput = Partial<InsertSettings>;
+type SettingsUpsertInput = Partial<typeof settings.$inferInsert>;
 
 function isEncryptedSecret(value?: string | null): value is string {
   if (!value) return false;
@@ -126,7 +126,30 @@ function buildDefaultSettingsInput({
     trackingEndTime: "15:00",
     schoolTimezone: "America/New_York",
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-    afterHoursMode: "off",
+    afterHoursMode: "off" as Settings["afterHoursMode"],
+  };
+}
+
+function normalizeSettings(input: Settings): Settings;
+function normalizeSettings<T extends Partial<Settings>>(
+  input: T
+): T & {
+  allowedDomains: string[] | null;
+  blockedDomains: string[] | null;
+  ipAllowlist: string[] | null;
+  gradeLevels: string[] | null;
+  trackingDays: string[] | null;
+  afterHoursMode: Settings["afterHoursMode"];
+};
+function normalizeSettings<T extends Partial<Settings>>(input: T) {
+  return {
+    ...input,
+    allowedDomains: input.allowedDomains ?? null,
+    blockedDomains: input.blockedDomains ?? null,
+    ipAllowlist: input.ipAllowlist ?? null,
+    gradeLevels: input.gradeLevels ?? null,
+    trackingDays: input.trackingDays ?? null,
+    afterHoursMode: (input.afterHoursMode ?? "off") as Settings["afterHoursMode"],
   };
 }
 
@@ -1339,10 +1362,11 @@ export class MemStorage implements IStorage {
     }
     const schoolName = this.schools.get(schoolId)?.name;
     const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
-    const settings: Settings = {
+    const settingsInput = {
       id: randomUUID(),
       ...defaults,
-    };
+    } satisfies Settings;
+    const settings = normalizeSettings(settingsInput);
     this.settingsBySchool.set(schoolId, settings);
     return settings;
   }
@@ -1358,12 +1382,13 @@ export class MemStorage implements IStorage {
       schoolName,
       wsSharedKey: input.wsSharedKey,
     });
-    const settings: Settings = {
+    const settingsInput = {
       id: existing?.id ?? randomUUID(),
       ...defaults,
       ...sanitizedInput,
       schoolId,
-    };
+    } satisfies Settings;
+    const settings = normalizeSettings(settingsInput);
     this.settingsBySchool.set(schoolId, settings);
     return settings;
   }
@@ -2930,9 +2955,10 @@ export class DatabaseStorage implements IStorage {
     }
     const schoolName = await this.getSchoolNameForSettings(schoolId);
     const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
+    const insertValues: typeof settings.$inferInsert = normalizeSettings(defaults);
     const [created] = await db
       .insert(settings)
-      .values(defaults)
+      .values(insertValues)
       .onConflictDoNothing()
       .returning();
     if (created) {
@@ -2959,12 +2985,17 @@ export class DatabaseStorage implements IStorage {
     const updateSet = Object.fromEntries(
       Object.entries(updateInput).filter(([, value]) => value !== undefined)
     );
+    const insertValues: typeof settings.$inferInsert = normalizeSettings({
+      ...defaults,
+      ...sanitizedInput,
+      schoolId,
+    });
     const [result] = await db
       .insert(settings)
-      .values({ ...defaults, ...sanitizedInput, schoolId })
+      .values(insertValues)
       .onConflictDoUpdate({
         target: settings.schoolId,
-        set: updateSet,
+        set: normalizeSettings(updateSet) as typeof settings.$inferInsert,
       })
       .returning();
     return result;
