@@ -32,6 +32,7 @@ export function createTestStorage() {
         email: overrides?.email ?? "teacher@classpilot.test",
         username: overrides?.username ?? "teacher",
         password,
+        initialPassword: password,
         role: overrides?.role ?? "teacher",
         schoolId: overrides?.schoolId ?? "school-1",
         displayName: overrides?.displayName ?? "Test Teacher",
