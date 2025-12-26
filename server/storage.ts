@@ -46,6 +46,7 @@ import {
   type InsertCheckIn,
   type TabInfo, // 🆕 All-tabs tracking
   makeStatusKey,
+  insertSettingsSchema,
   schools,
   users,
   devices,
@@ -109,8 +110,8 @@ function buildDefaultSettingsInput({
   schoolId: string;
   schoolName?: string | null;
   wsSharedKey?: string | null;
-}): Omit<Settings, "id"> {
-  return {
+}): InsertSettings {
+  const base: InsertSettings = {
     schoolId,
     schoolName: schoolName ?? "School",
     wsSharedKey: wsSharedKey ?? process.env.WS_SHARED_KEY ?? "change-this-key",
@@ -151,6 +152,7 @@ function normalizeSettings<T extends Partial<Settings>>(input: T) {
     trackingDays: input.trackingDays ?? null,
     afterHoursMode: (input.afterHoursMode ?? "off") as Settings["afterHoursMode"],
   };
+  return base;
 }
 
 export interface IStorage {
@@ -1382,13 +1384,15 @@ export class MemStorage implements IStorage {
       schoolName,
       wsSharedKey: input.wsSharedKey,
     });
-    const settingsInput = {
-      id: existing?.id ?? randomUUID(),
+    const parsed = insertSettingsSchema.parse({
       ...defaults,
       ...sanitizedInput,
       schoolId,
-    } satisfies Settings;
-    const settings = normalizeSettings(settingsInput);
+    });
+    const settings: Settings = {
+      id: existing?.id ?? randomUUID(),
+      ...parsed,
+    };
     this.settingsBySchool.set(schoolId, settings);
     return settings;
   }
@@ -2982,10 +2986,10 @@ export class DatabaseStorage implements IStorage {
       wsSharedKey: sanitizedInput.wsSharedKey,
     });
     const { schoolId: _ignoredSchoolId, ...updateInput } = sanitizedInput;
-    const updateSet = Object.fromEntries(
-      Object.entries(updateInput).filter(([, value]) => value !== undefined)
+    const updateSet = insertSettingsSchema.partial().parse(
+      Object.fromEntries(Object.entries(updateInput).filter(([, value]) => value !== undefined))
     );
-    const insertValues: typeof settings.$inferInsert = normalizeSettings({
+    const parsed = insertSettingsSchema.parse({
       ...defaults,
       ...sanitizedInput,
       schoolId,

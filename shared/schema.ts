@@ -537,7 +537,11 @@ export const settings = pgTable("settings", {
   afterHoursMode: text("after_hours_mode").notNull().default("off").$type<"off" | "limited" | "full">(),
 });
 
-export const insertSettingsSchema = createInsertSchema(settings).omit({ id: true });
+export const insertSettingsSchema = createInsertSchema(settings)
+  .omit({ id: true })
+  .extend({
+    afterHoursMode: z.enum(["off", "limited", "full"]).default("off"),
+  });
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;
 export type Settings = typeof settings.$inferSelect;
 
