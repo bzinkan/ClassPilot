@@ -348,12 +348,7 @@ export async function createApp(options: AppOptions = {}) {
     });
   }
 
-  app.get("/api/csrf", (req, res, next) => {
-    if (!req.session?.userId) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-    return csrfProtection(req, res, next);
-  }, (req, res) => {
+  app.get("/api/csrf", csrfProtection, (req, res) => {
     res.json({ csrfToken: req.csrfToken() });
   });
 
