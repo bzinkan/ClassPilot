@@ -46,6 +46,7 @@ import {
   type InsertCheckIn,
   type TabInfo, // 🆕 All-tabs tracking
   makeStatusKey,
+  insertSettingsSchema,
   schools,
   users,
   devices,
@@ -109,8 +110,8 @@ function buildDefaultSettingsInput({
   schoolId: string;
   schoolName?: string | null;
   wsSharedKey?: string | null;
-}): Omit<Settings, "id"> {
-  return {
+}): InsertSettings {
+  const base: InsertSettings = {
     schoolId,
     schoolName: schoolName ?? "School",
     wsSharedKey: wsSharedKey ?? process.env.WS_SHARED_KEY ?? "change-this-key",
@@ -126,8 +127,9 @@ function buildDefaultSettingsInput({
     trackingEndTime: "15:00",
     schoolTimezone: "America/New_York",
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
-    afterHoursMode: "off",
+    afterHoursMode: "off" as const,
   };
+  return base;
 }
 
 export interface IStorage {
@@ -1358,11 +1360,14 @@ export class MemStorage implements IStorage {
       schoolName,
       wsSharedKey: input.wsSharedKey,
     });
-    const settings: Settings = {
-      id: existing?.id ?? randomUUID(),
+    const parsed = insertSettingsSchema.parse({
       ...defaults,
       ...sanitizedInput,
       schoolId,
+    });
+    const settings: Settings = {
+      id: existing?.id ?? randomUUID(),
+      ...parsed,
     };
     this.settingsBySchool.set(schoolId, settings);
     return settings;
@@ -2956,12 +2961,17 @@ export class DatabaseStorage implements IStorage {
       wsSharedKey: sanitizedInput.wsSharedKey,
     });
     const { schoolId: _ignoredSchoolId, ...updateInput } = sanitizedInput;
-    const updateSet = Object.fromEntries(
-      Object.entries(updateInput).filter(([, value]) => value !== undefined)
+    const updateSet = insertSettingsSchema.partial().parse(
+      Object.fromEntries(Object.entries(updateInput).filter(([, value]) => value !== undefined))
     );
+    const parsed = insertSettingsSchema.parse({
+      ...defaults,
+      ...sanitizedInput,
+      schoolId,
+    });
     const [result] = await db
       .insert(settings)
-      .values({ ...defaults, ...sanitizedInput, schoolId })
+      .values(parsed)
       .onConflictDoUpdate({
         target: settings.schoolId,
         set: updateSet,
