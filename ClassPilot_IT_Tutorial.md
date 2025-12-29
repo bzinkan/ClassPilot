@@ -561,7 +561,7 @@ Jane Doe,jane.doe@school.edu,7th
 - ClassPilot extension installed
 
 **Server:**
-- Node.js 18+
+- Node.js 24+
 - PostgreSQL 14+
 - 512MB RAM minimum (1GB recommended)
 - 10GB storage

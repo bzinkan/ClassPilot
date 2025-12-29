@@ -922,7 +922,7 @@ The extension sends activity updates every **10 seconds**:
 - Google Workspace account
 
 **Server:**
-- Node.js 18+
+- Node.js 24+
 - PostgreSQL database
 - WebSocket support
 - HTTPS/TLS certificate
