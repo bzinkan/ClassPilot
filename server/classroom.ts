@@ -2,6 +2,18 @@ import { google } from "googleapis";
 import { storage } from "./storage";
 import { getBaseUrl } from "./config/baseUrl";
 
+// Timeout wrapper for API calls
+const API_TIMEOUT_MS = 30000; // 30 seconds
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number = API_TIMEOUT_MS): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`API call timed out after ${timeoutMs}ms`)), timeoutMs)
+    ),
+  ]);
+}
+
 // Helper to get an authenticated Classroom client for a user
 export async function getClassroomClient(userId: string) {
   // 1. Get tokens from DB
@@ -33,11 +45,13 @@ export async function getClassroomClient(userId: string) {
 export async function syncCourses(userId: string, schoolId: string) {
   const classroom = await getClassroomClient(userId);
 
-  // Fetch active courses where the user is a teacher
-  const response = await classroom.courses.list({
-    teacherId: "me",
-    courseStates: ["ACTIVE"],
-  });
+  // Fetch active courses where the user is a teacher (with timeout)
+  const response = await withTimeout(
+    classroom.courses.list({
+      teacherId: "me",
+      courseStates: ["ACTIVE"],
+    }) as Promise<any>
+  );
 
   const courses = response.data.courses || [];
 
@@ -63,10 +77,12 @@ export async function syncCourses(userId: string, schoolId: string) {
 export async function syncRoster(userId: string, schoolId: string, courseId: string) {
   const classroom = await getClassroomClient(userId);
 
-  // Fetch students
-  const response = await classroom.courses.students.list({
-    courseId,
-  });
+  // Fetch students (with timeout)
+  const response = await withTimeout(
+    classroom.courses.students.list({
+      courseId,
+    }) as Promise<any>
+  );
 
   const students = response.data.students || [];
   const studentEntries = [];

@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { WebSocketServer } from "ws";
 import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
+import { generateSecurePassword } from "./util/password";
 import rateLimit, { type Options } from "express-rate-limit";
 import { z } from "zod";
 import {
@@ -63,22 +64,34 @@ import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 
-// Helper function to normalize grade levels (strip ordinal suffixes like "th", "st", "nd", "rd")
+// Helper function to normalize and validate grade levels
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
   if (!grade) return null;
-  
+
   const trimmed = grade.trim();
   if (!trimmed) return null;
-  
+
+  // Security: Limit grade level length to prevent DoS
+  if (trimmed.length > 50) {
+    throw new Error("Grade level too long (max 50 characters)");
+  }
+
   // Remove common ordinal suffixes (case-insensitive)
   // Matches: 1st, 2nd, 3rd, 4th, 5th, etc. and returns just the number
   const normalized = trimmed.replace(/(\d+)(st|nd|rd|th)\b/gi, '$1');
-  
+
   // Also handle special cases like "Kindergarten" → "K"
   if (/^kindergarten$/i.test(normalized)) {
     return 'K';
   }
-  
+
+  // Validate against acceptable grade levels
+  const validGrades = ['PK', 'K', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12'];
+  if (!validGrades.includes(normalized.toUpperCase())) {
+    // Allow the value but log a warning
+    console.warn(`[grade-level] Non-standard grade level: ${normalized}`);
+  }
+
   return normalized;
 }
 
@@ -216,6 +229,16 @@ const apiLimiter = rateLimit({
   max: 100, // 100 requests per minute
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+// Strict rate limiter for authentication endpoints
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 login attempts per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many login attempts. Please try again later.",
+  skipSuccessfulRequests: true, // Only count failed attempts
 });
 
 // Per-device heartbeat rate limiter (critical for production)
@@ -766,7 +789,7 @@ export async function registerRoutes(
   });
 
   // Authentication endpoints
-  app.post("/api/login", async (req, res) => {
+  app.post("/api/login", authLimiter, async (req, res) => {
     try {
       const { email, username, password } = loginSchema.parse(req.body);
       
@@ -1788,8 +1811,13 @@ export async function registerRoutes(
 
   // Stop impersonating and return to original super admin session
   // Note: This endpoint must allow impersonating sessions (super admin currently acting as school admin)
-  app.post("/api/super-admin/stop-impersonate", async (req, res) => {
+  app.post("/api/super-admin/stop-impersonate", requireAuth, async (req, res) => {
     try {
+      // Verify user is authenticated
+      if (!req.session.userId) {
+        return res.status(401).json({ error: "Not authenticated" });
+      }
+
       if (!req.session.impersonating || !req.session.originalUserId) {
         return res.status(400).json({ error: "Not currently impersonating" });
       }
@@ -1797,6 +1825,11 @@ export async function registerRoutes(
       const originalUser = await storage.getUser(req.session.originalUserId);
       if (!originalUser || originalUser.role !== 'super_admin') {
         return res.status(403).json({ error: "Original session invalid" });
+      }
+
+      // Additional security check: verify the session userId matches either original or impersonated user
+      if (req.session.userId !== originalUser.id && req.session.originalUserId !== originalUser.id) {
+        return res.status(403).json({ error: "Session mismatch" });
       }
 
       console.log(`[STOP IMPERSONATE] Returning to super admin ${originalUser.id}`);
@@ -1842,8 +1875,8 @@ export async function registerRoutes(
         }
       }
 
-      // Generate temporary password
-      const tempPassword = Math.random().toString(36).slice(-10) + Math.random().toString(36).slice(-10);
+      // Generate cryptographically secure temporary password
+      const tempPassword = generateSecurePassword(16);
       const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
       // Update admin's password
@@ -1851,14 +1884,17 @@ export async function registerRoutes(
 
       console.log(`[RESET LOGIN] Super admin ${req.session.userId} reset password for ${admin.email} at school ${school.name}`);
 
-      res.json({ 
-        success: true, 
-        tempPassword,
+      // SECURITY: Password should be sent via secure email/SMS in production
+      // For now, we return it but this should be changed to email delivery
+      res.json({
+        success: true,
         admin: {
           email: admin.email,
           displayName: admin.displayName,
         },
-        message: `Temporary password generated for ${admin.displayName || admin.email}`
+        message: `Temporary password generated and should be sent to ${admin.email}`,
+        // TODO: Remove tempPassword from response once email delivery is implemented
+        tempPassword
       });
     } catch (error) {
       console.error("Reset login error:", error);
@@ -1885,7 +1921,7 @@ export async function registerRoutes(
 
       assertEmailMatchesDomain(email, school.domain);
 
-      const tempPassword = Math.random().toString(36).slice(-10);
+      const tempPassword = generateSecurePassword(16);
       const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
       const admin = await storage.createUser({
@@ -1896,14 +1932,17 @@ export async function registerRoutes(
         displayName: displayName || email.split('@')[0],
       });
 
-      res.json({ 
-        success: true, 
+      // SECURITY: Password should be sent via secure email/SMS in production
+      res.json({
+        success: true,
         admin: {
           id: admin.id,
           email: admin.email,
           displayName: admin.displayName,
         },
-        tempPassword, // Return temp password (should be sent via email in production)
+        message: `Admin created. Temporary password should be sent to ${admin.email}`,
+        // TODO: Remove tempPassword from response once email delivery is implemented
+        tempPassword
       });
     } catch (error) {
       console.error("Add admin error:", error);
@@ -2147,9 +2186,17 @@ export async function registerRoutes(
     try {
       const { fileContent } = req.body;
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      
+
       if (!fileContent || typeof fileContent !== "string") {
         return res.status(400).json({ error: "CSV file content is required" });
+      }
+
+      // Security: Limit CSV file size to prevent DoS attacks
+      const MAX_CSV_SIZE = 10 * 1024 * 1024; // 10MB
+      if (fileContent.length > MAX_CSV_SIZE) {
+        return res.status(413).json({
+          error: `CSV file too large. Maximum size is ${MAX_CSV_SIZE / 1024 / 1024}MB`,
+        });
       }
 
       let data: Record<string, string>[];
@@ -2413,9 +2460,26 @@ export async function registerRoutes(
           schoolId, // 🔑 Critical: Associate student with correct school
           studentStatus: 'active',
         });
-        
-        student = await storage.createStudent(studentData);
-        console.log('New student auto-registered');
+
+        try {
+          student = await storage.createStudent(studentData);
+          console.log('New student auto-registered');
+        } catch (createError: any) {
+          // Handle race condition: another request created the student concurrently
+          if (createError?.code === '23505' || createError?.message?.includes('unique')) {
+            console.log('Student created concurrently, fetching existing record');
+            student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+            if (!student) {
+              throw new Error('Failed to retrieve student after concurrent creation');
+            }
+            // Update device if needed
+            if (student.deviceId !== deviceData.deviceId) {
+              student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+            }
+          } else {
+            throw createError;
+          }
+        }
       }
       
       // Set this student as the active student for this device

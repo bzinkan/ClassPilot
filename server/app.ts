@@ -315,8 +315,43 @@ export async function createApp(options: AppOptions = {}) {
     return csrfProtection(req, res, next);
   });
 
-  app.get("/health", (_req, res) => {
-    res.json({ ok: true });
+  // Health check endpoint with database connectivity test
+  let lastHealthCheck = { ok: true, database: "unknown", timestamp: Date.now() };
+  let healthCheckCache = lastHealthCheck;
+  const HEALTH_CHECK_CACHE_MS = 10000; // Cache for 10 seconds
+
+  app.get("/health", async (_req, res) => {
+    const now = Date.now();
+
+    // Return cached result if fresh
+    if (now - healthCheckCache.timestamp < HEALTH_CHECK_CACHE_MS) {
+      return res.status(healthCheckCache.ok ? 200 : 503).json(healthCheckCache);
+    }
+
+    // Perform actual health check
+    let dbStatus = "unknown";
+    let isHealthy = true;
+
+    if (sessionPool) {
+      try {
+        await sessionPool.query("SELECT 1");
+        dbStatus = "connected";
+      } catch (error) {
+        console.error("[health] Database check failed:", error);
+        dbStatus = "disconnected";
+        isHealthy = false;
+      }
+    } else {
+      dbStatus = "memory-store"; // Using in-memory session store (test mode)
+    }
+
+    healthCheckCache = {
+      ok: isHealthy,
+      database: dbStatus,
+      timestamp: now
+    };
+
+    res.status(isHealthy ? 200 : 503).json(healthCheckCache);
   });
 
   app.get("/client-config.json", (req, res) => {

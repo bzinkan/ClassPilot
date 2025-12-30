@@ -19,6 +19,8 @@ describe("health endpoint", () => {
   it("returns ok payload", async () => {
     const response = await app.get("/health");
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ ok: true });
+    expect(response.body.ok).toBe(true);
+    expect(response.body.database).toBeDefined();
+    expect(response.body.timestamp).toBeDefined();
   });
 });

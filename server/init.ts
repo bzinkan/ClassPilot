@@ -1,12 +1,25 @@
 import { storage } from "./storage";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import { requireEnv } from "./util/requireEnv";
+import { generateSecurePassword } from "./util/password";
 
 export async function initializeApp() {
   const isProduction = process.env.NODE_ENV === "production";
-  const wsSharedKey = isProduction
-    ? requireEnv("WS_SHARED_KEY")
-    : (process.env.WS_SHARED_KEY || "change-this-key");
+
+  // Generate secure WebSocket key if not provided
+  let wsSharedKey: string;
+  if (isProduction) {
+    wsSharedKey = requireEnv("WS_SHARED_KEY");
+  } else {
+    if (process.env.WS_SHARED_KEY) {
+      wsSharedKey = process.env.WS_SHARED_KEY;
+    } else {
+      // Generate cryptographically secure random key for development
+      wsSharedKey = crypto.randomBytes(32).toString("base64");
+      console.log("[dev] Generated random WS_SHARED_KEY for this session");
+    }
+  }
   const seedDemoUsersEnv = process.env.SEED_DEMO_USERS;
   const seedDemoUsers = seedDemoUsersEnv === "true";
   const shouldSeedDemoUsers = !isProduction && (seedDemoUsers || seedDemoUsersEnv === undefined);
@@ -46,7 +59,9 @@ export async function initializeApp() {
     const existingAdmin = await storage.getUserByUsername("admin");
     
     if (!existingAdmin) {
-      const hashedPassword = await bcrypt.hash("admin123", 10);
+      // Generate secure random password for demo admin
+      const demoAdminPassword = generateSecurePassword(12);
+      const hashedPassword = await bcrypt.hash(demoAdminPassword, 10);
       await storage.createUser({
         username: "admin",
         email: "admin@localhost",
@@ -54,15 +69,18 @@ export async function initializeApp() {
         role: "admin",
         schoolName: "Default School",
       });
-      console.log("Created default admin account: username='admin', password='admin123'");
-      console.log("⚠️  IMPORTANT: Change this password in production!");
+      console.log("✅ Created demo admin account: username='admin'");
+      console.log(`   Password: ${demoAdminPassword}`);
+      console.log("   ⚠️  Save this password - it will not be shown again!");
     }
     
     // Create default teacher account if none exists (legacy - for backward compatibility)
     const existingTeacher = await storage.getUserByUsername("teacher");
-    
+
     if (!existingTeacher) {
-      const hashedPassword = await bcrypt.hash("teacher123", 10);
+      // Generate secure random password for demo teacher
+      const demoTeacherPassword = generateSecurePassword(12);
+      const hashedPassword = await bcrypt.hash(demoTeacherPassword, 10);
       await storage.createUser({
         username: "teacher",
         email: "teacher@localhost",
@@ -70,8 +88,9 @@ export async function initializeApp() {
         role: "teacher",
         schoolName: "Default School",
       });
-      console.log("Created default teacher account: username='teacher', password='teacher123'");
-      console.log("⚠️  IMPORTANT: Change this password in production!");
+      console.log("✅ Created demo teacher account: username='teacher'");
+      console.log(`   Password: ${demoTeacherPassword}`);
+      console.log("   ⚠️  Save this password - it will not be shown again!");
     }
   }
 

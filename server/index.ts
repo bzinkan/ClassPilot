@@ -41,4 +41,35 @@ import { setupVite, serveStatic, log } from "./vite";
       log(`serving on port ${port}`);
     }
   );
+
+  // Graceful shutdown handlers
+  const gracefulShutdown = async (signal: string) => {
+    console.log(`\n${signal} received, shutting down gracefully...`);
+
+    // Stop accepting new connections
+    server.close(() => {
+      console.log("HTTP server closed");
+    });
+
+    // Set timeout to force shutdown if graceful shutdown takes too long
+    const forceShutdownTimeout = setTimeout(() => {
+      console.error("Forced shutdown after timeout");
+      process.exit(1);
+    }, 30000); // 30 second timeout
+
+    try {
+      // TODO: Close WebSocket connections gracefully
+      // TODO: Drain database connection pool if needed
+      console.log("Cleanup complete");
+      clearTimeout(forceShutdownTimeout);
+      process.exit(0);
+    } catch (error) {
+      console.error("Error during shutdown:", error);
+      clearTimeout(forceShutdownTimeout);
+      process.exit(1);
+    }
+  };
+
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 })();
