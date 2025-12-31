@@ -17,14 +17,15 @@ type PoolLike = {
 };
 
 let pool: InstanceType<typeof Pool> | PoolLike;
-let db: ReturnType<typeof drizzle>;
+let db: ReturnType<typeof drizzle<typeof schema>>;
 
 if (isTest) {
   pool = createTestSessionPool();
-  db = {} as ReturnType<typeof drizzle>;
+  db = {} as ReturnType<typeof drizzle<typeof schema>>;
 } else {
-  pool = new Pool({ connectionString: process.env.DATABASE_URL });
-  db = drizzle(pool, { schema });
+  const pgPool = new Pool({ connectionString: process.env.DATABASE_URL });
+  pool = pgPool;
+  db = drizzle(pgPool, { schema });
 }
 
 export { pool, db };
