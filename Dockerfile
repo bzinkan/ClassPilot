@@ -58,12 +58,7 @@ ENV NODE_ENV=production
 ENV PORT=5000
 
 # Copy package files
-COPY package.json package-lock.json ./
-
-# Install production dependencies only
-RUN npm ci --omit=dev && \
-    npm cache clean --force && \
-    apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev
+COPY --chown=nodejs:nodejs package.json package-lock.json ./
 
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
@@ -72,6 +67,12 @@ COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
 # Copy other necessary files
 COPY --chown=nodejs:nodejs shared ./shared
 COPY --chown=nodejs:nodejs server ./server
+
+# Install production dependencies only
+RUN npm ci --omit=dev && \
+    npm cache clean --force && \
+    apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev && \
+    chown -R nodejs:nodejs /app/node_modules
 
 # Switch to non-root user
 USER nodejs
