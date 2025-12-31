@@ -53,10 +53,6 @@ RUN addgroup -g 1001 -S nodejs && \
 
 WORKDIR /app
 
-# Set environment
-ENV NODE_ENV=production
-ENV PORT=5000
-
 # Copy package files and vendor directory
 COPY --chown=nodejs:nodejs package.json package-lock.json ./
 COPY --chown=nodejs:nodejs vendor ./vendor
@@ -65,15 +61,18 @@ COPY --chown=nodejs:nodejs vendor ./vendor
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
 
-# Copy other necessary files
-COPY --chown=nodejs:nodejs shared ./shared
-COPY --chown=nodejs:nodejs server ./server
+# Note: We don't copy server/ and shared/ because they're already bundled into dist/
 
-# Install ALL dependencies (server code imports dev dependencies due to --packages=external)
+# Install ALL dependencies (including devDependencies because they're marked as external in the build)
+# IMPORTANT: Don't set NODE_ENV=production yet, it would cause npm ci to skip devDependencies
 RUN npm ci && \
     npm cache clean --force && \
     apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev && \
     chown -R nodejs:nodejs /app/node_modules
+
+# Set environment AFTER installing dependencies
+ENV NODE_ENV=production
+ENV PORT=5000
 
 # Switch to non-root user
 USER nodejs
