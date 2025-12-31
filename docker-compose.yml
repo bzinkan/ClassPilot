@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - DATABASE_URL=${DATABASE_URL}
+      - SESSION_SECRET=${SESSION_SECRET}
+      - STUDENT_TOKEN_SECRET=${STUDENT_TOKEN_SECRET}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY=${GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY}
+      - WS_SHARED_KEY=${WS_SHARED_KEY}
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:5000}
+      - SENTRY_DSN_SERVER=${SENTRY_DSN_SERVER:-}
+      - SEED_DEMO_USERS=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      - postgres
+
+  # Local PostgreSQL for testing (use Neon in production)
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=classpilot
+      - POSTGRES_PASSWORD=classpilot_dev
+      - POSTGRES_DB=classpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U classpilot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

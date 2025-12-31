@@ -1,17 +1,64 @@
-FROM node:24-slim
+# Multi-stage build for optimized production image
+# Stage 1: Build
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-ENV NODE_ENV=production
-ENV PORT=8080
-
+# Copy package files
 COPY package.json package-lock.json ./
+
+# Install all dependencies (including devDependencies for build)
 RUN npm ci
 
+# Copy source code
 COPY . .
 
+# Build the application
 RUN npm run build
 
-EXPOSE 8080
+# Stage 2: Production
+FROM node:24-alpine
 
-CMD ["npm", "run", "start"]
+# Install dumb-init for proper signal handling
+RUN apk add --no-cache dumb-init
+
+# Create non-root user for security
+RUN addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001
+
+WORKDIR /app
+
+# Set environment
+ENV NODE_ENV=production
+ENV PORT=5000
+
+# Copy package files
+COPY package.json package-lock.json ./
+
+# Install production dependencies only
+RUN npm ci --omit=dev && \
+    npm cache clean --force
+
+# Copy built files from builder
+COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
+
+# Copy other necessary files
+COPY --chown=nodejs:nodejs shared ./shared
+COPY --chown=nodejs:nodejs server ./server
+
+# Switch to non-root user
+USER nodejs
+
+# Expose port
+EXPOSE 5000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:5000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+
+# Use dumb-init to handle signals properly (for graceful shutdown)
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start the application
+CMD ["npm", "start"]
