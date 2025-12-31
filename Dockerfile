@@ -57,8 +57,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=5000
 
-# Copy package files
+# Copy package files and vendor directory
 COPY --chown=nodejs:nodejs package.json package-lock.json ./
+COPY --chown=nodejs:nodejs vendor ./vendor
 
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
