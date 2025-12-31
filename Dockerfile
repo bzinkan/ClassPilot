@@ -30,14 +30,22 @@ RUN npm run build
 # Stage 2: Production
 FROM node:24-alpine
 
-# Install runtime dependencies for canvas and dumb-init
+# Install runtime and build dependencies for canvas and dumb-init
 RUN apk add --no-cache \
     dumb-init \
     cairo \
     jpeg \
     pango \
     giflib \
-    pixman
+    pixman \
+    python3 \
+    make \
+    g++ \
+    cairo-dev \
+    jpeg-dev \
+    pango-dev \
+    giflib-dev \
+    pixman-dev
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
@@ -54,7 +62,8 @@ COPY package.json package-lock.json ./
 
 # Install production dependencies only
 RUN npm ci --omit=dev && \
-    npm cache clean --force
+    npm cache clean --force && \
+    apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev
 
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
