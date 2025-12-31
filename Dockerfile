@@ -69,8 +69,8 @@ COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
 COPY --chown=nodejs:nodejs shared ./shared
 COPY --chown=nodejs:nodejs server ./server
 
-# Install production dependencies only
-RUN npm ci --omit=dev && \
+# Install ALL dependencies (server code imports dev dependencies due to --packages=external)
+RUN npm ci && \
     npm cache clean --force && \
     apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev && \
     chown -R nodejs:nodejs /app/node_modules
