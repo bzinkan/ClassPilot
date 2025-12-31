@@ -5,6 +5,8 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/components/theme-provider";
 import NotFound from "@/pages/not-found";
+import LandingPage from "@/pages/landing";
+import PricingPage from "@/pages/pricing";
 import Login from "@/pages/login";
 import Dashboard from "@/pages/dashboard";
 import Settings from "@/pages/settings";
@@ -20,7 +22,8 @@ import SchoolDetail from "@/pages/super-admin/school-detail";
 function Router() {
   return (
     <Switch>
-      <Route path="/" component={Login} />
+      <Route path="/" component={LandingPage} />
+      <Route path="/pricing" component={PricingPage} />
       <Route path="/login" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/roster" component={Roster} />
