@@ -1,9 +1,8 @@
-import { Pool as NeonPool, neon, neonConfig } from "@neondatabase/serverless";
-import { drizzle } from "drizzle-orm/neon-http";
-import ws from "ws";
+import pg from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 
-neonConfig.webSocketConstructor = ws;
+const { Pool } = pg;
 
 const isTest = process.env.NODE_ENV === "test";
 
@@ -17,16 +16,15 @@ type PoolLike = {
   query: (query: string, params?: any[]) => Promise<{ rows?: any[] }>;
 };
 
-let pool: NeonPool;
+let pool: Pool | PoolLike;
 let db: ReturnType<typeof drizzle>;
 
 if (isTest) {
-  pool = createTestSessionPool() as unknown as NeonPool;
+  pool = createTestSessionPool();
   db = {} as ReturnType<typeof drizzle>;
 } else {
-  pool = new NeonPool({ connectionString: process.env.DATABASE_URL });
-  const client = neon(process.env.DATABASE_URL!);
-  db = drizzle(client, { schema });
+  pool = new Pool({ connectionString: process.env.DATABASE_URL });
+  db = drizzle(pool, { schema });
 }
 
 export { pool, db };
