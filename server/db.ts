@@ -16,7 +16,7 @@ type PoolLike = {
   query: (query: string, params?: any[]) => Promise<{ rows?: any[] }>;
 };
 
-let pool: Pool | PoolLike;
+let pool: InstanceType<typeof Pool> | PoolLike;
 let db: ReturnType<typeof drizzle>;
 
 if (isTest) {
