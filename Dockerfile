@@ -61,7 +61,9 @@ COPY --chown=nodejs:nodejs drizzle.config.ts ./
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
-COPY --from=builder --chown=nodejs:nodejs /app/shared ./shared
+
+# Copy shared folder directly (needed for drizzle-kit to read schema)
+COPY --chown=nodejs:nodejs shared ./shared
 
 # Note: We don't copy server/ because it's already bundled into dist/, but we need shared/ for drizzle-kit
 
