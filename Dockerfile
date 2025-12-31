@@ -4,6 +4,17 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
+# Install build dependencies for canvas
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    cairo-dev \
+    jpeg-dev \
+    pango-dev \
+    giflib-dev \
+    pixman-dev
+
 # Copy package files
 COPY package.json package-lock.json ./
 
@@ -19,8 +30,14 @@ RUN npm run build
 # Stage 2: Production
 FROM node:24-alpine
 
-# Install dumb-init for proper signal handling
-RUN apk add --no-cache dumb-init
+# Install runtime dependencies for canvas and dumb-init
+RUN apk add --no-cache \
+    dumb-init \
+    cairo \
+    jpeg \
+    pango \
+    giflib \
+    pixman
 
 # Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
