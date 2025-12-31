@@ -61,8 +61,9 @@ COPY --chown=nodejs:nodejs drizzle.config.ts ./
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
 COPY --from=builder --chown=nodejs:nodejs /app/migrations ./migrations
+COPY --from=builder --chown=nodejs:nodejs /app/shared ./shared
 
-# Note: We don't copy server/ and shared/ because they're already bundled into dist/
+# Note: We don't copy server/ because it's already bundled into dist/, but we need shared/ for drizzle-kit
 
 # Install ALL dependencies (including devDependencies because they're marked as external in the build)
 # IMPORTANT: Don't set NODE_ENV=production yet, it would cause npm ci to skip devDependencies
