@@ -56,6 +56,7 @@ WORKDIR /app
 # Copy package files and vendor directory
 COPY --chown=nodejs:nodejs package.json package-lock.json ./
 COPY --chown=nodejs:nodejs vendor ./vendor
+COPY --chown=nodejs:nodejs drizzle.config.ts ./
 
 # Copy built files from builder
 COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
