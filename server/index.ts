@@ -1,16 +1,25 @@
 import { createApp } from "./app";
 import { initializeApp } from "./init";
 
+console.log("[STARTUP] Starting ClassPilot application...");
+console.log("[STARTUP] Environment:", process.env.NODE_ENV);
+console.log("[STARTUP] Port:", process.env.PORT || "5000");
+
 (async () => {
   // Initialize default data
   try {
+    console.log("[INIT] Initializing app data...");
     await initializeApp();
+    console.log("[INIT] App data initialized successfully");
   } catch (error) {
-    console.error("Failed to initialize app:", error);
-    throw error;
+    console.error("[INIT ERROR] Failed to initialize app:", error);
+    process.exit(1);
   }
 
-  const { app, server } = await createApp();
+  try {
+    console.log("[APP] Creating app and server...");
+    const { app, server} = await createApp();
+    console.log("[APP] App and server created successfully");
 
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
@@ -25,7 +34,7 @@ import { initializeApp } from "./init";
       {
         port,
         host: "0.0.0.0",
-        reusePort: true,
+        reusePort: false,
       },
       () => {
         log(`serving on port ${port}`);
@@ -45,7 +54,7 @@ import { initializeApp } from "./init";
       {
         port,
         host: "0.0.0.0",
-        reusePort: true,
+        reusePort: false,
       },
       () => {
         console.log(`serving on port ${port}`);
@@ -83,4 +92,11 @@ import { initializeApp } from "./init";
 
   process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
   process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-})();
+  } catch (error) {
+    console.error("[FATAL] Fatal error during server setup:", error);
+    process.exit(1);
+  }
+})().catch((error) => {
+  console.error("[FATAL] Unhandled error in main async function:", error);
+  process.exit(1);
+});
