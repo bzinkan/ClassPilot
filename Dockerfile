@@ -91,5 +91,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Use dumb-init to handle signals properly (for graceful shutdown)
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start the application
-CMD ["npm", "start"]
+# Run migrations and start the application
+CMD ["sh", "-c", "npm run db:push && npm start"]
