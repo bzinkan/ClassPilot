@@ -3,7 +3,7 @@
 ## Architecture Overview
 
 ```
-Internet → Route53 → ALB (HTTPS) → Fargate Tasks → Neon PostgreSQL
+Internet → Route53 → ALB (HTTPS) → Fargate Tasks → RDS PostgreSQL
                                                  ↓
                                              CloudWatch
 ```
@@ -14,13 +14,14 @@ Internet → Route53 → ALB (HTTPS) → Fargate Tasks → Neon PostgreSQL
 |---------|--------------|------|
 | **Fargate** | 2 tasks × 0.25 vCPU, 512MB | ~$30 |
 | **Application Load Balancer** | Standard | ~$20 |
+| **RDS PostgreSQL** | db.t4g.micro (Free Tier eligible) | ~$15 |
 | **NAT Gateway** (optional) | Single AZ | ~$35 |
 | **Data Transfer** | ~50GB | ~$5 |
 | **CloudWatch Logs** | 10GB | ~$5 |
 | **Route53** | Hosted zone | ~$0.50 |
 | **ACM Certificate** | Free | $0 |
-| **Total (with NAT)** | | **~$95/month** |
-| **Total (without NAT)** | | **~$60/month** |
+| **Total (with NAT)** | | **~$110/month** |
+| **Total (without NAT)** | | **~$75/month** |
 
 **Scaling:** Each additional Fargate task adds ~$15/month
 
@@ -32,7 +33,6 @@ Internet → Route53 → ALB (HTTPS) → Fargate Tasks → Neon PostgreSQL
 2. **AWS CLI** installed: `aws --version`
 3. **Docker** installed: `docker --version`
 4. **Domain name** (for SSL certificate)
-5. **Neon PostgreSQL** database URL
 
 ---
 
@@ -201,7 +201,74 @@ aws ec2 authorize-security-group-ingress \
 
 ---
 
-## Step 6: Create Application Load Balancer
+## Step 6: Create RDS PostgreSQL Database
+
+```bash
+# Create security group for RDS
+export RDS_SG=$(aws ec2 create-security-group \
+  --group-name classpilot-rds-sg \
+  --description "Security group for ClassPilot RDS" \
+  --vpc-id ${VPC_ID} \
+  --query 'GroupId' \
+  --output text)
+
+# Allow PostgreSQL access from Fargate tasks only
+aws ec2 authorize-security-group-ingress \
+  --group-id ${RDS_SG} \
+  --protocol tcp \
+  --port 5432 \
+  --source-group ${FARGATE_SG}
+
+# Create DB subnet group (requires at least 2 subnets in different AZs)
+aws rds create-db-subnet-group \
+  --db-subnet-group-name classpilot-db-subnet \
+  --db-subnet-group-description "Subnet group for ClassPilot RDS" \
+  --subnet-ids ${SUBNET_1} ${SUBNET_2}
+
+# Generate a secure database password
+export DB_PASSWORD=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 24)
+echo "Save this password securely: ${DB_PASSWORD}"
+
+# Create RDS instance (db.t4g.micro is Free Tier eligible for 12 months)
+aws rds create-db-instance \
+  --db-instance-identifier classpilot-db \
+  --db-instance-class db.t4g.micro \
+  --engine postgres \
+  --engine-version 16.4 \
+  --master-username classpilot \
+  --master-user-password "${DB_PASSWORD}" \
+  --allocated-storage 20 \
+  --storage-type gp3 \
+  --db-name classpilot \
+  --vpc-security-group-ids ${RDS_SG} \
+  --db-subnet-group-name classpilot-db-subnet \
+  --backup-retention-period 7 \
+  --no-publicly-accessible \
+  --storage-encrypted \
+  --tags Key=Name,Value=classpilot-db
+
+# Wait for RDS to be available (takes 5-10 minutes)
+echo "Waiting for RDS instance to be available..."
+aws rds wait db-instance-available --db-instance-identifier classpilot-db
+
+# Get the RDS endpoint
+export RDS_ENDPOINT=$(aws rds describe-db-instances \
+  --db-instance-identifier classpilot-db \
+  --query 'DBInstances[0].Endpoint.Address' \
+  --output text)
+
+echo "RDS Endpoint: ${RDS_ENDPOINT}"
+
+# Construct the DATABASE_URL
+export DATABASE_URL="postgres://classpilot:${DB_PASSWORD}@${RDS_ENDPOINT}:5432/classpilot"
+echo "DATABASE_URL: ${DATABASE_URL}"
+```
+
+**Important:** Save the `DATABASE_URL` - you'll need it for the Parameter Store in Step 8.
+
+---
+
+## Step 7: Create Application Load Balancer
 
 ```bash
 # Create ALB
@@ -249,7 +316,7 @@ aws elbv2 create-listener \
 
 ---
 
-## Step 7: Request SSL Certificate (ACM)
+## Step 8: Request SSL Certificate (ACM)
 
 ```bash
 # Replace with your domain
@@ -302,7 +369,7 @@ aws elbv2 modify-listener \
 
 ---
 
-## Step 8: Create ECS Cluster and Task Definition
+## Step 9: Create ECS Cluster and Task Definition
 
 ```bash
 # Create ECS cluster
@@ -391,7 +458,8 @@ export WS_SHARED_KEY=$(node -e "console.log(require('crypto').randomBytes(32).to
 export GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY=$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")
 
 # Store in Parameter Store (SecureString)
-aws ssm put-parameter --name "classpilot/DATABASE_URL" --value "YOUR_NEON_DATABASE_URL" --type SecureString
+# Use the DATABASE_URL from Step 6 (RDS setup)
+aws ssm put-parameter --name "classpilot/DATABASE_URL" --value "${DATABASE_URL}" --type SecureString
 aws ssm put-parameter --name "classpilot/SESSION_SECRET" --value "${SESSION_SECRET}" --type SecureString
 aws ssm put-parameter --name "classpilot/STUDENT_TOKEN_SECRET" --value "${STUDENT_TOKEN_SECRET}" --type SecureString
 aws ssm put-parameter --name "classpilot/WS_SHARED_KEY" --value "${WS_SHARED_KEY}" --type SecureString
@@ -433,7 +501,7 @@ aws ecs register-task-definition --cli-input-json file://task-definition.json
 
 ---
 
-## Step 9: Create ECS Service
+## Step 10: Create ECS Service
 
 ```bash
 # Create service
@@ -451,7 +519,7 @@ aws ecs create-service \
 
 ---
 
-## Step 10: Configure DNS (Route53)
+## Step 11: Configure DNS (Route53)
 
 ```bash
 # Create hosted zone (if not exists)
@@ -486,7 +554,7 @@ aws route53 change-resource-record-sets \
 
 ---
 
-## Step 11: Enable Auto-Scaling (Optional but Recommended)
+## Step 12: Enable Auto-Scaling (Optional but Recommended)
 
 ```bash
 # Register scalable target
@@ -604,7 +672,7 @@ aws ecs describe-tasks \
 - [ ] All environment variables stored in Parameter Store
 - [ ] Auto-scaling configured (min: 2, max: 10)
 - [ ] CloudWatch alarms set up for CPU, memory, errors
-- [ ] Backup strategy for Neon database
+- [ ] RDS automated backups enabled (7-day retention configured)
 - [ ] Route53 DNS pointing to ALB
 - [ ] Test deployment with real traffic
 - [ ] Monitor costs in AWS Cost Explorer
