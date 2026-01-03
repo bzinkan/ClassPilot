@@ -144,8 +144,8 @@ export async function createApp(options: AppOptions = {}) {
       frameguard: { action: "sameorigin" },
       noSniff: true,
       referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-      hsts: isProduction()
-        ? {
+      // Only enable HSTS when using HTTPS (check PUBLIC_BASE_URL or default to false for HTTP load balancers)
+      hsts: process.env.PUBLIC_BASE_URL?.startsWith('https://') ? {
             maxAge: 15552000,
             includeSubDomains: true,
           }
@@ -157,12 +157,13 @@ export async function createApp(options: AppOptions = {}) {
           baseUri: ["'self'"],
           frameAncestors: ["'self'"],
           objectSrc: ["'none'"],
-          imgSrc: ["'self'", "data:", "https:"],
+          imgSrc: ["'self'", "data:", "https:", "http:"],
           fontSrc: ["'self'", "data:", "https://fonts.gstatic.com"],
           styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
           scriptSrc: ["'self'"],
-          connectSrc: ["'self'", "https:", "wss:"],
-          upgradeInsecureRequests: [],
+          connectSrc: ["'self'", "https:", "http:", "wss:", "ws:"],
+          // Only upgrade insecure requests when PUBLIC_BASE_URL is HTTPS
+          ...(process.env.PUBLIC_BASE_URL?.startsWith('https://') ? { upgradeInsecureRequests: [] } : {}),
         },
       } : false,
     })

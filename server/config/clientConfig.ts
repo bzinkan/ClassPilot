@@ -6,7 +6,9 @@ function getHostBaseUrl(req?: Request): string | undefined {
   if (!host) {
     return undefined;
   }
-  return `https://${host}`;
+  // Use the protocol from x-forwarded-proto header (set by load balancer) or default to http
+  const proto = req?.headers['x-forwarded-proto'] || 'http';
+  return `${proto}://${host}`;
 }
 
 export function buildClientConfig(req?: Request) {
