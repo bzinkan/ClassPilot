@@ -198,6 +198,11 @@ export async function createApp(options: AppOptions = {}) {
           return cb(null, true);
         }
 
+        // Allow AWS ALB domains (for Fargate deployments)
+        if (origin.includes(".elb.amazonaws.com")) {
+          return cb(null, true);
+        }
+
         // Allow custom domain from PUBLIC_BASE_URL
         const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
         if (publicBaseUrl) {
