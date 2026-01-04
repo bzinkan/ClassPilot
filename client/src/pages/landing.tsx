@@ -303,7 +303,7 @@ export default function LandingPage() {
             <div>
               <h3 className="text-white font-semibold mb-4">Legal</h3>
               <ul className="space-y-2 text-sm">
-                <li><a href="#" className="hover:text-amber-400 transition-colors">Privacy Policy</a></li>
+                <li><Link href="/privacy" className="hover:text-amber-400 transition-colors">Privacy Policy</Link></li>
                 <li><a href="#" className="hover:text-amber-400 transition-colors">Terms of Service</a></li>
                 <li><a href="#" className="hover:text-amber-400 transition-colors">FERPA Compliance</a></li>
                 <li><a href="#" className="hover:text-amber-400 transition-colors">Data Security</a></li>
