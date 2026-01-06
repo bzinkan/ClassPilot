@@ -19,6 +19,7 @@ import SchoolsList from "@/pages/super-admin/schools-list";
 import CreateSchool from "@/pages/super-admin/create-school";
 import SchoolDetail from "@/pages/super-admin/school-detail";
 import PrivacyPage from "@/pages/privacy";
+import TermsPage from "@/pages/terms";
 
 function Router() {
   return (
@@ -26,6 +27,7 @@ function Router() {
       <Route path="/" component={LandingPage} />
       <Route path="/pricing" component={PricingPage} />
       <Route path="/privacy" component={PrivacyPage} />
+      <Route path="/terms" component={TermsPage} />
       <Route path="/login" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/roster" component={Roster} />
