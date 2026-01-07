@@ -128,11 +128,14 @@ const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
 const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
-// Heartbeat frequency: 30s when active (keeps student "Online"), 5min when idle
+// Heartbeat frequency: 30s for both active and idle states
+// We keep the same frequency because Chrome's "idle" detection (no keyboard/mouse)
+// doesn't mean the student is away - they could be watching a video or reading.
+// The server will display the student's actual activity regardless of idle state.
 const HEARTBEAT_ACTIVE_MINUTES = 0.5;  // 30 seconds - minimum for Chrome alarms
-const HEARTBEAT_IDLE_MINUTES = 5;
-const OBSERVED_HEARTBEAT_SECONDS = 20;
-const NAVIGATION_DEBOUNCE_MS = 350;
+const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - same as active to prevent status flapping
+const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
+const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
 let trackingState = TRACKING_STATES.OFF;
@@ -573,8 +576,10 @@ async function updateTrackingState(reason = 'state-check') {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
     connectWebSocket();
   } else if (trackingState === TRACKING_STATES.IDLE) {
+    // Keep same heartbeat frequency and WebSocket connected even when Chrome reports idle
+    // Chrome's idle detection (no keyboard/mouse) doesn't mean student is away
     scheduleHeartbeat(HEARTBEAT_IDLE_MINUTES);
-    disconnectWebSocket();
+    connectWebSocket();
   } else {
     scheduleHeartbeat(null);
     disconnectWebSocket();
@@ -609,7 +614,8 @@ async function initializeAdaptiveTracking(reason) {
 }
 
 function queueNavigationEvent(eventType, url, title, metadata = {}) {
-  if (!licenseActive || trackingState !== TRACKING_STATES.ACTIVE) {
+  // Allow both ACTIVE and IDLE states (IDLE just means no keyboard/mouse, not away)
+  if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
     return;
   }
   if (!isHttpUrl(url)) {
@@ -628,7 +634,7 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     pendingNavigationEvents.delete(key);
     navigationDebounceTimers.delete(key);
 
-    if (!event || trackingState !== TRACKING_STATES.ACTIVE) {
+    if (!event || trackingState === TRACKING_STATES.OFF) {
       return;
     }
 
@@ -1248,25 +1254,20 @@ async function sendHeartbeat(reason = 'manual') {
   }
   
   try {
-    // Get active tab (prefer current window, fallback to global)
-    let tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    // If no tab in current window, try global query
-    if (tabs.length === 0) {
-      tabs = await chrome.tabs.query({ active: true });
-    }
-    
+    // Get the active tab from the LAST FOCUSED window (the one the user is actually looking at)
+    // Service workers don't have a "current window", so we must query for lastFocusedWindow
+    let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+
     // Determine tab data or use fallback for "no active tab" state
     // IMPORTANT: Use empty strings instead of null for Zod schema validation
     let activeTabUrl = '';
     let activeTabTitle = '';
     let activeTabId = null;
     let favicon = null;
-    
-    // Report the first active tab with HTTP URL
-    // If multiple windows are open, each has an "active" tab - we take the first HTTP one
+
+    // Get the active tab from the focused window
     if (tabs.length >= 1) {
-      // Find first tab with HTTP URL (prefer current window's tab which is first)
+      // Find first tab with HTTP URL (should normally be just one tab from focused window)
       const httpTab = tabs.find(t => t.url && t.url.startsWith('http'));
       if (httpTab) {
         activeTabUrl = httpTab.url;
@@ -1276,7 +1277,7 @@ async function sendHeartbeat(reason = 'manual') {
       }
       // Otherwise keep empty strings (Chrome internal pages only = no monitored activity)
     }
-    // If tabs.length === 0, keep empty strings
+    // If tabs.length === 0, keep empty strings (no focused window or all windows minimized)
     
     const isObservedHeartbeat = reason.startsWith('observed');
     const now = Date.now();
@@ -1887,6 +1888,20 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   }
 });
 
+// Track navigation commits for instant URL updates (fires immediately when navigation commits)
+chrome.webNavigation.onCommitted.addListener(async (details) => {
+  // Only track main frame navigations
+  if (details.frameId !== 0) return;
+  if (trackingState === TRACKING_STATES.OFF) return;
+
+  // Skip Chrome internal pages
+  if (!details.url.startsWith('http')) return;
+
+  // Send immediate heartbeat - this fires the moment navigation commits
+  // (before page is loaded, so teacher sees URL change instantly)
+  safeSendHeartbeat('navigation-committed');
+});
+
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
   // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
@@ -2364,23 +2379,50 @@ function connectWebSocket() {
   };
 }
 
-// Tab change listener - send immediate event (debounced)
+// Tab change listener - send immediate heartbeat when user switches tabs
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  if (trackingState !== TRACKING_STATES.ACTIVE) return;
+  // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
+  if (trackingState === TRACKING_STATES.OFF) return;
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
+    // Send immediate heartbeat to update teacher dashboard quickly
+    safeSendHeartbeat('tab-activated');
   } catch (error) {
     console.warn('Failed to read active tab info:', error);
   }
 });
 
-// Tab update listener - send event on URL/title change
+// Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  if (trackingState !== TRACKING_STATES.ACTIVE) return;
+  // Allow both ACTIVE and IDLE states
+  if (trackingState === TRACKING_STATES.OFF) return;
   if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
   if (changeInfo.url) {
     queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
+    // Send immediate heartbeat to update teacher dashboard quickly
+    safeSendHeartbeat('url-changed');
+  }
+});
+
+// Window focus change listener - detect when user switches windows or leaves Chrome
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  if (trackingState === TRACKING_STATES.OFF) return;
+
+  if (windowId === chrome.windows.WINDOW_ID_NONE) {
+    // User switched to a different application (not Chrome)
+    // Send heartbeat with current state - teacher will see last known tab
+    safeSendHeartbeat('window-unfocused');
+  } else {
+    // User focused a Chrome window - get the active tab in that window
+    try {
+      const tabs = await chrome.tabs.query({ active: true, windowId });
+      if (tabs.length > 0 && tabs[0].url?.startsWith('http')) {
+        safeSendHeartbeat('window-focused');
+      }
+    } catch (error) {
+      console.warn('Failed to query focused window tabs:', error);
+    }
   }
 });
 
