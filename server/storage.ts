@@ -385,10 +385,14 @@ export class MemStorage implements IStorage {
   }
 
   // Helper to calculate status from lastSeenAt
+  // Thresholds designed for 60-second heartbeat intervals:
+  // - "online" = last heartbeat within 90s (allows for network delays)
+  // - "idle" = last heartbeat within 3 minutes
+  // - "offline" = no heartbeat for over 3 minutes
   private calculateStatus(lastSeenAt: number): 'online' | 'idle' | 'offline' {
     const timeSinceLastSeen = Date.now() - lastSeenAt;
-    if (timeSinceLastSeen < 30000) return 'online';
-    if (timeSinceLastSeen < 120000) return 'idle';
+    if (timeSinceLastSeen < 90000) return 'online';  // 90 seconds
+    if (timeSinceLastSeen < 180000) return 'idle';   // 3 minutes
     return 'offline';
   }
 
@@ -1723,10 +1727,14 @@ export class DatabaseStorage implements IStorage {
   }
 
   // Helper to calculate status from lastSeenAt
+  // Thresholds designed for 60-second heartbeat intervals:
+  // - "online" = last heartbeat within 90s (allows for network delays)
+  // - "idle" = last heartbeat within 3 minutes
+  // - "offline" = no heartbeat for over 3 minutes
   private calculateStatus(lastSeenAt: number): 'online' | 'idle' | 'offline' {
     const timeSinceLastSeen = Date.now() - lastSeenAt;
-    if (timeSinceLastSeen < 30000) return 'online';
-    if (timeSinceLastSeen < 120000) return 'idle';
+    if (timeSinceLastSeen < 90000) return 'online';  // 90 seconds
+    if (timeSinceLastSeen < 180000) return 'idle';   // 3 minutes
     return 'offline';
   }
 

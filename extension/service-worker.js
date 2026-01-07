@@ -1263,21 +1263,18 @@ async function sendHeartbeat(reason = 'manual') {
     let activeTabId = null;
     let favicon = null;
     
-    // Only report tab if we have exactly one active tab with HTTP URL
-    // Avoid reporting arbitrary tabs from multi-window scenarios
-    if (tabs.length === 1) {
-      const activeTab = tabs[0];
-      // Skip chrome-internal URLs (chrome://, chrome-extension://, etc.)
-      if (activeTab.url && activeTab.url.startsWith('http')) {
-        activeTabUrl = activeTab.url;
-        activeTabTitle = activeTab.title || '';
-        activeTabId = activeTab.id ?? null;
-        favicon = activeTab.favIconUrl || null;
+    // Report the first active tab with HTTP URL
+    // If multiple windows are open, each has an "active" tab - we take the first HTTP one
+    if (tabs.length >= 1) {
+      // Find first tab with HTTP URL (prefer current window's tab which is first)
+      const httpTab = tabs.find(t => t.url && t.url.startsWith('http'));
+      if (httpTab) {
+        activeTabUrl = httpTab.url;
+        activeTabTitle = httpTab.title || '';
+        activeTabId = httpTab.id ?? null;
+        favicon = httpTab.favIconUrl || null;
       }
-      // Otherwise keep empty strings (Chrome internal page = no monitored activity)
-    } else if (tabs.length > 1) {
-      // Multiple active tabs across windows - indeterminate state
-      console.log('Multiple active tabs detected (' + tabs.length + ') - reporting as no active tab');
+      // Otherwise keep empty strings (Chrome internal pages only = no monitored activity)
     }
     // If tabs.length === 0, keep empty strings
     
