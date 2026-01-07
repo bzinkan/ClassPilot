@@ -128,9 +128,9 @@ const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
 const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
-// Heartbeat stays at 60s in ACTIVE mode (presence/lastSeen only).
-const HEARTBEAT_ACTIVE_MINUTES = 1;
-const HEARTBEAT_IDLE_MINUTES = 10;
+// Heartbeat frequency: 30s when active (keeps student "Online"), 5min when idle
+const HEARTBEAT_ACTIVE_MINUTES = 0.5;  // 30 seconds - minimum for Chrome alarms
+const HEARTBEAT_IDLE_MINUTES = 5;
 const OBSERVED_HEARTBEAT_SECONDS = 20;
 const NAVIGATION_DEBOUNCE_MS = 350;
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;

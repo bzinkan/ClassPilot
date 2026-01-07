@@ -4326,7 +4326,8 @@ export async function registerRoutes(
 
 
   // Settings endpoints
-  app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
+  // GET: Teachers can read settings (for dashboard features like max tabs), admins can too
+  app.get("/api/settings", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       logSettingsSchoolId(sessionSchoolId);
