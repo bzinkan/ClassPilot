@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -74,6 +74,9 @@ export default function Admin() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [staffToEdit, setStaffToEdit] = useState<StaffUser | null>(null);
   const [selectedRole, setSelectedRole] = useState<"teacher" | "school_admin">("teacher");
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [staffToResetPassword, setStaffToResetPassword] = useState<StaffUser | null>(null);
+  const [newPassword, setNewPassword] = useState("");
   const [enableTrackingHours, setEnableTrackingHours] = useState(false);
   const [trackingStartTime, setTrackingStartTime] = useState("08:00");
   const [trackingEndTime, setTrackingEndTime] = useState("15:00");
@@ -217,6 +220,30 @@ export default function Admin() {
     },
   });
 
+  const resetPasswordMutation = useMutation({
+    mutationFn: async (payload: { userId: string; newPassword: string }) => {
+      return await apiRequest("POST", `/api/admin/users/${payload.userId}/password`, {
+        newPassword: payload.newPassword,
+      });
+    },
+    onSuccess: () => {
+      toast({
+        title: "Password reset",
+        description: "The staff member's password has been reset successfully.",
+      });
+      setPasswordDialogOpen(false);
+      setStaffToResetPassword(null);
+      setNewPassword("");
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to reset password",
+        description: getFriendlyErrorMessage(error) || "An error occurred",
+      });
+    },
+  });
+
   const cleanupStudentsMutation = useMutation({
     mutationFn: async () => {
       return await apiRequest("POST", "/api/admin/cleanup-students");
@@ -293,6 +320,20 @@ export default function Admin() {
     setStaffToEdit(staff);
     setSelectedRole(staff.role);
     setEditDialogOpen(true);
+  };
+
+  const handleResetPasswordClick = (staff: StaffUser) => {
+    setStaffToResetPassword(staff);
+    setNewPassword("");
+    setPasswordDialogOpen(true);
+  };
+
+  const handleResetPasswordSubmit = () => {
+    if (!staffToResetPassword || !newPassword) return;
+    resetPasswordMutation.mutate({
+      userId: staffToResetPassword.id,
+      newPassword,
+    });
   };
 
   const handleDeleteConfirm = () => {
@@ -495,6 +536,16 @@ export default function Admin() {
                         disabled={updateStaffMutation.isPending}
                       >
                         Edit Role
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        data-testid={`button-reset-password-${member.id}`}
+                        onClick={() => handleResetPasswordClick(member)}
+                        disabled={resetPasswordMutation.isPending}
+                      >
+                        <Key className="h-4 w-4 mr-1" />
+                        Password
                       </Button>
                       <Button
                         variant="ghost"
@@ -850,6 +901,54 @@ export default function Admin() {
               </Button>
               <Button type="button" onClick={handleEditSubmit} disabled={updateStaffMutation.isPending}>
                 {updateStaffMutation.isPending ? "Saving..." : "Save"}
+              </Button>
+            </DialogFooter>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={passwordDialogOpen}
+        onOpenChange={(open) => {
+          setPasswordDialogOpen(open);
+          if (!open) {
+            setStaffToResetPassword(null);
+            setNewPassword("");
+          }
+        }}
+      >
+        <DialogContent data-testid="dialog-reset-password">
+          <DialogHeader>
+            <DialogTitle>Reset Password</DialogTitle>
+            <DialogDescription>
+              Set a new password for <strong>{staffToResetPassword?.displayName || staffToResetPassword?.email}</strong>.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="new-password">New Password</Label>
+              <Input
+                id="new-password"
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="Enter new password (min 10 characters)"
+                data-testid="input-new-password"
+              />
+              <p className="text-xs text-muted-foreground">
+                Minimum 10 characters required.
+              </p>
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setPasswordDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                onClick={handleResetPasswordSubmit}
+                disabled={resetPasswordMutation.isPending || newPassword.length < 10}
+              >
+                {resetPasswordMutation.isPending ? "Resetting..." : "Reset Password"}
               </Button>
             </DialogFooter>
           </div>
