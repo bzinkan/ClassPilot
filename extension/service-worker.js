@@ -749,7 +749,7 @@ async function ensureRegistered() {
     if (needsRegistration) {
       try {
         console.log('[Service Worker] Registering student with server');
-        const response = await fetch(`${CONFIG.serverUrl}/api/register-student`, {
+        const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1179,7 +1179,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
   }
   
   try {
-    const response = await fetch(`${CONFIG.serverUrl}/api/register-student`, {
+    const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

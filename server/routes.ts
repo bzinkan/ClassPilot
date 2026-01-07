@@ -2396,7 +2396,126 @@ export async function registerRoutes(
     }
   });
 
+  // PUBLIC: Extension self-registration endpoint (no teacher auth required)
+  // This allows the Chrome extension to register students directly using their Google account email
+  app.post("/api/extension/register", apiLimiter, async (req, res) => {
+    try {
+      const { deviceId, deviceName, studentEmail, studentName } = req.body;
+
+      // Validate required fields
+      if (!studentEmail || !studentName) {
+        return res.status(400).json({ error: "studentEmail and studentName are required" });
+      }
+
+      if (!deviceId) {
+        return res.status(400).json({ error: "deviceId is required" });
+      }
+
+      // Look up school by email domain
+      const schoolInfo = await getSchoolFromEmail(storage, studentEmail);
+      if (!schoolInfo) {
+        const domain = studentEmail.split('@')[1];
+        console.error('[extension/register] No school found for domain:', domain);
+        return res.status(401).json({
+          error: "Unauthorized",
+          details: `No school configured for domain: ${domain}`
+        });
+      }
+
+      const { schoolId, schoolName } = schoolInfo;
+      console.log('[extension/register] Found school:', schoolName, 'for email:', studentEmail);
+
+      // Check if school is active
+      const school = await storage.getSchool(schoolId);
+      if (!school || !school.isActive || school.planStatus !== 'active') {
+        return res.status(403).json({ error: "School is not active" });
+      }
+
+      // Register or update device
+      const deviceData = insertDeviceSchema.parse({
+        deviceId,
+        deviceName: deviceName || null,
+        classId: schoolId,
+        schoolId,
+      });
+
+      let device = await storage.getDevice(deviceData.deviceId);
+      if (!device) {
+        device = await storage.registerDevice(deviceData);
+        console.log('[extension/register] Created new device:', deviceId);
+      }
+
+      // Check if student exists or create new one
+      const normalizedEmail = normalizeEmail(studentEmail);
+      let student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+
+      if (student) {
+        // Update device if changed
+        if (student.deviceId !== deviceData.deviceId) {
+          console.log('[extension/register] Student switched devices');
+          student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+        }
+      } else {
+        // Create new student
+        const studentData = insertStudentSchema.parse({
+          deviceId: deviceData.deviceId,
+          studentName,
+          studentEmail: normalizedEmail,
+          gradeLevel: null,
+          schoolId,
+          studentStatus: 'active',
+        });
+
+        try {
+          student = await storage.createStudent(studentData);
+          console.log('[extension/register] Created new student:', normalizedEmail);
+        } catch (createError: any) {
+          // Handle race condition
+          if (createError?.code === '23505' || createError?.message?.includes('unique')) {
+            student = await storage.getStudentBySchoolEmail(schoolId, normalizedEmail);
+            if (!student) {
+              throw new Error('Failed to retrieve student after concurrent creation');
+            }
+            if (student.deviceId !== deviceData.deviceId) {
+              student = await storage.updateStudent(student.id, { deviceId: deviceData.deviceId }) || student;
+            }
+          } else {
+            throw createError;
+          }
+        }
+      }
+
+      // Set active student for device
+      await storage.setActiveStudentForDevice(deviceData.deviceId, student.id);
+
+      // Generate JWT token for subsequent requests
+      const studentToken = createStudentToken({
+        studentId: student.id,
+        deviceId: deviceData.deviceId,
+        schoolId: schoolId,
+        studentEmail: normalizedEmail,
+      });
+
+      console.log('[extension/register] Success - generated token for:', normalizedEmail);
+
+      // Notify teachers
+      broadcastToTeachers(schoolId, {
+        type: 'student-registered',
+        data: { device, student },
+      });
+
+      res.json({ success: true, device, student, studentToken });
+    } catch (error) {
+      console.error("[extension/register] Error:", error);
+      if (isLicenseLimitError(error)) {
+        return res.status(409).json(buildLicenseLimitResponse(error));
+      }
+      res.status(400).json({ error: error instanceof Error ? error.message : "Invalid request" });
+    }
+  });
+
   // Student auto-registration with email (from extension using Chrome Identity API)
+  // NOTE: This endpoint requires teacher auth - use /api/extension/register for public access
   app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const { deviceId, deviceName, studentEmail, studentName } = req.body;
