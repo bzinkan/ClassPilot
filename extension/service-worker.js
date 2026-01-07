@@ -96,7 +96,7 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
 }
 
 // Production server URL - can be overridden in extension settings
-const DEFAULT_SERVER_URL = 'https://classpilot.replit.app';
+const DEFAULT_SERVER_URL = 'https://www.classpilot.net';
 const INJECTED_SERVER_URL = typeof globalThis.CLASSPILOT_SERVER_URL === 'string'
   ? globalThis.CLASSPILOT_SERVER_URL
   : '';

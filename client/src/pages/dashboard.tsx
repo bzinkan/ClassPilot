@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, ChevronDown, ChevronRight } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -78,10 +78,6 @@ export default function Dashboard() {
   const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
   const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
   const [closeTabsPattern, setCloseTabsPattern] = useState("");
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [showAccountSecurity, setShowAccountSecurity] = useState(false);
   // Track selected tabs by composite key: "studentId|deviceId|url"
   const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
@@ -121,10 +117,6 @@ export default function Dashboard() {
   });
 
   const currentUser = currentUserData?.user;
-
-  const { data: accountSecurity } = useQuery<{ hasPassword: boolean }>({
-    queryKey: ['/api/account/security'],
-  });
 
   // Fetch active session and groups
   const { data: activeSession } = useQuery<Session | null>({
@@ -753,66 +745,6 @@ export default function Dashboard() {
       });
     },
   });
-
-  const changePasswordMutation = useMutation({
-    mutationFn: async (payload: { currentPassword?: string; newPassword: string }) => {
-      const res = await apiRequest('POST', '/api/account/password', payload);
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/account/security'] });
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      toast({
-        title: "Password updated",
-        description: "Your password has been updated successfully.",
-      });
-    },
-    onError: (error: Error) => {
-      toast({
-        variant: "destructive",
-        title: "Password update failed",
-        description: error.message,
-      });
-    },
-  });
-
-  const handleChangePassword = () => {
-    const hasPassword = accountSecurity?.hasPassword ?? false;
-
-    if (hasPassword && !currentPassword) {
-      toast({
-        variant: "destructive",
-        title: "Current password required",
-        description: "Please enter your current password to continue.",
-      });
-      return;
-    }
-
-    if (newPassword.length < 10) {
-      toast({
-        variant: "destructive",
-        title: "Password too short",
-        description: "New password must be at least 10 characters.",
-      });
-      return;
-    }
-
-    if (newPassword !== confirmPassword) {
-      toast({
-        variant: "destructive",
-        title: "Passwords do not match",
-        description: "Please make sure the new passwords match.",
-      });
-      return;
-    }
-
-    changePasswordMutation.mutate({
-      currentPassword: hasPassword ? currentPassword : undefined,
-      newPassword,
-    });
-  };
 
   // Remote control mutations
   const openTabMutation = useMutation({
