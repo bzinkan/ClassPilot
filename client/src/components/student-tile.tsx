@@ -439,9 +439,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       onClick={onClick}
     >
       <div className="p-4 space-y-3">
-        {/* Header Zone - Student Name + Status */}
+        {/* Header Zone - Avatar + Student Name + Status */}
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-1 min-w-0">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
             {onToggleSelect && (
               <Checkbox
                 checked={isSelected}
@@ -450,25 +450,43 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 data-testid={`checkbox-select-student-${student.primaryDeviceId}`}
               />
             )}
+            {/* Avatar with status indicator */}
+            <div className="relative flex-shrink-0">
+              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-semibold ${
+                student.status === 'online'
+                  ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
+                  : student.status === 'idle'
+                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
+                  : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+              }`}>
+                {student.studentName
+                  ? student.studentName.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
+                  : '?'}
+              </div>
+              <div
+                className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-gray-900 ${getStatusColor(student.status)} ${
+                  student.status === 'online' ? 'animate-pulse' : ''
+                }`}
+                title={getStatusLabel(student.status)}
+              />
+            </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-base truncate" data-testid={`text-student-name-${student.primaryDeviceId}`}>
+              <h3 className="font-semibold text-sm truncate" data-testid={`text-student-name-${student.primaryDeviceId}`}>
                 {student.studentName || (
-                  <span className="text-muted-foreground italic text-sm">
-                    {student.deviceName || student.primaryDeviceId}
+                  <span className="text-muted-foreground italic">
+                    {student.deviceName || 'Unknown'}
                   </span>
                 )}
               </h3>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <div
-                  className={`h-2 w-2 rounded-full ${getStatusColor(student.status)} ${
-                    student.status === 'online' ? 'animate-pulse' : ''
-                  }`}
-                  title={getStatusLabel(student.status)}
-                />
-                <span className="text-xs text-muted-foreground">
-                  {getStatusLabel(student.status)}
-                </span>
-              </div>
+              <span className={`text-xs font-medium ${
+                student.status === 'online'
+                  ? 'text-green-600 dark:text-green-400'
+                  : student.status === 'idle'
+                  ? 'text-amber-600 dark:text-amber-400'
+                  : 'text-muted-foreground'
+              }`}>
+                {getStatusLabel(student.status)}
+              </span>
             </div>
           </div>
           <div className="flex items-center gap-1 flex-shrink-0">
@@ -590,16 +608,16 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         )}
 
-        {/* Preview Zone - Large Live View or Tab Info */}
+        {/* Preview Zone - Large Live View or Website Preview Card */}
         {liveStream ? (
-          <div className="aspect-video rounded-md bg-black relative group">
-            <div 
+          <div className="aspect-video rounded-lg bg-black relative group overflow-hidden">
+            <div
               ref={tileVideoSlotRef}
               id={`tile-video-slot-${student.primaryDeviceId}`}
-              className="w-full h-full rounded-md overflow-hidden"
+              className="w-full h-full rounded-lg overflow-hidden"
               data-testid={`video-live-${student.primaryDeviceId}`}
             />
-            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none rounded-md" />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none rounded-lg" />
             <Button
               variant="ghost"
               size="icon"
@@ -612,27 +630,33 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
             </Button>
           </div>
         ) : (
-          <div className="aspect-video rounded-md bg-muted/30 border border-border/40 p-4 flex flex-col justify-center gap-2">
-            <div className="flex items-start gap-2">
-              {student.favicon && (
+          <div className="rounded-lg bg-muted/40 overflow-hidden">
+            {/* Website preview header bar */}
+            <div className="flex items-center gap-2 px-3 py-2 bg-muted/60 border-b border-border/30">
+              {student.favicon ? (
                 <img
                   src={student.favicon}
                   alt=""
-                  className="w-4 h-4 flex-shrink-0 mt-1 rounded"
+                  className="w-4 h-4 flex-shrink-0 rounded"
                   onError={(e) => {
                     (e.target as HTMLImageElement).style.display = 'none';
                   }}
                 />
+              ) : (
+                <div className="w-4 h-4 rounded bg-muted-foreground/20 flex items-center justify-center">
+                  <ExternalLink className="w-2.5 h-2.5 text-muted-foreground/50" />
+                </div>
               )}
-              <p className="font-medium text-sm leading-tight line-clamp-3" data-testid={`text-tab-title-${student.primaryDeviceId}`}>
+              <span className="text-xs text-muted-foreground truncate flex-1 font-mono" data-testid={`text-tab-url-${student.primaryDeviceId}`}>
+                {student.activeTabUrl ? (() => { try { return new URL(student.activeTabUrl).hostname; } catch { return student.activeTabUrl; } })() : 'No tab'}
+              </span>
+            </div>
+            {/* Website content preview */}
+            <div className="p-3 min-h-[60px]">
+              <p className="font-medium text-sm leading-snug line-clamp-2" data-testid={`text-tab-title-${student.primaryDeviceId}`}>
                 {student.activeTabTitle || <span className="text-muted-foreground italic">No active tab</span>}
               </p>
             </div>
-            {student.activeTabUrl && (
-              <p className="text-xs font-mono text-muted-foreground truncate" data-testid={`text-tab-url-${student.primaryDeviceId}`}>
-                {student.activeTabUrl}
-              </p>
-            )}
           </div>
         )}
 
@@ -665,38 +689,28 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         )}
 
-        {/* Footer Zone - Time Info + Actions */}
-        <div className="flex items-center justify-between gap-2 text-xs pt-2 border-t border-border/20">
-          <div className="flex items-center gap-1.5 text-muted-foreground">
-            <span className="uppercase tracking-wide text-[10px] font-medium">
-              LAST SEEN
-            </span>
-            <span className="text-foreground font-medium" data-testid={`text-last-seen-${student.primaryDeviceId}`}>
-              {formatDistanceToNow(student.lastSeenAt, { addSuffix: true })}
-            </span>
-          </div>
-          <div className="flex items-center gap-1">
-            {onStartLiveView && onStopLiveView && (
-              <Button
-                variant={liveStream ? "default" : "outline"}
-                size="sm"
-                className="h-7 px-2 text-xs"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (liveStream) {
-                    onStopLiveView();
-                  } else {
-                    onStartLiveView();
-                  }
-                }}
-                title={liveStream ? "Stop live view" : "Start live view"}
-                data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
-              >
-                <Monitor className="h-3.5 w-3.5 mr-1" />
-                {liveStream ? "Stop" : "View"}
-              </Button>
-            )}
-          </div>
+        {/* Footer Zone - Actions Only */}
+        <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/20">
+          {onStartLiveView && onStopLiveView && (
+            <Button
+              variant={liveStream ? "default" : "outline"}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (liveStream) {
+                  onStopLiveView();
+                } else {
+                  onStartLiveView();
+                }
+              }}
+              title={liveStream ? "Stop live view" : "Start live view"}
+              data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
+            >
+              <Monitor className="h-3.5 w-3.5 mr-1" />
+              {liveStream ? "Stop" : "View"}
+            </Button>
+          )}
         </div>
       </div>
 
