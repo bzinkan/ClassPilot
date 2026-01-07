@@ -15,8 +15,9 @@ RUN apk add --no-cache \
     giflib-dev \
     pixman-dev
 
-# Copy package files
+# Copy package files and vendor directory (vendor needed for file: dependencies)
 COPY package.json package-lock.json ./
+COPY vendor ./vendor
 
 # Install all dependencies (including devDependencies for build)
 RUN npm ci
