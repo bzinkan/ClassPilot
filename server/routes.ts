@@ -2514,6 +2514,41 @@ export async function registerRoutes(
     }
   });
 
+  // PUBLIC: Extension settings endpoint - allows authenticated student devices to get school tracking settings
+  // This is separate from /api/settings which requires admin auth
+  app.get("/api/extension/settings", apiLimiter, requireDeviceAuth, async (req, res) => {
+    try {
+      const schoolId = res.locals.schoolId as string;
+
+      if (!schoolId) {
+        return res.status(400).json({ error: "School context required" });
+      }
+
+      // Verify school is active
+      const school = await storage.getSchool(schoolId);
+      if (!school || !isSchoolLicenseActive(school)) {
+        return res.status(403).json({ error: "School inactive" });
+      }
+
+      // Get school settings
+      const settings = await storage.ensureSettingsForSchool(schoolId);
+
+      // Return only the settings relevant to extensions (tracking hours)
+      res.json({
+        enableTrackingHours: settings?.enableTrackingHours ?? false,
+        trackingStartTime: settings?.trackingStartTime ?? null,
+        trackingEndTime: settings?.trackingEndTime ?? null,
+        trackingDays: settings?.trackingDays ?? null,
+        schoolTimezone: settings?.schoolTimezone ?? null,
+        afterHoursMode: settings?.afterHoursMode ?? 'off',
+        maxTabsPerStudent: settings?.maxTabsPerStudent ?? null,
+      });
+    } catch (error) {
+      console.error("[extension/settings] Error:", error);
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  });
+
   // Student auto-registration with email (from extension using Chrome Identity API)
   // NOTE: This endpoint requires teacher auth - use /api/extension/register for public access
   app.post("/api/register-student", apiLimiter, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {

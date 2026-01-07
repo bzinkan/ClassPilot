@@ -377,13 +377,19 @@ async function refreshSchoolSettings({ force = false } = {}) {
     // Tracking hours are configured by admins via /api/settings in the ClassPilot admin UI
     // (enableTrackingHours, trackingStartTime, trackingEndTime, trackingDays, schoolTimezone).
     // Requires the "idle" permission in manifest.json to respect ACTIVE/IDLE states.
-    const headers = {};
-    if (CONFIG.studentToken) {
-      headers['x-student-token'] = CONFIG.studentToken;
+    // Use /api/extension/settings endpoint which accepts student token authentication
+    if (!CONFIG.studentToken) {
+      console.log('[School Hours] No student token, skipping settings fetch');
+      if (!schoolSettings) {
+        schoolSettings = { enableTrackingHours: false };
+      }
+      return schoolSettings;
     }
-    const response = await fetch(`${CONFIG.serverUrl}/api/settings`, {
+    const response = await fetch(`${CONFIG.serverUrl}/api/extension/settings`, {
       cache: 'no-store',
-      headers,
+      headers: {
+        'Authorization': `Bearer ${CONFIG.studentToken}`,
+      },
     });
     if (!response.ok) {
       throw new Error(`Settings fetch failed (${response.status})`);
