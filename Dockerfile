@@ -25,6 +25,12 @@ RUN npm ci
 # Copy source code
 COPY . .
 
+# Build args for Vite (client-side env vars must be available at build time)
+ARG VITE_TURN_USERNAME
+ARG VITE_TURN_CREDENTIAL
+ENV VITE_TURN_USERNAME=$VITE_TURN_USERNAME
+ENV VITE_TURN_CREDENTIAL=$VITE_TURN_CREDENTIAL
+
 # Build the application
 RUN npm run build
 
