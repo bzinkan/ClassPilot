@@ -610,23 +610,24 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
 
         {/* Preview Zone - Large Live View or Website Preview Card */}
         {liveStream ? (
-          <div className="aspect-video rounded-lg bg-black relative group overflow-hidden">
+          <div className="aspect-video rounded-lg bg-black relative overflow-hidden">
             <div
               ref={tileVideoSlotRef}
               id={`tile-video-slot-${student.primaryDeviceId}`}
               className="w-full h-full rounded-lg overflow-hidden"
               data-testid={`video-live-${student.primaryDeviceId}`}
             />
-            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors pointer-events-none rounded-lg" />
+            {/* Expand button - always visible */}
             <Button
-              variant="ghost"
-              size="icon"
-              className="absolute top-2 right-2 h-8 w-8 bg-black/60 hover:bg-black/80 text-white opacity-90 hover:opacity-100 transition-all shadow-lg pointer-events-auto z-10"
+              variant="secondary"
+              size="sm"
+              className="absolute top-2 right-2 h-7 px-2 bg-black/70 hover:bg-black/90 text-white border-0 shadow-lg z-20"
               onClick={handleExpand}
               data-testid={`button-enlarge-${student.primaryDeviceId}`}
               title="Expand video - Access zoom, screenshot, and recording controls"
             >
-              <Maximize2 className="h-4 w-4" />
+              <Maximize2 className="h-3.5 w-3.5 mr-1" />
+              Expand
             </Button>
           </div>
         ) : (
