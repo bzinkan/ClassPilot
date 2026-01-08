@@ -3,30 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Label } from "@/components/ui/label";
-import { Clock, Monitor, ExternalLink, AlertTriangle, Edit2, Lock, Unlock, Video, Layers, Maximize2, MoreVertical } from "lucide-react";
+import { Clock, Monitor, ExternalLink, AlertTriangle, Lock, Unlock, Video, Layers, Maximize2 } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import type { StudentStatus, AggregatedStudentStatus, Settings } from "@shared/schema";
 import { formatDistanceToNow } from "date-fns";
@@ -74,10 +51,6 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
 }
 
 export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [newStudentName, setNewStudentName] = useState(student.studentName || '');
-  const [newDeviceName, setNewDeviceName] = useState(student.deviceName ?? '');
-  const [newGradeLevel, setNewGradeLevel] = useState(student.gradeLevel || '');
   const [expanded, setExpanded] = useState(false);
   const { toast } = useToast();
   const tileVideoSlotRef = useRef<HTMLDivElement>(null);
@@ -163,80 +136,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const activeFlightPath = flightPaths.find((fp: any) => fp.flightPathName === student.activeFlightPathName);
   const isBlockedByFlightPath = student.flightPathActive && activeFlightPath && student.activeTabUrl && 
     isBlockedDomain(student.activeTabUrl, activeFlightPath.blockedDomains || []);
-  
-  const updateStudentMutation = useMutation({
-    mutationFn: async (data: { studentId: string; studentName: string; gradeLevel: string }) => {
-      return await apiRequest("PATCH", `/api/students/${data.studentId}`, { 
-        studentName: data.studentName,
-        gradeLevel: data.gradeLevel || null
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-      toast({
-        title: "Student information updated",
-        description: `Successfully updated student information`,
-      });
-      setEditDialogOpen(false);
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to update student",
-        description: error.message || "An error occurred",
-      });
-    },
-  });
-
-  const updateDeviceMutation = useMutation({
-    mutationFn: async (data: { deviceId: string; deviceName: string }) => {
-      return await apiRequest("PATCH", `/api/devices/${data.deviceId}`, { 
-        deviceName: data.deviceName || null
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
-      toast({
-        title: "Device information updated",
-        description: `Successfully updated device information`,
-      });
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to update device",
-        description: error.message || "An error occurred",
-      });
-    },
-  });
-
-  const handleEditClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setNewStudentName(student.studentName || '');
-    setNewDeviceName(student.deviceName ?? '');
-    setNewGradeLevel(student.gradeLevel || '');
-    setEditDialogOpen(true);
-  };
-
-  const handleSaveStudent = () => {
-    // Update student name and grade
-    if (newStudentName.trim() !== (student.studentName || '') || 
-        (newGradeLevel === 'none' ? '' : newGradeLevel) !== (student.gradeLevel || '')) {
-      updateStudentMutation.mutate({ 
-        studentId: student.studentId, 
-        studentName: newStudentName.trim() || '',
-        gradeLevel: newGradeLevel === 'none' ? '' : newGradeLevel
-      });
-    }
-    
-    // Update device name if changed
-    if (student.primaryDeviceId && newDeviceName !== (student.deviceName ?? '')) {
-      updateDeviceMutation.mutate({
-        deviceId: student.primaryDeviceId,
-        deviceName: newDeviceName
-      });
-    }
-  };
   
   // Expand video to portal
   const handleExpand = (e?: React.MouseEvent) => {
@@ -471,7 +370,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               />
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-sm truncate" data-testid={`text-student-name-${student.primaryDeviceId}`}>
+              <h3 className="font-semibold text-sm" data-testid={`text-student-name-${student.primaryDeviceId}`}>
                 {student.studentName || (
                   <span className="text-muted-foreground italic">
                     {student.deviceName || 'Unknown'}
@@ -511,49 +410,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                 <Unlock className="h-4 w-4" />
               )}
             </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7"
-                  onClick={(e) => e.stopPropagation()}
-                  data-testid={`button-menu-${student.primaryDeviceId}`}
-                >
-                  <MoreVertical className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" onClick={(e) => e.stopPropagation()}>
-                {student.screenLocked ? (
-                  <DropdownMenuItem 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      unlockScreenMutation.mutate();
-                    }}
-                    data-testid={`menu-unlock-screen-${student.primaryDeviceId}`}
-                  >
-                    <Unlock className="h-4 w-4 mr-2" />
-                    Unlock Current Screen
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      lockToCurrentScreenMutation.mutate();
-                    }}
-                    disabled={!student.activeTabUrl}
-                    data-testid={`menu-lock-screen-${student.primaryDeviceId}`}
-                  >
-                    <Lock className="h-4 w-4 mr-2" />
-                    Lock to Current Screen
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem onClick={handleEditClick} data-testid={`button-edit-student-${student.primaryDeviceId}`}>
-                  <Edit2 className="h-4 w-4 mr-2" />
-                  Edit Info
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
           </div>
         </div>
 
@@ -719,100 +575,6 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
       </div>
 
-      {/* Edit Student Dialog */}
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent onClick={(e) => e.stopPropagation()} data-testid={`dialog-edit-student-${student.primaryDeviceId ?? "unknown-device"}`}>
-          <DialogHeader>
-            <DialogTitle>Edit Student Information</DialogTitle>
-            <DialogDescription>
-              Update student name and device name for this Chromebook
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="device-id">Device ID (Read-only)</Label>
-              <Input
-                id="device-id"
-                value={student.primaryDeviceId ?? ""}
-                disabled
-                className="font-mono text-sm"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="device-name">Device Name (Optional)</Label>
-              <Input
-                id="device-name"
-                data-testid={`input-edit-device-name-${student.primaryDeviceId ?? "unknown-device"}`}
-                value={newDeviceName}
-                onChange={(e) => setNewDeviceName(e.target.value)}
-                placeholder="e.g., 6th chromebook 1"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleSaveStudent();
-                  }
-                }}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="student-name">Student Name</Label>
-              <Input
-                id="student-name"
-                data-testid={`input-edit-student-name-${student.primaryDeviceId ?? "unknown-device"}`}
-                value={newStudentName}
-                onChange={(e) => setNewStudentName(e.target.value)}
-                placeholder="e.g., Lucy Garcia"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    handleSaveStudent();
-                  }
-                }}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="grade-level">Grade Level (Optional)</Label>
-              <Select
-                value={newGradeLevel || undefined}
-                onValueChange={(value) => setNewGradeLevel(value || '')}
-              >
-                <SelectTrigger id="grade-level" data-testid={`select-edit-grade-level-${student.primaryDeviceId}`}>
-                  <SelectValue placeholder="Select grade level" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {settings?.gradeLevels && settings.gradeLevels.length > 0 ? (
-                    settings.gradeLevels.map((grade) => (
-                      <SelectItem key={grade} value={grade}>
-                        Grade {grade}
-                      </SelectItem>
-                    ))
-                  ) : (
-                    <SelectItem value="loading" disabled>
-                      Loading grades...
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setEditDialogOpen(false)}
-              data-testid="button-cancel-edit-student"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSaveStudent}
-              disabled={updateStudentMutation.isPending}
-              data-testid="button-save-student-name"
-            >
-              {updateStudentMutation.isPending ? "Saving..." : "Save"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      
       {/* Video Portal for enlarged view */}
       {expanded && liveStream && (
         <VideoPortal
