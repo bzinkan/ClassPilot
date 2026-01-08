@@ -681,42 +681,40 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         {/* Footer Zone - Actions Only */}
         <div className="flex items-center justify-end gap-2 pt-2 border-t border-border/20">
           {onStartLiveView && onStopLiveView && (
-            <>
-              <Button
-                variant={liveStream ? "default" : "outline"}
-                size="sm"
-                className="h-7 px-3 text-xs"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (liveStream) {
-                    onStopLiveView();
-                  } else {
-                    onStartLiveView();
-                  }
-                }}
-                title={liveStream ? "Stop live view" : "Start live view"}
-                data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
+            <Button
+              variant={liveStream ? "default" : "outline"}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (liveStream) {
+                  onStopLiveView();
+                } else {
+                  onStartLiveView();
+                }
+              }}
+              title={liveStream ? "Stop live view" : "Start live view"}
+              data-testid={`button-live-view-${student.primaryDeviceId ?? "unknown-device"}`}
             >
               <Monitor className="h-3.5 w-3.5 mr-1" />
               {liveStream ? "Stop" : "View"}
             </Button>
-              {liveStream && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 px-3 text-xs"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleExpand();
-                  }}
-                  title="Expand to full screen with zoom, screenshot, and recording controls"
-                  data-testid={`button-expand-${student.primaryDeviceId ?? "unknown-device"}`}
-                >
-                  <Maximize2 className="h-3.5 w-3.5 mr-1" />
-                  Expand
-                </Button>
-              )}
-            </>
+          )}
+          {liveStream && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleExpand();
+              }}
+              title="Expand to full screen with zoom, screenshot, and recording controls"
+              data-testid={`button-expand-${student.primaryDeviceId ?? "unknown-device"}`}
+            >
+              <Maximize2 className="h-3.5 w-3.5 mr-1" />
+              Expand
+            </Button>
           )}
         </div>
       </div>
