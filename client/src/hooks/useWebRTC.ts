@@ -1,24 +1,36 @@
 import { useRef, useCallback } from 'react';
 
-// ICE servers configuration with Xirsys TURN fallback for restrictive networks
-const ICE_SERVERS = [
-  // STUN servers for NAT traversal
-  { urls: 'stun:us-turn7.xirsys.com' },
-  
-  // Xirsys TURN servers with multiple transport options
-  {
-    username: import.meta.env.VITE_TURN_USERNAME || '',
-    credential: import.meta.env.VITE_TURN_CREDENTIAL || '',
-    urls: [
-      'turn:us-turn7.xirsys.com:80?transport=udp',
-      'turn:us-turn7.xirsys.com:3478?transport=udp',
-      'turn:us-turn7.xirsys.com:80?transport=tcp',
-      'turn:us-turn7.xirsys.com:3478?transport=tcp',
-      'turns:us-turn7.xirsys.com:443?transport=tcp',
-      'turns:us-turn7.xirsys.com:5349?transport=tcp'
-    ]
+// ICE servers configuration - STUN for most cases, TURN for restrictive networks
+const getIceServers = (): RTCIceServer[] => {
+  const servers: RTCIceServer[] = [
+    // Google's public STUN servers (reliable, free)
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ];
+
+  // Only add TURN servers if credentials are configured
+  const turnUsername = import.meta.env.VITE_TURN_USERNAME;
+  const turnCredential = import.meta.env.VITE_TURN_CREDENTIAL;
+
+  if (turnUsername && turnCredential) {
+    servers.push({
+      username: turnUsername,
+      credential: turnCredential,
+      urls: [
+        'turn:us-turn7.xirsys.com:80?transport=udp',
+        'turn:us-turn7.xirsys.com:3478?transport=udp',
+        'turn:us-turn7.xirsys.com:80?transport=tcp',
+        'turn:us-turn7.xirsys.com:3478?transport=tcp',
+        'turns:us-turn7.xirsys.com:443?transport=tcp',
+        'turns:us-turn7.xirsys.com:5349?transport=tcp'
+      ]
+    });
   }
-];
+
+  return servers;
+};
+
+const ICE_SERVERS = getIceServers();
 
 interface WebRTCConnection {
   peerConnection: RTCPeerConnection;
