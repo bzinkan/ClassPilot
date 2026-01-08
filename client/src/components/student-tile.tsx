@@ -239,8 +239,8 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   };
   
   // Expand video to portal
-  const handleExpand = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleExpand = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
     setExpanded(true);
     // Move video to portal after next render
     queueMicrotask(() => {
