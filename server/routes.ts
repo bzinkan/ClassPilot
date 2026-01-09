@@ -1,6 +1,6 @@
 import type { Express, Request, RequestHandler } from "express";
 import { createServer, type Server } from "http";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, WebSocket } from "ws";
 import { storage as defaultStorage, type IStorage } from "./storage";
 import bcrypt from "bcrypt";
 import { generateSecurePassword } from "./util/password";
@@ -523,16 +523,62 @@ export async function registerRoutes(
     });
   });
 
+  // WebSocket ping/pong keepalive to prevent ALB idle timeout (60s default)
+  const WS_PING_INTERVAL_MS = 30000; // 30 seconds
+  const WS_PONG_TIMEOUT_MS = 10000;  // 10 seconds to respond
+  const clientPingTimers = new Map<WebSocket, NodeJS.Timeout>();
+  const clientPongPending = new Map<WebSocket, boolean>();
+
+  function startPingInterval(ws: WebSocket) {
+    const timer = setInterval(() => {
+      if (ws.readyState !== WebSocket.OPEN) {
+        clearInterval(timer);
+        clientPingTimers.delete(ws);
+        return;
+      }
+
+      // Check if previous pong was received
+      if (clientPongPending.get(ws)) {
+        console.log('[WebSocket] Client failed to respond to ping, closing connection');
+        ws.terminate();
+        return;
+      }
+
+      // Send ping and mark pong as pending
+      clientPongPending.set(ws, true);
+      ws.ping();
+    }, WS_PING_INTERVAL_MS);
+
+    clientPingTimers.set(ws, timer);
+  }
+
+  function stopPingInterval(ws: WebSocket) {
+    const timer = clientPingTimers.get(ws);
+    if (timer) {
+      clearInterval(timer);
+      clientPingTimers.delete(ws);
+    }
+    clientPongPending.delete(ws);
+  }
+
   wss.on('connection', (ws, req: any) => {
     const client = registerWsClient(ws);
 
     // SECURITY: Extract session info if available (staff have sessions, students don't)
     const sessionUserId = req.session?.userId || null;
     const sessionRole = req.session?.role || null;
-    
-    console.log('WebSocket client connected', { 
-      hasSession: !!sessionUserId, 
+
+    console.log('WebSocket client connected', {
+      hasSession: !!sessionUserId,
       sessionRole: sessionRole || 'none'
+    });
+
+    // Start ping/pong keepalive
+    startPingInterval(ws);
+
+    // Handle pong responses
+    ws.on('pong', () => {
+      clientPongPending.set(ws, false);
     });
 
     ws.on('message', async (data) => {
@@ -778,12 +824,14 @@ export async function registerRoutes(
     });
 
     ws.on('close', () => {
+      stopPingInterval(ws);
       removeWsClient(ws);
       console.log('WebSocket client disconnected');
     });
 
     ws.on('error', (error) => {
       console.error('WebSocket error:', error);
+      stopPingInterval(ws);
       removeWsClient(ws);
     });
   });

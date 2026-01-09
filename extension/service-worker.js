@@ -2222,15 +2222,26 @@ function connectWebSocket() {
   ws.onopen = () => {
     console.log('WebSocket connected');
     wsReconnectBackoffMs = 5000;
-    // Authenticate as student with email as primary identity
+    // Authenticate as student - prefer JWT token (faster), fallback to email lookup
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
+        const authPayload = {
           type: 'auth',
           role: 'student',
-          studentEmail: CONFIG.studentEmail,  // 🟢 Primary identity - backend determines schoolId from domain
-          deviceId: CONFIG.deviceId,          // Internal tracking
-        }));
+          deviceId: CONFIG.deviceId,
+        };
+
+        // Prefer JWT token authentication (avoids email domain lookup)
+        if (CONFIG.studentToken) {
+          authPayload.studentToken = CONFIG.studentToken;
+          console.log('WebSocket auth: using JWT token');
+        } else {
+          // Fallback to email-based authentication
+          authPayload.studentEmail = CONFIG.studentEmail;
+          console.log('WebSocket auth: using email (no JWT token)');
+        }
+
+        ws.send(JSON.stringify(authPayload));
         console.log('WebSocket auth sent');
       } else {
         console.warn('WebSocket not ready yet, will retry on next connection');
