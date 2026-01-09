@@ -82,16 +82,14 @@ export async function subscribeWS(
   }
 
   subscribed = true;
-  console.log(`[WS-Redis] Subscribed to channel ${redisChannel} (instance: ${instanceId.slice(0, 8)})`);
   try {
     await redisSubscriber.subscribe(redisChannel, (payload: string) => {
       try {
-        const envelope = JSON.parse(payload) as WsRedisEnvelope;
-        if (!envelope || envelope.instanceId === instanceId) {
-          return; // Ignore own messages
+        const message = JSON.parse(payload) as WsRedisEnvelope;
+        if (!message || message.instanceId === instanceId) {
+          return;
         }
-        console.log(`[WS-Redis] Received message from instance ${envelope.instanceId.slice(0, 8)}, target: ${JSON.stringify(envelope.target)}`);
-        onMessage(envelope.target, envelope.message);
+        onMessage(message.target, message.message);
       } catch (error) {
         warnRedis(error);
       }
@@ -118,7 +116,6 @@ export async function publishWS(target: WsRedisTarget, message: unknown): Promis
 
   try {
     await redisPublisher.publish(redisChannel, JSON.stringify(payload));
-    console.log(`[WS-Redis] Published to ${target.kind}: ${JSON.stringify(target)}`);
   } catch (error) {
     warnRedis(error);
   }
