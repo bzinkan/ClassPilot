@@ -543,6 +543,7 @@ async function updateTrackingState(reason = 'state-check') {
     if (trackingState !== TRACKING_STATES.OFF) {
       trackingState = TRACKING_STATES.OFF;
       scheduleHeartbeat(null);
+      scheduleScreenshotCapture(false);  // Disable screenshots when license inactive
       disconnectWebSocket();
       syncObservedHeartbeat('license-inactive');
     }
@@ -574,14 +575,17 @@ async function updateTrackingState(reason = 'state-check') {
 
   if (trackingState === TRACKING_STATES.ACTIVE) {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
+    scheduleScreenshotCapture(true);  // Enable screenshot capture when active
     connectWebSocket();
   } else if (trackingState === TRACKING_STATES.IDLE) {
     // Keep same heartbeat frequency and WebSocket connected even when Chrome reports idle
     // Chrome's idle detection (no keyboard/mouse) doesn't mean student is away
     scheduleHeartbeat(HEARTBEAT_IDLE_MINUTES);
+    scheduleScreenshotCapture(true);  // Keep screenshots even when idle
     connectWebSocket();
   } else {
     scheduleHeartbeat(null);
+    scheduleScreenshotCapture(false);  // Disable screenshots when tracking is off
     disconnectWebSocket();
   }
 
@@ -1429,8 +1433,84 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     });
   } else if (alarm.name === 'license-check') {
     checkLicenseStatus('alarm');
+  } else if (alarm.name === 'screenshot-capture') {
+    captureAndSendScreenshot();
   }
 });
+
+// Screenshot Thumbnail Capture (for teacher dashboard grid view)
+const SCREENSHOT_INTERVAL_SECONDS = 10;
+let screenshotAlarmScheduled = false;
+
+function scheduleScreenshotCapture(enable) {
+  if (enable && !screenshotAlarmScheduled) {
+    // Chrome alarms minimum is 0.5 minutes (30 seconds)
+    // For 10-second interval, we'll use a combination of alarm + setTimeout
+    chrome.alarms.create('screenshot-capture', { periodInMinutes: 0.5 });
+    screenshotAlarmScheduled = true;
+    console.log('[Screenshot] Scheduled periodic capture');
+  } else if (!enable && screenshotAlarmScheduled) {
+    chrome.alarms.clear('screenshot-capture');
+    screenshotAlarmScheduled = false;
+    console.log('[Screenshot] Stopped periodic capture');
+  }
+}
+
+async function captureAndSendScreenshot() {
+  if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
+    return;
+  }
+  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
+    return;
+  }
+
+  try {
+    // Get the last focused window
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (!tab || !tab.windowId) {
+      console.log('[Screenshot] No active tab in focused window');
+      return;
+    }
+
+    // Skip chrome:// and other non-HTTP pages
+    if (!tab.url || !tab.url.startsWith('http')) {
+      console.log('[Screenshot] Skipping non-HTTP page');
+      return;
+    }
+
+    // Capture the visible tab as JPEG with quality for compression
+    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      format: 'jpeg',
+      quality: 50  // Lower quality for smaller file size (~30-50KB)
+    });
+
+    if (!dataUrl) {
+      console.log('[Screenshot] Capture returned empty');
+      return;
+    }
+
+    // Send screenshot to server
+    const headers = buildDeviceAuthHeaders();
+    const response = await fetch(`${CONFIG.serverUrl}/api/device/screenshot`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        deviceId: CONFIG.deviceId,
+        screenshot: dataUrl,  // base64 data URL
+        timestamp: Date.now(),
+      }),
+    });
+
+    if (!response.ok) {
+      console.warn('[Screenshot] Upload failed:', response.status);
+    } else {
+      console.log('[Screenshot] Uploaded successfully');
+    }
+  } catch (error) {
+    // Common errors: tab might be closed, permission denied for some pages
+    console.log('[Screenshot] Capture error:', error.message);
+  }
+}
 
 // Remote Control Handlers (Phase 1: GoGuardian-style features)
 let screenLocked = false;

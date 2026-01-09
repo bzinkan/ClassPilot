@@ -110,6 +110,15 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   const { data: flightPaths = [] } = useQuery<any[]>({
     queryKey: ['/api/flight-paths'],
   });
+
+  // Fetch screenshot thumbnail for this device (refreshes every 10 seconds)
+  const { data: screenshotData } = useQuery<{ screenshot: string; timestamp: number }>({
+    queryKey: ['/api/device/screenshot', student.primaryDeviceId],
+    enabled: !!student.primaryDeviceId && student.status !== 'offline' && !liveStream,
+    refetchInterval: 10000, // Refresh every 10 seconds
+    retry: false, // Don't retry on 404 (no screenshot available)
+    staleTime: 8000, // Consider data stale after 8 seconds
+  });
   
   // Get unique recent domains (last 5)
   const recentDomains = recentHeartbeats
@@ -464,7 +473,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         )}
 
-        {/* Preview Zone - Large Live View or Website Preview Card */}
+        {/* Preview Zone - Live View, Screenshot Thumbnail, or Website Preview Card */}
         {liveStream ? (
           <div className="aspect-video rounded-lg bg-black relative overflow-hidden">
             <div
@@ -473,6 +482,34 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               className="w-full h-full rounded-lg overflow-hidden"
               data-testid={`video-live-${student.primaryDeviceId}`}
             />
+          </div>
+        ) : screenshotData?.screenshot ? (
+          // Screenshot thumbnail when available
+          <div className="aspect-video rounded-lg bg-muted/40 relative overflow-hidden">
+            <img
+              src={screenshotData.screenshot}
+              alt={`${student.studentName || 'Student'}'s screen`}
+              className="w-full h-full object-cover"
+              data-testid={`screenshot-${student.primaryDeviceId}`}
+            />
+            {/* Overlay with tab info */}
+            <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
+              <div className="flex items-center gap-1.5">
+                {student.favicon && (
+                  <img
+                    src={student.favicon}
+                    alt=""
+                    className="w-3 h-3 flex-shrink-0 rounded"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = 'none';
+                    }}
+                  />
+                )}
+                <span className="text-xs text-white/90 truncate font-medium">
+                  {student.activeTabTitle || 'No active tab'}
+                </span>
+              </div>
+            </div>
           </div>
         ) : (
           <div className="rounded-lg bg-muted/40 overflow-hidden">

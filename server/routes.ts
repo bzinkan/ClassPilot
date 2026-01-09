@@ -283,6 +283,22 @@ const heartbeatLastFullPayloadAt = new Map<string, number>();
 const DEVICE_HEARTBEAT_MIN_INTERVAL_MS = 8_000;
 const HEARTBEAT_FULL_PAYLOAD_MIN_MS = 30_000;
 
+// Screenshot thumbnail storage (in-memory, TTL-based)
+// Key: deviceId, Value: { screenshot: base64 data URL, timestamp: number }
+const SCREENSHOT_TTL_MS = 60_000; // 60 seconds TTL
+const SCREENSHOT_MAX_SIZE_BYTES = 200_000; // ~200KB max per screenshot
+const deviceScreenshots = new Map<string, { screenshot: string; timestamp: number }>();
+
+// Cleanup expired screenshots periodically
+setInterval(() => {
+  const now = Date.now();
+  deviceScreenshots.forEach((data, deviceId) => {
+    if (now - data.timestamp > SCREENSHOT_TTL_MS) {
+      deviceScreenshots.delete(deviceId);
+    }
+  });
+}, 30_000); // Run cleanup every 30 seconds
+
 const HEARTBEAT_QUEUE_MAX = 500;
 const heartbeatPersistQueue: Array<() => Promise<void>> = [];
 let heartbeatQueueActive = false;
@@ -2824,6 +2840,75 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Heartbeat uncaught error:", error);
       return res.sendStatus(204);
+    }
+  });
+
+  // Screenshot upload endpoint (from extension) - JWT-authenticated
+  app.post("/api/device/screenshot", requireDeviceAuth, requireActiveSchoolDeviceMiddleware, async (req, res) => {
+    try {
+      const authDeviceId = res.locals.deviceId as string | undefined;
+      if (!authDeviceId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { screenshot, timestamp } = req.body;
+      if (!screenshot || typeof screenshot !== "string") {
+        return res.status(400).json({ error: "Invalid screenshot data" });
+      }
+
+      // Validate screenshot size (base64 encoded, ~200KB max)
+      if (screenshot.length > SCREENSHOT_MAX_SIZE_BYTES * 1.4) { // Base64 is ~1.33x larger
+        return res.status(400).json({ error: "Screenshot too large" });
+      }
+
+      // Validate it's a data URL
+      if (!screenshot.startsWith("data:image/")) {
+        return res.status(400).json({ error: "Invalid screenshot format" });
+      }
+
+      // Store screenshot in memory
+      deviceScreenshots.set(authDeviceId, {
+        screenshot,
+        timestamp: timestamp || Date.now(),
+      });
+
+      return res.status(200).json({ ok: true });
+    } catch (error) {
+      console.error("Screenshot upload error:", error);
+      return res.status(500).json({ error: "Failed to upload screenshot" });
+    }
+  });
+
+  // Screenshot retrieval endpoint (for teacher dashboard) - requires auth
+  app.get("/api/device/screenshot/:deviceId", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, async (req, res) => {
+    try {
+      const { deviceId } = req.params;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      // Verify the device belongs to the same school
+      const device = await storage.getDevice(deviceId);
+      if (!device || device.schoolId !== sessionSchoolId) {
+        return res.status(404).json({ error: "Device not found" });
+      }
+
+      const screenshotData = deviceScreenshots.get(deviceId);
+      if (!screenshotData) {
+        return res.status(404).json({ error: "No screenshot available" });
+      }
+
+      // Check if screenshot is expired
+      if (Date.now() - screenshotData.timestamp > SCREENSHOT_TTL_MS) {
+        deviceScreenshots.delete(deviceId);
+        return res.status(404).json({ error: "Screenshot expired" });
+      }
+
+      return res.status(200).json({
+        screenshot: screenshotData.screenshot,
+        timestamp: screenshotData.timestamp,
+      });
+    } catch (error) {
+      console.error("Screenshot retrieval error:", error);
+      return res.status(500).json({ error: "Failed to retrieve screenshot" });
     }
   });
 

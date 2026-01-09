@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -76,8 +76,6 @@ export default function Dashboard() {
   const [showOpenTabDialog, setShowOpenTabDialog] = useState(false);
   const [openTabUrl, setOpenTabUrl] = useState("");
   const [showCloseTabsDialog, setShowCloseTabsDialog] = useState(false);
-  const [closeTabsMode, setCloseTabsMode] = useState<"all" | "pattern">("all");
-  const [closeTabsPattern, setCloseTabsPattern] = useState("");
   // Track selected tabs by composite key: "studentId|deviceId|url"
   const [selectedTabsToClose, setSelectedTabsToClose] = useState<Set<string>>(new Set());
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
@@ -780,7 +778,6 @@ export default function Dashboard() {
         description: data.message,
       });
       setShowCloseTabsDialog(false);
-      setCloseTabsPattern("");
       setSelectedTabsToClose(new Set());
     },
     onError: (error: Error) => {
@@ -855,34 +852,35 @@ export default function Dashboard() {
     openTabMutation.mutate({ url: normalizedUrl, targetDeviceIds });
   };
 
+  // Close selected tabs (from checkboxes in the Tabs dialog)
   const handleCloseTabs = () => {
-    const targetDeviceIds = getTargetDeviceIds();
-    
-    if (closeTabsMode === "all") {
-      closeTabsMutation.mutate({ closeAll: true, targetDeviceIds });
-    } else {
-      // Close specific selected tabs
-      if (selectedTabsToClose.size === 0) {
-        toast({
-          variant: "destructive",
-          title: "No Tabs Selected",
-          description: "Please select at least one tab to close",
-        });
-        return;
-      }
-      
-      // Parse composite keys "studentId|deviceId|url" into structured data
-      const tabsToClose: Array<{ deviceId: string; url: string }> = [];
-      selectedTabsToClose.forEach(compositeKey => {
-        const parts = compositeKey.split('|');
-        if (parts.length === 3) {
-          const [, deviceId, url] = parts; // studentId not needed
-          tabsToClose.push({ deviceId, url });
-        }
+    if (selectedTabsToClose.size === 0) {
+      toast({
+        variant: "destructive",
+        title: "No Tabs Selected",
+        description: "Please select at least one tab to close",
       });
-      
-      closeTabsMutation.mutate({ tabsToClose });
+      return;
     }
+
+    // Parse composite keys "studentId|deviceId|url" into structured data
+    const tabsToClose: Array<{ deviceId: string; url: string }> = [];
+    selectedTabsToClose.forEach(compositeKey => {
+      const parts = compositeKey.split('|');
+      if (parts.length === 3) {
+        const [, deviceId, url] = parts; // studentId not needed
+        tabsToClose.push({ deviceId, url });
+      }
+    });
+
+    closeTabsMutation.mutate({ tabsToClose });
+    // Clear selection after closing
+    setSelectedTabsToClose(new Set());
+  };
+
+  // Close a single tab on a specific device
+  const handleCloseSingleTab = (deviceId: string, url: string) => {
+    closeTabsMutation.mutate({ tabsToClose: [{ deviceId, url }] });
   };
 
   const handleLockScreen = () => {
@@ -1316,11 +1314,11 @@ export default function Dashboard() {
             size="sm"
             variant="outline"
             onClick={() => setShowCloseTabsDialog(true)}
-            data-testid="button-close-tabs"
+            data-testid="button-tabs"
             className="text-blue-600 dark:text-blue-400"
           >
-            <TabletSmartphone className="h-4 w-4 mr-2" />
-            Close Tabs
+            <List className="h-4 w-4 mr-2" />
+            Tabs
           </Button>
 
           <Button
@@ -1590,109 +1588,136 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* Close Tabs Dialog */}
+      {/* Tabs Dialog */}
       <Dialog open={showCloseTabsDialog} onOpenChange={setShowCloseTabsDialog}>
-        <DialogContent className="max-w-2xl" data-testid="dialog-close-tabs">
+        <DialogContent className="max-w-2xl" data-testid="dialog-tabs">
           <DialogHeader>
-            <DialogTitle>Close Tabs on Student Devices</DialogTitle>
+            <DialogTitle>Open Tabs ({openTabs.length})</DialogTitle>
             <DialogDescription>
               {selectedStudentIds.size > 0
-                ? `Close tabs on ${selectedStudentIds.size} selected student(s)`
-                : "Close tabs on all student devices"}
+                ? `Viewing tabs from ${selectedStudentIds.size} selected student(s)`
+                : "Viewing tabs from all students"}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <Tabs value={closeTabsMode} onValueChange={(v) => setCloseTabsMode(v as "all" | "pattern")}>
-              <TabsList className="grid w-full grid-cols-2">
-                <TabsTrigger value="all" data-testid="tab-close-all">Close All Tabs</TabsTrigger>
-                <TabsTrigger value="pattern" data-testid="tab-close-pattern">Close by Tab</TabsTrigger>
-              </TabsList>
-              <TabsContent value="all" className="space-y-2">
-                <p className="text-sm text-muted-foreground">
-                  This will close all tabs on the selected student devices.
-                </p>
-              </TabsContent>
-              <TabsContent value="pattern" className="space-y-2">
-                <Label>Select Tabs to Close</Label>
-                {openTabs.length === 0 ? (
-                  <p className="text-sm text-muted-foreground py-4">
-                    No tabs are currently open on {selectedStudentIds.size > 0 ? 'selected students' : 'any student devices'}
-                  </p>
-                ) : (
-                  <>
-                    <div className="flex items-center gap-2 mb-2">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setSelectedTabsToClose(new Set(openTabs.map(t => `${t.studentId}|${t.deviceId}|${t.url}`)))}
-                        data-testid="button-select-all-tabs"
-                        className="h-8"
+            {openTabs.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-8 text-center">
+                No tabs are currently open on {selectedStudentIds.size > 0 ? 'selected students' : 'any student devices'}
+              </p>
+            ) : (
+              <>
+                <div className="flex items-center gap-2 mb-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSelectedTabsToClose(new Set(openTabs.map(t => `${t.studentId}|${t.deviceId}|${t.url}`)))}
+                    data-testid="button-select-all-tabs"
+                    className="h-8"
+                  >
+                    <CheckSquare className="h-3 w-3 mr-1" />
+                    Select All
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setSelectedTabsToClose(new Set())}
+                    data-testid="button-clear-tabs"
+                    className="h-8"
+                  >
+                    <XSquare className="h-3 w-3 mr-1" />
+                    Clear
+                  </Button>
+                  <span className="text-xs text-muted-foreground ml-auto">
+                    {selectedTabsToClose.size} selected
+                  </span>
+                </div>
+                <div className="border rounded-md max-h-80 overflow-y-auto">
+                  {openTabs.map((tab) => {
+                    const compositeKey = `${tab.studentId}|${tab.deviceId}|${tab.url}`;
+                    const hostname = (() => {
+                      try { return new URL(tab.url).hostname; } catch { return tab.url; }
+                    })();
+                    return (
+                      <div
+                        key={compositeKey}
+                        className="flex items-center gap-3 p-3 hover:bg-muted/50 border-b last:border-b-0 group"
+                        data-testid={`tab-row-${tab.deviceId}-${encodeURIComponent(tab.url)}`}
                       >
-                        <CheckSquare className="h-3 w-3 mr-1" />
-                        Select All
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setSelectedTabsToClose(new Set())}
-                        data-testid="button-clear-tabs"
-                        className="h-8"
-                      >
-                        <XSquare className="h-3 w-3 mr-1" />
-                        Clear
-                      </Button>
-                      <span className="text-xs text-muted-foreground ml-auto">
-                        {selectedTabsToClose.size} of {openTabs.length} selected
-                      </span>
-                    </div>
-                    <div className="border rounded-md max-h-60 overflow-y-auto">
-                      {openTabs.map((tab) => (
-                        <label
-                          key={`${tab.studentId}-${tab.deviceId}-${tab.url}`}
-                          className="flex items-start gap-3 p-3 hover:bg-muted/50 cursor-pointer border-b last:border-b-0"
-                          data-testid={`tab-option-${tab.studentId}-${tab.deviceId}-${tab.url}`}
-                        >
-                          <input
-                            type="checkbox"
-                            className="mt-1 h-4 w-4"
-                            checked={selectedTabsToClose.has(`${tab.studentId}|${tab.deviceId}|${tab.url}`)}
-                            onChange={(e) => {
-                              const compositeKey = `${tab.studentId}|${tab.deviceId}|${tab.url}`;
-                              const newSet = new Set(selectedTabsToClose);
-                              if (e.target.checked) {
-                                newSet.add(compositeKey);
-                              } else {
-                                newSet.delete(compositeKey);
-                              }
-                              setSelectedTabsToClose(newSet);
-                            }}
-                            data-testid={`checkbox-tab-${tab.url}`}
-                          />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <div className="text-sm font-medium truncate">{tab.title}</div>
-                              <span className="text-xs text-muted-foreground shrink-0">• {tab.studentName}</span>
-                            </div>
-                            <div className="text-xs text-muted-foreground truncate">{tab.url}</div>
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 shrink-0"
+                          checked={selectedTabsToClose.has(compositeKey)}
+                          onChange={(e) => {
+                            const newSet = new Set(selectedTabsToClose);
+                            if (e.target.checked) {
+                              newSet.add(compositeKey);
+                            } else {
+                              newSet.delete(compositeKey);
+                            }
+                            setSelectedTabsToClose(newSet);
+                          }}
+                          data-testid={`checkbox-tab-${encodeURIComponent(tab.url)}`}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium truncate">{tab.title}</span>
                           </div>
-                        </label>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </TabsContent>
-            </Tabs>
+                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                            <span className="truncate">{hostname}</span>
+                            <span>•</span>
+                            <span className="shrink-0">{tab.studentName}</span>
+                          </div>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 opacity-50 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
+                          onClick={() => handleCloseSingleTab(tab.deviceId, tab.url)}
+                          disabled={closeTabsMutation.isPending}
+                          title="Close this tab"
+                          data-testid={`button-close-tab-${encodeURIComponent(tab.url)}`}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowCloseTabsDialog(false)} data-testid="button-cancel-close-tabs">
-              Cancel
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button variant="outline" onClick={() => setShowCloseTabsDialog(false)} data-testid="button-close-tabs-dialog">
+              Done
             </Button>
-            <Button onClick={handleCloseTabs} disabled={closeTabsMutation.isPending} data-testid="button-confirm-close-tabs">
-              <TabletSmartphone className="h-4 w-4 mr-2" />
-              Close Tabs
-            </Button>
+            {selectedTabsToClose.size > 0 && (
+              <Button
+                variant="destructive"
+                onClick={handleCloseTabs}
+                disabled={closeTabsMutation.isPending}
+                data-testid="button-close-selected-tabs"
+              >
+                <X className="h-4 w-4 mr-2" />
+                Close Selected ({selectedTabsToClose.size})
+              </Button>
+            )}
+            {openTabs.length > 0 && (
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  const targetDeviceIds = getTargetDeviceIds();
+                  closeTabsMutation.mutate({ closeAll: true, targetDeviceIds });
+                }}
+                disabled={closeTabsMutation.isPending}
+                data-testid="button-close-all-tabs"
+              >
+                <TabletSmartphone className="h-4 w-4 mr-2" />
+                Close All Tabs
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
