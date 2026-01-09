@@ -76,7 +76,8 @@ COPY --chown=nodejs:nodejs shared ./shared
 
 # Install ALL dependencies (including devDependencies because they're marked as external in the build)
 # IMPORTANT: Don't set NODE_ENV=production yet, it would cause npm ci to skip devDependencies
-RUN npm ci && \
+# Note: --install-links ensures file: dependencies are copied rather than symlinked
+RUN npm ci --install-links && \
     npm cache clean --force && \
     apk del python3 make g++ cairo-dev jpeg-dev pango-dev giflib-dev pixman-dev && \
     chown -R nodejs:nodejs /app/node_modules
