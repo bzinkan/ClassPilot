@@ -15,9 +15,12 @@ type WsRedisEnvelope = {
 };
 
 const instanceId = randomUUID();
+const instanceShortId = instanceId.slice(0, 8); // Short ID for logging
 const redisUrl = getOptionalEnv("REDIS_URL");
 const redisPrefix = getOptionalEnv("REDIS_PREFIX") ?? "classpilot";
 const redisChannel = `${redisPrefix}:ws:broadcast`;
+
+console.log(`[Redis] Instance ${instanceShortId} starting, Redis URL: ${redisUrl ? 'configured' : 'NOT configured'}`);
 
 let redisPublisher: RedisClientType | null = null;
 let redisSubscriber: RedisClientType | null = null;
@@ -48,17 +51,28 @@ async function ensureRedisReady(): Promise<void> {
 
   redisInitPromise = (async () => {
     try {
+      console.log(`[Redis] Instance ${instanceShortId} connecting to Redis...`);
       redisPublisher = createClient({ url: redisUrl });
-      redisPublisher.on("error", warnRedis);
+      redisPublisher.on("error", (err: unknown) => {
+        console.error(`[Redis] Instance ${instanceShortId} publisher error:`, err);
+        warnRedis(err);
+      });
       await redisPublisher.connect();
+      console.log(`[Redis] Instance ${instanceShortId} publisher connected`);
 
       redisSubscriber = redisPublisher.duplicate();
-      redisSubscriber.on("error", warnRedis);
+      redisSubscriber.on("error", (err: unknown) => {
+        console.error(`[Redis] Instance ${instanceShortId} subscriber error:`, err);
+        warnRedis(err);
+      });
       await redisSubscriber.connect();
+      console.log(`[Redis] Instance ${instanceShortId} subscriber connected`);
 
       redisEnabled = true;
+      console.log(`[Redis] Instance ${instanceShortId} fully initialized`);
     } catch (error) {
       redisEnabled = false;
+      console.error(`[Redis] Instance ${instanceShortId} initialization failed:`, error);
       warnRedis(error);
     }
   })();
@@ -82,7 +96,7 @@ export async function subscribeWS(
   }
 
   subscribed = true;
-  console.log(`[Redis] Subscribing to channel: ${redisChannel}`);
+  console.log(`[Redis] Instance ${instanceShortId} subscribing to channel: ${redisChannel}`);
   try {
     await redisSubscriber.subscribe(redisChannel, (payload: string) => {
       try {
@@ -90,20 +104,22 @@ export async function subscribeWS(
         if (!envelope) {
           return;
         }
+        const senderShortId = envelope.instanceId.slice(0, 8);
         // Skip messages from this instance (they were already handled locally)
         if (envelope.instanceId === instanceId) {
           return;
         }
         const msgType = (envelope.message as { type?: string })?.type ?? 'unknown';
-        console.log(`[Redis] Received ${msgType} from another instance, target: ${envelope.target.kind}`);
+        console.log(`[Redis] Instance ${instanceShortId} received ${msgType} from ${senderShortId}, target: ${envelope.target.kind}`);
         onMessage(envelope.target, envelope.message);
       } catch (error) {
+        console.error(`[Redis] Instance ${instanceShortId} message parse error:`, error);
         warnRedis(error);
       }
     });
-    console.log(`[Redis] Successfully subscribed`);
+    console.log(`[Redis] Instance ${instanceShortId} successfully subscribed to ${redisChannel}`);
   } catch (error) {
-    console.error(`[Redis] Subscription failed:`, error);
+    console.error(`[Redis] Instance ${instanceShortId} subscription failed:`, error);
     warnRedis(error);
   }
 }
@@ -125,9 +141,12 @@ export async function publishWS(target: WsRedisTarget, message: unknown): Promis
 
   try {
     const msgType = (message as { type?: string })?.type ?? 'unknown';
-    console.log(`[Redis] Publishing ${msgType} to ${target.kind}`);
-    await redisPublisher.publish(redisChannel, JSON.stringify(payload));
+    const targetInfo = target.kind === 'device' ? `device:${(target as any).deviceId}` : target.kind;
+    console.log(`[Redis] Instance ${instanceShortId} publishing ${msgType} to ${targetInfo}`);
+    const numSubscribers = await redisPublisher.publish(redisChannel, JSON.stringify(payload));
+    console.log(`[Redis] Instance ${instanceShortId} published ${msgType}, ${numSubscribers} subscribers received`);
   } catch (error) {
+    console.error(`[Redis] Instance ${instanceShortId} publish failed:`, error);
     warnRedis(error);
   }
 }
