@@ -605,6 +605,11 @@ export async function registerRoutes(
       try {
         const message = JSON.parse(data.toString());
 
+        // Log all non-auth messages for debugging WebRTC signaling
+        if (message.type !== 'auth' && message.type !== 'heartbeat') {
+          console.log(`[WebSocket] Message received: ${message.type} from ${client.role || 'unauthenticated'} (authenticated: ${client.authenticated})`);
+        }
+
         // Handle authentication
         if (message.type === 'auth') {
           if (message.role === 'teacher' || message.role === 'school_admin' || message.role === 'super_admin') {
