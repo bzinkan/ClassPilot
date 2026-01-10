@@ -120,3 +120,56 @@ export async function publishWS(target: WsRedisTarget, message: unknown): Promis
     warnRedis(error);
   }
 }
+
+// Screenshot storage in Redis (for multi-instance deployments)
+const SCREENSHOT_KEY_PREFIX = `${redisPrefix}:screenshot:`;
+const SCREENSHOT_TTL_SECONDS = 60; // 60 seconds TTL
+
+export type ScreenshotData = {
+  screenshot: string;
+  timestamp: number;
+  tabTitle?: string;
+  tabUrl?: string;
+  tabFavicon?: string;
+};
+
+export async function setScreenshot(deviceId: string, data: ScreenshotData): Promise<boolean> {
+  if (!redisUrl) {
+    return false; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return false;
+  }
+
+  try {
+    const key = `${SCREENSHOT_KEY_PREFIX}${deviceId}`;
+    await redisPublisher.setEx(key, SCREENSHOT_TTL_SECONDS, JSON.stringify(data));
+    return true;
+  } catch (error) {
+    console.warn("[Screenshot] Redis setEx failed:", error);
+    return false;
+  }
+}
+
+export async function getScreenshot(deviceId: string): Promise<ScreenshotData | null> {
+  if (!redisUrl) {
+    return null; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return null;
+  }
+
+  try {
+    const key = `${SCREENSHOT_KEY_PREFIX}${deviceId}`;
+    const data = await redisPublisher.get(key);
+    if (!data) {
+      return null;
+    }
+    return JSON.parse(data) as ScreenshotData;
+  } catch (error) {
+    console.warn("[Screenshot] Redis get failed:", error);
+    return null;
+  }
+}

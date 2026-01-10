@@ -37,7 +37,7 @@ import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@sh
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
-import { publishWS, subscribeWS, isRedisEnabled, type WsRedisTarget } from "./ws-redis";
+import { publishWS, subscribeWS, isRedisEnabled, setScreenshot, getScreenshot, type WsRedisTarget, type ScreenshotData } from "./ws-redis";
 import {
   authenticateWsClient,
   broadcastToStudentsLocal,
@@ -283,25 +283,20 @@ const heartbeatLastFullPayloadAt = new Map<string, number>();
 const DEVICE_HEARTBEAT_MIN_INTERVAL_MS = 8_000;
 const HEARTBEAT_FULL_PAYLOAD_MIN_MS = 30_000;
 
-// Screenshot thumbnail storage (in-memory, TTL-based)
+// Screenshot thumbnail storage
+// Uses Redis when available (multi-instance), falls back to in-memory (single-instance)
 // Key: deviceId, Value: { screenshot, timestamp, and tab metadata from when screenshot was taken }
 const SCREENSHOT_TTL_MS = 60_000; // 60 seconds TTL
 const SCREENSHOT_MAX_SIZE_BYTES = 200_000; // ~200KB max per screenshot
-type ScreenshotData = {
-  screenshot: string;
-  timestamp: number;
-  tabTitle?: string;
-  tabUrl?: string;
-  tabFavicon?: string;
-};
-const deviceScreenshots = new Map<string, ScreenshotData>();
+// In-memory fallback for single-instance mode (when Redis is not available)
+const deviceScreenshotsLocal = new Map<string, ScreenshotData>();
 
-// Cleanup expired screenshots periodically
+// Cleanup expired screenshots periodically (only needed for in-memory storage)
 setInterval(() => {
   const now = Date.now();
-  deviceScreenshots.forEach((data, deviceId) => {
+  deviceScreenshotsLocal.forEach((data, deviceId) => {
     if (now - data.timestamp > SCREENSHOT_TTL_MS) {
-      deviceScreenshots.delete(deviceId);
+      deviceScreenshotsLocal.delete(deviceId);
     }
   });
 }, 30_000); // Run cleanup every 30 seconds
@@ -2873,14 +2868,21 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid screenshot format" });
       }
 
-      // Store screenshot in memory with tab metadata
-      deviceScreenshots.set(authDeviceId, {
+      // Store screenshot with tab metadata
+      const screenshotPayload: ScreenshotData = {
         screenshot,
         timestamp: timestamp || Date.now(),
         tabTitle: typeof tabTitle === "string" ? tabTitle : undefined,
         tabUrl: typeof tabUrl === "string" ? tabUrl : undefined,
         tabFavicon: typeof tabFavicon === "string" ? tabFavicon : undefined,
-      });
+      };
+
+      // Try Redis first (for multi-instance deployments), fallback to in-memory
+      const storedInRedis = await setScreenshot(authDeviceId, screenshotPayload);
+      if (!storedInRedis) {
+        // Fallback to local in-memory storage
+        deviceScreenshotsLocal.set(authDeviceId, screenshotPayload);
+      }
 
       return res.status(200).json({ ok: true });
     } catch (error) {
@@ -2901,14 +2903,20 @@ export async function registerRoutes(
         return res.status(404).json({ error: "Device not found" });
       }
 
-      const screenshotData = deviceScreenshots.get(deviceId);
+      // Try Redis first (for multi-instance deployments), fallback to in-memory
+      let screenshotData = await getScreenshot(deviceId);
+      if (!screenshotData) {
+        // Fallback to local in-memory storage
+        screenshotData = deviceScreenshotsLocal.get(deviceId) ?? null;
+      }
+
       if (!screenshotData) {
         return res.status(404).json({ error: "No screenshot available" });
       }
 
-      // Check if screenshot is expired
+      // Check if screenshot is expired (Redis handles TTL automatically, but check for in-memory)
       if (Date.now() - screenshotData.timestamp > SCREENSHOT_TTL_MS) {
-        deviceScreenshots.delete(deviceId);
+        deviceScreenshotsLocal.delete(deviceId);
         return res.status(404).json({ error: "Screenshot expired" });
       }
 
