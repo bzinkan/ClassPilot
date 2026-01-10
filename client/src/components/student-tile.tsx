@@ -112,7 +112,14 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   });
 
   // Fetch screenshot thumbnail for this device (refreshes every 10 seconds)
-  const { data: screenshotData } = useQuery<{ screenshot: string; timestamp: number }>({
+  // Includes tab metadata (title, url, favicon) from when the screenshot was captured
+  const { data: screenshotData } = useQuery<{
+    screenshot: string;
+    timestamp: number;
+    tabTitle?: string;
+    tabUrl?: string;
+    tabFavicon?: string;
+  }>({
     queryKey: ['/api/device/screenshot', student.primaryDeviceId],
     enabled: !!student.primaryDeviceId && student.status !== 'offline' && !liveStream,
     refetchInterval: 10000, // Refresh every 10 seconds
@@ -485,6 +492,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
           </div>
         ) : screenshotData?.screenshot ? (
           // Screenshot thumbnail when available
+          // Uses tab metadata from the screenshot (not current heartbeat) so overlay matches the image
           <div className="aspect-video rounded-lg bg-muted/40 relative overflow-hidden">
             <img
               src={screenshotData.screenshot}
@@ -492,12 +500,12 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
               className="w-full h-full object-cover"
               data-testid={`screenshot-${student.primaryDeviceId}`}
             />
-            {/* Overlay with tab info */}
+            {/* Overlay with tab info from when screenshot was taken */}
             <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
               <div className="flex items-center gap-1.5">
-                {student.favicon && (
+                {screenshotData.tabFavicon && (
                   <img
-                    src={student.favicon}
+                    src={screenshotData.tabFavicon}
                     alt=""
                     className="w-3 h-3 flex-shrink-0 rounded"
                     onError={(e) => {
@@ -506,7 +514,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
                   />
                 )}
                 <span className="text-xs text-white/90 truncate font-medium">
-                  {student.activeTabTitle || 'No active tab'}
+                  {screenshotData.tabTitle || 'No active tab'}
                 </span>
               </div>
             </div>

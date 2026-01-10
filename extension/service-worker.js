@@ -1489,7 +1489,7 @@ async function captureAndSendScreenshot() {
       return;
     }
 
-    // Send screenshot to server
+    // Send screenshot to server with tab metadata
     const headers = buildDeviceAuthHeaders();
     const response = await fetch(`${CONFIG.serverUrl}/api/device/screenshot`, {
       method: 'POST',
@@ -1498,6 +1498,9 @@ async function captureAndSendScreenshot() {
         deviceId: CONFIG.deviceId,
         screenshot: dataUrl,  // base64 data URL
         timestamp: Date.now(),
+        tabTitle: tab.title || '',
+        tabUrl: tab.url || '',
+        tabFavicon: tab.favIconUrl || '',
       }),
     });
 

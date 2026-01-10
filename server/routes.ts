@@ -284,10 +284,17 @@ const DEVICE_HEARTBEAT_MIN_INTERVAL_MS = 8_000;
 const HEARTBEAT_FULL_PAYLOAD_MIN_MS = 30_000;
 
 // Screenshot thumbnail storage (in-memory, TTL-based)
-// Key: deviceId, Value: { screenshot: base64 data URL, timestamp: number }
+// Key: deviceId, Value: { screenshot, timestamp, and tab metadata from when screenshot was taken }
 const SCREENSHOT_TTL_MS = 60_000; // 60 seconds TTL
 const SCREENSHOT_MAX_SIZE_BYTES = 200_000; // ~200KB max per screenshot
-const deviceScreenshots = new Map<string, { screenshot: string; timestamp: number }>();
+type ScreenshotData = {
+  screenshot: string;
+  timestamp: number;
+  tabTitle?: string;
+  tabUrl?: string;
+  tabFavicon?: string;
+};
+const deviceScreenshots = new Map<string, ScreenshotData>();
 
 // Cleanup expired screenshots periodically
 setInterval(() => {
@@ -2851,7 +2858,7 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      const { screenshot, timestamp } = req.body;
+      const { screenshot, timestamp, tabTitle, tabUrl, tabFavicon } = req.body;
       if (!screenshot || typeof screenshot !== "string") {
         return res.status(400).json({ error: "Invalid screenshot data" });
       }
@@ -2866,10 +2873,13 @@ export async function registerRoutes(
         return res.status(400).json({ error: "Invalid screenshot format" });
       }
 
-      // Store screenshot in memory
+      // Store screenshot in memory with tab metadata
       deviceScreenshots.set(authDeviceId, {
         screenshot,
         timestamp: timestamp || Date.now(),
+        tabTitle: typeof tabTitle === "string" ? tabTitle : undefined,
+        tabUrl: typeof tabUrl === "string" ? tabUrl : undefined,
+        tabFavicon: typeof tabFavicon === "string" ? tabFavicon : undefined,
       });
 
       return res.status(200).json({ ok: true });
@@ -2905,6 +2915,9 @@ export async function registerRoutes(
       return res.status(200).json({
         screenshot: screenshotData.screenshot,
         timestamp: screenshotData.timestamp,
+        tabTitle: screenshotData.tabTitle,
+        tabUrl: screenshotData.tabUrl,
+        tabFavicon: screenshotData.tabFavicon,
       });
     } catch (error) {
       console.error("Screenshot retrieval error:", error);
