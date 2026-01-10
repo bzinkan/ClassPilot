@@ -3436,6 +3436,7 @@ export async function registerRoutes(
           if (status.primaryDeviceId) {
             const redisFlightPath = await getFlightPathStatus(status.primaryDeviceId);
             if (redisFlightPath) {
+              console.log(`[Flight Path] Redis overlay for ${status.primaryDeviceId}: active=${redisFlightPath.active}, name=${redisFlightPath.flightPathName}`);
               status.flightPathActive = redisFlightPath.active;
               status.activeFlightPathName = redisFlightPath.flightPathName;
             }
@@ -5908,12 +5909,13 @@ export async function registerRoutes(
 
       for (const deviceId of deviceIds) {
         // Store in Redis for multi-instance consistency
-        await setFlightPathStatus(deviceId, {
+        const redisSuccess = await setFlightPathStatus(deviceId, {
           active: true,
           flightPathName,
           flightPathId,
           appliedAt: now,
         });
+        console.log(`[Flight Path] Apply to ${deviceId}: Redis write ${redisSuccess ? 'success' : 'failed/in-memory only'}, name=${flightPathName}`);
 
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent && assertSameSchool(sessionSchoolId, activeStudent.schoolId)) {
@@ -5965,10 +5967,11 @@ export async function registerRoutes(
       const removedStudentIds = new Set<string>();
       for (const deviceId of targetDeviceIds) {
         // Remove from Redis for multi-instance consistency
-        await setFlightPathStatus(deviceId, {
+        const redisSuccess = await setFlightPathStatus(deviceId, {
           active: false,
           appliedAt: now,
         });
+        console.log(`[Flight Path] Remove from ${deviceId}: Redis delete ${redisSuccess ? 'success' : 'failed/in-memory only'}`);
 
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {

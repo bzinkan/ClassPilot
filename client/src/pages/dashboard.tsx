@@ -88,7 +88,8 @@ export default function Dashboard() {
   const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true); // Track if component is mounted
   const maxReconnectDelay = 30000; // 30 seconds max delay
-  
+  const [wsAuthenticated, setWsAuthenticated] = useState(false); // Track WebSocket auth state
+
   // WebRTC hook for live video streaming
   const webrtc = useWebRTC(wsRef.current);
 
@@ -186,22 +187,34 @@ export default function Dashboard() {
 
         socket.onmessage = (event) => {
           if (!isMountedRef.current) return; // Don't process messages if unmounted
-          
+
           try {
             const message = JSON.parse(event.data);
             console.log("[Dashboard] WebSocket message received:", message);
+
+            // Handle authentication response
+            if (message.type === 'auth-success') {
+              console.log("[Dashboard] WebSocket authenticated successfully");
+              setWsAuthenticated(true);
+            }
+
+            if (message.type === 'auth-error') {
+              console.error("[Dashboard] WebSocket auth error:", message.message);
+              setWsAuthenticated(false);
+            }
+
             if (message.type === 'student-update') {
               console.log("[Dashboard] Student update detected, invalidating queries...");
               // Invalidate queries to force refetch (needed because staleTime: Infinity)
               queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
             }
-            
+
             // Handle WebRTC signaling messages
             if (message.type === 'answer') {
               console.log("[Dashboard] Received WebRTC answer from", message.from);
               webrtc.handleAnswer(message.from, message.sdp);
             }
-            
+
             if (message.type === 'ice') {
               console.log("[Dashboard] Received ICE candidate from", message.from);
               webrtc.handleIceCandidate(message.from, message.candidate);
@@ -221,6 +234,7 @@ export default function Dashboard() {
           }
           
           setWsConnected(false);
+          setWsAuthenticated(false); // Reset auth state on disconnect
           wsRef.current = null;
           
           // Attempt to reconnect with exponential backoff
@@ -378,6 +392,17 @@ export default function Dashboard() {
 
   // Live view handlers
   const handleStartLiveView = async (deviceId: string) => {
+    // Ensure WebSocket is authenticated before starting WebRTC
+    if (!wsAuthenticated) {
+      console.warn('[Dashboard] Cannot start live view - WebSocket not authenticated yet');
+      toast({
+        title: "Not Ready",
+        description: "Please wait for connection to be established",
+        variant: "destructive",
+      });
+      return;
+    }
+
     await webrtc.startLiveView(deviceId, (stream) => {
       console.log(`[Dashboard] Received stream for ${deviceId}`);
       setLiveStreams((prev) => {
