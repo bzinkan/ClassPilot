@@ -184,3 +184,60 @@ export async function getScreenshot(deviceId: string): Promise<ScreenshotData | 
     return null;
   }
 }
+
+// Flight path status storage in Redis (for multi-instance deployments)
+const FLIGHT_PATH_KEY_PREFIX = `${redisPrefix}:flightpath:`;
+const FLIGHT_PATH_TTL_SECONDS = 3600; // 1 hour TTL (flight paths persist for the session)
+
+export type FlightPathStatus = {
+  active: boolean;
+  flightPathName?: string;
+  flightPathId?: string;
+  appliedAt: number;
+};
+
+export async function setFlightPathStatus(deviceId: string, data: FlightPathStatus): Promise<boolean> {
+  if (!redisUrl) {
+    return false; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return false;
+  }
+
+  try {
+    const key = `${FLIGHT_PATH_KEY_PREFIX}${deviceId}`;
+    if (data.active) {
+      await redisPublisher.setEx(key, FLIGHT_PATH_TTL_SECONDS, JSON.stringify(data));
+    } else {
+      // When removing flight path, delete the key
+      await redisPublisher.del(key);
+    }
+    return true;
+  } catch (error) {
+    console.warn("[FlightPath] Redis set failed:", error);
+    return false;
+  }
+}
+
+export async function getFlightPathStatus(deviceId: string): Promise<FlightPathStatus | null> {
+  if (!redisUrl) {
+    return null; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return null;
+  }
+
+  try {
+    const key = `${FLIGHT_PATH_KEY_PREFIX}${deviceId}`;
+    const data = await redisPublisher.get(key);
+    if (!data) {
+      return null;
+    }
+    return JSON.parse(data) as FlightPathStatus;
+  } catch (error) {
+    console.warn("[FlightPath] Redis get failed:", error);
+    return null;
+  }
+}

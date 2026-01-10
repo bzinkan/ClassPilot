@@ -37,7 +37,7 @@ import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@sh
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
-import { publishWS, subscribeWS, isRedisEnabled, setScreenshot, getScreenshot, type WsRedisTarget, type ScreenshotData } from "./ws-redis";
+import { publishWS, subscribeWS, isRedisEnabled, setScreenshot, getScreenshot, setFlightPathStatus, getFlightPathStatus, type WsRedisTarget, type ScreenshotData, type FlightPathStatus } from "./ws-redis";
 import {
   authenticateWsClient,
   broadcastToStudentsLocal,
@@ -3312,6 +3312,20 @@ export async function registerRoutes(
       filteredStatuses.forEach(s => {
         console.log(`  - ${s.studentName} (grade: ${s.gradeLevel}, status: ${s.status}, screenLocked: ${s.screenLocked})`);
       });
+
+      // Overlay Redis flight path status for multi-instance consistency
+      if (isRedisEnabled()) {
+        for (const status of filteredStatuses) {
+          if (status.deviceId) {
+            const redisFlightPath = await getFlightPathStatus(status.deviceId);
+            if (redisFlightPath) {
+              status.flightPathActive = redisFlightPath.active;
+              status.activeFlightPathName = redisFlightPath.flightPathName;
+            }
+          }
+        }
+      }
+
       res.json(filteredStatuses);
     } catch (error) {
       console.error("Get students error:", error);
@@ -3415,7 +3429,20 @@ export async function registerRoutes(
         filteredStatuses = [];
         console.log('Teacher has no active session - showing empty dashboard');
       }
-      
+
+      // Overlay Redis flight path status for multi-instance consistency
+      if (isRedisEnabled()) {
+        for (const status of filteredStatuses) {
+          if (status.primaryDeviceId) {
+            const redisFlightPath = await getFlightPathStatus(status.primaryDeviceId);
+            if (redisFlightPath) {
+              status.flightPathActive = redisFlightPath.active;
+              status.activeFlightPathName = redisFlightPath.flightPathName;
+            }
+          }
+        }
+      }
+
       res.json(filteredStatuses);
     } catch (error) {
       console.error("Error fetching aggregated students:", error);
@@ -5858,16 +5885,55 @@ export async function registerRoutes(
         type: 'remote-control',
         command: {
           type: 'apply-flight-path',
-          data: { 
+          data: {
             flightPathId,
             flightPathName,
-            allowedDomains 
+            allowedDomains
           },
         },
       }, undefined, targetDeviceIds);
-      
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${sentCount} device(s)` 
+
+      // Immediately update StudentStatus for instant UI feedback (same as remove-flight-path)
+      const now = Date.now();
+      const deviceIds = targetDeviceIds && targetDeviceIds.length > 0
+        ? targetDeviceIds
+        : await (async () => {
+            // If no specific devices, get all online devices for this school
+            const students = await storage.getStudentStatusesBySchool(sessionSchoolId);
+            return students
+              .filter((s: StudentStatus) => s.status === 'online' || s.status === 'idle')
+              .map((s: StudentStatus) => s.deviceId)
+              .filter((id): id is string => !!id);
+          })();
+
+      for (const deviceId of deviceIds) {
+        // Store in Redis for multi-instance consistency
+        await setFlightPathStatus(deviceId, {
+          active: true,
+          flightPathName,
+          flightPathId,
+          appliedAt: now,
+        });
+
+        const activeStudent = await storage.getActiveStudentForDevice(deviceId);
+        if (activeStudent && assertSameSchool(sessionSchoolId, activeStudent.schoolId)) {
+          const status = await storage.getStudentStatus(activeStudent.id);
+          if (status) {
+            status.flightPathActive = true;
+            status.activeFlightPathName = flightPathName;
+            status.screenLockedSetAt = now; // Prevent heartbeat overwrite for 5 seconds
+            await storage.updateStudentStatus(status);
+          }
+        }
+      }
+
+      // Notify teachers to update UI immediately
+      broadcastToTeachers(sessionSchoolId, {
+        type: 'student-update',
+      });
+
+      const target = targetDeviceIds && targetDeviceIds.length > 0
+        ? `${sentCount} device(s)`
         : "all connected devices";
       res.json({ success: true, message: `Applied flight path "${flightPathName}" to ${target}` });
     } catch (error) {
@@ -5875,7 +5941,7 @@ export async function registerRoutes(
       res.status(500).json({ error: "Internal server error" });
     }
   });
-  
+
   // Remove Flight Path
   app.post("/api/remote/remove-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
@@ -5898,6 +5964,12 @@ export async function registerRoutes(
       const now = Date.now();
       const removedStudentIds = new Set<string>();
       for (const deviceId of targetDeviceIds) {
+        // Remove from Redis for multi-instance consistency
+        await setFlightPathStatus(deviceId, {
+          active: false,
+          appliedAt: now,
+        });
+
         const activeStudent = await storage.getActiveStudentForDevice(deviceId);
         if (activeStudent) {
           if (!assertSameSchool(sessionSchoolId, activeStudent.schoolId)) {
@@ -5913,7 +5985,7 @@ export async function registerRoutes(
           }
         }
       }
-      
+
       // Notify teachers to update UI immediately
       broadcastToTeachers(sessionSchoolId, {
         type: 'student-update',
