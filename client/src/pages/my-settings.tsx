@@ -145,17 +145,7 @@ export default function MySettings() {
         defaultFlightPathId: data.defaultFlightPathId || null,
       };
 
-      const response = await fetch('/api/teacher/settings', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to save settings');
-      }
-
-      return await response.json();
+      return await apiRequest("POST", "/api/teacher/settings", payload);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['/api/teacher/settings'] });
