@@ -484,6 +484,7 @@ export async function registerRoutes(
   const wss = new WebSocketServer({ noServer: true });
 
   const deliverRedisMessage = (target: WsRedisTarget, message: unknown) => {
+    const msgType = (message as { type?: string })?.type ?? 'unknown';
     switch (target.kind) {
       case "staff":
         broadcastToTeachersLocal(target.schoolId, message);
@@ -492,6 +493,7 @@ export async function registerRoutes(
         broadcastToStudentsLocal(target.schoolId, message, undefined, target.targetDeviceIds);
         break;
       case "device":
+        console.log(`[Redis] Delivering ${msgType} to device ${target.deviceId}`);
         sendToDeviceLocal(target.schoolId, target.deviceId, message);
         break;
       case "role":
@@ -806,14 +808,16 @@ export async function registerRoutes(
         // Handle request to start screen sharing from teacher to student
         if (message.type === 'request-stream' && client.role === 'teacher') {
           const targetDeviceId = message.deviceId;
+          console.log(`[WebSocket] Received request-stream for device: ${targetDeviceId}`);
           if (!targetDeviceId) return;
 
           // No additional permission check needed here
           // Dashboard visibility already controls which students teachers can see
           // If a teacher can see a student tile, they can use Live View
-          
+
           // Forward the request to the student device
           if (client.schoolId) {
+            console.log(`[WebSocket] Forwarding request-stream to ${targetDeviceId} (schoolId: ${client.schoolId})`);
             sendToDevice(client.schoolId, targetDeviceId, {
               type: 'request-stream',
               from: 'teacher'

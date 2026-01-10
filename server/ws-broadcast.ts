@@ -146,10 +146,13 @@ export function broadcastToStudentsLocal(
 
 export function sendToDeviceLocal(schoolId: string, deviceId: string, message: unknown) {
   const sockets = studentSocketsBySchool.get(schoolId);
+  const msgType = (message as { type?: string })?.type ?? 'unknown';
   if (!sockets) {
+    console.log(`[WS-Local] No sockets for school ${schoolId} to deliver ${msgType} to ${deviceId}`);
     return;
   }
   const messageStr = JSON.stringify(message);
+  let sent = false;
   sockets.forEach((ws) => {
     const client = wsClients.get(ws);
     if (!client || !client.authenticated || client.deviceId !== deviceId) {
@@ -157,8 +160,13 @@ export function sendToDeviceLocal(schoolId: string, deviceId: string, message: u
     }
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(messageStr);
+      sent = true;
+      console.log(`[WS-Local] Sent ${msgType} to device ${deviceId}`);
     }
   });
+  if (!sent) {
+    console.log(`[WS-Local] Device ${deviceId} not found locally for ${msgType}`);
+  }
 }
 
 export function sendToRoleLocal(schoolId: string, role: WsRole, message: unknown) {
