@@ -37,7 +37,7 @@ import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@sh
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
-import { publishWS, subscribeWS, type WsRedisTarget } from "./ws-redis";
+import { publishWS, subscribeWS, isRedisEnabled, type WsRedisTarget } from "./ws-redis";
 import {
   authenticateWsClient,
   broadcastToStudentsLocal,
@@ -5522,18 +5522,29 @@ export async function registerRoutes(
         },
       }, undefined, targetDeviceIds);
       
-      console.log(`Open tab command sent to ${sentCount} connected device(s)`);
-      
+      console.log(`Open tab command sent to ${sentCount} local device(s)${isRedisEnabled() ? ' (also published to Redis)' : ''}`);
+
+      // When Redis pub/sub is enabled, sentCount only reflects local connections.
+      // The message is also published to Redis for other instances, so we can't
+      // accurately determine the total recipients. Show a generic success message.
+      if (isRedisEnabled()) {
+        const target = targetDeviceIds && targetDeviceIds.length > 0
+          ? 'selected device(s)'
+          : 'connected device(s)';
+        return res.json({ success: true, sentCount, message: `Opening ${url} on ${target}` });
+      }
+
+      // Single-instance mode: sentCount is accurate
       if (sentCount === 0) {
-        return res.status(200).json({ 
-          success: true, 
+        return res.status(200).json({
+          success: true,
           sentCount: 0,
           message: `No student devices are currently connected. Make sure students have the Chrome extension installed and running.`
         });
       }
-      
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${sentCount} selected device(s)` 
+
+      const target = targetDeviceIds && targetDeviceIds.length > 0
+        ? `${sentCount} selected device(s)`
         : `${sentCount} connected device(s)`;
       res.json({ success: true, sentCount, message: `Opened ${url} on ${target}` });
     } catch (error) {

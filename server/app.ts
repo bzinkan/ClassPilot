@@ -285,6 +285,10 @@ export async function createApp(options: AppOptions = {}) {
   // Setup Google OAuth (must be after session middleware)
   setupGoogleAuth(app);
 
+  // Screenshot endpoint needs larger body limit (500KB for compressed images)
+  // Must be defined BEFORE the general JSON parser
+  app.use("/api/device/screenshot", express.json({ limit: "500kb" }));
+
   // Parse JSON with size limit to prevent memory issues
   app.use(
     express.json({
