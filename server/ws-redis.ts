@@ -82,19 +82,28 @@ export async function subscribeWS(
   }
 
   subscribed = true;
+  console.log(`[Redis] Subscribing to channel: ${redisChannel}`);
   try {
     await redisSubscriber.subscribe(redisChannel, (payload: string) => {
       try {
-        const message = JSON.parse(payload) as WsRedisEnvelope;
-        if (!message || message.instanceId === instanceId) {
+        const envelope = JSON.parse(payload) as WsRedisEnvelope;
+        if (!envelope) {
           return;
         }
-        onMessage(message.target, message.message);
+        // Skip messages from this instance (they were already handled locally)
+        if (envelope.instanceId === instanceId) {
+          return;
+        }
+        const msgType = (envelope.message as { type?: string })?.type ?? 'unknown';
+        console.log(`[Redis] Received ${msgType} from another instance, target: ${envelope.target.kind}`);
+        onMessage(envelope.target, envelope.message);
       } catch (error) {
         warnRedis(error);
       }
     });
+    console.log(`[Redis] Successfully subscribed`);
   } catch (error) {
+    console.error(`[Redis] Subscription failed:`, error);
     warnRedis(error);
   }
 }
@@ -115,6 +124,8 @@ export async function publishWS(target: WsRedisTarget, message: unknown): Promis
   };
 
   try {
+    const msgType = (message as { type?: string })?.type ?? 'unknown';
+    console.log(`[Redis] Publishing ${msgType} to ${target.kind}`);
     await redisPublisher.publish(redisChannel, JSON.stringify(payload));
   } catch (error) {
     warnRedis(error);
