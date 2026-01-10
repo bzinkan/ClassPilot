@@ -1220,15 +1220,16 @@ export class MemStorage implements IStorage {
         status.favicon = heartbeat.favicon ?? undefined;
         status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
-        // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
+        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 5 seconds)
+        // This prevents heartbeat race conditions where the extension hasn't yet processed the server command
         const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
         if (!serverSetRecently) {
           status.screenLocked = heartbeat.screenLocked ?? false;
+          status.flightPathActive = heartbeat.flightPathActive ?? false;
+          status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         }
-        
+
         status.isSharing = heartbeat.isSharing ?? false;
-        status.flightPathActive = heartbeat.flightPathActive ?? false;
-        status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
@@ -2798,15 +2799,16 @@ export class DatabaseStorage implements IStorage {
         status.favicon = heartbeat.favicon ?? undefined;
         status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
-        // Only update screenLocked from heartbeat if server hasn't set it recently (within 5 seconds)
+        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 5 seconds)
+        // This prevents heartbeat race conditions where the extension hasn't yet processed the server command
         const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
         if (!serverSetRecently) {
           status.screenLocked = heartbeat.screenLocked ?? false;
+          status.flightPathActive = heartbeat.flightPathActive ?? false;
+          status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         }
-        
+
         status.isSharing = heartbeat.isSharing ?? false;
-        status.flightPathActive = heartbeat.flightPathActive ?? false;
-        status.activeFlightPathName = heartbeat.activeFlightPathName || undefined;
         status.cameraActive = heartbeat.cameraActive ?? false;
         status.lastSeenAt = now;
         status.status = this.calculateStatus(now);
