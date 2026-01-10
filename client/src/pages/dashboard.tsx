@@ -292,11 +292,25 @@ export default function Dashboard() {
 
   // Re-authenticate when currentUser becomes available (for teachers)
   useEffect(() => {
-    if (currentUser?.id && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      console.log("[Dashboard] Re-authenticating with userId:", currentUser.id);
-      wsRef.current.send(JSON.stringify({ type: 'auth', role: 'teacher', userId: currentUser.id }));
+    if (!currentUser?.id) {
+      console.log("[Dashboard] Waiting for currentUser...");
+      return;
     }
-  }, [currentUser?.id]);
+    if (!wsRef.current) {
+      console.log("[Dashboard] WebSocket not ready yet, will auth on connect");
+      return;
+    }
+    if (wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log("[Dashboard] WebSocket not open yet, state:", wsRef.current.readyState);
+      return;
+    }
+    if (wsAuthenticated) {
+      console.log("[Dashboard] Already authenticated, skipping re-auth");
+      return;
+    }
+    console.log("[Dashboard] Sending auth with userId:", currentUser.id);
+    wsRef.current.send(JSON.stringify({ type: 'auth', role: currentUser.role || 'teacher', userId: currentUser.id }));
+  }, [currentUser?.id, currentUser?.role, wsConnected, wsAuthenticated]);
 
   // Set initial grade when settings load and validate saved grade
   useEffect(() => {
