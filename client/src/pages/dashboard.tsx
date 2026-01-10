@@ -87,6 +87,7 @@ export default function Dashboard() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true); // Track if component is mounted
+  const invalidateTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Debounce WebSocket invalidations
   const maxReconnectDelay = 30000; // 30 seconds max delay
   const [wsAuthenticated, setWsAuthenticated] = useState(false); // Track WebSocket auth state
 
@@ -95,7 +96,7 @@ export default function Dashboard() {
 
   const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
     queryKey: ['/api/students-aggregated'],
-    refetchInterval: 5000, // Poll every 5 seconds to update idle/offline status
+    refetchInterval: 15000, // Poll every 15 seconds for idle/offline detection (WebSocket handles real-time updates)
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
@@ -204,9 +205,16 @@ export default function Dashboard() {
             }
 
             if (message.type === 'student-update') {
-              console.log("[Dashboard] Student update detected, invalidating queries...");
-              // Invalidate queries to force refetch (needed because staleTime: Infinity)
-              queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
+              // Debounce invalidations to coalesce multiple rapid updates into one refetch
+              // This prevents flickering when multiple heartbeats arrive quickly
+              if (invalidateTimeoutRef.current) {
+                clearTimeout(invalidateTimeoutRef.current);
+              }
+              invalidateTimeoutRef.current = setTimeout(() => {
+                console.log("[Dashboard] Student update detected, invalidating queries...");
+                queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
+                invalidateTimeoutRef.current = null;
+              }, 300); // 300ms debounce - coalesces rapid updates
             }
 
             // Handle WebRTC signaling messages
@@ -830,6 +838,12 @@ export default function Dashboard() {
 
   const lockScreenMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
+      // Optimistic update - instantly show locked state
+      const devicesToLock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => devicesToLock.includes(s.primaryDeviceId ?? '') ? { ...s, screenLocked: true } : s)
+      );
+
       const res = await apiRequest('POST', '/api/remote/lock-screen', { url, targetDeviceIds });
       return res.json();
     },
@@ -838,9 +852,10 @@ export default function Dashboard() {
         title: "Success",
         description: data.message,
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
     },
     onError: (error: Error) => {
+      // Revert optimistic update on error
+      queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
         title: "Error",
@@ -851,6 +866,12 @@ export default function Dashboard() {
 
   const unlockScreenMutation = useMutation({
     mutationFn: async (targetDeviceIds?: string[]) => {
+      // Optimistic update - instantly show unlocked state
+      const devicesToUnlock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => devicesToUnlock.includes(s.primaryDeviceId ?? '') ? { ...s, screenLocked: false } : s)
+      );
+
       const res = await apiRequest('POST', '/api/remote/unlock-screen', { targetDeviceIds });
       return res.json();
     },
@@ -859,9 +880,10 @@ export default function Dashboard() {
         title: "Success",
         description: data.message,
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
     },
     onError: (error: Error) => {
+      // Revert optimistic update on error
+      queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
         title: "Error",
@@ -935,7 +957,13 @@ export default function Dashboard() {
 
   // Apply Flight Path mutation
   const applyFlightPathMutation = useMutation({
-    mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[] }) => {
+    mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds, flightPathName }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[]; flightPathName?: string }) => {
+      // Optimistic update - instantly show flight path active
+      const devicesToApply = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => devicesToApply.includes(s.primaryDeviceId ?? '') ? { ...s, flightPathActive: true, activeFlightPathName: flightPathName } : s)
+      );
+
       const res = await apiRequest('POST', '/api/remote/apply-flight-path', { flightPathId, allowedDomains, targetDeviceIds });
       return res.json();
     },
@@ -946,9 +974,10 @@ export default function Dashboard() {
       });
       setShowApplyFlightPathDialog(false);
       setSelectedFlightPathId("");
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
     },
     onError: (error: Error) => {
+      // Revert optimistic update on error
+      queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
         title: "Error",
@@ -960,6 +989,11 @@ export default function Dashboard() {
   // Remove Flight Path mutation
   const removeFlightPathMutation = useMutation({
     mutationFn: async (targetDeviceIds: string[]) => {
+      // Optimistic update - instantly show flight path removed
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => targetDeviceIds.includes(s.primaryDeviceId ?? '') ? { ...s, flightPathActive: false, activeFlightPathName: undefined } : s)
+      );
+
       const res = await apiRequest('POST', '/api/remote/remove-flight-path', { targetDeviceIds });
       return res.json();
     },
@@ -968,9 +1002,10 @@ export default function Dashboard() {
         title: "Success",
         description: data.message,
       });
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
     },
     onError: (error: Error) => {
+      // Revert optimistic update on error
+      queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
         title: "Error",
@@ -1001,10 +1036,11 @@ export default function Dashboard() {
     }
     
     const targetDeviceIds = getTargetDeviceIds();
-    applyFlightPathMutation.mutate({ 
-      flightPathId: flightPath.id, 
+    applyFlightPathMutation.mutate({
+      flightPathId: flightPath.id,
       allowedDomains: flightPath.allowedDomains || [],
-      targetDeviceIds 
+      targetDeviceIds,
+      flightPathName: flightPath.flightPathName,
     });
   };
 

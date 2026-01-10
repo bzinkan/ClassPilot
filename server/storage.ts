@@ -1220,9 +1220,10 @@ export class MemStorage implements IStorage {
         status.favicon = heartbeat.favicon ?? undefined;
         status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
-        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 5 seconds)
+        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 15 seconds)
         // This prevents heartbeat race conditions where the extension hasn't yet processed the server command
-        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
+        // 15 seconds covers the worst-case heartbeat interval plus network delays
+        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 15000;
         if (!serverSetRecently) {
           status.screenLocked = heartbeat.screenLocked ?? false;
           status.flightPathActive = heartbeat.flightPathActive ?? false;
@@ -2799,9 +2800,10 @@ export class DatabaseStorage implements IStorage {
         status.favicon = heartbeat.favicon ?? undefined;
         status.allOpenTabs = allOpenTabs; // 🆕 Update all tabs (in-memory only)
         
-        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 5 seconds)
+        // Only update screenLocked/flightPath from heartbeat if server hasn't set it recently (within 15 seconds)
         // This prevents heartbeat race conditions where the extension hasn't yet processed the server command
-        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 5000;
+        // 15 seconds covers the worst-case heartbeat interval plus network delays
+        const serverSetRecently = status.screenLockedSetAt && (now - status.screenLockedSetAt) < 15000;
         if (!serverSetRecently) {
           status.screenLocked = heartbeat.screenLocked ?? false;
           status.flightPathActive = heartbeat.flightPathActive ?? false;
