@@ -132,8 +132,9 @@ const IDLE_DETECTION_SECONDS = 180;
 // We keep the same frequency because Chrome's "idle" detection (no keyboard/mouse)
 // doesn't mean the student is away - they could be watching a video or reading.
 // The server will display the student's actual activity regardless of idle state.
-const HEARTBEAT_ACTIVE_MINUTES = 0.5;  // 30 seconds - minimum for Chrome alarms
-const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - same as active to prevent status flapping
+const HEARTBEAT_INTERVAL_MS = 10000;  // 10 seconds - using setInterval to bypass Chrome alarms minimum
+const HEARTBEAT_ACTIVE_MINUTES = 0.5;  // 30 seconds - fallback for Chrome alarms
+const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - fallback for Chrome alarms
 const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -147,6 +148,7 @@ let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
 let settingsAlarmScheduled = false;
+let heartbeatIntervalId = null;
 let observedHeartbeatTimer = null;
 let observedByTeacher = false;
 let lastObservedSignature = null;
@@ -457,10 +459,21 @@ function disconnectWebSocket() {
 }
 
 function scheduleHeartbeat(periodInMinutes) {
+  // Clear any existing heartbeat mechanisms
   chrome.alarms.clear('heartbeat');
+  if (heartbeatIntervalId) {
+    clearInterval(heartbeatIntervalId);
+    heartbeatIntervalId = null;
+  }
+
   if (periodInMinutes) {
-    chrome.alarms.create('heartbeat', { periodInMinutes });
+    // Use setInterval for 10-second heartbeats (Chrome alarms minimum is 30 seconds)
+    heartbeatIntervalId = setInterval(() => {
+      safeSendHeartbeat('interval');
+    }, HEARTBEAT_INTERVAL_MS);
+    // Send immediately when starting
     safeSendHeartbeat('schedule');
+    console.log('[Heartbeat] Scheduled every 10 seconds');
   }
 }
 
@@ -470,6 +483,11 @@ function clearNetworkAlarms() {
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear('health-check');
   chrome.alarms.clear('heartbeat');
+  // Also clear setInterval-based heartbeat
+  if (heartbeatIntervalId) {
+    clearInterval(heartbeatIntervalId);
+    heartbeatIntervalId = null;
+  }
   settingsAlarmScheduled = false;
 }
 
@@ -1439,19 +1457,21 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // Screenshot Thumbnail Capture (for teacher dashboard grid view)
-const SCREENSHOT_INTERVAL_SECONDS = 10;
-let screenshotAlarmScheduled = false;
+const SCREENSHOT_INTERVAL_MS = 10000; // 10 seconds
+let screenshotIntervalId = null;
 
 function scheduleScreenshotCapture(enable) {
-  if (enable && !screenshotAlarmScheduled) {
-    // Chrome alarms minimum is 0.5 minutes (30 seconds)
-    // For 10-second interval, we'll use a combination of alarm + setTimeout
-    chrome.alarms.create('screenshot-capture', { periodInMinutes: 0.5 });
-    screenshotAlarmScheduled = true;
-    console.log('[Screenshot] Scheduled periodic capture');
-  } else if (!enable && screenshotAlarmScheduled) {
-    chrome.alarms.clear('screenshot-capture');
-    screenshotAlarmScheduled = false;
+  if (enable && !screenshotIntervalId) {
+    // Use setInterval for 10-second captures (Chrome alarms minimum is 30 seconds)
+    screenshotIntervalId = setInterval(() => {
+      captureAndSendScreenshot();
+    }, SCREENSHOT_INTERVAL_MS);
+    // Also capture immediately when enabled
+    captureAndSendScreenshot();
+    console.log('[Screenshot] Scheduled periodic capture every 10 seconds');
+  } else if (!enable && screenshotIntervalId) {
+    clearInterval(screenshotIntervalId);
+    screenshotIntervalId = null;
     console.log('[Screenshot] Stopped periodic capture');
   }
 }

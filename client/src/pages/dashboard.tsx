@@ -860,7 +860,10 @@ export default function Dashboard() {
   const closeTabsMutation = useMutation({
     mutationFn: async ({ closeAll, pattern, specificUrls, targetDeviceIds, tabsToClose }: { closeAll?: boolean; pattern?: string; specificUrls?: string[]; targetDeviceIds?: string[]; tabsToClose?: Array<{ deviceId: string; url: string }> }) => {
       const res = await apiRequest('POST', '/api/remote/close-tabs', { closeAll, pattern, specificUrls, targetDeviceIds, tabsToClose });
-      return res.json();
+      const data = await res.json();
+      // Collect device IDs from tabsToClose or targetDeviceIds for screenshot refresh
+      const affectedDeviceIds = tabsToClose?.map(t => t.deviceId) || targetDeviceIds;
+      return { ...data, affectedDeviceIds };
     },
     onSuccess: (data) => {
       toast({
@@ -869,6 +872,10 @@ export default function Dashboard() {
       });
       setShowCloseTabsDialog(false);
       setSelectedTabsToClose(new Set());
+      // Refresh screenshots after closing tabs so thumbnail updates
+      if (data.affectedDeviceIds) {
+        refreshScreenshotsForDevices(data.affectedDeviceIds);
+      }
     },
     onError: (error: Error) => {
       toast({
