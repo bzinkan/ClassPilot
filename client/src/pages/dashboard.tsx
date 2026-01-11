@@ -88,6 +88,7 @@ export default function Dashboard() {
   const reconnectAttemptsRef = useRef(0);
   const isMountedRef = useRef(true); // Track if component is mounted
   const invalidateTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Debounce WebSocket invalidations
+  const optimisticUpdateUntilRef = useRef<number>(0); // Skip WS refetches until this timestamp
   const maxReconnectDelay = 30000; // 30 seconds max delay
   const [wsAuthenticated, setWsAuthenticated] = useState(false); // Track WebSocket auth state
 
@@ -205,12 +206,24 @@ export default function Dashboard() {
             }
 
             if (message.type === 'student-update') {
+              // Skip refetches during optimistic update period to prevent flickering
+              // After lock/unlock/flight path actions, we show optimistic state for 3 seconds
+              // before allowing WebSocket updates to trigger refetches
+              if (Date.now() < optimisticUpdateUntilRef.current) {
+                console.log("[Dashboard] Skipping refetch during optimistic update period");
+                return;
+              }
+
               // Debounce invalidations to coalesce multiple rapid updates into one refetch
-              // This prevents flickering when multiple heartbeats arrive quickly
               if (invalidateTimeoutRef.current) {
                 clearTimeout(invalidateTimeoutRef.current);
               }
               invalidateTimeoutRef.current = setTimeout(() => {
+                // Double-check we're still outside optimistic period
+                if (Date.now() < optimisticUpdateUntilRef.current) {
+                  console.log("[Dashboard] Skipping delayed refetch during optimistic update period");
+                  return;
+                }
                 console.log("[Dashboard] Student update detected, invalidating queries...");
                 queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
                 invalidateTimeoutRef.current = null;
@@ -838,6 +851,9 @@ export default function Dashboard() {
 
   const lockScreenMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
+      // Block WebSocket refetches for 3 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 3000;
+
       // Optimistic update - instantly show locked state
       const devicesToLock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
@@ -855,6 +871,7 @@ export default function Dashboard() {
     },
     onError: (error: Error) => {
       // Revert optimistic update on error
+      optimisticUpdateUntilRef.current = 0; // Allow refetches again
       queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
@@ -866,6 +883,9 @@ export default function Dashboard() {
 
   const unlockScreenMutation = useMutation({
     mutationFn: async (targetDeviceIds?: string[]) => {
+      // Block WebSocket refetches for 3 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 3000;
+
       // Optimistic update - instantly show unlocked state
       const devicesToUnlock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
@@ -883,6 +903,7 @@ export default function Dashboard() {
     },
     onError: (error: Error) => {
       // Revert optimistic update on error
+      optimisticUpdateUntilRef.current = 0; // Allow refetches again
       queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
@@ -958,6 +979,9 @@ export default function Dashboard() {
   // Apply Flight Path mutation
   const applyFlightPathMutation = useMutation({
     mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds, flightPathName }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[]; flightPathName?: string }) => {
+      // Block WebSocket refetches for 3 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 3000;
+
       // Optimistic update - instantly show flight path active
       const devicesToApply = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
@@ -977,6 +1001,7 @@ export default function Dashboard() {
     },
     onError: (error: Error) => {
       // Revert optimistic update on error
+      optimisticUpdateUntilRef.current = 0; // Allow refetches again
       queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
@@ -989,6 +1014,9 @@ export default function Dashboard() {
   // Remove Flight Path mutation
   const removeFlightPathMutation = useMutation({
     mutationFn: async (targetDeviceIds: string[]) => {
+      // Block WebSocket refetches for 3 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 3000;
+
       // Optimistic update - instantly show flight path removed
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
         old?.map(s => targetDeviceIds.includes(s.primaryDeviceId ?? '') ? { ...s, flightPathActive: false, activeFlightPathName: undefined } : s)
@@ -1005,6 +1033,7 @@ export default function Dashboard() {
     },
     onError: (error: Error) => {
       // Revert optimistic update on error
+      optimisticUpdateUntilRef.current = 0; // Allow refetches again
       queryClient.invalidateQueries({ queryKey: ['/api/students-aggregated'] });
       toast({
         variant: "destructive",
