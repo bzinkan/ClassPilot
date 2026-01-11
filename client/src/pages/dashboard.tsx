@@ -97,7 +97,7 @@ export default function Dashboard() {
 
   const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
     queryKey: ['/api/students-aggregated'],
-    refetchInterval: 15000, // Poll every 15 seconds for idle/offline detection (WebSocket handles real-time updates)
+    refetchInterval: 10000, // Poll every 10 seconds for status updates
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
