@@ -210,14 +210,31 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         targetDeviceIds: [student.primaryDeviceId]
       });
     },
+    onMutate: async () => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ['/api/students-aggregated'] });
+
+      // Snapshot the previous value
+      const previousStudents = queryClient.getQueryData(['/api/students-aggregated']);
+
+      // Optimistically update to the new value
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => s.primaryDeviceId === student.primaryDeviceId ? { ...s, screenLocked: true } : s)
+      );
+
+      return { previousStudents };
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Screen locked",
         description: `${student.studentName} is now locked to their current screen`,
       });
     },
-    onError: (error: any) => {
+    onError: (error: any, _, context) => {
+      // Revert optimistic update on error
+      if (context?.previousStudents) {
+        queryClient.setQueryData(['/api/students-aggregated'], context.previousStudents);
+      }
       toast({
         variant: "destructive",
         title: "Failed to lock screen",
@@ -225,7 +242,7 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       });
     },
   });
-  
+
   // Unlock screen mutation
   const unlockScreenMutation = useMutation({
     mutationFn: async () => {
@@ -236,12 +253,31 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         targetDeviceIds: [student.primaryDeviceId]
       });
     },
+    onMutate: async () => {
+      // Cancel any outgoing refetches
+      await queryClient.cancelQueries({ queryKey: ['/api/students-aggregated'] });
+
+      // Snapshot the previous value
+      const previousStudents = queryClient.getQueryData(['/api/students-aggregated']);
+
+      // Optimistically update to the new value
+      queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
+        old?.map(s => s.primaryDeviceId === student.primaryDeviceId ? { ...s, screenLocked: false } : s)
+      );
+
+      return { previousStudents };
+    },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['/api/students'] });
       toast({
         title: "Screen unlocked",
         description: `${student.studentName} can now browse freely`,
       });
+    },
+    onError: (_, __, context) => {
+      // Revert optimistic update on error
+      if (context?.previousStudents) {
+        queryClient.setQueryData(['/api/students-aggregated'], context.previousStudents);
+      }
     },
   });
   
