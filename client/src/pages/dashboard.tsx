@@ -97,7 +97,14 @@ export default function Dashboard() {
 
   const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
     queryKey: ['/api/students-aggregated'],
-    refetchInterval: 10000, // Poll every 10 seconds for status updates
+    // Custom refetch interval that respects optimistic update period
+    refetchInterval: () => {
+      // Skip polling during optimistic update period to prevent flickering
+      if (Date.now() < optimisticUpdateUntilRef.current) {
+        return false; // Don't refetch
+      }
+      return 10000; // Poll every 10 seconds
+    },
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({
@@ -804,11 +811,32 @@ export default function Dashboard() {
     },
   });
 
+  // Helper to refresh screenshots for targeted devices after a delay
+  // This gives the extension time to navigate and capture the new screen
+  const refreshScreenshotsForDevices = (targetDeviceIds?: string[]) => {
+    const deviceIds = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
+
+    // Refresh after 2 seconds (give extension time to navigate and capture)
+    setTimeout(() => {
+      deviceIds.forEach(deviceId => {
+        queryClient.invalidateQueries({ queryKey: ['/api/device/screenshot', deviceId] });
+      });
+    }, 2000);
+
+    // Refresh again after 5 seconds for good measure
+    setTimeout(() => {
+      deviceIds.forEach(deviceId => {
+        queryClient.invalidateQueries({ queryKey: ['/api/device/screenshot', deviceId] });
+      });
+    }, 5000);
+  };
+
   // Remote control mutations
   const openTabMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
       const res = await apiRequest('POST', '/api/remote/open-tab', { url, targetDeviceIds });
-      return res.json();
+      const data = await res.json();
+      return { ...data, targetDeviceIds };
     },
     onSuccess: (data) => {
       toast({
@@ -817,6 +845,8 @@ export default function Dashboard() {
       });
       setShowOpenTabDialog(false);
       setOpenTabUrl("");
+      // Refresh screenshots after opening tab so thumbnail updates
+      refreshScreenshotsForDevices(data.targetDeviceIds);
     },
     onError: (error: Error) => {
       toast({
@@ -851,8 +881,8 @@ export default function Dashboard() {
 
   const lockScreenMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
-      // Block WebSocket refetches for 7 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 7000;
+      // Block WebSocket refetches for 15 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 15000;
 
       // Optimistic update - instantly show locked state
       const devicesToLock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -884,8 +914,8 @@ export default function Dashboard() {
 
   const unlockScreenMutation = useMutation({
     mutationFn: async (targetDeviceIds?: string[]) => {
-      // Block WebSocket refetches for 7 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 7000;
+      // Block WebSocket refetches for 15 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 15000;
 
       // Optimistic update - instantly show unlocked state
       const devicesToUnlock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -981,8 +1011,8 @@ export default function Dashboard() {
   // Apply Flight Path mutation
   const applyFlightPathMutation = useMutation({
     mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds, flightPathName }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[]; flightPathName?: string }) => {
-      // Block WebSocket refetches for 7 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 7000;
+      // Block WebSocket refetches for 15 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 15000;
 
       // Optimistic update - instantly show flight path active
       const devicesToApply = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -992,7 +1022,7 @@ export default function Dashboard() {
 
       const res = await apiRequest('POST', '/api/remote/apply-flight-path', { flightPathId, allowedDomains, targetDeviceIds });
       const data = await res.json();
-      return { ...data, deviceCount: devicesToApply.length, flightPathName };
+      return { ...data, deviceCount: devicesToApply.length, flightPathName, devicesToApply };
     },
     onSuccess: (data) => {
       toast({
@@ -1001,6 +1031,8 @@ export default function Dashboard() {
       });
       setShowApplyFlightPathDialog(false);
       setSelectedFlightPathId("");
+      // Refresh screenshots after applying flight path so thumbnail updates
+      refreshScreenshotsForDevices(data.devicesToApply);
     },
     onError: (error: Error) => {
       // Revert optimistic update on error
@@ -1017,8 +1049,8 @@ export default function Dashboard() {
   // Remove Flight Path mutation
   const removeFlightPathMutation = useMutation({
     mutationFn: async (targetDeviceIds: string[]) => {
-      // Block WebSocket refetches for 7 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 7000;
+      // Block WebSocket refetches for 15 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 15000;
 
       // Optimistic update - instantly show flight path removed
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
