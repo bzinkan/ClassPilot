@@ -37,7 +37,7 @@ import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@sh
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
-import { publishWS, subscribeWS, isRedisEnabled, setScreenshot, getScreenshot, setFlightPathStatus, getFlightPathStatus, type WsRedisTarget, type ScreenshotData, type FlightPathStatus } from "./ws-redis";
+import { publishWS, subscribeWS, isRedisEnabled, setScreenshot, getScreenshot, setFlightPathStatus, getFlightPathStatus, setDeviceLastSeen, getDeviceLastSeen, type WsRedisTarget, type ScreenshotData, type FlightPathStatus } from "./ws-redis";
 import {
   authenticateWsClient,
   broadcastToStudentsLocal,
@@ -2831,6 +2831,8 @@ export async function registerRoutes(
 
       const persisted = enqueueHeartbeatPersist(async () => {
         await storage.addHeartbeat(data, allOpenTabs);
+        // Store lastSeenAt in Redis for multi-instance consistency
+        await setDeviceLastSeen(data.deviceId, Date.now());
         if (data.schoolId) {
           broadcastToTeachers(data.schoolId, {
             type: "student-update",
@@ -3056,6 +3058,8 @@ export async function registerRoutes(
 
       const persisted = enqueueHeartbeatPersist(async () => {
         await storage.addHeartbeat(data, allOpenTabs);
+        // Store lastSeenAt in Redis for multi-instance consistency
+        await setDeviceLastSeen(data.deviceId, Date.now());
         // Notify teachers of update (non-blocking)
         if (data.schoolId) {
           broadcastToTeachers(data.schoolId, {
@@ -3430,13 +3434,28 @@ export async function registerRoutes(
         console.log('Teacher has no active session - showing empty dashboard');
       }
 
-      // Overlay Redis flight path status for multi-instance consistency
+      // Overlay Redis data for multi-instance consistency
       if (isRedisEnabled()) {
         for (const status of filteredStatuses) {
           if (status.primaryDeviceId) {
+            // Overlay lastSeenAt from Redis (ensures all instances see same timestamp)
+            const redisLastSeen = await getDeviceLastSeen(status.primaryDeviceId);
+            if (redisLastSeen && redisLastSeen > status.lastSeenAt) {
+              status.lastSeenAt = redisLastSeen;
+              // Recalculate status based on Redis lastSeenAt
+              const timeSinceLastSeen = Date.now() - redisLastSeen;
+              if (timeSinceLastSeen < 90000) {
+                status.status = 'online';
+              } else if (timeSinceLastSeen < 180000) {
+                status.status = 'idle';
+              } else {
+                status.status = 'offline';
+              }
+            }
+
+            // Overlay flight path status from Redis
             const redisFlightPath = await getFlightPathStatus(status.primaryDeviceId);
             if (redisFlightPath) {
-              console.log(`[Flight Path] Redis overlay for ${status.primaryDeviceId}: active=${redisFlightPath.active}, name=${redisFlightPath.flightPathName}`);
               status.flightPathActive = redisFlightPath.active;
               status.activeFlightPathName = redisFlightPath.flightPathName;
             }

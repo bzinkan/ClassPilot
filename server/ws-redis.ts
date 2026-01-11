@@ -260,3 +260,49 @@ export async function getFlightPathStatus(deviceId: string): Promise<FlightPathS
     return null;
   }
 }
+
+// Device lastSeenAt storage in Redis (for multi-instance deployments)
+// This ensures all ECS instances see the same lastSeenAt timestamp
+const DEVICE_LASTSEEN_KEY_PREFIX = `${redisPrefix}:lastseen:`;
+const DEVICE_LASTSEEN_TTL_SECONDS = 300; // 5 minutes TTL
+
+export async function setDeviceLastSeen(deviceId: string, timestamp: number): Promise<boolean> {
+  if (!redisUrl) {
+    return false; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return false;
+  }
+
+  try {
+    const key = `${DEVICE_LASTSEEN_KEY_PREFIX}${deviceId}`;
+    await redisPublisher.setEx(key, DEVICE_LASTSEEN_TTL_SECONDS, timestamp.toString());
+    return true;
+  } catch (error) {
+    console.warn("[LastSeen] Redis set failed:", error);
+    return false;
+  }
+}
+
+export async function getDeviceLastSeen(deviceId: string): Promise<number | null> {
+  if (!redisUrl) {
+    return null; // Fallback to in-memory
+  }
+  await ensureRedisReady();
+  if (!redisEnabled || !redisPublisher) {
+    return null;
+  }
+
+  try {
+    const key = `${DEVICE_LASTSEEN_KEY_PREFIX}${deviceId}`;
+    const data = await redisPublisher.get(key);
+    if (!data) {
+      return null;
+    }
+    return parseInt(data, 10);
+  } catch (error) {
+    console.warn("[LastSeen] Redis get failed:", error);
+    return null;
+  }
+}
