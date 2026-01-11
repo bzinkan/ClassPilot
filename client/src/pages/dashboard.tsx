@@ -851,8 +851,8 @@ export default function Dashboard() {
 
   const lockScreenMutation = useMutation({
     mutationFn: async ({ url, targetDeviceIds }: { url: string; targetDeviceIds?: string[] }) => {
-      // Block WebSocket refetches for 3 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 3000;
+      // Block WebSocket refetches for 7 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 7000;
 
       // Optimistic update - instantly show locked state
       const devicesToLock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -861,12 +861,13 @@ export default function Dashboard() {
       );
 
       const res = await apiRequest('POST', '/api/remote/lock-screen', { url, targetDeviceIds });
-      return res.json();
+      const data = await res.json();
+      return { ...data, deviceCount: devicesToLock.length };
     },
     onSuccess: (data) => {
       toast({
         title: "Success",
-        description: data.message,
+        description: `Locked screen for ${data.deviceCount} student(s)`,
       });
     },
     onError: (error: Error) => {
@@ -883,8 +884,8 @@ export default function Dashboard() {
 
   const unlockScreenMutation = useMutation({
     mutationFn: async (targetDeviceIds?: string[]) => {
-      // Block WebSocket refetches for 3 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 3000;
+      // Block WebSocket refetches for 7 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 7000;
 
       // Optimistic update - instantly show unlocked state
       const devicesToUnlock = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -893,12 +894,13 @@ export default function Dashboard() {
       );
 
       const res = await apiRequest('POST', '/api/remote/unlock-screen', { targetDeviceIds });
-      return res.json();
+      const data = await res.json();
+      return { ...data, deviceCount: devicesToUnlock.length };
     },
     onSuccess: (data) => {
       toast({
         title: "Success",
-        description: data.message,
+        description: `Unlocked screen for ${data.deviceCount} student(s)`,
       });
     },
     onError: (error: Error) => {
@@ -979,8 +981,8 @@ export default function Dashboard() {
   // Apply Flight Path mutation
   const applyFlightPathMutation = useMutation({
     mutationFn: async ({ flightPathId, allowedDomains, targetDeviceIds, flightPathName }: { flightPathId: string; allowedDomains: string[]; targetDeviceIds?: string[]; flightPathName?: string }) => {
-      // Block WebSocket refetches for 3 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 3000;
+      // Block WebSocket refetches for 7 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 7000;
 
       // Optimistic update - instantly show flight path active
       const devicesToApply = targetDeviceIds || students.filter(s => s.status === 'online' || s.status === 'idle').map(s => s.primaryDeviceId).filter((id): id is string => !!id);
@@ -989,12 +991,13 @@ export default function Dashboard() {
       );
 
       const res = await apiRequest('POST', '/api/remote/apply-flight-path', { flightPathId, allowedDomains, targetDeviceIds });
-      return res.json();
+      const data = await res.json();
+      return { ...data, deviceCount: devicesToApply.length, flightPathName };
     },
     onSuccess: (data) => {
       toast({
         title: "Success",
-        description: data.message,
+        description: `Applied "${data.flightPathName}" to ${data.deviceCount} student(s)`,
       });
       setShowApplyFlightPathDialog(false);
       setSelectedFlightPathId("");
@@ -1014,8 +1017,8 @@ export default function Dashboard() {
   // Remove Flight Path mutation
   const removeFlightPathMutation = useMutation({
     mutationFn: async (targetDeviceIds: string[]) => {
-      // Block WebSocket refetches for 3 seconds to preserve optimistic state
-      optimisticUpdateUntilRef.current = Date.now() + 3000;
+      // Block WebSocket refetches for 7 seconds to preserve optimistic state
+      optimisticUpdateUntilRef.current = Date.now() + 7000;
 
       // Optimistic update - instantly show flight path removed
       queryClient.setQueryData<AggregatedStudentStatus[]>(['/api/students-aggregated'], (old) =>
@@ -1023,12 +1026,13 @@ export default function Dashboard() {
       );
 
       const res = await apiRequest('POST', '/api/remote/remove-flight-path', { targetDeviceIds });
-      return res.json();
+      const data = await res.json();
+      return { ...data, deviceCount: targetDeviceIds.length };
     },
     onSuccess: (data) => {
       toast({
         title: "Success",
-        description: data.message,
+        description: `Removed flight path from ${data.deviceCount} student(s)`,
       });
     },
     onError: (error: Error) => {
