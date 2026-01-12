@@ -23,6 +23,7 @@ interface StudentTileProps {
   onStartLiveView?: () => void;
   onStopLiveView?: () => void;
   onEndLiveRefresh?: () => void;
+  onBlockRefetches?: () => void; // Block dashboard polling during optimistic updates
 }
 
 function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean {
@@ -50,7 +51,7 @@ function isBlockedDomain(url: string | null, blockedDomains: string[]): boolean 
   }
 }
 
-export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh }: StudentTileProps) {
+export function StudentTile({ student, onClick, blockedDomains = [], isOffTask = false, isSelected = false, onToggleSelect, liveStream, onStartLiveView, onStopLiveView, onEndLiveRefresh, onBlockRefetches }: StudentTileProps) {
   const [expanded, setExpanded] = useState(false);
   const { toast } = useToast();
   const tileVideoSlotRef = useRef<HTMLDivElement>(null);
@@ -213,6 +214,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       });
     },
     onMutate: async () => {
+      // Block dashboard refetches for 15 seconds to preserve optimistic state
+      onBlockRefetches?.();
+
       // Cancel any outgoing refetches
       await queryClient.cancelQueries({ queryKey: ['/api/students-aggregated'] });
 
@@ -256,6 +260,9 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
       });
     },
     onMutate: async () => {
+      // Block dashboard refetches for 15 seconds to preserve optimistic state
+      onBlockRefetches?.();
+
       // Cancel any outgoing refetches
       await queryClient.cancelQueries({ queryKey: ['/api/students-aggregated'] });
 

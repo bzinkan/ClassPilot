@@ -76,6 +76,11 @@ export function serveStatic(app: Express) {
     );
   }
 
+  // Redirect /index.html to / to avoid soft 404 in Google Search Console
+  app.get("/index.html", (_req, res) => {
+    res.redirect(301, "/");
+  });
+
   app.use(express.static(distPath));
 
   // fall through to index.html if the file doesn't exist

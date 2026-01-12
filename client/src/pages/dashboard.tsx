@@ -1617,6 +1617,7 @@ export default function Dashboard() {
                   onStartLiveView={primaryDeviceId ? () => handleStartLiveView(primaryDeviceId) : undefined}
                   onStopLiveView={primaryDeviceId ? () => handleStopLiveView(primaryDeviceId) : undefined}
                   onEndLiveRefresh={primaryDeviceId ? () => refreshTile(primaryDeviceId) : undefined}
+                  onBlockRefetches={() => { optimisticUpdateUntilRef.current = Date.now() + 15000; }}
                 />
               );
             })}

@@ -1,0 +1,26 @@
+# ClassPilot robots.txt
+User-agent: *
+
+# Allow public pages
+Allow: /
+Allow: /pricing
+Allow: /privacy
+Allow: /terms
+Allow: /login
+
+# Block app pages (require authentication)
+Disallow: /dashboard
+Disallow: /roster
+Disallow: /settings
+Disallow: /my-settings
+Disallow: /admin
+Disallow: /students
+Disallow: /super-admin
+Disallow: /class/
+
+# Block direct file access
+Disallow: /index.html
+Disallow: /*.html$
+
+# Sitemap (if you create one)
+# Sitemap: https://classpilot.net/sitemap.xml
