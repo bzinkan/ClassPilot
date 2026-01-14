@@ -419,15 +419,15 @@ export default function Settings() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="blockedDomains">Blocked Domains (comma-separated)</Label>
+                <Label htmlFor="blockedDomains">Blocked Websites (comma-separated)</Label>
                 <Input
                   id="blockedDomains"
                   data-testid="input-blocked-domains"
                   {...form.register("blockedDomains")}
-                  placeholder="example.com, badsite.net"
+                  placeholder="lens.google.com, chat.openai.com, quillbot.com"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Student tiles will be highlighted if they visit these domains
+                  Students will be blocked from accessing these domains. Use this to block AI tools, cheating sites, etc.
                 </p>
               </div>
 

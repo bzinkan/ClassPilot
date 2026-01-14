@@ -884,6 +884,7 @@ if (chrome.runtime.onStartup) {
     'lockScreenState',
     'licenseActive',
     'planStatus',
+    'globalBlockedDomains',
   ]);
   const resolvedServerUrl = await resolveServerUrl();
 
@@ -931,11 +932,19 @@ if (chrome.runtime.onStartup) {
     }
   }
   
+  // Restore global blacklist state
+  if (stored.globalBlockedDomains && stored.globalBlockedDomains.length > 0) {
+    globalBlockedDomains = stored.globalBlockedDomains;
+    await updateGlobalBlacklistRules(globalBlockedDomains);
+    console.log('[Service Worker] Global blacklist rules re-applied:', globalBlockedDomains);
+  }
+
   console.log('[Service Worker] State restored:', { 
     deviceId: CONFIG.deviceId, 
     studentEmail: CONFIG.studentEmail,
     flightPathActive: allowedDomains.length > 0,
-    screenLocked: screenLocked
+    screenLocked: screenLocked,
+    globalBlockedDomains: globalBlockedDomains.length
   });
 
   if (stored.licenseActive === false) {
@@ -1053,6 +1062,54 @@ async function updateBlockingRules(allowedDomains) {
 
 async function clearBlockingRules() {
   await updateBlockingRules([]);
+}
+
+// Global Blacklist - blocks specific domains school-wide (independent of Flight Path)
+// Uses rule IDs starting from 1000 to avoid conflicts with Flight Path rules (ID 1)
+const BLACKLIST_RULE_START_ID = 1000;
+
+async function updateGlobalBlacklistRules(blockedDomains) {
+  try {
+    // Get all existing rules to find blacklist rules (IDs >= 1000)
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const blacklistRuleIds = existingRules
+      .filter(rule => rule.id >= BLACKLIST_RULE_START_ID)
+      .map(rule => rule.id);
+    
+    // Remove existing blacklist rules
+    if (blacklistRuleIds.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: blacklistRuleIds
+      });
+    }
+    
+    // If no blocked domains, we're done
+    if (!blockedDomains || blockedDomains.length === 0) {
+      console.log('[Blacklist] Cleared - no domains blocked');
+      return;
+    }
+    
+    // Create blocking rules for each domain
+    const rules = blockedDomains.map((domain, index) => ({
+      id: BLACKLIST_RULE_START_ID + index,
+      priority: 10, // Higher priority than Flight Path (priority 1)
+      action: {
+        type: "block"
+      },
+      condition: {
+        resourceTypes: ["main_frame"],
+        requestDomains: [domain.replace(/^https?:///, '').replace(//$/, '')]
+      }
+    }));
+    
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: rules
+    });
+    
+    console.log('[Blacklist] Updated. Blocked domains:', blockedDomains);
+  } catch (error) {
+    console.error('[Blacklist] Error updating rules:', error.message);
+  }
 }
 
 // Get logged-in Chromebook user info using Chrome Identity API
@@ -1542,6 +1599,7 @@ let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
+let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 
 // Helper function to extract domain from URL
 function extractDomain(url) {
@@ -1949,6 +2007,32 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   
   const targetDomain = extractDomain(details.url);
   if (!targetDomain) return;
+
+  // Check global blacklist first (school-wide blocked domains)
+  if (globalBlockedDomains.length > 0) {
+    const isBlacklisted = globalBlockedDomains.some(blockedDomain => {
+      const normalizedBlocked = blockedDomain.replace(/^www./, '');
+      return targetDomain === normalizedBlocked || targetDomain.endsWith('.' + normalizedBlocked);
+    });
+    
+    if (isBlacklisted) {
+      console.log('[Blacklist] Blocked navigation to:', details.url);
+      
+      // Go back or close the tab
+      chrome.tabs.goBack(details.tabId).catch(() => {
+        // If can't go back, try to navigate to a safe page
+        chrome.tabs.update(details.tabId, { url: 'about:blank' });
+      });
+      
+      // Show notification
+      safeNotify({
+        title: 'Website Blocked',
+        message: `Access to ${targetDomain} is blocked by your school.`,
+        priority: 2,
+      });
+      return;
+    }
+  }
   
   // Check screen lock
   if (screenLocked) {
@@ -2404,6 +2488,49 @@ function connectWebSocket() {
             })();
           }
         }
+
+        // Handle global blocked domains (school-wide blacklist)
+        if (message.settings && message.settings.globalBlockedDomains) {
+          globalBlockedDomains = message.settings.globalBlockedDomains;
+          console.log('[Blacklist] Received from server:', globalBlockedDomains);
+          
+          // Apply blacklist rules and persist to storage
+          (async () => {
+            try {
+              await updateGlobalBlacklistRules(globalBlockedDomains);
+              await chrome.storage.local.set({ globalBlockedDomains });
+              console.log('[Blacklist] Persisted to storage');
+            } catch (error) {
+              console.error('[Blacklist] Error applying rules:', error);
+            }
+          })();
+        }
+      }
+
+      // Handle global blacklist updates from server
+      if (message.type === 'update-global-blacklist') {
+        globalBlockedDomains = message.blockedDomains || [];
+        console.log('[Blacklist] Update received from server:', globalBlockedDomains);
+        
+        // Apply updated blacklist rules and persist to storage
+        (async () => {
+          try {
+            await updateGlobalBlacklistRules(globalBlockedDomains);
+            await chrome.storage.local.set({ globalBlockedDomains });
+            console.log('[Blacklist] Persisted updated blacklist to storage');
+            
+            // Notify user if blacklist was updated
+            if (globalBlockedDomains.length > 0) {
+              safeNotify({
+                title: 'Website Restrictions Updated',
+                message: `Your school has blocked access to: ${globalBlockedDomains.slice(0, 3).join(', ')}${globalBlockedDomains.length > 3 ? '...' : ''}`,
+                priority: 1,
+              });
+            }
+          } catch (error) {
+            console.error('[Blacklist] Error applying updated rules:', error);
+          }
+        })();
       }
       
       // Handle WebRTC signaling - teacher requesting to view screen

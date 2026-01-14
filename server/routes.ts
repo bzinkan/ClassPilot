@@ -753,21 +753,26 @@ export async function registerRoutes(
                 maxTabs = (!isNaN(parsed) && parsed > 0) ? parsed : null;
               }
               
-              ws.send(JSON.stringify({ 
-                type: 'auth-success', 
+              // Get global blocked domains (school-wide blacklist)
+              const globalBlockedDomains = settings?.blockedDomains || [];
+
+              ws.send(JSON.stringify({
+                type: 'auth-success',
                 role: 'student',
                 settings: {
-                  maxTabsPerStudent: maxTabs
+                  maxTabsPerStudent: maxTabs,
+                  globalBlockedDomains: globalBlockedDomains
                 }
               }));
             } catch (error) {
               console.error('Error fetching settings for student auth:', error);
-              // Even on error, send null to indicate no limit
-              ws.send(JSON.stringify({ 
-                type: 'auth-success', 
+              // Even on error, send null to indicate no limit and empty blacklist
+              ws.send(JSON.stringify({
+                type: 'auth-success',
                 role: 'student',
                 settings: {
-                  maxTabsPerStudent: null
+                  maxTabsPerStudent: null,
+                  globalBlockedDomains: []
                 }
               }));
             }
@@ -4559,6 +4564,16 @@ export async function registerRoutes(
       }) as typeof settingsTable.$inferInsert;
       const { schoolId: _ignoredSchoolId, ...payload } = data;
       const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
+
+      // Broadcast updated blacklist to all connected students in this school
+      if (settings.blockedDomains) {
+        broadcastToStudents(sessionSchoolId, {
+          type: 'update-global-blacklist',
+          blockedDomains: settings.blockedDomains
+        });
+        console.log(`[Settings] Broadcasted global blacklist update to school ${sessionSchoolId}:`, settings.blockedDomains);
+      }
+
       res.json(settings);
     } catch (error) {
       console.error("Update settings error:", error);
@@ -4577,6 +4592,16 @@ export async function registerRoutes(
       const data = insertSettingsSchema.parse(updatedData) as typeof settingsTable.$inferInsert;
       const { schoolId: _ignoredSchoolId, ...payload } = data;
       const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
+
+      // Broadcast updated blacklist to all connected students in this school
+      if (settings.blockedDomains) {
+        broadcastToStudents(sessionSchoolId, {
+          type: 'update-global-blacklist',
+          blockedDomains: settings.blockedDomains
+        });
+        console.log(`[Settings] Broadcasted global blacklist update to school ${sessionSchoolId}:`, settings.blockedDomains);
+      }
+
       res.json(settings);
     } catch (error) {
       console.error("Update settings error:", error);
