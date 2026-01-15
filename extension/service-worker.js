@@ -2243,6 +2243,157 @@ async function handleChatMessage(message) {
   chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
 }
 
+// ====================================
+// TEACHER BROADCAST HANDLERS
+// ====================================
+
+let broadcastPeerConnection = null;
+let broadcastStream = null;
+
+// ICE servers for broadcast (same as screen share)
+const BROADCAST_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+// Handle broadcast offer from teacher
+async function handleBroadcastOffer(sdp) {
+  try {
+    // Close any existing broadcast connection
+    if (broadcastPeerConnection) {
+      broadcastPeerConnection.close();
+      broadcastPeerConnection = null;
+    }
+
+    // Create peer connection
+    broadcastPeerConnection = new RTCPeerConnection({ iceServers: BROADCAST_ICE_SERVERS });
+
+    // Handle incoming stream
+    broadcastPeerConnection.ontrack = async (event) => {
+      console.log('[Broadcast] Received track:', event.track.kind);
+      const [stream] = event.streams;
+      if (stream) {
+        broadcastStream = stream;
+        // Send stream to content script to display
+        await showBroadcastOverlay(stream);
+      }
+    };
+
+    // Handle ICE candidates
+    broadcastPeerConnection.onicecandidate = (event) => {
+      if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'broadcast-ice-student',
+          candidate: event.candidate.toJSON(),
+        }));
+      }
+    };
+
+    // Handle connection state
+    broadcastPeerConnection.onconnectionstatechange = () => {
+      console.log('[Broadcast] Connection state:', broadcastPeerConnection?.connectionState);
+      if (broadcastPeerConnection?.connectionState === 'failed' ||
+          broadcastPeerConnection?.connectionState === 'disconnected') {
+        handleBroadcastStop();
+      }
+    };
+
+    // Set remote description and create answer
+    await broadcastPeerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
+    const answer = await broadcastPeerConnection.createAnswer();
+    await broadcastPeerConnection.setLocalDescription(answer);
+
+    // Send answer back to teacher
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'broadcast-answer',
+        sdp: broadcastPeerConnection.localDescription.toJSON(),
+      }));
+    }
+
+    console.log('[Broadcast] Sent answer to teacher');
+  } catch (error) {
+    console.error('[Broadcast] Error handling offer:', error);
+  }
+}
+
+// Handle ICE candidate from teacher
+async function handleBroadcastIce(candidate) {
+  try {
+    if (broadcastPeerConnection && broadcastPeerConnection.remoteDescription) {
+      await broadcastPeerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      console.log('[Broadcast] Added ICE candidate');
+    }
+  } catch (error) {
+    console.error('[Broadcast] Error adding ICE candidate:', error);
+  }
+}
+
+// Handle broadcast stop
+function handleBroadcastStop() {
+  console.log('[Broadcast] Stopping broadcast');
+
+  // Close peer connection
+  if (broadcastPeerConnection) {
+    broadcastPeerConnection.close();
+    broadcastPeerConnection = null;
+  }
+
+  // Stop stream tracks
+  if (broadcastStream) {
+    broadcastStream.getTracks().forEach(track => track.stop());
+    broadcastStream = null;
+  }
+
+  // Hide overlay on all tabs
+  hideBroadcastOverlay();
+}
+
+// Show broadcast overlay on all tabs
+async function showBroadcastOverlay(stream) {
+  // We can't directly pass MediaStream to content script
+  // Instead, we'll signal content script to create the overlay
+  // and use a data channel or other mechanism
+
+  // For now, notify all tabs to show broadcast overlay
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+      try {
+        await ensureContentScriptInjected(tab.id);
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'teacher-broadcast-start',
+        });
+      } catch (error) {
+        console.log('Could not send broadcast start to tab:', tab.id, error);
+      }
+    }
+  }
+
+  // Store that broadcast is active
+  await chrome.storage.local.set({ teacherBroadcastActive: true });
+}
+
+// Hide broadcast overlay on all tabs
+async function hideBroadcastOverlay() {
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+      try {
+        await ensureContentScriptInjected(tab.id);
+        await chrome.tabs.sendMessage(tab.id, {
+          type: 'teacher-broadcast-stop',
+        });
+      } catch (error) {
+        console.log('Could not send broadcast stop to tab:', tab.id, error);
+      }
+    }
+  }
+
+  // Clear broadcast state
+  await chrome.storage.local.set({ teacherBroadcastActive: false });
+}
+
 // Check-in Request Handler (Phase 3)
 async function handleCheckInRequest(request) {
   console.log('Check-in request received:', request);
@@ -2900,6 +3051,38 @@ function connectWebSocket() {
       // Handle check-in requests (Phase 3)
       if (message.type === 'check-in-request') {
         handleCheckInRequest(message);
+      }
+
+      // ====================================
+      // TEACHER BROADCAST (Receiving teacher's screen)
+      // ====================================
+
+      // Teacher started broadcasting - request to join
+      if (message.type === 'teacher-broadcast-start') {
+        console.log('[Broadcast] Teacher started broadcasting, requesting to join');
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'broadcast-join' }));
+        }
+      }
+
+      // Teacher stopped broadcasting
+      if (message.type === 'teacher-broadcast-stop') {
+        console.log('[Broadcast] Teacher stopped broadcasting');
+        handleBroadcastStop();
+      }
+
+      // Received broadcast offer from teacher
+      if (message.type === 'broadcast-offer') {
+        console.log('[Broadcast] Received offer from teacher');
+        handleBroadcastOffer(message.sdp);
+      }
+
+      // Received ICE candidate for broadcast
+      if (message.type === 'broadcast-ice') {
+        console.log('[Broadcast] Received ICE candidate from teacher');
+        if (message.candidate) {
+          handleBroadcastIce(message.candidate);
+        }
       }
     } catch (error) {
       console.error('Error processing WebSocket message:', error);

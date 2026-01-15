@@ -851,6 +851,100 @@ export async function registerRoutes(
           console.log(`[WebSocket] Sent stop-share to ${targetDeviceId}`);
         }
 
+        // ====================================
+        // TEACHER BROADCAST (Screen Sharing to Students)
+        // ====================================
+
+        // Teacher starts broadcasting their screen to all students
+        if (message.type === 'teacher-broadcast-start' && client.role === 'teacher') {
+          console.log(`[WebSocket] Teacher starting broadcast`);
+          if (client.schoolId) {
+            // Notify all students that teacher is broadcasting
+            broadcastToStudents(client.schoolId, {
+              type: 'teacher-broadcast-start',
+            });
+          }
+        }
+
+        // Teacher stops broadcasting
+        if (message.type === 'teacher-broadcast-stop' && client.role === 'teacher') {
+          console.log(`[WebSocket] Teacher stopping broadcast`);
+          if (client.schoolId) {
+            broadcastToStudents(client.schoolId, {
+              type: 'teacher-broadcast-stop',
+            });
+          }
+        }
+
+        // Route broadcast WebRTC offer from teacher to specific student
+        if (message.type === 'broadcast-offer' && client.role === 'teacher') {
+          const targetDeviceId = message.to;
+          if (!targetDeviceId || !client.schoolId) return;
+
+          console.log(`[WebSocket] Routing broadcast offer to ${targetDeviceId}`);
+          sendToDevice(client.schoolId, targetDeviceId, {
+            type: 'broadcast-offer',
+            sdp: message.sdp,
+          });
+        }
+
+        // Route broadcast ICE candidate from teacher to student
+        if (message.type === 'broadcast-ice' && client.role === 'teacher') {
+          const targetDeviceId = message.to;
+          if (!targetDeviceId || !client.schoolId) return;
+
+          sendToDevice(client.schoolId, targetDeviceId, {
+            type: 'broadcast-ice',
+            candidate: message.candidate,
+          });
+        }
+
+        // Student requests to join broadcast
+        if (message.type === 'broadcast-join' && client.role === 'student') {
+          console.log(`[WebSocket] Student ${client.deviceId} joining broadcast`);
+          if (client.schoolId && client.deviceId) {
+            // Notify teacher that student wants to join
+            sendToRole(client.schoolId, 'teacher', {
+              type: 'broadcast-student-join',
+              deviceId: client.deviceId,
+            });
+          }
+        }
+
+        // Route broadcast answer from student to teacher
+        if (message.type === 'broadcast-answer' && client.role === 'student') {
+          console.log(`[WebSocket] Student ${client.deviceId} sending broadcast answer`);
+          if (client.schoolId && client.deviceId) {
+            sendToRole(client.schoolId, 'teacher', {
+              type: 'broadcast-answer',
+              from: client.deviceId,
+              sdp: message.sdp,
+            });
+          }
+        }
+
+        // Route broadcast ICE candidate from student to teacher
+        if (message.type === 'broadcast-ice-student' && client.role === 'student') {
+          if (client.schoolId && client.deviceId) {
+            sendToRole(client.schoolId, 'teacher', {
+              type: 'broadcast-ice-student',
+              from: client.deviceId,
+              candidate: message.candidate,
+            });
+          }
+        }
+
+        // Student leaves broadcast
+        if (message.type === 'broadcast-leave' && client.role === 'student') {
+          console.log(`[WebSocket] Student ${client.deviceId} leaving broadcast`);
+          if (client.schoolId && client.deviceId) {
+            sendToRole(client.schoolId, 'teacher', {
+              type: 'broadcast-student-leave',
+              deviceId: client.deviceId,
+            });
+          }
+        }
+
       } catch (error) {
         console.error('WebSocket message error:', error);
       }
