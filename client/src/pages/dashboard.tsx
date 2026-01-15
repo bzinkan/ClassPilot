@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter, Hand, MessageSquareOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -101,6 +102,7 @@ export default function Dashboard() {
   const [pollTotalResponses, setPollTotalResponses] = useState(0);
   const [selectedSubgroupId, setSelectedSubgroupId] = useState<string>("");
   const [subgroupMembers, setSubgroupMembers] = useState<Set<string>>(new Set());
+  const [raisedHands, setRaisedHands] = useState<Map<string, { studentId: string; studentName: string; studentEmail: string; timestamp: string }>>(new Map());
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -178,6 +180,28 @@ export default function Dashboard() {
     enabled: !!activeSession?.groupId,
     select: (data: any[]) => data.map((s: any) => s.id),
   });
+
+  // Fetch initial raised hands
+  const { data: initialRaisedHands } = useQuery<{ raisedHands: { id: string; studentId: string; studentName: string; studentEmail: string; timestamp: string }[] }>({
+    queryKey: ['/api/teacher/raised-hands'],
+    refetchInterval: 30000, // Refresh every 30 seconds as backup
+  });
+
+  // Sync initial raised hands to state
+  useEffect(() => {
+    if (initialRaisedHands?.raisedHands) {
+      const handsMap = new Map<string, { studentId: string; studentName: string; studentEmail: string; timestamp: string }>();
+      initialRaisedHands.raisedHands.forEach(hand => {
+        handsMap.set(hand.studentId, {
+          studentId: hand.studentId,
+          studentName: hand.studentName,
+          studentEmail: hand.studentEmail,
+          timestamp: hand.timestamp,
+        });
+      });
+      setRaisedHands(handsMap);
+    }
+  }, [initialRaisedHands]);
 
   // WebSocket connection with automatic reconnection
   useEffect(() => {
@@ -282,6 +306,34 @@ export default function Dashboard() {
             if (message.type === 'ice') {
               console.log("[Dashboard] Received ICE candidate from", message.from);
               webrtc.handleIceCandidate(message.from, message.candidate);
+            }
+
+            // Handle raised hand notifications
+            if (message.type === 'hand-raised') {
+              console.log("[Dashboard] Hand raised:", message.data);
+              setRaisedHands(prev => {
+                const newMap = new Map(prev);
+                newMap.set(message.data.studentId, {
+                  studentId: message.data.studentId,
+                  studentName: message.data.studentName,
+                  studentEmail: message.data.studentEmail,
+                  timestamp: message.data.timestamp,
+                });
+                return newMap;
+              });
+              toast({
+                title: "✋ Hand Raised",
+                description: `${message.data.studentName} is asking for help`,
+              });
+            }
+
+            if (message.type === 'hand-lowered') {
+              console.log("[Dashboard] Hand lowered:", message.data);
+              setRaisedHands(prev => {
+                const newMap = new Map(prev);
+                newMap.delete(message.data.studentId);
+                return newMap;
+              });
             }
           } catch (error) {
             console.error("[Dashboard] WebSocket message error:", error);
@@ -1431,6 +1483,54 @@ export default function Dashboard() {
     },
   });
 
+  // Dismiss hand mutation
+  const dismissHandMutation = useMutation({
+    mutationFn: async (studentId: string) => {
+      const res = await apiRequest('POST', `/api/teacher/dismiss-hand/${studentId}`);
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (_, studentId) => {
+      setRaisedHands(prev => {
+        const newMap = new Map(prev);
+        newMap.delete(studentId);
+        return newMap;
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Toggle hand raising mutation
+  const toggleHandRaisingMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest('POST', '/api/settings/hand-raising', { enabled });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/settings'] });
+      toast({
+        title: data.enabled ? "Hand Raising Enabled" : "Hand Raising Disabled",
+        description: data.enabled
+          ? "Students can now raise their hands"
+          : "Students cannot raise their hands",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
   // Poll results polling
   const pollResultsIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -1999,6 +2099,60 @@ export default function Dashboard() {
             <BarChart3 className="h-4 w-4 mr-2" />
             {activePoll ? `Poll (${pollTotalResponses})` : "Poll"}
           </Button>
+
+          {/* Raised Hands */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={raisedHands.size > 0 ? "default" : "outline"}
+                data-testid="button-raised-hands"
+                className={raisedHands.size > 0 ? "bg-amber-500 hover:bg-amber-600 text-white animate-pulse" : "text-amber-600 dark:text-amber-400"}
+              >
+                <Hand className="h-4 w-4 mr-2" />
+                {raisedHands.size > 0 ? `Hands (${raisedHands.size})` : "Hands"}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-72">
+              <DropdownMenuLabel className="flex items-center justify-between">
+                <span>Raised Hands</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => toggleHandRaisingMutation.mutate(!(settings?.handRaisingEnabled !== false))}
+                  className="h-6 px-2 text-xs"
+                >
+                  <MessageSquareOff className="h-3 w-3 mr-1" />
+                  {settings?.handRaisingEnabled !== false ? "Disable" : "Enable"}
+                </Button>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {raisedHands.size === 0 ? (
+                <div className="px-2 py-4 text-center text-sm text-muted-foreground">
+                  No raised hands
+                </div>
+              ) : (
+                Array.from(raisedHands.values()).map((hand) => (
+                  <DropdownMenuItem
+                    key={hand.studentId}
+                    className="flex items-center justify-between cursor-pointer"
+                    onClick={() => dismissHandMutation.mutate(hand.studentId)}
+                  >
+                    <div className="flex items-center">
+                      <Hand className="h-4 w-4 mr-2 text-amber-500" />
+                      <div>
+                        <div className="font-medium">{hand.studentName}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {new Date(hand.timestamp).toLocaleTimeString()}
+                        </div>
+                      </div>
+                    </div>
+                    <X className="h-4 w-4 text-muted-foreground hover:text-foreground" />
+                  </DropdownMenuItem>
+                ))
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
           {/* Subgroup Filter */}
           {subgroups.length > 0 && (

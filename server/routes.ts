@@ -6756,6 +6756,177 @@ export async function registerRoutes(
     }
   });
 
+  // ====================================
+  // RAISE HAND API
+  // ====================================
+
+  // In-memory storage for raised hands (ephemeral, per session)
+  const raisedHands = new Map<string, { studentId: string; studentName: string; studentEmail: string; deviceId: string; timestamp: Date; schoolId: string }>();
+
+  // Student raises hand
+  app.post("/api/student/raise-hand", requireDeviceAuth, requireActiveSchoolDeviceMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const authSchoolId = res.locals.schoolId as string | undefined;
+      const authStudentId = res.locals.studentId as string | undefined;
+      const authDeviceId = res.locals.deviceId as string | undefined;
+
+      if (!authSchoolId || !authDeviceId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { studentName, studentEmail } = req.body;
+
+      // Check if messaging/hand raising is enabled for this school
+      const settings = await storage.getSettingsBySchoolId(authSchoolId);
+      if (settings?.handRaisingEnabled === false) {
+        return res.status(403).json({ error: "Hand raising is disabled" });
+      }
+
+      const handKey = authStudentId || authDeviceId;
+      raisedHands.set(handKey, {
+        studentId: authStudentId || authDeviceId,
+        studentName: studentName || "Unknown Student",
+        studentEmail: studentEmail || "",
+        deviceId: authDeviceId,
+        timestamp: new Date(),
+        schoolId: authSchoolId,
+      });
+
+      // Broadcast to teachers
+      broadcastToTeachers(authSchoolId, {
+        type: "hand-raised",
+        data: {
+          studentId: authStudentId || authDeviceId,
+          studentName: studentName || "Unknown Student",
+          studentEmail: studentEmail || "",
+          deviceId: authDeviceId,
+          timestamp: new Date().toISOString(),
+        },
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Raise hand error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Student lowers hand
+  app.post("/api/student/lower-hand", requireDeviceAuth, requireActiveSchoolDeviceMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const authSchoolId = res.locals.schoolId as string | undefined;
+      const authStudentId = res.locals.studentId as string | undefined;
+      const authDeviceId = res.locals.deviceId as string | undefined;
+
+      if (!authSchoolId || !authDeviceId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const handKey = authStudentId || authDeviceId;
+      raisedHands.delete(handKey);
+
+      // Broadcast to teachers
+      broadcastToTeachers(authSchoolId, {
+        type: "hand-lowered",
+        data: {
+          studentId: authStudentId || authDeviceId,
+          deviceId: authDeviceId,
+        },
+      });
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Lower hand error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Teacher dismisses a raised hand
+  app.post("/api/teacher/dismiss-hand/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { studentId } = req.params;
+      const schoolId = req.session?.schoolId;
+
+      if (!schoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      raisedHands.delete(studentId);
+
+      // Notify the student that their hand was dismissed
+      const student = await storage.getStudent(studentId);
+      if (student?.deviceId) {
+        sendToDevice(schoolId, student.deviceId, {
+          type: "remote-control",
+          command: {
+            type: "hand-dismissed",
+          },
+        });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Dismiss hand error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get all raised hands for the current school
+  app.get("/api/teacher/raised-hands", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const schoolId = req.session?.schoolId;
+
+      if (!schoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const hands = Array.from(raisedHands.entries())
+        .filter(([_, hand]) => hand.schoolId === schoolId)
+        .map(([key, hand]) => ({
+          id: key,
+          studentId: hand.studentId,
+          studentName: hand.studentName,
+          studentEmail: hand.studentEmail,
+          deviceId: hand.deviceId,
+          timestamp: hand.timestamp.toISOString(),
+        }));
+
+      res.json({ raisedHands: hands });
+    } catch (error) {
+      console.error("Get raised hands error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Toggle hand raising for the school
+  app.post("/api/settings/hand-raising", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const schoolId = req.session?.schoolId;
+      const { enabled } = req.body;
+
+      if (!schoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      // Update the settings
+      await storage.upsertSettingsForSchool(schoolId, { handRaisingEnabled: enabled });
+
+      // Broadcast to all students in this school
+      broadcastToStudents(schoolId, {
+        type: "remote-control",
+        command: {
+          type: "messaging-toggle",
+          data: { enabled },
+        },
+      });
+
+      res.json({ success: true, enabled });
+    } catch (error) {
+      console.error("Toggle hand raising error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   if (enableBackgroundJobs) {
     // Session expiration job (runs frequently for real-time accuracy)
     setInterval(async () => {

@@ -68,6 +68,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     showChatNotification(message.data.message, message.data.fromName);
   }
 
+  // Hand dismissed notification
+  if (message.type === 'hand-dismissed') {
+    // Clear raised hand state
+    chrome.storage.local.set({ handRaised: false });
+    showChatNotification('Your teacher acknowledged your raised hand.', 'Teacher');
+  }
+
+  // Messaging toggle (enable/disable hand raising)
+  if (message.type === 'messaging-toggle') {
+    chrome.storage.local.set({ messagingEnabled: message.data.enabled });
+  }
+
   return true;
 });
 

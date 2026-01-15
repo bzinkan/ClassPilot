@@ -9,14 +9,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   chrome.runtime.sendMessage({ type: 'get-config' }, async (response) => {
     const config = response.config;
     currentConfig = config;
-    
+
     // ALWAYS show main view with auto-detected info (no manual registration)
     showMainView(config);
     updateLicenseBanner();
   });
-  
+
   // Load and display messages
   loadMessages();
+
+  // Initialize raise hand functionality
+  initRaiseHand();
   
   // Listen for storage changes to update messages in real-time
   chrome.storage.onChanged.addListener((changes, namespace) => {
@@ -276,6 +279,86 @@ async function clearMessages() {
   if (confirm('Are you sure you want to clear all messages?')) {
     await chrome.storage.local.set({ messages: [] });
     loadMessages();
+  }
+}
+
+// Raise hand functionality
+let handRaised = false;
+
+async function initRaiseHand() {
+  const stored = await chrome.storage.local.get(['handRaised', 'messagingEnabled']);
+  handRaised = stored.handRaised || false;
+
+  updateRaiseHandUI(handRaised, stored.messagingEnabled !== false);
+
+  // Add event listeners
+  document.getElementById('raise-hand-btn')?.addEventListener('click', raiseHand);
+  document.getElementById('lower-hand-btn')?.addEventListener('click', lowerHand);
+}
+
+function updateRaiseHandUI(isRaised, messagingEnabled = true) {
+  const raiseBtn = document.getElementById('raise-hand-btn');
+  const raisedStatus = document.getElementById('hand-raised-status');
+  const disabledMsg = document.getElementById('messaging-disabled');
+
+  if (!messagingEnabled) {
+    raiseBtn?.classList.add('hidden');
+    raisedStatus?.classList.add('hidden');
+    disabledMsg?.classList.remove('hidden');
+    return;
+  }
+
+  disabledMsg?.classList.add('hidden');
+
+  if (isRaised) {
+    raiseBtn?.classList.add('hidden');
+    raisedStatus?.classList.remove('hidden');
+  } else {
+    raiseBtn?.classList.remove('hidden');
+    raisedStatus?.classList.add('hidden');
+  }
+}
+
+async function raiseHand() {
+  const btn = document.getElementById('raise-hand-btn');
+  btn.disabled = true;
+  btn.textContent = 'Raising...';
+
+  try {
+    // Send to background script
+    chrome.runtime.sendMessage({ type: 'raise-hand' }, (response) => {
+      if (response?.success) {
+        handRaised = true;
+        chrome.storage.local.set({ handRaised: true });
+        updateRaiseHandUI(true);
+      } else {
+        btn.disabled = false;
+        btn.textContent = '✋ Raise Hand';
+        alert(response?.error || 'Failed to raise hand. Please try again.');
+      }
+    });
+  } catch (error) {
+    console.error('Error raising hand:', error);
+    btn.disabled = false;
+    btn.textContent = '✋ Raise Hand';
+    alert('Failed to raise hand. Please try again.');
+  }
+}
+
+async function lowerHand() {
+  try {
+    chrome.runtime.sendMessage({ type: 'lower-hand' }, (response) => {
+      if (response?.success) {
+        handRaised = false;
+        chrome.storage.local.set({ handRaised: false });
+        updateRaiseHandUI(false);
+      } else {
+        alert(response?.error || 'Failed to lower hand. Please try again.');
+      }
+    });
+  } catch (error) {
+    console.error('Error lowering hand:', error);
+    alert('Failed to lower hand. Please try again.');
   }
 }
 

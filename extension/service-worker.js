@@ -2116,6 +2116,50 @@ async function handleRemoteControl(command) {
 
         console.log('Chat notification sent:', chatFromName, chatMessage);
         break;
+
+      case 'hand-dismissed':
+        // Notify student their hand was acknowledged
+        chrome.storage.local.set({ handRaised: false });
+
+        const dismissTabs = await chrome.tabs.query({});
+        for (const tab of dismissTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'hand-dismissed'
+              });
+            } catch (error) {
+              console.log('Could not send hand-dismissed to tab:', tab.id, error);
+            }
+          }
+        }
+
+        console.log('Hand dismissed notification sent');
+        break;
+
+      case 'messaging-toggle':
+        // Update local storage with messaging enabled state
+        const messagingEnabled = command.data.enabled;
+        chrome.storage.local.set({ messagingEnabled });
+
+        const toggleTabs = await chrome.tabs.query({});
+        for (const tab of toggleTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'messaging-toggle',
+                data: { enabled: messagingEnabled }
+              });
+            } catch (error) {
+              console.log('Could not send messaging-toggle to tab:', tab.id, error);
+            }
+          }
+        }
+
+        console.log('Messaging toggle sent:', messagingEnabled);
+        break;
     }
   } catch (error) {
     console.error('Error handling remote control command:', error);
@@ -3011,7 +3055,75 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
     return true;
   }
-  
+
+  // Handle raise hand from popup
+  if (message.type === 'raise-hand') {
+    console.log('Raise hand requested');
+
+    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
+      sendResponse({ success: false, error: 'Not connected to server' });
+      return true;
+    }
+
+    const headers = buildDeviceAuthHeaders();
+    headers['Content-Type'] = 'application/json';
+
+    fetch(`${CONFIG.serverUrl}/api/student/raise-hand`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        deviceId: CONFIG.deviceId,
+        studentId: CONFIG.activeStudentId,
+        studentEmail: CONFIG.studentEmail,
+        studentName: CONFIG.studentName,
+      }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        console.log('Hand raised:', data);
+        sendResponse({ success: true, data });
+      })
+      .catch(err => {
+        console.error('Failed to raise hand:', err);
+        sendResponse({ success: false, error: err.message });
+      });
+
+    return true;
+  }
+
+  // Handle lower hand from popup
+  if (message.type === 'lower-hand') {
+    console.log('Lower hand requested');
+
+    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
+      sendResponse({ success: false, error: 'Not connected to server' });
+      return true;
+    }
+
+    const headers = buildDeviceAuthHeaders();
+    headers['Content-Type'] = 'application/json';
+
+    fetch(`${CONFIG.serverUrl}/api/student/lower-hand`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        deviceId: CONFIG.deviceId,
+        studentId: CONFIG.activeStudentId,
+      }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        console.log('Hand lowered:', data);
+        sendResponse({ success: true, data });
+      })
+      .catch(err => {
+        console.error('Failed to lower hand:', err);
+        sendResponse({ success: false, error: err.message });
+      });
+
+    return true;
+  }
+
   if (message.type === 'update-server-url') {
     const newServerUrl = message.serverUrl;
     if (newServerUrl) {

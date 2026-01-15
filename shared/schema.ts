@@ -560,6 +560,7 @@ export const settings = pgTable("settings", {
   schoolTimezone: text("school_timezone").default("America/New_York"), // School timezone (IANA format, e.g., "America/New_York")
   trackingDays: text("tracking_days").array().default(sql`'{Monday,Tuesday,Wednesday,Thursday,Friday}'::text[]`), // Days of the week when tracking is active
   afterHoursMode: text("after_hours_mode").notNull().default("off").$type<"off" | "limited" | "full">(),
+  handRaisingEnabled: boolean("hand_raising_enabled").default(true), // Allow students to raise hands
 });
 
 export const insertSettingsSchema = createInsertSchema(settings)
