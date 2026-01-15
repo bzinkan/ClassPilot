@@ -885,6 +885,7 @@ if (chrome.runtime.onStartup) {
     'licenseActive',
     'planStatus',
     'globalBlockedDomains',
+    'teacherBlockListState',
   ]);
   const resolvedServerUrl = await resolveServerUrl();
 
@@ -939,12 +940,26 @@ if (chrome.runtime.onStartup) {
     console.log('[Service Worker] Global blacklist rules re-applied:', globalBlockedDomains);
   }
 
-  console.log('[Service Worker] State restored:', { 
-    deviceId: CONFIG.deviceId, 
+  // Teacher block lists are SESSION-BASED and NOT restored on wake
+  // They only apply while the student is actively in a teacher's class session
+  // Clear any stale teacher block list state from storage
+  if (stored.teacherBlockListState) {
+    await chrome.storage.local.remove('teacherBlockListState');
+    console.log('[Service Worker] Cleared stale teacher block list state (session-based, not persisted)');
+  }
+  // Reset in-memory teacher block list state
+  teacherBlockedDomains = [];
+  activeBlockListName = null;
+  // Clear any existing teacher block list rules
+  await clearTeacherBlockListRules();
+
+  console.log('[Service Worker] State restored:', {
+    deviceId: CONFIG.deviceId,
     studentEmail: CONFIG.studentEmail,
     flightPathActive: allowedDomains.length > 0,
     screenLocked: screenLocked,
-    globalBlockedDomains: globalBlockedDomains.length
+    globalBlockedDomains: globalBlockedDomains.length,
+    teacherBlockedDomains: 0 // Always 0 on wake - session-based
   });
 
   if (stored.licenseActive === false) {
@@ -1110,6 +1125,58 @@ async function updateGlobalBlacklistRules(blockedDomains) {
   } catch (error) {
     console.error('[Blacklist] Error updating rules:', error.message);
   }
+}
+
+// Teacher Block List - blocks specific domains during teacher session
+// Uses rule IDs starting from 2000 to avoid conflicts with global blacklist (1000+) and Flight Path (1)
+const TEACHER_BLOCKLIST_RULE_START_ID = 2000;
+
+async function updateTeacherBlockListRules(blockedDomains) {
+  try {
+    // Get all existing rules to find teacher blocklist rules (IDs >= 2000)
+    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
+    const teacherRuleIds = existingRules
+      .filter(rule => rule.id >= TEACHER_BLOCKLIST_RULE_START_ID)
+      .map(rule => rule.id);
+    
+    // Remove existing teacher blocklist rules
+    if (teacherRuleIds.length > 0) {
+      await chrome.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: teacherRuleIds
+      });
+    }
+    
+    // If no blocked domains, we're done
+    if (!blockedDomains || blockedDomains.length === 0) {
+      console.log('[Teacher Block List] Cleared - no domains blocked');
+      return;
+    }
+    
+    // Create blocking rules for each domain
+    const rules = blockedDomains.map((domain, index) => ({
+      id: TEACHER_BLOCKLIST_RULE_START_ID + index,
+      priority: 15, // Higher priority than global blacklist (10) and Flight Path (1)
+      action: {
+        type: "block"
+      },
+      condition: {
+        resourceTypes: ["main_frame"],
+        requestDomains: [domain.replace(/^https?:///, '').replace(//$/, '')]
+      }
+    }));
+    
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      addRules: rules
+    });
+    
+    console.log('[Teacher Block List] Updated. Blocked domains:', blockedDomains);
+  } catch (error) {
+    console.error('[Teacher Block List] Error updating rules:', error.message);
+  }
+}
+
+async function clearTeacherBlockListRules() {
+  await updateTeacherBlockListRules([]);
 }
 
 // Get logged-in Chromebook user info using Chrome Identity API
@@ -1600,6 +1667,8 @@ let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
+let teacherBlockedDomains = []; // Teacher-applied session blacklist
+let activeBlockListName = null; // Name of the currently active teacher block list
 
 // Helper function to extract domain from URL
 function extractDomain(url) {
@@ -1871,6 +1940,44 @@ async function handleRemoteControl(command) {
         console.log('Flight Path removed - all restrictions cleared');
         break;
         
+      case 'apply-block-list':
+        teacherBlockedDomains = command.data.blockedDomains || [];
+        activeBlockListName = command.data.blockListName || null;
+
+        // NOTE: Teacher block lists are SESSION-BASED and NOT persisted to storage
+        // They only apply while the student is in the teacher's active session
+        // When service worker restarts or student joins another class, they're cleared
+
+        // Update blocking rules (merges with global blacklist)
+        await updateTeacherBlockListRules(teacherBlockedDomains);
+
+        if (teacherBlockedDomains.length > 0) {
+          safeNotify({
+            title: 'Block List Applied',
+            message: `Your teacher has blocked: ${teacherBlockedDomains.slice(0, 3).join(', ')}${teacherBlockedDomains.length > 3 ? '...' : ''}`,
+            priority: 1,
+          });
+        }
+
+        console.log('[Block List] Teacher block list applied (session-based):', activeBlockListName, teacherBlockedDomains);
+        break;
+
+      case 'remove-block-list':
+        teacherBlockedDomains = [];
+        activeBlockListName = null;
+
+        // Clear teacher block list rules (keeps global blacklist)
+        await clearTeacherBlockListRules();
+        
+        safeNotify({
+          title: 'Block List Removed',
+          message: 'Your teacher has removed the block list.',
+          priority: 1,
+        });
+        
+        console.log('[Block List] Teacher block list removed');
+        break;
+        
       case 'limit-tabs':
         currentMaxTabs = command.data.maxTabs;
         
@@ -1889,6 +1996,125 @@ async function handleRemoteControl(command) {
         }
         
         console.log('Tab limit set to:', currentMaxTabs);
+        break;
+
+      case 'attention-mode':
+        // Show/hide attention overlay on all tabs
+        const attentionActive = command.data.active;
+        const attentionMessage = command.data.message || 'Please look up!';
+
+        const attentionTabs = await chrome.tabs.query({});
+        for (const tab of attentionTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'attention-mode',
+                data: { active: attentionActive, message: attentionMessage }
+              });
+            } catch (error) {
+              console.log('Could not send attention-mode to tab:', tab.id, error);
+            }
+          }
+        }
+
+        if (attentionActive) {
+          safeNotify({
+            title: 'Attention Required',
+            message: attentionMessage,
+            priority: 2,
+          });
+        }
+
+        console.log('Attention mode:', attentionActive ? 'ON' : 'OFF', attentionMessage);
+        break;
+
+      case 'timer':
+        // Start/stop timer overlay on all tabs
+        const timerAction = command.data.action;
+        const timerSeconds = command.data.seconds;
+        const timerMessage = command.data.message || '';
+
+        const timerTabs = await chrome.tabs.query({});
+        for (const tab of timerTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'timer',
+                data: { action: timerAction, seconds: timerSeconds, message: timerMessage }
+              });
+            } catch (error) {
+              console.log('Could not send timer to tab:', tab.id, error);
+            }
+          }
+        }
+
+        if (timerAction === 'start') {
+          safeNotify({
+            title: 'Timer Started',
+            message: `${Math.floor(timerSeconds / 60)}:${String(timerSeconds % 60).padStart(2, '0')} remaining`,
+            priority: 1,
+          });
+        }
+
+        console.log('Timer:', timerAction, timerSeconds, 'seconds');
+        break;
+
+      case 'poll':
+        // Show/hide poll overlay on all tabs
+        const pollAction = command.data.action;
+        const pollId = command.data.pollId;
+        const pollQuestion = command.data.question;
+        const pollOptions = command.data.options;
+
+        const pollTabs = await chrome.tabs.query({});
+        for (const tab of pollTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'poll',
+                data: { action: pollAction, pollId, question: pollQuestion, options: pollOptions }
+              });
+            } catch (error) {
+              console.log('Could not send poll to tab:', tab.id, error);
+            }
+          }
+        }
+
+        if (pollAction === 'start') {
+          safeNotify({
+            title: 'Poll',
+            message: pollQuestion,
+            priority: 2,
+          });
+        }
+
+        console.log('Poll:', pollAction, pollId);
+        break;
+
+      case 'chat-notification':
+        // Show chat notification overlay on all tabs
+        const chatMessage = command.data.message;
+        const chatFromName = command.data.fromName;
+
+        const chatTabs = await chrome.tabs.query({});
+        for (const tab of chatTabs) {
+          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
+            try {
+              await ensureContentScriptInjected(tab.id);
+              await chrome.tabs.sendMessage(tab.id, {
+                type: 'chat-notification',
+                data: { message: chatMessage, fromName: chatFromName }
+              });
+            } catch (error) {
+              console.log('Could not send chat-notification to tab:', tab.id, error);
+            }
+          }
+        }
+
+        console.log('Chat notification sent:', chatFromName, chatMessage);
         break;
     }
   } catch (error) {
@@ -2028,6 +2254,29 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       safeNotify({
         title: 'Website Blocked',
         message: `Access to ${targetDomain} is blocked by your school.`,
+        priority: 2,
+      });
+      return;
+    }
+  }
+
+  // Check teacher block list (session-based)
+  if (teacherBlockedDomains.length > 0) {
+    const isTeacherBlocked = teacherBlockedDomains.some(blockedDomain => {
+      const normalizedBlocked = blockedDomain.replace(/^www./, '');
+      return targetDomain === normalizedBlocked || targetDomain.endsWith('.' + normalizedBlocked);
+    });
+    
+    if (isTeacherBlocked) {
+      console.log('[Teacher Block List] Blocked navigation to:', details.url);
+      
+      chrome.tabs.goBack(details.tabId).catch(() => {
+        chrome.tabs.update(details.tabId, { url: 'about:blank' });
+      });
+      
+      safeNotify({
+        title: 'Website Blocked',
+        message: `Access to ${targetDomain} is blocked by your teacher.`,
         priority: 2,
       });
       return;
@@ -2493,7 +2742,7 @@ function connectWebSocket() {
         if (message.settings && message.settings.globalBlockedDomains) {
           globalBlockedDomains = message.settings.globalBlockedDomains;
           console.log('[Blacklist] Received from server:', globalBlockedDomains);
-          
+
           // Apply blacklist rules and persist to storage
           (async () => {
             try {
@@ -2502,6 +2751,21 @@ function connectWebSocket() {
               console.log('[Blacklist] Persisted to storage');
             } catch (error) {
               console.error('[Blacklist] Error applying rules:', error);
+            }
+          })();
+        }
+
+        // Clear any existing teacher block list on new auth
+        // Teacher block lists are session-based and tied to specific teacher sessions
+        if (teacherBlockedDomains.length > 0) {
+          console.log('[Block List] Clearing teacher block list on new auth (session-based)');
+          teacherBlockedDomains = [];
+          activeBlockListName = null;
+          (async () => {
+            try {
+              await clearTeacherBlockListRules();
+            } catch (error) {
+              console.error('[Block List] Error clearing rules on auth:', error);
             }
           })();
         }
@@ -2713,6 +2977,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === 'get-config') {
     sendResponse({ config: CONFIG });
+    return true;
+  }
+
+  // Handle poll response from content script
+  if (message.type === 'poll-response') {
+    const { pollId, selectedOption } = message;
+    console.log('Poll response received:', pollId, selectedOption);
+
+    // Send poll response to server
+    if (CONFIG.deviceId && CONFIG.serverUrl) {
+      const headers = buildDeviceAuthHeaders();
+      headers['Content-Type'] = 'application/json';
+
+      fetch(`${CONFIG.serverUrl}/api/polls/${pollId}/respond`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          deviceId: CONFIG.deviceId,
+          studentId: CONFIG.activeStudentId,
+          selectedOption,
+        }),
+      })
+        .then(res => res.json())
+        .then(data => {
+          console.log('Poll response submitted:', data);
+        })
+        .catch(err => {
+          console.error('Failed to submit poll response:', err);
+        });
+    }
+
+    sendResponse({ success: true });
     return true;
   }
   

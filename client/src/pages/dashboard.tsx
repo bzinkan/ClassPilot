@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +31,7 @@ import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { StudentStatus, AggregatedStudentStatus, Heartbeat, Settings, FlightPath, Group, Session } from "@shared/schema";
+import type { StudentStatus, AggregatedStudentStatus, Heartbeat, Settings, FlightPath, Group, Session, BlockList, Subgroup } from "@shared/schema";
 import { isWithinTrackingHours } from "@shared/utils";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
@@ -81,6 +81,26 @@ export default function Dashboard() {
   const [showApplyFlightPathDialog, setShowApplyFlightPathDialog] = useState(false);
   const [selectedFlightPathId, setSelectedFlightPathId] = useState("");
   const [showFlightPathViewerDialog, setShowFlightPathViewerDialog] = useState(false);
+  const [showApplyBlockListDialog, setShowApplyBlockListDialog] = useState(false);
+  const [selectedBlockListId, setSelectedBlockListId] = useState("");
+  const [showBlockListViewerDialog, setShowBlockListViewerDialog] = useState(false);
+  const [showAttentionDialog, setShowAttentionDialog] = useState(false);
+  const [attentionMessage, setAttentionMessage] = useState("Please look up!");
+  const [attentionActive, setAttentionActive] = useState(false);
+  const [showTimerDialog, setShowTimerDialog] = useState(false);
+  const [timerMinutes, setTimerMinutes] = useState(5);
+  const [timerSeconds, setTimerSeconds] = useState(0);
+  const [timerMessage, setTimerMessage] = useState("");
+  const [timerActive, setTimerActive] = useState(false);
+  const [showPollDialog, setShowPollDialog] = useState(false);
+  const [showPollResultsDialog, setShowPollResultsDialog] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState("");
+  const [pollOptions, setPollOptions] = useState(["", ""]);
+  const [activePoll, setActivePoll] = useState<{ id: string; question: string; options: string[] } | null>(null);
+  const [pollResults, setPollResults] = useState<{ option: number; count: number }[]>([]);
+  const [pollTotalResponses, setPollTotalResponses] = useState(0);
+  const [selectedSubgroupId, setSelectedSubgroupId] = useState<string>("");
+  const [subgroupMembers, setSubgroupMembers] = useState<Set<string>>(new Set());
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -120,6 +140,10 @@ export default function Dashboard() {
     queryKey: ['/api/flight-paths'],
   });
 
+  const { data: blockLists = [] } = useQuery<BlockList[]>({
+    queryKey: ['/api/block-lists'],
+  });
+
   const { data: currentUserData } = useQuery<{ success: boolean; user: CurrentUser }>({
     queryKey: ['/api/me'],
   });
@@ -134,6 +158,18 @@ export default function Dashboard() {
 
   const { data: groups = [] } = useQuery<Group[]>({
     queryKey: ['/api/teacher/groups'],
+  });
+
+  // Fetch subgroups for the active session's group
+  const { data: subgroups = [] } = useQuery<Subgroup[]>({
+    queryKey: ['/api/groups', activeSession?.groupId, 'subgroups'],
+    queryFn: async () => {
+      if (!activeSession?.groupId) return [];
+      const res = await apiRequest('GET', `/api/groups/${activeSession.groupId}/subgroups`);
+      const data = await res.json();
+      return data.subgroups || [];
+    },
+    enabled: !!activeSession?.groupId,
   });
 
   // Fetch students in the active session's group
@@ -499,18 +535,21 @@ export default function Dashboard() {
   // Full filtered students list (includes search filter) - used for display
   const filteredStudents = sessionFilteredStudents
     .filter((student) => {
-      const matchesSearch = 
+      const matchesSearch =
         (student.studentName || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
         student.studentId.toLowerCase().includes(searchQuery.toLowerCase()) ||
         (student.classId ?? '').toLowerCase().includes(searchQuery.toLowerCase());
-      
-      return matchesSearch;
+
+      // Filter by subgroup if one is selected
+      const matchesSubgroup = !selectedSubgroupId || subgroupMembers.has(student.studentId);
+
+      return matchesSearch && matchesSubgroup;
     })
     .sort((a, b) => {
       // Sort alphabetically by last name only
       const aLastName = getLastName(a.studentName);
       const bLastName = getLastName(b.studentName);
-      
+
       return aLastName.localeCompare(bLastName);
     });
 
@@ -1174,6 +1213,341 @@ export default function Dashboard() {
     removeFlightPathMutation.mutate({ targetDeviceIds: [deviceId] });
   };
 
+  // Apply Block List mutation
+  const applyBlockListMutation = useMutation({
+    mutationFn: async ({ blockListId, targetDeviceIds }: { blockListId: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', `/api/block-lists/${blockListId}/apply`, { targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data) => {
+      const blockList = blockLists.find(bl => bl.id === selectedBlockListId);
+      toast({
+        title: "Success",
+        description: `Applied "${blockList?.name || 'Block List'}" to ${data.sentTo || 0} student(s)`,
+      });
+      setShowApplyBlockListDialog(false);
+      setSelectedBlockListId("");
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Remove Block List mutation
+  const removeBlockListMutation = useMutation({
+    mutationFn: async ({ targetDeviceIds }: { targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/block-lists/remove', { targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Success",
+        description: `Removed block list from ${data.sentTo || 0} student(s)`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Block List handlers
+  const handleApplyBlockList = () => {
+    if (!selectedBlockListId) {
+      toast({
+        variant: "destructive",
+        title: "No Block List Selected",
+        description: "Please select a block list to apply",
+      });
+      return;
+    }
+
+    const targetDeviceIds = getTargetDeviceIds();
+    applyBlockListMutation.mutate({
+      blockListId: selectedBlockListId,
+      targetDeviceIds,
+    });
+  };
+
+  const handleRemoveBlockList = () => {
+    const targetDeviceIds = getTargetDeviceIds();
+    removeBlockListMutation.mutate({ targetDeviceIds });
+  };
+
+  // Attention Mode mutation
+  const attentionModeMutation = useMutation({
+    mutationFn: async ({ active, message, targetDeviceIds }: { active: boolean; message: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/attention-mode', { active, message, targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data, variables) => {
+      setAttentionActive(variables.active);
+      toast({
+        title: variables.active ? "Attention Mode Enabled" : "Attention Mode Disabled",
+        description: variables.active
+          ? `Showing "${variables.message}" to ${data.sentTo || 0} student(s)`
+          : `Released ${data.sentTo || 0} student(s)`,
+      });
+      if (!variables.active) {
+        setShowAttentionDialog(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Timer mutation
+  const timerMutation = useMutation({
+    mutationFn: async ({ action, seconds, message, targetDeviceIds }: { action: 'start' | 'stop'; seconds?: number; message?: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/remote/timer', { action, seconds, message, targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data, variables) => {
+      setTimerActive(variables.action === 'start');
+      toast({
+        title: variables.action === 'start' ? "Timer Started" : "Timer Stopped",
+        description: variables.action === 'start'
+          ? `${Math.floor((variables.seconds || 0) / 60)}:${String((variables.seconds || 0) % 60).padStart(2, '0')} timer sent to ${data.sentTo || 0} student(s)`
+          : `Stopped timer for ${data.sentTo || 0} student(s)`,
+      });
+      if (variables.action === 'start') {
+        setShowTimerDialog(false);
+      }
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Attention Mode handlers
+  const handleAttentionMode = (active: boolean) => {
+    const targetDeviceIds = getTargetDeviceIds();
+    attentionModeMutation.mutate({
+      active,
+      message: attentionMessage,
+      targetDeviceIds,
+    });
+  };
+
+  // Timer handlers
+  const handleStartTimer = () => {
+    const totalSeconds = (timerMinutes * 60) + timerSeconds;
+    if (totalSeconds <= 0) {
+      toast({
+        variant: "destructive",
+        title: "Invalid Timer",
+        description: "Please set a time greater than 0",
+      });
+      return;
+    }
+    const targetDeviceIds = getTargetDeviceIds();
+    timerMutation.mutate({
+      action: 'start',
+      seconds: totalSeconds,
+      message: timerMessage,
+      targetDeviceIds,
+    });
+  };
+
+  const handleStopTimer = () => {
+    const targetDeviceIds = getTargetDeviceIds();
+    timerMutation.mutate({
+      action: 'stop',
+      targetDeviceIds,
+    });
+  };
+
+  // Poll mutation
+  const pollMutation = useMutation({
+    mutationFn: async ({ question, options, targetDeviceIds }: { question: string; options: string[]; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', '/api/polls/create', { question, options, targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data) => {
+      setActivePoll({ id: data.poll.id, question: data.poll.question, options: data.poll.options });
+      setPollResults([]);
+      setPollTotalResponses(0);
+      toast({
+        title: "Poll Created",
+        description: `Poll sent to ${data.sentTo || 0} student(s)`,
+      });
+      setShowPollDialog(false);
+      setPollQuestion("");
+      setPollOptions(["", ""]);
+      // Start polling for results
+      startPollResultsPolling(data.poll.id);
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Close poll mutation
+  const closePollMutation = useMutation({
+    mutationFn: async ({ pollId, targetDeviceIds }: { pollId: string; targetDeviceIds?: string[] }) => {
+      const res = await apiRequest('POST', `/api/polls/${pollId}/close`, { targetDeviceIds });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: () => {
+      setActivePoll(null);
+      setShowPollResultsDialog(false);
+      toast({
+        title: "Poll Closed",
+        description: "Poll has been closed",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Poll results polling
+  const pollResultsIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const startPollResultsPolling = (pollId: string) => {
+    // Clear any existing interval
+    if (pollResultsIntervalRef.current) {
+      clearInterval(pollResultsIntervalRef.current);
+    }
+
+    // Fetch immediately
+    fetchPollResults(pollId);
+
+    // Poll every 2 seconds
+    pollResultsIntervalRef.current = setInterval(() => {
+      fetchPollResults(pollId);
+    }, 2000);
+  };
+
+  const fetchPollResults = async (pollId: string) => {
+    try {
+      const res = await apiRequest('GET', `/api/polls/${pollId}/results`);
+      const data = await res.json();
+      setPollResults(data.results || []);
+      setPollTotalResponses(data.totalResponses || 0);
+
+      // If poll is closed, stop polling
+      if (!data.poll.isActive) {
+        if (pollResultsIntervalRef.current) {
+          clearInterval(pollResultsIntervalRef.current);
+          pollResultsIntervalRef.current = null;
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching poll results:', err);
+    }
+  };
+
+  // Cleanup poll interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollResultsIntervalRef.current) {
+        clearInterval(pollResultsIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Fetch subgroup members when subgroup is selected
+  useEffect(() => {
+    if (selectedSubgroupId) {
+      apiRequest('GET', `/api/subgroups/${selectedSubgroupId}/members`)
+        .then(res => res.json())
+        .then(data => {
+          setSubgroupMembers(new Set(data.members || []));
+        })
+        .catch(err => {
+          console.error('Error fetching subgroup members:', err);
+          setSubgroupMembers(new Set());
+        });
+    } else {
+      setSubgroupMembers(new Set());
+    }
+  }, [selectedSubgroupId]);
+
+  // Poll handlers
+  const handleCreatePoll = () => {
+    const validOptions = pollOptions.filter(opt => opt.trim() !== '');
+    if (!pollQuestion.trim()) {
+      toast({
+        variant: "destructive",
+        title: "Invalid Poll",
+        description: "Please enter a question",
+      });
+      return;
+    }
+    if (validOptions.length < 2) {
+      toast({
+        variant: "destructive",
+        title: "Invalid Poll",
+        description: "Please enter at least 2 options",
+      });
+      return;
+    }
+    const targetDeviceIds = getTargetDeviceIds();
+    pollMutation.mutate({
+      question: pollQuestion.trim(),
+      options: validOptions,
+      targetDeviceIds,
+    });
+  };
+
+  const handleClosePoll = () => {
+    if (!activePoll) return;
+    const targetDeviceIds = getTargetDeviceIds();
+    closePollMutation.mutate({
+      pollId: activePoll.id,
+      targetDeviceIds,
+    });
+  };
+
+  const addPollOption = () => {
+    if (pollOptions.length < 5) {
+      setPollOptions([...pollOptions, ""]);
+    }
+  };
+
+  const removePollOption = (index: number) => {
+    if (pollOptions.length > 2) {
+      setPollOptions(pollOptions.filter((_, i) => i !== index));
+    }
+  };
+
+  const updatePollOption = (index: number, value: string) => {
+    const newOptions = [...pollOptions];
+    newOptions[index] = value;
+    setPollOptions(newOptions);
+  };
+
   return (
     <div className="min-h-screen">
       {/* Header */}
@@ -1567,6 +1941,106 @@ export default function Dashboard() {
             <Route className="h-4 w-4 mr-2" />
             Flight Path
           </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowApplyBlockListDialog(true)}
+            data-testid="button-apply-block-list"
+            className="text-red-600 dark:text-red-400"
+          >
+            <ShieldBan className="h-4 w-4 mr-2" />
+            Apply Block List
+          </Button>
+
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setShowBlockListViewerDialog(true)}
+            data-testid="button-block-list"
+            className="text-red-600 dark:text-red-400"
+          >
+            <Shield className="h-4 w-4 mr-2" />
+            Block List
+          </Button>
+
+          <Button
+            size="sm"
+            variant={attentionActive ? "default" : "outline"}
+            onClick={() => attentionActive ? handleAttentionMode(false) : setShowAttentionDialog(true)}
+            disabled={attentionModeMutation.isPending}
+            data-testid="button-attention"
+            className={attentionActive ? "bg-indigo-600 hover:bg-indigo-700 text-white" : "text-indigo-600 dark:text-indigo-400"}
+          >
+            {attentionActive ? <EyeOff className="h-4 w-4 mr-2" /> : <Eye className="h-4 w-4 mr-2" />}
+            {attentionActive ? "Release" : "Attention"}
+          </Button>
+
+          <Button
+            size="sm"
+            variant={timerActive ? "default" : "outline"}
+            onClick={() => timerActive ? handleStopTimer() : setShowTimerDialog(true)}
+            disabled={timerMutation.isPending}
+            data-testid="button-timer"
+            className={timerActive ? "bg-teal-600 hover:bg-teal-700 text-white" : "text-teal-600 dark:text-teal-400"}
+          >
+            {timerActive ? <Clock className="h-4 w-4 mr-2" /> : <Timer className="h-4 w-4 mr-2" />}
+            {timerActive ? "Stop Timer" : "Timer"}
+          </Button>
+
+          <Button
+            size="sm"
+            variant={activePoll ? "default" : "outline"}
+            onClick={() => activePoll ? setShowPollResultsDialog(true) : setShowPollDialog(true)}
+            disabled={pollMutation.isPending}
+            data-testid="button-poll"
+            className={activePoll ? "bg-violet-600 hover:bg-violet-700 text-white" : "text-violet-600 dark:text-violet-400"}
+          >
+            <BarChart3 className="h-4 w-4 mr-2" />
+            {activePoll ? `Poll (${pollTotalResponses})` : "Poll"}
+          </Button>
+
+          {/* Subgroup Filter */}
+          {subgroups.length > 0 && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  data-testid="button-subgroup-filter"
+                  className={selectedSubgroupId ? "text-pink-600 dark:text-pink-400 border-pink-300" : "text-pink-600 dark:text-pink-400"}
+                >
+                  <UsersRound className="h-4 w-4 mr-2" />
+                  {selectedSubgroupId
+                    ? subgroups.find(s => s.id === selectedSubgroupId)?.name || "Subgroup"
+                    : "Subgroups"}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Filter by Subgroup</DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuCheckboxItem
+                  checked={!selectedSubgroupId}
+                  onCheckedChange={() => setSelectedSubgroupId("")}
+                >
+                  All Students
+                </DropdownMenuCheckboxItem>
+                {subgroups.map((subgroup) => (
+                  <DropdownMenuCheckboxItem
+                    key={subgroup.id}
+                    checked={selectedSubgroupId === subgroup.id}
+                    onCheckedChange={() => setSelectedSubgroupId(subgroup.id)}
+                  >
+                    <span
+                      className="w-3 h-3 rounded-full mr-2"
+                      style={{ backgroundColor: subgroup.color || '#9333ea' }}
+                    />
+                    {subgroup.name}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
           </div>
         )}
 
@@ -2079,6 +2553,440 @@ export default function Dashboard() {
           <DialogFooter>
             <Button onClick={() => setShowFlightPathViewerDialog(false)} data-testid="button-close-flight-path-viewer">
               Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Apply Block List Dialog */}
+      <Dialog open={showApplyBlockListDialog} onOpenChange={setShowApplyBlockListDialog}>
+        <DialogContent data-testid="dialog-apply-block-list">
+          <DialogHeader>
+            <DialogTitle>Apply Block List to Students</DialogTitle>
+            <DialogDescription>
+              {selectedStudentIds.size > 0
+                ? `Apply a block list to ${selectedStudentIds.size} selected student(s)`
+                : "Apply a block list to all online students"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="block-list-select">Select Block List</Label>
+              <Select value={selectedBlockListId} onValueChange={setSelectedBlockListId}>
+                <SelectTrigger id="block-list-select" data-testid="select-block-list">
+                  <SelectValue placeholder="Choose a block list" />
+                </SelectTrigger>
+                <SelectContent>
+                  {blockLists.map((blockList) => (
+                    <SelectItem key={blockList.id} value={blockList.id} data-testid={`option-block-list-${blockList.id}`}>
+                      {blockList.name}
+                    </SelectItem>
+                  ))}
+                  {blockLists.length === 0 && (
+                    <div className="p-2 text-sm text-muted-foreground">
+                      No block lists available. Create one in My Settings.
+                    </div>
+                  )}
+                </SelectContent>
+              </Select>
+              {selectedBlockListId && (() => {
+                const bl = blockLists.find(b => b.id === selectedBlockListId);
+                return bl ? (
+                  <div className="mt-2 p-3 bg-muted/30 rounded-md">
+                    <p className="text-xs font-medium mb-1">Description:</p>
+                    <p className="text-xs text-muted-foreground mb-2">{bl.description || "No description provided"}</p>
+                    <p className="text-xs font-medium mb-1">Blocked Domains ({bl.blockedDomains?.length || 0}):</p>
+                    <div className="flex flex-wrap gap-1">
+                      {bl.blockedDomains && bl.blockedDomains.length > 0 ? (
+                        bl.blockedDomains.map((domain, idx) => (
+                          <Badge key={idx} variant="destructive" className="text-xs">
+                            {domain}
+                          </Badge>
+                        ))
+                      ) : (
+                        <p className="text-xs text-muted-foreground">No domains</p>
+                      )}
+                    </div>
+                  </div>
+                ) : null;
+              })()}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowApplyBlockListDialog(false)} data-testid="button-cancel-apply-block-list">
+              Cancel
+            </Button>
+            <Button onClick={handleApplyBlockList} disabled={applyBlockListMutation.isPending || !selectedBlockListId} data-testid="button-confirm-apply-block-list">
+              <ShieldBan className="h-4 w-4 mr-2" />
+              Apply Block List
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Block List Viewer Dialog */}
+      <Dialog open={showBlockListViewerDialog} onOpenChange={setShowBlockListViewerDialog}>
+        <DialogContent className="max-w-2xl" data-testid="dialog-block-list-viewer">
+          <DialogHeader>
+            <DialogTitle>Block List Status</DialogTitle>
+            <DialogDescription>
+              Manage active block lists for your students. Block lists are session-based and will be removed when students disconnect.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-3 bg-muted/30 rounded-md">
+              <div>
+                <p className="text-sm font-medium">Remove Block List from All Students</p>
+                <p className="text-xs text-muted-foreground">This will remove any teacher-applied block list from all online students</p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRemoveBlockList}
+                disabled={removeBlockListMutation.isPending}
+                className="text-destructive hover:text-destructive"
+                data-testid="button-remove-all-block-lists"
+              >
+                <X className="h-4 w-4 mr-2" />
+                Remove All
+              </Button>
+            </div>
+            <div className="border-t pt-4">
+              <p className="text-sm font-medium mb-2">Your Block Lists</p>
+              {blockLists.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No block lists created yet. Create one in My Settings.</p>
+              ) : (
+                <div className="space-y-2 max-h-[250px] overflow-y-auto">
+                  {blockLists.map((bl) => (
+                    <div key={bl.id} className="flex items-center justify-between p-3 border rounded-md" data-testid={`block-list-item-${bl.id}`}>
+                      <div className="flex-1">
+                        <p className="text-sm font-medium">{bl.name}</p>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {bl.blockedDomains?.slice(0, 3).map((domain, idx) => (
+                            <Badge key={idx} variant="secondary" className="text-xs">
+                              {domain}
+                            </Badge>
+                          ))}
+                          {(bl.blockedDomains?.length || 0) > 3 && (
+                            <Badge variant="secondary" className="text-xs">
+                              +{(bl.blockedDomains?.length || 0) - 3} more
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          setSelectedBlockListId(bl.id);
+                          setShowBlockListViewerDialog(false);
+                          setShowApplyBlockListDialog(true);
+                        }}
+                        data-testid={`button-quick-apply-${bl.id}`}
+                      >
+                        <ShieldBan className="h-4 w-4 mr-2" />
+                        Apply
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setShowBlockListViewerDialog(false)} data-testid="button-close-block-list-viewer">
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Attention Mode Dialog */}
+      <Dialog open={showAttentionDialog} onOpenChange={setShowAttentionDialog}>
+        <DialogContent data-testid="dialog-attention-mode">
+          <DialogHeader>
+            <DialogTitle>Attention Mode</DialogTitle>
+            <DialogDescription>
+              {selectedStudentIds.size > 0
+                ? `Get the attention of ${selectedStudentIds.size} selected student(s)`
+                : "Get the attention of all students"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="attention-message">Message to Display</Label>
+              <Input
+                id="attention-message"
+                value={attentionMessage}
+                onChange={(e) => setAttentionMessage(e.target.value)}
+                placeholder="Please look up!"
+                data-testid="input-attention-message"
+              />
+              <p className="text-xs text-muted-foreground">
+                This message will be shown full-screen on student devices until you release them.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowAttentionDialog(false)} data-testid="button-cancel-attention">
+              Cancel
+            </Button>
+            <Button
+              onClick={() => handleAttentionMode(true)}
+              disabled={attentionModeMutation.isPending}
+              className="bg-indigo-600 hover:bg-indigo-700"
+              data-testid="button-activate-attention"
+            >
+              <Eye className="h-4 w-4 mr-2" />
+              Activate Attention Mode
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Timer Dialog */}
+      <Dialog open={showTimerDialog} onOpenChange={setShowTimerDialog}>
+        <DialogContent data-testid="dialog-timer">
+          <DialogHeader>
+            <DialogTitle>Start Timer</DialogTitle>
+            <DialogDescription>
+              {selectedStudentIds.size > 0
+                ? `Display a countdown timer for ${selectedStudentIds.size} selected student(s)`
+                : "Display a countdown timer for all students"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Quick Presets</Label>
+              <div className="flex gap-2 flex-wrap">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setTimerMinutes(1); setTimerSeconds(0); }}
+                  data-testid="button-timer-1min"
+                >
+                  1 min
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setTimerMinutes(3); setTimerSeconds(0); }}
+                  data-testid="button-timer-3min"
+                >
+                  3 min
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setTimerMinutes(5); setTimerSeconds(0); }}
+                  data-testid="button-timer-5min"
+                >
+                  5 min
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setTimerMinutes(10); setTimerSeconds(0); }}
+                  data-testid="button-timer-10min"
+                >
+                  10 min
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => { setTimerMinutes(15); setTimerSeconds(0); }}
+                  data-testid="button-timer-15min"
+                >
+                  15 min
+                </Button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Custom Time</Label>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min="0"
+                  max="60"
+                  value={timerMinutes}
+                  onChange={(e) => setTimerMinutes(Math.max(0, Math.min(60, parseInt(e.target.value) || 0)))}
+                  className="w-20"
+                  data-testid="input-timer-minutes"
+                />
+                <span className="text-sm text-muted-foreground">min</span>
+                <Input
+                  type="number"
+                  min="0"
+                  max="59"
+                  value={timerSeconds}
+                  onChange={(e) => setTimerSeconds(Math.max(0, Math.min(59, parseInt(e.target.value) || 0)))}
+                  className="w-20"
+                  data-testid="input-timer-seconds"
+                />
+                <span className="text-sm text-muted-foreground">sec</span>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="timer-message">Optional Message</Label>
+              <Input
+                id="timer-message"
+                value={timerMessage}
+                onChange={(e) => setTimerMessage(e.target.value)}
+                placeholder="e.g., Complete the assignment"
+                data-testid="input-timer-message"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTimerDialog(false)} data-testid="button-cancel-timer">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleStartTimer}
+              disabled={timerMutation.isPending}
+              className="bg-teal-600 hover:bg-teal-700"
+              data-testid="button-start-timer"
+            >
+              <Timer className="h-4 w-4 mr-2" />
+              Start Timer
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create Poll Dialog */}
+      <Dialog open={showPollDialog} onOpenChange={setShowPollDialog}>
+        <DialogContent className="max-w-lg" data-testid="dialog-poll">
+          <DialogHeader>
+            <DialogTitle>Create Poll</DialogTitle>
+            <DialogDescription>
+              {selectedStudentIds.size > 0
+                ? `Send a poll to ${selectedStudentIds.size} selected student(s)`
+                : "Send a poll to all students"}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="poll-question">Question</Label>
+              <Input
+                id="poll-question"
+                value={pollQuestion}
+                onChange={(e) => setPollQuestion(e.target.value)}
+                placeholder="What do you think about...?"
+                data-testid="input-poll-question"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Options (2-5)</Label>
+              <div className="space-y-2">
+                {pollOptions.map((option, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-violet-100 dark:bg-violet-900 text-violet-600 dark:text-violet-400 flex items-center justify-center text-sm font-medium flex-shrink-0">
+                      {String.fromCharCode(65 + index)}
+                    </span>
+                    <Input
+                      value={option}
+                      onChange={(e) => updatePollOption(index, e.target.value)}
+                      placeholder={`Option ${String.fromCharCode(65 + index)}`}
+                      data-testid={`input-poll-option-${index}`}
+                    />
+                    {pollOptions.length > 2 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => removePollOption(index)}
+                        className="text-destructive hover:text-destructive"
+                        data-testid={`button-remove-option-${index}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {pollOptions.length < 5 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addPollOption}
+                  className="w-full mt-2"
+                  data-testid="button-add-option"
+                >
+                  <Plus className="h-4 w-4 mr-2" />
+                  Add Option
+                </Button>
+              )}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPollDialog(false)} data-testid="button-cancel-poll">
+              Cancel
+            </Button>
+            <Button
+              onClick={handleCreatePoll}
+              disabled={pollMutation.isPending}
+              className="bg-violet-600 hover:bg-violet-700"
+              data-testid="button-create-poll"
+            >
+              <BarChart3 className="h-4 w-4 mr-2" />
+              Create Poll
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Poll Results Dialog */}
+      <Dialog open={showPollResultsDialog} onOpenChange={setShowPollResultsDialog}>
+        <DialogContent className="max-w-lg" data-testid="dialog-poll-results">
+          <DialogHeader>
+            <DialogTitle>Poll Results</DialogTitle>
+            <DialogDescription>
+              {activePoll?.question}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="text-center text-2xl font-bold text-violet-600 dark:text-violet-400">
+              {pollTotalResponses} response{pollTotalResponses !== 1 ? 's' : ''}
+            </div>
+            <div className="space-y-3">
+              {activePoll?.options.map((option, index) => {
+                const result = pollResults.find(r => r.option === index);
+                const count = result?.count || 0;
+                const percentage = pollTotalResponses > 0 ? Math.round((count / pollTotalResponses) * 100) : 0;
+                return (
+                  <div key={index} className="space-y-1">
+                    <div className="flex items-center justify-between text-sm">
+                      <div className="flex items-center gap-2">
+                        <span className="w-6 h-6 rounded-full bg-violet-100 dark:bg-violet-900 text-violet-600 dark:text-violet-400 flex items-center justify-center text-xs font-medium">
+                          {String.fromCharCode(65 + index)}
+                        </span>
+                        <span>{option}</span>
+                      </div>
+                      <span className="font-medium">{count} ({percentage}%)</span>
+                    </div>
+                    <div className="h-4 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-violet-500 to-purple-500 rounded-full transition-all duration-500"
+                        style={{ width: `${percentage}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowPollResultsDialog(false)} data-testid="button-close-results">
+              Close
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleClosePoll}
+              disabled={closePollMutation.isPending}
+              data-testid="button-end-poll"
+            >
+              <X className="h-4 w-4 mr-2" />
+              End Poll
             </Button>
           </DialogFooter>
         </DialogContent>

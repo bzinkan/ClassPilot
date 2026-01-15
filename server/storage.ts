@@ -38,13 +38,23 @@ import {
   type InsertSession,
   type FlightPath,
   type InsertFlightPath,
+  type BlockList,
+  type InsertBlockList,
   type StudentGroup,
   type InsertStudentGroup,
   type Message,
   type InsertMessage,
   type CheckIn,
   type InsertCheckIn,
-  type TabInfo, // 🆕 All-tabs tracking
+  type Poll,
+  type InsertPoll,
+  type PollResponse,
+  type InsertPollResponse,
+  type Subgroup,
+  type InsertSubgroup,
+  type SubgroupMember,
+  type InsertSubgroupMember,
+  type TabInfo, // All-tabs tracking
   makeStatusKey,
   insertSettingsSchema,
   schools,
@@ -67,14 +77,19 @@ import {
   groupStudents,
   sessions,
   flightPaths,
+  blockLists,
   studentGroups,
   messages,
   checkIns,
+  polls,
+  pollResponses,
+  subgroups,
+  subgroupMembers,
   normalizeEmail,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
 import { db } from "./db";
-import { eq, desc, lt, sql as drizzleSql, inArray, isNull } from "drizzle-orm";
+import { eq, desc, lt, sql as drizzleSql, sql, inArray, isNull, and } from "drizzle-orm";
 import { decryptSecret, encryptSecret } from "./security/crypto";
 
 type GoogleOAuthTokenUpsert = Pick<InsertGoogleOAuthToken, "scope" | "tokenType" | "expiryDate"> & {
@@ -318,6 +333,14 @@ export interface IStorage {
   updateFlightPath(id: string, updates: Partial<InsertFlightPath>): Promise<FlightPath | undefined>;
   deleteFlightPath(id: string): Promise<boolean>;
 
+  // Block Lists (teacher-scoped)
+  getBlockList(id: string): Promise<BlockList | undefined>;
+  getBlockListsBySchool(schoolId: string): Promise<BlockList[]>;
+  getBlockListsByTeacher(teacherId: string): Promise<BlockList[]>;
+  createBlockList(blockList: InsertBlockList): Promise<BlockList>;
+  updateBlockList(id: string, updates: Partial<InsertBlockList>): Promise<BlockList | undefined>;
+  deleteBlockList(id: string): Promise<boolean>;
+
   // Student Groups (teacher-scoped)
   getStudentGroup(id: string): Promise<StudentGroup | undefined>;
   getStudentGroupsBySchool(schoolId: string): Promise<StudentGroup[]>;
@@ -337,6 +360,32 @@ export interface IStorage {
   getCheckInsByStudent(studentId: string): Promise<CheckIn[]>;
   getAllCheckIns(): Promise<CheckIn[]>;
   createCheckIn(checkIn: InsertCheckIn): Promise<CheckIn>;
+
+  // Polls
+  getPoll(id: string): Promise<Poll | undefined>;
+  getPollsBySession(sessionId: string): Promise<Poll[]>;
+  getActivePollsBySession(sessionId: string): Promise<Poll[]>;
+  createPoll(poll: InsertPoll): Promise<Poll>;
+  closePoll(pollId: string): Promise<Poll | undefined>;
+
+  // Poll Responses
+  getPollResponse(id: string): Promise<PollResponse | undefined>;
+  getPollResponsesByPoll(pollId: string): Promise<PollResponse[]>;
+  createPollResponse(response: InsertPollResponse): Promise<PollResponse>;
+  getPollResults(pollId: string): Promise<{ option: number; count: number }[]>;
+
+  // Subgroups
+  getSubgroup(id: string): Promise<Subgroup | undefined>;
+  getSubgroupsByGroup(groupId: string): Promise<Subgroup[]>;
+  createSubgroup(subgroup: InsertSubgroup): Promise<Subgroup>;
+  updateSubgroup(id: string, updates: Partial<InsertSubgroup>): Promise<Subgroup | undefined>;
+  deleteSubgroup(id: string): Promise<boolean>;
+
+  // Subgroup Members
+  getSubgroupMembers(subgroupId: string): Promise<string[]>; // Returns student IDs
+  addSubgroupMember(subgroupId: string, studentId: string): Promise<SubgroupMember>;
+  removeSubgroupMember(subgroupId: string, studentId: string): Promise<boolean>;
+  getStudentSubgroups(studentId: string): Promise<string[]>; // Returns subgroup IDs
 }
 
 export class MemStorage implements IStorage {
@@ -357,6 +406,7 @@ export class MemStorage implements IStorage {
   private teacherSettings: Map<string, TeacherSettings>;
   private teacherStudents: TeacherStudent[];
   private flightPaths: Map<string, FlightPath>;
+  private blockLists: Map<string, BlockList>;
   private studentGroups: Map<string, StudentGroup>;
   private messages: Message[];
   private checkIns: CheckIn[];
@@ -379,6 +429,7 @@ export class MemStorage implements IStorage {
     this.teacherSettings = new Map();
     this.teacherStudents = [];
     this.flightPaths = new Map();
+    this.blockLists = new Map();
     this.studentGroups = new Map();
     this.messages = [];
     this.checkIns = [];
@@ -1530,6 +1581,51 @@ export class MemStorage implements IStorage {
     return this.flightPaths.delete(id);
   }
 
+  // Block Lists
+  async getBlockList(id: string): Promise<BlockList | undefined> {
+    return this.blockLists.get(id);
+  }
+
+  async getBlockListsBySchool(schoolId: string): Promise<BlockList[]> {
+    return Array.from(this.blockLists.values()).filter((bl) => bl.schoolId === schoolId);
+  }
+
+  async getBlockListsByTeacher(teacherId: string): Promise<BlockList[]> {
+    return Array.from(this.blockLists.values()).filter((bl) => bl.teacherId === teacherId);
+  }
+
+  async createBlockList(insertBlockList: InsertBlockList): Promise<BlockList> {
+    const id = randomUUID();
+    const blockList: BlockList = {
+      id,
+      schoolId: insertBlockList.schoolId,
+      teacherId: insertBlockList.teacherId,
+      name: insertBlockList.name,
+      description: insertBlockList.description ?? null,
+      blockedDomains: insertBlockList.blockedDomains ?? null,
+      isDefault: insertBlockList.isDefault ?? false,
+      createdAt: new Date(),
+    };
+    this.blockLists.set(id, blockList);
+    return blockList;
+  }
+
+  async updateBlockList(id: string, updates: Partial<InsertBlockList>): Promise<BlockList | undefined> {
+    const existing = this.blockLists.get(id);
+    if (!existing) return undefined;
+
+    const updated: BlockList = {
+      ...existing,
+      ...updates,
+    };
+    this.blockLists.set(id, updated);
+    return updated;
+  }
+
+  async deleteBlockList(id: string): Promise<boolean> {
+    return this.blockLists.delete(id);
+  }
+
   // Student Groups
   async getStudentGroup(id: string): Promise<StudentGroup | undefined> {
     return this.studentGroups.get(id);
@@ -1627,6 +1723,145 @@ export class MemStorage implements IStorage {
     };
     this.checkIns.push(checkIn);
     return checkIn;
+  }
+
+  // Polls (stubs - not used in memory storage)
+  private polls: Poll[] = [];
+  private pollResponses: PollResponse[] = [];
+  private subgroups: Subgroup[] = [];
+  private subgroupMembers: SubgroupMember[] = [];
+
+  async getPoll(id: string): Promise<Poll | undefined> {
+    return this.polls.find(p => p.id === id);
+  }
+
+  async getPollsBySession(sessionId: string): Promise<Poll[]> {
+    return this.polls.filter(p => p.sessionId === sessionId);
+  }
+
+  async getActivePollsBySession(sessionId: string): Promise<Poll[]> {
+    return this.polls.filter(p => p.sessionId === sessionId && p.isActive);
+  }
+
+  async createPoll(insertPoll: InsertPoll): Promise<Poll> {
+    const poll: Poll = {
+      id: randomUUID(),
+      sessionId: insertPoll.sessionId,
+      teacherId: insertPoll.teacherId,
+      question: insertPoll.question,
+      options: insertPoll.options,
+      isActive: true,
+      createdAt: new Date(),
+      closedAt: null,
+    };
+    this.polls.push(poll);
+    return poll;
+  }
+
+  async closePoll(pollId: string): Promise<Poll | undefined> {
+    const poll = this.polls.find(p => p.id === pollId);
+    if (poll) {
+      poll.isActive = false;
+      poll.closedAt = new Date();
+    }
+    return poll;
+  }
+
+  async getPollResponse(id: string): Promise<PollResponse | undefined> {
+    return this.pollResponses.find(r => r.id === id);
+  }
+
+  async getPollResponsesByPoll(pollId: string): Promise<PollResponse[]> {
+    return this.pollResponses.filter(r => r.pollId === pollId);
+  }
+
+  async createPollResponse(insertResponse: InsertPollResponse): Promise<PollResponse> {
+    const response: PollResponse = {
+      id: randomUUID(),
+      pollId: insertResponse.pollId,
+      studentId: insertResponse.studentId,
+      deviceId: insertResponse.deviceId ?? null,
+      selectedOption: insertResponse.selectedOption,
+      createdAt: new Date(),
+    };
+    this.pollResponses.push(response);
+    return response;
+  }
+
+  async getPollResults(pollId: string): Promise<{ option: number; count: number }[]> {
+    const responses = this.pollResponses.filter(r => r.pollId === pollId);
+    const counts = new Map<number, number>();
+    for (const r of responses) {
+      counts.set(r.selectedOption, (counts.get(r.selectedOption) || 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([option, count]) => ({ option, count }));
+  }
+
+  // Subgroups (stubs - not used in memory storage)
+  async getSubgroup(id: string): Promise<Subgroup | undefined> {
+    return this.subgroups.find(s => s.id === id);
+  }
+
+  async getSubgroupsByGroup(groupId: string): Promise<Subgroup[]> {
+    return this.subgroups.filter(s => s.groupId === groupId);
+  }
+
+  async createSubgroup(insertSubgroup: InsertSubgroup): Promise<Subgroup> {
+    const subgroup: Subgroup = {
+      id: randomUUID(),
+      groupId: insertSubgroup.groupId,
+      name: insertSubgroup.name,
+      color: insertSubgroup.color ?? null,
+      createdAt: new Date(),
+    };
+    this.subgroups.push(subgroup);
+    return subgroup;
+  }
+
+  async updateSubgroup(id: string, updates: Partial<InsertSubgroup>): Promise<Subgroup | undefined> {
+    const subgroup = this.subgroups.find(s => s.id === id);
+    if (subgroup) {
+      Object.assign(subgroup, updates);
+    }
+    return subgroup;
+  }
+
+  async deleteSubgroup(id: string): Promise<boolean> {
+    const idx = this.subgroups.findIndex(s => s.id === id);
+    if (idx >= 0) {
+      this.subgroups.splice(idx, 1);
+      this.subgroupMembers = this.subgroupMembers.filter(m => m.subgroupId !== id);
+      return true;
+    }
+    return false;
+  }
+
+  async getSubgroupMembers(subgroupId: string): Promise<string[]> {
+    return this.subgroupMembers.filter(m => m.subgroupId === subgroupId).map(m => m.studentId);
+  }
+
+  async addSubgroupMember(subgroupId: string, studentId: string): Promise<SubgroupMember> {
+    const member: SubgroupMember = {
+      id: randomUUID(),
+      subgroupId,
+      studentId,
+      assignedAt: new Date(),
+    };
+    this.subgroupMembers.push(member);
+    return member;
+  }
+
+  async removeSubgroupMember(subgroupId: string, studentId: string): Promise<boolean> {
+    const idx = this.subgroupMembers.findIndex(m => m.subgroupId === subgroupId && m.studentId === studentId);
+    if (idx >= 0) {
+      this.subgroupMembers.splice(idx, 1);
+      return true;
+    }
+    return false;
+  }
+
+  async getStudentSubgroups(studentId: string): Promise<string[]> {
+    return this.subgroupMembers.filter(m => m.studentId === studentId).map(m => m.subgroupId);
   }
 
   // Dashboard Tabs (stubs - not used in memory storage)
@@ -3160,6 +3395,35 @@ export class DatabaseStorage implements IStorage {
     return result.rowCount !== null && result.rowCount > 0;
   }
 
+  // Block Lists
+  async getBlockList(id: string): Promise<BlockList | undefined> {
+    const [blockList] = await db.select().from(blockLists).where(eq(blockLists.id, id));
+    return blockList || undefined;
+  }
+
+  async getBlockListsBySchool(schoolId: string): Promise<BlockList[]> {
+    return await db.select().from(blockLists).where(eq(blockLists.schoolId, schoolId));
+  }
+
+  async getBlockListsByTeacher(teacherId: string): Promise<BlockList[]> {
+    return await db.select().from(blockLists).where(eq(blockLists.teacherId, teacherId));
+  }
+
+  async createBlockList(insertBlockList: InsertBlockList): Promise<BlockList> {
+    const [created] = await db.insert(blockLists).values(insertBlockList).returning();
+    return created;
+  }
+
+  async updateBlockList(id: string, updates: Partial<InsertBlockList>): Promise<BlockList | undefined> {
+    const [updated] = await db.update(blockLists).set(updates).where(eq(blockLists.id, id)).returning();
+    return updated || undefined;
+  }
+
+  async deleteBlockList(id: string): Promise<boolean> {
+    const result = await db.delete(blockLists).where(eq(blockLists.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
   // Student Groups
   async getStudentGroup(id: string): Promise<StudentGroup | undefined> {
     const [group] = await db.select().from(studentGroups).where(eq(studentGroups.id, id));
@@ -3249,6 +3513,115 @@ export class DatabaseStorage implements IStorage {
       .values(insertCheckIn)
       .returning();
     return created;
+  }
+
+  // Polls
+  async getPoll(id: string): Promise<Poll | undefined> {
+    const [poll] = await db.select().from(polls).where(eq(polls.id, id));
+    return poll || undefined;
+  }
+
+  async getPollsBySession(sessionId: string): Promise<Poll[]> {
+    return await db.select().from(polls).where(eq(polls.sessionId, sessionId)).orderBy(desc(polls.createdAt));
+  }
+
+  async getActivePollsBySession(sessionId: string): Promise<Poll[]> {
+    return await db.select().from(polls).where(and(eq(polls.sessionId, sessionId), eq(polls.isActive, true)));
+  }
+
+  async createPoll(insertPoll: InsertPoll): Promise<Poll> {
+    const [created] = await db.insert(polls).values(insertPoll).returning();
+    return created;
+  }
+
+  async closePoll(pollId: string): Promise<Poll | undefined> {
+    const [updated] = await db
+      .update(polls)
+      .set({ isActive: false, closedAt: new Date() })
+      .where(eq(polls.id, pollId))
+      .returning();
+    return updated || undefined;
+  }
+
+  async getPollResponse(id: string): Promise<PollResponse | undefined> {
+    const [response] = await db.select().from(pollResponses).where(eq(pollResponses.id, id));
+    return response || undefined;
+  }
+
+  async getPollResponsesByPoll(pollId: string): Promise<PollResponse[]> {
+    return await db.select().from(pollResponses).where(eq(pollResponses.pollId, pollId));
+  }
+
+  async createPollResponse(insertResponse: InsertPollResponse): Promise<PollResponse> {
+    const [created] = await db.insert(pollResponses).values(insertResponse).returning();
+    return created;
+  }
+
+  async getPollResults(pollId: string): Promise<{ option: number; count: number }[]> {
+    const results = await db
+      .select({
+        option: pollResponses.selectedOption,
+        count: sql<number>`count(*)::int`,
+      })
+      .from(pollResponses)
+      .where(eq(pollResponses.pollId, pollId))
+      .groupBy(pollResponses.selectedOption);
+    return results;
+  }
+
+  // Subgroups
+  async getSubgroup(id: string): Promise<Subgroup | undefined> {
+    const [subgroup] = await db.select().from(subgroups).where(eq(subgroups.id, id));
+    return subgroup || undefined;
+  }
+
+  async getSubgroupsByGroup(groupId: string): Promise<Subgroup[]> {
+    return await db.select().from(subgroups).where(eq(subgroups.groupId, groupId)).orderBy(subgroups.name);
+  }
+
+  async createSubgroup(insertSubgroup: InsertSubgroup): Promise<Subgroup> {
+    const [created] = await db.insert(subgroups).values(insertSubgroup).returning();
+    return created;
+  }
+
+  async updateSubgroup(id: string, updates: Partial<InsertSubgroup>): Promise<Subgroup | undefined> {
+    const [updated] = await db.update(subgroups).set(updates).where(eq(subgroups.id, id)).returning();
+    return updated || undefined;
+  }
+
+  async deleteSubgroup(id: string): Promise<boolean> {
+    // Delete members first
+    await db.delete(subgroupMembers).where(eq(subgroupMembers.subgroupId, id));
+    const result = await db.delete(subgroups).where(eq(subgroups.id, id));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async getSubgroupMembers(subgroupId: string): Promise<string[]> {
+    const members = await db
+      .select({ studentId: subgroupMembers.studentId })
+      .from(subgroupMembers)
+      .where(eq(subgroupMembers.subgroupId, subgroupId));
+    return members.map(m => m.studentId);
+  }
+
+  async addSubgroupMember(subgroupId: string, studentId: string): Promise<SubgroupMember> {
+    const [created] = await db.insert(subgroupMembers).values({ subgroupId, studentId }).returning();
+    return created;
+  }
+
+  async removeSubgroupMember(subgroupId: string, studentId: string): Promise<boolean> {
+    const result = await db
+      .delete(subgroupMembers)
+      .where(and(eq(subgroupMembers.subgroupId, subgroupId), eq(subgroupMembers.studentId, studentId)));
+    return result.rowCount !== null && result.rowCount > 0;
+  }
+
+  async getStudentSubgroups(studentId: string): Promise<string[]> {
+    const memberships = await db
+      .select({ subgroupId: subgroupMembers.subgroupId })
+      .from(subgroupMembers)
+      .where(eq(subgroupMembers.studentId, studentId));
+    return memberships.map(m => m.subgroupId);
   }
 
   // Dashboard Tabs

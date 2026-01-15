@@ -16,6 +16,7 @@ import {
   insertSettingsSchema,
   settings as settingsTable,
   insertFlightPathSchema,
+  insertBlockListSchema,
   insertStudentGroupSchema,
   insertDashboardTabSchema,
   insertGroupSchema,
@@ -5142,15 +5143,40 @@ export async function registerRoutes(
   app.post("/api/sessions/end", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
       const teacherId = req.session?.userId;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
-      
+
       const activeSession = await storage.getActiveSessionByTeacher(teacherId);
       if (!activeSession) {
         return res.status(404).json({ error: "No active session found" });
       }
-      
+
+      // Before ending session, broadcast remove-block-list to all students in the group
+      // Teacher block lists are session-based and should be cleared when session ends
+      if (activeSession.groupId) {
+        try {
+          const studentIds = await storage.getGroupStudents(activeSession.groupId);
+          let sentCount = 0;
+          for (const studentId of studentIds) {
+            const student = await storage.getStudent(studentId);
+            if (student?.deviceId) {
+              sendToDevice(sessionSchoolId, student.deviceId, {
+                type: 'remote-control',
+                command: 'remove-block-list',
+                data: {}
+              });
+              sentCount++;
+            }
+          }
+          console.log(`[Session End] Broadcast remove-block-list to ${sentCount} devices in group ${activeSession.groupId}`);
+        } catch (err) {
+          // Don't fail the session end if broadcast fails
+          console.error('[Session End] Failed to broadcast remove-block-list:', err);
+        }
+      }
+
       const session = await storage.endSession(activeSession.id);
       res.json(session);
     } catch (error) {
@@ -5301,6 +5327,175 @@ export async function registerRoutes(
       res.json({ success: true });
     } catch (error) {
       console.error("Delete flight path error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Block Lists CRUD endpoints (teacher-scoped)
+  app.get("/api/block-lists", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+    try {
+      const userId = req.session?.userId;
+      if (!userId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const blockLists = await storage.getBlockListsByTeacher(userId);
+      res.json(blockLists);
+    } catch (error) {
+      console.error("Get block lists error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.get("/api/block-lists/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+    try {
+      const blockList = await storage.getBlockList(req.params.id);
+      if (!blockList) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, blockList.schoolId)) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      res.json(blockList);
+    } catch (error) {
+      console.error("Get block list error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/block-lists", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      const blockListSchema = insertBlockListSchema.extend({
+        schoolId: z.string().optional(),
+      });
+      const data = blockListSchema.parse(req.body);
+
+      const blockList = await storage.createBlockList({
+        ...data,
+        schoolId: sessionSchoolId,
+        teacherId: teacherId,
+        blockedDomains: data.blockedDomains ?? []
+      });
+      res.json(blockList);
+    } catch (error) {
+      console.error("Create block list error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.patch("/api/block-lists/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const updates = insertBlockListSchema.partial().parse(req.body);
+
+      const existing = await storage.getBlockList(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      if (existing.teacherId !== req.session?.userId) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const blockList = await storage.updateBlockList(req.params.id, updates);
+      res.json(blockList);
+    } catch (error) {
+      console.error("Update block list error:", error);
+      res.status(400).json({ error: "Invalid request" });
+    }
+  });
+
+  app.delete("/api/block-lists/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+    try {
+      const existing = await storage.getBlockList(req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      if (existing.teacherId !== req.session?.userId) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+      const success = await storage.deleteBlockList(req.params.id);
+      if (!success) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete block list error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Apply/Remove Block List endpoints
+  app.post("/api/block-lists/:id/apply", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+    try {
+      const blockList = await storage.getBlockList(req.params.id);
+      if (!blockList) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, blockList.schoolId)) {
+        return res.status(404).json({ error: "Block List not found" });
+      }
+
+      const { targetDeviceIds } = req.body as { targetDeviceIds?: string[] };
+
+      const sentCount = broadcastToStudents(sessionSchoolId, {
+        type: 'remote-control',
+        command: {
+          action: 'apply-block-list',
+          data: {
+            blockListId: blockList.id,
+            blockListName: blockList.name,
+            blockedDomains: blockList.blockedDomains || []
+          }
+        }
+      }, undefined, targetDeviceIds);
+
+      console.log(`[Block List] Applied "${blockList.name}" to ${sentCount} device(s)`);
+
+      res.json({
+        success: true,
+        sentCount,
+        message: `Applied "${blockList.name}" to ${sentCount} device(s)`
+      });
+    } catch (error) {
+      console.error("Apply block list error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  app.post("/api/block-lists/remove", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      const { targetDeviceIds } = req.body as { targetDeviceIds?: string[] };
+
+      const sentCount = broadcastToStudents(sessionSchoolId, {
+        type: 'remote-control',
+        command: {
+          action: 'remove-block-list'
+        }
+      }, undefined, targetDeviceIds);
+
+      console.log(`[Block List] Removed from ${sentCount} device(s)`);
+
+      res.json({
+        success: true,
+        sentCount,
+        message: `Removed block list from ${sentCount} device(s)`
+      });
+    } catch (error) {
+      console.error("Remove block list error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
@@ -6051,7 +6246,7 @@ export async function registerRoutes(
     try {
       const { maxTabs } = req.body;
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      
+
       broadcastToStudents(sessionSchoolId, {
         type: 'remote-control',
         command: {
@@ -6059,14 +6254,98 @@ export async function registerRoutes(
           data: { maxTabs },
         },
       });
-      
+
       res.json({ success: true, message: `Set tab limit to ${maxTabs}` });
     } catch (error) {
       console.error("Limit tabs error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });
-  
+
+  // Attention Mode - force students to look up from screens
+  app.post("/api/remote/attention-mode", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { active, message, targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      let sentTo = 0;
+
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        // Send to specific devices
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, {
+            type: 'remote-control',
+            command: {
+              type: 'attention-mode',
+              data: { active: !!active, message: message || 'Please look up!' },
+            },
+          });
+          sentTo++;
+        }
+      } else {
+        // Broadcast to all students
+        sentTo = broadcastToStudents(sessionSchoolId, {
+          type: 'remote-control',
+          command: {
+            type: 'attention-mode',
+            data: { active: !!active, message: message || 'Please look up!' },
+          },
+        });
+      }
+
+      res.json({ success: true, sentTo, message: active ? 'Attention mode enabled' : 'Attention mode disabled' });
+    } catch (error) {
+      console.error("Attention mode error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Timer - display countdown timer on student screens
+  app.post("/api/remote/timer", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { action, seconds, message, targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      if (!action || !['start', 'stop'].includes(action)) {
+        return res.status(400).json({ error: "Action must be 'start' or 'stop'" });
+      }
+
+      if (action === 'start' && (!seconds || seconds <= 0)) {
+        return res.status(400).json({ error: "Seconds must be a positive number" });
+      }
+
+      let sentTo = 0;
+
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        // Send to specific devices
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, {
+            type: 'remote-control',
+            command: {
+              type: 'timer',
+              data: { action, seconds, message: message || '' },
+            },
+          });
+          sentTo++;
+        }
+      } else {
+        // Broadcast to all students
+        sentTo = broadcastToStudents(sessionSchoolId, {
+          type: 'remote-control',
+          command: {
+            type: 'timer',
+            data: { action, seconds, message: message || '' },
+          },
+        });
+      }
+
+      res.json({ success: true, sentTo, message: action === 'start' ? `Timer started: ${seconds}s` : 'Timer stopped' });
+    } catch (error) {
+      console.error("Timer error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Send Chat Message
   app.post("/api/chat/send", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
@@ -6115,21 +6394,364 @@ export async function registerRoutes(
     try {
       const { question, options } = req.body;
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      
+
       if (!question || !options || !Array.isArray(options)) {
         return res.status(400).json({ error: "Question and options are required" });
       }
-      
+
       broadcastToStudents(sessionSchoolId, {
         type: 'check-in-request',
         question,
         options,
         timestamp: Date.now(),
       });
-      
+
       res.json({ success: true });
     } catch (error) {
       console.error("Send check-in error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // ====================================
+  // POLLS API
+  // ====================================
+
+  // Create a new poll
+  app.post("/api/polls/create", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { question, options, targetDeviceIds } = req.body;
+      const teacherId = req.session?.userId;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      if (!question || !options || !Array.isArray(options) || options.length < 2) {
+        return res.status(400).json({ error: "Question and at least 2 options are required" });
+      }
+
+      // Get active session for this teacher
+      const activeSession = await storage.getActiveSessionByTeacher(teacherId);
+      if (!activeSession) {
+        return res.status(400).json({ error: "No active session. Start a class session first." });
+      }
+
+      // Create the poll
+      const poll = await storage.createPoll({
+        sessionId: activeSession.id,
+        teacherId,
+        question,
+        options,
+      });
+
+      // Broadcast poll to students
+      let sentTo = 0;
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, {
+            type: 'remote-control',
+            command: {
+              type: 'poll',
+              data: { action: 'start', pollId: poll.id, question, options },
+            },
+          });
+          sentTo++;
+        }
+      } else {
+        sentTo = broadcastToStudents(sessionSchoolId, {
+          type: 'remote-control',
+          command: {
+            type: 'poll',
+            data: { action: 'start', pollId: poll.id, question, options },
+          },
+        });
+      }
+
+      res.json({ success: true, poll, sentTo });
+    } catch (error) {
+      console.error("Create poll error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get poll results
+  app.get("/api/polls/:pollId/results", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const { pollId } = req.params;
+
+      const poll = await storage.getPoll(pollId);
+      if (!poll) {
+        return res.status(404).json({ error: "Poll not found" });
+      }
+
+      const results = await storage.getPollResults(pollId);
+      const responses = await storage.getPollResponsesByPoll(pollId);
+
+      res.json({
+        poll,
+        results,
+        totalResponses: responses.length,
+      });
+    } catch (error) {
+      console.error("Get poll results error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Submit poll response (from extension)
+  app.post("/api/polls/:pollId/respond", checkIPAllowlist, apiLimiter, async (req, res) => {
+    try {
+      const { pollId } = req.params;
+      const { deviceId, studentId, selectedOption } = req.body;
+
+      if (typeof selectedOption !== 'number') {
+        return res.status(400).json({ error: "Selected option is required" });
+      }
+
+      const poll = await storage.getPoll(pollId);
+      if (!poll) {
+        return res.status(404).json({ error: "Poll not found" });
+      }
+
+      if (!poll.isActive) {
+        return res.status(400).json({ error: "Poll is closed" });
+      }
+
+      if (selectedOption < 0 || selectedOption >= poll.options.length) {
+        return res.status(400).json({ error: "Invalid option index" });
+      }
+
+      // Check if student already responded
+      const existingResponses = await storage.getPollResponsesByPoll(pollId);
+      const alreadyResponded = existingResponses.some(r => r.studentId === studentId || r.deviceId === deviceId);
+      if (alreadyResponded) {
+        return res.status(400).json({ error: "Already responded to this poll" });
+      }
+
+      const response = await storage.createPollResponse({
+        pollId,
+        studentId: studentId || 'anonymous',
+        deviceId: deviceId || null,
+        selectedOption,
+      });
+
+      res.json({ success: true, response });
+    } catch (error) {
+      console.error("Poll respond error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Close a poll
+  app.post("/api/polls/:pollId/close", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { pollId } = req.params;
+      const { targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      const poll = await storage.closePoll(pollId);
+      if (!poll) {
+        return res.status(404).json({ error: "Poll not found" });
+      }
+
+      // Broadcast close command to students
+      let sentTo = 0;
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, {
+            type: 'remote-control',
+            command: {
+              type: 'poll',
+              data: { action: 'close', pollId },
+            },
+          });
+          sentTo++;
+        }
+      } else {
+        sentTo = broadcastToStudents(sessionSchoolId, {
+          type: 'remote-control',
+          command: {
+            type: 'poll',
+            data: { action: 'close', pollId },
+          },
+        });
+      }
+
+      res.json({ success: true, poll, sentTo });
+    } catch (error) {
+      console.error("Close poll error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get polls for current session
+  app.get("/api/polls", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const teacherId = req.session?.userId;
+
+      if (!teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const activeSession = await storage.getActiveSessionByTeacher(teacherId);
+      if (!activeSession) {
+        return res.json({ polls: [] });
+      }
+
+      const sessionPolls = await storage.getPollsBySession(activeSession.id);
+      res.json({ polls: sessionPolls });
+    } catch (error) {
+      console.error("Get polls error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // ====================================
+  // SUBGROUPS API
+  // ====================================
+
+  // Get subgroups for a group
+  app.get("/api/groups/:groupId/subgroups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const { groupId } = req.params;
+
+      const group = await storage.getGroup(groupId);
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+
+      const groupSubgroups = await storage.getSubgroupsByGroup(groupId);
+      res.json({ subgroups: groupSubgroups });
+    } catch (error) {
+      console.error("Get subgroups error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Create a subgroup
+  app.post("/api/groups/:groupId/subgroups", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { groupId } = req.params;
+      const { name, color } = req.body;
+
+      if (!name) {
+        return res.status(400).json({ error: "Name is required" });
+      }
+
+      const group = await storage.getGroup(groupId);
+      if (!group) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+
+      const subgroup = await storage.createSubgroup({
+        groupId,
+        name,
+        color: color || null,
+      });
+
+      res.json({ success: true, subgroup });
+    } catch (error) {
+      console.error("Create subgroup error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Update a subgroup
+  app.put("/api/subgroups/:subgroupId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { subgroupId } = req.params;
+      const { name, color } = req.body;
+
+      const subgroup = await storage.updateSubgroup(subgroupId, { name, color });
+      if (!subgroup) {
+        return res.status(404).json({ error: "Subgroup not found" });
+      }
+
+      res.json({ success: true, subgroup });
+    } catch (error) {
+      console.error("Update subgroup error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Delete a subgroup
+  app.delete("/api/subgroups/:subgroupId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { subgroupId } = req.params;
+
+      const deleted = await storage.deleteSubgroup(subgroupId);
+      if (!deleted) {
+        return res.status(404).json({ error: "Subgroup not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete subgroup error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Get subgroup members
+  app.get("/api/subgroups/:subgroupId/members", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const { subgroupId } = req.params;
+
+      const members = await storage.getSubgroupMembers(subgroupId);
+      res.json({ members });
+    } catch (error) {
+      console.error("Get subgroup members error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Add members to a subgroup
+  app.post("/api/subgroups/:subgroupId/members", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { subgroupId } = req.params;
+      const { studentIds } = req.body;
+
+      if (!studentIds || !Array.isArray(studentIds)) {
+        return res.status(400).json({ error: "Student IDs array is required" });
+      }
+
+      const subgroup = await storage.getSubgroup(subgroupId);
+      if (!subgroup) {
+        return res.status(404).json({ error: "Subgroup not found" });
+      }
+
+      const added = [];
+      for (const studentId of studentIds) {
+        try {
+          const member = await storage.addSubgroupMember(subgroupId, studentId);
+          added.push(member);
+        } catch (err) {
+          // Ignore duplicate errors
+          console.log(`Could not add student ${studentId} to subgroup:`, err);
+        }
+      }
+
+      res.json({ success: true, added: added.length });
+    } catch (error) {
+      console.error("Add subgroup members error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Remove a member from a subgroup
+  app.delete("/api/subgroups/:subgroupId/members/:studentId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { subgroupId, studentId } = req.params;
+
+      const removed = await storage.removeSubgroupMember(subgroupId, studentId);
+      if (!removed) {
+        return res.status(404).json({ error: "Member not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Remove subgroup member error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

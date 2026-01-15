@@ -472,6 +472,26 @@ export const insertFlightPathSchema = createInsertSchema(flightPaths)
 export type InsertFlightPath = z.infer<typeof insertFlightPathSchema>;
 export type FlightPath = typeof flightPaths.$inferSelect;
 
+// Block Lists - Teacher-scoped website blocking (session-based)
+export const blockLists = pgTable("block_lists", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  teacherId: text("teacher_id").notNull(), // FK to users table
+  name: text("name").notNull(),
+  description: text("description"),
+  blockedDomains: text("blocked_domains").array().default(sql`'{}'::text[]`),
+  isDefault: boolean("is_default").default(false),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertBlockListSchema = createInsertSchema(blockLists)
+  .omit({ id: true, createdAt: true })
+  .extend({
+    blockedDomains: z.array(z.string()).default([]),
+  });
+export type InsertBlockList = z.infer<typeof insertBlockListSchema>;
+export type BlockList = typeof blockLists.$inferSelect;
+
 // Student Groups - For differentiated instruction (teacher-scoped)
 export const studentGroups = pgTable("student_groups", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -636,6 +656,99 @@ export const sessions = pgTable("sessions", {
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, createdAt: true, startTime: true });
 export type InsertSession = z.infer<typeof insertSessionSchema>;
 export type Session = typeof sessions.$inferSelect;
+
+// Session Settings - Toggle-able session-specific features
+export const sessionSettings = pgTable("session_settings", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId: varchar("session_id").notNull().unique(),
+  chatEnabled: boolean("chat_enabled").default(true),
+  raiseHandEnabled: boolean("raise_hand_enabled").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertSessionSettingsSchema = createInsertSchema(sessionSettings).omit({ id: true, createdAt: true });
+export type InsertSessionSettings = z.infer<typeof insertSessionSettingsSchema>;
+export type SessionSettings = typeof sessionSettings.$inferSelect;
+
+// Chat Messages - Session-scoped teacher-student messaging
+export const chatMessages = pgTable("chat_messages", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId: varchar("session_id").notNull(),
+  senderId: text("sender_id").notNull(), // teacher or student ID
+  senderType: text("sender_type").notNull().$type<"teacher" | "student">(),
+  recipientId: text("recipient_id"), // null = broadcast to all
+  content: text("content").notNull(),
+  messageType: text("message_type").notNull().$type<"message" | "raise_hand" | "question">(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertChatMessageSchema = createInsertSchema(chatMessages)
+  .omit({ id: true, createdAt: true })
+  .extend({
+    senderType: z.enum(["teacher", "student"]),
+    messageType: z.enum(["message", "raise_hand", "question"]),
+  });
+export type InsertChatMessage = z.infer<typeof insertChatMessageSchema>;
+export type DbChatMessage = typeof chatMessages.$inferSelect;
+
+// Polls - Quick pulse checks with multiple choice answers
+export const polls = pgTable("polls", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  sessionId: varchar("session_id").notNull(),
+  teacherId: text("teacher_id").notNull(),
+  question: text("question").notNull(),
+  options: text("options").array().notNull(),
+  isActive: boolean("is_active").default(true),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  closedAt: timestamp("closed_at"),
+});
+
+export const insertPollSchema = createInsertSchema(polls)
+  .omit({ id: true, createdAt: true, closedAt: true, isActive: true })
+  .extend({
+    options: z.array(z.string()).min(2).max(5),
+  });
+export type InsertPoll = z.infer<typeof insertPollSchema>;
+export type Poll = typeof polls.$inferSelect;
+
+// Poll Responses - Student answers to polls
+export const pollResponses = pgTable("poll_responses", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  pollId: varchar("poll_id").notNull(),
+  studentId: text("student_id").notNull(),
+  deviceId: text("device_id"),
+  selectedOption: integer("selected_option").notNull(),
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertPollResponseSchema = createInsertSchema(pollResponses).omit({ id: true, createdAt: true });
+export type InsertPollResponse = z.infer<typeof insertPollResponseSchema>;
+export type PollResponse = typeof pollResponses.$inferSelect;
+
+// Subgroups - Within a class (group) for differentiated instruction
+export const subgroups = pgTable("subgroups", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  groupId: varchar("group_id").notNull(), // FK to groups table
+  name: text("name").notNull(),
+  color: text("color"), // For visual distinction (hex color or named color)
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+});
+
+export const insertSubgroupSchema = createInsertSchema(subgroups).omit({ id: true, createdAt: true });
+export type InsertSubgroup = z.infer<typeof insertSubgroupSchema>;
+export type Subgroup = typeof subgroups.$inferSelect;
+
+// Subgroup Members - Students assigned to subgroups
+export const subgroupMembers = pgTable("subgroup_members", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  subgroupId: varchar("subgroup_id").notNull(), // FK to subgroups table
+  studentId: text("student_id").notNull(),
+  assignedAt: timestamp("assigned_at").notNull().default(sql`now()`),
+});
+
+export const insertSubgroupMemberSchema = createInsertSchema(subgroupMembers).omit({ id: true, assignedAt: true });
+export type InsertSubgroupMember = z.infer<typeof insertSubgroupMemberSchema>;
+export type SubgroupMember = typeof subgroupMembers.$inferSelect;
 
 // WebRTC signaling
 export interface SignalMessage {
