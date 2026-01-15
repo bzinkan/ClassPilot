@@ -672,7 +672,7 @@ export default function MySettings() {
                     <SelectContent>
                       {groups.map((group) => (
                         <SelectItem key={group.id} value={group.id}>
-                          {group.groupName}
+                          {group.name}
                         </SelectItem>
                       ))}
                       {groups.length === 0 && (
@@ -1254,8 +1254,8 @@ export default function MySettings() {
                     data-testid={`member-row-${student.id}`}
                   >
                     <div>
-                      <p className="font-medium">{student.fullName || student.id}</p>
-                      <p className="text-xs text-muted-foreground">{student.email}</p>
+                      <p className="font-medium">{student.studentName || student.id}</p>
+                      <p className="text-xs text-muted-foreground">{student.studentEmail}</p>
                     </div>
                     <Button
                       type="button"
