@@ -134,7 +134,7 @@ export interface AppOptions {
 export async function createApp(options: AppOptions = {}) {
   const app = express();
 
-  // CRITICAL: Trust proxy for Replit Deployments
+  // Trust proxy for reverse proxy / load balancer deployments (AWS ALB, nginx, etc.)
   if (isProduction()) {
     app.set("trust proxy", 1);
   }
@@ -190,11 +190,6 @@ export async function createApp(options: AppOptions = {}) {
 
         // Allow configured allowlist
         if (allowlist.some((a) => origin === a || (a.endsWith("/*") && origin.startsWith(a.slice(0, -1))))) {
-          return cb(null, true);
-        }
-
-        // Allow replit.app domains in production
-        if (origin.includes(".replit.app") || origin.includes(".replit.dev")) {
           return cb(null, true);
         }
 

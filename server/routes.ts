@@ -4721,12 +4721,7 @@ export async function registerRoutes(
           let hostname = url.hostname;
           
           // Clean up common domain patterns
-          if (hostname.includes('.replit.dev')) {
-            // Shorten Replit dev URLs to just "replit.dev"
-            domain = 'replit.dev';
-          } else if (hostname.includes('.riker.replit.dev')) {
-            domain = 'replit.dev';
-          } else if (hostname.startsWith('www.')) {
+          if (hostname.startsWith('www.')) {
             domain = hostname.substring(4);
           } else if (hostname.includes('chrome://')) {
             domain = url.protocol.replace(':', '');
@@ -4737,8 +4732,6 @@ export async function registerRoutes(
           // If URL parsing fails, clean up common patterns
           if (domain && domain.includes('chrome://')) {
             domain = 'chrome (extensions)';
-          } else if (domain && domain.includes('replit')) {
-            domain = 'replit.dev';
           }
         }
         

@@ -100,7 +100,7 @@ async function updateLicenseBanner() {
 
 async function loadStudents(deviceId) {
   try {
-    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
+    const serverUrl = currentConfig.serverUrl;
     const response = await fetch(`${serverUrl}/api/device/${deviceId}/students`);
     
     if (!response.ok) {
@@ -160,7 +160,7 @@ async function setActiveStudent(studentId) {
   }
   
   try {
-    const serverUrl = currentConfig.serverUrl || 'https://classpilot.replit.app';
+    const serverUrl = currentConfig.serverUrl;
     const response = await fetch(`${serverUrl}/api/device/${currentConfig.deviceId}/active-student`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -10,9 +10,5 @@ export function getBaseUrl(): string {
     return stripTrailingSlash(publicBaseUrl);
   }
 
-  if (process.env.REPLIT_DEV_DOMAIN) {
-    return stripTrailingSlash(`https://${process.env.REPLIT_DEV_DOMAIN}`);
-  }
-
   return DEFAULT_BASE_URL;
 }
