@@ -374,6 +374,30 @@
       </div>
     </div>
 
+    <div class="section" id="chat-section">
+      <h2>💬 Message Teacher</h2>
+      <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">
+        Send a message or ask a question
+      </p>
+      <textarea id="chat-input" placeholder="Type your message..."
+        style="width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 13px; resize: none; height: 60px; font-family: inherit;"></textarea>
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button id="send-question-btn" style="flex: 1; padding: 8px 12px; background: #8b5cf6; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
+          ❓ Ask Question
+        </button>
+        <button id="send-message-btn" style="flex: 1; padding: 8px 12px; background: #10b981; color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 500; cursor: pointer;">
+          💬 Send
+        </button>
+      </div>
+      <div id="message-sent-status" class="hidden" style="margin-top: 12px; padding: 12px; background: #dcfce7; border-left: 4px solid #22c55e; border-radius: 4px;">
+        <p style="font-size: 13px; color: #166534; font-weight: 500;">✓ Message sent!</p>
+        <p style="font-size: 11px; color: #15803d; margin-top: 4px;">Your teacher will see your message.</p>
+      </div>
+      <div id="chat-disabled" class="hidden" style="margin-top: 12px; padding: 12px; background: #f1f5f9; border-left: 4px solid #94a3b8; border-radius: 4px;">
+        <p style="font-size: 12px; color: #64748b;">Messaging is currently disabled by your teacher.</p>
+      </div>
+    </div>
+
     <div class="section">
       <h2>📢 Announcements & Messages</h2>
       <div id="messages-container">

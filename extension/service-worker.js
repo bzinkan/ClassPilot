@@ -1669,6 +1669,7 @@ let currentMaxTabs = null;
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
+let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
 
 // Helper function to extract domain from URL
 function extractDomain(url) {
@@ -1939,7 +1940,26 @@ async function handleRemoteControl(command) {
         
         console.log('Flight Path removed - all restrictions cleared');
         break;
-        
+
+      case 'temp-unblock':
+        // Temporarily allow access to a blocked domain
+        const tempDomain = command.data.domain;
+        const tempExpiresAt = command.data.expiresAt || (Date.now() + 5 * 60 * 1000);
+        const tempDuration = command.data.durationMinutes || 5;
+
+        // Add to temporary allowed list
+        temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.domain !== tempDomain);
+        temporaryAllowedDomains.push({ domain: tempDomain, expiresAt: tempExpiresAt });
+
+        safeNotify({
+          title: 'Temporary Access Granted',
+          message: `Your teacher has temporarily unblocked ${tempDomain} for ${tempDuration} minutes.`,
+          priority: 1,
+        });
+
+        console.log('[Temp Unblock] Temporarily allowed domain:', tempDomain, 'until', new Date(tempExpiresAt));
+        break;
+
       case 'apply-block-list':
         teacherBlockedDomains = command.data.blockedDomains || [];
         activeBlockListName = command.data.blockListName || null;
@@ -2277,6 +2297,21 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   
   const targetDomain = extractDomain(details.url);
   if (!targetDomain) return;
+
+  // Clean up expired temporary allowed domains
+  const now = Date.now();
+  temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.expiresAt > now);
+
+  // Check if domain is temporarily allowed (bypass blocking)
+  const isTempAllowed = temporaryAllowedDomains.some(d => {
+    const normalizedAllowed = d.domain.replace(/^www\./, '');
+    return targetDomain === normalizedAllowed || targetDomain.endsWith('.' + normalizedAllowed);
+  });
+
+  if (isTempAllowed) {
+    console.log('[Temp Unblock] Allowing temporarily unblocked domain:', targetDomain);
+    return; // Allow navigation
+  }
 
   // Check global blacklist first (school-wide blocked domains)
   if (globalBlockedDomains.length > 0) {
@@ -3150,6 +3185,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })
       .catch(err => {
         console.error('Failed to lower hand:', err);
+        sendResponse({ success: false, error: err.message });
+      });
+
+    return true;
+  }
+
+  // Handle send message from popup (two-way chat)
+  if (message.type === 'send-student-message') {
+    console.log('Send message requested:', message.messageType);
+
+    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
+      sendResponse({ success: false, error: 'Not connected to server' });
+      return true;
+    }
+
+    if (!message.message || message.message.trim().length === 0) {
+      sendResponse({ success: false, error: 'Message is required' });
+      return true;
+    }
+
+    const headers = buildDeviceAuthHeaders();
+    headers['Content-Type'] = 'application/json';
+
+    fetch(`${CONFIG.serverUrl}/api/student/send-message`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        message: message.message.trim(),
+        messageType: message.messageType || 'message',
+      }),
+    })
+      .then(res => res.json())
+      .then(data => {
+        if (data.error) {
+          console.error('Failed to send message:', data.error);
+          sendResponse({ success: false, error: data.error });
+        } else {
+          console.log('Message sent:', data);
+          sendResponse({ success: true, messageId: data.messageId });
+        }
+      })
+      .catch(err => {
+        console.error('Failed to send message:', err);
         sendResponse({ success: false, error: err.message });
       });
 

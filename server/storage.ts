@@ -54,6 +54,10 @@ import {
   type InsertSubgroup,
   type SubgroupMember,
   type InsertSubgroupMember,
+  type DbChatMessage,
+  type InsertChatMessage,
+  type AuditLog,
+  type InsertAuditLog,
   type TabInfo, // All-tabs tracking
   makeStatusKey,
   insertSettingsSchema,
@@ -85,6 +89,8 @@ import {
   pollResponses,
   subgroups,
   subgroupMembers,
+  chatMessages,
+  auditLogs,
   normalizeEmail,
 } from "@shared/schema";
 import { randomUUID } from "crypto";
@@ -386,6 +392,22 @@ export interface IStorage {
   addSubgroupMember(subgroupId: string, studentId: string): Promise<SubgroupMember>;
   removeSubgroupMember(subgroupId: string, studentId: string): Promise<boolean>;
   getStudentSubgroups(studentId: string): Promise<string[]>; // Returns subgroup IDs
+
+  // Chat Messages (Two-Way Chat)
+  createChatMessage(message: InsertChatMessage): Promise<DbChatMessage>;
+  getStudentMessagesForSchool(schoolId: string, options?: { since?: Date; limit?: number }): Promise<DbChatMessage[]>;
+  getChatMessagesBySession(sessionId: string): Promise<DbChatMessage[]>;
+
+  // Audit Logs
+  createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
+  getAuditLogsBySchool(schoolId: string, options?: {
+    action?: string;
+    userId?: string;
+    since?: Date;
+    until?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ logs: AuditLog[]; total: number }>;
 }
 
 export class MemStorage implements IStorage {
@@ -1950,6 +1972,35 @@ export class MemStorage implements IStorage {
 
   async endSession(sessionId: string): Promise<Session | undefined> {
     return undefined;
+  }
+
+  // Chat Messages (stubs for MemStorage)
+  async createChatMessage(message: InsertChatMessage): Promise<DbChatMessage> {
+    throw new Error("Chat messages not supported in memory storage");
+  }
+
+  async getStudentMessagesForSchool(schoolId: string, options?: { since?: Date; limit?: number }): Promise<DbChatMessage[]> {
+    return [];
+  }
+
+  async getChatMessagesBySession(sessionId: string): Promise<DbChatMessage[]> {
+    return [];
+  }
+
+  // Audit Logs (MemStorage stubs)
+  async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
+    throw new Error("Audit logs not supported in MemStorage");
+  }
+
+  async getAuditLogsBySchool(schoolId: string, options?: {
+    action?: string;
+    userId?: string;
+    since?: Date;
+    until?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ logs: AuditLog[]; total: number }> {
+    return { logs: [], total: 0 };
   }
 }
 
@@ -3801,6 +3852,95 @@ export class DatabaseStorage implements IStorage {
       .where(eq(sessions.id, sessionId))
       .returning();
     return updated || undefined;
+  }
+
+  // Chat Messages (Two-Way Chat)
+  async createChatMessage(message: InsertChatMessage): Promise<DbChatMessage> {
+    const [created] = await db
+      .insert(chatMessages)
+      .values(message)
+      .returning();
+    return created;
+  }
+
+  async getStudentMessagesForSchool(schoolId: string, options?: { since?: Date; limit?: number }): Promise<DbChatMessage[]> {
+    // Get all student messages for this school by joining with students table
+    // We need to get messages where senderType='student' and the sender is from this school
+    const limit = options?.limit || 50;
+    const since = options?.since;
+
+    let query = db
+      .select({ chatMessages })
+      .from(chatMessages)
+      .innerJoin(students, eq(students.id, chatMessages.senderId))
+      .where(
+        since
+          ? drizzleSql`${chatMessages.senderType} = 'student' AND ${students.schoolId} = ${schoolId} AND ${chatMessages.createdAt} > ${since}`
+          : drizzleSql`${chatMessages.senderType} = 'student' AND ${students.schoolId} = ${schoolId}`
+      )
+      .orderBy(desc(chatMessages.createdAt))
+      .limit(limit);
+
+    const rows = await query;
+    return rows.map((row: { chatMessages: DbChatMessage }) => row.chatMessages);
+  }
+
+  async getChatMessagesBySession(sessionId: string): Promise<DbChatMessage[]> {
+    return await db
+      .select()
+      .from(chatMessages)
+      .where(eq(chatMessages.sessionId, sessionId))
+      .orderBy(desc(chatMessages.createdAt));
+  }
+
+  // Audit Logs
+  async createAuditLog(log: InsertAuditLog): Promise<AuditLog> {
+    const [created] = await db.insert(auditLogs).values(log).returning();
+    return created;
+  }
+
+  async getAuditLogsBySchool(schoolId: string, options?: {
+    action?: string;
+    userId?: string;
+    since?: Date;
+    until?: Date;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ logs: AuditLog[]; total: number }> {
+    const limit = options?.limit || 50;
+    const offset = options?.offset || 0;
+
+    // Build conditions array
+    const conditions = [eq(auditLogs.schoolId, schoolId)];
+    if (options?.action) {
+      conditions.push(eq(auditLogs.action, options.action));
+    }
+    if (options?.userId) {
+      conditions.push(eq(auditLogs.userId, options.userId));
+    }
+    if (options?.since) {
+      conditions.push(sql`${auditLogs.createdAt} >= ${options.since}`);
+    }
+    if (options?.until) {
+      conditions.push(sql`${auditLogs.createdAt} <= ${options.until}`);
+    }
+
+    // Get total count
+    const [{ count }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(auditLogs)
+      .where(and(...conditions));
+
+    // Get paginated logs
+    const logs = await db
+      .select()
+      .from(auditLogs)
+      .where(and(...conditions))
+      .orderBy(desc(auditLogs.createdAt))
+      .limit(limit)
+      .offset(offset);
+
+    return { logs, total: Number(count) };
   }
 }
 

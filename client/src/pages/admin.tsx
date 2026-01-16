@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3 } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -31,9 +31,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
-import type { Settings, Session, Group } from "@shared/schema";
+import type { Settings, Session, Group, AuditLog } from "@shared/schema";
 
 // Helper to normalize grade levels (strip "th", "rd", "st", "nd" suffixes)
 function normalizeGrade(grade: string | null | undefined): string | null {
@@ -86,6 +86,9 @@ export default function Admin() {
   const [initialAfterHoursMode, setInitialAfterHoursMode] = useState<"off" | "limited" | "full">("off");
   const [afterHoursConfirmOpen, setAfterHoursConfirmOpen] = useState(false);
   const [tracking247ConfirmOpen, setTracking247ConfirmOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<"staff" | "audit">("staff");
+  const [auditPage, setAuditPage] = useState(0);
+  const [auditActionFilter, setAuditActionFilter] = useState<string>("");
 
   const form = useForm<CreateStaffForm>({
     resolver: zodResolver(createStaffSchema),
@@ -112,6 +115,20 @@ export default function Admin() {
 
   const { data: allGroups = [] } = useQuery<Group[]>({
     queryKey: ["/api/teacher/groups"],
+  });
+
+  // Audit logs query
+  const { data: auditLogsData, isLoading: auditLogsLoading } = useQuery<{ logs: AuditLog[]; total: number }>({
+    queryKey: ["/api/admin/audit-logs", auditPage, auditActionFilter],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set("limit", "20");
+      params.set("offset", String(auditPage * 20));
+      if (auditActionFilter) params.set("action", auditActionFilter);
+      const res = await apiRequest("GET", `/api/admin/audit-logs?${params.toString()}`);
+      return res.json();
+    },
+    enabled: activeTab === "audit",
   });
 
   const getFriendlyErrorMessage = (error: unknown) => {
@@ -393,6 +410,13 @@ export default function Admin() {
           <ThemeToggle />
           <Button
             variant="outline"
+            onClick={() => setLocation("/admin/analytics")}
+          >
+            <BarChart3 className="h-4 w-4 mr-2" />
+            Analytics
+          </Button>
+          <Button
+            variant="outline"
             onClick={() => setLocation("/dashboard")}
             data-testid="button-back-dashboard"
           >
@@ -402,7 +426,20 @@ export default function Admin() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "staff" | "audit")} className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="staff" className="flex items-center gap-2">
+            <Users className="h-4 w-4" />
+            Staff & Settings
+          </TabsTrigger>
+          <TabsTrigger value="audit" className="flex items-center gap-2">
+            <FileText className="h-4 w-4" />
+            Audit Logs
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="staff" className="space-y-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
@@ -860,6 +897,133 @@ export default function Admin() {
           </Button>
         </CardContent>
       </Card>
+        </TabsContent>
+
+        <TabsContent value="audit" className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <FileText className="h-5 w-5" />
+                Audit Logs
+              </CardTitle>
+              <CardDescription>
+                Track administrative actions and changes for compliance
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex items-center gap-4">
+                <div className="flex-1">
+                  <Label htmlFor="action-filter">Filter by Action</Label>
+                  <Select
+                    value={auditActionFilter}
+                    onValueChange={(v) => {
+                      setAuditActionFilter(v === "all" ? "" : v);
+                      setAuditPage(0);
+                    }}
+                  >
+                    <SelectTrigger id="action-filter">
+                      <SelectValue placeholder="All actions" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All actions</SelectItem>
+                      <SelectItem value="auth.login">Login</SelectItem>
+                      <SelectItem value="auth.logout">Logout</SelectItem>
+                      <SelectItem value="settings.update">Settings Update</SelectItem>
+                      <SelectItem value="user.create">User Created</SelectItem>
+                      <SelectItem value="user.update">User Updated</SelectItem>
+                      <SelectItem value="user.delete">User Deleted</SelectItem>
+                      <SelectItem value="student.create">Student Created</SelectItem>
+                      <SelectItem value="student.update">Student Updated</SelectItem>
+                      <SelectItem value="student.delete">Student Deleted</SelectItem>
+                      <SelectItem value="session.start">Session Started</SelectItem>
+                      <SelectItem value="session.end">Session Ended</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {auditLogsLoading ? (
+                <div className="text-center py-8 text-muted-foreground">Loading audit logs...</div>
+              ) : auditLogsData?.logs && auditLogsData.logs.length > 0 ? (
+                <div className="space-y-4">
+                  <div className="border rounded-lg overflow-hidden">
+                    <table className="w-full text-sm">
+                      <thead className="bg-muted">
+                        <tr>
+                          <th className="px-4 py-2 text-left font-medium">Time</th>
+                          <th className="px-4 py-2 text-left font-medium">User</th>
+                          <th className="px-4 py-2 text-left font-medium">Action</th>
+                          <th className="px-4 py-2 text-left font-medium">Details</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {auditLogsData.logs.map((log) => (
+                          <tr key={log.id} className="border-t">
+                            <td className="px-4 py-2 whitespace-nowrap">
+                              {new Date(log.createdAt).toLocaleString()}
+                            </td>
+                            <td className="px-4 py-2">
+                              <div>{log.userEmail || log.userId}</div>
+                              {log.userRole && (
+                                <Badge variant="outline" className="text-xs mt-1">
+                                  {log.userRole}
+                                </Badge>
+                              )}
+                            </td>
+                            <td className="px-4 py-2">
+                              <Badge variant={
+                                log.action.startsWith('auth.') ? 'default' :
+                                log.action.includes('delete') ? 'destructive' :
+                                'secondary'
+                              }>
+                                {log.action}
+                              </Badge>
+                            </td>
+                            <td className="px-4 py-2 max-w-xs truncate">
+                              {log.entityName && <span>{log.entityName}</span>}
+                              {log.entityType && !log.entityName && <span className="text-muted-foreground">{log.entityType}</span>}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-muted-foreground">
+                      Showing {auditPage * 20 + 1} - {Math.min((auditPage + 1) * 20, auditLogsData.total)} of {auditLogsData.total}
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={auditPage === 0}
+                        onClick={() => setAuditPage(p => p - 1)}
+                      >
+                        <ChevronLeft className="h-4 w-4" />
+                        Previous
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={(auditPage + 1) * 20 >= auditLogsData.total}
+                        onClick={() => setAuditPage(p => p + 1)}
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-8 text-muted-foreground">
+                  No audit logs found. Actions will be recorded as users interact with the system.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       <Dialog
         open={editDialogOpen}

@@ -751,6 +751,31 @@ export const insertSubgroupMemberSchema = createInsertSchema(subgroupMembers).om
 export type InsertSubgroupMember = z.infer<typeof insertSubgroupMemberSchema>;
 export type SubgroupMember = typeof subgroupMembers.$inferSelect;
 
+// Audit Logs - Track admin/teacher actions for compliance
+export const auditLogs = pgTable("audit_logs", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolId: text("school_id").notNull(),
+  userId: text("user_id").notNull(), // User who performed the action
+  userEmail: text("user_email"), // Denormalized for easier querying
+  userRole: text("user_role"), // Role at time of action (teacher, school_admin, super_admin)
+  action: text("action").notNull(), // e.g., 'login', 'settings.update', 'student.create', 'session.start'
+  entityType: text("entity_type"), // Type of entity affected: 'settings', 'student', 'user', 'group', 'session', etc.
+  entityId: text("entity_id"), // ID of affected entity
+  entityName: text("entity_name"), // Human-readable name (e.g., student name, group name)
+  changes: jsonb("changes"), // JSON containing old and new values for updates
+  metadata: jsonb("metadata"), // Additional context (IP address, user agent, etc.)
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+}, (table) => ({
+  schoolIdIdx: index("audit_logs_school_id_idx").on(table.schoolId),
+  createdAtIdx: index("audit_logs_created_at_idx").on(table.createdAt),
+  actionIdx: index("audit_logs_action_idx").on(table.action),
+  userIdIdx: index("audit_logs_user_id_idx").on(table.userId),
+}));
+
+export const insertAuditLogSchema = createInsertSchema(auditLogs).omit({ id: true, createdAt: true });
+export type InsertAuditLog = z.infer<typeof insertAuditLogSchema>;
+export type AuditLog = typeof auditLogs.$inferSelect;
+
 // WebRTC signaling
 export interface SignalMessage {
   type: 'offer' | 'answer' | 'ice-candidate';

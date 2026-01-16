@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route } from "lucide-react";
+import { MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, ListChecks, CheckSquare, XSquare, Users, BarChart3, Route, KeyRound } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -54,11 +54,14 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
   const [showStudentDataDialog, setShowStudentDataDialog] = useState(false);
   const [showTabLimit, setShowTabLimit] = useState(false);
   const [showApplyScene, setShowApplyScene] = useState(false);
+  const [showTempUnblock, setShowTempUnblock] = useState(false);
   const [targetUrl, setTargetUrl] = useState("");
   const [lockUrl, setLockUrl] = useState("");
   const [tabLimit, setTabLimit] = useState("");
   const [selectedSceneId, setSelectedSceneId] = useState("");
   const [selectedStudentForData, setSelectedStudentForData] = useState<string>("all");
+  const [tempUnblockDomain, setTempUnblockDomain] = useState("");
+  const [tempUnblockDuration, setTempUnblockDuration] = useState("5");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
 
@@ -237,7 +240,47 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
     }
   };
 
+  const handleTempUnblock = async () => {
+    if (!tempUnblockDomain) {
+      toast({
+        title: "Error",
+        description: "Please enter a domain to unblock",
+        variant: "destructive",
+      });
+      return;
+    }
 
+    if (!validateSelection()) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await apiRequest("POST", "/api/remote/temp-unblock", {
+        domain: tempUnblockDomain.trim().replace(/^https?:\/\//, '').replace(/^www\./, ''),
+        durationMinutes: parseInt(tempUnblockDuration) || 5,
+        targetDeviceIds: targetDeviceIdsArray
+      });
+
+      const target = selectedStudentIds.size > 0
+        ? `${selectedStudentIds.size} student(s)`
+        : "all students";
+      toast({
+        title: "Success",
+        description: `Temporarily unblocked ${tempUnblockDomain} for ${target} (${tempUnblockDuration} minutes)`,
+      });
+      setShowTempUnblock(false);
+      setTempUnblockDomain("");
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to temporarily unblock domain",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   const handleApplyTabLimit = async () => {
     const maxTabs = tabLimit ? parseInt(tabLimit, 10) : null;
@@ -502,6 +545,53 @@ export function RemoteControlToolbar({ selectedStudentIds, students, onToggleStu
             </Button>
             <Button onClick={handleLockScreen} disabled={isLoading} data-testid="button-submit-lock">
               Lock Screens
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Temp Unblock Dialog */}
+      <Dialog open={showTempUnblock} onOpenChange={setShowTempUnblock}>
+        <DialogContent data-testid="dialog-temp-unblock">
+          <DialogHeader>
+            <DialogTitle>Temporarily Unblock Domain</DialogTitle>
+            <DialogDescription>
+              Allow temporary access to a blocked domain. This bypasses both school and teacher block lists for the specified duration.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="temp-unblock-domain">Domain to Unblock</Label>
+              <Input
+                id="temp-unblock-domain"
+                placeholder="e.g., youtube.com or docs.google.com"
+                value={tempUnblockDomain}
+                onChange={(e) => setTempUnblockDomain(e.target.value)}
+                data-testid="input-temp-unblock-domain"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="temp-unblock-duration">Duration (minutes)</Label>
+              <Select value={tempUnblockDuration} onValueChange={setTempUnblockDuration}>
+                <SelectTrigger id="temp-unblock-duration" data-testid="select-temp-unblock-duration">
+                  <SelectValue placeholder="Select duration" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="5">5 minutes</SelectItem>
+                  <SelectItem value="10">10 minutes</SelectItem>
+                  <SelectItem value="15">15 minutes</SelectItem>
+                  <SelectItem value="30">30 minutes</SelectItem>
+                  <SelectItem value="60">1 hour</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTempUnblock(false)} data-testid="button-cancel-temp-unblock">
+              Cancel
+            </Button>
+            <Button onClick={handleTempUnblock} disabled={isLoading} data-testid="button-submit-temp-unblock">
+              Unblock
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -64,6 +64,7 @@ import { deviceRateLimit } from "./middleware/deviceRateLimit";
 import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
+import { logAudit, logAuditFromRequest, AuditAction } from "./audit";
 
 // Helper function to normalize and validate grade levels
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -922,16 +923,30 @@ export async function registerRoutes(
       req.session.schoolId = user.schoolId ?? undefined;
       req.session.schoolSessionVersion = schoolSessionVersion;
 
-      res.json({ 
-        success: true, 
-        user: { 
-          id: user.id, 
+      // Log successful login (non-blocking)
+      if (user.schoolId) {
+        logAudit({
+          userId: user.id,
+          userEmail: user.email,
+          userRole: user.role,
+          schoolId: user.schoolId,
+          ipAddress: req.ip || req.connection?.remoteAddress,
+          userAgent: req.get('user-agent'),
+        }, AuditAction.LOGIN, {
+          metadata: { method: 'password' },
+        }).catch(() => {}); // Ignore errors
+      }
+
+      res.json({
+        success: true,
+        user: {
+          id: user.id,
           email: user.email,
-          username: user.username, 
+          username: user.username,
           role: user.role,
           schoolId: user.schoolId,
           displayName: user.displayName
-        } 
+        }
       });
     } catch (error) {
       console.error("Login error:", error);
@@ -940,6 +955,21 @@ export async function registerRoutes(
   });
 
   app.post("/api/logout", (req, res) => {
+    const userId = req.session?.userId;
+    const userRole = req.session?.role;
+    const schoolId = req.session?.schoolId;
+
+    // Log logout (non-blocking)
+    if (userId && schoolId) {
+      logAudit({
+        userId,
+        userRole,
+        schoolId,
+        ipAddress: req.ip || req.connection?.remoteAddress,
+        userAgent: req.get('user-agent'),
+      }, AuditAction.LOGOUT).catch(() => {}); // Ignore errors
+    }
+
     req.session.destroy(() => {
       res.json({ success: true });
     });
@@ -1501,8 +1531,200 @@ export async function registerRoutes(
     }
   });
 
+  // ====== AUDIT LOGS ======
+
+  // Get audit logs for the school (school admin only)
+  app.get("/api/admin/audit-logs", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, apiLimiter, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId;
+
+      if (!sessionSchoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { action, userId, since, until, limit, offset } = req.query;
+
+      const options: {
+        action?: string;
+        userId?: string;
+        since?: Date;
+        until?: Date;
+        limit?: number;
+        offset?: number;
+      } = {};
+
+      if (typeof action === 'string' && action) options.action = action;
+      if (typeof userId === 'string' && userId) options.userId = userId;
+      if (typeof since === 'string' && since) options.since = new Date(since);
+      if (typeof until === 'string' && until) options.until = new Date(until);
+      if (typeof limit === 'string' && limit) options.limit = parseInt(limit, 10);
+      if (typeof offset === 'string' && offset) options.offset = parseInt(offset, 10);
+
+      const result = await storage.getAuditLogsBySchool(sessionSchoolId, options);
+
+      res.json(result);
+    } catch (error) {
+      console.error("Get audit logs error:", error);
+      res.status(500).json({ error: "Failed to get audit logs" });
+    }
+  });
+
+  // ====== ANALYTICS ENDPOINTS ======
+
+  // Get school-wide analytics summary
+  app.get("/api/admin/analytics/summary", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, apiLimiter, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId;
+      if (!sessionSchoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { period = '24h' } = req.query;
+
+      // Calculate time range
+      let cutoffTime: number;
+      switch (period) {
+        case '7d':
+          cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
+          break;
+        case '30d':
+          cutoffTime = Date.now() - (30 * 24 * 60 * 60 * 1000);
+          break;
+        default: // 24h
+          cutoffTime = Date.now() - (24 * 60 * 60 * 1000);
+      }
+
+      const [students, devices, heartbeats, teachers] = await Promise.all([
+        storage.getStudentsBySchool(sessionSchoolId),
+        storage.getDevicesBySchool(sessionSchoolId),
+        storage.getHeartbeatsBySchool(sessionSchoolId),
+        storage.getUsersBySchool(sessionSchoolId),
+      ]);
+
+      // Filter heartbeats by time range
+      const recentHeartbeats = heartbeats.filter(hb =>
+        new Date(hb.timestamp).getTime() >= cutoffTime
+      );
+
+      // Count active students (those with heartbeats in period)
+      const activeStudentIds = new Set(recentHeartbeats.map(hb => hb.studentId).filter(Boolean));
+
+      // Calculate total browsing time (approx 10s per heartbeat)
+      const totalBrowsingMinutes = Math.round((recentHeartbeats.length * 10) / 60);
+
+      // Top websites
+      const urlCounts = new Map<string, number>();
+      for (const hb of recentHeartbeats) {
+        if (!hb.activeTabUrl) continue;
+        try {
+          const url = new URL(hb.activeTabUrl);
+          let domain = url.hostname.replace(/^www\./, '');
+          const count = urlCounts.get(domain) || 0;
+          urlCounts.set(domain, count + 1);
+        } catch { /* skip invalid URLs */ }
+      }
+
+      const topWebsites = Array.from(urlCounts.entries())
+        .map(([domain, count]) => ({ domain, visits: count, minutes: Math.round((count * 10) / 60) }))
+        .sort((a, b) => b.visits - a.visits)
+        .slice(0, 10);
+
+      // Activity by hour (for the most recent 24 hours)
+      const hourlyActivity: { hour: number; count: number }[] = [];
+      const last24h = heartbeats.filter(hb =>
+        new Date(hb.timestamp).getTime() >= Date.now() - (24 * 60 * 60 * 1000)
+      );
+      const hourCounts = new Map<number, number>();
+      for (const hb of last24h) {
+        const hour = new Date(hb.timestamp).getHours();
+        hourCounts.set(hour, (hourCounts.get(hour) || 0) + 1);
+      }
+      for (let i = 0; i < 24; i++) {
+        hourlyActivity.push({ hour: i, count: hourCounts.get(i) || 0 });
+      }
+
+      res.json({
+        summary: {
+          totalStudents: students.length,
+          activeStudents: activeStudentIds.size,
+          totalDevices: devices.length,
+          totalTeachers: teachers.filter(t => t.role === 'teacher').length,
+          totalBrowsingMinutes,
+          period,
+        },
+        topWebsites,
+        hourlyActivity,
+      });
+    } catch (error) {
+      console.error("Get analytics summary error:", error);
+      res.status(500).json({ error: "Failed to get analytics" });
+    }
+  });
+
+  // Get analytics by teacher
+  app.get("/api/admin/analytics/by-teacher", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, apiLimiter, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId;
+      if (!sessionSchoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const { period = '7d' } = req.query;
+
+      let cutoffTime: number;
+      switch (period) {
+        case '30d':
+          cutoffTime = Date.now() - (30 * 24 * 60 * 60 * 1000);
+          break;
+        default: // 7d
+          cutoffTime = Date.now() - (7 * 24 * 60 * 60 * 1000);
+      }
+
+      const [teachers, sessions, groups] = await Promise.all([
+        storage.getUsersBySchool(sessionSchoolId),
+        storage.getSessionsBySchool(sessionSchoolId),
+        storage.getGroupsBySchool(sessionSchoolId),
+      ]);
+
+      // Get sessions in the time period
+      const recentSessions = sessions.filter(s =>
+        new Date(s.startTime).getTime() >= cutoffTime
+      );
+
+      // Build teacher stats
+      const teacherStats = teachers
+        .filter(t => t.role === 'teacher')
+        .map(teacher => {
+          const teacherSessions = recentSessions.filter(s => s.teacherId === teacher.id);
+          const teacherGroups = groups.filter(g => g.teacherId === teacher.id);
+
+          let totalSessionMinutes = 0;
+          for (const session of teacherSessions) {
+            const start = new Date(session.startTime).getTime();
+            const end = session.endTime ? new Date(session.endTime).getTime() : Date.now();
+            totalSessionMinutes += (end - start) / (1000 * 60);
+          }
+
+          return {
+            id: teacher.id,
+            name: teacher.displayName || teacher.email,
+            email: teacher.email,
+            sessionCount: teacherSessions.length,
+            totalSessionMinutes: Math.round(totalSessionMinutes),
+            groupCount: teacherGroups.length,
+          };
+        })
+        .sort((a, b) => b.sessionCount - a.sessionCount);
+
+      res.json({ teachers: teacherStats, period });
+    } catch (error) {
+      console.error("Get teacher analytics error:", error);
+      res.status(500).json({ error: "Failed to get analytics" });
+    }
+  });
+
   // ====== SUPER ADMIN ROUTES ======
-  
+
   // List all schools with search and filtering support
   app.get("/api/super-admin/schools", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
@@ -4594,6 +4816,13 @@ export async function registerRoutes(
       const { schoolId: _ignoredSchoolId, ...payload } = data;
       const settings = await storage.upsertSettingsForSchool(sessionSchoolId, payload);
 
+      // Log settings update (non-blocking)
+      logAuditFromRequest(req, AuditAction.SETTINGS_UPDATE, {
+        entityType: 'settings',
+        entityId: sessionSchoolId,
+        changes: { old: currentSettings, new: settings },
+      }).catch(() => {}); // Ignore errors
+
       // Broadcast updated blacklist to all connected students in this school
       if (settings.blockedDomains) {
         broadcastToStudents(sessionSchoolId, {
@@ -6091,8 +6320,8 @@ export async function registerRoutes(
         type: 'student-update',
       });
       
-      const target = targetDeviceIds && targetDeviceIds.length > 0 
-        ? `${unlockedStudentIds.size} student(s)` 
+      const target = targetDeviceIds && targetDeviceIds.length > 0
+        ? `${unlockedStudentIds.size} student(s)`
         : "all students";
       res.json({ success: true, message: `Unlocked ${target}` });
     } catch (error) {
@@ -6100,7 +6329,46 @@ export async function registerRoutes(
       res.status(500).json({ error: "Internal server error" });
     }
   });
-  
+
+  // Temporary Unblock - Allow access to a specific domain for a limited time
+  // In-memory store for temporary unblocks (expires automatically)
+  const tempUnblocks = new Map<string, { domain: string; expiresAt: number }[]>();
+
+  app.post("/api/remote/temp-unblock", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { domain, durationMinutes = 5, targetDeviceIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      if (!domain) {
+        return res.status(400).json({ error: "Domain is required" });
+      }
+
+      const duration = Math.min(Math.max(parseInt(durationMinutes) || 5, 1), 60); // 1-60 minutes
+      const expiresAt = Date.now() + (duration * 60 * 1000);
+
+      // Broadcast temp unblock to students
+      broadcastToStudents(sessionSchoolId, {
+        type: 'remote-control',
+        command: {
+          type: 'temp-unblock',
+          data: {
+            domain,
+            durationMinutes: duration,
+            expiresAt,
+          },
+        },
+      }, undefined, targetDeviceIds);
+
+      const target = targetDeviceIds && targetDeviceIds.length > 0
+        ? `${targetDeviceIds.length} device(s)`
+        : "all students";
+      res.json({ success: true, message: `Temporarily unblocked ${domain} for ${target} (${duration} minutes)` });
+    } catch (error) {
+      console.error("Temp unblock error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Apply Flight Path
   app.post("/api/remote/apply-flight-path", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
@@ -6923,6 +7191,162 @@ export async function registerRoutes(
       res.json({ success: true, enabled });
     } catch (error) {
       console.error("Toggle hand raising error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // ============================================
+  // TWO-WAY CHAT ENDPOINTS
+  // ============================================
+
+  // Student sends a message to teacher
+  app.post("/api/student/send-message", requireDeviceAuth, requireActiveSchoolDeviceMiddleware, apiLimiter, async (req, res) => {
+    try {
+      const authSchoolId = res.locals.schoolId;
+      const authStudentId = res.locals.studentId;
+      const authDeviceId = res.locals.deviceId;
+      const { message, messageType = 'message' } = req.body;
+
+      if (!authStudentId) {
+        return res.status(401).json({ error: "Student not identified" });
+      }
+
+      // Validate message
+      if (!message || typeof message !== 'string' || message.trim().length === 0) {
+        return res.status(400).json({ error: "Message is required" });
+      }
+      if (message.length > 500) {
+        return res.status(400).json({ error: "Message too long (max 500 characters)" });
+      }
+
+      // Get student info
+      const student = await storage.getStudent(authStudentId);
+      if (!student) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+
+      // Store in chatMessages table
+      const chatMessage = await storage.createChatMessage({
+        sessionId: 'direct', // Direct messages not tied to a specific session
+        senderId: authStudentId,
+        senderType: 'student',
+        recipientId: null, // Goes to all teachers in the school
+        content: message.trim(),
+        messageType: messageType as 'message' | 'question',
+      });
+
+      // Broadcast to all teachers in this school
+      broadcastToTeachers(authSchoolId, {
+        type: 'student-message',
+        data: {
+          messageId: chatMessage.id,
+          studentId: authStudentId,
+          studentName: student.studentName,
+          studentEmail: student.studentEmail,
+          deviceId: authDeviceId,
+          message: message.trim(),
+          messageType,
+          timestamp: new Date().toISOString(),
+        }
+      });
+
+      console.log(`[Chat] Student ${student.studentEmail} sent message: "${message.slice(0, 50)}..."`);
+      res.json({ success: true, messageId: chatMessage.id });
+    } catch (error) {
+      console.error("Student send message error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Teacher gets recent student messages
+  app.get("/api/teacher/messages", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId;
+      const { since, limit = '50' } = req.query;
+
+      if (!sessionSchoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      const messages = await storage.getStudentMessagesForSchool(sessionSchoolId, {
+        since: since ? new Date(since as string) : undefined,
+        limit: parseInt(limit as string, 10),
+      });
+
+      // Enrich messages with student info
+      const enrichedMessages = await Promise.all(messages.map(async (msg) => {
+        const student = await storage.getStudent(msg.senderId);
+        return {
+          id: msg.id,
+          studentId: msg.senderId,
+          studentName: student?.studentName || 'Unknown',
+          studentEmail: student?.studentEmail || 'unknown',
+          message: msg.content,
+          messageType: msg.messageType,
+          timestamp: msg.createdAt,
+        };
+      }));
+
+      res.json({ messages: enrichedMessages });
+    } catch (error) {
+      console.error("Get teacher messages error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Teacher replies to a specific student
+  app.post("/api/teacher/reply", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const sessionSchoolId = res.locals.schoolId;
+      const teacherId = req.session?.userId;
+      const { studentId, message } = req.body;
+
+      if (!sessionSchoolId || !teacherId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      // Get teacher info for the reply
+      const teachers = await storage.getUsersBySchool(sessionSchoolId);
+      const teacher = teachers.find(t => t.id === teacherId);
+      const teacherName = teacher?.displayName || teacher?.email || 'Teacher';
+
+      if (!studentId || !message) {
+        return res.status(400).json({ error: "studentId and message are required" });
+      }
+
+      if (message.length > 500) {
+        return res.status(400).json({ error: "Message too long (max 500 characters)" });
+      }
+
+      const student = await storage.getStudent(studentId);
+      if (!student || student.schoolId !== sessionSchoolId) {
+        return res.status(404).json({ error: "Student not found" });
+      }
+
+      // Store the reply
+      const chatMessage = await storage.createChatMessage({
+        sessionId: 'direct',
+        senderId: teacherId,
+        senderType: 'teacher',
+        recipientId: studentId,
+        content: message.trim(),
+        messageType: 'message',
+      });
+
+      // Send to the specific student's device
+      if (student.deviceId) {
+        sendToDevice(sessionSchoolId, student.deviceId, {
+          type: 'chat',
+          message: message.trim(),
+          fromName: teacherName,
+          timestamp: Date.now(),
+        });
+      }
+
+      console.log(`[Chat] Teacher replied to ${student.studentEmail}: "${message.slice(0, 50)}..."`);
+      res.json({ success: true, messageId: chatMessage.id });
+    } catch (error) {
+      console.error("Teacher reply error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
   });

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter, Hand, MessageSquareOff } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter, Hand, MessageSquareOff, MessageSquare, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -103,6 +103,9 @@ export default function Dashboard() {
   const [selectedSubgroupId, setSelectedSubgroupId] = useState<string>("");
   const [subgroupMembers, setSubgroupMembers] = useState<Set<string>>(new Set());
   const [raisedHands, setRaisedHands] = useState<Map<string, { studentId: string; studentName: string; studentEmail: string; timestamp: string }>>(new Map());
+  const [studentMessages, setStudentMessages] = useState<Array<{ id: string; studentId: string; studentName: string; studentEmail: string; message: string; messageType: string; timestamp: string; read: boolean }>>([]);
+  const [replyingToMessage, setReplyingToMessage] = useState<string | null>(null);
+  const [replyText, setReplyText] = useState("");
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -187,6 +190,12 @@ export default function Dashboard() {
     refetchInterval: 30000, // Refresh every 30 seconds as backup
   });
 
+  // Fetch initial student messages
+  const { data: initialStudentMessages } = useQuery<{ messages: Array<{ id: string; studentId: string; studentName: string; studentEmail: string; message: string; messageType: string; createdAt: string }> }>({
+    queryKey: ['/api/teacher/messages'],
+    refetchInterval: 30000, // Refresh every 30 seconds as backup
+  });
+
   // Sync initial raised hands to state
   useEffect(() => {
     if (initialRaisedHands?.raisedHands) {
@@ -202,6 +211,22 @@ export default function Dashboard() {
       setRaisedHands(handsMap);
     }
   }, [initialRaisedHands]);
+
+  // Sync initial student messages to state
+  useEffect(() => {
+    if (initialStudentMessages?.messages) {
+      setStudentMessages(initialStudentMessages.messages.map(msg => ({
+        id: msg.id,
+        studentId: msg.studentId,
+        studentName: msg.studentName,
+        studentEmail: msg.studentEmail,
+        message: msg.message,
+        messageType: msg.messageType,
+        timestamp: msg.createdAt,
+        read: false,
+      })));
+    }
+  }, [initialStudentMessages]);
 
   // WebSocket connection with automatic reconnection
   useEffect(() => {
@@ -333,6 +358,26 @@ export default function Dashboard() {
                 const newMap = new Map(prev);
                 newMap.delete(message.data.studentId);
                 return newMap;
+              });
+            }
+
+            // Handle student messages (two-way chat)
+            if (message.type === 'student-message') {
+              console.log("[Dashboard] Student message received:", message.data);
+              const newMsg = {
+                id: message.data.id,
+                studentId: message.data.studentId,
+                studentName: message.data.studentName,
+                studentEmail: message.data.studentEmail,
+                message: message.data.message,
+                messageType: message.data.messageType,
+                timestamp: message.data.timestamp,
+                read: false,
+              };
+              setStudentMessages(prev => [newMsg, ...prev]);
+              toast({
+                title: message.data.messageType === 'question' ? "❓ Question" : "💬 Message",
+                description: `${message.data.studentName}: ${message.data.message.slice(0, 50)}${message.data.message.length > 50 ? '...' : ''}`,
               });
             }
 
@@ -1507,6 +1552,42 @@ export default function Dashboard() {
     },
   });
 
+  // Reply to student message mutation
+  const replyToMessageMutation = useMutation({
+    mutationFn: async ({ studentId, message }: { studentId: string; message: string }) => {
+      const res = await apiRequest('POST', '/api/teacher/reply', { studentId, message });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: () => {
+      setReplyingToMessage(null);
+      setReplyText("");
+      toast({
+        title: "Reply Sent",
+        description: "Your reply has been sent to the student",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Mark student message as read
+  const markMessageRead = (messageId: string) => {
+    setStudentMessages(prev => prev.map(msg =>
+      msg.id === messageId ? { ...msg, read: true } : msg
+    ));
+  };
+
+  // Dismiss/remove student message
+  const dismissMessage = (messageId: string) => {
+    setStudentMessages(prev => prev.filter(msg => msg.id !== messageId));
+  };
+
   // Toggle hand raising mutation
   const toggleHandRaisingMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
@@ -2151,6 +2232,107 @@ export default function Dashboard() {
                     <X className="h-4 w-4 text-muted-foreground hover:text-foreground" />
                   </DropdownMenuItem>
                 ))
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Student Messages (Two-Way Chat) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                size="sm"
+                variant={studentMessages.filter(m => !m.read).length > 0 ? "default" : "outline"}
+                data-testid="button-student-messages"
+                className={studentMessages.filter(m => !m.read).length > 0 ? "bg-blue-500 hover:bg-blue-600 text-white animate-pulse" : "text-blue-600 dark:text-blue-400"}
+              >
+                <MessageSquare className="h-4 w-4 mr-2" />
+                {studentMessages.filter(m => !m.read).length > 0 ? `Messages (${studentMessages.filter(m => !m.read).length})` : "Messages"}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-80">
+              <DropdownMenuLabel>Student Messages</DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {studentMessages.length === 0 ? (
+                <div className="px-2 py-4 text-center text-sm text-muted-foreground">
+                  No messages from students
+                </div>
+              ) : (
+                <div className="max-h-80 overflow-y-auto">
+                  {studentMessages.slice(0, 10).map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`px-3 py-2 border-b last:border-b-0 ${!msg.read ? 'bg-blue-50 dark:bg-blue-950' : ''}`}
+                      onClick={() => markMessageRead(msg.id)}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-xs px-1.5 py-0.5 rounded ${msg.messageType === 'question' ? 'bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300' : 'bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300'}`}>
+                              {msg.messageType === 'question' ? '?' : 'msg'}
+                            </span>
+                            <span className="font-medium text-sm truncate">{msg.studentName}</span>
+                          </div>
+                          <p className="text-sm text-foreground mt-1 break-words">{msg.message}</p>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {new Date(msg.timestamp).toLocaleTimeString()}
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setReplyingToMessage(replyingToMessage === msg.id ? null : msg.id);
+                              setReplyText("");
+                            }}
+                          >
+                            <Send className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 w-6 p-0"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              dismissMessage(msg.id);
+                            }}
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                      {replyingToMessage === msg.id && (
+                        <div className="mt-2 flex gap-2" onClick={(e) => e.stopPropagation()}>
+                          <Input
+                            value={replyText}
+                            onChange={(e) => setReplyText(e.target.value)}
+                            placeholder="Type reply..."
+                            className="h-8 text-sm"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && replyText.trim()) {
+                                replyToMessageMutation.mutate({ studentId: msg.studentId, message: replyText.trim() });
+                              }
+                            }}
+                          />
+                          <Button
+                            size="sm"
+                            className="h-8"
+                            disabled={!replyText.trim() || replyToMessageMutation.isPending}
+                            onClick={() => {
+                              if (replyText.trim()) {
+                                replyToMessageMutation.mutate({ studentId: msg.studentId, message: replyText.trim() });
+                              }
+                            }}
+                          >
+                            <Send className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </DropdownMenuContent>
           </DropdownMenu>

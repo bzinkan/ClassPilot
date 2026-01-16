@@ -13,6 +13,7 @@ import Settings from "@/pages/settings";
 import MySettings from "@/pages/my-settings";
 import Admin from "@/pages/admin";
 import AdminClasses from "@/pages/admin-classes";
+import AdminAnalytics from "@/pages/admin-analytics";
 import StudentsPage from "@/pages/students";
 import Roster from "@/pages/roster";
 import SchoolsList from "@/pages/super-admin/schools-list";
@@ -35,6 +36,7 @@ function Router() {
       <Route path="/my-settings" component={MySettings} />
       <Route path="/admin" component={Admin} />
       <Route path="/admin/classes" component={AdminClasses} />
+      <Route path="/admin/analytics" component={AdminAnalytics} />
       <Route path="/students" component={StudentsPage} />
       <Route path="/super-admin/schools" component={SchoolsList} />
       <Route path="/super-admin/schools/new" component={CreateSchool} />

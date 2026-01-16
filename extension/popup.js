@@ -20,7 +20,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Initialize raise hand functionality
   initRaiseHand();
-  
+
+  // Initialize chat UI
+  initChatUI();
+
   // Listen for storage changes to update messages in real-time
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === 'local' && changes.messages) {
@@ -360,6 +363,61 @@ async function lowerHand() {
     console.error('Error lowering hand:', error);
     alert('Failed to lower hand. Please try again.');
   }
+}
+
+// Two-way chat functions
+async function sendStudentMessage(messageType = 'message') {
+  const input = document.getElementById('chat-input');
+  const message = input?.value?.trim();
+  const sendBtn = document.getElementById('send-message-btn');
+  const questionBtn = document.getElementById('send-question-btn');
+
+  if (!message) {
+    alert('Please enter a message');
+    return;
+  }
+
+  if (message.length > 500) {
+    alert('Message is too long (max 500 characters)');
+    return;
+  }
+
+  // Disable buttons while sending
+  if (sendBtn) sendBtn.disabled = true;
+  if (questionBtn) questionBtn.disabled = true;
+
+  try {
+    chrome.runtime.sendMessage({
+      type: 'send-student-message',
+      message,
+      messageType
+    }, (response) => {
+      // Re-enable buttons
+      if (sendBtn) sendBtn.disabled = false;
+      if (questionBtn) questionBtn.disabled = false;
+
+      if (response?.success) {
+        input.value = '';
+        const sentStatus = document.getElementById('message-sent-status');
+        sentStatus?.classList.remove('hidden');
+        setTimeout(() => {
+          sentStatus?.classList.add('hidden');
+        }, 3000);
+      } else {
+        alert(response?.error || 'Failed to send message. Please try again.');
+      }
+    });
+  } catch (error) {
+    console.error('Error sending message:', error);
+    if (sendBtn) sendBtn.disabled = false;
+    if (questionBtn) questionBtn.disabled = false;
+    alert('Failed to send message. Please try again.');
+  }
+}
+
+function initChatUI() {
+  document.getElementById('send-message-btn')?.addEventListener('click', () => sendStudentMessage('message'));
+  document.getElementById('send-question-btn')?.addEventListener('click', () => sendStudentMessage('question'));
 }
 
 function showPrivacyInfo() {
