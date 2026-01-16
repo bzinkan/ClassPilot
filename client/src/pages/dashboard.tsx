@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter, Hand, MessageSquareOff, Presentation, StopCircle } from "lucide-react";
+import { Monitor, Users, Activity, Settings as SettingsIcon, LogOut, Download, Calendar, Shield, AlertTriangle, UserCog, Plus, X, GraduationCap, WifiOff, Video, MonitorPlay, TabletSmartphone, Lock, Unlock, Layers, Route, CheckSquare, XSquare, User, List, ShieldBan, Eye, EyeOff, Timer, Clock, BarChart3, Trash2, UsersRound, Filter, Hand, MessageSquareOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +31,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { useWebRTC } from "@/hooks/useWebRTC";
-import { useTeacherBroadcast } from "@/hooks/useTeacherBroadcast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import type { StudentStatus, AggregatedStudentStatus, Heartbeat, Settings, FlightPath, Group, Session, BlockList, Subgroup } from "@shared/schema";
 import { isWithinTrackingHours } from "@shared/utils";
@@ -117,10 +116,6 @@ export default function Dashboard() {
 
   // WebRTC hook for live video streaming
   const webrtc = useWebRTC(wsRef.current);
-
-  // Teacher broadcast hook for presenting screen to students
-  const broadcast = useTeacherBroadcast(wsRef.current);
-  const broadcastPreviewRef = useRef<HTMLVideoElement>(null);
 
   const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
     queryKey: ['/api/students-aggregated'],
@@ -341,26 +336,7 @@ export default function Dashboard() {
               });
             }
 
-            // Handle broadcast-related messages
-            if (message.type === 'broadcast-student-join') {
-              console.log("[Dashboard] Student joining broadcast:", message.deviceId);
-              broadcast.handleStudentJoin(message.deviceId);
-            }
-
-            if (message.type === 'broadcast-answer') {
-              console.log("[Dashboard] Broadcast answer from:", message.from);
-              broadcast.handleStudentAnswer(message.from, message.sdp);
-            }
-
-            if (message.type === 'broadcast-ice-student') {
-              broadcast.handleStudentIce(message.from, message.candidate);
-            }
-
-            if (message.type === 'broadcast-student-leave') {
-              console.log("[Dashboard] Student leaving broadcast:", message.deviceId);
-              broadcast.handleStudentLeave(message.deviceId);
-            }
-          } catch (error) {
+            } catch (error) {
             console.error("[Dashboard] WebSocket message error:", error);
           }
         };
@@ -1602,41 +1578,6 @@ export default function Dashboard() {
     };
   }, []);
 
-  // Handle starting broadcast
-  const handleStartBroadcast = async () => {
-    try {
-      const stream = await broadcast.startBroadcast();
-      if (stream && broadcastPreviewRef.current) {
-        broadcastPreviewRef.current.srcObject = stream;
-      }
-      toast({
-        title: "Presenting Screen",
-        description: "Your screen is now being shared with all students",
-      });
-    } catch (error: any) {
-      console.error('Failed to start broadcast:', error);
-      if (error.name !== 'NotAllowedError') {
-        toast({
-          variant: "destructive",
-          title: "Broadcast Failed",
-          description: error.message || "Failed to share screen",
-        });
-      }
-    }
-  };
-
-  // Handle stopping broadcast
-  const handleStopBroadcast = () => {
-    broadcast.stopBroadcast();
-    if (broadcastPreviewRef.current) {
-      broadcastPreviewRef.current.srcObject = null;
-    }
-    toast({
-      title: "Stopped Presenting",
-      description: "Screen sharing has ended",
-    });
-  };
-
   // Fetch subgroup members when subgroup is selected
   useEffect(() => {
     if (selectedSubgroupId) {
@@ -2158,27 +2099,6 @@ export default function Dashboard() {
           >
             <BarChart3 className="h-4 w-4 mr-2" />
             {activePoll ? `Poll (${pollTotalResponses})` : "Poll"}
-          </Button>
-
-          {/* Present Screen */}
-          <Button
-            size="sm"
-            variant={broadcast.isBroadcasting ? "default" : "outline"}
-            onClick={() => broadcast.isBroadcasting ? handleStopBroadcast() : handleStartBroadcast()}
-            data-testid="button-present"
-            className={broadcast.isBroadcasting ? "bg-rose-600 hover:bg-rose-700 text-white" : "text-rose-600 dark:text-rose-400"}
-          >
-            {broadcast.isBroadcasting ? (
-              <>
-                <StopCircle className="h-4 w-4 mr-2" />
-                Stop ({broadcast.viewerCount})
-              </>
-            ) : (
-              <>
-                <Presentation className="h-4 w-4 mr-2" />
-                Present
-              </>
-            )}
           </Button>
 
           {/* Raised Hands */}
