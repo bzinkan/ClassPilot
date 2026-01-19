@@ -176,6 +176,7 @@ function StudentsContent() {
   const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false);
   const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
   const [selectedOrgUnit, setSelectedOrgUnit] = useState<string>("");
+  const [importGradeLevel, setImportGradeLevel] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
@@ -281,9 +282,10 @@ function StudentsContent() {
 
   // Import from Google Workspace Directory mutation
   const importDirectoryMutation = useMutation({
-    mutationFn: async (orgUnitPath?: string) => {
+    mutationFn: async (params: { orgUnitPath?: string; gradeLevel?: string }) => {
       const res = await apiRequest("POST", "/api/directory/import", {
-        orgUnitPath: orgUnitPath || undefined,
+        orgUnitPath: params.orgUnitPath || undefined,
+        gradeLevel: params.gradeLevel || undefined,
       });
       return res.json();
     },
@@ -828,6 +830,7 @@ function StudentsContent() {
         if (!open) {
           setWorkspaceImportResult(null);
           setSelectedOrgUnit("");
+          setImportGradeLevel("");
         }
       }}>
         <DialogContent className="max-w-2xl">
@@ -949,7 +952,39 @@ function StudentsContent() {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Select an Organizational Unit to import only students from that group (e.g., by grade level)
+                    Select an Organizational Unit to import only students from that group
+                  </p>
+                </div>
+
+                {/* Grade Level Assignment */}
+                <div className="space-y-2">
+                  <Label htmlFor="grade-level">Assign Grade Level (Optional)</Label>
+                  <Select
+                    value={importGradeLevel}
+                    onValueChange={setImportGradeLevel}
+                  >
+                    <SelectTrigger id="grade-level" data-testid="select-import-grade">
+                      <SelectValue placeholder="No grade assignment" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No grade assignment</SelectItem>
+                      <SelectItem value="K">Kindergarten</SelectItem>
+                      <SelectItem value="1">Grade 1</SelectItem>
+                      <SelectItem value="2">Grade 2</SelectItem>
+                      <SelectItem value="3">Grade 3</SelectItem>
+                      <SelectItem value="4">Grade 4</SelectItem>
+                      <SelectItem value="5">Grade 5</SelectItem>
+                      <SelectItem value="6">Grade 6</SelectItem>
+                      <SelectItem value="7">Grade 7</SelectItem>
+                      <SelectItem value="8">Grade 8</SelectItem>
+                      <SelectItem value="9">Grade 9</SelectItem>
+                      <SelectItem value="10">Grade 10</SelectItem>
+                      <SelectItem value="11">Grade 11</SelectItem>
+                      <SelectItem value="12">Grade 12</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    All imported students will be assigned to this grade level
                   </p>
                 </div>
 
@@ -983,7 +1018,10 @@ function StudentsContent() {
                     Cancel
                   </Button>
                   <Button
-                    onClick={() => importDirectoryMutation.mutate(selectedOrgUnit && selectedOrgUnit !== "__all__" ? selectedOrgUnit : undefined)}
+                    onClick={() => importDirectoryMutation.mutate({
+                      orgUnitPath: selectedOrgUnit && selectedOrgUnit !== "__all__" ? selectedOrgUnit : undefined,
+                      gradeLevel: importGradeLevel && importGradeLevel !== "__none__" ? importGradeLevel : undefined,
+                    })}
                     disabled={importDirectoryMutation.isPending || directoryUsers.length === 0}
                     data-testid="button-import-workspace-users"
                   >
@@ -995,7 +1033,7 @@ function StudentsContent() {
                     ) : (
                       <>
                         <Users className="h-4 w-4 mr-2" />
-                        Import {directoryUsers.length} Students
+                        Import {directoryUsers.length} Students{importGradeLevel && importGradeLevel !== "__none__" ? ` as Grade ${importGradeLevel}` : ""}
                       </>
                     )}
                   </Button>

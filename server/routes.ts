@@ -4326,11 +4326,12 @@ export async function registerRoutes(
       const schoolId = sessionSchoolId;
 
       const { importStudentsFromDirectory } = await import("./directory");
-      const { domain, orgUnitPath } = req.body;
+      const { domain, orgUnitPath, gradeLevel } = req.body;
 
       const result = await importStudentsFromDirectory(user.id, schoolId, {
         domain,
         orgUnitPath,
+        gradeLevel,
       });
 
       res.json({

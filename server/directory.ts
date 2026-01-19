@@ -149,6 +149,7 @@ export async function importStudentsFromDirectory(
     domain?: string;
     orgUnitPath?: string;
     includeStudentsOnly?: boolean;
+    gradeLevel?: string;
   } = {}
 ): Promise<{
   imported: number;
@@ -165,7 +166,7 @@ export async function importStudentsFromDirectory(
 
   try {
     let query = "";
-    
+
     if (options.orgUnitPath) {
       query = `orgUnitPath='${options.orgUnitPath}'`;
     }
@@ -182,17 +183,24 @@ export async function importStudentsFromDirectory(
         );
 
         if (existingStudent) {
-          await storage.updateStudent(existingStudent.id, {
+          // Update existing student - also update grade if provided
+          const updateData: { studentName: string; gradeLevel?: string } = {
             studentName: user.name,
-          });
+          };
+          if (options.gradeLevel) {
+            updateData.gradeLevel = options.gradeLevel;
+          }
+          await storage.updateStudent(existingStudent.id, updateData);
           result.updated++;
         } else {
+          // Create new student with grade level if provided
           await storage.createStudent({
             studentEmail: user.email,
             studentName: user.name,
             schoolId,
             studentStatus: "active",
             emailLc: user.email.toLowerCase(),
+            gradeLevel: options.gradeLevel || undefined,
           });
           result.imported++;
         }
