@@ -173,6 +173,7 @@ export default function Admin() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
       form.reset();
       toast({
         title: "Staff member added",
@@ -194,6 +195,7 @@ export default function Admin() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
       toast({
         title: "Staff account deleted",
         description: "The staff account has been deleted successfully.",
