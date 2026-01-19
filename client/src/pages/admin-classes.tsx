@@ -276,6 +276,7 @@ export default function AdminClasses() {
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   const [selectedCourses, setSelectedCourses] = useState<Set<string>>(new Set());
   const [courseTeacherOverrides, setCourseTeacherOverrides] = useState<Map<string, string>>(new Map());
+  const [courseGradeLevels, setCourseGradeLevels] = useState<Map<string, string>>(new Map());
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -428,9 +429,11 @@ export default function AdminClasses() {
       if (!teacherId) {
         throw new Error("No teacher assigned to this course. Please select a teacher.");
       }
+      const gradeLevel = courseGradeLevels.get(course.courseId);
       const res = await apiRequest("POST", "/api/admin/classroom/create-class", {
         courseId: course.courseId,
         teacherId,
+        gradeLevel: gradeLevel || undefined,
       });
       return res.json();
     },
@@ -525,6 +528,18 @@ export default function AdminClasses() {
       const newMap = new Map(prev);
       if (teacherId) {
         newMap.set(courseId, teacherId);
+      } else {
+        newMap.delete(courseId);
+      }
+      return newMap;
+    });
+  };
+
+  const setCourseGradeLevel = (courseId: string, gradeLevel: string) => {
+    setCourseGradeLevels((prev) => {
+      const newMap = new Map(prev);
+      if (gradeLevel) {
+        newMap.set(courseId, gradeLevel);
       } else {
         newMap.delete(courseId);
       }
@@ -673,6 +688,7 @@ export default function AdminClasses() {
                 if (!open) {
                   setSelectedCourses(new Set());
                   setCourseTeacherOverrides(new Map());
+                  setCourseGradeLevels(new Map());
                 }
               }}>
                 <DialogTrigger asChild>
@@ -723,6 +739,7 @@ export default function AdminClasses() {
                           const isDisabled = course.alreadyExists;
                           const isSelected = selectedCourses.has(course.courseId);
                           const overrideTeacherId = courseTeacherOverrides.get(course.courseId);
+                          const courseGradeLevel = courseGradeLevels.get(course.courseId);
                           return (
                             <div
                               key={course.courseId}
@@ -775,8 +792,31 @@ export default function AdminClasses() {
                                   {course.section && <span>• {course.section}</span>}
                                 </div>
                               </div>
-                              <div className="text-sm text-muted-foreground whitespace-nowrap">
-                                {course.studentCount} students
+                              <div className="flex items-center gap-2">
+                                {!isDisabled && (
+                                  <div onClick={(e) => e.stopPropagation()}>
+                                    <Select
+                                      value={courseGradeLevel || ""}
+                                      onValueChange={(val) => setCourseGradeLevel(course.courseId, val)}
+                                    >
+                                      <SelectTrigger className="h-7 w-[90px] text-xs" data-testid={`select-grade-${course.courseId}`}>
+                                        <SelectValue placeholder="Grade" />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="">No grade</SelectItem>
+                                        <SelectItem value="K">K</SelectItem>
+                                        {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((g) => (
+                                          <SelectItem key={g} value={String(g)}>
+                                            {g}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                )}
+                                <div className="text-sm text-muted-foreground whitespace-nowrap">
+                                  {course.studentCount} students
+                                </div>
                               </div>
                             </div>
                           );

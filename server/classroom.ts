@@ -74,7 +74,12 @@ export async function syncCourses(userId: string, schoolId: string) {
   return courses;
 }
 
-export async function syncRoster(userId: string, schoolId: string, courseId: string) {
+export async function syncRoster(
+  userId: string,
+  schoolId: string,
+  courseId: string,
+  options: { gradeLevel?: string } = {}
+) {
   const classroom = await getClassroomClient(userId);
 
   // Fetch students (with timeout)
@@ -111,11 +116,19 @@ export async function syncRoster(userId: string, schoolId: string, courseId: str
         schoolId,
         studentStatus: "active",
         deviceId: null, // Device ID will be linked when they sign in via extension
+        gradeLevel: options.gradeLevel || undefined,
       });
     } else {
-      // Update existing student with Google User ID if missing
+      // Update existing student with Google User ID if missing, and grade level if provided
+      const updateData: { googleUserId?: string; gradeLevel?: string } = {};
       if (!dbStudent.googleUserId && profile?.id) {
-        await storage.updateStudent(dbStudent.id, { googleUserId: profile.id });
+        updateData.googleUserId = profile.id;
+      }
+      if (options.gradeLevel) {
+        updateData.gradeLevel = options.gradeLevel;
+      }
+      if (Object.keys(updateData).length > 0) {
+        await storage.updateStudent(dbStudent.id, updateData);
       }
     }
 

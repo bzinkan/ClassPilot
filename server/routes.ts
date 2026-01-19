@@ -4111,9 +4111,10 @@ export async function registerRoutes(
       const schoolId = req.session.schoolId!;
 
       const { courseId } = req.params;
+      const { gradeLevel } = req.body;
 
       // Sync the student list from Google
-      const students = await syncRoster(user.id, schoolId, courseId);
+      const students = await syncRoster(user.id, schoolId, courseId, { gradeLevel });
 
       // Automatically create a ClassPilot group for this course
       const course = await storage.getClassroomCourse(schoolId, courseId);
@@ -4262,6 +4263,10 @@ export async function registerRoutes(
       let assignedCount = 0;
       for (const studentId of studentIds) {
         try {
+          // Update student grade level if provided
+          if (gradeLevel) {
+            await storage.updateStudent(studentId, { gradeLevel });
+          }
           await storage.assignStudentToGroup(newGroup.id, studentId);
           assignedCount++;
         } catch (e) {
