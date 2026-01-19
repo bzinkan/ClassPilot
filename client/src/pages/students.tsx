@@ -257,6 +257,11 @@ function StudentsContent() {
 
   const directoryUsers = directoryData?.users || [];
   const orgUnits = orgUnitsData?.orgUnits || [];
+
+  // Filter directory users by selected OU (client-side filtering for preview)
+  const filteredDirectoryUsers = selectedOrgUnit && selectedOrgUnit !== "__all__"
+    ? directoryUsers.filter(user => user.orgUnitPath === selectedOrgUnit)
+    : directoryUsers;
   
   // Parse error codes from the error message (format: "403: {\"error\":\"...\",\"code\":\"...\"}")
   const getDirectoryErrorCode = (): string | null => {
@@ -919,7 +924,10 @@ function StudentsContent() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <p className="text-sm text-muted-foreground">
-                    Found {directoryUsers.length} user{directoryUsers.length !== 1 ? 's' : ''} in your domain
+                    {selectedOrgUnit && selectedOrgUnit !== "__all__"
+                      ? `Showing ${filteredDirectoryUsers.length} of ${directoryUsers.length} users`
+                      : `Found ${directoryUsers.length} user${directoryUsers.length !== 1 ? 's' : ''} in your domain`
+                    }
                   </p>
                   <Button
                     variant="outline"
@@ -988,9 +996,9 @@ function StudentsContent() {
                   </p>
                 </div>
 
-                {directoryUsers.length > 0 && (
+                {filteredDirectoryUsers.length > 0 ? (
                   <div className="border rounded-md divide-y max-h-64 overflow-auto">
-                    {directoryUsers.slice(0, 20).map((user) => (
+                    {filteredDirectoryUsers.slice(0, 20).map((user) => (
                       <div
                         key={user.id}
                         className="flex items-center justify-between p-3 text-sm"
@@ -1005,13 +1013,17 @@ function StudentsContent() {
                         )}
                       </div>
                     ))}
-                    {directoryUsers.length > 20 && (
+                    {filteredDirectoryUsers.length > 20 && (
                       <div className="p-3 text-sm text-center text-muted-foreground">
-                        ...and {directoryUsers.length - 20} more users
+                        ...and {filteredDirectoryUsers.length - 20} more users
                       </div>
                     )}
                   </div>
-                )}
+                ) : directoryUsers.length > 0 && selectedOrgUnit && selectedOrgUnit !== "__all__" ? (
+                  <div className="border rounded-md p-4 text-center text-muted-foreground">
+                    No users found in this Organizational Unit
+                  </div>
+                ) : null}
 
                 <div className="flex justify-end gap-2">
                   <Button variant="outline" onClick={() => setShowWorkspaceDialog(false)}>
@@ -1022,7 +1034,7 @@ function StudentsContent() {
                       orgUnitPath: selectedOrgUnit && selectedOrgUnit !== "__all__" ? selectedOrgUnit : undefined,
                       gradeLevel: importGradeLevel && importGradeLevel !== "__none__" ? importGradeLevel : undefined,
                     })}
-                    disabled={importDirectoryMutation.isPending || directoryUsers.length === 0}
+                    disabled={importDirectoryMutation.isPending || filteredDirectoryUsers.length === 0}
                     data-testid="button-import-workspace-users"
                   >
                     {importDirectoryMutation.isPending ? (
@@ -1033,7 +1045,7 @@ function StudentsContent() {
                     ) : (
                       <>
                         <Users className="h-4 w-4 mr-2" />
-                        Import {directoryUsers.length} Students{importGradeLevel && importGradeLevel !== "__none__" ? ` as Grade ${importGradeLevel}` : ""}
+                        Import {filteredDirectoryUsers.length} Student{filteredDirectoryUsers.length !== 1 ? 's' : ''}{importGradeLevel && importGradeLevel !== "__none__" ? ` as Grade ${importGradeLevel}` : ""}
                       </>
                     )}
                   </Button>
