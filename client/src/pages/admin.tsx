@@ -81,6 +81,7 @@ export default function Admin() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [staffToEdit, setStaffToEdit] = useState<StaffUser | null>(null);
   const [selectedRole, setSelectedRole] = useState<"teacher" | "school_admin">("teacher");
+  const [editName, setEditName] = useState("");
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [staffToResetPassword, setStaffToResetPassword] = useState<StaffUser | null>(null);
   const [newPassword, setNewPassword] = useState("");
@@ -218,17 +219,19 @@ export default function Admin() {
   });
 
   const updateStaffMutation = useMutation({
-    mutationFn: async (payload: { userId: string; role: "teacher" | "school_admin" }) => {
+    mutationFn: async (payload: { userId: string; role: "teacher" | "school_admin"; name?: string }) => {
       return await apiRequest("PATCH", `/api/admin/users/${payload.userId}`, {
         role: payload.role,
+        name: payload.name?.trim() || undefined,
       });
     },
     onSuccess: () => {
       toast({
         title: "Staff updated",
-        description: "The staff role has been updated successfully.",
+        description: "Staff details have been updated successfully.",
       });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
       setEditDialogOpen(false);
       setStaffToEdit(null);
     },
@@ -348,6 +351,7 @@ export default function Admin() {
   const handleEditClick = (staff: StaffUser) => {
     setStaffToEdit(staff);
     setSelectedRole(staff.role);
+    setEditName(staff.displayName || "");
     setEditDialogOpen(true);
   };
 
@@ -375,7 +379,7 @@ export default function Admin() {
     if (!staffToEdit) {
       return;
     }
-    updateStaffMutation.mutate({ userId: staffToEdit.id, role: selectedRole });
+    updateStaffMutation.mutate({ userId: staffToEdit.id, role: selectedRole, name: editName });
   };
 
   const is247 =
@@ -1050,14 +1054,25 @@ export default function Admin() {
           }
         }}
       >
-        <DialogContent data-testid="dialog-edit-role">
+        <DialogContent data-testid="dialog-edit-staff">
           <DialogHeader>
-            <DialogTitle>Edit Role</DialogTitle>
+            <DialogTitle>Edit Staff</DialogTitle>
             <DialogDescription>
-              Update the role for <strong>{staffToEdit?.displayName || staffToEdit?.email}</strong>.
+              Update details for <strong>{staffToEdit?.displayName || staffToEdit?.email}</strong>.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-name">Display Name</Label>
+              <Input
+                id="edit-name"
+                data-testid="input-edit-name"
+                type="text"
+                placeholder="e.g., John Smith"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+              />
+            </div>
             <div className="space-y-2">
               <Label htmlFor="edit-role">Role</Label>
               <Select
