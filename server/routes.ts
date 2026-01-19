@@ -1111,14 +1111,23 @@ export async function registerRoutes(
       if (!user) {
         return res.status(404).json({ error: "User not found" });
       }
-      
+
+      // Get school name from schools table (user.schoolName is deprecated)
+      let schoolName = user.schoolName; // fallback to deprecated field
+      if (user.schoolId) {
+        const school = await storage.getSchool(user.schoolId);
+        if (school) {
+          schoolName = school.schoolName;
+        }
+      }
+
       res.json({
         success: true,
         user: {
           id: user.id,
           username: user.username,
           role: user.role,
-          schoolName: user.schoolName,
+          schoolName: schoolName,
           impersonating: req.session.impersonating || false,
         },
       });
