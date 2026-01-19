@@ -459,6 +459,28 @@ export default function AdminClasses() {
     },
   });
 
+  // Sync courses from Google Classroom (actually fetches from Google API)
+  const syncFromGoogleMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("GET", "/api/classroom/courses");
+      return res.json();
+    },
+    onSuccess: async () => {
+      await refetchCourses();
+      toast({
+        title: "Sync Complete",
+        description: "Google Classroom courses have been synced",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Sync Failed",
+        description: error.message,
+      });
+    },
+  });
+
   const onSubmit = (data: CreateClassForm) => {
     createClassMutation.mutate(data);
   };
@@ -711,26 +733,30 @@ export default function AdminClasses() {
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
                       <p className="text-sm text-muted-foreground">
-                        {isLoadingCourses ? "Loading courses..." : `${importableCoursesCount} courses available to import`}
+                        {isLoadingCourses || syncFromGoogleMutation.isPending
+                          ? "Syncing courses from Google..."
+                          : `${importableCoursesCount} courses available to import`}
                       </p>
-                      <Button 
-                        variant="ghost" 
+                      <Button
+                        variant="outline"
                         size="sm"
-                        onClick={() => refetchCourses()}
-                        disabled={isLoadingCourses}
+                        onClick={() => syncFromGoogleMutation.mutate()}
+                        disabled={isLoadingCourses || syncFromGoogleMutation.isPending}
                         data-testid="button-refresh-courses"
                       >
-                        <RefreshCw className={`h-4 w-4 ${isLoadingCourses ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`h-4 w-4 mr-2 ${isLoadingCourses || syncFromGoogleMutation.isPending ? 'animate-spin' : ''}`} />
+                        Sync from Google
                       </Button>
                     </div>
 
-                    {isLoadingCourses ? (
+                    {isLoadingCourses || syncFromGoogleMutation.isPending ? (
                       <div className="py-8 text-center text-muted-foreground">
-                        Loading Google Classroom courses...
+                        Fetching courses from Google Classroom...
                       </div>
                     ) : classroomCourses.length === 0 ? (
                       <div className="py-8 text-center text-muted-foreground">
-                        No Google Classroom courses found. Make sure teachers have synced their courses.
+                        <p>No Google Classroom courses found.</p>
+                        <p className="text-sm mt-2">Click "Sync from Google" to fetch your courses.</p>
                       </div>
                     ) : (
                       <div className="space-y-2">
