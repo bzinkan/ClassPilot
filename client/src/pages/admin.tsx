@@ -61,6 +61,13 @@ interface StaffUser {
   schoolName?: string | null;
 }
 
+interface CurrentUser {
+  id: string;
+  username: string;
+  role: string;
+  schoolName: string;
+}
+
 interface StaffResponse {
   users: StaffUser[];
 }
@@ -103,6 +110,11 @@ export default function Admin() {
   const { data: staffData, isLoading } = useQuery<StaffResponse>({
     queryKey: ["/api/admin/users"],
   });
+
+  const { data: currentUserData } = useQuery<{ success: boolean; user: CurrentUser }>({
+    queryKey: ["/api/me"],
+  });
+  const currentUser = currentUserData?.user;
 
   const { data: settings } = useQuery<Settings>({
     queryKey: ["/api/settings"],
@@ -403,7 +415,11 @@ export default function Admin() {
           </div>
           <div>
             <h1 className="text-3xl font-semibold">Admin Dashboard</h1>
-            <p className="text-muted-foreground">Manage staff accounts for your school</p>
+            <p className="text-muted-foreground">
+              {currentUser?.schoolName && <span className="font-medium">{currentUser.schoolName}</span>}
+              {currentUser?.schoolName && ' • '}
+              Manage staff accounts for your school
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-2">

@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle, Plus, Search } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -35,6 +36,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { EditStudentDialog } from "@/components/edit-student-dialog";
 
 interface CurrentUser {
@@ -100,6 +108,14 @@ interface DirectoryImportResult {
   errors: string[];
 }
 
+interface OrgUnit {
+  orgUnitPath: string;
+  orgUnitId: string;
+  name: string;
+  description?: string;
+  parentOrgUnitPath?: string;
+}
+
 // Admin Guard Wrapper - Only checks auth, doesn't run any queries/mutations
 export default function StudentsPage() {
   const [, setLocation] = useLocation();
@@ -159,7 +175,9 @@ function StudentsContent() {
   const [syncingCourseId, setSyncingCourseId] = useState<string | null>(null);
   const [showWorkspaceDialog, setShowWorkspaceDialog] = useState(false);
   const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
+  const [selectedOrgUnit, setSelectedOrgUnit] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
   const [newStudentName, setNewStudentName] = useState("");
   const [newStudentEmail, setNewStudentEmail] = useState("");
@@ -230,7 +248,14 @@ function StudentsContent() {
     enabled: showWorkspaceDialog,
   });
 
+  // Fetch organizational units (only when dialog is open)
+  const { data: orgUnitsData, isLoading: isLoadingOrgUnits } = useQuery<{ orgUnits: OrgUnit[] }>({
+    queryKey: ["/api/directory/orgunits"],
+    enabled: showWorkspaceDialog,
+  });
+
   const directoryUsers = directoryData?.users || [];
+  const orgUnits = orgUnitsData?.orgUnits || [];
   
   // Parse error codes from the error message (format: "403: {\"error\":\"...\",\"code\":\"...\"}")
   const getDirectoryErrorCode = (): string | null => {
@@ -256,8 +281,10 @@ function StudentsContent() {
 
   // Import from Google Workspace Directory mutation
   const importDirectoryMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/directory/import", {});
+    mutationFn: async (orgUnitPath?: string) => {
+      const res = await apiRequest("POST", "/api/directory/import", {
+        orgUnitPath: orgUnitPath || undefined,
+      });
       return res.json();
     },
     onSuccess: async (data: DirectoryImportResult) => {
@@ -319,7 +346,39 @@ function StudentsContent() {
     }
     return true;
   });
-  
+
+  // Selection helpers
+  const isAllSelected = filteredStudents.length > 0 && filteredStudents.every(s => selectedStudents.has(s.id));
+  const isSomeSelected = filteredStudents.some(s => selectedStudents.has(s.id));
+
+  const toggleSelectAll = () => {
+    if (isAllSelected) {
+      // Deselect all filtered students
+      const newSelected = new Set(selectedStudents);
+      filteredStudents.forEach(s => newSelected.delete(s.id));
+      setSelectedStudents(newSelected);
+    } else {
+      // Select all filtered students
+      const newSelected = new Set(selectedStudents);
+      filteredStudents.forEach(s => newSelected.add(s.id));
+      setSelectedStudents(newSelected);
+    }
+  };
+
+  const toggleSelectStudent = (studentId: string) => {
+    const newSelected = new Set(selectedStudents);
+    if (newSelected.has(studentId)) {
+      newSelected.delete(studentId);
+    } else {
+      newSelected.add(studentId);
+    }
+    setSelectedStudents(newSelected);
+  };
+
+  const clearSelection = () => {
+    setSelectedStudents(new Set());
+  };
+
   // Handle adding a new grade category
   const handleAddGrade = (grade: string) => {
     if (!manualGrades.includes(grade) && !gradesWithStudents.includes(grade)) {
@@ -766,7 +825,10 @@ function StudentsContent() {
       {/* Google Workspace Import Dialog */}
       <Dialog open={showWorkspaceDialog} onOpenChange={(open) => {
         setShowWorkspaceDialog(open);
-        if (!open) setWorkspaceImportResult(null);
+        if (!open) {
+          setWorkspaceImportResult(null);
+          setSelectedOrgUnit("");
+        }
       }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -867,6 +929,30 @@ function StudentsContent() {
                   </Button>
                 </div>
 
+                {/* Organizational Unit Filter */}
+                <div className="space-y-2">
+                  <Label htmlFor="ou-filter">Filter by Organizational Unit (Optional)</Label>
+                  <Select
+                    value={selectedOrgUnit}
+                    onValueChange={setSelectedOrgUnit}
+                  >
+                    <SelectTrigger id="ou-filter" data-testid="select-org-unit">
+                      <SelectValue placeholder={isLoadingOrgUnits ? "Loading..." : "All Users (no filter)"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">All Users (no filter)</SelectItem>
+                      {orgUnits.map((ou) => (
+                        <SelectItem key={ou.orgUnitId} value={ou.orgUnitPath}>
+                          {ou.name} ({ou.orgUnitPath})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Select an Organizational Unit to import only students from that group (e.g., by grade level)
+                  </p>
+                </div>
+
                 {directoryUsers.length > 0 && (
                   <div className="border rounded-md divide-y max-h-64 overflow-auto">
                     {directoryUsers.slice(0, 20).map((user) => (
@@ -897,7 +983,7 @@ function StudentsContent() {
                     Cancel
                   </Button>
                   <Button
-                    onClick={() => importDirectoryMutation.mutate()}
+                    onClick={() => importDirectoryMutation.mutate(selectedOrgUnit && selectedOrgUnit !== "__all__" ? selectedOrgUnit : undefined)}
                     disabled={importDirectoryMutation.isPending || directoryUsers.length === 0}
                     data-testid="button-import-workspace-users"
                   >
@@ -992,6 +1078,40 @@ function StudentsContent() {
             />
           </div>
 
+          {/* Selection Actions Bar */}
+          {selectedStudents.size > 0 && (
+            <div className="flex items-center justify-between p-3 bg-muted rounded-lg border" data-testid="selection-bar">
+              <span className="text-sm font-medium">
+                {selectedStudents.size} student{selectedStudents.size !== 1 ? 's' : ''} selected
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={clearSelection}
+                  data-testid="button-clear-selection"
+                >
+                  Clear Selection
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={() => {
+                    // For now, just show a toast - bulk delete can be implemented later
+                    toast({
+                      title: "Bulk Actions",
+                      description: `${selectedStudents.size} students selected. Bulk delete functionality coming soon.`,
+                    });
+                  }}
+                  data-testid="button-bulk-delete"
+                >
+                  <Trash2 className="h-4 w-4 mr-2" />
+                  Delete Selected
+                </Button>
+              </div>
+            </div>
+          )}
+
           {/* Student Table */}
           {isLoading ? (
             <div className="text-center py-8 text-muted-foreground">
@@ -1008,6 +1128,19 @@ function StudentsContent() {
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-[50px]">
+                      <Checkbox
+                        checked={isAllSelected}
+                        ref={(el) => {
+                          if (el) {
+                            (el as HTMLButtonElement).dataset.state = isSomeSelected && !isAllSelected ? "indeterminate" : isAllSelected ? "checked" : "unchecked";
+                          }
+                        }}
+                        onCheckedChange={toggleSelectAll}
+                        aria-label="Select all students"
+                        data-testid="checkbox-select-all"
+                      />
+                    </TableHead>
                     <TableHead>Name</TableHead>
                     <TableHead>Email</TableHead>
                     <TableHead>Grade</TableHead>
@@ -1016,7 +1149,19 @@ function StudentsContent() {
                 </TableHeader>
                 <TableBody>
                   {filteredStudents.map((student) => (
-                    <TableRow key={student.id} data-testid={`row-student-${student.id}`}>
+                    <TableRow
+                      key={student.id}
+                      data-testid={`row-student-${student.id}`}
+                      className={selectedStudents.has(student.id) ? "bg-muted/50" : ""}
+                    >
+                      <TableCell>
+                        <Checkbox
+                          checked={selectedStudents.has(student.id)}
+                          onCheckedChange={() => toggleSelectStudent(student.id)}
+                          aria-label={`Select ${student.studentName}`}
+                          data-testid={`checkbox-student-${student.id}`}
+                        />
+                      </TableCell>
                       <TableCell className="font-medium">{student.studentName}</TableCell>
                       <TableCell>{student.studentEmail}</TableCell>
                       <TableCell>

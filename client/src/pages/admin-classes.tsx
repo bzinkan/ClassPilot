@@ -67,6 +67,8 @@ type CreateClassForm = z.infer<typeof createClassSchema>;
 interface Teacher {
   id: string;
   username: string;
+  email: string;
+  displayName: string | null;
   role: string;
   schoolName: string;
 }
@@ -605,7 +607,7 @@ export default function AdminClasses() {
                         <SelectContent>
                           {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((teacher) => (
                             <SelectItem key={teacher.id} value={teacher.id}>
-                              {teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
+                              {teacher.displayName || teacher.email || teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
                             </SelectItem>
                           ))}
                         </SelectContent>
@@ -760,7 +762,7 @@ export default function AdminClasses() {
                                         <SelectContent>
                                           {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((teacher) => (
                                             <SelectItem key={teacher.id} value={teacher.id}>
-                                              {teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
+                                              {teacher.displayName || teacher.email || teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
                                             </SelectItem>
                                           ))}
                                         </SelectContent>

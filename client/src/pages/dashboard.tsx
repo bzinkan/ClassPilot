@@ -107,6 +107,8 @@ export default function Dashboard() {
   const [studentMessages, setStudentMessages] = useState<Array<{ id: string; studentId: string; studentName: string; studentEmail: string; message: string; messageType: string; timestamp: string; read: boolean }>>([]);
   const [replyingToMessage, setReplyingToMessage] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
+  // Admin observe mode - which session the admin is currently observing
+  const [adminObservedSessionId, setAdminObservedSessionId] = useState<string | null>(null);
   const { toast } = useToast();
   const notifiedViolations = useRef<Set<string>>(new Set());
   const wsRef = useRef<WebSocket | null>(null);
@@ -166,22 +168,42 @@ export default function Dashboard() {
     queryKey: ['/api/teacher/groups'],
   });
 
-  // Fetch subgroups for the active session's group
+  // Fetch all active sessions school-wide (for admins to observe)
+  const { data: allActiveSessions = [] } = useQuery<Session[]>({
+    queryKey: ['/api/sessions/all'],
+    enabled: currentUser?.role === 'school_admin',
+    refetchInterval: 10000, // Check every 10 seconds
+  });
+
+  // Admin observe mode logic
+  const isAdmin = currentUser?.role === 'school_admin';
+  const observedSession = isAdmin && adminObservedSessionId
+    ? allActiveSessions.find(s => s.id === adminObservedSessionId)
+    : null;
+  // Admin is "teaching" if they have their own active session OR they're observing a session they own
+  const isAdminTeaching = isAdmin && (
+    !!activeSession || // Admin started their own session
+    (observedSession && observedSession.teacherId === currentUser?.id) // Observing their own session
+  );
+  // The effective session to use for student filtering - admin's observed session or teacher's active session
+  const effectiveSession = isAdmin ? (observedSession || activeSession) : activeSession;
+
+  // Fetch subgroups for the effective session's group
   const { data: subgroups = [] } = useQuery<Subgroup[]>({
-    queryKey: ['/api/groups', activeSession?.groupId, 'subgroups'],
+    queryKey: ['/api/groups', effectiveSession?.groupId, 'subgroups'],
     queryFn: async () => {
-      if (!activeSession?.groupId) return [];
-      const res = await apiRequest('GET', `/api/groups/${activeSession.groupId}/subgroups`);
+      if (!effectiveSession?.groupId) return [];
+      const res = await apiRequest('GET', `/api/groups/${effectiveSession.groupId}/subgroups`);
       const data = await res.json();
       return data.subgroups || [];
     },
-    enabled: !!activeSession?.groupId,
+    enabled: !!effectiveSession?.groupId,
   });
 
-  // Fetch students in the active session's group
+  // Fetch students in the effective session's group
   const { data: sessionStudentIds = [] } = useQuery<string[]>({
-    queryKey: ['/api/groups', activeSession?.groupId, 'students'],
-    enabled: !!activeSession?.groupId,
+    queryKey: ['/api/groups', effectiveSession?.groupId, 'students'],
+    enabled: !!effectiveSession?.groupId,
     select: (data: any[]) => data.map((s: any) => s.id),
   });
 
@@ -1744,6 +1766,8 @@ export default function Dashboard() {
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">ClassPilot</h1>
                 <p className="text-xs text-muted-foreground font-medium">
+                  {currentUser?.schoolName && <span className="font-semibold">{currentUser.schoolName}</span>}
+                  {currentUser?.schoolName && ' • '}
                   {currentUser?.role === 'school_admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
                 </p>
               </div>
@@ -1845,6 +1869,106 @@ export default function Dashboard() {
                   )}
                 </>
               )}
+              {/* Admin Class Selection */}
+              {currentUser?.role === 'school_admin' && (
+                <>
+                  {/* Admin's own active session controls */}
+                  {activeSession && (
+                    <>
+                      <Badge variant="default" className="text-xs" data-testid="badge-admin-teaching">
+                        <div className="h-2 w-2 rounded-full mr-1.5 bg-green-500 animate-pulse" />
+                        Teaching: {groups.find(g => g.id === activeSession.groupId)?.name || 'Active Class'}
+                      </Badge>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => endSessionMutation.mutate()}
+                        disabled={endSessionMutation.isPending}
+                        data-testid="button-admin-end-session"
+                      >
+                        <X className="h-4 w-4 mr-2" />
+                        End Class
+                      </Button>
+                    </>
+                  )}
+                  {/* Observe other active sessions dropdown */}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant={observedSession ? "secondary" : "outline"}
+                        size="sm"
+                        data-testid="button-admin-observe"
+                      >
+                        <Eye className="h-4 w-4 mr-2" />
+                        {observedSession
+                          ? `Observing: ${groups.find(g => g.id === observedSession.groupId)?.name || 'Class'}`
+                          : 'Observe Class'
+                        }
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-72">
+                      <DropdownMenuLabel>Active Classes</DropdownMenuLabel>
+                      <DropdownMenuSeparator />
+                      {allActiveSessions.length === 0 ? (
+                        <div className="px-2 py-6 text-center text-sm text-muted-foreground">
+                          No active classes right now
+                        </div>
+                      ) : (
+                        <>
+                          {adminObservedSessionId && (
+                            <>
+                              <DropdownMenuCheckboxItem
+                                onSelect={() => setAdminObservedSessionId(null)}
+                                data-testid="menu-item-stop-observing"
+                              >
+                                <X className="h-4 w-4 mr-2 text-muted-foreground" />
+                                Stop Observing
+                              </DropdownMenuCheckboxItem>
+                              <DropdownMenuSeparator />
+                            </>
+                          )}
+                          {allActiveSessions.map((session) => {
+                            const sessionGroup = groups.find(g => g.id === session.groupId);
+                            const isOwnSession = session.teacherId === currentUser?.id;
+                            return (
+                              <DropdownMenuCheckboxItem
+                                key={session.id}
+                                checked={adminObservedSessionId === session.id}
+                                onSelect={() => setAdminObservedSessionId(session.id)}
+                                data-testid={`menu-item-observe-${session.id}`}
+                              >
+                                <div className="flex flex-col">
+                                  <span className="font-medium">
+                                    {sessionGroup?.name || 'Unknown Class'}
+                                    {isOwnSession && <span className="ml-1 text-xs text-primary">(yours)</span>}
+                                  </span>
+                                  <span className="text-xs text-muted-foreground">
+                                    Started {new Date(session.startTime).toLocaleTimeString()}
+                                  </span>
+                                </div>
+                              </DropdownMenuCheckboxItem>
+                            );
+                          })}
+                        </>
+                      )}
+                      <DropdownMenuSeparator />
+                      <DropdownMenuLabel className="text-xs text-muted-foreground font-normal">
+                        Start your own class
+                      </DropdownMenuLabel>
+                      {!activeSession && groups.filter(g => g.teacherId === currentUser?.id || g.teacherId === null).map((group) => (
+                        <DropdownMenuCheckboxItem
+                          key={`start-${group.id}`}
+                          onSelect={() => startSessionMutation.mutate(group.id)}
+                          data-testid={`menu-item-admin-start-${group.id}`}
+                        >
+                          <Plus className="h-4 w-4 mr-2 text-green-600" />
+                          <span>{group.name}</span>
+                        </DropdownMenuCheckboxItem>
+                      ))}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </>
+              )}
               {currentUser?.impersonating && (
                 <Button
                   variant="destructive"
@@ -1866,17 +1990,6 @@ export default function Dashboard() {
                 <Download className="h-4 w-4 mr-2" />
                 Export CSV
               </Button>
-              {currentUser?.role === 'school_admin' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowGradeDialog(true)}
-                  data-testid="button-manage-grades"
-                >
-                  <GraduationCap className="h-4 w-4 mr-2" />
-                  Manage Grades
-                </Button>
-              )}
               {currentUser?.role === 'teacher' && (
                 <Button
                   variant="ghost"
@@ -2054,8 +2167,8 @@ export default function Dashboard() {
           </div>
         )}
 
-        {/* Control Buttons - only show if admin OR teacher with active session */}
-        {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
+        {/* Control Buttons - only show if teacher with active session OR admin who is teaching (not just observing) */}
+        {((currentUser?.role === 'teacher' && activeSession) || (isAdmin && isAdminTeaching)) && (
           <div className="flex items-center gap-2 flex-wrap mb-8">
           <Button
             size="sm"
@@ -3330,26 +3443,28 @@ export default function Dashboard() {
         </DialogContent>
       </Dialog>
 
-      {/* Floating Action Button for quick access */}
-      <TeacherFab
-        attentionActive={attentionActive}
-        onAttentionClick={() => attentionActive ? handleAttentionMode(false) : setShowAttentionDialog(true)}
-        attentionPending={attentionModeMutation.isPending}
-        timerActive={timerActive}
-        onTimerClick={() => timerActive ? handleStopTimer() : setShowTimerDialog(true)}
-        timerPending={timerMutation.isPending}
-        activePoll={activePoll}
-        pollTotalResponses={pollTotalResponses}
-        onPollClick={() => activePoll ? setShowPollResultsDialog(true) : setShowPollDialog(true)}
-        pollPending={pollMutation.isPending}
-        raisedHands={raisedHands}
-        onDismissHand={(studentId) => dismissHandMutation.mutate(studentId)}
-        studentMessages={studentMessages}
-        onMarkMessageRead={markMessageRead}
-        onDismissMessage={dismissMessage}
-        onReplyToMessage={(studentId, message) => replyToMessageMutation.mutate({ studentId, message })}
-        replyPending={replyToMessageMutation.isPending}
-      />
+      {/* Floating Action Button for quick access - only for teachers with active session or admins teaching */}
+      {((currentUser?.role === 'teacher' && activeSession) || (isAdmin && isAdminTeaching)) && (
+        <TeacherFab
+          attentionActive={attentionActive}
+          onAttentionClick={() => attentionActive ? handleAttentionMode(false) : setShowAttentionDialog(true)}
+          attentionPending={attentionModeMutation.isPending}
+          timerActive={timerActive}
+          onTimerClick={() => timerActive ? handleStopTimer() : setShowTimerDialog(true)}
+          timerPending={timerMutation.isPending}
+          activePoll={activePoll}
+          pollTotalResponses={pollTotalResponses}
+          onPollClick={() => activePoll ? setShowPollResultsDialog(true) : setShowPollDialog(true)}
+          pollPending={pollMutation.isPending}
+          raisedHands={raisedHands}
+          onDismissHand={(studentId) => dismissHandMutation.mutate(studentId)}
+          studentMessages={studentMessages}
+          onMarkMessageRead={markMessageRead}
+          onDismissMessage={dismissMessage}
+          onReplyToMessage={(studentId, message) => replyToMessageMutation.mutate({ studentId, message })}
+          replyPending={replyToMessageMutation.isPending}
+        />
+      )}
     </div>
   );
 }
