@@ -1117,7 +1117,7 @@ export async function registerRoutes(
       if (user.schoolId) {
         const school = await storage.getSchool(user.schoolId);
         if (school) {
-          schoolName = school.schoolName;
+          schoolName = school.name;
         }
       }
 
@@ -7056,8 +7056,8 @@ export async function registerRoutes(
       if (authStudentId) {
         const student = await storage.getStudent(authStudentId);
         if (student) {
-          studentName = student.name || studentName;
-          studentEmail = student.email || studentEmail;
+          studentName = student.studentName || studentName;
+          studentEmail = student.studentEmail || studentEmail;
         }
       }
 
