@@ -36,7 +36,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 function showMainView(config) {
-  document.getElementById('setup-view').classList.add('hidden');
+  const setupView = document.getElementById('setup-view');
+  if (setupView) setupView.classList.add('hidden');
   document.getElementById('main-view').classList.remove('hidden');
   
   // Update UI with config

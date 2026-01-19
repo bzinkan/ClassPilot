@@ -1058,4 +1058,493 @@ function addChatNotificationStyles() {
   document.head.appendChild(style);
 }
 
+// ============================================
+// FLOATING ACTION BUTTON (FAB)
+// ============================================
+
+let fabExpanded = false;
+let handRaised = false;
+let messagingEnabled = true;
+
+function createFloatingActionButton() {
+  // Don't create FAB on extension pages or special pages
+  if (window.location.protocol === 'chrome-extension:' ||
+      window.location.protocol === 'chrome:' ||
+      window.location.protocol === 'about:') {
+    return;
+  }
+
+  // Remove existing FAB if present
+  const existing = document.getElementById('classpilot-fab-container');
+  if (existing) {
+    existing.remove();
+  }
+
+  const fabContainer = document.createElement('div');
+  fabContainer.id = 'classpilot-fab-container';
+  fabContainer.innerHTML = `
+    <div class="classpilot-fab-menu" id="classpilot-fab-menu">
+      <button class="classpilot-fab-item classpilot-fab-message" id="classpilot-fab-message" title="Message Teacher">
+        <span class="classpilot-fab-icon">💬</span>
+        <span class="classpilot-fab-label">Message</span>
+      </button>
+      <button class="classpilot-fab-item classpilot-fab-hand" id="classpilot-fab-hand" title="Raise Hand">
+        <span class="classpilot-fab-icon">✋</span>
+        <span class="classpilot-fab-label">Raise Hand</span>
+      </button>
+    </div>
+    <button class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot">
+      <span class="classpilot-fab-main-icon">🎓</span>
+    </button>
+    <div class="classpilot-fab-message-box" id="classpilot-fab-message-box">
+      <div class="classpilot-fab-message-header">
+        <span>💬 Message Teacher</span>
+        <button class="classpilot-fab-message-close" id="classpilot-fab-message-close">×</button>
+      </div>
+      <textarea class="classpilot-fab-message-input" id="classpilot-fab-message-input" placeholder="Type your message..."></textarea>
+      <div class="classpilot-fab-message-actions">
+        <button class="classpilot-fab-message-btn classpilot-fab-message-question" id="classpilot-fab-send-question">❓ Question</button>
+        <button class="classpilot-fab-message-btn classpilot-fab-message-send" id="classpilot-fab-send-message">💬 Send</button>
+      </div>
+    </div>
+  `;
+
+  addFabStyles();
+  document.body.appendChild(fabContainer);
+
+  // Get initial state
+  chrome.storage.local.get(['handRaised', 'messagingEnabled'], (result) => {
+    handRaised = result.handRaised || false;
+    messagingEnabled = result.messagingEnabled !== false;
+    updateFabHandState();
+  });
+
+  // Main FAB click - toggle menu
+  document.getElementById('classpilot-fab-main').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleFabMenu();
+  });
+
+  // Raise Hand button
+  document.getElementById('classpilot-fab-hand').addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (handRaised) {
+      lowerHand();
+    } else {
+      raiseHand();
+    }
+  });
+
+  // Message button - show message box
+  document.getElementById('classpilot-fab-message').addEventListener('click', (e) => {
+    e.stopPropagation();
+    showMessageBox();
+  });
+
+  // Close message box
+  document.getElementById('classpilot-fab-message-close').addEventListener('click', (e) => {
+    e.stopPropagation();
+    hideMessageBox();
+  });
+
+  // Send question
+  document.getElementById('classpilot-fab-send-question').addEventListener('click', () => {
+    sendMessage('question');
+  });
+
+  // Send message
+  document.getElementById('classpilot-fab-send-message').addEventListener('click', () => {
+    sendMessage('message');
+  });
+
+  // Close menu when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!fabContainer.contains(e.target)) {
+      closeFabMenu();
+      hideMessageBox();
+    }
+  });
+}
+
+function toggleFabMenu() {
+  const menu = document.getElementById('classpilot-fab-menu');
+  const main = document.getElementById('classpilot-fab-main');
+  fabExpanded = !fabExpanded;
+
+  if (fabExpanded) {
+    menu.classList.add('classpilot-fab-menu-open');
+    main.classList.add('classpilot-fab-main-active');
+  } else {
+    menu.classList.remove('classpilot-fab-menu-open');
+    main.classList.remove('classpilot-fab-main-active');
+    hideMessageBox();
+  }
+}
+
+function closeFabMenu() {
+  const menu = document.getElementById('classpilot-fab-menu');
+  const main = document.getElementById('classpilot-fab-main');
+  fabExpanded = false;
+  menu?.classList.remove('classpilot-fab-menu-open');
+  main?.classList.remove('classpilot-fab-main-active');
+}
+
+function showMessageBox() {
+  const messageBox = document.getElementById('classpilot-fab-message-box');
+  messageBox?.classList.add('classpilot-fab-message-box-open');
+  document.getElementById('classpilot-fab-message-input')?.focus();
+}
+
+function hideMessageBox() {
+  const messageBox = document.getElementById('classpilot-fab-message-box');
+  messageBox?.classList.remove('classpilot-fab-message-box-open');
+}
+
+function raiseHand() {
+  chrome.runtime.sendMessage({ type: 'raise-hand' }, (response) => {
+    if (response?.success) {
+      handRaised = true;
+      chrome.storage.local.set({ handRaised: true });
+      updateFabHandState();
+      showFabNotification('✋ Hand raised! Your teacher has been notified.');
+      closeFabMenu();
+    } else {
+      showFabNotification('Could not raise hand. Please try again.', true);
+    }
+  });
+}
+
+function lowerHand() {
+  chrome.runtime.sendMessage({ type: 'lower-hand' }, (response) => {
+    if (response?.success) {
+      handRaised = false;
+      chrome.storage.local.set({ handRaised: false });
+      updateFabHandState();
+      showFabNotification('Hand lowered.');
+      closeFabMenu();
+    }
+  });
+}
+
+function updateFabHandState() {
+  const handBtn = document.getElementById('classpilot-fab-hand');
+  const label = handBtn?.querySelector('.classpilot-fab-label');
+
+  if (handRaised) {
+    handBtn?.classList.add('classpilot-fab-hand-raised');
+    if (label) label.textContent = 'Lower Hand';
+  } else {
+    handBtn?.classList.remove('classpilot-fab-hand-raised');
+    if (label) label.textContent = 'Raise Hand';
+  }
+}
+
+function sendMessage(type) {
+  const input = document.getElementById('classpilot-fab-message-input');
+  const message = input?.value?.trim();
+
+  if (!message) {
+    showFabNotification('Please enter a message.', true);
+    return;
+  }
+
+  chrome.runtime.sendMessage({
+    type: 'send-chat',
+    message: message,
+    messageType: type
+  }, (response) => {
+    if (response?.success) {
+      input.value = '';
+      hideMessageBox();
+      closeFabMenu();
+      showFabNotification(type === 'question' ? '❓ Question sent!' : '💬 Message sent!');
+    } else {
+      showFabNotification('Could not send message. Please try again.', true);
+    }
+  });
+}
+
+function showFabNotification(message, isError = false) {
+  // Remove existing notification
+  const existing = document.getElementById('classpilot-fab-notification');
+  if (existing) existing.remove();
+
+  const notification = document.createElement('div');
+  notification.id = 'classpilot-fab-notification';
+  notification.className = isError ? 'classpilot-fab-notification-error' : '';
+  notification.textContent = message;
+  document.body.appendChild(notification);
+
+  setTimeout(() => {
+    notification.classList.add('classpilot-fab-notification-out');
+    setTimeout(() => notification.remove(), 300);
+  }, 3000);
+}
+
+function addFabStyles() {
+  if (document.getElementById('classpilot-fab-styles')) {
+    return;
+  }
+
+  const style = document.createElement('style');
+  style.id = 'classpilot-fab-styles';
+  style.textContent = `
+    #classpilot-fab-container {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      z-index: 2147483640;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    .classpilot-fab-main {
+      width: 56px;
+      height: 56px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 20px rgba(59, 130, 246, 0.4);
+      transition: all 0.3s ease;
+    }
+
+    .classpilot-fab-main:hover {
+      transform: scale(1.1);
+      box-shadow: 0 6px 25px rgba(59, 130, 246, 0.5);
+    }
+
+    .classpilot-fab-main.classpilot-fab-main-active {
+      transform: rotate(45deg);
+      background: linear-gradient(135deg, #64748b 0%, #475569 100%);
+    }
+
+    .classpilot-fab-main-icon {
+      font-size: 24px;
+      transition: transform 0.3s ease;
+    }
+
+    .classpilot-fab-main.classpilot-fab-main-active .classpilot-fab-main-icon {
+      transform: rotate(-45deg);
+    }
+
+    .classpilot-fab-menu {
+      position: absolute;
+      bottom: 70px;
+      right: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(20px);
+      transition: all 0.3s ease;
+    }
+
+    .classpilot-fab-menu.classpilot-fab-menu-open {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+
+    .classpilot-fab-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: white;
+      border: none;
+      border-radius: 28px;
+      cursor: pointer;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.15);
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+
+    .classpilot-fab-item:hover {
+      transform: translateX(-5px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+    }
+
+    .classpilot-fab-hand {
+      background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    }
+
+    .classpilot-fab-hand.classpilot-fab-hand-raised {
+      background: linear-gradient(135deg, #fca5a5 0%, #f87171 100%);
+    }
+
+    .classpilot-fab-message {
+      background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+    }
+
+    .classpilot-fab-icon {
+      font-size: 20px;
+    }
+
+    .classpilot-fab-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1e293b;
+    }
+
+    .classpilot-fab-message-box {
+      position: absolute;
+      bottom: 70px;
+      right: 0;
+      width: 300px;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(20px) scale(0.95);
+      transition: all 0.3s ease;
+      overflow: hidden;
+    }
+
+    .classpilot-fab-message-box.classpilot-fab-message-box-open {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0) scale(1);
+    }
+
+    .classpilot-fab-message-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 16px;
+      background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+      color: white;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .classpilot-fab-message-close {
+      background: none;
+      border: none;
+      color: white;
+      font-size: 24px;
+      cursor: pointer;
+      padding: 0;
+      line-height: 1;
+      opacity: 0.8;
+    }
+
+    .classpilot-fab-message-close:hover {
+      opacity: 1;
+    }
+
+    .classpilot-fab-message-input {
+      width: 100%;
+      padding: 14px 16px;
+      border: none;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 14px;
+      resize: none;
+      height: 80px;
+      font-family: inherit;
+      box-sizing: border-box;
+    }
+
+    .classpilot-fab-message-input:focus {
+      outline: none;
+      background: #f8fafc;
+    }
+
+    .classpilot-fab-message-actions {
+      display: flex;
+      gap: 8px;
+      padding: 12px;
+    }
+
+    .classpilot-fab-message-btn {
+      flex: 1;
+      padding: 10px 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .classpilot-fab-message-question {
+      background: #8b5cf6;
+      color: white;
+    }
+
+    .classpilot-fab-message-question:hover {
+      background: #7c3aed;
+    }
+
+    .classpilot-fab-message-send {
+      background: #10b981;
+      color: white;
+    }
+
+    .classpilot-fab-message-send:hover {
+      background: #059669;
+    }
+
+    #classpilot-fab-notification {
+      position: fixed;
+      bottom: 90px;
+      right: 20px;
+      background: #1e293b;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      z-index: 2147483641;
+      animation: classpilot-fab-notif-in 0.3s ease-out;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+
+    #classpilot-fab-notification.classpilot-fab-notification-error {
+      background: #dc2626;
+    }
+
+    #classpilot-fab-notification.classpilot-fab-notification-out {
+      animation: classpilot-fab-notif-out 0.3s ease-in forwards;
+    }
+
+    @keyframes classpilot-fab-notif-in {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes classpilot-fab-notif-out {
+      from { opacity: 1; transform: translateY(0); }
+      to { opacity: 0; transform: translateY(10px); }
+    }
+  `;
+
+  document.head.appendChild(style);
+}
+
+// Listen for storage changes to update FAB state
+chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === 'local') {
+    if (changes.handRaised) {
+      handRaised = changes.handRaised.newValue || false;
+      updateFabHandState();
+    }
+    if (changes.messagingEnabled) {
+      messagingEnabled = changes.messagingEnabled.newValue !== false;
+    }
+  }
+});
+
+// Initialize FAB when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', createFloatingActionButton);
+} else {
+  createFloatingActionButton();
+}
+
 console.log('ClassPilot content script loaded');

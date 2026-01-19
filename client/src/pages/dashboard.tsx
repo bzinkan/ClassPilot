@@ -8,6 +8,7 @@ import { StudentTile } from "@/components/student-tile";
 import { StudentDetailDrawer } from "@/components/student-detail-drawer";
 import { RemoteControlToolbar } from "@/components/remote-control-toolbar";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { TeacherFab } from "@/components/teacher-fab";
 import {
   Dialog,
   DialogContent,
@@ -3328,6 +3329,27 @@ export default function Dashboard() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Floating Action Button for quick access */}
+      <TeacherFab
+        attentionActive={attentionActive}
+        onAttentionClick={() => attentionActive ? handleAttentionMode(false) : setShowAttentionDialog(true)}
+        attentionPending={attentionModeMutation.isPending}
+        timerActive={timerActive}
+        onTimerClick={() => timerActive ? handleStopTimer() : setShowTimerDialog(true)}
+        timerPending={timerMutation.isPending}
+        activePoll={activePoll}
+        pollTotalResponses={pollTotalResponses}
+        onPollClick={() => activePoll ? setShowPollResultsDialog(true) : setShowPollDialog(true)}
+        pollPending={pollMutation.isPending}
+        raisedHands={raisedHands}
+        onDismissHand={(studentId) => dismissHandMutation.mutate(studentId)}
+        studentMessages={studentMessages}
+        onMarkMessageRead={markMessageRead}
+        onDismissMessage={dismissMessage}
+        onReplyToMessage={(studentId, message) => replyToMessageMutation.mutate({ studentId, message })}
+        replyPending={replyToMessageMutation.isPending}
+      />
     </div>
   );
 }

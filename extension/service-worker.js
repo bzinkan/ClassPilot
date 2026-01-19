@@ -1113,7 +1113,7 @@ async function updateGlobalBlacklistRules(blockedDomains) {
       },
       condition: {
         resourceTypes: ["main_frame"],
-        requestDomains: [domain.replace(/^https?:///, '').replace(//$/, '')]
+        requestDomains: [domain.replace(/^https?:\/\//, '').replace(/\/$/, '')]
       }
     }));
     
@@ -1161,7 +1161,7 @@ async function updateTeacherBlockListRules(blockedDomains) {
       },
       condition: {
         resourceTypes: ["main_frame"],
-        requestDomains: [domain.replace(/^https?:///, '').replace(//$/, '')]
+        requestDomains: [domain.replace(/^https?:\/\//, '').replace(/\/$/, '')]
       }
     }));
     

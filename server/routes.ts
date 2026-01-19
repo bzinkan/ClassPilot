@@ -7035,7 +7035,16 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      const { studentName, studentEmail } = req.body;
+      let { studentName, studentEmail } = req.body;
+
+      // Look up the actual student record to get the correct name
+      if (authStudentId) {
+        const student = await storage.getStudent(authStudentId);
+        if (student) {
+          studentName = student.name || studentName;
+          studentEmail = student.email || studentEmail;
+        }
+      }
 
       // Check if messaging/hand raising is enabled for this school
       const settings = await storage.getSettingsBySchoolId(authSchoolId);
