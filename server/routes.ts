@@ -5869,8 +5869,8 @@ export async function registerRoutes(
 
   app.patch("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
     try {
-      const updates = insertStudentGroupSchema.partial().parse(req.body);
-      const existing = await storage.getStudentGroup(req.params.id);
+      const updates = insertGroupSchema.partial().parse(req.body);
+      const existing = await storage.getGroup(req.params.id);
       if (!existing) {
         return res.status(404).json({ error: "Group not found" });
       }
@@ -5878,7 +5878,7 @@ export async function registerRoutes(
       if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
         return res.status(404).json({ error: "Group not found" });
       }
-      const group = await storage.updateStudentGroup(req.params.id, { ...updates, schoolId: existing.schoolId });
+      const group = await storage.updateGroup(req.params.id, { ...updates, schoolId: existing.schoolId });
       if (!group) {
         return res.status(404).json({ error: "Group not found" });
       }
@@ -5891,7 +5891,7 @@ export async function registerRoutes(
 
   app.delete("/api/groups/:id", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {
-      const existing = await storage.getStudentGroup(req.params.id);
+      const existing = await storage.getGroup(req.params.id);
       if (!existing) {
         return res.status(404).json({ error: "Group not found" });
       }
@@ -5899,7 +5899,7 @@ export async function registerRoutes(
       if (!assertSameSchool(sessionSchoolId, existing.schoolId)) {
         return res.status(404).json({ error: "Group not found" });
       }
-      const success = await storage.deleteStudentGroup(req.params.id);
+      const success = await storage.deleteGroup(req.params.id);
       if (!success) {
         return res.status(404).json({ error: "Group not found" });
       }
