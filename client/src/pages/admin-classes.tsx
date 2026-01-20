@@ -108,20 +108,67 @@ interface ClassroomCoursePreview {
 interface ClassCardProps {
   group: Group;
   teacher: Teacher | undefined;
+  teachers: Teacher[];
   isExpanded: boolean;
   onToggleExpand: () => void;
   onDelete: () => void;
   isDeleting: boolean;
 }
 
-function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDeleting }: ClassCardProps) {
+function ClassCard({ group, teacher, teachers, isExpanded, onToggleExpand, onDelete, isDeleting }: ClassCardProps) {
   const { toast } = useToast();
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
-  
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editName, setEditName] = useState(group.name);
+  const [editTeacherId, setEditTeacherId] = useState(group.teacherId || "");
+  const [editGradeLevel, setEditGradeLevel] = useState(group.gradeLevel || "");
+  const [editPeriodLabel, setEditPeriodLabel] = useState(group.periodLabel || "");
+
   // Fetch students for this class (always fetch to show count)
   const { data: classStudents = [], isLoading } = useQuery<Student[]>({
     queryKey: ["/api/groups", group.id, "students"],
   });
+
+  // Update class mutation
+  const updateClassMutation = useMutation({
+    mutationFn: async (updates: { name?: string; teacherId?: string; gradeLevel?: string; periodLabel?: string }) => {
+      const res = await apiRequest("PATCH", `/api/groups/${group.id}`, updates);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/teacher/groups"], exact: false });
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      toast({
+        title: "Class Updated",
+        description: "Class has been updated successfully",
+      });
+      setEditDialogOpen(false);
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message || "Failed to update class",
+      });
+    },
+  });
+
+  const handleSaveEdit = () => {
+    updateClassMutation.mutate({
+      name: editName,
+      teacherId: editTeacherId || undefined,
+      gradeLevel: editGradeLevel || undefined,
+      periodLabel: editPeriodLabel || undefined,
+    });
+  };
+
+  const openEditDialog = () => {
+    setEditName(group.name);
+    setEditTeacherId(group.teacherId || "");
+    setEditGradeLevel(group.gradeLevel || "");
+    setEditPeriodLabel(group.periodLabel || "");
+    setEditDialogOpen(true);
+  };
 
   const removeStudentMutation = useMutation({
     mutationFn: async (studentId: string) => {
@@ -189,6 +236,14 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
               </span>
             )}
           </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={openEditDialog}
+            data-testid={`button-edit-${group.id}`}
+          >
+            <Edit className="h-4 w-4" />
+          </Button>
           <Button
             variant="ghost"
             size="icon"
@@ -260,6 +315,93 @@ function ClassCard({ group, teacher, isExpanded, onToggleExpand, onDelete, isDel
           }}
         />
       )}
+
+      {/* Edit Class Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Edit Class</DialogTitle>
+            <DialogDescription>
+              Update class details and assign a teacher
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-name">Class Name</Label>
+              <Input
+                id="edit-name"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                placeholder="e.g., 7th Science P3"
+                data-testid="input-edit-class-name"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="edit-teacher">Teacher *</Label>
+              <Select
+                value={editTeacherId}
+                onValueChange={setEditTeacherId}
+              >
+                <SelectTrigger data-testid="select-edit-teacher">
+                  <SelectValue placeholder="Select a teacher" />
+                </SelectTrigger>
+                <SelectContent>
+                  {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.displayName || t.email || t.username} {t.role === 'school_admin' ? '(Admin)' : ''}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="edit-grade">Grade Level</Label>
+              <Select
+                value={editGradeLevel || "__none__"}
+                onValueChange={(val) => setEditGradeLevel(val === "__none__" ? "" : val)}
+              >
+                <SelectTrigger data-testid="select-edit-grade">
+                  <SelectValue placeholder="Select grade" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No grade</SelectItem>
+                  <SelectItem value="K">K</SelectItem>
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((g) => (
+                    <SelectItem key={g} value={String(g)}>
+                      {g}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="edit-period">Period</Label>
+              <Input
+                id="edit-period"
+                value={editPeriodLabel}
+                onChange={(e) => setEditPeriodLabel(e.target.value)}
+                placeholder="e.g., P3 or 10:10-10:55"
+                data-testid="input-edit-period"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveEdit}
+              disabled={updateClassMutation.isPending || !editName || !editTeacherId}
+              data-testid="button-save-edit-class"
+            >
+              {updateClassMutation.isPending ? "Saving..." : "Save Changes"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Collapsible>
   );
 }
@@ -929,6 +1071,7 @@ export default function AdminClasses() {
                         key={group.id}
                         group={group}
                         teacher={teacher}
+                        teachers={teachers}
                         isExpanded={isExpanded}
                         onToggleExpand={toggleExpand}
                         onDelete={() => deleteClassMutation.mutate(group.id)}
