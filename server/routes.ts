@@ -4096,7 +4096,7 @@ export async function registerRoutes(
 
       // Perform sync
       const courses = await syncCourses(user.id, schoolId);
-      res.json(courses);
+      res.json({ courses });
     } catch (error: any) {
       console.error("Classroom courses error:", error);
       res.status(500).json({ error: error.message || "Failed to sync courses" });
