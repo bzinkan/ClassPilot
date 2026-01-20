@@ -4113,11 +4113,12 @@ export async function registerRoutes(
       const { courseId } = req.params;
       const { gradeLevel } = req.body;
 
-      // Sync the student list from Google
-      const students = await syncRoster(user.id, schoolId, courseId, { gradeLevel });
+      // Sync the student list from Google (only returns students who accepted invitation)
+      const syncedStudents = await syncRoster(user.id, schoolId, courseId, { gradeLevel });
 
       // Automatically create a ClassPilot group for this course
       const course = await storage.getClassroomCourse(schoolId, courseId);
+      let assignedCount = 0;
 
       if (course) {
         // Check if group exists for this teacher with this name
@@ -4130,22 +4131,37 @@ export async function registerRoutes(
             schoolId,
             name: course.name,
             groupType: "admin_class",
+            gradeLevel: gradeLevel || null,
             description: `Imported from Google Classroom: ${course.section || ""}`,
           });
         }
 
+        // Get all students linked to this course (from classroom_course_students table)
+        // This includes students who may have been imported via Google Workspace
+        const courseStudentIds = await storage.getClassroomCourseStudentIds(schoolId, courseId);
+
+        // Also add any synced students from Google Classroom API
+        const allStudentIds = new Set([
+          ...courseStudentIds,
+          ...syncedStudents.map(s => s.studentId)
+        ]);
+
         // Add students to the ClassPilot group
-        for (const s of students) {
-          // We ignore errors here in case student is already in the group
+        for (const studentId of allStudentIds) {
           try {
-            await storage.assignStudentToGroup(group.id, s.studentId);
+            await storage.assignStudentToGroup(group.id, studentId);
+            // Update grade level if provided
+            if (gradeLevel) {
+              await storage.updateStudent(studentId, { gradeLevel });
+            }
+            assignedCount++;
           } catch (e) {
-            // Continue if assignment exists
+            // Continue if assignment already exists
           }
         }
       }
 
-      res.json({ success: true, count: students.length });
+      res.json({ success: true, count: assignedCount, syncedFromGoogle: syncedStudents.length });
     } catch (error: any) {
       console.error("Classroom roster sync error:", error);
       res.status(500).json({ error: error.message });

@@ -229,7 +229,7 @@ function StudentsContent() {
       await queryClient.invalidateQueries({ queryKey: ["/api/classroom/courses"] });
       toast({
         title: "Import Complete",
-        description: `Imported ${data.studentsImported || 0} students from Google Classroom`,
+        description: `Imported ${data.count || 0} students from Google Classroom`,
       });
       setSyncingCourseId(null);
     },
