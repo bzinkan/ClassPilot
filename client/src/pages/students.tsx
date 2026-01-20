@@ -177,6 +177,7 @@ function StudentsContent() {
   const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
   const [selectedOrgUnit, setSelectedOrgUnit] = useState<string>("");
   const [importGradeLevel, setImportGradeLevel] = useState<string>("");
+  const [classroomImportGrade, setClassroomImportGrade] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
   const [showAddStudentDialog, setShowAddStudentDialog] = useState(false);
@@ -217,9 +218,11 @@ function StudentsContent() {
 
   // Sync Google Classroom roster mutation
   const syncClassroomMutation = useMutation({
-    mutationFn: async (courseId: string) => {
+    mutationFn: async ({ courseId, gradeLevel }: { courseId: string; gradeLevel?: string }) => {
       setSyncingCourseId(courseId);
-      const res = await apiRequest("POST", `/api/classroom/courses/${courseId}/sync`, {});
+      const res = await apiRequest("POST", `/api/classroom/courses/${courseId}/sync`, {
+        gradeLevel: gradeLevel || undefined,
+      });
       return res.json();
     },
     onSuccess: async (data) => {
@@ -727,7 +730,12 @@ function StudentsContent() {
       </Card>
 
       {/* Google Classroom Import Dialog */}
-      <Dialog open={showClassroomDialog} onOpenChange={setShowClassroomDialog}>
+      <Dialog open={showClassroomDialog} onOpenChange={(open) => {
+        setShowClassroomDialog(open);
+        if (!open) {
+          setClassroomImportGrade("");
+        }
+      }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -772,8 +780,8 @@ function StudentsContent() {
                 </Button>
               </div>
             ) : (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between mb-4">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
                   <p className="text-sm text-muted-foreground">
                     Found {classroomCourses.length} course{classroomCourses.length !== 1 ? 's' : ''}
                   </p>
@@ -787,7 +795,40 @@ function StudentsContent() {
                     Refresh
                   </Button>
                 </div>
-                <div className="border rounded-md divide-y max-h-96 overflow-auto">
+
+                {/* Grade Level Assignment */}
+                <div className="space-y-2">
+                  <Label htmlFor="classroom-grade-level">Assign Grade Level (Optional)</Label>
+                  <Select
+                    value={classroomImportGrade}
+                    onValueChange={setClassroomImportGrade}
+                  >
+                    <SelectTrigger id="classroom-grade-level" data-testid="select-classroom-import-grade">
+                      <SelectValue placeholder="No grade assignment" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No grade assignment</SelectItem>
+                      <SelectItem value="K">Kindergarten</SelectItem>
+                      <SelectItem value="1">Grade 1</SelectItem>
+                      <SelectItem value="2">Grade 2</SelectItem>
+                      <SelectItem value="3">Grade 3</SelectItem>
+                      <SelectItem value="4">Grade 4</SelectItem>
+                      <SelectItem value="5">Grade 5</SelectItem>
+                      <SelectItem value="6">Grade 6</SelectItem>
+                      <SelectItem value="7">Grade 7</SelectItem>
+                      <SelectItem value="8">Grade 8</SelectItem>
+                      <SelectItem value="9">Grade 9</SelectItem>
+                      <SelectItem value="10">Grade 10</SelectItem>
+                      <SelectItem value="11">Grade 11</SelectItem>
+                      <SelectItem value="12">Grade 12</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    All imported students from the selected course will be assigned to this grade level
+                  </p>
+                </div>
+
+                <div className="border rounded-md divide-y max-h-72 overflow-auto">
                   {classroomCourses.map((course) => (
                     <div
                       key={course.id}
@@ -806,7 +847,10 @@ function StudentsContent() {
                         )}
                       </div>
                       <Button
-                        onClick={() => syncClassroomMutation.mutate(course.id)}
+                        onClick={() => syncClassroomMutation.mutate({
+                          courseId: course.id,
+                          gradeLevel: classroomImportGrade && classroomImportGrade !== "__none__" ? classroomImportGrade : undefined,
+                        })}
                         disabled={syncingCourseId !== null}
                         data-testid={`button-sync-course-${course.id}`}
                       >

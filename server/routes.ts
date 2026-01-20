@@ -4141,10 +4141,10 @@ export async function registerRoutes(
         const courseStudentIds = await storage.getClassroomCourseStudentIds(schoolId, courseId);
 
         // Also add any synced students from Google Classroom API
-        const allStudentIds = new Set([
+        const allStudentIds = Array.from(new Set([
           ...courseStudentIds,
           ...syncedStudents.map(s => s.studentId)
-        ]);
+        ]));
 
         // Add students to the ClassPilot group
         for (const studentId of allStudentIds) {
