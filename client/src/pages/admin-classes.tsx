@@ -822,14 +822,14 @@ export default function AdminClasses() {
                                 {!isDisabled && (
                                   <div onClick={(e) => e.stopPropagation()}>
                                     <Select
-                                      value={courseGradeLevel || ""}
-                                      onValueChange={(val) => setCourseGradeLevel(course.courseId, val)}
+                                      value={courseGradeLevel || "__none__"}
+                                      onValueChange={(val) => setCourseGradeLevel(course.courseId, val === "__none__" ? "" : val)}
                                     >
                                       <SelectTrigger className="h-7 w-[90px] text-xs" data-testid={`select-grade-${course.courseId}`}>
                                         <SelectValue placeholder="Grade" />
                                       </SelectTrigger>
                                       <SelectContent>
-                                        <SelectItem value="">No grade</SelectItem>
+                                        <SelectItem value="__none__">No grade</SelectItem>
                                         <SelectItem value="K">K</SelectItem>
                                         {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((g) => (
                                           <SelectItem key={g} value={String(g)}>
