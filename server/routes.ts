@@ -4619,6 +4619,60 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk delete students (admin only)
+  app.post("/api/admin/students/bulk-delete", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
+    try {
+      const { studentIds } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      if (!Array.isArray(studentIds) || studentIds.length === 0) {
+        return res.status(400).json({ error: "studentIds array is required" });
+      }
+
+      const results = {
+        deleted: 0,
+        failed: 0,
+        errors: [] as string[],
+      };
+
+      for (const studentId of studentIds) {
+        try {
+          const student = await storage.getStudent(studentId);
+          if (!student) {
+            results.failed++;
+            continue;
+          }
+
+          // Verify student belongs to same school (tenant isolation)
+          if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+            results.failed++;
+            continue;
+          }
+
+          const deleted = await storage.deleteStudent(studentId);
+          if (deleted) {
+            results.deleted++;
+            // Broadcast update to teachers
+            broadcastToTeachers(sessionSchoolId, {
+              type: 'student-update',
+              deviceId: student.deviceId || studentId,
+            });
+          } else {
+            results.failed++;
+          }
+        } catch (err: any) {
+          results.failed++;
+          results.errors.push(`Failed to delete ${studentId}: ${err.message}`);
+        }
+      }
+
+      res.json({ success: true, ...results });
+    } catch (error) {
+      console.error("Bulk delete students error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Delete device and all its student assignments
   app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {

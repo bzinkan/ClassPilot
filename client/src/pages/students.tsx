@@ -447,6 +447,30 @@ function StudentsContent() {
     },
   });
 
+  // Bulk delete students mutation
+  const bulkDeleteMutation = useMutation({
+    mutationFn: async (studentIds: string[]) => {
+      const res = await apiRequest("POST", "/api/admin/students/bulk-delete", { studentIds });
+      return res.json();
+    },
+    onSuccess: (data: { deleted: number; failed: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      toast({
+        title: "Bulk Delete Complete",
+        description: `Deleted ${data.deleted} student${data.deleted !== 1 ? 's' : ''}${data.failed > 0 ? `, ${data.failed} failed` : ''}`,
+      });
+      setSelectedStudents(new Set());
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to delete students",
+        variant: "destructive",
+      });
+    },
+  });
+
   // Add student mutation
   const addStudentMutation = useMutation({
     mutationFn: async (data: { studentName: string; studentEmail: string; gradeLevel?: string }) => {
@@ -1146,17 +1170,21 @@ function StudentsContent() {
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={() => {
-                    // For now, just show a toast - bulk delete can be implemented later
-                    toast({
-                      title: "Bulk Actions",
-                      description: `${selectedStudents.size} students selected. Bulk delete functionality coming soon.`,
-                    });
-                  }}
+                  onClick={() => bulkDeleteMutation.mutate(Array.from(selectedStudents))}
+                  disabled={bulkDeleteMutation.isPending}
                   data-testid="button-bulk-delete"
                 >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete Selected
+                  {bulkDeleteMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Deleting...
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="h-4 w-4 mr-2" />
+                      Delete Selected
+                    </>
+                  )}
                 </Button>
               </div>
             </div>
