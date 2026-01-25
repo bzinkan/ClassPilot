@@ -105,6 +105,7 @@ export default function Dashboard() {
   const [subgroupMembers, setSubgroupMembers] = useState<Set<string>>(new Set());
   const [raisedHands, setRaisedHands] = useState<Map<string, { studentId: string; studentName: string; studentEmail: string; timestamp: string }>>(new Map());
   const [studentMessages, setStudentMessages] = useState<Array<{ id: string; studentId: string; studentName: string; studentEmail: string; message: string; messageType: string; timestamp: string; read: boolean }>>([]);
+  const dismissedMessageIds = useRef<Set<string>>(new Set()); // Track dismissed messages to prevent re-adding
   const [replyingToMessage, setReplyingToMessage] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   // Admin observe mode - which session the admin is currently observing
@@ -387,8 +388,16 @@ export default function Dashboard() {
             // Handle student messages (two-way chat)
             if (message.type === 'student-message') {
               console.log("[Dashboard] Student message received:", message.data);
+              const msgId = message.data.id;
+
+              // Skip if this message was dismissed
+              if (dismissedMessageIds.current.has(msgId)) {
+                console.log("[Dashboard] Skipping dismissed message:", msgId);
+                return;
+              }
+
               const newMsg = {
-                id: message.data.id,
+                id: msgId,
                 studentId: message.data.studentId,
                 studentName: message.data.studentName,
                 studentEmail: message.data.studentEmail,
@@ -397,7 +406,14 @@ export default function Dashboard() {
                 timestamp: message.data.timestamp,
                 read: false,
               };
-              setStudentMessages(prev => [newMsg, ...prev]);
+
+              // Dedupe: only add if not already present
+              setStudentMessages(prev => {
+                if (prev.some(m => m.id === msgId)) {
+                  return prev;
+                }
+                return [newMsg, ...prev];
+              });
               toast({
                 title: message.data.messageType === 'question' ? "❓ Question" : "💬 Message",
                 description: `${message.data.studentName}: ${message.data.message.slice(0, 50)}${message.data.message.length > 50 ? '...' : ''}`,
@@ -1608,6 +1624,7 @@ export default function Dashboard() {
 
   // Dismiss/remove student message
   const dismissMessage = (messageId: string) => {
+    dismissedMessageIds.current.add(messageId);
     setStudentMessages(prev => prev.filter(msg => msg.id !== messageId));
   };
 

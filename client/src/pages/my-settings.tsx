@@ -583,7 +583,7 @@ export default function MySettings() {
                   </Button>
                 </div>
                 <CardDescription>
-                  Create lists of blocked websites to prevent students from accessing distracting or inappropriate sites during class. Apply block lists from the dashboard during active sessions.
+                  Create lists of blocked websites to apply on-demand during class. Unlike "Blocked Domains" below (which are always active), these block lists must be manually applied from the dashboard and are session-based.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -865,7 +865,7 @@ export default function MySettings() {
                         />
                       </FormControl>
                       <FormDescription>
-                        Comma-separated list of domains to block for your students. These domains are in addition to school-wide blocked domains.
+                        Comma-separated list of domains that are ALWAYS blocked for your students. Unlike "My Block Lists" above, these are permanent and don't need to be applied.
                       </FormDescription>
                       <FormMessage />
                     </FormItem>

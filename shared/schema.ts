@@ -561,6 +561,7 @@ export const settings = pgTable("settings", {
   trackingDays: text("tracking_days").array().default(sql`'{Monday,Tuesday,Wednesday,Thursday,Friday}'::text[]`), // Days of the week when tracking is active
   afterHoursMode: text("after_hours_mode").notNull().default("off").$type<"off" | "limited" | "full">(),
   handRaisingEnabled: boolean("hand_raising_enabled").default(true), // Allow students to raise hands
+  studentMessagingEnabled: boolean("student_messaging_enabled").default(true), // Allow students to send messages
 });
 
 export const insertSettingsSchema = createInsertSchema(settings)

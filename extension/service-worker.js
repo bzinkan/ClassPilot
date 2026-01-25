@@ -2051,24 +2051,11 @@ async function handleRemoteControl(command) {
         break;
 
       case 'attention-mode':
-        // Show/hide attention overlay on all tabs
+        // Show/hide attention overlay on all tabs (parallel for speed)
         const attentionActive = command.data.active;
         const attentionMessage = command.data.message || 'Please look up!';
 
-        const attentionTabs = await chrome.tabs.query({});
-        for (const tab of attentionTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'attention-mode',
-                data: { active: attentionActive, message: attentionMessage }
-              });
-            } catch (error) {
-              console.log('Could not send attention-mode to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
 
         if (attentionActive) {
           safeNotify({
@@ -2082,25 +2069,12 @@ async function handleRemoteControl(command) {
         break;
 
       case 'timer':
-        // Start/stop timer overlay on all tabs
+        // Start/stop timer overlay on all tabs (parallel for speed)
         const timerAction = command.data.action;
         const timerSeconds = command.data.seconds;
         const timerMessage = command.data.message || '';
 
-        const timerTabs = await chrome.tabs.query({});
-        for (const tab of timerTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'timer',
-                data: { action: timerAction, seconds: timerSeconds, message: timerMessage }
-              });
-            } catch (error) {
-              console.log('Could not send timer to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('timer', { action: timerAction, seconds: timerSeconds, message: timerMessage });
 
         if (timerAction === 'start') {
           safeNotify({
@@ -2114,26 +2088,13 @@ async function handleRemoteControl(command) {
         break;
 
       case 'poll':
-        // Show/hide poll overlay on all tabs
+        // Show/hide poll overlay on all tabs (parallel for speed)
         const pollAction = command.data.action;
         const pollId = command.data.pollId;
         const pollQuestion = command.data.question;
         const pollOptions = command.data.options;
 
-        const pollTabs = await chrome.tabs.query({});
-        for (const tab of pollTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'poll',
-                data: { action: pollAction, pollId, question: pollQuestion, options: pollOptions }
-              });
-            } catch (error) {
-              console.log('Could not send poll to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('poll', { action: pollAction, pollId, question: pollQuestion, options: pollOptions });
 
         if (pollAction === 'start') {
           safeNotify({
@@ -2147,24 +2108,11 @@ async function handleRemoteControl(command) {
         break;
 
       case 'chat-notification':
-        // Show chat notification overlay on all tabs
+        // Show chat notification overlay on all tabs (parallel for speed)
         const chatMessage = command.data.message;
         const chatFromName = command.data.fromName;
 
-        const chatTabs = await chrome.tabs.query({});
-        for (const tab of chatTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'chat-notification',
-                data: { message: chatMessage, fromName: chatFromName }
-              });
-            } catch (error) {
-              console.log('Could not send chat-notification to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('chat-notification', { message: chatMessage, fromName: chatFromName });
 
         console.log('Chat notification sent:', chatFromName, chatMessage);
         break;
@@ -2173,19 +2121,7 @@ async function handleRemoteControl(command) {
         // Notify student their hand was acknowledged
         chrome.storage.local.set({ handRaised: false });
 
-        const dismissTabs = await chrome.tabs.query({});
-        for (const tab of dismissTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'hand-dismissed'
-              });
-            } catch (error) {
-              console.log('Could not send hand-dismissed to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('hand-dismissed', {});
 
         console.log('Hand dismissed notification sent');
         break;
@@ -2195,20 +2131,7 @@ async function handleRemoteControl(command) {
         const messagingEnabled = command.data.enabled;
         chrome.storage.local.set({ messagingEnabled });
 
-        const toggleTabs = await chrome.tabs.query({});
-        for (const tab of toggleTabs) {
-          if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-            try {
-              await ensureContentScriptInjected(tab.id);
-              await chrome.tabs.sendMessage(tab.id, {
-                type: 'messaging-toggle',
-                data: { enabled: messagingEnabled }
-              });
-            } catch (error) {
-              console.log('Could not send messaging-toggle to tab:', tab.id, error);
-            }
-          }
-        }
+        await broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
 
         console.log('Messaging toggle sent:', messagingEnabled);
         break;
@@ -2236,6 +2159,27 @@ async function ensureContentScriptInjected(tabId) {
       throw injectError;
     }
   }
+}
+
+// Helper function to broadcast message to all tabs in parallel (faster delivery)
+async function broadcastToAllTabs(messageType, messageData) {
+  const tabs = await chrome.tabs.query({});
+  const validTabs = tabs.filter(tab =>
+    tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')
+  );
+
+  // Process all tabs in parallel for faster delivery
+  await Promise.allSettled(validTabs.map(async (tab) => {
+    try {
+      await ensureContentScriptInjected(tab.id);
+      await chrome.tabs.sendMessage(tab.id, {
+        type: messageType,
+        data: messageData
+      });
+    } catch (error) {
+      console.log(`Could not send ${messageType} to tab:`, tab.id, error);
+    }
+  }));
 }
 
 // Chat/Message Handlers (Phase 2)

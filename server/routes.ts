@@ -5760,7 +5760,8 @@ export async function registerRoutes(
 
       const { targetDeviceIds } = req.body as { targetDeviceIds?: string[] };
 
-      const sentCount = broadcastToStudents(sessionSchoolId, {
+      let sentTo = 0;
+      const blockListMessage = {
         type: 'remote-control',
         command: {
           action: 'apply-block-list',
@@ -5770,14 +5771,25 @@ export async function registerRoutes(
             blockedDomains: blockList.blockedDomains || []
           }
         }
-      }, undefined, targetDeviceIds);
+      };
 
-      console.log(`[Block List] Applied "${blockList.name}" to ${sentCount} device(s)`);
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        // Send to specific devices
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, blockListMessage);
+          sentTo++;
+        }
+      } else {
+        // Broadcast to all students
+        sentTo = broadcastToStudents(sessionSchoolId, blockListMessage);
+      }
+
+      console.log(`[Block List] Applied "${blockList.name}" to ${sentTo} device(s)`);
 
       res.json({
         success: true,
-        sentCount,
-        message: `Applied "${blockList.name}" to ${sentCount} device(s)`
+        sentTo,
+        message: `Applied "${blockList.name}" to ${sentTo} device(s)`
       });
     } catch (error) {
       console.error("Apply block list error:", error);
@@ -5790,19 +5802,31 @@ export async function registerRoutes(
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       const { targetDeviceIds } = req.body as { targetDeviceIds?: string[] };
 
-      const sentCount = broadcastToStudents(sessionSchoolId, {
+      let sentTo = 0;
+      const removeMessage = {
         type: 'remote-control',
         command: {
           action: 'remove-block-list'
         }
-      }, undefined, targetDeviceIds);
+      };
 
-      console.log(`[Block List] Removed from ${sentCount} device(s)`);
+      if (targetDeviceIds && Array.isArray(targetDeviceIds) && targetDeviceIds.length > 0) {
+        // Send to specific devices
+        for (const deviceId of targetDeviceIds) {
+          sendToDevice(sessionSchoolId, deviceId, removeMessage);
+          sentTo++;
+        }
+      } else {
+        // Broadcast to all students
+        sentTo = broadcastToStudents(sessionSchoolId, removeMessage);
+      }
+
+      console.log(`[Block List] Removed from ${sentTo} device(s)`);
 
       res.json({
         success: true,
-        sentCount,
-        message: `Removed block list from ${sentCount} device(s)`
+        sentTo,
+        message: `Removed block list from ${sentTo} device(s)`
       });
     } catch (error) {
       console.error("Remove block list error:", error);
@@ -7285,6 +7309,35 @@ export async function registerRoutes(
     }
   });
 
+  // Toggle student messaging for the school
+  app.post("/api/settings/student-messaging", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const schoolId = req.session?.schoolId;
+      const { enabled } = req.body;
+
+      if (!schoolId) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
+
+      // Update the settings
+      await storage.upsertSettingsForSchool(schoolId, { studentMessagingEnabled: enabled });
+
+      // Broadcast to all students in this school
+      broadcastToStudents(schoolId, {
+        type: "remote-control",
+        command: {
+          type: "messaging-toggle",
+          data: { messagingEnabled: enabled },
+        },
+      });
+
+      res.json({ success: true, enabled });
+    } catch (error) {
+      console.error("Toggle student messaging error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // ============================================
   // TWO-WAY CHAT ENDPOINTS
   // ============================================
@@ -7299,6 +7352,12 @@ export async function registerRoutes(
 
       if (!authStudentId) {
         return res.status(401).json({ error: "Student not identified" });
+      }
+
+      // Check if messaging is enabled for this school
+      const settings = await storage.getSettingsBySchoolId(authSchoolId);
+      if (settings?.studentMessagingEnabled === false) {
+        return res.status(403).json({ error: "Student messaging is disabled" });
       }
 
       // Validate message
