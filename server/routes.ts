@@ -5671,41 +5671,30 @@ export async function registerRoutes(
   });
 
   app.post("/api/block-lists", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
-    console.log("[BlockList] POST /api/block-lists - handler started, body:", JSON.stringify(req.body));
     try {
       const teacherId = req.session?.userId;
-      console.log("[BlockList] teacherId:", teacherId);
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
-      console.log("[BlockList] schoolId:", sessionSchoolId);
 
-      // Simple validation - bypass complex schema for now
       const { name, description, blockedDomains } = req.body;
-      console.log("[BlockList] extracted: name=", name, "blockedDomains=", blockedDomains);
-
       if (!name || typeof name !== "string") {
         return res.status(400).json({ error: "Name is required" });
       }
 
       const domainsArray = Array.isArray(blockedDomains) ? blockedDomains.filter((d: unknown) => typeof d === "string") : [];
-      console.log("[BlockList] domainsArray:", domainsArray);
 
-      const insertData = {
+      const blockList = await storage.createBlockList({
         name: name.trim(),
         description: description || null,
         schoolId: sessionSchoolId,
         teacherId: teacherId,
         blockedDomains: domainsArray
-      };
-      console.log("[BlockList] insertData:", JSON.stringify(insertData));
-      console.log("[BlockList] calling storage.createBlockList NOW...");
-      const blockList = await storage.createBlockList(insertData);
-      console.log("[BlockList] created successfully:", blockList.id);
+      });
       res.json(blockList);
     } catch (error) {
-      console.error("[BlockList] ERROR:", error);
+      console.error("Create block list error:", error);
       res.status(400).json({ error: "Invalid request" });
     }
   });
