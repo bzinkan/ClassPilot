@@ -1249,7 +1249,7 @@ function sendMessage(type) {
   }
 
   chrome.runtime.sendMessage({
-    type: 'send-chat',
+    type: 'send-student-message',
     message: message,
     messageType: type
   }, (response) => {
