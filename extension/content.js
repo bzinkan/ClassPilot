@@ -3,6 +3,12 @@
 // Handles attention mode, timers, and polls
 // Monitors camera usage
 
+// Prevent double-injection
+if (window.__CLASSPILOT_CONTENT_LOADED__) {
+  // Script already loaded, exit early
+} else {
+  window.__CLASSPILOT_CONTENT_LOADED__ = true;
+
 // Track active camera streams
 let activeCameraStreams = new Set();
 let cameraActive = false;
@@ -1548,3 +1554,5 @@ if (document.readyState === 'loading') {
 }
 
 console.log('ClassPilot content script loaded');
+
+} // End of double-injection guard
