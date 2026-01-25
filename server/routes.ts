@@ -5671,24 +5671,30 @@ export async function registerRoutes(
   });
 
   app.post("/api/block-lists", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    console.log("[BlockList] POST /api/block-lists - handler started");
     try {
       const teacherId = req.session?.userId;
+      console.log("[BlockList] teacherId:", teacherId);
       if (!teacherId) {
         return res.status(401).json({ error: "Unauthorized" });
       }
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      console.log("[BlockList] schoolId:", sessionSchoolId);
 
       const blockListSchema = insertBlockListSchema.extend({
         schoolId: z.string().optional(),
       });
       const data = blockListSchema.parse(req.body);
+      console.log("[BlockList] parsed data:", JSON.stringify(data));
 
+      console.log("[BlockList] calling storage.createBlockList...");
       const blockList = await storage.createBlockList({
         ...data,
         schoolId: sessionSchoolId,
         teacherId: teacherId,
         blockedDomains: data.blockedDomains ?? []
       });
+      console.log("[BlockList] created successfully:", blockList.id);
       res.json(blockList);
     } catch (error) {
       console.error("Create block list error:", error);
