@@ -5671,7 +5671,7 @@ export async function registerRoutes(
   });
 
   app.post("/api/block-lists", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
-    console.log("[BlockList] POST /api/block-lists - handler started");
+    console.log("[BlockList] POST /api/block-lists - handler started, body:", JSON.stringify(req.body));
     try {
       const teacherId = req.session?.userId;
       console.log("[BlockList] teacherId:", teacherId);
@@ -5681,23 +5681,28 @@ export async function registerRoutes(
       const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
       console.log("[BlockList] schoolId:", sessionSchoolId);
 
+      console.log("[BlockList] creating schema...");
       const blockListSchema = insertBlockListSchema.extend({
         schoolId: z.string().optional(),
       });
+      console.log("[BlockList] parsing body...");
       const data = blockListSchema.parse(req.body);
       console.log("[BlockList] parsed data:", JSON.stringify(data));
 
-      console.log("[BlockList] calling storage.createBlockList...");
-      const blockList = await storage.createBlockList({
-        ...data,
+      const insertData = {
+        name: data.name,
+        description: data.description,
         schoolId: sessionSchoolId,
         teacherId: teacherId,
         blockedDomains: data.blockedDomains ?? []
-      });
+      };
+      console.log("[BlockList] insertData:", JSON.stringify(insertData));
+      console.log("[BlockList] calling storage.createBlockList NOW...");
+      const blockList = await storage.createBlockList(insertData);
       console.log("[BlockList] created successfully:", blockList.id);
       res.json(blockList);
     } catch (error) {
-      console.error("Create block list error:", error);
+      console.error("[BlockList] ERROR:", error);
       res.status(400).json({ error: "Invalid request" });
     }
   });
