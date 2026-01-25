@@ -147,6 +147,7 @@ let wsReconnectBackoffMs = 5000;
 let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
+let lastKnownTabs = []; // Cache tabs to prevent flickering when query returns partial results
 let settingsAlarmScheduled = false;
 let heartbeatIntervalId = null;
 let observedHeartbeatTimer = null;
@@ -170,6 +171,22 @@ const kv = {
 
 function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
+}
+
+// Refresh the tab cache - called when tabs change to keep cache accurate
+async function refreshTabCache() {
+  try {
+    const allTabs = await chrome.tabs.query({});
+    const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
+    if (httpTabs.length > 0) {
+      lastKnownTabs = httpTabs.slice(0, 20).map(tab => ({
+        url: (tab.url || '').substring(0, 512),
+        title: (tab.title || 'Untitled').substring(0, 512),
+      }));
+    }
+  } catch (error) {
+    // Ignore errors - cache will be updated on next successful query
+  }
 }
 
 function extractManagedValue(value) {
@@ -1438,19 +1455,34 @@ async function sendHeartbeat(reason = 'manual') {
     }
 
     // Collect ALL open tabs for teacher dashboard
+    // Use caching to prevent flickering when chrome.tabs.query returns inconsistent results
     let allOpenTabs = [];
     try {
       const allTabs = await chrome.tabs.query({});
-      allOpenTabs = allTabs
-        .filter(tab => tab.url && tab.url.startsWith('http')) // Only HTTP(S), skip chrome://
-        .slice(0, 20) // Limit to 20 tabs
-        .map(tab => ({
-          url: (tab.url || '').substring(0, 512), // Truncate to 512 chars
-          title: (tab.title || 'Untitled').substring(0, 512), // Truncate to 512 chars
-        }));
+      const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
+
+      if (httpTabs.length > 0) {
+        allOpenTabs = httpTabs
+          .slice(0, 20) // Limit to 20 tabs
+          .map(tab => ({
+            url: (tab.url || '').substring(0, 512),
+            title: (tab.title || 'Untitled').substring(0, 512),
+          }));
+        // Update cache with new tabs
+        lastKnownTabs = allOpenTabs;
+      } else if (lastKnownTabs.length > 0) {
+        // Query returned no HTTP tabs but we have cached tabs
+        // This can happen during tab loading or service worker restart
+        allOpenTabs = lastKnownTabs;
+        console.log(`[Heartbeat] Using cached ${lastKnownTabs.length} tabs (query returned 0 HTTP tabs)`);
+      }
     } catch (error) {
-      console.warn('Failed to collect all tabs:', error);
-      // Continue with empty array
+      console.warn('[Heartbeat] Failed to collect tabs:', error);
+      // Use cached tabs on error to prevent flickering
+      if (lastKnownTabs.length > 0) {
+        allOpenTabs = lastKnownTabs;
+        console.log(`[Heartbeat] Using cached ${lastKnownTabs.length} tabs after error`);
+      }
     }
     
     // Send heartbeat even without active tab (keeps student "online")
@@ -2454,6 +2486,14 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       });
     }
   }
+
+  // Refresh tab cache when a new tab is created
+  refreshTabCache();
+});
+
+// Refresh tab cache when tabs are removed
+chrome.tabs.onRemoved.addListener(() => {
+  refreshTabCache();
 });
 
 // ============================================================================
