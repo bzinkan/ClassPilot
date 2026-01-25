@@ -3461,7 +3461,10 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createBlockList(insertBlockList: InsertBlockList): Promise<BlockList> {
+    console.log("[Storage] createBlockList called with:", JSON.stringify(insertBlockList));
+    console.log("[Storage] about to db.insert...");
     const [created] = await db.insert(blockLists).values(insertBlockList).returning();
+    console.log("[Storage] insert complete, created:", created?.id);
     return created;
   }
 
