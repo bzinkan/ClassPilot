@@ -5686,8 +5686,14 @@ export async function registerRoutes(
         schoolId: z.string().optional(),
       });
       console.log("[BlockList] parsing body...");
-      const data = blockListSchema.parse(req.body);
-      console.log("[BlockList] parsed data:", JSON.stringify(data));
+      let data;
+      try {
+        data = blockListSchema.parse(req.body);
+        console.log("[BlockList] parsed data:", JSON.stringify(data));
+      } catch (parseError) {
+        console.error("[BlockList] PARSE ERROR:", parseError);
+        return res.status(400).json({ error: "Invalid request body" });
+      }
 
       const insertData = {
         name: data.name,
