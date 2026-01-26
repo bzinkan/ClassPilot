@@ -1702,6 +1702,7 @@ let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
+let attentionModeActive = false; // When true, blocks navigation and new tabs
 
 // Helper function to extract domain from URL
 function extractDomain(url) {
@@ -2051,11 +2052,15 @@ async function handleRemoteControl(command) {
         break;
 
       case 'attention-mode':
-        // Show/hide attention overlay on all tabs (parallel for speed)
+        // Show/hide attention overlay on all tabs (fire-and-forget for instant response)
         const attentionActive = command.data.active;
         const attentionMessage = command.data.message || 'Please look up!';
 
-        await broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
+        // Update attention mode state (blocks navigation and new tabs when active)
+        attentionModeActive = attentionActive;
+
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
 
         if (attentionActive) {
           safeNotify({
@@ -2069,12 +2074,13 @@ async function handleRemoteControl(command) {
         break;
 
       case 'timer':
-        // Start/stop timer overlay on all tabs (parallel for speed)
+        // Start/stop timer overlay on all tabs (fire-and-forget for instant response)
         const timerAction = command.data.action;
         const timerSeconds = command.data.seconds;
         const timerMessage = command.data.message || '';
 
-        await broadcastToAllTabs('timer', { action: timerAction, seconds: timerSeconds, message: timerMessage });
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('timer', { action: timerAction, seconds: timerSeconds, message: timerMessage });
 
         if (timerAction === 'start') {
           safeNotify({
@@ -2088,13 +2094,14 @@ async function handleRemoteControl(command) {
         break;
 
       case 'poll':
-        // Show/hide poll overlay on all tabs (parallel for speed)
+        // Show/hide poll overlay on all tabs (fire-and-forget for instant response)
         const pollAction = command.data.action;
         const pollId = command.data.pollId;
         const pollQuestion = command.data.question;
         const pollOptions = command.data.options;
 
-        await broadcastToAllTabs('poll', { action: pollAction, pollId, question: pollQuestion, options: pollOptions });
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('poll', { action: pollAction, pollId, question: pollQuestion, options: pollOptions });
 
         if (pollAction === 'start') {
           safeNotify({
@@ -2108,11 +2115,12 @@ async function handleRemoteControl(command) {
         break;
 
       case 'chat-notification':
-        // Show chat notification overlay on all tabs (parallel for speed)
+        // Show chat notification overlay on all tabs (fire-and-forget for instant response)
         const chatMessage = command.data.message;
         const chatFromName = command.data.fromName;
 
-        await broadcastToAllTabs('chat-notification', { message: chatMessage, fromName: chatFromName });
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('chat-notification', { message: chatMessage, fromName: chatFromName });
 
         console.log('Chat notification sent:', chatFromName, chatMessage);
         break;
@@ -2121,7 +2129,8 @@ async function handleRemoteControl(command) {
         // Notify student their hand was acknowledged
         chrome.storage.local.set({ handRaised: false });
 
-        await broadcastToAllTabs('hand-dismissed', {});
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('hand-dismissed', {});
 
         console.log('Hand dismissed notification sent');
         break;
@@ -2131,7 +2140,8 @@ async function handleRemoteControl(command) {
         const messagingEnabled = command.data.enabled;
         chrome.storage.local.set({ messagingEnabled });
 
-        await broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
 
         console.log('Messaging toggle sent:', messagingEnabled);
         break;
@@ -2141,102 +2151,106 @@ async function handleRemoteControl(command) {
   }
 }
 
-// Helper function to ensure content script is injected
+// Track which tabs have content script injected to avoid repeated injection attempts
+const injectedTabs = new Set();
+
+// Helper function to ensure content script is injected (optimized for speed)
 async function ensureContentScriptInjected(tabId) {
+  // Skip if we already know content script is injected
+  if (injectedTabs.has(tabId)) {
+    return;
+  }
+
+  // Try to inject the content script directly (faster than ping-then-inject)
   try {
-    // Try to ping the content script
-    await chrome.tabs.sendMessage(tabId, { type: 'ping-test' });
-  } catch (error) {
-    // Content script not loaded, inject it
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId: tabId },
-        files: ['content.js']
-      });
-      console.log('Content script injected into tab:', tabId);
-    } catch (injectError) {
-      console.log('Could not inject content script into tab:', tabId, injectError);
-      throw injectError;
-    }
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      files: ['content.js']
+    });
+    injectedTabs.add(tabId);
+  } catch (injectError) {
+    // Script might already be injected or tab doesn't support scripting
+    // Either way, mark as "attempted" to avoid repeated failures
+    injectedTabs.add(tabId);
   }
 }
 
-// Helper function to broadcast message to all tabs in parallel (faster delivery)
+// Clean up injectedTabs when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  injectedTabs.delete(tabId);
+});
+
+// Helper function to broadcast message to all tabs in parallel (fastest delivery)
 async function broadcastToAllTabs(messageType, messageData) {
   const tabs = await chrome.tabs.query({});
   const validTabs = tabs.filter(tab =>
     tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')
   );
 
-  // Process all tabs in parallel for faster delivery
-  await Promise.allSettled(validTabs.map(async (tab) => {
-    try {
-      await ensureContentScriptInjected(tab.id);
-      await chrome.tabs.sendMessage(tab.id, {
-        type: messageType,
-        data: messageData
-      });
-    } catch (error) {
-      console.log(`Could not send ${messageType} to tab:`, tab.id, error);
-    }
-  }));
+  // Immediate fire-and-forget to all tabs for fastest possible delivery
+  // Don't wait for injection - just try to send immediately
+  for (const tab of validTabs) {
+    // Try to send message immediately (content script might already be loaded)
+    chrome.tabs.sendMessage(tab.id, {
+      type: messageType,
+      data: messageData
+    }).catch(() => {
+      // If send fails, inject content script and retry once
+      chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content.js']
+      }).then(() => {
+        injectedTabs.add(tab.id);
+        // Retry sending after injection
+        chrome.tabs.sendMessage(tab.id, {
+          type: messageType,
+          data: messageData
+        }).catch(() => {}); // Ignore final errors
+      }).catch(() => {}); // Ignore injection errors
+    });
+  }
 }
 
 // Chat/Message Handlers (Phase 2)
 async function handleChatMessage(message) {
   console.log('Chat message received:', message);
-  
-  // Show full-screen modal on all active tabs
-  const tabs = await chrome.tabs.query({});
-  for (const tab of tabs) {
-    // Skip chrome:// URLs and extension pages
-    if (tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')) {
-      try {
-        // Ensure content script is injected before sending message
-        await ensureContentScriptInjected(tab.id);
-        
-        await chrome.tabs.sendMessage(tab.id, {
-          type: 'show-message',
-          data: {
-            message: message.message,
-            fromName: message.fromName || 'Teacher',
-            timestamp: message.timestamp || Date.now(),
-          },
-        });
-      } catch (error) {
-        console.log('Could not send message to tab:', tab.id, error);
-      }
-    }
-  }
-  
-  // Also show browser notification as backup
+
+  // Show browser notification immediately (fastest feedback)
   safeNotify({
     title: `Message from ${message.fromName || 'Teacher'}`,
     message: message.message,
     priority: 2,
     requireInteraction: false,
   });
-  
-  // Store message in local storage for popup to display
-  const stored = await chrome.storage.local.get(['messages']);
-  const messages = stored.messages || [];
-  messages.push({
-    ...message,
-    timestamp: Date.now(),
-    read: false,
+
+  // Fire-and-forget broadcast to all tabs for instant delivery
+  broadcastToAllTabs('show-message', {
+    message: message.message,
+    fromName: message.fromName || 'Teacher',
+    timestamp: message.timestamp || Date.now(),
   });
-  
-  // Keep only last 50 messages
-  if (messages.length > 50) {
-    messages.shift();
-  }
-  
-  await chrome.storage.local.set({ messages });
-  
-  // Update badge to show unread count
-  const unreadCount = messages.filter(m => !m.read).length;
-  chrome.action.setBadgeText({ text: unreadCount > 0 ? String(unreadCount) : '' });
-  chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
+
+  // Store message in local storage (async, non-blocking)
+  chrome.storage.local.get(['messages']).then(stored => {
+    const messages = stored.messages || [];
+    messages.push({
+      ...message,
+      timestamp: Date.now(),
+      read: false,
+    });
+
+    // Keep only last 50 messages
+    if (messages.length > 50) {
+      messages.shift();
+    }
+
+    chrome.storage.local.set({ messages }).then(() => {
+      // Update badge to show unread count
+      const unreadCount = messages.filter(m => !m.read).length;
+      chrome.action.setBadgeText({ text: unreadCount > 0 ? String(unreadCount) : '' });
+      chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
+    });
+  });
 }
 
 // Check-in Request Handler (Phase 3)
@@ -2265,12 +2279,23 @@ async function handleCheckInRequest(request) {
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // Only check main frame navigations
   if (details.frameId !== 0) return;
-  
+
   // Allow chrome:// URLs
   if (details.url.startsWith('chrome://') || details.url.startsWith('about:')) {
     return;
   }
-  
+
+  // Block ALL navigation when attention mode is active
+  if (attentionModeActive) {
+    console.log('[Attention Mode] Blocked navigation to:', details.url);
+
+    chrome.tabs.goBack(details.tabId).catch(() => {
+      // If can't go back, just stay on current page
+    });
+
+    return;
+  }
+
   const targetDomain = extractDomain(details.url);
   if (!targetDomain) return;
 
@@ -2395,15 +2420,24 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
+  // Block new tabs when attention mode is active
+  if (attentionModeActive) {
+    if (tab.id) {
+      chrome.tabs.remove(tab.id);
+      console.log('[Attention Mode] Blocked new tab creation');
+    }
+    return;
+  }
+
   // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
   // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
   if (screenLocked && lockedDomain && allowedDomains.length === 0) {
     // Single domain lock mode - block all new tabs
     if (tab.id) {
       chrome.tabs.remove(tab.id);
-      
+
       let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
-      
+
       safeNotify({
         title: 'Screen Locked',
         message: message,

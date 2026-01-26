@@ -3032,41 +3032,70 @@ export default function Dashboard() {
       <Dialog open={showAttentionDialog} onOpenChange={setShowAttentionDialog}>
         <DialogContent data-testid="dialog-attention-mode">
           <DialogHeader>
-            <DialogTitle>Attention Mode</DialogTitle>
+            <DialogTitle>{attentionActive ? "Attention Mode Active" : "Attention Mode"}</DialogTitle>
             <DialogDescription>
-              {selectedStudentIds.size > 0
-                ? `Get the attention of ${selectedStudentIds.size} selected student(s)`
-                : "Get the attention of all students"}
+              {attentionActive
+                ? "Students are currently viewing your attention message"
+                : selectedStudentIds.size > 0
+                  ? `Get the attention of ${selectedStudentIds.size} selected student(s)`
+                  : "Get the attention of all students"}
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label htmlFor="attention-message">Message to Display</Label>
-              <Input
-                id="attention-message"
-                value={attentionMessage}
-                onChange={(e) => setAttentionMessage(e.target.value)}
-                placeholder="Please look up!"
-                data-testid="input-attention-message"
-              />
-              <p className="text-xs text-muted-foreground">
-                This message will be shown full-screen on student devices until you release them.
-              </p>
+          {attentionActive ? (
+            <div className="space-y-4 py-4">
+              <div className="flex items-center justify-center p-6 bg-indigo-50 rounded-lg">
+                <div className="text-center">
+                  <Eye className="h-12 w-12 mx-auto mb-3 text-indigo-600" />
+                  <p className="text-lg font-medium text-indigo-900">"{attentionMessage}"</p>
+                  <p className="text-sm text-indigo-600 mt-2">Displayed on student screens</p>
+                </div>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="attention-message">Message to Display</Label>
+                <Input
+                  id="attention-message"
+                  value={attentionMessage}
+                  onChange={(e) => setAttentionMessage(e.target.value)}
+                  placeholder="Please look up!"
+                  data-testid="input-attention-message"
+                />
+                <p className="text-xs text-muted-foreground">
+                  This message will be shown full-screen on student devices until you release them.
+                </p>
+              </div>
+            </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAttentionDialog(false)} data-testid="button-cancel-attention">
-              Cancel
+              {attentionActive ? "Close" : "Cancel"}
             </Button>
-            <Button
-              onClick={() => handleAttentionMode(true)}
-              disabled={attentionModeMutation.isPending}
-              className="bg-indigo-600 hover:bg-indigo-700"
-              data-testid="button-activate-attention"
-            >
-              <Eye className="h-4 w-4 mr-2" />
-              Activate Attention Mode
-            </Button>
+            {attentionActive ? (
+              <Button
+                onClick={() => {
+                  handleAttentionMode(false);
+                  setShowAttentionDialog(false);
+                }}
+                disabled={attentionModeMutation.isPending}
+                variant="destructive"
+                data-testid="button-release-attention"
+              >
+                <EyeOff className="h-4 w-4 mr-2" />
+                Release Students
+              </Button>
+            ) : (
+              <Button
+                onClick={() => handleAttentionMode(true)}
+                disabled={attentionModeMutation.isPending}
+                className="bg-indigo-600 hover:bg-indigo-700"
+                data-testid="button-activate-attention"
+              >
+                <Eye className="h-4 w-4 mr-2" />
+                Activate Attention Mode
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -3323,7 +3352,7 @@ export default function Dashboard() {
       {((currentUser?.role === 'teacher' && activeSession) || (isAdmin && isAdminTeaching)) && (
         <TeacherFab
           attentionActive={attentionActive}
-          onAttentionClick={() => attentionActive ? handleAttentionMode(false) : setShowAttentionDialog(true)}
+          onAttentionClick={() => setShowAttentionDialog(true)}
           attentionPending={attentionModeMutation.isPending}
           timerActive={timerActive}
           onTimerClick={() => timerActive ? handleStopTimer() : setShowTimerDialog(true)}
