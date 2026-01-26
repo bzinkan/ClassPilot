@@ -1,4 +1,13 @@
-import type { Heartbeat, Settings } from './schema';
+import type { Heartbeat, Settings, School } from './schema';
+
+// School-level tracking configuration (Super Admin controlled)
+export type SchoolTrackingConfig = Pick<
+  School,
+  | "trackingStartHour"
+  | "trackingEndHour"
+  | "is24HourEnabled"
+  | "schoolTimezone"
+>;
 
 type TrackingScheduleSettings = Pick<
   Settings,
@@ -286,4 +295,44 @@ export function isTrackingAllowedNow(settings: TrackingScheduleSettings): boolea
   }
 
   return settings.afterHoursMode !== "off";
+}
+
+/**
+ * Check if tracking is allowed based on Super Admin configured school hours.
+ * This is the school-level tracking window configured by Super Admin.
+ *
+ * @param school - School configuration with tracking hours
+ * @returns true if currently within tracking window (or if 24/7 enabled), false otherwise
+ */
+export function isSchoolTrackingAllowed(school: SchoolTrackingConfig): boolean {
+  // If 24/7 monitoring is enabled, always allow tracking
+  if (school.is24HourEnabled) {
+    return true;
+  }
+
+  const timezone = school.schoolTimezone || "America/New_York";
+  const startHour = school.trackingStartHour ?? 7; // Default 7 AM
+  const endHour = school.trackingEndHour ?? 17; // Default 5 PM
+
+  try {
+    const now = new Date();
+
+    // Get current hour in school's timezone
+    const schoolHour = parseInt(
+      now.toLocaleString("en-US", {
+        timeZone: timezone,
+        hour12: false,
+        hour: '2-digit'
+      }),
+      10
+    );
+
+    // Check if current hour is within the tracking window
+    // Note: This is a simple hour-based check, not minute-precise
+    return schoolHour >= startHour && schoolHour < endHour;
+  } catch (error) {
+    console.error("Error checking school tracking hours:", error);
+    // On error, default to allowing tracking (fail open for usability)
+    return true;
+  }
 }

@@ -522,6 +522,11 @@ export class MemStorage implements IStorage {
       trialEndsAt: insertSchool.trialEndsAt ?? null,
       deletedAt: null,
       lastActivityAt: null,
+      // Super Admin configurable tracking hours
+      trackingStartHour: insertSchool.trackingStartHour ?? 7,
+      trackingEndHour: insertSchool.trackingEndHour ?? 17,
+      is24HourEnabled: insertSchool.is24HourEnabled ?? false,
+      schoolTimezone: insertSchool.schoolTimezone ?? "America/New_York",
     };
     this.schools.set(id, school);
     return school;

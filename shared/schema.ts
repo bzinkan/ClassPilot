@@ -23,6 +23,11 @@ export const schools = pgTable("schools", {
   trialEndsAt: timestamp("trial_ends_at"), // Nullable - when trial expires
   deletedAt: timestamp("deleted_at"), // Soft delete timestamp (null = active)
   lastActivityAt: timestamp("last_activity_at"), // Last student activity timestamp
+  // Super Admin configurable tracking window (per-school)
+  trackingStartHour: integer("tracking_start_hour").notNull().default(7), // Default 7:00 AM
+  trackingEndHour: integer("tracking_end_hour").notNull().default(17), // Default 5:00 PM (17:00)
+  is24HourEnabled: boolean("is_24_hour_enabled").notNull().default(false), // Premium feature - 24/7 monitoring
+  schoolTimezone: text("school_timezone").notNull().default("America/New_York"), // IANA timezone (e.g., "America/New_York")
 });
 
 export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, createdAt: true });

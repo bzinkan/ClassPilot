@@ -9,7 +9,15 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check } from "lucide-react";
+import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check, Clock } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 interface School {
   id: string;
@@ -22,6 +30,11 @@ interface School {
   adminCount: number;
   createdAt: string;
   trialEndsAt: string | null;
+  // Tracking hours configuration
+  trackingStartHour: number;
+  trackingEndHour: number;
+  is24HourEnabled: boolean;
+  schoolTimezone: string;
 }
 
 interface Admin {
@@ -55,6 +68,12 @@ export default function SchoolDetail() {
   const [newAdminCredentialsDialogOpen, setNewAdminCredentialsDialogOpen] = useState(false);
   const [newAdminCredentials, setNewAdminCredentials] = useState<{ email: string; displayName: string; tempPassword: string } | null>(null);
   const [newAdminPasswordCopied, setNewAdminPasswordCopied] = useState(false);
+  // Tracking hours state
+  const [isEditTrackingHoursOpen, setIsEditTrackingHoursOpen] = useState(false);
+  const [trackingStartHour, setTrackingStartHour] = useState(7);
+  const [trackingEndHour, setTrackingEndHour] = useState(17);
+  const [is24HourEnabled, setIs24HourEnabled] = useState(false);
+  const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -136,6 +155,54 @@ export default function SchoolDetail() {
   const handleEditLicenses = () => {
     if (newMaxLicenses < 1) return;
     editLicensesMutation.mutate(newMaxLicenses);
+  };
+
+  // Tracking hours mutation
+  const editTrackingHoursMutation = useMutation({
+    mutationFn: async (updates: {
+      trackingStartHour: number;
+      trackingEndHour: number;
+      is24HourEnabled: boolean;
+      schoolTimezone: string;
+    }) => {
+      return await apiRequest("PATCH", `/api/super-admin/schools/${schoolId}`, updates);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/super-admin/schools/${schoolId}`] });
+      queryClient.invalidateQueries({ queryKey: ['/api/super-admin/schools'] });
+
+      toast({
+        title: "Tracking hours updated",
+        description: is24HourEnabled
+          ? "24/7 monitoring enabled for this school"
+          : `Tracking window set to ${formatHour(trackingStartHour)} - ${formatHour(trackingEndHour)}`,
+      });
+
+      setIsEditTrackingHoursOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to update tracking hours",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  const handleEditTrackingHours = () => {
+    editTrackingHoursMutation.mutate({
+      trackingStartHour,
+      trackingEndHour,
+      is24HourEnabled,
+      schoolTimezone,
+    });
+  };
+
+  // Format hour (0-23) to readable time
+  const formatHour = (hour: number): string => {
+    const period = hour >= 12 ? 'PM' : 'AM';
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:00 ${period}`;
   };
 
   const impersonateMutation = useMutation({
@@ -274,7 +341,7 @@ export default function SchoolDetail() {
           </div>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-3 mb-6">
+        <div className="grid gap-4 md:grid-cols-4 mb-6">
           <Card>
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
               <CardTitle className="text-sm font-medium">Admins</CardTitle>
@@ -310,6 +377,44 @@ export default function SchoolDetail() {
                   }}
                   className="h-6 px-2"
                   data-testid="button-edit-licenses"
+                >
+                  <Edit className="w-3 h-3 mr-1" />
+                  Edit
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium flex items-center gap-1">
+                <Clock className="w-4 h-4" />
+                Tracking Hours
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="text-lg font-bold">
+                {school.is24HourEnabled ? (
+                  <span className="text-green-600">24/7</span>
+                ) : (
+                  `${formatHour(school.trackingStartHour)} - ${formatHour(school.trackingEndHour)}`
+                )}
+              </div>
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-xs text-muted-foreground">
+                  {school.is24HourEnabled ? "Premium" : `${school.trackingEndHour - school.trackingStartHour}h window`}
+                </p>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setTrackingStartHour(school.trackingStartHour);
+                    setTrackingEndHour(school.trackingEndHour);
+                    setIs24HourEnabled(school.is24HourEnabled);
+                    setSchoolTimezone(school.schoolTimezone);
+                    setIsEditTrackingHoursOpen(true);
+                  }}
+                  className="h-6 px-2"
+                  data-testid="button-edit-tracking-hours"
                 >
                   <Edit className="w-3 h-3 mr-1" />
                   Edit
@@ -468,6 +573,121 @@ export default function SchoolDetail() {
                 data-testid="button-confirm-edit-licenses"
               >
                 {editLicensesMutation.isPending ? "Updating..." : "Update Limit"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Edit Tracking Hours Dialog */}
+        <Dialog open={isEditTrackingHoursOpen} onOpenChange={setIsEditTrackingHoursOpen}>
+          <DialogContent className="sm:max-w-[425px]">
+            <DialogHeader>
+              <DialogTitle>Edit Tracking Hours</DialogTitle>
+              <DialogDescription>
+                Configure when student activity is monitored for this school
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <Label htmlFor="is24Hour">24/7 Monitoring</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Premium feature - monitor students around the clock
+                  </p>
+                </div>
+                <Switch
+                  id="is24Hour"
+                  checked={is24HourEnabled}
+                  onCheckedChange={setIs24HourEnabled}
+                  data-testid="switch-24-hour"
+                />
+              </div>
+
+              {!is24HourEnabled && (
+                <>
+                  <div className="space-y-2">
+                    <Label htmlFor="startHour">Start Time</Label>
+                    <Select
+                      value={trackingStartHour.toString()}
+                      onValueChange={(value) => setTrackingStartHour(parseInt(value))}
+                    >
+                      <SelectTrigger id="startHour" data-testid="select-start-hour">
+                        <SelectValue placeholder="Select start time" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Array.from({ length: 24 }, (_, i) => (
+                          <SelectItem key={i} value={i.toString()}>
+                            {formatHour(i)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="endHour">End Time</Label>
+                    <Select
+                      value={trackingEndHour.toString()}
+                      onValueChange={(value) => setTrackingEndHour(parseInt(value))}
+                    >
+                      <SelectTrigger id="endHour" data-testid="select-end-hour">
+                        <SelectValue placeholder="Select end time" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Array.from({ length: 24 }, (_, i) => (
+                          <SelectItem key={i} value={i.toString()}>
+                            {formatHour(i)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="timezone">Timezone</Label>
+                    <Select
+                      value={schoolTimezone}
+                      onValueChange={setSchoolTimezone}
+                    >
+                      <SelectTrigger id="timezone" data-testid="select-timezone">
+                        <SelectValue placeholder="Select timezone" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="America/New_York">Eastern (ET)</SelectItem>
+                        <SelectItem value="America/Chicago">Central (CT)</SelectItem>
+                        <SelectItem value="America/Denver">Mountain (MT)</SelectItem>
+                        <SelectItem value="America/Los_Angeles">Pacific (PT)</SelectItem>
+                        <SelectItem value="America/Anchorage">Alaska (AKT)</SelectItem>
+                        <SelectItem value="Pacific/Honolulu">Hawaii (HT)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <p className="text-sm text-muted-foreground">
+                    Tracking window: {trackingEndHour - trackingStartHour} hours
+                    {trackingEndHour - trackingStartHour < 10 && (
+                      <span className="text-yellow-600 ml-2">
+                        (Recommended: 10 hours)
+                      </span>
+                    )}
+                  </p>
+                </>
+              )}
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setIsEditTrackingHoursOpen(false)}
+                data-testid="button-cancel-edit-tracking-hours"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleEditTrackingHours}
+                disabled={editTrackingHoursMutation.isPending || (!is24HourEnabled && trackingEndHour <= trackingStartHour)}
+                data-testid="button-confirm-edit-tracking-hours"
+              >
+                {editTrackingHoursMutation.isPending ? "Updating..." : "Save Changes"}
               </Button>
             </DialogFooter>
           </DialogContent>

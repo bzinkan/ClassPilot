@@ -34,7 +34,7 @@ import {
   type InsertDevice,
   type School,
 } from "@shared/schema";
-import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow } from "@shared/utils";
+import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow, isSchoolTrackingAllowed } from "@shared/utils";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
@@ -2989,6 +2989,13 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
+      // Check Super Admin configured school-level tracking window
+      const school = res.locals.school as School | undefined;
+      if (school && !isSchoolTrackingAllowed(school)) {
+        return res.sendStatus(204);
+      }
+
+      // Check school admin configured tracking hours
       const settings = await storage.ensureSettingsForSchool(authSchoolId);
       if (!isTrackingAllowedNow(settings)) {
         return res.sendStatus(204);
@@ -2996,7 +3003,6 @@ export async function registerRoutes(
 
       const now = Date.now();
       const deviceKey = authDeviceId;
-      const school = res.locals.school as School | undefined;
 
       const lastAcceptedAt = deviceKey ? heartbeatLastAcceptedAt.get(deviceKey) : undefined;
       if (deviceKey && lastAcceptedAt && now - lastAcceptedAt < DEVICE_HEARTBEAT_MIN_INTERVAL_MS) {
@@ -3255,9 +3261,15 @@ export async function registerRoutes(
             schoolActive: false,
           });
         }
+        // Check Super Admin configured school-level tracking window first
+        if (!isSchoolTrackingAllowed(school)) {
+          // Outside school tracking hours - return 204 to prevent retries but don't store
+          return res.sendStatus(204);
+        }
       }
-      
-      // Check if tracking hours are enforced (timezone-aware)
+
+      // Check if school admin tracking hours are enforced (timezone-aware)
+      // This is a secondary check for more granular school admin control
       const schoolId = data.schoolId ?? sessionSchoolId;
       const settings = await storage.ensureSettingsForSchool(schoolId);
       if (!isTrackingAllowedNow(settings)) {
@@ -3329,6 +3341,13 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Unauthorized" });
       }
 
+      // Check Super Admin configured school-level tracking window
+      const school = res.locals.school as School | undefined;
+      if (school && !isSchoolTrackingAllowed(school)) {
+        return res.sendStatus(204);
+      }
+
+      // Check school admin configured tracking hours
       const settings = await storage.ensureSettingsForSchool(authSchoolId);
       if (!isTrackingAllowedNow(settings)) {
         return res.sendStatus(204);
