@@ -58,6 +58,11 @@ export function createTestStorage() {
           trialEndsAt: null,
           deletedAt: null,
           lastActivityAt: null,
+          // Enable 24/7 tracking for tests so heartbeats work regardless of time
+          is24HourEnabled: true,
+          trackingStartHour: 7,
+          trackingEndHour: 17,
+          schoolTimezone: "America/New_York",
         });
       }
       return user;
@@ -82,6 +87,11 @@ export function createTestStorage() {
         trialEndsAt: overrides?.trialEndsAt ?? null,
         deletedAt: overrides?.deletedAt ?? null,
         lastActivityAt: overrides?.lastActivityAt ?? null,
+        // Enable 24/7 tracking for tests so heartbeats work regardless of time
+        is24HourEnabled: overrides?.is24HourEnabled ?? true,
+        trackingStartHour: overrides?.trackingStartHour ?? 7,
+        trackingEndHour: overrides?.trackingEndHour ?? 17,
+        schoolTimezone: overrides?.schoolTimezone ?? "America/New_York",
       };
       schools.set(school.id, school);
       return school;
