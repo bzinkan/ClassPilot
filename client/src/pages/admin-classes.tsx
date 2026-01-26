@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight, X, Cloud, Check, RefreshCw } from "lucide-react";
+import { ArrowLeft, Plus, Users, Trash2, Edit, ChevronDown, ChevronRight, X, Cloud, Check, RefreshCw, ChevronsUpDown } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -38,6 +38,15 @@ import {
 } from "@/components/ui/form";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 import {
   Collapsible,
   CollapsibleContent,
@@ -123,6 +132,23 @@ function ClassCard({ group, teacher, teachers, isExpanded, onToggleExpand, onDel
   const [editTeacherId, setEditTeacherId] = useState(group.teacherId || "");
   const [editGradeLevel, setEditGradeLevel] = useState(group.gradeLevel || "");
   const [editPeriodLabel, setEditPeriodLabel] = useState(group.periodLabel || "");
+  const [editTeacherComboboxOpen, setEditTeacherComboboxOpen] = useState(false);
+
+  // Helper to get last name for sorting
+  const getLastName = (name: string | null | undefined): string => {
+    if (!name) return "";
+    const parts = name.trim().split(/\s+/);
+    return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : parts[0].toLowerCase();
+  };
+
+  // Sort teachers by last name
+  const sortedTeachers = teachers
+    .filter(t => t.role === 'teacher' || t.role === 'school_admin')
+    .sort((a, b) => {
+      const aLastName = getLastName(a.displayName) || a.email.toLowerCase();
+      const bLastName = getLastName(b.displayName) || b.email.toLowerCase();
+      return aLastName.localeCompare(bLastName);
+    });
 
   // Fetch students for this class (always fetch to show count)
   const { data: classStudents = [], isLoading } = useQuery<Student[]>({
@@ -339,21 +365,55 @@ function ClassCard({ group, teacher, teachers, isExpanded, onToggleExpand, onDel
 
             <div className="space-y-2">
               <Label htmlFor="edit-teacher">Teacher *</Label>
-              <Select
-                value={editTeacherId}
-                onValueChange={setEditTeacherId}
-              >
-                <SelectTrigger data-testid="select-edit-teacher">
-                  <SelectValue placeholder="Select a teacher" />
-                </SelectTrigger>
-                <SelectContent>
-                  {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.displayName || t.email || t.username} {t.role === 'school_admin' ? '(Admin)' : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Popover open={editTeacherComboboxOpen} onOpenChange={setEditTeacherComboboxOpen}>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="outline"
+                    role="combobox"
+                    aria-expanded={editTeacherComboboxOpen}
+                    className="w-full justify-between font-normal"
+                    data-testid="select-edit-teacher"
+                  >
+                    {editTeacherId
+                      ? (() => {
+                          const selectedTeacher = sortedTeachers.find(t => t.id === editTeacherId);
+                          return selectedTeacher
+                            ? `${selectedTeacher.displayName || selectedTeacher.email || selectedTeacher.username}${selectedTeacher.role === 'school_admin' ? ' (Admin)' : ''}`
+                            : "Select a teacher";
+                        })()
+                      : "Select a teacher"}
+                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                  <Command>
+                    <CommandInput placeholder="Search teachers..." />
+                    <CommandList>
+                      <CommandEmpty>No teacher found.</CommandEmpty>
+                      <CommandGroup>
+                        {sortedTeachers.map((t) => (
+                          <CommandItem
+                            key={t.id}
+                            value={`${t.displayName || ''} ${t.email} ${t.username}`}
+                            onSelect={() => {
+                              setEditTeacherId(t.id);
+                              setEditTeacherComboboxOpen(false);
+                            }}
+                          >
+                            <Check
+                              className={`mr-2 h-4 w-4 ${
+                                editTeacherId === t.id ? "opacity-100" : "opacity-0"
+                              }`}
+                            />
+                            {t.displayName || t.email || t.username}
+                            {t.role === 'school_admin' ? ' (Admin)' : ''}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    </CommandList>
+                  </Command>
+                </PopoverContent>
+              </Popover>
             </div>
 
             <div className="space-y-2">
@@ -419,6 +479,7 @@ export default function AdminClasses() {
   const [selectedCourses, setSelectedCourses] = useState<Set<string>>(new Set());
   const [courseTeacherOverrides, setCourseTeacherOverrides] = useState<Map<string, string>>(new Map());
   const [courseGradeLevels, setCourseGradeLevels] = useState<Map<string, string>>(new Map());
+  const [teacherComboboxOpen, setTeacherComboboxOpen] = useState(false);
 
   const form = useForm<CreateClassForm>({
     resolver: zodResolver(createClassSchema),
@@ -456,6 +517,22 @@ export default function AdminClasses() {
   const teachers = teachersData?.teachers || [];
   const allStudents = studentsData?.students || [];
 
+  // Helper to get last name for sorting
+  const getLastName = (name: string | null | undefined): string => {
+    if (!name) return "";
+    const parts = name.trim().split(/\s+/);
+    return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : parts[0].toLowerCase();
+  };
+
+  // Sort teachers by last name (filtered to teachers and school_admins only)
+  const sortedTeachers = teachers
+    .filter(t => t.role === 'teacher' || t.role === 'school_admin')
+    .sort((a, b) => {
+      const aLastName = getLastName(a.displayName) || a.email.toLowerCase();
+      const bLastName = getLastName(b.displayName) || b.email.toLowerCase();
+      return aLastName.localeCompare(bLastName);
+    });
+
   // Get available grades from BOTH students AND classes (so empty classes show up in tabs)
   const adminClasses = allGroups.filter(g => g.groupType === 'admin_class');
   const gradesFromStudents = allStudents
@@ -474,9 +551,17 @@ export default function AdminClasses() {
   });
 
   // Filter students by selected grade (for assign students section - independent filter)
+  // Only show students with the selected grade (students must have a grade to be assigned)
   const assignFilteredStudents = assignStudentsGrade
     ? allStudents.filter(s => normalizeGrade(s.gradeLevel) === assignStudentsGrade)
-    : allStudents;
+    : [];
+
+  // Default to first available grade when grades are loaded
+  React.useEffect(() => {
+    if (availableGrades.length > 0 && !assignStudentsGrade) {
+      setAssignStudentsGrade(availableGrades[0]);
+    }
+  }, [availableGrades, assignStudentsGrade]);
 
   // Filter classes by selected grade
   const filteredClasses = selectedGrade
@@ -776,21 +861,55 @@ export default function AdminClasses() {
 
                     <div className="space-y-2">
                       <Label htmlFor="teacherId">Teacher *</Label>
-                      <Select
-                        value={form.watch("teacherId")}
-                        onValueChange={(value) => form.setValue("teacherId", value)}
-                      >
-                        <SelectTrigger data-testid="select-teacher">
-                          <SelectValue placeholder="Select a teacher" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {teachers.filter(t => t.role === 'teacher' || t.role === 'school_admin').map((teacher) => (
-                            <SelectItem key={teacher.id} value={teacher.id}>
-                              {teacher.displayName || teacher.email || teacher.username} {teacher.role === 'school_admin' ? '(Admin)' : ''}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      <Popover open={teacherComboboxOpen} onOpenChange={setTeacherComboboxOpen}>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant="outline"
+                            role="combobox"
+                            aria-expanded={teacherComboboxOpen}
+                            className="w-full justify-between font-normal"
+                            data-testid="select-teacher"
+                          >
+                            {form.watch("teacherId")
+                              ? (() => {
+                                  const selectedTeacher = sortedTeachers.find(t => t.id === form.watch("teacherId"));
+                                  return selectedTeacher
+                                    ? `${selectedTeacher.displayName || selectedTeacher.email || selectedTeacher.username}${selectedTeacher.role === 'school_admin' ? ' (Admin)' : ''}`
+                                    : "Select a teacher";
+                                })()
+                              : "Select a teacher"}
+                            <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
+                          <Command>
+                            <CommandInput placeholder="Search teachers..." />
+                            <CommandList>
+                              <CommandEmpty>No teacher found.</CommandEmpty>
+                              <CommandGroup>
+                                {sortedTeachers.map((teacher) => (
+                                  <CommandItem
+                                    key={teacher.id}
+                                    value={`${teacher.displayName || ''} ${teacher.email} ${teacher.username}`}
+                                    onSelect={() => {
+                                      form.setValue("teacherId", teacher.id);
+                                      setTeacherComboboxOpen(false);
+                                    }}
+                                  >
+                                    <Check
+                                      className={`mr-2 h-4 w-4 ${
+                                        form.watch("teacherId") === teacher.id ? "opacity-100" : "opacity-0"
+                                      }`}
+                                    />
+                                    {teacher.displayName || teacher.email || teacher.username}
+                                    {teacher.role === 'school_admin' ? ' (Admin)' : ''}
+                                  </CommandItem>
+                                ))}
+                              </CommandGroup>
+                            </CommandList>
+                          </Command>
+                        </PopoverContent>
+                      </Popover>
                       {form.formState.errors.teacherId && (
                         <p className="text-sm text-destructive">{form.formState.errors.teacherId.message}</p>
                       )}
@@ -1119,12 +1238,9 @@ export default function AdminClasses() {
               {/* Grade filter tabs for students */}
               <Tabs value={assignStudentsGrade} onValueChange={setAssignStudentsGrade} className="w-full">
                 <TabsList className="w-full justify-start flex-wrap h-auto">
-                  <TabsTrigger value="" className="flex-shrink-0" data-testid="assign-grade-tab-all">
-                    All Grades
-                  </TabsTrigger>
                   {availableGrades.map((grade) => (
-                    <TabsTrigger 
-                      key={grade} 
+                    <TabsTrigger
+                      key={grade}
                       value={grade}
                       className="flex-shrink-0"
                       data-testid={`assign-grade-tab-${grade}`}
@@ -1144,8 +1260,7 @@ export default function AdminClasses() {
                     onClick={selectAllFilteredStudents}
                     data-testid="button-select-all-students"
                   >
-                    Select All {assignStudentsGrade ? `Grade ${assignStudentsGrade}` : ''}
-                    {assignStudentsGrade && ` (${assignFilteredStudents.length})`}
+                    Select All Grade {assignStudentsGrade} ({assignFilteredStudents.length})
                   </Button>
                   {selectedStudents.size > 0 && (
                     <Button
@@ -1161,9 +1276,13 @@ export default function AdminClasses() {
               )}
               
               <div className="border rounded-lg p-4 max-h-96 overflow-y-auto space-y-2">
-                {assignFilteredStudents.length === 0 ? (
+                {availableGrades.length === 0 ? (
                   <p className="text-sm text-muted-foreground text-center py-4">
-                    {assignStudentsGrade ? `No students in Grade ${assignStudentsGrade}` : "No students available"}
+                    No students with grades available. Assign grades to students in the Student Roster first.
+                  </p>
+                ) : assignFilteredStudents.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    No students in Grade {assignStudentsGrade}
                   </p>
                 ) : (
                   assignFilteredStudents.map((student) => (

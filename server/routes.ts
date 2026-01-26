@@ -4689,6 +4689,66 @@ export async function registerRoutes(
     }
   });
 
+  // Bulk update student grades (admin only)
+  app.post("/api/admin/students/bulk-update-grade", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
+    try {
+      const { studentIds, gradeLevel } = req.body;
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+
+      if (!Array.isArray(studentIds) || studentIds.length === 0) {
+        return res.status(400).json({ error: "studentIds array is required" });
+      }
+
+      if (gradeLevel === undefined) {
+        return res.status(400).json({ error: "gradeLevel is required" });
+      }
+
+      const normalizedGrade = normalizeGradeLevel(gradeLevel);
+
+      const results = {
+        updated: 0,
+        failed: 0,
+        errors: [] as string[],
+      };
+
+      for (const studentId of studentIds) {
+        try {
+          const student = await storage.getStudent(studentId);
+          if (!student) {
+            results.failed++;
+            continue;
+          }
+
+          // Verify student belongs to same school (tenant isolation)
+          if (!assertSameSchool(sessionSchoolId, student.schoolId)) {
+            results.failed++;
+            continue;
+          }
+
+          const updated = await storage.updateStudent(studentId, { gradeLevel: normalizedGrade });
+          if (updated) {
+            results.updated++;
+            // Broadcast update to teachers
+            broadcastToTeachers(sessionSchoolId, {
+              type: 'student-update',
+              deviceId: student.deviceId || studentId,
+            });
+          } else {
+            results.failed++;
+          }
+        } catch (err: any) {
+          results.failed++;
+          results.errors.push(`Failed to update ${studentId}: ${err.message}`);
+        }
+      }
+
+      res.json({ success: true, ...results });
+    } catch (error) {
+      console.error("Bulk update student grades error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   // Delete device and all its student assignments
   app.delete("/api/devices/:deviceId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, async (req, res) => {
     try {

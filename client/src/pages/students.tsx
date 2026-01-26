@@ -186,6 +186,8 @@ function StudentsContent() {
   const [newStudentGrade, setNewStudentGrade] = useState("");
   const [showAddGradeDialog, setShowAddGradeDialog] = useState(false);
   const [manualGrades, setManualGrades] = useState<string[]>([]); // Manually added grade categories
+  const [showBulkGradeDialog, setShowBulkGradeDialog] = useState(false);
+  const [bulkGradeLevel, setBulkGradeLevel] = useState("");
 
   // Fetch all students (only runs for admins)
   const { data: studentsData, isLoading } = useQuery<StudentsResponse>({
@@ -341,10 +343,17 @@ function StudentsContent() {
     return acc;
   }, {} as Record<string, number>);
 
+  // Count students without a grade assigned
+  const studentsWithoutGrade = allStudents.filter(s => normalizeGrade(s.gradeLevel) === null);
+
   // Filter students by selected grade and search query
   const filteredStudents = allStudents.filter(student => {
-    // Grade filter
-    if (selectedGrade && normalizeGrade(student.gradeLevel) !== selectedGrade) {
+    // Grade filter - handle special "__no_grade__" value
+    if (selectedGrade === "__no_grade__") {
+      if (normalizeGrade(student.gradeLevel) !== null) {
+        return false;
+      }
+    } else if (selectedGrade && normalizeGrade(student.gradeLevel) !== selectedGrade) {
       return false;
     }
     // Search filter
@@ -469,6 +478,32 @@ function StudentsContent() {
       toast({
         title: "Error",
         description: error.message || "Failed to delete students",
+        variant: "destructive",
+      });
+    },
+  });
+
+  // Bulk update student grades mutation
+  const bulkUpdateGradeMutation = useMutation({
+    mutationFn: async ({ studentIds, gradeLevel }: { studentIds: string[]; gradeLevel: string }) => {
+      const res = await apiRequest("POST", "/api/admin/students/bulk-update-grade", { studentIds, gradeLevel });
+      return res.json();
+    },
+    onSuccess: (data: { updated: number; failed: number }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teacher-students"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/groups"], exact: false });
+      toast({
+        title: "Grade Assignment Complete",
+        description: `Updated ${data.updated} student${data.updated !== 1 ? 's' : ''}${data.failed > 0 ? `, ${data.failed} failed` : ''}`,
+      });
+      setSelectedStudents(new Set());
+      setShowBulkGradeDialog(false);
+      setBulkGradeLevel("");
+    },
+    onError: (error: Error) => {
+      toast({
+        title: "Error",
+        description: error.message || "Failed to update student grades",
         variant: "destructive",
       });
     },
@@ -1131,7 +1166,7 @@ function StudentsContent() {
             <div>
               <CardTitle>Current Student Roster</CardTitle>
               <CardDescription>
-                {filteredStudents.length} student{filteredStudents.length !== 1 ? 's' : ''}{selectedGrade ? ` in Grade ${selectedGrade}` : ''}{searchQuery ? ` matching "${searchQuery}"` : ''}
+                {filteredStudents.length} student{filteredStudents.length !== 1 ? 's' : ''}{selectedGrade === "__no_grade__" ? ' without a grade' : selectedGrade ? ` in Grade ${selectedGrade}` : ''}{searchQuery ? ` matching "${searchQuery}"` : ''}
               </CardDescription>
             </div>
             <div className="flex gap-2">
@@ -1155,19 +1190,11 @@ function StudentsContent() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {/* Grade Filter Buttons - Only show if there are active grades */}
-          {activeGrades.length > 0 && (
+          {/* Grade Filter Buttons - Only show if there are active grades or students without grades */}
+          {(activeGrades.length > 0 || studentsWithoutGrade.length > 0) && (
             <div className="space-y-3">
               <Label className="text-sm font-medium">Filter by Grade</Label>
               <div className="flex flex-wrap gap-2">
-                <Button
-                  variant={selectedGrade === "" ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setSelectedGrade("")}
-                  data-testid="button-grade-all"
-                >
-                  All ({allStudents.length})
-                </Button>
                 {activeGrades.map((grade) => (
                   <Button
                     key={grade}
@@ -1180,6 +1207,18 @@ function StudentsContent() {
                     <span className="ml-1 text-xs opacity-70">({gradeStudentCounts[grade] || 0})</span>
                   </Button>
                 ))}
+                {/* No Grade tab - only shows if there are students without grades */}
+                {studentsWithoutGrade.length > 0 && (
+                  <Button
+                    variant={selectedGrade === "__no_grade__" ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setSelectedGrade("__no_grade__")}
+                    data-testid="button-grade-none"
+                  >
+                    No Grade
+                    <span className="ml-1 text-xs opacity-70">({studentsWithoutGrade.length})</span>
+                  </Button>
+                )}
               </div>
             </div>
           )}
@@ -1212,6 +1251,16 @@ function StudentsContent() {
                   Clear Selection
                 </Button>
                 <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowBulkGradeDialog(true)}
+                  disabled={bulkUpdateGradeMutation.isPending}
+                  data-testid="button-bulk-assign-grade"
+                >
+                  <GraduationCap className="h-4 w-4 mr-2" />
+                  Assign Grade
+                </Button>
+                <Button
                   variant="destructive"
                   size="sm"
                   onClick={() => bulkDeleteMutation.mutate(Array.from(selectedStudents))}
@@ -1241,9 +1290,11 @@ function StudentsContent() {
             </div>
           ) : filteredStudents.length === 0 ? (
             <div className="text-center py-8 text-muted-foreground">
-              {selectedGrade 
-                ? `No students found in grade ${selectedGrade}` 
-                : "No students found. Import students to get started."}
+              {selectedGrade === "__no_grade__"
+                ? "No students without a grade assigned"
+                : selectedGrade
+                  ? `No students found in grade ${selectedGrade}`
+                  : "No students found. Import students to get started."}
             </div>
           ) : (
             <div className="border rounded-md">
@@ -1464,6 +1515,64 @@ function StudentsContent() {
             <div className="flex justify-end">
               <Button variant="outline" onClick={() => setShowAddGradeDialog(false)}>
                 Cancel
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Assign Grade Dialog */}
+      <Dialog open={showBulkGradeDialog} onOpenChange={(open) => {
+        setShowBulkGradeDialog(open);
+        if (!open) setBulkGradeLevel("");
+      }}>
+        <DialogContent data-testid="dialog-bulk-assign-grade">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <GraduationCap className="h-5 w-5" />
+              Assign Grade to Students
+            </DialogTitle>
+            <DialogDescription>
+              Assign a grade level to {selectedStudents.size} selected student{selectedStudents.size !== 1 ? 's' : ''}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <div className="space-y-2">
+              <Label htmlFor="bulk-grade-select">Grade Level</Label>
+              <Select value={bulkGradeLevel} onValueChange={setBulkGradeLevel}>
+                <SelectTrigger id="bulk-grade-select" data-testid="select-bulk-grade">
+                  <SelectValue placeholder="Select a grade" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="K">Kindergarten</SelectItem>
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((g) => (
+                    <SelectItem key={g} value={String(g)}>
+                      {g}{g === 1 ? "st" : g === 2 ? "nd" : g === 3 ? "rd" : "th"} Grade
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setShowBulkGradeDialog(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => bulkUpdateGradeMutation.mutate({
+                  studentIds: Array.from(selectedStudents),
+                  gradeLevel: bulkGradeLevel,
+                })}
+                disabled={!bulkGradeLevel || bulkUpdateGradeMutation.isPending}
+                data-testid="button-confirm-bulk-grade"
+              >
+                {bulkUpdateGradeMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Assigning...
+                  </>
+                ) : (
+                  `Assign to ${selectedStudents.size} Student${selectedStudents.size !== 1 ? 's' : ''}`
+                )}
               </Button>
             </div>
           </div>
