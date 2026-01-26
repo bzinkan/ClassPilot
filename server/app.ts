@@ -198,12 +198,15 @@ export async function createApp(options: AppOptions = {}) {
           return cb(null, true);
         }
 
-        // Allow custom domain from PUBLIC_BASE_URL
+        // Allow custom domain from PUBLIC_BASE_URL (both www and non-www)
         const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
         if (publicBaseUrl) {
           try {
             const customDomain = new URL(publicBaseUrl).hostname;
-            if (origin.includes(customDomain)) {
+            // Strip www. prefix to get base domain for comparison
+            const baseDomain = customDomain.replace(/^www\./, '');
+            // Allow both www.domain.com and domain.com
+            if (origin.includes(baseDomain)) {
               return cb(null, true);
             }
           } catch (e) {
