@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useForm } from "react-hook-form";
@@ -557,7 +557,7 @@ export default function AdminClasses() {
     : [];
 
   // Default to first available grade when grades are loaded
-  React.useEffect(() => {
+  useEffect(() => {
     if (availableGrades.length > 0 && !assignStudentsGrade) {
       setAssignStudentsGrade(availableGrades[0]);
     }
