@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3, LogOut } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3, LogOut, Upload, Search, Plus } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -97,6 +97,14 @@ export default function Admin() {
   const [activeTab, setActiveTab] = useState<"staff" | "audit">("staff");
   const [auditPage, setAuditPage] = useState(0);
   const [auditActionFilter, setAuditActionFilter] = useState<string>("");
+  const [addStaffDialogOpen, setAddStaffDialogOpen] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [staffSearchQuery, setStaffSearchQuery] = useState("");
+  const [staffPage, setStaffPage] = useState(0);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importPreview, setImportPreview] = useState<Array<{ name: string; email: string; role: string }>>([]);
+  const [importError, setImportError] = useState<string>("");
+  const STAFF_PER_PAGE = 10;
 
   const form = useForm<CreateStaffForm>({
     resolver: zodResolver(createStaffSchema),
@@ -175,6 +183,7 @@ export default function Admin() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
       form.reset();
+      setAddStaffDialogOpen(false);
       toast({
         title: "Staff member added",
         description: "The staff account has been created successfully.",
@@ -188,6 +197,98 @@ export default function Admin() {
       });
     },
   });
+
+  const bulkImportMutation = useMutation({
+    mutationFn: async (users: Array<{ name: string; email: string; role: string }>) => {
+      const results = { success: 0, failed: 0, errors: [] as string[] };
+      for (const user of users) {
+        try {
+          await apiRequest("POST", "/api/admin/users", {
+            email: user.email,
+            role: user.role === "admin" ? "school_admin" : "teacher",
+            name: user.name || undefined,
+          });
+          results.success++;
+        } catch (error: any) {
+          results.failed++;
+          results.errors.push(`${user.email}: ${error.message || "Failed"}`);
+        }
+      }
+      return results;
+    },
+    onSuccess: (results) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
+      setImportDialogOpen(false);
+      setImportFile(null);
+      setImportPreview([]);
+      setImportError("");
+      toast({
+        title: "Import complete",
+        description: `Successfully imported ${results.success} staff members.${results.failed > 0 ? ` ${results.failed} failed.` : ""}`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Import failed",
+        description: error.message || "An error occurred during import",
+      });
+    },
+  });
+
+  const parseCSV = (text: string): Array<{ name: string; email: string; role: string }> => {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return [];
+
+    const header = lines[0].toLowerCase().split(",").map(h => h.trim());
+    const emailIdx = header.findIndex(h => h === "email" || h === "e-mail");
+    const nameIdx = header.findIndex(h => h === "name" || h === "full name" || h === "displayname");
+    const roleIdx = header.findIndex(h => h === "role" || h === "type");
+
+    if (emailIdx === -1) {
+      throw new Error("CSV must have an 'email' column");
+    }
+
+    const results: Array<{ name: string; email: string; role: string }> = [];
+    for (let i = 1; i < lines.length; i++) {
+      const values = lines[i].split(",").map(v => v.trim().replace(/^"|"$/g, ""));
+      const email = values[emailIdx];
+      if (!email || !email.includes("@")) continue;
+
+      const name = nameIdx !== -1 ? values[nameIdx] || "" : "";
+      const roleValue = roleIdx !== -1 ? values[roleIdx]?.toLowerCase() || "" : "";
+      const role = roleValue.includes("admin") ? "admin" : "teacher";
+
+      results.push({ name, email, role });
+    }
+    return results;
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImportFile(file);
+    setImportError("");
+    setImportPreview([]);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const text = event.target?.result as string;
+        const parsed = parseCSV(text);
+        if (parsed.length === 0) {
+          setImportError("No valid staff entries found in CSV");
+        } else {
+          setImportPreview(parsed);
+        }
+      } catch (error: any) {
+        setImportError(error.message || "Failed to parse CSV");
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const deleteStaffMutation = useMutation({
     mutationFn: async (id: string) => {
@@ -470,168 +571,183 @@ export default function Admin() {
         </TabsList>
 
         <TabsContent value="staff" className="space-y-6">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <UserPlus className="h-5 w-5" />
-              Add Staff
-            </CardTitle>
-            <CardDescription>
-              Add a teacher or school admin to your school
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">Name (Optional)</Label>
-                <Input
-                  id="name"
-                  data-testid="input-staff-name"
-                  type="text"
-                  placeholder="e.g., John Smith"
-                  {...form.register("name")}
-                />
-                {form.formState.errors.name && (
-                  <p className="text-sm text-destructive">
-                    {form.formState.errors.name.message}
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
-                <Input
-                  id="email"
-                  data-testid="input-staff-email"
-                  type="email"
-                  placeholder="e.g., john.smith@school.edu"
-                  {...form.register("email")}
-                />
-                {form.formState.errors.email && (
-                  <p className="text-sm text-destructive">
-                    {form.formState.errors.email.message}
-                  </p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="role">Role</Label>
-                <Select
-                  value={form.watch("role")}
-                  onValueChange={(value) => form.setValue("role", value as "teacher" | "school_admin")}
-                >
-                  <SelectTrigger id="role" data-testid="select-staff-role">
-                    <SelectValue placeholder="Select role" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="teacher">Teacher</SelectItem>
-                    <SelectItem value="school_admin">School Admin</SelectItem>
-                  </SelectContent>
-                </Select>
-                <input type="hidden" {...form.register("role")} />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="password">Temp Password (Optional)</Label>
-                <Input
-                  id="password"
-                  data-testid="input-staff-password"
-                  type="password"
-                  placeholder="Leave blank for Google-only login"
-                  {...form.register("password")}
-                />
-                {form.formState.errors.password && (
-                  <p className="text-sm text-destructive">
-                    {form.formState.errors.password.message}
-                  </p>
-                )}
-              </div>
-
-              <Button
-                type="submit"
-                data-testid="button-create-staff"
-                className="w-full"
-                disabled={createStaffMutation.isPending}
-              >
-                {createStaffMutation.isPending ? "Adding..." : "Add Staff"}
-              </Button>
-            </form>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Staff Accounts</CardTitle>
-            <CardDescription>
-              {staff.length} {staff.length === 1 ? "staff member" : "staff members"} in the system
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="text-center py-8 text-muted-foreground">
-                Loading staff...
-              </div>
-            ) : staff.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                No staff yet. Add a staff member to get started!
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {staff.map((member: StaffUser) => (
-                  <div
-                    key={member.id}
-                    data-testid={`staff-row-${member.id}`}
-                    className="flex items-center justify-between p-3 rounded-lg border hover-elevate"
+          {/* Staff Management Card */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="flex items-center gap-2">
+                    <Users className="h-5 w-5" />
+                    Staff Accounts
+                  </CardTitle>
+                  <CardDescription>
+                    {staff.length} {staff.length === 1 ? "staff member" : "staff members"} in the system
+                  </CardDescription>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => setImportDialogOpen(true)}
                   >
-                    <div>
-                      <p className="font-medium" data-testid={`staff-name-${member.id}`}>
-                        {member.displayName || member.email}
-                      </p>
-                      <div className="mt-1 flex items-center gap-2 text-sm text-muted-foreground">
-                        <Badge variant={member.role === "school_admin" ? "default" : "secondary"}>
-                          {member.role === "school_admin" ? "School Admin" : "Teacher"}
-                        </Badge>
-                        <span>{member.schoolName}</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        data-testid={`button-edit-${member.id}`}
-                        onClick={() => handleEditClick(member)}
-                        disabled={updateStaffMutation.isPending}
-                      >
-                        Edit Role
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        data-testid={`button-reset-password-${member.id}`}
-                        onClick={() => handleResetPasswordClick(member)}
-                        disabled={resetPasswordMutation.isPending}
-                      >
-                        <Key className="h-4 w-4 mr-1" />
-                        Password
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        data-testid={`button-delete-${member.id}`}
-                        onClick={() => handleDeleteClick(member)}
-                        disabled={deleteStaffMutation.isPending}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
+                    <Upload className="h-4 w-4 mr-2" />
+                    Import CSV
+                  </Button>
+                  <Button onClick={() => setAddStaffDialogOpen(true)}>
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Staff
+                  </Button>
+                </div>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Search */}
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search by name or email..."
+                  value={staffSearchQuery}
+                  onChange={(e) => {
+                    setStaffSearchQuery(e.target.value);
+                    setStaffPage(0);
+                  }}
+                  className="pl-9"
+                />
+              </div>
+
+              {/* Staff List */}
+              {isLoading ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  Loading staff...
+                </div>
+              ) : staff.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">
+                  <Users className="h-12 w-12 mx-auto mb-3 text-muted-foreground/30" />
+                  <p>No staff yet. Add a staff member to get started!</p>
+                </div>
+              ) : (() => {
+                const filteredStaff = staff.filter((member: StaffUser) => {
+                  const query = staffSearchQuery.toLowerCase();
+                  return (
+                    member.email.toLowerCase().includes(query) ||
+                    (member.displayName?.toLowerCase().includes(query) ?? false)
+                  );
+                });
+                const totalPages = Math.ceil(filteredStaff.length / STAFF_PER_PAGE);
+                const paginatedStaff = filteredStaff.slice(
+                  staffPage * STAFF_PER_PAGE,
+                  (staffPage + 1) * STAFF_PER_PAGE
+                );
+
+                return (
+                  <div className="space-y-4">
+                    {filteredStaff.length === 0 ? (
+                      <div className="text-center py-8 text-muted-foreground">
+                        No staff members match your search.
+                      </div>
+                    ) : (
+                      <>
+                        <div className="border rounded-lg overflow-hidden">
+                          <table className="w-full">
+                            <thead className="bg-muted">
+                              <tr>
+                                <th className="px-4 py-3 text-left font-medium text-sm">Name</th>
+                                <th className="px-4 py-3 text-left font-medium text-sm">Email</th>
+                                <th className="px-4 py-3 text-left font-medium text-sm">Role</th>
+                                <th className="px-4 py-3 text-right font-medium text-sm">Actions</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {paginatedStaff.map((member: StaffUser) => (
+                                <tr
+                                  key={member.id}
+                                  data-testid={`staff-row-${member.id}`}
+                                  className="border-t hover:bg-muted/50"
+                                >
+                                  <td className="px-4 py-3">
+                                    <span className="font-medium" data-testid={`staff-name-${member.id}`}>
+                                      {member.displayName || "—"}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3 text-muted-foreground">
+                                    {member.email}
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <Badge variant={member.role === "school_admin" ? "default" : "secondary"}>
+                                      {member.role === "school_admin" ? "School Admin" : "Teacher"}
+                                    </Badge>
+                                  </td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex items-center justify-end gap-1">
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        data-testid={`button-edit-${member.id}`}
+                                        onClick={() => handleEditClick(member)}
+                                        disabled={updateStaffMutation.isPending}
+                                      >
+                                        Edit
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        data-testid={`button-reset-password-${member.id}`}
+                                        onClick={() => handleResetPasswordClick(member)}
+                                        disabled={resetPasswordMutation.isPending}
+                                      >
+                                        <Key className="h-4 w-4" />
+                                      </Button>
+                                      <Button
+                                        variant="ghost"
+                                        size="sm"
+                                        data-testid={`button-delete-${member.id}`}
+                                        onClick={() => handleDeleteClick(member)}
+                                        disabled={deleteStaffMutation.isPending}
+                                      >
+                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                      </Button>
+                                    </div>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Pagination */}
+                        {totalPages > 1 && (
+                          <div className="flex items-center justify-between">
+                            <div className="text-sm text-muted-foreground">
+                              Showing {staffPage * STAFF_PER_PAGE + 1} - {Math.min((staffPage + 1) * STAFF_PER_PAGE, filteredStaff.length)} of {filteredStaff.length}
+                            </div>
+                            <div className="flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={staffPage === 0}
+                                onClick={() => setStaffPage(p => p - 1)}
+                              >
+                                <ChevronLeft className="h-4 w-4" />
+                                Previous
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={staffPage >= totalPages - 1}
+                                onClick={() => setStaffPage(p => p + 1)}
+                              >
+                                Next
+                                <ChevronRight className="h-4 w-4" />
+                              </Button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+            </CardContent>
+          </Card>
 
       <Card>
         <CardHeader>
@@ -1247,6 +1363,217 @@ export default function Admin() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Add Staff Dialog */}
+      <Dialog
+        open={addStaffDialogOpen}
+        onOpenChange={(open) => {
+          setAddStaffDialogOpen(open);
+          if (!open) {
+            form.reset();
+          }
+        }}
+      >
+        <DialogContent data-testid="dialog-add-staff">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <UserPlus className="h-5 w-5" />
+              Add Staff Member
+            </DialogTitle>
+            <DialogDescription>
+              Add a teacher or school admin to your school. They can sign in with Google or use a temporary password.
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="modal-name">Name (Optional)</Label>
+              <Input
+                id="modal-name"
+                data-testid="input-staff-name"
+                type="text"
+                placeholder="e.g., John Smith"
+                {...form.register("name")}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="modal-email">Email *</Label>
+              <Input
+                id="modal-email"
+                data-testid="input-staff-email"
+                type="email"
+                placeholder="e.g., john.smith@school.edu"
+                {...form.register("email")}
+              />
+              {form.formState.errors.email && (
+                <p className="text-sm text-destructive">
+                  {form.formState.errors.email.message}
+                </p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="modal-role">Role</Label>
+              <Select
+                value={form.watch("role")}
+                onValueChange={(value) => form.setValue("role", value as "teacher" | "school_admin")}
+              >
+                <SelectTrigger id="modal-role" data-testid="select-staff-role">
+                  <SelectValue placeholder="Select role" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="teacher">Teacher</SelectItem>
+                  <SelectItem value="school_admin">School Admin</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="modal-password">Temp Password (Optional)</Label>
+              <Input
+                id="modal-password"
+                data-testid="input-staff-password"
+                type="password"
+                placeholder="Leave blank for Google-only login"
+                {...form.register("password")}
+              />
+              <p className="text-xs text-muted-foreground">
+                If left blank, the user must sign in with Google.
+              </p>
+            </div>
+
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setAddStaffDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                data-testid="button-create-staff"
+                disabled={createStaffMutation.isPending}
+              >
+                {createStaffMutation.isPending ? "Adding..." : "Add Staff"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import CSV Dialog */}
+      <Dialog
+        open={importDialogOpen}
+        onOpenChange={(open) => {
+          setImportDialogOpen(open);
+          if (!open) {
+            setImportFile(null);
+            setImportPreview([]);
+            setImportError("");
+          }
+        }}
+      >
+        <DialogContent className="max-w-2xl" data-testid="dialog-import-staff">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Upload className="h-5 w-5" />
+              Import Staff from CSV
+            </DialogTitle>
+            <DialogDescription>
+              Upload a CSV file to bulk import staff members. The file should have columns for email, name (optional), and role (optional).
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {/* File Upload */}
+            <div className="space-y-2">
+              <Label htmlFor="csv-file">CSV File</Label>
+              <div className="border-2 border-dashed rounded-lg p-6 text-center">
+                <input
+                  id="csv-file"
+                  type="file"
+                  accept=".csv"
+                  onChange={handleFileChange}
+                  className="hidden"
+                />
+                <label htmlFor="csv-file" className="cursor-pointer">
+                  <Upload className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+                  <p className="text-sm text-muted-foreground">
+                    {importFile ? importFile.name : "Click to upload or drag and drop"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    CSV file with email, name, and role columns
+                  </p>
+                </label>
+              </div>
+            </div>
+
+            {/* CSV Format Help */}
+            <div className="bg-muted p-3 rounded-lg">
+              <p className="text-sm font-medium mb-1">Expected CSV format:</p>
+              <code className="text-xs text-muted-foreground">
+                email,name,role<br />
+                john@school.edu,John Smith,teacher<br />
+                jane@school.edu,Jane Doe,admin
+              </code>
+            </div>
+
+            {/* Error */}
+            {importError && (
+              <div className="bg-destructive/10 text-destructive p-3 rounded-lg text-sm">
+                {importError}
+              </div>
+            )}
+
+            {/* Preview */}
+            {importPreview.length > 0 && (
+              <div className="space-y-2">
+                <Label>Preview ({importPreview.length} staff members)</Label>
+                <div className="border rounded-lg max-h-48 overflow-auto">
+                  <table className="w-full text-sm">
+                    <thead className="bg-muted sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Name</th>
+                        <th className="px-3 py-2 text-left font-medium">Email</th>
+                        <th className="px-3 py-2 text-left font-medium">Role</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importPreview.slice(0, 10).map((user, idx) => (
+                        <tr key={idx} className="border-t">
+                          <td className="px-3 py-2">{user.name || "—"}</td>
+                          <td className="px-3 py-2">{user.email}</td>
+                          <td className="px-3 py-2">
+                            <Badge variant={user.role === "admin" ? "default" : "secondary"}>
+                              {user.role === "admin" ? "School Admin" : "Teacher"}
+                            </Badge>
+                          </td>
+                        </tr>
+                      ))}
+                      {importPreview.length > 10 && (
+                        <tr className="border-t">
+                          <td colSpan={3} className="px-3 py-2 text-center text-muted-foreground">
+                            ...and {importPreview.length - 10} more
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setImportDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => bulkImportMutation.mutate(importPreview)}
+              disabled={importPreview.length === 0 || bulkImportMutation.isPending}
+            >
+              {bulkImportMutation.isPending ? "Importing..." : `Import ${importPreview.length} Staff`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
