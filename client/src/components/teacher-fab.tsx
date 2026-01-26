@@ -42,6 +42,8 @@ interface TeacherFabProps {
   // Raised hands
   raisedHands: Map<string, RaisedHand>;
   onDismissHand: (studentId: string) => void;
+  handRaisingEnabled?: boolean;
+  onToggleHandRaising?: (enabled: boolean) => void;
 
   // Messages
   studentMessages: StudentMessage[];
@@ -49,6 +51,8 @@ interface TeacherFabProps {
   onDismissMessage: (messageId: string) => void;
   onReplyToMessage: (studentId: string, message: string) => void;
   replyPending?: boolean;
+  studentMessagingEnabled?: boolean;
+  onToggleStudentMessaging?: (enabled: boolean) => void;
 }
 
 export function TeacherFab({
@@ -64,11 +68,15 @@ export function TeacherFab({
   pollPending,
   raisedHands,
   onDismissHand,
+  handRaisingEnabled = true,
+  onToggleHandRaising,
   studentMessages,
   onMarkMessageRead,
   onDismissMessage,
   onReplyToMessage,
   replyPending,
+  studentMessagingEnabled = true,
+  onToggleStudentMessaging,
 }: TeacherFabProps) {
   const [expanded, setExpanded] = useState(false);
   const [activePanel, setActivePanel] = useState<'hands' | 'messages' | null>(null);
@@ -97,12 +105,28 @@ export function TeacherFab({
               <Hand className="h-4 w-4" />
               Raised Hands ({handsCount})
             </span>
-            <button
-              onClick={() => setActivePanel(null)}
-              className="text-white/80 hover:text-white"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              {onToggleHandRaising && (
+                <button
+                  onClick={() => onToggleHandRaising(!handRaisingEnabled)}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded font-medium transition-colors",
+                    handRaisingEnabled
+                      ? "bg-white/20 text-white hover:bg-white/30"
+                      : "bg-red-600 text-white hover:bg-red-700"
+                  )}
+                  title={handRaisingEnabled ? "Click to disable hand raising" : "Click to enable hand raising"}
+                >
+                  {handRaisingEnabled ? "ON" : "OFF"}
+                </button>
+              )}
+              <button
+                onClick={() => setActivePanel(null)}
+                className="text-white/80 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="max-h-72 overflow-y-auto">
             {handsCount === 0 ? (
@@ -148,12 +172,28 @@ export function TeacherFab({
               <MessageSquare className="h-4 w-4" />
               Messages ({unreadCount} new)
             </span>
-            <button
-              onClick={() => setActivePanel(null)}
-              className="text-white/80 hover:text-white"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              {onToggleStudentMessaging && (
+                <button
+                  onClick={() => onToggleStudentMessaging(!studentMessagingEnabled)}
+                  className={cn(
+                    "text-xs px-2 py-1 rounded font-medium transition-colors",
+                    studentMessagingEnabled
+                      ? "bg-white/20 text-white hover:bg-white/30"
+                      : "bg-red-600 text-white hover:bg-red-700"
+                  )}
+                  title={studentMessagingEnabled ? "Click to disable student messaging" : "Click to enable student messaging"}
+                >
+                  {studentMessagingEnabled ? "ON" : "OFF"}
+                </button>
+              )}
+              <button
+                onClick={() => setActivePanel(null)}
+                className="text-white/80 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
           <div className="max-h-72 overflow-y-auto">
             {studentMessages.length === 0 ? (

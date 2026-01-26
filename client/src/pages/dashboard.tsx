@@ -105,7 +105,22 @@ export default function Dashboard() {
   const [subgroupMembers, setSubgroupMembers] = useState<Set<string>>(new Set());
   const [raisedHands, setRaisedHands] = useState<Map<string, { studentId: string; studentName: string; studentEmail: string; timestamp: string }>>(new Map());
   const [studentMessages, setStudentMessages] = useState<Array<{ id: string; studentId: string; studentName: string; studentEmail: string; message: string; messageType: string; timestamp: string; read: boolean }>>([]);
-  const dismissedMessageIds = useRef<Set<string>>(new Set()); // Track dismissed messages to prevent re-adding
+  // Track dismissed messages in localStorage to persist across page reloads
+  const dismissedMessageIds = useRef<Set<string>>(new Set<string>());
+  // Initialize dismissed messages from localStorage on mount
+  const dismissedMessagesInitialized = useRef(false);
+  if (!dismissedMessagesInitialized.current) {
+    dismissedMessagesInitialized.current = true;
+    try {
+      const saved = localStorage.getItem('classpilot-dismissed-messages');
+      if (saved) {
+        const ids = JSON.parse(saved) as string[];
+        ids.forEach(id => dismissedMessageIds.current.add(id));
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }
   const [replyingToMessage, setReplyingToMessage] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
   // Admin observe mode - which session the admin is currently observing
@@ -236,19 +251,22 @@ export default function Dashboard() {
     }
   }, [initialRaisedHands]);
 
-  // Sync initial student messages to state
+  // Sync initial student messages to state (filtering out dismissed messages)
   useEffect(() => {
     if (initialStudentMessages?.messages) {
-      setStudentMessages(initialStudentMessages.messages.map(msg => ({
-        id: msg.id,
-        studentId: msg.studentId,
-        studentName: msg.studentName,
-        studentEmail: msg.studentEmail,
-        message: msg.message,
-        messageType: msg.messageType,
-        timestamp: msg.createdAt,
-        read: false,
-      })));
+      const filteredMessages = initialStudentMessages.messages
+        .filter(msg => !dismissedMessageIds.current.has(msg.id))
+        .map(msg => ({
+          id: msg.id,
+          studentId: msg.studentId,
+          studentName: msg.studentName,
+          studentEmail: msg.studentEmail,
+          message: msg.message,
+          messageType: msg.messageType,
+          timestamp: msg.createdAt,
+          read: false,
+        }));
+      setStudentMessages(filteredMessages);
     }
   }, [initialStudentMessages]);
 
@@ -1622,9 +1640,16 @@ export default function Dashboard() {
     ));
   };
 
-  // Dismiss/remove student message
+  // Dismiss/remove student message (persists to localStorage)
   const dismissMessage = (messageId: string) => {
     dismissedMessageIds.current.add(messageId);
+    // Persist to localStorage (keep only last 100 dismissed IDs to prevent unbounded growth)
+    try {
+      const ids = Array.from(dismissedMessageIds.current).slice(-100);
+      localStorage.setItem('classpilot-dismissed-messages', JSON.stringify(ids));
+    } catch {
+      // Ignore localStorage errors
+    }
     setStudentMessages(prev => prev.filter(msg => msg.id !== messageId));
   };
 
@@ -1642,6 +1667,31 @@ export default function Dashboard() {
         description: data.enabled
           ? "Students can now raise their hands"
           : "Students cannot raise their hands",
+      });
+    },
+    onError: (error: Error) => {
+      toast({
+        variant: "destructive",
+        title: "Error",
+        description: error.message,
+      });
+    },
+  });
+
+  // Toggle student messaging mutation
+  const toggleStudentMessagingMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      const res = await apiRequest('POST', '/api/settings/student-messaging', { enabled });
+      const data = await res.json();
+      return data;
+    },
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['/api/settings'] });
+      toast({
+        title: data.enabled ? "Student Messaging Enabled" : "Student Messaging Disabled",
+        description: data.enabled
+          ? "Students can now send messages"
+          : "Students cannot send messages",
       });
     },
     onError: (error: Error) => {
@@ -3284,11 +3334,15 @@ export default function Dashboard() {
           pollPending={pollMutation.isPending}
           raisedHands={raisedHands}
           onDismissHand={(studentId) => dismissHandMutation.mutate(studentId)}
+          handRaisingEnabled={settings?.handRaisingEnabled !== false}
+          onToggleHandRaising={(enabled) => toggleHandRaisingMutation.mutate(enabled)}
           studentMessages={studentMessages}
           onMarkMessageRead={markMessageRead}
           onDismissMessage={dismissMessage}
           onReplyToMessage={(studentId, message) => replyToMessageMutation.mutate({ studentId, message })}
           replyPending={replyToMessageMutation.isPending}
+          studentMessagingEnabled={settings?.studentMessagingEnabled !== false}
+          onToggleStudentMessaging={(enabled) => toggleStudentMessagingMutation.mutate(enabled)}
         />
       )}
     </div>

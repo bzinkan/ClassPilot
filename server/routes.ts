@@ -5764,7 +5764,7 @@ export async function registerRoutes(
       const blockListMessage = {
         type: 'remote-control',
         command: {
-          action: 'apply-block-list',
+          type: 'apply-block-list',
           data: {
             blockListId: blockList.id,
             blockListName: blockList.name,
@@ -5806,7 +5806,7 @@ export async function registerRoutes(
       const removeMessage = {
         type: 'remote-control',
         command: {
-          action: 'remove-block-list'
+          type: 'remove-block-list'
         }
       };
 
