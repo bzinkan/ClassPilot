@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Eye, EyeOff, Timer, Clock, BarChart3, Hand, MessageSquare, X, Send, GraduationCap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+
+const FAB_POSITION_KEY = "classpilot-fab-position";
 
 interface RaisedHand {
   studentId: string;
@@ -83,6 +85,131 @@ export function TeacherFab({
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
 
+  // Draggable FAB state
+  const [position, setPosition] = useState<{ x: number; y: number }>({ x: 24, y: 24 }); // bottom-right offset
+  const [isDragging, setIsDragging] = useState(false);
+  const dragStartRef = useRef<{ x: number; y: number; posX: number; posY: number } | null>(null);
+  const fabRef = useRef<HTMLDivElement>(null);
+  const hasDraggedRef = useRef(false);
+
+  // Load saved position from localStorage
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(FAB_POSITION_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (typeof parsed.x === 'number' && typeof parsed.y === 'number') {
+          setPosition(parsed);
+        }
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, []);
+
+  // Save position to localStorage when it changes
+  const savePosition = useCallback((pos: { x: number; y: number }) => {
+    try {
+      localStorage.setItem(FAB_POSITION_KEY, JSON.stringify(pos));
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, []);
+
+  // Handle drag start (mouse)
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return; // Only left click
+    e.preventDefault();
+    hasDraggedRef.current = false;
+    dragStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      posX: position.x,
+      posY: position.y,
+    };
+    setIsDragging(true);
+  }, [position]);
+
+  // Handle drag start (touch)
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    hasDraggedRef.current = false;
+    dragStartRef.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+      posX: position.x,
+      posY: position.y,
+    };
+    setIsDragging(true);
+  }, [position]);
+
+  // Handle drag move and end
+  useEffect(() => {
+    if (!isDragging) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!dragStartRef.current) return;
+      const deltaX = dragStartRef.current.x - e.clientX;
+      const deltaY = dragStartRef.current.y - e.clientY;
+
+      // Only count as drag if moved more than 5px
+      if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+        hasDraggedRef.current = true;
+      }
+
+      const newX = Math.max(10, Math.min(window.innerWidth - 70, dragStartRef.current.posX + deltaX));
+      const newY = Math.max(10, Math.min(window.innerHeight - 70, dragStartRef.current.posY + deltaY));
+      setPosition({ x: newX, y: newY });
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      if (!dragStartRef.current || e.touches.length !== 1) return;
+      const touch = e.touches[0];
+      const deltaX = dragStartRef.current.x - touch.clientX;
+      const deltaY = dragStartRef.current.y - touch.clientY;
+
+      // Only count as drag if moved more than 5px
+      if (Math.abs(deltaX) > 5 || Math.abs(deltaY) > 5) {
+        hasDraggedRef.current = true;
+      }
+
+      const newX = Math.max(10, Math.min(window.innerWidth - 70, dragStartRef.current.posX + deltaX));
+      const newY = Math.max(10, Math.min(window.innerHeight - 70, dragStartRef.current.posY + deltaY));
+      setPosition({ x: newX, y: newY });
+    };
+
+    const handleEnd = () => {
+      if (dragStartRef.current) {
+        savePosition(position);
+      }
+      setIsDragging(false);
+      dragStartRef.current = null;
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleEnd);
+    document.addEventListener('touchmove', handleTouchMove, { passive: false });
+    document.addEventListener('touchend', handleEnd);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleEnd);
+      document.removeEventListener('touchmove', handleTouchMove);
+      document.removeEventListener('touchend', handleEnd);
+    };
+  }, [isDragging, position, savePosition]);
+
+  // Handle FAB click - only toggle if not dragging
+  const handleFabClick = useCallback(() => {
+    if (hasDraggedRef.current) {
+      hasDraggedRef.current = false;
+      return; // Don't toggle if we just finished dragging
+    }
+    setExpanded(!expanded);
+    if (expanded) setActivePanel(null);
+  }, [expanded]);
+
   const unreadCount = studentMessages.filter(m => !m.read).length;
   const handsCount = raisedHands.size;
   const totalNotifications = unreadCount + handsCount;
@@ -96,7 +223,14 @@ export function TeacherFab({
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+    <div
+      ref={fabRef}
+      className="fixed z-50 flex flex-col items-end gap-3"
+      style={{
+        right: `${position.x}px`,
+        bottom: `${position.y}px`,
+      }}
+    >
       {/* Hands Panel */}
       {activePanel === 'hands' && (
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 w-80 max-h-96 overflow-hidden animate-in slide-in-from-bottom-2 duration-200">
@@ -389,15 +523,15 @@ export function TeacherFab({
 
       {/* Main FAB Button */}
       <button
-        onClick={() => {
-          setExpanded(!expanded);
-          if (expanded) setActivePanel(null);
-        }}
+        onClick={handleFabClick}
+        onMouseDown={handleMouseDown}
+        onTouchStart={handleTouchStart}
         className={cn(
-          "w-14 h-14 rounded-full shadow-xl flex items-center justify-center transition-all duration-300 hover:scale-110 relative",
+          "w-14 h-14 rounded-full shadow-xl flex items-center justify-center transition-all duration-300 relative select-none",
           expanded
             ? "bg-gray-600 dark:bg-gray-700 rotate-45"
-            : "bg-gradient-to-br from-blue-500 to-indigo-600"
+            : "bg-gradient-to-br from-blue-500 to-indigo-600",
+          isDragging ? "cursor-grabbing scale-110" : "cursor-grab hover:scale-110"
         )}
       >
         {expanded ? (
