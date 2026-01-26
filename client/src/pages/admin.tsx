@@ -625,13 +625,27 @@ export default function Admin() {
                   <p>No staff yet. Add a staff member to get started!</p>
                 </div>
               ) : (() => {
-                const filteredStaff = staff.filter((member: StaffUser) => {
-                  const query = staffSearchQuery.toLowerCase();
-                  return (
-                    member.email.toLowerCase().includes(query) ||
-                    (member.displayName?.toLowerCase().includes(query) ?? false)
-                  );
-                });
+                // Helper to extract last name for sorting
+                const getLastName = (name: string | null | undefined): string => {
+                  if (!name) return "";
+                  const parts = name.trim().split(/\s+/);
+                  return parts.length > 1 ? parts[parts.length - 1].toLowerCase() : parts[0].toLowerCase();
+                };
+
+                const filteredStaff = staff
+                  .filter((member: StaffUser) => {
+                    const query = staffSearchQuery.toLowerCase();
+                    return (
+                      member.email.toLowerCase().includes(query) ||
+                      (member.displayName?.toLowerCase().includes(query) ?? false)
+                    );
+                  })
+                  .sort((a: StaffUser, b: StaffUser) => {
+                    // Sort by last name, then by email if no name
+                    const aLastName = getLastName(a.displayName) || a.email.toLowerCase();
+                    const bLastName = getLastName(b.displayName) || b.email.toLowerCase();
+                    return aLastName.localeCompare(bLastName);
+                  });
                 const totalPages = Math.ceil(filteredStaff.length / STAFF_PER_PAGE);
                 const paginatedStaff = filteredStaff.slice(
                   staffPage * STAFF_PER_PAGE,
