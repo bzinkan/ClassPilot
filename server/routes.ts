@@ -7500,6 +7500,29 @@ export async function registerRoutes(
     }
   });
 
+  // Teacher dismisses/deletes a student message
+  app.delete("/api/teacher/messages/:messageId", checkIPAllowlist, requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireTeacherRole, apiLimiter, async (req, res) => {
+    try {
+      const { messageId } = req.params;
+
+      if (!messageId) {
+        return res.status(400).json({ error: "Message ID is required" });
+      }
+
+      const deleted = await storage.deleteChatMessage(messageId);
+
+      if (!deleted) {
+        return res.status(404).json({ error: "Message not found" });
+      }
+
+      console.log(`[Chat] Teacher deleted message: ${messageId}`);
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete message error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
   if (enableBackgroundJobs) {
     // Session expiration job (runs frequently for real-time accuracy)
     setInterval(async () => {

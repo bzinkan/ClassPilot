@@ -397,6 +397,7 @@ export interface IStorage {
   createChatMessage(message: InsertChatMessage): Promise<DbChatMessage>;
   getStudentMessagesForSchool(schoolId: string, options?: { since?: Date; limit?: number }): Promise<DbChatMessage[]>;
   getChatMessagesBySession(sessionId: string): Promise<DbChatMessage[]>;
+  deleteChatMessage(messageId: string): Promise<boolean>;
 
   // Audit Logs
   createAuditLog(log: InsertAuditLog): Promise<AuditLog>;
@@ -1985,6 +1986,10 @@ export class MemStorage implements IStorage {
 
   async getChatMessagesBySession(sessionId: string): Promise<DbChatMessage[]> {
     return [];
+  }
+
+  async deleteChatMessage(messageId: string): Promise<boolean> {
+    return false;
   }
 
   // Audit Logs (MemStorage stubs)
@@ -3891,6 +3896,11 @@ export class DatabaseStorage implements IStorage {
       .from(chatMessages)
       .where(eq(chatMessages.sessionId, sessionId))
       .orderBy(desc(chatMessages.createdAt));
+  }
+
+  async deleteChatMessage(messageId: string): Promise<boolean> {
+    const result = await db.delete(chatMessages).where(eq(chatMessages.id, messageId));
+    return (result.rowCount ?? 0) > 0;
   }
 
   // Audit Logs

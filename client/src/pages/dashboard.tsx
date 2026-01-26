@@ -1640,17 +1640,25 @@ export default function Dashboard() {
     ));
   };
 
-  // Dismiss/remove student message (persists to localStorage)
-  const dismissMessage = (messageId: string) => {
-    dismissedMessageIds.current.add(messageId);
-    // Persist to localStorage (keep only last 100 dismissed IDs to prevent unbounded growth)
-    try {
-      const ids = Array.from(dismissedMessageIds.current).slice(-100);
-      localStorage.setItem('classpilot-dismissed-messages', JSON.stringify(ids));
-    } catch {
-      // Ignore localStorage errors
-    }
+  // Dismiss/remove student message (deletes from server)
+  const dismissMessage = async (messageId: string) => {
+    // Optimistically remove from UI
     setStudentMessages(prev => prev.filter(msg => msg.id !== messageId));
+
+    // Delete from server (fire-and-forget, but track for backup)
+    try {
+      await apiRequest('DELETE', `/api/teacher/messages/${messageId}`);
+    } catch (error) {
+      console.error('Failed to delete message from server:', error);
+      // Still keep locally dismissed as backup
+      dismissedMessageIds.current.add(messageId);
+      try {
+        const ids = Array.from(dismissedMessageIds.current).slice(-100);
+        localStorage.setItem('classpilot-dismissed-messages', JSON.stringify(ids));
+      } catch {
+        // Ignore localStorage errors
+      }
+    }
   };
 
   // Toggle hand raising mutation
