@@ -7297,7 +7297,7 @@ export async function registerRoutes(
       broadcastToStudents(schoolId, {
         type: "remote-control",
         command: {
-          type: "messaging-toggle",
+          type: "hand-raising-toggle",
           data: { enabled },
         },
       });

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3 } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3, LogOut } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -443,7 +443,16 @@ export default function Admin() {
             data-testid="button-back-dashboard"
           >
             <ArrowLeft className="h-4 w-4 mr-2" />
-            Back to Dashboard
+            Dashboard
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setLocation("/")}
+            data-testid="button-logout"
+            title="Log out"
+          >
+            <LogOut className="h-5 w-5" />
           </Button>
         </div>
       </div>

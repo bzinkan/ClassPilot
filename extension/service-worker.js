@@ -2137,13 +2137,24 @@ async function handleRemoteControl(command) {
 
       case 'messaging-toggle':
         // Update local storage with messaging enabled state
-        const messagingEnabled = command.data.enabled;
+        const messagingEnabled = command.data.messagingEnabled ?? command.data.enabled;
         chrome.storage.local.set({ messagingEnabled });
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
 
         console.log('Messaging toggle sent:', messagingEnabled);
+        break;
+
+      case 'hand-raising-toggle':
+        // Update local storage with hand raising enabled state
+        const handRaisingEnabled = command.data.enabled;
+        chrome.storage.local.set({ handRaisingEnabled });
+
+        // Fire-and-forget - don't await to avoid any delay
+        broadcastToAllTabs('hand-raising-toggle', { enabled: handRaisingEnabled });
+
+        console.log('Hand raising toggle sent:', handRaisingEnabled);
         break;
     }
   } catch (error) {

@@ -1071,6 +1071,7 @@ function addChatNotificationStyles() {
 let fabExpanded = false;
 let handRaised = false;
 let messagingEnabled = true;
+let handRaisingEnabled = true;
 
 function createFloatingActionButton() {
   // Don't create FAB on extension pages or special pages
@@ -1119,10 +1120,12 @@ function createFloatingActionButton() {
   document.body.appendChild(fabContainer);
 
   // Get initial state
-  chrome.storage.local.get(['handRaised', 'messagingEnabled'], (result) => {
+  chrome.storage.local.get(['handRaised', 'messagingEnabled', 'handRaisingEnabled'], (result) => {
     handRaised = result.handRaised || false;
     messagingEnabled = result.messagingEnabled !== false;
+    handRaisingEnabled = result.handRaisingEnabled !== false;
     updateFabHandState();
+    updateFabMessageState();
   });
 
   // Main FAB click - toggle menu
@@ -1134,6 +1137,10 @@ function createFloatingActionButton() {
   // Raise Hand button
   document.getElementById('classpilot-fab-hand').addEventListener('click', (e) => {
     e.stopPropagation();
+    if (!handRaisingEnabled) {
+      showFabNotification('Hand raising is currently disabled by your teacher.', true);
+      return;
+    }
     if (handRaised) {
       lowerHand();
     } else {
@@ -1144,6 +1151,10 @@ function createFloatingActionButton() {
   // Message button - show message box
   document.getElementById('classpilot-fab-message').addEventListener('click', (e) => {
     e.stopPropagation();
+    if (!messagingEnabled) {
+      showFabNotification('Messaging is currently disabled by your teacher.', true);
+      return;
+    }
     showMessageBox();
   });
 
@@ -1161,6 +1172,23 @@ function createFloatingActionButton() {
   // Send message
   document.getElementById('classpilot-fab-send-message').addEventListener('click', () => {
     sendMessage('message');
+  });
+
+  // Prevent clicks on message box from closing it
+  document.getElementById('classpilot-fab-message-box').addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
+
+  // Prevent textarea interactions from closing the message box
+  const messageInput = document.getElementById('classpilot-fab-message-input');
+  messageInput.addEventListener('click', (e) => {
+    e.stopPropagation();
+  });
+  messageInput.addEventListener('focus', (e) => {
+    e.stopPropagation();
+  });
+  messageInput.addEventListener('mousedown', (e) => {
+    e.stopPropagation();
   });
 
   // Close menu when clicking outside
@@ -1236,12 +1264,35 @@ function updateFabHandState() {
   const handBtn = document.getElementById('classpilot-fab-hand');
   const label = handBtn?.querySelector('.classpilot-fab-label');
 
+  // Handle disabled state
+  if (!handRaisingEnabled) {
+    handBtn?.classList.add('classpilot-fab-disabled');
+    handBtn?.classList.remove('classpilot-fab-hand-raised');
+    if (label) label.textContent = 'Unavailable';
+    return;
+  }
+
+  handBtn?.classList.remove('classpilot-fab-disabled');
+
   if (handRaised) {
     handBtn?.classList.add('classpilot-fab-hand-raised');
     if (label) label.textContent = 'Lower Hand';
   } else {
     handBtn?.classList.remove('classpilot-fab-hand-raised');
     if (label) label.textContent = 'Raise Hand';
+  }
+}
+
+function updateFabMessageState() {
+  const messageBtn = document.getElementById('classpilot-fab-message');
+  const label = messageBtn?.querySelector('.classpilot-fab-label');
+
+  if (!messagingEnabled) {
+    messageBtn?.classList.add('classpilot-fab-disabled');
+    if (label) label.textContent = 'Unavailable';
+  } else {
+    messageBtn?.classList.remove('classpilot-fab-disabled');
+    if (label) label.textContent = 'Message';
   }
 }
 
@@ -1384,6 +1435,21 @@ function addFabStyles() {
 
     .classpilot-fab-message {
       background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+    }
+
+    .classpilot-fab-disabled {
+      background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%) !important;
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .classpilot-fab-disabled .classpilot-fab-label {
+      color: #6b7280 !important;
+    }
+
+    .classpilot-fab-disabled:hover {
+      transform: none !important;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1) !important;
     }
 
     .classpilot-fab-icon {
@@ -1542,6 +1608,11 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     }
     if (changes.messagingEnabled) {
       messagingEnabled = changes.messagingEnabled.newValue !== false;
+      updateFabMessageState();
+    }
+    if (changes.handRaisingEnabled) {
+      handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;
+      updateFabHandState();
     }
   }
 });
