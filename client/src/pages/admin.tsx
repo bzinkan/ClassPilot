@@ -85,15 +85,6 @@ export default function Admin() {
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [staffToResetPassword, setStaffToResetPassword] = useState<StaffUser | null>(null);
   const [newPassword, setNewPassword] = useState("");
-  const [enableTrackingHours, setEnableTrackingHours] = useState(false);
-  const [trackingStartTime, setTrackingStartTime] = useState("08:00");
-  const [trackingEndTime, setTrackingEndTime] = useState("15:00");
-  const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
-  const [trackingDays, setTrackingDays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
-  const [afterHoursMode, setAfterHoursMode] = useState<"off" | "limited" | "full">("off");
-  const [initialAfterHoursMode, setInitialAfterHoursMode] = useState<"off" | "limited" | "full">("off");
-  const [afterHoursConfirmOpen, setAfterHoursConfirmOpen] = useState(false);
-  const [tracking247ConfirmOpen, setTracking247ConfirmOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<"staff" | "audit">("staff");
   const [auditPage, setAuditPage] = useState(0);
   const [auditActionFilter, setAuditActionFilter] = useState<string>("");
@@ -400,48 +391,6 @@ export default function Admin() {
     },
   });
 
-  const updateTrackingHoursMutation = useMutation({
-    mutationFn: async () => {
-      return await apiRequest("PATCH", "/api/settings", {
-        enableTrackingHours,
-        trackingStartTime,
-        trackingEndTime,
-        schoolTimezone,
-        trackingDays,
-        afterHoursMode,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/settings"] });
-      setInitialAfterHoursMode(afterHoursMode);
-      toast({
-        title: "Tracking hours updated",
-        description: "School tracking hours have been configured successfully.",
-      });
-    },
-    onError: (error: any) => {
-      toast({
-        variant: "destructive",
-        title: "Failed to update tracking hours",
-        description: error.message || "An error occurred",
-      });
-    },
-  });
-
-  // Initialize tracking hours from settings
-  useEffect(() => {
-    if (settings) {
-      setEnableTrackingHours(settings.enableTrackingHours ?? false);
-      setTrackingStartTime(settings.trackingStartTime || "08:00");
-      setTrackingEndTime(settings.trackingEndTime || "15:00");
-      setSchoolTimezone(settings.schoolTimezone || "America/New_York");
-      setTrackingDays(settings.trackingDays || ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
-      const mode = (settings.afterHoursMode as "off" | "limited" | "full") || "off";
-      setAfterHoursMode(mode);
-      setInitialAfterHoursMode(mode);
-    }
-  }, [settings]);
-
   const onSubmit = (data: CreateStaffForm) => {
     createStaffMutation.mutate(data);
   };
@@ -483,32 +432,6 @@ export default function Admin() {
       return;
     }
     updateStaffMutation.mutate({ userId: staffToEdit.id, role: selectedRole, name: editName });
-  };
-
-  const is247 =
-    enableTrackingHours
-    && trackingDays.length === 7
-    && trackingStartTime === "00:00"
-    && (trackingEndTime === "23:59" || trackingEndTime === "24:00");
-  const needsAfterHoursConfirm = initialAfterHoursMode === "off" && afterHoursMode !== "off";
-  const afterHoursHelperText =
-    afterHoursMode === "off"
-      ? "No monitoring outside school hours. Extension stops all network activity so the system can sleep and reduce cost."
-      : "After-hours monitoring increases server traffic and storage and may increase plan cost.";
-
-  const handleSaveTrackingHours = ({
-    skipAfterHoursConfirm = false,
-    skip247Confirm = false,
-  }: { skipAfterHoursConfirm?: boolean; skip247Confirm?: boolean } = {}) => {
-    if (needsAfterHoursConfirm && !skipAfterHoursConfirm) {
-      setAfterHoursConfirmOpen(true);
-      return;
-    }
-    if (is247 && !skip247Confirm) {
-      setTracking247ConfirmOpen(true);
-      return;
-    }
-    updateTrackingHoursMutation.mutate();
   };
 
   const staff = staffData?.users || [];
@@ -762,159 +685,6 @@ export default function Admin() {
               })()}
             </CardContent>
           </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Clock className="h-5 w-5" />
-            School Tracking Hours
-          </CardTitle>
-          <CardDescription>
-            Configure when student monitoring is active for privacy compliance
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="bg-muted p-4 rounded-lg space-y-3">
-            <div className="flex items-center space-x-2">
-              <Checkbox
-                id="enableTrackingHours"
-                checked={enableTrackingHours}
-                onCheckedChange={(checked) => setEnableTrackingHours(checked as boolean)}
-                data-testid="checkbox-enable-tracking-hours"
-              />
-              <Label htmlFor="enableTrackingHours" className="font-medium cursor-pointer">
-                Enable School Hours Tracking
-              </Label>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              When enabled, student activity will only be tracked during the specified hours. Heartbeats received outside these hours will be ignored.
-            </p>
-          </div>
-
-          {enableTrackingHours && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="trackingStartTime">School Start Time</Label>
-                  <Input
-                    id="trackingStartTime"
-                    type="time"
-                    value={trackingStartTime}
-                    onChange={(e) => setTrackingStartTime(e.target.value)}
-                    data-testid="input-tracking-start-time"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="trackingEndTime">School End Time</Label>
-                  <Input
-                    id="trackingEndTime"
-                    type="time"
-                    value={trackingEndTime}
-                    onChange={(e) => setTrackingEndTime(e.target.value)}
-                    data-testid="input-tracking-end-time"
-                  />
-                </div>
-              </div>
-              
-              <div className="space-y-2">
-                <Label htmlFor="schoolTimezone">School Timezone</Label>
-                <Select value={schoolTimezone} onValueChange={setSchoolTimezone}>
-                  <SelectTrigger id="schoolTimezone" data-testid="select-school-timezone">
-                    <SelectValue placeholder="Select timezone" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="America/New_York">Eastern Time (ET)</SelectItem>
-                    <SelectItem value="America/Chicago">Central Time (CT)</SelectItem>
-                    <SelectItem value="America/Denver">Mountain Time (MT)</SelectItem>
-                    <SelectItem value="America/Phoenix">Arizona (MST)</SelectItem>
-                    <SelectItem value="America/Los_Angeles">Pacific Time (PT)</SelectItem>
-                    <SelectItem value="America/Anchorage">Alaska Time (AKT)</SelectItem>
-                    <SelectItem value="Pacific/Honolulu">Hawaii Time (HST)</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  Tracking hours will be enforced in this timezone, regardless of server location.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Tracking Days</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].map((day) => (
-                    <div key={day} className="flex items-center space-x-2">
-                      <Checkbox
-                        id={`tracking-day-${day}`}
-                        checked={trackingDays.includes(day)}
-                        onCheckedChange={(checked) => {
-                          if (checked) {
-                            setTrackingDays([...trackingDays, day]);
-                          } else {
-                            setTrackingDays(trackingDays.filter(d => d !== day));
-                          }
-                        }}
-                        data-testid={`checkbox-tracking-day-${day.toLowerCase()}`}
-                      />
-                      <Label htmlFor={`tracking-day-${day}`} className="cursor-pointer text-sm font-normal">
-                        {day}
-                      </Label>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Select which days of the week student activity should be tracked. Deselect weekends or holidays to pause monitoring.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="afterHoursMode">Outside School Hours</Label>
-                <Select
-                  value={afterHoursMode}
-                  onValueChange={(value) => setAfterHoursMode(value as "off" | "limited" | "full")}
-                >
-                  <SelectTrigger id="afterHoursMode" data-testid="select-after-hours-mode">
-                    <SelectValue placeholder="Select after-hours mode" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="off">Off (recommended)</SelectItem>
-                    <SelectItem value="limited">Limited (may increase cost)</SelectItem>
-                    <SelectItem value="full">Full (highest cost)</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {afterHoursHelperText}
-                </p>
-              </div>
-
-              {afterHoursMode !== "off" && (
-                <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-                  <AlertTriangle className="mt-0.5 h-4 w-4" />
-                  <span>
-                    After-hours monitoring increases server traffic and storage. This may increase your plan cost.
-                  </span>
-                </div>
-              )}
-            </div>
-          )}
-
-          {is247 && (
-            <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
-              <AlertTriangle className="mt-0.5 h-4 w-4" />
-              <span>
-                You are enabling 24/7 monitoring. This may significantly increase traffic and cost.
-              </span>
-            </div>
-          )}
-
-          <Button
-            onClick={() => handleSaveTrackingHours()}
-            disabled={updateTrackingHoursMutation.isPending}
-            data-testid="button-save-tracking-hours"
-            className="w-full"
-          >
-            {updateTrackingHoursMutation.isPending ? "Saving..." : "Save Tracking Hours"}
-          </Button>
-        </CardContent>
-      </Card>
 
       <Card>
         <CardHeader>
@@ -1329,50 +1099,6 @@ export default function Admin() {
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               Yes, Clear All Data
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={afterHoursConfirmOpen} onOpenChange={setAfterHoursConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Enable after-hours monitoring?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This will allow monitoring outside school hours and may increase cost due to additional device traffic and storage.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setAfterHoursConfirmOpen(false);
-                handleSaveTrackingHours({ skipAfterHoursConfirm: true });
-              }}
-            >
-              Enable
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      <AlertDialog open={tracking247ConfirmOpen} onOpenChange={setTracking247ConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Enable 24/7 monitoring?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This may significantly increase traffic and cost. Continue?
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => {
-                setTracking247ConfirmOpen(false);
-                handleSaveTrackingHours({ skip247Confirm: true });
-              }}
-            >
-              Continue
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
