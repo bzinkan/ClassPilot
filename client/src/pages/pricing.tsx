@@ -492,7 +492,7 @@ export default function PricingPage() {
                 margin: '0 0 16px 0',
                 lineHeight: 1.6,
               }}>
-                Commit to an annual plan today and get your <strong style={{ color: '#f8fafc' }}>first 2 months free</strong> — pay just <strong style={{ color: '#f8fafc' }}>${skipTrialPrice.toLocaleString()}</strong> for year one. Plus, we'll include a free onboarding session for your teachers.
+                Commit to an annual plan today and get your <strong style={{ color: '#f8fafc' }}>first 2 months free</strong> — pay just <strong style={{ color: '#f8fafc' }}>${skipTrialPrice.toLocaleString()}</strong> for year one.
               </p>
               <div style={{
                 fontSize: '12px',

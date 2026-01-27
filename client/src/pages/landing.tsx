@@ -71,7 +71,7 @@ export default function LandingPage() {
 
   const steps = [
     { num: '01', title: 'Create Account', desc: 'Sign up with Google. Your Classroom rosters sync automatically.' },
-    { num: '02', title: 'Students Install', desc: 'One Chrome extension. Auto-registers with school email.' },
+    { num: '02', title: 'Deploy Extension', desc: 'School Admin deploys the Chrome extension via Google Workspace for Education.' },
     { num: '03', title: 'Start Teaching', desc: 'Open dashboard. See every screen. Keep everyone on track.' },
   ];
 
