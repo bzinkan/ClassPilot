@@ -19,8 +19,12 @@ import Roster from "@/pages/roster";
 import SchoolsList from "@/pages/super-admin/schools-list";
 import CreateSchool from "@/pages/super-admin/create-school";
 import SchoolDetail from "@/pages/super-admin/school-detail";
+import TrialRequests from "@/pages/super-admin/trial-requests";
 import PrivacyPage from "@/pages/privacy";
 import TermsPage from "@/pages/terms";
+import HelpCenter from "@/pages/help";
+import TeacherGuides from "@/pages/guides";
+import RequestTrial from "@/pages/request-trial";
 
 function Router() {
   return (
@@ -29,6 +33,9 @@ function Router() {
       <Route path="/pricing" component={PricingPage} />
       <Route path="/privacy" component={PrivacyPage} />
       <Route path="/terms" component={TermsPage} />
+      <Route path="/help" component={HelpCenter} />
+      <Route path="/guides" component={TeacherGuides} />
+      <Route path="/request-trial" component={RequestTrial} />
       <Route path="/login" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/roster" component={Roster} />
@@ -41,6 +48,7 @@ function Router() {
       <Route path="/super-admin/schools" component={SchoolsList} />
       <Route path="/super-admin/schools/new" component={CreateSchool} />
       <Route path="/super-admin/schools/:id" component={SchoolDetail} />
+      <Route path="/super-admin/trial-requests" component={TrialRequests} />
       <Route path="/class/:classId">
         {(params) => <Dashboard />}
       </Route>

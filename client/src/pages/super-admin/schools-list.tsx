@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check } from "lucide-react";
+import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check, Mail } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -233,13 +233,23 @@ export default function SchoolsList() {
               Manage all schools and their configurations
             </p>
           </div>
-          <Button
-            onClick={() => setLocation("/super-admin/schools/new")}
-            data-testid="button-create-school"
-          >
-            <Plus className="w-4 h-4 mr-2" />
-            Create School
-          </Button>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setLocation("/super-admin/trial-requests")}
+              data-testid="button-trial-requests"
+            >
+              <Mail className="w-4 h-4 mr-2" />
+              Trial Requests
+            </Button>
+            <Button
+              onClick={() => setLocation("/super-admin/schools/new")}
+              data-testid="button-create-school"
+            >
+              <Plus className="w-4 h-4 mr-2" />
+              Create School
+            </Button>
+          </div>
         </div>
 
         {/* Summary Stats */}

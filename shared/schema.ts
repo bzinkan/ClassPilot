@@ -823,3 +823,26 @@ export interface CheckInRequest {
   question: string;
   options: string[]; // e.g., ['😊 Happy', '😐 Neutral', '😔 Sad', '😰 Stressed']
 }
+
+// Trial Requests - Schools requesting to start a free trial
+export const trialRequests = pgTable("trial_requests", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  schoolName: text("school_name").notNull(),
+  schoolDomain: text("school_domain").notNull(),
+  adminFirstName: text("admin_first_name").notNull(),
+  adminLastName: text("admin_last_name").notNull(),
+  adminEmail: text("admin_email").notNull(),
+  adminPhone: text("admin_phone"),
+  estimatedStudents: text("estimated_students"),
+  estimatedTeachers: text("estimated_teachers"),
+  message: text("message"),
+  status: text("status").notNull().default("pending"), // 'pending', 'contacted', 'converted', 'declined'
+  notes: text("notes"), // Super admin notes about this request
+  createdAt: timestamp("created_at").notNull().default(sql`now()`),
+  processedAt: timestamp("processed_at"), // When super admin processed this request
+  processedBy: text("processed_by"), // Super admin user ID who processed it
+});
+
+export const insertTrialRequestSchema = createInsertSchema(trialRequests).omit({ id: true, createdAt: true, processedAt: true, processedBy: true, status: true, notes: true });
+export type InsertTrialRequest = z.infer<typeof insertTrialRequestSchema>;
+export type TrialRequest = typeof trialRequests.$inferSelect;

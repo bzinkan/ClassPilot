@@ -26,6 +26,8 @@ import {
   adminResetPasswordSchema,
   createSchoolRequestSchema, // Validation schema for creating schools
   normalizeEmail, // Email normalization helper
+  trialRequests, // Trial request submissions
+  insertTrialRequestSchema, // Validation schema for trial requests
   type StudentStatus,
   type SignalMessage,
   type InsertRoster,
@@ -35,6 +37,8 @@ import {
   type School,
 } from "@shared/schema";
 import { groupSessionsByDevice, formatDuration, isTrackingAllowedNow, isSchoolTrackingAllowed } from "@shared/utils";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 import { createStudentToken, verifyStudentToken, TokenExpiredError, InvalidTokenError } from "./jwt-utils";
 import { syncCourses, syncRoster } from "./classroom";
 import { getBaseUrl } from "./config/baseUrl";
@@ -65,6 +69,7 @@ import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 import { logAudit, logAuditFromRequest, AuditAction } from "./audit";
+import { sendTrialRequestNotification } from "./util/email";
 
 // Helper function to normalize and validate grade levels
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -1035,6 +1040,68 @@ export async function registerRoutes(
     } catch (error) {
       console.error("School status error:", error);
       return res.status(500).json({ error: "Failed to load school status" });
+    }
+  });
+
+  // Public endpoint: Submit a trial request (no auth required)
+  app.post("/api/trial-requests", apiLimiter, async (req, res) => {
+    try {
+      const validationResult = insertTrialRequestSchema.safeParse(req.body);
+      if (!validationResult.success) {
+        return res.status(400).json({
+          error: "Invalid request data",
+          details: validationResult.error.errors
+        });
+      }
+
+      const data = validationResult.data;
+
+      // Check if a request with this email already exists (prevent spam)
+      const existingRequest = await db.select()
+        .from(trialRequests)
+        .where(sql`LOWER(${trialRequests.adminEmail}) = LOWER(${data.adminEmail})`)
+        .limit(1);
+
+      if (existingRequest.length > 0) {
+        // Return success anyway to prevent email enumeration
+        console.log(`[Trial Request] Duplicate request from ${data.adminEmail}`);
+        return res.json({ success: true, message: "Trial request submitted successfully" });
+      }
+
+      // Insert the trial request
+      const [newRequest] = await db.insert(trialRequests).values({
+        schoolName: data.schoolName,
+        schoolDomain: data.schoolDomain.toLowerCase(),
+        adminFirstName: data.adminFirstName,
+        adminLastName: data.adminLastName,
+        adminEmail: data.adminEmail.toLowerCase(),
+        adminPhone: data.adminPhone || null,
+        estimatedStudents: data.estimatedStudents || null,
+        estimatedTeachers: data.estimatedTeachers || null,
+        message: data.message || null,
+      }).returning();
+
+      console.log(`[Trial Request] New request from ${data.schoolName} (${data.adminEmail})`);
+
+      // Send email notification to admin (non-blocking)
+      sendTrialRequestNotification({
+        schoolName: data.schoolName,
+        schoolDomain: data.schoolDomain,
+        adminFirstName: data.adminFirstName,
+        adminLastName: data.adminLastName,
+        adminEmail: data.adminEmail,
+        adminPhone: data.adminPhone,
+        estimatedStudents: data.estimatedStudents,
+        estimatedTeachers: data.estimatedTeachers,
+        message: data.message,
+      }).catch((err) => {
+        console.error("[Trial Request] Failed to send email notification:", err);
+      });
+
+      res.json({ success: true, message: "Trial request submitted successfully" });
+    } catch (error) {
+      console.error("Trial request error:", error);
+      res.status(500).json({ error: "Failed to submit trial request" });
     }
   });
 
@@ -2262,6 +2329,83 @@ export async function registerRoutes(
         return res.status(error.status).json({ error: error.message });
       }
       res.status(500).json({ error: "Failed to add admin" });
+    }
+  });
+
+  // ====== TRIAL REQUESTS MANAGEMENT (Super Admin) ======
+
+  // Get all trial requests
+  app.get("/api/super-admin/trial-requests", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { status } = req.query;
+
+      let query = db.select().from(trialRequests).orderBy(sql`${trialRequests.createdAt} DESC`);
+
+      if (status && status !== 'all') {
+        const requests = await db.select()
+          .from(trialRequests)
+          .where(sql`${trialRequests.status} = ${status}`)
+          .orderBy(sql`${trialRequests.createdAt} DESC`);
+        return res.json(requests);
+      }
+
+      const requests = await query;
+      res.json(requests);
+    } catch (error) {
+      console.error("Get trial requests error:", error);
+      res.status(500).json({ error: "Failed to get trial requests" });
+    }
+  });
+
+  // Update trial request status
+  app.patch("/api/super-admin/trial-requests/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { status, notes } = req.body;
+
+      const validStatuses = ['pending', 'contacted', 'converted', 'declined'];
+      if (status && !validStatuses.includes(status)) {
+        return res.status(400).json({ error: "Invalid status" });
+      }
+
+      const [updated] = await db.update(trialRequests)
+        .set({
+          status: status || undefined,
+          notes: notes !== undefined ? notes : undefined,
+          processedAt: new Date(),
+          processedBy: req.session.userId,
+        })
+        .where(sql`${trialRequests.id} = ${id}`)
+        .returning();
+
+      if (!updated) {
+        return res.status(404).json({ error: "Trial request not found" });
+      }
+
+      res.json(updated);
+    } catch (error) {
+      console.error("Update trial request error:", error);
+      res.status(500).json({ error: "Failed to update trial request" });
+    }
+  });
+
+  // Delete trial request
+  app.delete("/api/super-admin/trial-requests/:id", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const result = await db.delete(trialRequests)
+        .where(sql`${trialRequests.id} = ${id}`)
+        .returning();
+
+      if (result.length === 0) {
+        return res.status(404).json({ error: "Trial request not found" });
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete trial request error:", error);
+      res.status(500).json({ error: "Failed to delete trial request" });
     }
   });
 
