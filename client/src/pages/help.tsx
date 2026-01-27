@@ -76,15 +76,15 @@ export default function HelpCenter() {
       items: [
         {
           question: 'How do I create a ClassPilot account?',
-          answer: 'Visit classpilot.net and click "Start Free Trial". You can sign up using your Google account, which will automatically sync your Google Classroom rosters. Alternatively, you can create an account with your email and password.',
+          answer: 'Click "Start Free Trial" to register your school. School Admins can sign up their school domain, sync with Google Classroom, and import students from Google Workspace for Education. You can also create an account with your email and password.',
         },
         {
-          question: 'How do students install the Chrome extension?',
-          answer: 'Students install the ClassPilot extension from the Chrome Web Store. Once installed, it automatically detects their school email from their Chromebook login and registers them with your school. No manual setup required from students.',
+          question: 'How is the Chrome extension installed?',
+          answer: 'School Admins deploy the ClassPilot extension through Google Workspace for Education admin console. This allows force-installation across all managed Chromebooks — no action required from students or teachers.',
         },
         {
           question: 'How long does setup take?',
-          answer: 'Most schools are up and running in under 10 minutes. Create your account, have students install the extension, and you\'re ready to monitor. Google Classroom sync makes roster import instant.',
+          answer: 'Most schools are up and running in under 10 minutes. Register your school, deploy the extension via Google Workspace, and you\'re ready to monitor. Google Classroom sync makes roster import instant.',
         },
         {
           question: 'What devices are supported?',
@@ -106,7 +106,7 @@ export default function HelpCenter() {
         },
         {
           question: 'What is a Flight Path?',
-          answer: 'A Flight Path is a list of allowed websites. When you apply a Flight Path to students, they can ONLY visit websites on that list. Everything else is blocked. Great for keeping students focused on specific resources during assignments.',
+          answer: 'A Flight Path is a list of allowed websites. The first domain you enter becomes the starting point — students will be navigated there automatically. From there, they can only visit other websites on the list. Everything else is blocked. Great for keeping students focused on specific resources during assignments.',
         },
         {
           question: 'What is a Block List?',
@@ -118,7 +118,7 @@ export default function HelpCenter() {
         },
         {
           question: 'Can I see what tabs students have open?',
-          answer: 'Yes! Click on any student tile to open the detail drawer. You\'ll see their current active tab plus a list of all open tabs. You can also view their browsing history for the session.',
+          answer: 'Yes! Select a student and click the "Tabs" button to see all their open tabs. You\'ll see their current active tab plus a list of all open tabs. You can also view their browsing history for the session.',
         },
         {
           question: 'How do I lock a student\'s screen?',
@@ -130,7 +130,7 @@ export default function HelpCenter() {
         },
         {
           question: 'How do I close tabs on student devices?',
-          answer: 'Select students, click "Close Tabs", and choose which tabs to close. You can close specific tabs or all tabs except those on allowed domains.',
+          answer: 'Select a student and click the "Tabs" button to view their open tabs. From there, you can select a specific tab to close or use "Close All" to close all tabs at once.',
         },
       ],
     },
@@ -140,11 +140,11 @@ export default function HelpCenter() {
       items: [
         {
           question: 'How do I add teachers to my school?',
-          answer: 'Go to the Admin dashboard and click "Add Staff". Enter the teacher\'s email address and they\'ll receive an invitation. You can also bulk import teachers via CSV.',
+          answer: 'Go to the Admin dashboard and click "Add Staff". Enter the teacher\'s email address to add them to your school. Teachers simply log in with their school email address — no invitation emails are sent.',
         },
         {
           question: 'How do I import student rosters?',
-          answer: 'ClassPilot supports Google Classroom sync for automatic roster import. Alternatively, you can upload a CSV file with student names and emails. Students are automatically matched when they install the extension.',
+          answer: 'The easiest way is to import students directly from Google Workspace for Education. ClassPilot also supports Google Classroom sync for automatic roster import. Alternatively, you can upload a CSV file with student names and emails.',
         },
         {
           question: 'Can I see what all teachers are doing?',
@@ -155,8 +155,8 @@ export default function HelpCenter() {
           answer: 'In Settings, go to "Global Blacklist". Add domains you want blocked school-wide. These blocks apply to all students regardless of which teacher is monitoring them.',
         },
         {
-          question: 'What\'s the difference between Basic and Pro plans?',
-          answer: 'Basic plan includes core monitoring features. Pro adds advanced features like extended history, screenshot thumbnails, detailed analytics, and priority support. Contact us for pricing.',
+          question: 'What does 24/7 monitoring cost?',
+          answer: 'ClassPilot includes all core monitoring features in the base subscription. For schools that need around-the-clock monitoring outside school hours, 24/7 monitoring is available at an additional cost. Contact us for pricing details.',
         },
       ],
     },
@@ -174,7 +174,7 @@ export default function HelpCenter() {
         },
         {
           question: 'Is monitoring active outside school hours?',
-          answer: 'No. ClassPilot respects student privacy by only monitoring during configured school hours (default 7 AM - 5 PM). Outside these hours, no data is collected. Schools can adjust these times in settings.',
+          answer: 'No. ClassPilot respects student privacy by only monitoring during configured school hours. The default is 7 AM - 5 PM, but this can be changed upon request. Outside these hours, no data is collected.',
         },
         {
           question: 'How long is student data retained?',
@@ -208,7 +208,7 @@ export default function HelpCenter() {
         },
         {
           question: 'I can\'t see student screenshots',
-          answer: 'Screenshot thumbnails require the Pro plan and must be enabled in your session settings. Also ensure students have granted the necessary permissions to the extension.',
+          answer: 'Screenshot thumbnails must be enabled in your session settings. Also ensure students have granted the necessary permissions to the extension.',
         },
         {
           question: 'Google Classroom sync isn\'t working',

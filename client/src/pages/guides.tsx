@@ -408,9 +408,9 @@ export default function TeacherGuides() {
             textAlign: 'left',
           }}>
             {[
-              { step: '1', title: 'Create Account', desc: 'Sign up at classpilot.net with Google or email' },
+              { step: '1', title: 'School Registration', desc: 'Admin registers school domain and syncs with Google Workspace' },
               { step: '2', title: 'Set Up Classes', desc: 'Import from Google Classroom or create manually' },
-              { step: '3', title: 'Distribute Extension', desc: 'Share the Chrome extension link with students' },
+              { step: '3', title: 'Deploy Extension', desc: 'Admin deploys extension via Google Workspace for Education' },
               { step: '4', title: 'Start Monitoring', desc: 'Click "Start Session" and see all screens live' },
             ].map((item) => (
               <div key={item.step} style={{
@@ -452,13 +452,13 @@ export default function TeacherGuides() {
         background: 'linear-gradient(135deg, rgba(251, 191, 36, 0.1) 0%, transparent 100%)',
       }}>
         <h2 style={{ fontSize: '32px', fontWeight: 700, marginBottom: '16px' }}>
-          Ready to get started?
+          Need more help?
         </h2>
         <p style={{ color: '#94a3b8', marginBottom: '32px' }}>
-          Start your free 30-day trial today. No credit card required.
+          Visit our Help Center for answers to common questions or contact support.
         </p>
-        <Link href="/login" className="btn-primary">
-          Start Free Trial
+        <Link href="/help" className="btn-primary">
+          Visit Help Center
         </Link>
       </div>
 
@@ -521,15 +521,16 @@ function generatePDFContent(): string {
 
   <div class="section">
     <h3>Creating Your Account</h3>
+    <p>Your School Administrator will register your school with ClassPilot. Once registered:</p>
     <ol>
-      <li>Visit <strong>classpilot.net</strong> and click "Start Free Trial"</li>
-      <li>Sign in with your Google account (recommended for Google Classroom sync) or create an account with email</li>
-      <li>Enter your school information when prompted</li>
+      <li>Visit <strong>classpilot.net</strong> and click "Sign In"</li>
+      <li>Sign in with your school Google account</li>
+      <li>Your account will be automatically linked to your school</li>
       <li>You'll be taken to your teacher dashboard</li>
     </ol>
 
     <div class="tip">
-      <div class="tip-title">Pro Tip</div>
+      <div class="tip-title">Google Classroom Sync</div>
       Using Google sign-in automatically syncs your Google Classroom rosters, saving you time on setup.
     </div>
   </div>
@@ -545,21 +546,21 @@ function generatePDFContent(): string {
     </ul>
   </div>
 
-  <h2>2. Student Setup</h2>
+  <h2>2. Extension Deployment</h2>
 
   <div class="section">
-    <h3>Installing the Chrome Extension</h3>
-    <p>Students need to install the ClassPilot extension on their Chromebooks:</p>
+    <h3>How the Chrome Extension is Installed</h3>
+    <p>School Administrators deploy the ClassPilot extension through Google Workspace for Education:</p>
     <ol>
-      <li>Share the Chrome Web Store link with students</li>
-      <li>Students click "Add to Chrome" to install</li>
-      <li>The extension auto-detects their school email from their Chromebook login</li>
+      <li>School Admin accesses the Google Admin Console</li>
+      <li>The extension is force-installed across all managed Chromebooks</li>
+      <li>The extension auto-detects student school email from their Chromebook login</li>
       <li>Students will appear in your dashboard automatically when you start a session</li>
     </ol>
 
     <div class="tip">
-      <div class="tip-title">For Administrators</div>
-      The extension can be force-installed via Google Admin Console for managed Chromebooks, eliminating the need for individual student installation.
+      <div class="tip-title">No Student Action Required</div>
+      Students do not need to install anything. The extension is deployed automatically by your School Administrator through Google Workspace for Education.
     </div>
   </div>
 
