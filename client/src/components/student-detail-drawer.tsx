@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { ExternalLink, Clock, Monitor, Camera, History as HistoryIcon, LayoutGrid, Calendar as CalendarIcon, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +52,39 @@ export function StudentDetailDrawer({
     return null;
   }, [student, urlSessions]);
 
+  const [panelWidth, setPanelWidth] = useState(700);
+  const isResizing = useRef(false);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+  }, []);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing.current) return;
+      const newWidth = window.innerWidth - e.clientX;
+      const maxWidth = window.innerWidth * 0.9;
+      setPanelWidth(Math.max(400, Math.min(maxWidth, newWidth)));
+    };
+
+    const handleMouseUp = () => {
+      if (!isResizing.current) return;
+      isResizing.current = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
   if (!student) return null;
 
   const getStatusColor = (status: string) => {
@@ -82,7 +115,14 @@ export function StudentDetailDrawer({
 
   return (
     <Sheet open={!!student} onOpenChange={(open) => !open && onClose()}>
-      <SheetContent side="right" className="w-full sm:w-[600px] md:w-[700px] max-w-[90vw] p-0 flex flex-col">
+      <SheetContent side="right" className="p-0 flex flex-col" style={{ width: `${panelWidth}px`, maxWidth: '90vw' }}>
+        {/* Resize drag handle */}
+        <div
+          onMouseDown={handleMouseDown}
+          className="absolute left-0 top-0 bottom-0 w-2 cursor-col-resize z-50 group"
+        >
+          <div className="absolute left-0.5 top-1/2 -translate-y-1/2 w-1 h-12 rounded-full bg-border opacity-0 group-hover:opacity-100 transition-opacity" />
+        </div>
         <SheetHeader className="px-6 py-4 border-b">
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">

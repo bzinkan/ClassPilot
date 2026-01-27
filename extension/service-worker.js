@@ -542,7 +542,7 @@ async function safeSendHeartbeat(reason) {
     if (globalThis.Sentry?.captureException) {
       globalThis.Sentry.captureException(error);
     }
-    console.error(`[Heartbeat] Failed (${reason}):`, error);
+    console.warn(`[Heartbeat] Failed (${reason}):`, error?.message || error);
   }
 }
 
@@ -1539,10 +1539,8 @@ async function sendHeartbeat(reason = 'manual') {
       setTimeout(() => ensureRegistered(), 2000); // 2 second delay before re-registering
       return; // Skip rest of error handling
     } else if (response.status >= 500) {
-      // Server error - log and wait for next scheduled heartbeat
-      console.error('Heartbeat server error:', response.status);
-      chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
-      chrome.action.setBadgeText({ text: '!' });
+      // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
+      console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
@@ -1554,13 +1552,8 @@ async function sendHeartbeat(reason = 'manual') {
     }
     
   } catch (error) {
-    if (globalThis.Sentry?.captureException) {
-      globalThis.Sentry.captureException(error);
-    }
-    console.error('Heartbeat network error:', error);
-    chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
-    chrome.action.setBadgeText({ text: '!' });
-    throw error;
+    // Network errors are expected during off-hours, deploys, or connectivity blips — don't surface as errors
+    console.warn('Heartbeat network issue:', error?.message || error);
   }
 }
 
@@ -3003,7 +2996,8 @@ function connectWebSocket() {
   };
   
   ws.onerror = (error) => {
-    console.error('WebSocket error:', error);
+    // Expected during off-hours, deploys, or connectivity blips — don't surface as errors
+    console.warn('WebSocket connection issue');
   };
   
   ws.onclose = () => {

@@ -2205,6 +2205,26 @@ export default function Dashboard() {
               <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
                 <DropdownMenuLabel>Select Students</DropdownMenuLabel>
                 <DropdownMenuSeparator />
+                {filteredStudents.length > 0 && (
+                  <>
+                    <DropdownMenuCheckboxItem
+                      checked={selectedStudentIds.size === filteredStudents.length && filteredStudents.length > 0}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          selectAll();
+                        } else {
+                          clearSelection();
+                        }
+                      }}
+                      onSelect={(e) => e.preventDefault()}
+                      data-testid="dropdown-item-select-all"
+                      className="font-medium"
+                    >
+                      Select All ({filteredStudents.length})
+                    </DropdownMenuCheckboxItem>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
                 {filteredStudents.length === 0 ? (
                   <div className="px-2 py-6 text-center text-sm text-muted-foreground">
                     No students available
