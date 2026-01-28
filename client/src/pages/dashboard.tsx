@@ -1843,7 +1843,7 @@ export default function Dashboard() {
                 <p className="text-xs text-muted-foreground font-medium">
                   {currentUser?.schoolName && <span className="font-semibold">{currentUser.schoolName}</span>}
                   {currentUser?.schoolName && ' • '}
-                  {currentUser?.role === 'school_admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
+                  {currentUser?.role === 'school_admin' ? 'Admin Panel' : 'Teacher Dashboard'}
                 </p>
               </div>
             </div>

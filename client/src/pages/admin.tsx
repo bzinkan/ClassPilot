@@ -444,7 +444,7 @@ export default function Admin() {
             <Users className="h-6 w-6 text-primary-foreground" />
           </div>
           <div>
-            <h1 className="text-3xl font-semibold">Admin Dashboard</h1>
+            <h1 className="text-3xl font-semibold">Admin Panel</h1>
             <p className="text-muted-foreground">
               {currentUser?.schoolName && <span className="font-medium">{currentUser.schoolName}</span>}
               {currentUser?.schoolName && ' • '}
