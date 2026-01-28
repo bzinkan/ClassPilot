@@ -70,6 +70,7 @@ export default function SchoolDetail() {
   const [newAdminName, setNewAdminName] = useState("");
   const [isEditLicensesOpen, setIsEditLicensesOpen] = useState(false);
   const [newMaxLicenses, setNewMaxLicenses] = useState(100);
+  const [onboardingEmailDialogOpen, setOnboardingEmailDialogOpen] = useState(false);
   const [resetLoginDialogOpen, setResetLoginDialogOpen] = useState(false);
   const [tempPassword, setTempPassword] = useState<string>("");
   const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
@@ -292,6 +293,27 @@ export default function SchoolDetail() {
     },
   });
 
+  const onboardingEmailMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/send-onboarding-email`, {});
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      setOnboardingEmailDialogOpen(false);
+      toast({
+        title: "Onboarding emails sent",
+        description: `${data.sent} email${data.sent !== 1 ? "s" : ""} sent successfully${data.failed > 0 ? `, ${data.failed} failed` : ""}`,
+      });
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to send onboarding emails",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
   const resetLoginMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/reset-login`, {});
@@ -401,6 +423,14 @@ export default function SchoolDetail() {
             >
               <KeyRound className="w-4 h-4 mr-2" />
               Reset Admin Login
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => setOnboardingEmailDialogOpen(true)}
+              disabled={school.adminCount === 0 || onboardingEmailMutation.isPending}
+            >
+              <Send className="w-4 h-4 mr-2" />
+              Send Onboarding Email
             </Button>
           </div>
         </div>
@@ -837,6 +867,29 @@ export default function SchoolDetail() {
         </Dialog>
 
         {/* Reset Login Dialog */}
+        <Dialog open={onboardingEmailDialogOpen} onOpenChange={setOnboardingEmailDialogOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Send Onboarding Email</DialogTitle>
+              <DialogDescription>
+                This will send a welcome email to all admins of {school.name} with login instructions, Chrome extension install guide, and getting started links.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setOnboardingEmailDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => onboardingEmailMutation.mutate()}
+                disabled={onboardingEmailMutation.isPending}
+              >
+                <Send className="w-4 h-4 mr-2" />
+                {onboardingEmailMutation.isPending ? "Sending..." : "Send Email"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
         <Dialog open={resetLoginDialogOpen} onOpenChange={setResetLoginDialogOpen}>
           <DialogContent>
             <DialogHeader>

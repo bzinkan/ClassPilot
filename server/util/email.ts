@@ -236,3 +236,138 @@ This message was sent to all ClassPilot school administrators.
   console.log(`[Email] Broadcast complete: ${result.sent} sent, ${result.failed} failed`);
   return result;
 }
+
+interface OnboardingEmailData {
+  schoolName: string;
+  adminEmail: string;
+  adminName: string;
+  loginUrl: string;
+}
+
+export async function sendOnboardingEmail(data: OnboardingEmailData): Promise<boolean> {
+  const subject = `Welcome to ClassPilot, ${data.schoolName}!`;
+  const extensionUrl = "https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca";
+  const extensionId = "iggbfegfcjkfieoemeolfmfnapepalca";
+  const guidesUrl = "https://school-pilot.net/guides";
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #0f172a; padding: 24px; text-align: center;">
+        <h1 style="color: #fbbf24; margin: 0; font-size: 24px;">ClassPilot</h1>
+        <p style="color: #94a3b8; margin: 8px 0 0;">Welcome Aboard!</p>
+      </div>
+
+      <div style="padding: 32px; background: #f8fafc;">
+        <p style="color: #0f172a; font-size: 16px; line-height: 1.6;">
+          Hi ${escapeHtml(data.adminName)},
+        </p>
+        <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+          Your school, <strong>${escapeHtml(data.schoolName)}</strong>, is now set up on ClassPilot!
+          Here's everything you need to get started.
+        </p>
+
+        <h2 style="color: #0f172a; margin: 28px 0 12px; font-size: 18px;">1. Log In</h2>
+        <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+          Sign in to your admin dashboard using your email address:
+        </p>
+        <div style="text-align: center; margin: 16px 0;">
+          <a href="${escapeHtml(data.loginUrl)}" style="display: inline-block; background: #2563eb; color: white; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px;">Log In to ClassPilot</a>
+        </div>
+
+        <h2 style="color: #0f172a; margin: 28px 0 12px; font-size: 18px;">2. Install the Chrome Extension</h2>
+        <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+          Students need the ClassPilot Chrome extension installed on their managed Chromebooks.
+        </p>
+        <div style="text-align: center; margin: 16px 0;">
+          <a href="${extensionUrl}" style="display: inline-block; background: #0f172a; color: #fbbf24; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px;">View in Chrome Web Store</a>
+        </div>
+
+        <div style="background: white; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 16px 0;">
+          <h3 style="color: #0f172a; margin: 0 0 12px; font-size: 15px;">Force-Install via Google Admin Console</h3>
+          <ol style="color: #475569; font-size: 14px; line-height: 1.8; margin: 0; padding-left: 20px;">
+            <li>Go to <strong>Google Admin Console</strong> &gt; Devices &gt; Chrome &gt; Apps &amp; extensions</li>
+            <li>Select the organizational unit for your students</li>
+            <li>Click the <strong>+</strong> icon &gt; Add Chrome app or extension by ID</li>
+            <li>Enter the extension ID: <code style="background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 13px;">${extensionId}</code></li>
+            <li>Set the installation policy to <strong>Force install</strong></li>
+            <li>Click <strong>Save</strong></li>
+          </ol>
+        </div>
+
+        <h2 style="color: #0f172a; margin: 28px 0 12px; font-size: 18px;">3. Getting Started Guides</h2>
+        <p style="color: #475569; font-size: 15px; line-height: 1.6;">
+          Visit our guides for step-by-step instructions on setting up classes, adding teachers, and using ClassPilot features:
+        </p>
+        <div style="text-align: center; margin: 16px 0;">
+          <a href="${guidesUrl}" style="display: inline-block; background: white; color: #2563eb; padding: 12px 32px; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 15px; border: 2px solid #2563eb;">View Guides</a>
+        </div>
+
+        <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid #e2e8f0;">
+          <p style="color: #64748b; margin: 0; font-size: 14px;">
+            Need help? Reply to this email or contact us at <a href="mailto:support@school-pilot.net" style="color: #2563eb;">support@school-pilot.net</a>
+          </p>
+        </div>
+      </div>
+
+      <div style="background: #0f172a; padding: 16px; text-align: center;">
+        <p style="color: #64748b; margin: 0; font-size: 12px;">
+          &copy; ${new Date().getFullYear()} ClassPilot. All rights reserved.
+        </p>
+      </div>
+    </div>
+  `;
+
+  const text = `
+Welcome to ClassPilot, ${data.schoolName}!
+
+Hi ${data.adminName},
+
+Your school, ${data.schoolName}, is now set up on ClassPilot! Here's everything you need to get started.
+
+1. LOG IN
+---------
+Sign in to your admin dashboard: ${data.loginUrl}
+
+2. INSTALL THE CHROME EXTENSION
+-------------------------------
+Students need the ClassPilot Chrome extension on their managed Chromebooks.
+
+Chrome Web Store: ${extensionUrl}
+
+Force-Install via Google Admin Console:
+  1. Go to Google Admin Console > Devices > Chrome > Apps & extensions
+  2. Select the organizational unit for your students
+  3. Click the + icon > Add Chrome app or extension by ID
+  4. Enter the extension ID: ${extensionId}
+  5. Set the installation policy to Force install
+  6. Click Save
+
+3. GETTING STARTED GUIDES
+--------------------------
+Visit our guides for step-by-step instructions: ${guidesUrl}
+
+Need help? Contact us at support@school-pilot.net
+  `.trim();
+
+  if (!transporter) {
+    console.log(`[Email] SMTP not configured. Would have sent onboarding email to ${data.adminEmail}:`);
+    console.log(`[Email] Subject: ${subject}`);
+    console.log(`[Email] Content:\n${text}`);
+    return true;
+  }
+
+  try {
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: data.adminEmail,
+      subject,
+      text,
+      html,
+    });
+    console.log(`[Email] Onboarding email sent to ${data.adminEmail}`);
+    return true;
+  } catch (error) {
+    console.error(`[Email] Failed to send onboarding email to ${data.adminEmail}:`, error);
+    return false;
+  }
+}

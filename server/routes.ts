@@ -2292,6 +2292,47 @@ export async function registerRoutes(
     }
   });
 
+  // Send onboarding email to all school admins
+  app.post("/api/super-admin/schools/:id/send-onboarding-email", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const school = await storage.getSchool(id);
+
+      if (!school) {
+        return res.status(404).json({ error: "School not found" });
+      }
+
+      const allUsers = await storage.getUsersBySchool(id);
+      const admins = allUsers.filter(u => u.role === "school_admin");
+
+      if (admins.length === 0) {
+        return res.status(400).json({ error: "No admins found for this school" });
+      }
+
+      const { sendOnboardingEmail } = await import("./util/email");
+      const loginUrl = `https://school-pilot.net/login`;
+
+      let sent = 0;
+      let failed = 0;
+
+      for (const admin of admins) {
+        const success = await sendOnboardingEmail({
+          schoolName: school.name,
+          adminEmail: admin.email,
+          adminName: admin.displayName || admin.email,
+          loginUrl,
+        });
+        if (success) sent++;
+        else failed++;
+      }
+
+      res.json({ success: true, sent, failed });
+    } catch (error) {
+      console.error("Send onboarding email error:", error);
+      res.status(500).json({ error: "Failed to send onboarding emails" });
+    }
+  });
+
   // Add admin to school
   app.post("/api/super-admin/schools/:id/admins", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
