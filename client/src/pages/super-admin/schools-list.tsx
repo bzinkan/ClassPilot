@@ -7,7 +7,8 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check, Mail } from "lucide-react";
+import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check, Mail, Send } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -49,6 +50,9 @@ export default function SchoolsList() {
   const [resetLoginDialogOpen, setResetLoginDialogOpen] = useState(false);
   const [tempPassword, setTempPassword] = useState<string>("");
   const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
+  const [broadcastDialogOpen, setBroadcastDialogOpen] = useState(false);
+  const [broadcastSubject, setBroadcastSubject] = useState("");
+  const [broadcastMessage, setBroadcastMessage] = useState("");
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -188,12 +192,50 @@ export default function SchoolsList() {
   });
 
   const [passwordCopied, setPasswordCopied] = useState(false);
-  
+
   const copyPassword = () => {
     navigator.clipboard.writeText(tempPassword);
     setPasswordCopied(true);
     setTimeout(() => setPasswordCopied(false), 2000);
   };
+
+  // Query to get admin email counts for broadcast preview
+  const { data: adminEmailsData } = useQuery<{
+    success: boolean;
+    totalAdmins: number;
+    schoolCount: number;
+  }>({
+    queryKey: ['/api/super-admin/admin-emails'],
+    queryFn: async () => {
+      const response = await fetch('/api/super-admin/admin-emails');
+      if (!response.ok) throw new Error('Failed to fetch admin emails');
+      return response.json();
+    },
+    enabled: broadcastDialogOpen,
+  });
+
+  const broadcastMutation = useMutation({
+    mutationFn: async ({ subject, message }: { subject: string; message: string }) => {
+      const res = await apiRequest("POST", "/api/super-admin/broadcast-email", { subject, message });
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      toast({
+        title: "Broadcast sent",
+        description: `Email sent to ${data.sent} admin${data.sent !== 1 ? 's' : ''}${data.failed > 0 ? ` (${data.failed} failed)` : ''}`,
+      });
+      setBroadcastDialogOpen(false);
+      setBroadcastSubject("");
+      setBroadcastMessage("");
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to send broadcast",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
 
   const getStatusBadge = (status: string) => {
     const variants: Record<string, "default" | "secondary" | "destructive"> = {
@@ -234,6 +276,14 @@ export default function SchoolsList() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setBroadcastDialogOpen(true)}
+              data-testid="button-broadcast-email"
+            >
+              <Send className="w-4 h-4 mr-2" />
+              Broadcast Email
+            </Button>
             <Button
               variant="outline"
               onClick={() => setLocation("/super-admin/trial-requests")}
@@ -563,6 +613,67 @@ export default function SchoolsList() {
               data-testid="button-close-reset-dialog"
             >
               Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Broadcast Email Dialog */}
+      <Dialog open={broadcastDialogOpen} onOpenChange={setBroadcastDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Broadcast Email to All Admins</DialogTitle>
+            <DialogDescription>
+              Send an email to all school administrators. Use this for important announcements, maintenance notices, or incident updates.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            {adminEmailsData && (
+              <div className="p-3 bg-muted rounded-lg text-sm">
+                <p className="font-medium">Recipients: {adminEmailsData.totalAdmins} admin{adminEmailsData.totalAdmins !== 1 ? 's' : ''}</p>
+                <p className="text-muted-foreground">Across {adminEmailsData.schoolCount} active/trial school{adminEmailsData.schoolCount !== 1 ? 's' : ''}</p>
+              </div>
+            )}
+            <div className="space-y-2">
+              <Label htmlFor="broadcast-subject">Subject</Label>
+              <Input
+                id="broadcast-subject"
+                value={broadcastSubject}
+                onChange={(e) => setBroadcastSubject(e.target.value)}
+                placeholder="Important: ClassPilot Service Notice"
+                data-testid="input-broadcast-subject"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="broadcast-message">Message</Label>
+              <Textarea
+                id="broadcast-message"
+                value={broadcastMessage}
+                onChange={(e) => setBroadcastMessage(e.target.value)}
+                placeholder="Enter your message here..."
+                rows={6}
+                data-testid="input-broadcast-message"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setBroadcastDialogOpen(false);
+                setBroadcastSubject("");
+                setBroadcastMessage("");
+              }}
+              data-testid="button-cancel-broadcast"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => broadcastMutation.mutate({ subject: broadcastSubject, message: broadcastMessage })}
+              disabled={!broadcastSubject || !broadcastMessage || broadcastMutation.isPending}
+              data-testid="button-send-broadcast"
+            >
+              {broadcastMutation.isPending ? "Sending..." : "Send to All Admins"}
             </Button>
           </DialogFooter>
         </DialogContent>

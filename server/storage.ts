@@ -213,6 +213,7 @@ export interface IStorage {
   getUserByEmail(email: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   getUsersBySchool(schoolId: string): Promise<User[]>;
+  getSchoolAdmins(schoolId: string): Promise<User[]>;
   createUser(user: InsertUser): Promise<User>;
   updateUser(id: string, updates: Partial<InsertUser>): Promise<User | undefined>;
   getAllUsers(): Promise<User[]>;
@@ -633,6 +634,12 @@ export class MemStorage implements IStorage {
   async getUsersBySchool(schoolId: string): Promise<User[]> {
     return Array.from(this.users.values()).filter(
       (user) => user.schoolId === schoolId
+    );
+  }
+
+  async getSchoolAdmins(schoolId: string): Promise<User[]> {
+    return Array.from(this.users.values()).filter(
+      (user) => user.schoolId === schoolId && user.role === "school_admin"
     );
   }
 
@@ -2251,6 +2258,12 @@ export class DatabaseStorage implements IStorage {
 
   async getUsersBySchool(schoolId: string): Promise<User[]> {
     return await db.select().from(users).where(eq(users.schoolId, schoolId));
+  }
+
+  async getSchoolAdmins(schoolId: string): Promise<User[]> {
+    return await db.select().from(users).where(
+      and(eq(users.schoolId, schoolId), eq(users.role, "school_admin"))
+    );
   }
 
   async createUser(insertUser: InsertUser): Promise<User> {

@@ -2573,6 +2573,92 @@ export async function registerRoutes(
     }
   });
 
+  // ── Super Admin: Broadcast Email to All School Admins ──
+  app.post("/api/super-admin/broadcast-email", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { subject, message } = req.body;
+
+      if (!subject || !message) {
+        return res.status(400).json({ error: "Subject and message are required" });
+      }
+
+      // Get all school admins from active/trial schools
+      const schools = await storage.getAllSchools();
+      const activeSchools = schools.filter(s => s.status === "active" || s.status === "trial");
+
+      const recipients: Array<{ email: string; name?: string | null; schoolName?: string }> = [];
+
+      for (const school of activeSchools) {
+        const admins = await storage.getSchoolAdmins(school.id);
+        for (const admin of admins) {
+          recipients.push({
+            email: admin.email,
+            name: admin.displayName,
+            schoolName: school.name,
+          });
+        }
+      }
+
+      if (recipients.length === 0) {
+        return res.status(400).json({ error: "No active school admins found" });
+      }
+
+      const { sendBroadcastEmail } = await import("./util/email");
+      const result = await sendBroadcastEmail({ subject, message, recipients });
+
+      res.json({
+        success: true,
+        sent: result.sent,
+        failed: result.failed,
+        totalRecipients: recipients.length,
+        errors: result.errors.length > 0 ? result.errors : undefined,
+      });
+    } catch (error) {
+      console.error("Broadcast email error:", error);
+      res.status(500).json({ error: "Failed to send broadcast email" });
+    }
+  });
+
+  // ── Super Admin: Get All Admin Emails (for preview) ──
+  app.get("/api/super-admin/admin-emails", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const schools = await storage.getAllSchools();
+      const activeSchools = schools.filter(s => s.status === "active" || s.status === "trial");
+
+      const adminsBySchool: Array<{
+        schoolId: string;
+        schoolName: string;
+        status: string;
+        admins: Array<{ email: string; name?: string | null }>;
+      }> = [];
+
+      let totalAdmins = 0;
+
+      for (const school of activeSchools) {
+        const admins = await storage.getSchoolAdmins(school.id);
+        if (admins.length > 0) {
+          adminsBySchool.push({
+            schoolId: school.id,
+            schoolName: school.name,
+            status: school.status,
+            admins: admins.map(a => ({ email: a.email, name: a.displayName })),
+          });
+          totalAdmins += admins.length;
+        }
+      }
+
+      res.json({
+        success: true,
+        totalAdmins,
+        schoolCount: adminsBySchool.length,
+        adminsBySchool,
+      });
+    } catch (error) {
+      console.error("Get admin emails error:", error);
+      res.status(500).json({ error: "Failed to get admin emails" });
+    }
+  });
+
   // Admin: Get all teacher-student assignments
   app.get("/api/admin/teacher-students", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireAdminRole, async (req, res) => {
     try {

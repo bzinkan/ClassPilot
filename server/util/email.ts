@@ -161,3 +161,78 @@ function escapeHtml(text: string): string {
   };
   return text.replace(/[&<>"']/g, (char) => map[char]);
 }
+
+interface BroadcastEmailData {
+  subject: string;
+  message: string;
+  recipients: Array<{ email: string; name?: string | null; schoolName?: string }>;
+}
+
+export async function sendBroadcastEmail(data: BroadcastEmailData): Promise<{ sent: number; failed: number; errors: string[] }> {
+  const result = { sent: 0, failed: 0, errors: [] as string[] };
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #0f172a; padding: 24px; text-align: center;">
+        <h1 style="color: #fbbf24; margin: 0; font-size: 24px;">ClassPilot</h1>
+        <p style="color: #94a3b8; margin: 8px 0 0;">Important Notice</p>
+      </div>
+
+      <div style="padding: 32px; background: #f8fafc;">
+        <div style="background: white; padding: 24px; border-radius: 8px; border: 1px solid #e2e8f0;">
+          <p style="margin: 0; color: #0f172a; white-space: pre-wrap; line-height: 1.6;">${escapeHtml(data.message)}</p>
+        </div>
+
+        <div style="margin-top: 32px; padding-top: 24px; border-top: 1px solid #e2e8f0;">
+          <p style="color: #64748b; margin: 0; font-size: 14px;">
+            This message was sent to all ClassPilot school administrators.
+          </p>
+        </div>
+      </div>
+
+      <div style="background: #0f172a; padding: 16px; text-align: center;">
+        <p style="color: #64748b; margin: 0; font-size: 12px;">
+          © ${new Date().getFullYear()} ClassPilot. All rights reserved.
+        </p>
+      </div>
+    </div>
+  `;
+
+  const text = `
+${data.message}
+
+---
+This message was sent to all ClassPilot school administrators.
+© ${new Date().getFullYear()} ClassPilot
+  `.trim();
+
+  // If no SMTP configured, log and return
+  if (!transporter) {
+    console.log(`[Email] SMTP not configured. Would have sent broadcast to ${data.recipients.length} recipients:`);
+    console.log(`[Email] Subject: ${data.subject}`);
+    console.log(`[Email] Recipients: ${data.recipients.map(r => r.email).join(", ")}`);
+    console.log(`[Email] Content:\n${text}`);
+    return { sent: data.recipients.length, failed: 0, errors: [] };
+  }
+
+  // Send to each recipient individually (better deliverability than BCC)
+  for (const recipient of data.recipients) {
+    try {
+      await transporter.sendMail({
+        from: FROM_EMAIL,
+        to: recipient.email,
+        subject: data.subject,
+        text,
+        html,
+      });
+      result.sent++;
+    } catch (error: any) {
+      result.failed++;
+      result.errors.push(`${recipient.email}: ${error.message || "Unknown error"}`);
+      console.error(`[Email] Failed to send broadcast to ${recipient.email}:`, error);
+    }
+  }
+
+  console.log(`[Email] Broadcast complete: ${result.sent} sent, ${result.failed} failed`);
+  return result;
+}
