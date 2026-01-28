@@ -143,7 +143,7 @@ let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
 let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
-let wsReconnectBackoffMs = 5000;
+let wsReconnectBackoffMs = 10000; // Start with 10s to reduce console noise during deploys
 let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
@@ -2736,8 +2736,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+// Schedule WebSocket reconnection with exponential backoff
+function scheduleWsReconnect() {
+  if (trackingState !== TRACKING_STATES.ACTIVE) {
+    return;
+  }
+  const delay = Math.min(wsReconnectBackoffMs, 120000);
+  // Add jitter (0-20% of delay) to prevent thundering herd
+  const jitter = Math.floor(Math.random() * delay * 0.2);
+  const actualDelay = delay + jitter;
+  console.log(`WebSocket will reconnect in ${Math.round(actualDelay / 1000)}s...`);
+  chrome.alarms.create('ws-reconnect', {
+    when: Date.now() + actualDelay,
+  });
+  wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 120000);
+}
+
 // Connect to WebSocket for signaling
-function connectWebSocket() {
+async function connectWebSocket() {
   if (trackingState !== TRACKING_STATES.ACTIVE) {
     console.log('Skipping WebSocket - tracking state is not ACTIVE');
     return;
@@ -2747,18 +2763,36 @@ function connectWebSocket() {
     console.log('Skipping WebSocket - missing email or deviceId');
     return;
   }
-  
+
+  // Pre-flight health check: verify server is reachable before attempting WebSocket
+  // This prevents browser-level 503 errors from appearing in console during deploys
+  try {
+    const healthResponse = await fetch(`${CONFIG.serverUrl}/health`, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    if (!healthResponse.ok) {
+      console.log('Skipping WebSocket - server health check failed');
+      scheduleWsReconnect();
+      return;
+    }
+  } catch (error) {
+    console.log('Skipping WebSocket - server unreachable');
+    scheduleWsReconnect();
+    return;
+  }
+
   // Clear any pending reconnection alarm since we're connecting now
   chrome.alarms.clear('ws-reconnect');
-  
+
   const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
   const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
-  
+
   ws = new WebSocket(wsUrl);
   
   ws.onopen = () => {
     console.log('WebSocket connected');
-    wsReconnectBackoffMs = 5000;
+    wsReconnectBackoffMs = 10000; // Reset backoff on successful connection
     // Authenticate as student - prefer JWT token (faster), fallback to email lookup
     try {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -3004,17 +3038,7 @@ function connectWebSocket() {
     console.log('WebSocket disconnected');
     ws = null; // Clear the reference
     setObservedState(false, 'ws-closed');
-    
-    if (trackingState !== TRACKING_STATES.ACTIVE) {
-      return;
-    }
-
-    const delay = Math.min(wsReconnectBackoffMs, 120000);
-    console.log(`WebSocket will reconnect in ${Math.round(delay / 1000)}s...`);
-    chrome.alarms.create('ws-reconnect', {
-      when: Date.now() + delay,
-    });
-    wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 120000);
+    scheduleWsReconnect();
   };
 }
 
