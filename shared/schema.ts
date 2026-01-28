@@ -28,6 +28,12 @@ export const schools = pgTable("schools", {
   trackingEndHour: integer("tracking_end_hour").notNull().default(17), // Default 5:00 PM (17:00)
   is24HourEnabled: boolean("is_24_hour_enabled").notNull().default(false), // Premium feature - 24/7 monitoring
   schoolTimezone: text("school_timezone").notNull().default("America/New_York"), // IANA timezone (e.g., "America/New_York")
+  // Billing
+  billingEmail: text("billing_email"), // Invoice recipient (defaults to admin email if null)
+  stripeCustomerId: text("stripe_customer_id"), // Stripe Customer ID
+  lastPaymentAmount: integer("last_payment_amount"), // Last payment in cents
+  lastPaymentDate: timestamp("last_payment_date"), // When last payment was received
+  totalPaid: integer("total_paid").notNull().default(0), // Lifetime total paid in cents
 });
 
 export const insertSchoolSchema = createInsertSchema(schools).omit({ id: true, createdAt: true });

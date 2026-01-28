@@ -527,6 +527,12 @@ export class MemStorage implements IStorage {
       trackingEndHour: insertSchool.trackingEndHour ?? 17,
       is24HourEnabled: insertSchool.is24HourEnabled ?? false,
       schoolTimezone: insertSchool.schoolTimezone ?? "America/New_York",
+      // Billing
+      billingEmail: insertSchool.billingEmail ?? null,
+      stripeCustomerId: insertSchool.stripeCustomerId ?? null,
+      lastPaymentAmount: insertSchool.lastPaymentAmount ?? null,
+      lastPaymentDate: insertSchool.lastPaymentDate ?? null,
+      totalPaid: insertSchool.totalPaid ?? 0,
     };
     this.schools.set(id, school);
     return school;

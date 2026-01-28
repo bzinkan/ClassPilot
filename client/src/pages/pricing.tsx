@@ -1,8 +1,12 @@
 import { useState } from 'react';
 import { Link } from "wouter";
+import { apiRequest } from "@/lib/queryClient";
 
 export default function PricingPage() {
   const [studentCount, setStudentCount] = useState(500);
+  const [checkoutLoading, setCheckoutLoading] = useState(false);
+  const [checkoutForm, setCheckoutForm] = useState({ schoolName: '', billingEmail: '' });
+  const [showCheckoutForm, setShowCheckoutForm] = useState(false);
 
   const basePrice = 500;
   const perStudent = 2;
@@ -501,18 +505,84 @@ export default function PricingPage() {
               }}>
                 Renews at ${annualTotal.toLocaleString()}/year
               </div>
-              <a
-                href="mailto:info@school-pilot.net?subject=Skip%20Trial%20Offer%20-%20ClassPilot&body=Hi%2C%0A%0AI'm%20interested%20in%20the%20skip%20trial%20offer%20for%20ClassPilot.%0A%0ASchool%20Name%3A%20%0ANumber%20of%20Students%3A%20%0A%0APlease%20contact%20me%20with%20more%20information.%0A%0AThank%20you!"
-                className="btn-secondary"
-                style={{
-                  width: '100%',
-                  borderColor: 'rgba(251, 191, 36, 0.3)',
-                  color: '#fbbf24',
-                  textAlign: 'center',
-                }}
-              >
-                Contact Us to Claim Offer
-              </a>
+              {!showCheckoutForm ? (
+                <button
+                  onClick={() => setShowCheckoutForm(true)}
+                  className="btn-secondary"
+                  style={{
+                    width: '100%',
+                    borderColor: 'rgba(251, 191, 36, 0.3)',
+                    color: '#fbbf24',
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Pay Now & Skip Trial →
+                </button>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <input
+                    type="text"
+                    placeholder="School Name"
+                    value={checkoutForm.schoolName}
+                    onChange={(e) => setCheckoutForm(f => ({ ...f, schoolName: e.target.value }))}
+                    style={{
+                      padding: '12px 16px',
+                      borderRadius: '8px',
+                      border: '1px solid #334155',
+                      background: '#0f172a',
+                      color: '#f8fafc',
+                      fontSize: '14px',
+                    }}
+                  />
+                  <input
+                    type="email"
+                    placeholder="Billing Email"
+                    value={checkoutForm.billingEmail}
+                    onChange={(e) => setCheckoutForm(f => ({ ...f, billingEmail: e.target.value }))}
+                    style={{
+                      padding: '12px 16px',
+                      borderRadius: '8px',
+                      border: '1px solid #334155',
+                      background: '#0f172a',
+                      color: '#f8fafc',
+                      fontSize: '14px',
+                    }}
+                  />
+                  <button
+                    onClick={async () => {
+                      if (!checkoutForm.schoolName || !checkoutForm.billingEmail) return;
+                      setCheckoutLoading(true);
+                      try {
+                        const res = await apiRequest("POST", "/api/checkout/create-session", {
+                          studentCount,
+                          skipTrial: true,
+                          schoolName: checkoutForm.schoolName,
+                          billingEmail: checkoutForm.billingEmail,
+                        });
+                        const data = await res.json();
+                        if (data.url) window.location.href = data.url;
+                      } catch (e) {
+                        console.error("Checkout error:", e);
+                      } finally {
+                        setCheckoutLoading(false);
+                      }
+                    }}
+                    disabled={checkoutLoading || !checkoutForm.schoolName || !checkoutForm.billingEmail}
+                    className="btn-secondary"
+                    style={{
+                      width: '100%',
+                      borderColor: 'rgba(251, 191, 36, 0.3)',
+                      color: '#fbbf24',
+                      textAlign: 'center',
+                      cursor: checkoutLoading ? 'wait' : 'pointer',
+                      opacity: checkoutLoading ? 0.6 : 1,
+                    }}
+                  >
+                    {checkoutLoading ? 'Redirecting to payment...' : `Pay $${skipTrialPrice.toLocaleString()} Now`}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

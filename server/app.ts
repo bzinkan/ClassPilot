@@ -300,7 +300,7 @@ export async function createApp(options: AppOptions = {}) {
   app.use(express.urlencoded({ extended: false, limit: "12kb" }));
 
   const csrfProtection = csurf();
-  const csrfExcludedPaths = new Set(["/api/login"]);
+  const csrfExcludedPaths = new Set(["/api/login", "/api/stripe/webhook"]);
   const isMutatingMethod = (method: string) => !["GET", "HEAD", "OPTIONS"].includes(method);
 
   app.use((req, res, next) => {

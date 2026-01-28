@@ -21,6 +21,8 @@ const createSchoolSchema = z.object({
   firstAdminEmail: z.string().min(1, "Admin email is required").email("Invalid email address"),
   firstAdminName: z.string().min(1, "Admin name is required"),
   firstAdminPassword: z.string().min(6, "Password must be at least 6 characters").optional().or(z.literal("")),
+  billingEmail: z.string().email("Invalid email").optional().or(z.literal("")),
+  trialDays: z.number().min(1).default(30),
 });
 
 type CreateSchoolForm = z.infer<typeof createSchoolSchema>;
@@ -39,6 +41,8 @@ export default function CreateSchool() {
       firstAdminEmail: "",
       firstAdminName: "",
       firstAdminPassword: "",
+      billingEmail: "",
+      trialDays: 30,
     },
   });
 
@@ -177,6 +181,43 @@ export default function CreateSchool() {
                           type="number"
                           placeholder="100"
                           data-testid="input-maxLicenses"
+                          {...field}
+                          onChange={(e) => field.onChange(parseInt(e.target.value))}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="billingEmail"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Billing Email (optional)</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="email"
+                          placeholder="Defaults to admin email if left blank"
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="trialDays"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Trial Duration (days)</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          min={1}
                           {...field}
                           onChange={(e) => field.onChange(parseInt(e.target.value))}
                         />

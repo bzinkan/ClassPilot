@@ -70,6 +70,7 @@ import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 import { logAudit, logAuditFromRequest, AuditAction } from "./audit";
 import { sendTrialRequestNotification } from "./util/email";
+import { createCheckoutSession, createCustomInvoice, handleWebhookEvent, constructWebhookEvent, stripe as stripeClient } from "./stripe";
 
 // Helper function to normalize and validate grade levels
 function normalizeGradeLevel(grade: string | null | undefined): string | null {
@@ -1882,12 +1883,22 @@ export async function registerRoutes(
         return res.status(400).json({ error: "School with this domain already exists" });
       }
 
+      // Calculate trialEndsAt from trialDays if provided
+      let trialEndsAt: Date | null = null;
+      if (data.trialEndsAt) {
+        trialEndsAt = new Date(data.trialEndsAt);
+      } else if ((data as any).trialDays && (data.status || 'trial') === 'trial') {
+        trialEndsAt = new Date();
+        trialEndsAt.setDate(trialEndsAt.getDate() + Number((data as any).trialDays));
+      }
+
       const school = await storage.createSchool({
         name: data.name,
         domain: data.domain,
         status: data.status || 'trial',
         maxLicenses: data.maxLicenses || 100,
-        trialEndsAt: data.trialEndsAt ? new Date(data.trialEndsAt) : null,
+        trialEndsAt,
+        billingEmail: (data as any).billingEmail || null,
       });
 
       // If firstAdminEmail provided, create school admin user
@@ -2406,6 +2417,159 @@ export async function registerRoutes(
     } catch (error) {
       console.error("Delete trial request error:", error);
       res.status(500).json({ error: "Failed to delete trial request" });
+    }
+  });
+
+  // ── Stripe: Create Checkout Session (self-service) ──
+  app.post("/api/checkout/create-session", async (req, res) => {
+    try {
+      const { studentCount, skipTrial, schoolName, billingEmail } = req.body;
+      if (!studentCount || !billingEmail || !schoolName) {
+        return res.status(400).json({ error: "studentCount, schoolName, and billingEmail are required" });
+      }
+
+      const baseUrl = getBaseUrl();
+      const url = await createCheckoutSession({
+        schoolId: req.body.schoolId || "pending",
+        schoolName,
+        studentCount: Number(studentCount),
+        skipTrial: !!skipTrial,
+        billingEmail,
+        successUrl: `${baseUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancelUrl: `${baseUrl}/pricing`,
+      });
+
+      res.json({ url });
+    } catch (error) {
+      console.error("Create checkout session error:", error);
+      res.status(500).json({ error: "Failed to create checkout session" });
+    }
+  });
+
+  // ── Stripe: Webhook ──
+  app.post("/api/stripe/webhook", async (req, res) => {
+    try {
+      const signature = req.headers["stripe-signature"] as string;
+      const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+      if (!webhookSecret) {
+        console.error("STRIPE_WEBHOOK_SECRET not configured");
+        return res.status(500).json({ error: "Webhook not configured" });
+      }
+
+      if (!req.rawBody) {
+        return res.status(400).json({ error: "Missing raw body" });
+      }
+
+      const event = constructWebhookEvent(req.rawBody, signature, webhookSecret);
+      await handleWebhookEvent(event);
+
+      res.json({ received: true });
+    } catch (error: any) {
+      console.error("Stripe webhook error:", error.message);
+      res.status(400).json({ error: `Webhook Error: ${error.message}` });
+    }
+  });
+
+  // ── Stripe: Super Admin Send Invoice ──
+  app.post("/api/super-admin/schools/:id/send-invoice", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const school = await storage.getSchool(id);
+      if (!school) return res.status(404).json({ error: "School not found" });
+
+      const {
+        studentCount,
+        basePrice = 500,
+        perStudentPrice = 2,
+        description,
+        daysUntilDue = 30,
+        billingEmail,
+      } = req.body;
+
+      if (!studentCount || studentCount < 1) {
+        return res.status(400).json({ error: "studentCount is required and must be >= 1" });
+      }
+
+      const email = billingEmail || school.billingEmail;
+      if (!email) {
+        return res.status(400).json({ error: "No billing email set for this school" });
+      }
+
+      const result = await createCustomInvoice({
+        schoolId: id,
+        schoolName: school.name,
+        billingEmail: email,
+        stripeCustomerId: school.stripeCustomerId,
+        studentCount: Number(studentCount),
+        basePrice: Number(basePrice),
+        perStudentPrice: Number(perStudentPrice),
+        description,
+        daysUntilDue: Number(daysUntilDue),
+      });
+
+      // Update billing email if provided
+      if (billingEmail && billingEmail !== school.billingEmail) {
+        await storage.updateSchool(id, { billingEmail });
+      }
+
+      res.json({
+        success: true,
+        invoiceId: result.invoiceId,
+        invoiceUrl: result.invoiceUrl,
+      });
+    } catch (error) {
+      console.error("Send invoice error:", error);
+      res.status(500).json({ error: "Failed to send invoice" });
+    }
+  });
+
+  // ── Stripe: Super Admin Get Billing Info ──
+  app.get("/api/super-admin/schools/:id/billing", requireAuth, requireSuperAdminRole, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const school = await storage.getSchool(id);
+      if (!school) return res.status(404).json({ error: "School not found" });
+
+      // Get recent invoices from Stripe if customer exists
+      let invoices: any[] = [];
+      if (school.stripeCustomerId && stripeClient) {
+        try {
+          const stripeInvoices = await stripeClient.invoices.list({
+            customer: school.stripeCustomerId,
+            limit: 10,
+          });
+          invoices = stripeInvoices.data.map((inv) => ({
+            id: inv.id,
+            amount: inv.amount_paid,
+            status: inv.status,
+            created: inv.created,
+            hostedUrl: inv.hosted_invoice_url,
+            pdfUrl: inv.invoice_pdf,
+            description: inv.description,
+          }));
+        } catch (e) {
+          console.error("Error fetching Stripe invoices:", e);
+        }
+      }
+
+      res.json({
+        billingEmail: school.billingEmail,
+        stripeCustomerId: school.stripeCustomerId,
+        planStatus: school.planStatus,
+        planTier: school.planTier,
+        status: school.status,
+        activeUntil: school.activeUntil,
+        trialEndsAt: school.trialEndsAt,
+        maxLicenses: school.maxLicenses,
+        lastPaymentAmount: school.lastPaymentAmount,
+        lastPaymentDate: school.lastPaymentDate,
+        totalPaid: school.totalPaid,
+        invoices,
+      });
+    } catch (error) {
+      console.error("Get billing info error:", error);
+      res.status(500).json({ error: "Failed to get billing info" });
     }
   });
 

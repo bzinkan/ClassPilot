@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check, Clock } from "lucide-react";
+import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check, Clock, CreditCard, Send, DollarSign } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -35,6 +35,15 @@ interface School {
   trackingEndHour: number;
   is24HourEnabled: boolean;
   schoolTimezone: string;
+  // Billing
+  billingEmail: string | null;
+  stripeCustomerId: string | null;
+  planTier: string;
+  planStatus: string;
+  activeUntil: string | null;
+  lastPaymentAmount: number | null;
+  lastPaymentDate: string | null;
+  totalPaid: number;
 }
 
 interface Admin {
@@ -74,6 +83,16 @@ export default function SchoolDetail() {
   const [trackingEndHour, setTrackingEndHour] = useState(17);
   const [is24HourEnabled, setIs24HourEnabled] = useState(false);
   const [schoolTimezone, setSchoolTimezone] = useState("America/New_York");
+  // Billing state
+  const [isInvoiceDialogOpen, setIsInvoiceDialogOpen] = useState(false);
+  const [invoiceStudentCount, setInvoiceStudentCount] = useState(100);
+  const [invoiceBasePrice, setInvoiceBasePrice] = useState(500);
+  const [invoicePerStudentPrice, setInvoicePerStudentPrice] = useState(2);
+  const [invoiceDescription, setInvoiceDescription] = useState("");
+  const [invoiceDaysUntilDue, setInvoiceDaysUntilDue] = useState(30);
+  const [invoiceBillingEmail, setInvoiceBillingEmail] = useState("");
+  const [isEditBillingEmailOpen, setIsEditBillingEmailOpen] = useState(false);
+  const [newBillingEmail, setNewBillingEmail] = useState("");
 
   const { data, isLoading } = useQuery<{ 
     success: boolean; 
@@ -156,6 +175,51 @@ export default function SchoolDetail() {
     if (newMaxLicenses < 1) return;
     editLicensesMutation.mutate(newMaxLicenses);
   };
+
+  // Send invoice mutation
+  const sendInvoiceMutation = useMutation({
+    mutationFn: async (data: {
+      studentCount: number;
+      basePrice: number;
+      perStudentPrice: number;
+      description?: string;
+      daysUntilDue: number;
+      billingEmail?: string;
+    }) => {
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/send-invoice`, data);
+      return res.json();
+    },
+    onSuccess: (data: any) => {
+      queryClient.invalidateQueries({ queryKey: [`/api/super-admin/schools/${schoolId}`] });
+      toast({
+        title: "Invoice sent",
+        description: data.invoiceUrl ? "Invoice has been sent to the billing email." : "Invoice created successfully.",
+      });
+      setIsInvoiceDialogOpen(false);
+    },
+    onError: (error: any) => {
+      toast({
+        variant: "destructive",
+        title: "Failed to send invoice",
+        description: error.message || "An error occurred",
+      });
+    },
+  });
+
+  // Update billing email mutation
+  const updateBillingEmailMutation = useMutation({
+    mutationFn: async (billingEmail: string) => {
+      return await apiRequest("PATCH", `/api/super-admin/schools/${schoolId}`, { billingEmail });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [`/api/super-admin/schools/${schoolId}`] });
+      toast({ title: "Billing email updated" });
+      setIsEditBillingEmailOpen(false);
+    },
+    onError: (error: any) => {
+      toast({ variant: "destructive", title: "Failed to update billing email", description: error.message });
+    },
+  });
 
   // Tracking hours mutation
   const editTrackingHoursMutation = useMutation({
@@ -423,6 +487,85 @@ export default function SchoolDetail() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Billing & Payments */}
+        <Card className="mb-6">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <CreditCard className="w-5 h-5" />
+                Billing & Payments
+              </CardTitle>
+              <Button
+                size="sm"
+                onClick={() => {
+                  setInvoiceStudentCount(school.maxLicenses || 100);
+                  setInvoiceBillingEmail(school.billingEmail || "");
+                  setIsInvoiceDialogOpen(true);
+                }}
+              >
+                <Send className="w-4 h-4 mr-2" />
+                Send Invoice
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <p className="text-sm text-muted-foreground">Payment Status</p>
+                <Badge variant={school.planStatus === 'active' ? 'default' : school.planStatus === 'past_due' ? 'destructive' : 'secondary'} className="mt-1">
+                  {school.status === 'trial' ? 'Trial' : school.planStatus}
+                </Badge>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Last Payment</p>
+                <p className="text-lg font-semibold mt-1">
+                  {school.lastPaymentAmount
+                    ? `$${(school.lastPaymentAmount / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+                    : '—'}
+                </p>
+                {school.lastPaymentDate && (
+                  <p className="text-xs text-muted-foreground">
+                    {new Date(school.lastPaymentDate).toLocaleDateString()}
+                  </p>
+                )}
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Total Paid</p>
+                <p className="text-lg font-semibold mt-1">
+                  ${((school.totalPaid || 0) / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Active Until</p>
+                <p className="text-lg font-semibold mt-1">
+                  {school.activeUntil
+                    ? new Date(school.activeUntil).toLocaleDateString()
+                    : school.trialEndsAt
+                      ? `Trial ends ${new Date(school.trialEndsAt).toLocaleDateString()}`
+                      : '—'}
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 pt-4 border-t flex items-center gap-4">
+              <div className="flex-1">
+                <p className="text-sm text-muted-foreground">Billing Email</p>
+                <p className="text-sm font-medium">{school.billingEmail || 'Not set'}</p>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setNewBillingEmail(school.billingEmail || "");
+                  setIsEditBillingEmailOpen(true);
+                }}
+              >
+                <Edit className="w-3 h-3 mr-1" />
+                Edit
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
 
         <div className="grid gap-6 md:grid-cols-2">
           <Card>
@@ -806,6 +949,142 @@ export default function SchoolDetail() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+      {/* Send Invoice Dialog */}
+      <Dialog open={isInvoiceDialogOpen} onOpenChange={setIsInvoiceDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Send Invoice</DialogTitle>
+            <DialogDescription>
+              Create and send a Stripe invoice to the school's billing contact.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Billing Email</Label>
+              <Input
+                type="email"
+                value={invoiceBillingEmail}
+                onChange={(e) => setInvoiceBillingEmail(e.target.value)}
+                placeholder="billing@school.edu"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Student Count</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={invoiceStudentCount}
+                  onChange={(e) => setInvoiceStudentCount(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Days Until Due</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={invoiceDaysUntilDue}
+                  onChange={(e) => setInvoiceDaysUntilDue(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Base Price ($)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={invoiceBasePrice}
+                  onChange={(e) => setInvoiceBasePrice(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Per Student ($)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={invoicePerStudentPrice}
+                  onChange={(e) => setInvoicePerStudentPrice(Number(e.target.value))}
+                />
+              </div>
+            </div>
+            <div className="p-3 bg-muted rounded-md">
+              <div className="flex justify-between text-sm">
+                <span>Base fee</span>
+                <span>${invoiceBasePrice.toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span>{invoiceStudentCount} students × ${invoicePerStudentPrice}</span>
+                <span>${(invoiceStudentCount * invoicePerStudentPrice).toLocaleString()}</span>
+              </div>
+              <div className="flex justify-between text-sm font-bold border-t mt-2 pt-2">
+                <span>Total</span>
+                <span>${(invoiceBasePrice + invoiceStudentCount * invoicePerStudentPrice).toLocaleString()}</span>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Description (optional)</Label>
+              <Input
+                value={invoiceDescription}
+                onChange={(e) => setInvoiceDescription(e.target.value)}
+                placeholder="ClassPilot Annual Plan"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsInvoiceDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                sendInvoiceMutation.mutate({
+                  studentCount: invoiceStudentCount,
+                  basePrice: invoiceBasePrice,
+                  perStudentPrice: invoicePerStudentPrice,
+                  description: invoiceDescription || undefined,
+                  daysUntilDue: invoiceDaysUntilDue,
+                  billingEmail: invoiceBillingEmail || undefined,
+                });
+              }}
+              disabled={sendInvoiceMutation.isPending || !invoiceBillingEmail}
+            >
+              <Send className="w-4 h-4 mr-2" />
+              {sendInvoiceMutation.isPending ? 'Sending...' : 'Send Invoice'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Billing Email Dialog */}
+      <Dialog open={isEditBillingEmailOpen} onOpenChange={setIsEditBillingEmailOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Edit Billing Email</DialogTitle>
+            <DialogDescription>
+              Set the email address where invoices will be sent.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Billing Email</Label>
+              <Input
+                type="email"
+                value={newBillingEmail}
+                onChange={(e) => setNewBillingEmail(e.target.value)}
+                placeholder="billing@school.edu"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditBillingEmailOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => updateBillingEmailMutation.mutate(newBillingEmail)}
+              disabled={updateBillingEmailMutation.isPending || !newBillingEmail}
+            >
+              {updateBillingEmailMutation.isPending ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       </div>
     </div>
   );

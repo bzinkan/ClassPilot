@@ -25,6 +25,7 @@ import TermsPage from "@/pages/terms";
 import HelpCenter from "@/pages/help";
 import TeacherGuides from "@/pages/guides";
 import RequestTrial from "@/pages/request-trial";
+import CheckoutSuccess from "@/pages/checkout-success";
 
 function Router() {
   return (
@@ -36,6 +37,7 @@ function Router() {
       <Route path="/help" component={HelpCenter} />
       <Route path="/guides" component={TeacherGuides} />
       <Route path="/request-trial" component={RequestTrial} />
+      <Route path="/checkout/success" component={CheckoutSuccess} />
       <Route path="/login" component={Login} />
       <Route path="/dashboard" component={Dashboard} />
       <Route path="/roster" component={Roster} />
