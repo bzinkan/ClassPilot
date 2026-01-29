@@ -2311,6 +2311,7 @@ export async function registerRoutes(
 
       const { sendOnboardingEmail } = await import("./util/email");
       const loginUrl = `https://school-pilot.net/login`;
+      const { subject: customSubject, message: customMessage } = req.body || {};
 
       let sent = 0;
       let failed = 0;
@@ -2321,6 +2322,8 @@ export async function registerRoutes(
           adminEmail: admin.email,
           adminName: admin.displayName || admin.email,
           loginUrl,
+          customSubject: customSubject || undefined,
+          customMessage: customMessage || undefined,
         });
         if (success) sent++;
         else failed++;

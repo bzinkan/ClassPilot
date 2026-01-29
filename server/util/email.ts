@@ -242,10 +242,12 @@ interface OnboardingEmailData {
   adminEmail: string;
   adminName: string;
   loginUrl: string;
+  customSubject?: string;
+  customMessage?: string;
 }
 
 export async function sendOnboardingEmail(data: OnboardingEmailData): Promise<boolean> {
-  const subject = `Welcome to ClassPilot, ${data.schoolName}!`;
+  const subject = data.customSubject || `Welcome to ClassPilot, ${data.schoolName}!`;
   const extensionUrl = "https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca";
   const extensionId = "iggbfegfcjkfieoemeolfmfnapepalca";
   const guidesUrl = "https://school-pilot.net/guides";
@@ -258,6 +260,9 @@ export async function sendOnboardingEmail(data: OnboardingEmailData): Promise<bo
       </div>
 
       <div style="padding: 32px; background: #f8fafc;">
+        ${data.customMessage ? `
+        <div style="color: #475569; font-size: 15px; line-height: 1.6; white-space: pre-wrap;">${escapeHtml(data.customMessage)}</div>
+        ` : `
         <p style="color: #0f172a; font-size: 16px; line-height: 1.6;">
           Hi ${escapeHtml(data.adminName)},
         </p>
@@ -265,6 +270,7 @@ export async function sendOnboardingEmail(data: OnboardingEmailData): Promise<bo
           Your school, <strong>${escapeHtml(data.schoolName)}</strong>, is now set up on ClassPilot!
           Here's everything you need to get started.
         </p>
+        `}
 
         <h2 style="color: #0f172a; margin: 28px 0 12px; font-size: 18px;">1. Log In</h2>
         <p style="color: #475569; font-size: 15px; line-height: 1.6;">
@@ -318,11 +324,11 @@ export async function sendOnboardingEmail(data: OnboardingEmailData): Promise<bo
   `;
 
   const text = `
-Welcome to ClassPilot, ${data.schoolName}!
+${data.customMessage || `Welcome to ClassPilot, ${data.schoolName}!
 
 Hi ${data.adminName},
 
-Your school, ${data.schoolName}, is now set up on ClassPilot! Here's everything you need to get started.
+Your school, ${data.schoolName}, is now set up on ClassPilot! Here's everything you need to get started.`}
 
 1. LOG IN
 ---------

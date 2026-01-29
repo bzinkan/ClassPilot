@@ -8,6 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft, Building2, Plus, Mail, User, Edit, UserCog, KeyRound, Copy, Check, Clock, CreditCard, Send, DollarSign } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
@@ -71,6 +72,8 @@ export default function SchoolDetail() {
   const [isEditLicensesOpen, setIsEditLicensesOpen] = useState(false);
   const [newMaxLicenses, setNewMaxLicenses] = useState(100);
   const [onboardingEmailDialogOpen, setOnboardingEmailDialogOpen] = useState(false);
+  const [onboardingSubject, setOnboardingSubject] = useState("");
+  const [onboardingMessage, setOnboardingMessage] = useState("");
   const [resetLoginDialogOpen, setResetLoginDialogOpen] = useState(false);
   const [tempPassword, setTempPassword] = useState<string>("");
   const [resetAdminInfo, setResetAdminInfo] = useState<{ email: string; displayName: string | null } | null>(null);
@@ -294,12 +297,14 @@ export default function SchoolDetail() {
   });
 
   const onboardingEmailMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/send-onboarding-email`, {});
+    mutationFn: async ({ subject, message }: { subject: string; message: string }) => {
+      const res = await apiRequest("POST", `/api/super-admin/schools/${schoolId}/send-onboarding-email`, { subject, message });
       return res.json();
     },
     onSuccess: (data: any) => {
       setOnboardingEmailDialogOpen(false);
+      setOnboardingSubject("");
+      setOnboardingMessage("");
       toast({
         title: "Onboarding emails sent",
         description: `${data.sent} email${data.sent !== 1 ? "s" : ""} sent successfully${data.failed > 0 ? `, ${data.failed} failed` : ""}`,
@@ -426,7 +431,11 @@ export default function SchoolDetail() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => setOnboardingEmailDialogOpen(true)}
+              onClick={() => {
+                setOnboardingSubject(`Welcome to ClassPilot, ${school.name}!`);
+                setOnboardingMessage(`Hi,\n\nYour school, ${school.name}, is now set up on ClassPilot! Here's everything you need to get started.\n\nPlease use the links in this email to log in, install the Chrome extension on student devices, and review our getting started guides.`);
+                setOnboardingEmailDialogOpen(true);
+              }}
               disabled={school.adminCount === 0 || onboardingEmailMutation.isPending}
             >
               <Send className="w-4 h-4 mr-2" />
@@ -868,20 +877,46 @@ export default function SchoolDetail() {
 
         {/* Reset Login Dialog */}
         <Dialog open={onboardingEmailDialogOpen} onOpenChange={setOnboardingEmailDialogOpen}>
-          <DialogContent>
+          <DialogContent className="max-w-lg">
             <DialogHeader>
               <DialogTitle>Send Onboarding Email</DialogTitle>
               <DialogDescription>
-                This will send a welcome email to all admins of {school.name} with login instructions, Chrome extension install guide, and getting started links.
+                Send a welcome email to all admins of {school.name} with login instructions, Chrome extension install guide, and getting started links. You can customize the subject and intro message below.
               </DialogDescription>
             </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label htmlFor="onboarding-subject">Subject</Label>
+                <Input
+                  id="onboarding-subject"
+                  value={onboardingSubject}
+                  onChange={(e) => setOnboardingSubject(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="onboarding-message">Intro Message</Label>
+                <Textarea
+                  id="onboarding-message"
+                  value={onboardingMessage}
+                  onChange={(e) => setOnboardingMessage(e.target.value)}
+                  rows={5}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Login button, Chrome extension link, and guides link are always included below this message.
+                </p>
+              </div>
+            </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setOnboardingEmailDialogOpen(false)}>
+              <Button variant="outline" onClick={() => {
+                setOnboardingEmailDialogOpen(false);
+                setOnboardingSubject("");
+                setOnboardingMessage("");
+              }}>
                 Cancel
               </Button>
               <Button
-                onClick={() => onboardingEmailMutation.mutate()}
-                disabled={onboardingEmailMutation.isPending}
+                onClick={() => onboardingEmailMutation.mutate({ subject: onboardingSubject, message: onboardingMessage })}
+                disabled={!onboardingSubject || onboardingEmailMutation.isPending}
               >
                 <Send className="w-4 h-4 mr-2" />
                 {onboardingEmailMutation.isPending ? "Sending..." : "Send Email"}
