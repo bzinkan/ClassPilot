@@ -41,6 +41,7 @@ interface TrialRequest {
   estimatedStudents: string | null;
   estimatedTeachers: string | null;
   message: string | null;
+  zipCode: string | null;
   status: string;
   notes: string | null;
   createdAt: string;
@@ -164,6 +165,16 @@ export default function TrialRequests() {
       updateMutation.mutate({ id: selectedRequest.id, notes: editNotes });
       setSelectedRequest({ ...selectedRequest, notes: editNotes });
     }
+  };
+
+  const buildCreateSchoolUrl = (request: TrialRequest) => {
+    const params = new URLSearchParams();
+    params.set("name", request.schoolName);
+    params.set("domain", request.schoolDomain);
+    params.set("email", request.adminEmail);
+    params.set("adminName", `${request.adminFirstName} ${request.adminLastName}`);
+    if (request.zipCode) params.set("zipCode", request.zipCode);
+    return `/super-admin/schools/new?${params.toString()}`;
   };
 
   const handleDelete = (request: TrialRequest) => {
@@ -376,7 +387,7 @@ export default function TrialRequests() {
                           <XCircle className="w-4 h-4 mr-2" />
                           Mark as Declined
                         </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => setLocation("/super-admin/schools/new")}>
+                        <DropdownMenuItem onClick={() => setLocation(buildCreateSchoolUrl(request))}>
                           <ExternalLink className="w-4 h-4 mr-2" />
                           Create School
                         </DropdownMenuItem>
@@ -459,6 +470,10 @@ export default function TrialRequests() {
                     <p className="font-medium">{selectedRequest.schoolDomain}</p>
                   </div>
                   <div>
+                    <p className="text-muted-foreground">Zip Code</p>
+                    <p className="font-medium">{selectedRequest.zipCode || "Not provided"}</p>
+                  </div>
+                  <div>
                     <p className="text-muted-foreground">Estimated Students</p>
                     <p className="font-medium">{selectedRequest.estimatedStudents || "Not specified"}</p>
                   </div>
@@ -533,7 +548,7 @@ export default function TrialRequests() {
           )}
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLocation("/super-admin/schools/new")}>
+            <Button variant="outline" onClick={() => selectedRequest && setLocation(buildCreateSchoolUrl(selectedRequest))}>
               Create School for This Request
             </Button>
             <Button onClick={() => setDetailsDialogOpen(false)}>

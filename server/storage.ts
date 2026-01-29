@@ -127,10 +127,12 @@ function buildDefaultSettingsInput({
   schoolId,
   schoolName,
   wsSharedKey,
+  schoolTimezone,
 }: {
   schoolId: string;
   schoolName?: string | null;
   wsSharedKey?: string | null;
+  schoolTimezone?: string | null;
 }): InsertSettings {
   return {
     schoolId,
@@ -146,7 +148,7 @@ function buildDefaultSettingsInput({
     enableTrackingHours: false,
     trackingStartTime: "08:00",
     trackingEndTime: "15:00",
-    schoolTimezone: "America/New_York",
+    schoolTimezone: schoolTimezone ?? "America/New_York",
     trackingDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
     afterHoursMode: "off" as Settings["afterHoursMode"],
   };
@@ -1476,8 +1478,8 @@ export class MemStorage implements IStorage {
     if (existing) {
       return existing;
     }
-    const schoolName = this.schools.get(schoolId)?.name;
-    const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
+    const school = this.schools.get(schoolId);
+    const defaults = buildDefaultSettingsInput({ schoolId, schoolName: school?.name, schoolTimezone: school?.schoolTimezone });
     const settings = normalizeSettingsForInsert({
       id: randomUUID(),
       ...defaults,
@@ -3299,8 +3301,8 @@ export class DatabaseStorage implements IStorage {
     if (existing) {
       return existing;
     }
-    const schoolName = await this.getSchoolNameForSettings(schoolId);
-    const defaults = buildDefaultSettingsInput({ schoolId, schoolName });
+    const school = await this.getSchool(schoolId);
+    const defaults = buildDefaultSettingsInput({ schoolId, schoolName: school?.name, schoolTimezone: school?.schoolTimezone });
     const insertValues: typeof settings.$inferInsert = normalizeSettings(defaults);
     const [created] = await db
       .insert(settings)

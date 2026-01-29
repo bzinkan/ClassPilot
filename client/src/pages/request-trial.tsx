@@ -9,6 +9,7 @@ export default function RequestTrial() {
     adminLastName: "",
     adminEmail: "",
     adminPhone: "",
+    zipCode: "",
     estimatedStudents: "",
     estimatedTeachers: "",
     message: "",
@@ -350,6 +351,24 @@ export default function RequestTrial() {
                 style={styles.input}
               />
               <p style={styles.hint}>The email domain used by your students (e.g., students@lincolnhs.edu)</p>
+            </div>
+
+            <div style={styles.formGroup}>
+              <label style={styles.label}>
+                School Zip Code<span style={styles.required}>*</span>
+              </label>
+              <input
+                type="text"
+                name="zipCode"
+                value={formData.zipCode}
+                onChange={handleChange}
+                placeholder="90210"
+                required
+                maxLength={5}
+                pattern="[0-9]{5}"
+                style={{ ...styles.input, maxWidth: "160px" }}
+              />
+              <p style={styles.hint}>Used to set your school's timezone for tracking hours</p>
             </div>
 
             <div style={styles.row}>

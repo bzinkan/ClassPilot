@@ -23,6 +23,7 @@ const createSchoolSchema = z.object({
   firstAdminPassword: z.string().min(6, "Password must be at least 6 characters").optional().or(z.literal("")),
   billingEmail: z.string().email("Invalid email").optional().or(z.literal("")),
   trialDays: z.number().min(1).default(30),
+  zipCode: z.string().regex(/^[0-9]{5}$/, "Must be a 5-digit zip code").optional().or(z.literal("")),
 });
 
 type CreateSchoolForm = z.infer<typeof createSchoolSchema>;
@@ -31,18 +32,22 @@ export default function CreateSchool() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
 
+  // Pre-fill from query params (e.g., when creating from a trial request)
+  const params = new URLSearchParams(window.location.search);
+
   const form = useForm<CreateSchoolForm>({
     resolver: zodResolver(createSchoolSchema),
     defaultValues: {
-      name: "",
-      domain: "",
+      name: params.get("name") || "",
+      domain: params.get("domain") || "",
       status: "trial",
       maxLicenses: 100,
-      firstAdminEmail: "",
-      firstAdminName: "",
+      firstAdminEmail: params.get("email") || "",
+      firstAdminName: params.get("adminName") || "",
       firstAdminPassword: "",
       billingEmail: "",
       trialDays: 30,
+      zipCode: params.get("zipCode") || "",
     },
   });
 
@@ -204,6 +209,28 @@ export default function CreateSchool() {
                         />
                       </FormControl>
                       <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={form.control}
+                  name="zipCode"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Zip Code (Optional)</FormLabel>
+                      <FormControl>
+                        <Input
+                          placeholder="90210"
+                          maxLength={5}
+                          className="w-40"
+                          {...field}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                      <p className="text-sm text-muted-foreground">
+                        Used to auto-detect the school's timezone for tracking hours
+                      </p>
                     </FormItem>
                   )}
                 />

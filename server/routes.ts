@@ -70,6 +70,7 @@ import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 import { logAudit, logAuditFromRequest, AuditAction } from "./audit";
 import { sendTrialRequestNotification } from "./util/email";
+import { getTimezoneFromZip } from "./util/zipToTimezone";
 import { createCheckoutSession, createCustomInvoice, handleWebhookEvent, constructWebhookEvent, stripe as stripeClient } from "./stripe";
 
 // Helper function to normalize and validate grade levels
@@ -1080,6 +1081,7 @@ export async function registerRoutes(
         estimatedStudents: data.estimatedStudents || null,
         estimatedTeachers: data.estimatedTeachers || null,
         message: data.message || null,
+        zipCode: data.zipCode || null,
       }).returning();
 
       console.log(`[Trial Request] New request from ${data.schoolName} (${data.adminEmail})`);
@@ -1892,6 +1894,10 @@ export async function registerRoutes(
         trialEndsAt.setDate(trialEndsAt.getDate() + Number((data as any).trialDays));
       }
 
+      // Auto-detect timezone from zip code if provided
+      const zipCode = (data as any).zipCode as string | undefined;
+      const detectedTimezone = zipCode ? getTimezoneFromZip(zipCode) : "America/New_York";
+
       const school = await storage.createSchool({
         name: data.name,
         domain: data.domain,
@@ -1899,6 +1905,7 @@ export async function registerRoutes(
         maxLicenses: data.maxLicenses || 100,
         trialEndsAt,
         billingEmail: (data as any).billingEmail || null,
+        schoolTimezone: detectedTimezone,
       });
 
       // If firstAdminEmail provided, create school admin user
@@ -1998,6 +2005,21 @@ export async function registerRoutes(
       let school = await storage.updateSchool(id, updates);
       if (!school) {
         return res.status(404).json({ error: "School not found" });
+      }
+
+      // Sync timezone and tracking hours to settings table
+      if (updates.schoolTimezone || updates.trackingStartHour !== undefined || updates.trackingEndHour !== undefined) {
+        const settingsUpdate: Record<string, any> = {};
+        if (updates.schoolTimezone) {
+          settingsUpdate.schoolTimezone = updates.schoolTimezone;
+        }
+        if (updates.trackingStartHour !== undefined) {
+          settingsUpdate.trackingStartTime = `${String(updates.trackingStartHour).padStart(2, '0')}:00`;
+        }
+        if (updates.trackingEndHour !== undefined) {
+          settingsUpdate.trackingEndTime = `${String(updates.trackingEndHour).padStart(2, '0')}:00`;
+        }
+        await storage.upsertSettingsForSchool(id, settingsUpdate);
       }
 
       if (updates.status === "suspended") {

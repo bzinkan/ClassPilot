@@ -112,6 +112,7 @@ export const createSchoolRequestSchema = z.object({
   firstAdminEmail: z.string().email("Invalid admin email address").optional(),
   firstAdminName: z.string().min(1, "Admin name is required").optional(),
   firstAdminPassword: z.string().min(6, "Password must be at least 6 characters").optional().or(z.literal("")),
+  zipCode: z.string().regex(/^[0-9]{5}$/, "Must be a 5-digit zip code").optional(),
 }).superRefine((data, ctx) => {
   // If firstAdminEmail is provided, firstAdminName must also be provided
   if (data.firstAdminEmail && !data.firstAdminName) {
@@ -842,6 +843,7 @@ export const trialRequests = pgTable("trial_requests", {
   estimatedStudents: text("estimated_students"),
   estimatedTeachers: text("estimated_teachers"),
   message: text("message"),
+  zipCode: text("zip_code"),
   status: text("status").notNull().default("pending"), // 'pending', 'contacted', 'converted', 'declined'
   notes: text("notes"), // Super admin notes about this request
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
