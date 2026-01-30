@@ -7,7 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check, Mail, Send } from "lucide-react";
+import { Building2, Plus, Users, GraduationCap, Shield, Search, MoreVertical, Trash2, Pause, Play, UserCog, KeyRound, Copy, Check, Mail, Send, LogOut } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -298,6 +298,18 @@ export default function SchoolsList() {
             >
               <Plus className="w-4 h-4 mr-2" />
               Create School
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={async () => {
+                await apiRequest("POST", "/api/logout");
+                setLocation("/");
+              }}
+              data-testid="button-logout"
+              title="Log out"
+            >
+              <LogOut className="h-5 w-5" />
             </Button>
           </div>
         </div>
