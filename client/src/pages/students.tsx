@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle, Plus, Search } from "lucide-react";
+import { ArrowLeft, Upload, Download, Edit, Trash2, FileSpreadsheet, GraduationCap, RefreshCw, Users, Loader2, Building2, AlertCircle, Plus, Search, ChevronRight, ChevronDown } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -114,6 +114,7 @@ interface OrgUnit {
   name: string;
   description?: string;
   parentOrgUnitPath?: string;
+  detectedGrade: string | null;
 }
 
 // Admin Guard Wrapper - Only checks auth, doesn't run any queries/mutations
@@ -177,6 +178,11 @@ function StudentsContent() {
   const [workspaceImportResult, setWorkspaceImportResult] = useState<DirectoryImportResult | null>(null);
   const [selectedOrgUnit, setSelectedOrgUnit] = useState<string>("");
   const [importGradeLevel, setImportGradeLevel] = useState<string>("");
+  // Enhanced multi-OU import state
+  const [checkedOUs, setCheckedOUs] = useState<Set<string>>(new Set());
+  const [ouGradeOverrides, setOuGradeOverrides] = useState<Record<string, string>>({});
+  const [expandedOU, setExpandedOU] = useState<string | null>(null);
+  const [excludedEmails, setExcludedEmails] = useState<Record<string, Set<string>>>({});
   const [classroomImportGrade, setClassroomImportGrade] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedStudents, setSelectedStudents] = useState<Set<string>>(new Set());
@@ -292,10 +298,11 @@ function StudentsContent() {
 
   // Import from Google Workspace Directory mutation
   const importDirectoryMutation = useMutation({
-    mutationFn: async (params: { orgUnitPath?: string; gradeLevel?: string }) => {
+    mutationFn: async (params: { orgUnitPath?: string; gradeLevel?: string; entries?: Array<{ orgUnitPath: string; gradeLevel?: string; excludeEmails?: string[] }> }) => {
       const res = await apiRequest("POST", "/api/directory/import", {
         orgUnitPath: params.orgUnitPath || undefined,
         gradeLevel: params.gradeLevel || undefined,
+        entries: params.entries || undefined,
       });
       return res.json();
     },
@@ -939,6 +946,10 @@ function StudentsContent() {
           setWorkspaceImportResult(null);
           setSelectedOrgUnit("");
           setImportGradeLevel("");
+          setCheckedOUs(new Set());
+          setOuGradeOverrides({});
+          setExpandedOU(null);
+          setExcludedEmails({});
         }
       }}>
         <DialogContent className="max-w-2xl">
@@ -1027,10 +1038,7 @@ function StudentsContent() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <p className="text-sm text-muted-foreground">
-                    {selectedOrgUnit && selectedOrgUnit !== "__all__"
-                      ? `Showing ${filteredDirectoryUsers.length} of ${directoryUsers.length} users`
-                      : `Found ${directoryUsers.length} user${directoryUsers.length !== 1 ? 's' : ''} in your domain`
-                    }
+                    Found {directoryUsers.length} user{directoryUsers.length !== 1 ? 's' : ''} in your domain
                   </p>
                   <Button
                     variant="outline"
@@ -1043,115 +1051,244 @@ function StudentsContent() {
                   </Button>
                 </div>
 
-                {/* Organizational Unit Filter */}
-                <div className="space-y-2">
-                  <Label htmlFor="ou-filter">Filter by Organizational Unit (Optional)</Label>
-                  <Select
-                    value={selectedOrgUnit}
-                    onValueChange={setSelectedOrgUnit}
-                  >
-                    <SelectTrigger id="ou-filter" data-testid="select-org-unit">
-                      <SelectValue placeholder={isLoadingOrgUnits ? "Loading..." : "All Users (no filter)"} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__all__">All Users (no filter)</SelectItem>
-                      {orgUnits.map((ou) => (
-                        <SelectItem key={ou.orgUnitId} value={ou.orgUnitPath}>
-                          {ou.name} ({ou.orgUnitPath})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Select an Organizational Unit to import only students from that group
-                  </p>
-                </div>
-
-                {/* Grade Level Assignment */}
-                <div className="space-y-2">
-                  <Label htmlFor="grade-level">Assign Grade Level (Optional)</Label>
-                  <Select
-                    value={importGradeLevel}
-                    onValueChange={setImportGradeLevel}
-                  >
-                    <SelectTrigger id="grade-level" data-testid="select-import-grade">
-                      <SelectValue placeholder="No grade assignment" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">No grade assignment</SelectItem>
-                      <SelectItem value="K">Kindergarten</SelectItem>
-                      <SelectItem value="1">Grade 1</SelectItem>
-                      <SelectItem value="2">Grade 2</SelectItem>
-                      <SelectItem value="3">Grade 3</SelectItem>
-                      <SelectItem value="4">Grade 4</SelectItem>
-                      <SelectItem value="5">Grade 5</SelectItem>
-                      <SelectItem value="6">Grade 6</SelectItem>
-                      <SelectItem value="7">Grade 7</SelectItem>
-                      <SelectItem value="8">Grade 8</SelectItem>
-                      <SelectItem value="9">Grade 9</SelectItem>
-                      <SelectItem value="10">Grade 10</SelectItem>
-                      <SelectItem value="11">Grade 11</SelectItem>
-                      <SelectItem value="12">Grade 12</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    All imported students will be assigned to this grade level
-                  </p>
-                </div>
-
-                {filteredDirectoryUsers.length > 0 ? (
-                  <div className="border rounded-md divide-y max-h-64 overflow-auto">
-                    {filteredDirectoryUsers.slice(0, 20).map((user) => (
-                      <div
-                        key={user.id}
-                        className="flex items-center justify-between p-3 text-sm"
-                        data-testid={`row-user-${user.id}`}
-                      >
-                        <div>
-                          <p className="font-medium">{user.name}</p>
-                          <p className="text-muted-foreground text-xs">{user.email}</p>
+                {expandedOU ? (
+                  /* Expanded OU — individual user selection */
+                  (() => {
+                    const ouUsers = directoryUsers.filter(u => u.orgUnitPath === expandedOU && !u.suspended && !u.isAdmin);
+                    const ouExcluded = excludedEmails[expandedOU] || new Set<string>();
+                    const ouInfo = orgUnits.find(o => o.orgUnitPath === expandedOU);
+                    const gradeVal = ouGradeOverrides[expandedOU] ?? ouInfo?.detectedGrade ?? "";
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Button variant="ghost" size="sm" onClick={() => setExpandedOU(null)}>
+                            <ArrowLeft className="h-4 w-4 mr-1" /> Back to OUs
+                          </Button>
+                          <span className="font-medium">{ouInfo?.name || expandedOU}</span>
+                          <span className="text-xs text-muted-foreground">({ouUsers.length} users)</span>
                         </div>
-                        {user.orgUnitPath && (
-                          <span className="text-xs text-muted-foreground">{user.orgUnitPath}</span>
-                        )}
+
+                        <div className="flex items-center gap-2">
+                          <Label className="text-xs whitespace-nowrap">Grade:</Label>
+                          <Select
+                            value={gradeVal || "__none__"}
+                            onValueChange={(v) => setOuGradeOverrides(prev => ({ ...prev, [expandedOU]: v === "__none__" ? "" : v }))}
+                          >
+                            <SelectTrigger className="w-40 h-8 text-xs">
+                              <SelectValue placeholder="No grade" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__none__">No grade</SelectItem>
+                              <SelectItem value="PK">Pre-K</SelectItem>
+                              <SelectItem value="K">Kindergarten</SelectItem>
+                              {[1,2,3,4,5,6,7,8,9,10,11,12].map(g => (
+                                <SelectItem key={g} value={String(g)}>Grade {g}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="border rounded-md divide-y max-h-72 overflow-auto">
+                          {ouUsers.map((user) => {
+                            const isExcluded = ouExcluded.has(user.email.toLowerCase());
+                            return (
+                              <div
+                                key={user.id}
+                                className="flex items-center gap-3 p-2 text-sm"
+                                data-testid={`row-user-${user.id}`}
+                              >
+                                <Checkbox
+                                  checked={!isExcluded}
+                                  onCheckedChange={(checked) => {
+                                    setExcludedEmails(prev => {
+                                      const set = new Set(prev[expandedOU] || []);
+                                      if (checked) set.delete(user.email.toLowerCase());
+                                      else set.add(user.email.toLowerCase());
+                                      return { ...prev, [expandedOU]: set };
+                                    });
+                                  }}
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-medium truncate">{user.name}</p>
+                                  <p className="text-muted-foreground text-xs truncate">{user.email}</p>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                    ))}
-                    {filteredDirectoryUsers.length > 20 && (
-                      <div className="p-3 text-sm text-center text-muted-foreground">
-                        ...and {filteredDirectoryUsers.length - 20} more users
+                    );
+                  })()
+                ) : (
+                  /* OU list with checkboxes */
+                  <div className="space-y-3">
+                    {isLoadingOrgUnits ? (
+                      <div className="flex items-center justify-center py-4">
+                        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                        <span className="text-sm text-muted-foreground">Loading organizational units...</span>
                       </div>
+                    ) : orgUnits.length === 0 ? (
+                      <div className="text-center py-4 text-sm text-muted-foreground">
+                        No organizational units found. You can still import all domain users below.
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-center justify-between">
+                          <Label className="text-sm">Select Organizational Units to Import</Label>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-xs h-7"
+                              onClick={() => setCheckedOUs(new Set(orgUnits.map(o => o.orgUnitPath)))}
+                            >
+                              Select All
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="text-xs h-7"
+                              onClick={() => setCheckedOUs(new Set())}
+                            >
+                              Deselect All
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="border rounded-md divide-y max-h-72 overflow-auto">
+                          {orgUnits.map((ou) => {
+                            const ouUsers = directoryUsers.filter(u => u.orgUnitPath === ou.orgUnitPath && !u.suspended && !u.isAdmin);
+                            const ouExcluded = excludedEmails[ou.orgUnitPath] || new Set<string>();
+                            const effectiveCount = ouUsers.length - ouExcluded.size;
+                            const isChecked = checkedOUs.has(ou.orgUnitPath);
+                            const gradeVal = ouGradeOverrides[ou.orgUnitPath] ?? ou.detectedGrade ?? "";
+
+                            return (
+                              <div key={ou.orgUnitId} className="flex items-center gap-2 p-2 text-sm hover:bg-muted/50">
+                                <Checkbox
+                                  checked={isChecked}
+                                  onCheckedChange={(checked) => {
+                                    setCheckedOUs(prev => {
+                                      const next = new Set(prev);
+                                      if (checked) next.add(ou.orgUnitPath);
+                                      else next.delete(ou.orgUnitPath);
+                                      return next;
+                                    });
+                                  }}
+                                  data-testid={`checkbox-ou-${ou.orgUnitId}`}
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <span className="font-medium">{ou.name}</span>
+                                  <span className="text-xs text-muted-foreground ml-2">
+                                    {effectiveCount} user{effectiveCount !== 1 ? 's' : ''}
+                                  </span>
+                                </div>
+
+                                <Select
+                                  value={gradeVal || "__none__"}
+                                  onValueChange={(v) => setOuGradeOverrides(prev => ({ ...prev, [ou.orgUnitPath]: v === "__none__" ? "" : v }))}
+                                >
+                                  <SelectTrigger className="w-28 h-7 text-xs" onClick={(e) => e.stopPropagation()}>
+                                    <SelectValue placeholder="Grade" />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="__none__">No grade</SelectItem>
+                                    <SelectItem value="PK">Pre-K</SelectItem>
+                                    <SelectItem value="K">Kindergarten</SelectItem>
+                                    {[1,2,3,4,5,6,7,8,9,10,11,12].map(g => (
+                                      <SelectItem key={g} value={String(g)}>Grade {g}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+
+                                {ou.detectedGrade && !ouGradeOverrides[ou.orgUnitPath] && (
+                                  <span className="text-xs bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 px-1.5 py-0.5 rounded">
+                                    auto
+                                  </span>
+                                )}
+
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 w-7 p-0"
+                                  onClick={() => setExpandedOU(ou.orgUnitPath)}
+                                  title="View individual users"
+                                >
+                                  <ChevronRight className="h-4 w-4" />
+                                </Button>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </>
                     )}
                   </div>
-                ) : directoryUsers.length > 0 && selectedOrgUnit && selectedOrgUnit !== "__all__" ? (
-                  <div className="border rounded-md p-4 text-center text-muted-foreground">
-                    No users found in this Organizational Unit
-                  </div>
-                ) : null}
+                )}
 
                 <div className="flex justify-end gap-2">
                   <Button variant="outline" onClick={() => setShowWorkspaceDialog(false)}>
                     Cancel
                   </Button>
-                  <Button
-                    onClick={() => importDirectoryMutation.mutate({
-                      orgUnitPath: selectedOrgUnit && selectedOrgUnit !== "__all__" ? selectedOrgUnit : undefined,
-                      gradeLevel: importGradeLevel && importGradeLevel !== "__none__" ? importGradeLevel : undefined,
-                    })}
-                    disabled={importDirectoryMutation.isPending || filteredDirectoryUsers.length === 0}
-                    data-testid="button-import-workspace-users"
-                  >
-                    {importDirectoryMutation.isPending ? (
-                      <>
-                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                        Importing...
-                      </>
-                    ) : (
-                      <>
-                        <Users className="h-4 w-4 mr-2" />
-                        Import {filteredDirectoryUsers.length} Student{filteredDirectoryUsers.length !== 1 ? 's' : ''}{importGradeLevel && importGradeLevel !== "__none__" ? ` as Grade ${importGradeLevel}` : ""}
-                      </>
-                    )}
-                  </Button>
+                  {checkedOUs.size > 0 ? (
+                    <Button
+                      onClick={() => {
+                        const entries = Array.from(checkedOUs).map(ouPath => {
+                          const ou = orgUnits.find(o => o.orgUnitPath === ouPath);
+                          const gradeVal = ouGradeOverrides[ouPath] ?? ou?.detectedGrade ?? "";
+                          const ouExcluded = excludedEmails[ouPath];
+                          return {
+                            orgUnitPath: ouPath,
+                            gradeLevel: gradeVal || undefined,
+                            excludeEmails: ouExcluded ? Array.from(ouExcluded) : undefined,
+                          };
+                        });
+                        importDirectoryMutation.mutate({ entries });
+                      }}
+                      disabled={importDirectoryMutation.isPending}
+                      data-testid="button-import-workspace-users"
+                    >
+                      {importDirectoryMutation.isPending ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Importing...
+                        </>
+                      ) : (
+                        <>
+                          <Users className="h-4 w-4 mr-2" />
+                          Import {checkedOUs.size} OU{checkedOUs.size !== 1 ? 's' : ''} ({(() => {
+                            let total = 0;
+                            checkedOUs.forEach(ouPath => {
+                              const ouUsers = directoryUsers.filter(u => u.orgUnitPath === ouPath && !u.suspended && !u.isAdmin);
+                              const ouExcluded = excludedEmails[ouPath] || new Set<string>();
+                              total += ouUsers.length - ouExcluded.size;
+                            });
+                            return total;
+                          })()} students)
+                        </>
+                      )}
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() => importDirectoryMutation.mutate({
+                        orgUnitPath: undefined,
+                        gradeLevel: undefined,
+                      })}
+                      disabled={importDirectoryMutation.isPending || directoryUsers.length === 0}
+                      data-testid="button-import-workspace-users"
+                    >
+                      {importDirectoryMutation.isPending ? (
+                        <>
+                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                          Importing...
+                        </>
+                      ) : (
+                        <>
+                          <Users className="h-4 w-4 mr-2" />
+                          Import All {directoryUsers.length} Students
+                        </>
+                      )}
+                    </Button>
+                  )}
                 </div>
               </div>
             )}

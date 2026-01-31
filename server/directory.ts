@@ -125,7 +125,60 @@ export async function listDomainUsers(
   }
 }
 
-export async function getOrganizationUnits(userId: string): Promise<any[]> {
+/** Attempt to detect a grade level from an OU name string */
+export function detectGradeFromName(name: string): string | null {
+  const n = name.trim();
+
+  // Pre-K variants
+  if (/^pre[- ]?k(indergarten)?$/i.test(n)) return "PK";
+
+  // Kindergarten variants
+  if (/^(kindergarten|kinder|k)$/i.test(n)) return "K";
+
+  // "Grade 3", "Grade 03"
+  const gradeNum = n.match(/^grade\s+0?(\d{1,2})$/i);
+  if (gradeNum) {
+    const g = parseInt(gradeNum[1], 10);
+    if (g >= 1 && g <= 12) return String(g);
+  }
+
+  // "3rd Grade", "1st Grade", "11th Grade"
+  const ordinalGrade = n.match(/^0?(\d{1,2})(?:st|nd|rd|th)\s+grade$/i);
+  if (ordinalGrade) {
+    const g = parseInt(ordinalGrade[1], 10);
+    if (g >= 1 && g <= 12) return String(g);
+  }
+
+  // "First Grade" through "Twelfth Grade"
+  const wordMap: Record<string, string> = {
+    first: "1", second: "2", third: "3", fourth: "4", fifth: "5", sixth: "6",
+    seventh: "7", eighth: "8", ninth: "9", tenth: "10", eleventh: "11", twelfth: "12",
+  };
+  const wordGrade = n.match(/^(\w+)\s+grade$/i);
+  if (wordGrade && wordMap[wordGrade[1].toLowerCase()]) {
+    return wordMap[wordGrade[1].toLowerCase()];
+  }
+
+  // Bare ordinal: "3rd", "5th"
+  const bareOrdinal = n.match(/^0?(\d{1,2})(?:st|nd|rd|th)$/i);
+  if (bareOrdinal) {
+    const g = parseInt(bareOrdinal[1], 10);
+    if (g >= 1 && g <= 12) return String(g);
+  }
+
+  return null;
+}
+
+export interface EnrichedOrgUnit {
+  orgUnitPath: string;
+  orgUnitId: string;
+  name: string;
+  description?: string;
+  parentOrgUnitPath?: string;
+  detectedGrade: string | null;
+}
+
+export async function getOrganizationUnits(userId: string): Promise<EnrichedOrgUnit[]> {
   try {
     const auth = await getAuthClient(userId);
     const admin = google.admin({ version: "directory_v1", auth });
@@ -135,7 +188,15 @@ export async function getOrganizationUnits(userId: string): Promise<any[]> {
       type: "all",
     });
 
-    return response.data.organizationUnits || [];
+    const orgUnits = response.data.organizationUnits || [];
+    return orgUnits.map((ou: any) => ({
+      orgUnitPath: ou.orgUnitPath,
+      orgUnitId: ou.orgUnitId,
+      name: ou.name,
+      description: ou.description,
+      parentOrgUnitPath: ou.parentOrgUnitPath,
+      detectedGrade: detectGradeFromName(ou.name),
+    }));
   } catch (error: any) {
     console.error("Failed to fetch org units:", error.message);
     return [];
@@ -150,6 +211,7 @@ export async function importStudentsFromDirectory(
     orgUnitPath?: string;
     includeStudentsOnly?: boolean;
     gradeLevel?: string;
+    excludeEmails?: string[];
   } = {}
 ): Promise<{
   imported: number;
@@ -173,7 +235,8 @@ export async function importStudentsFromDirectory(
 
     const { users } = await listDomainUsers(userId, options.domain, query);
 
-    const activeUsers = users.filter((u) => !u.suspended && !u.isAdmin);
+    const excludeSet = new Set((options.excludeEmails || []).map(e => e.toLowerCase()));
+    const activeUsers = users.filter((u) => !u.suspended && !u.isAdmin && !excludeSet.has(u.email.toLowerCase()));
 
     for (const user of activeUsers) {
       try {
@@ -183,7 +246,6 @@ export async function importStudentsFromDirectory(
         );
 
         if (existingStudent) {
-          // Update existing student - also update grade if provided
           const updateData: { studentName: string; gradeLevel?: string } = {
             studentName: user.name,
           };
@@ -193,7 +255,6 @@ export async function importStudentsFromDirectory(
           await storage.updateStudent(existingStudent.id, updateData);
           result.updated++;
         } else {
-          // Create new student with grade level if provided
           await storage.createStudent({
             studentEmail: user.email,
             studentName: user.name,
@@ -215,5 +276,112 @@ export async function importStudentsFromDirectory(
       throw error;
     }
     throw new Error(`Import failed: ${error.message}`);
+  }
+}
+
+/** Import from multiple OUs at once, each with its own grade and exclusions */
+export async function importStudentsMultiOU(
+  userId: string,
+  schoolId: string,
+  entries: Array<{
+    orgUnitPath: string;
+    gradeLevel?: string;
+    excludeEmails?: string[];
+  }>,
+  domain?: string
+): Promise<{
+  imported: number;
+  updated: number;
+  skipped: number;
+  errors: string[];
+}> {
+  const totals = { imported: 0, updated: 0, skipped: 0, errors: [] as string[] };
+
+  for (const entry of entries) {
+    const result = await importStudentsFromDirectory(userId, schoolId, {
+      domain,
+      orgUnitPath: entry.orgUnitPath,
+      gradeLevel: entry.gradeLevel,
+      excludeEmails: entry.excludeEmails,
+    });
+    totals.imported += result.imported;
+    totals.updated += result.updated;
+    totals.skipped += result.skipped;
+    totals.errors.push(...result.errors);
+  }
+
+  return totals;
+}
+
+/** Import staff/teachers from Google Workspace directory into the users table */
+export async function importStaffFromDirectory(
+  userId: string,
+  schoolId: string,
+  options: {
+    domain?: string;
+    orgUnitPath?: string;
+    role?: "teacher" | "school_admin";
+    excludeEmails?: string[];
+  } = {}
+): Promise<{
+  imported: number;
+  skipped: number;
+  errors: string[];
+}> {
+  const result = { imported: 0, skipped: 0, errors: [] as string[] };
+
+  try {
+    let query = "";
+    if (options.orgUnitPath) {
+      query = `orgUnitPath='${options.orgUnitPath}'`;
+    }
+
+    const { users } = await listDomainUsers(userId, options.domain, query);
+    const excludeSet = new Set((options.excludeEmails || []).map(e => e.toLowerCase()));
+    const activeUsers = users.filter((u) => !u.suspended && !excludeSet.has(u.email.toLowerCase()));
+    const role = options.role || "teacher";
+
+    // Get school to validate domain
+    const school = await storage.getSchool(schoolId);
+    if (!school) throw new Error("School not found");
+
+    for (const user of activeUsers) {
+      try {
+        const email = user.email.toLowerCase();
+
+        // Validate domain matches school
+        const emailDomain = email.split("@")[1];
+        if (emailDomain !== school.domain.toLowerCase()) {
+          result.skipped++;
+          continue;
+        }
+
+        const existing = await storage.getUserByEmail(email);
+        if (existing) {
+          result.skipped++;
+          continue;
+        }
+
+        await storage.createUser({
+          email,
+          username: email,
+          password: null,
+          role,
+          schoolId,
+          displayName: user.name,
+          schoolName: school.name,
+        });
+        result.imported++;
+      } catch (err: any) {
+        result.errors.push(`Failed to import ${user.email}: ${err.message}`);
+      }
+    }
+
+    return result;
+  } catch (error: any) {
+    if (error.code === "NO_TOKENS" || error.code === "INSUFFICIENT_PERMISSIONS") {
+      throw error;
+    }
+    throw new Error(`Staff import failed: ${error.message}`);
   }
 }

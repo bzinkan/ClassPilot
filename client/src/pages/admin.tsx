@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3, LogOut, Upload, Search, Plus } from "lucide-react";
+import { Trash2, UserPlus, Users, ArrowLeft, AlertTriangle, Clock, Settings as SettingsIcon, Key, FileText, ChevronLeft, ChevronRight, BarChart3, LogOut, Upload, Search, Plus, Building2, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { useLocation } from "wouter";
 import { ThemeToggle } from "@/components/theme-toggle";
 import {
@@ -90,6 +90,11 @@ export default function Admin() {
   const [auditActionFilter, setAuditActionFilter] = useState<string>("");
   const [addStaffDialogOpen, setAddStaffDialogOpen] = useState(false);
   const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [wsImportDialogOpen, setWsImportDialogOpen] = useState(false);
+  const [wsImportOU, setWsImportOU] = useState<string>("");
+  const [wsImportRole, setWsImportRole] = useState<"teacher" | "school_admin">("teacher");
+  const [wsExcludedEmails, setWsExcludedEmails] = useState<Set<string>>(new Set());
+  const [wsImportResult, setWsImportResult] = useState<{ imported: number; skipped: number; errors: string[] } | null>(null);
   const [staffSearchQuery, setStaffSearchQuery] = useState("");
   const [staffPage, setStaffPage] = useState(0);
   const [importFile, setImportFile] = useState<File | null>(null);
@@ -225,6 +230,53 @@ export default function Admin() {
         title: "Import failed",
         description: error.message || "An error occurred during import",
       });
+    },
+  });
+
+  // Google Workspace staff import queries
+  interface DirectoryUser { id: string; email: string; name: string; orgUnitPath?: string; isAdmin?: boolean; suspended?: boolean; }
+  interface OrgUnit { orgUnitPath: string; orgUnitId: string; name: string; detectedGrade: string | null; }
+
+  const { data: wsUsersData, isLoading: wsUsersLoading, error: wsUsersError, refetch: wsUsersRefetch } = useQuery<{ users: DirectoryUser[] }>({
+    queryKey: ["/api/directory/users"],
+    enabled: wsImportDialogOpen,
+  });
+  const { data: wsOUData, isLoading: wsOULoading } = useQuery<{ orgUnits: OrgUnit[] }>({
+    queryKey: ["/api/directory/orgunits"],
+    enabled: wsImportDialogOpen,
+  });
+
+  const wsUsers = wsUsersData?.users || [];
+  const wsOUs = wsOUData?.orgUnits || [];
+  const wsFilteredUsers = wsImportOU && wsImportOU !== "__all__"
+    ? wsUsers.filter(u => u.orgUnitPath === wsImportOU && !u.suspended)
+    : wsUsers.filter(u => !u.suspended);
+
+  const wsErrorCode = (() => {
+    if (!wsUsersError) return null;
+    const msg = (wsUsersError as Error).message || "";
+    try { const m = msg.match(/\{.*\}/); if (m) return JSON.parse(m[0]).code || null; } catch {}
+    if (msg.includes("NO_TOKENS")) return "NO_TOKENS";
+    if (msg.includes("INSUFFICIENT_PERMISSIONS")) return "INSUFFICIENT_PERMISSIONS";
+    return null;
+  })();
+
+  const wsImportMutation = useMutation({
+    mutationFn: async (params: { orgUnitPath?: string; role: string; excludeEmails?: string[] }) => {
+      const res = await apiRequest("POST", "/api/directory/import-staff", params);
+      return res.json();
+    },
+    onSuccess: (data: { imported: number; skipped: number; errors: string[] }) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/teachers"] });
+      setWsImportResult(data);
+      toast({
+        title: "Staff import complete",
+        description: `Imported ${data.imported} new staff, skipped ${data.skipped} existing`,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ variant: "destructive", title: "Staff import failed", description: error.message });
     },
   });
 
@@ -508,6 +560,19 @@ export default function Admin() {
                   </CardDescription>
                 </div>
                 <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setWsImportDialogOpen(true);
+                      setWsImportResult(null);
+                      setWsImportOU("");
+                      setWsImportRole("teacher");
+                      setWsExcludedEmails(new Set());
+                    }}
+                  >
+                    <Building2 className="h-4 w-4 mr-2" />
+                    Import from Google
+                  </Button>
                   <Button
                     variant="outline"
                     onClick={() => setImportDialogOpen(true)}
@@ -1312,6 +1377,165 @@ export default function Admin() {
               {bulkImportMutation.isPending ? "Importing..." : `Import ${importPreview.length} Staff`}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Google Workspace Staff Import Dialog */}
+      <Dialog open={wsImportDialogOpen} onOpenChange={(open) => {
+        setWsImportDialogOpen(open);
+        if (!open) { setWsImportResult(null); setWsImportOU(""); setWsExcludedEmails(new Set()); }
+      }}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Building2 className="h-5 w-5" />
+              Import Staff from Google Workspace
+            </DialogTitle>
+            <DialogDescription>
+              Import teachers and staff from your Google Workspace directory
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            {wsUsersLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-6 w-6 animate-spin mr-2" />
+                <span className="text-muted-foreground">Loading users from Google Workspace...</span>
+              </div>
+            ) : wsErrorCode === "NO_TOKENS" ? (
+              <div className="text-center py-8 space-y-4">
+                <p className="text-muted-foreground">Google Workspace is not connected. Please sign out and sign back in with Google.</p>
+                <Button variant="outline" onClick={() => window.location.href = "/auth/google"}>Reconnect Google Account</Button>
+              </div>
+            ) : wsErrorCode === "INSUFFICIENT_PERMISSIONS" ? (
+              <div className="text-center py-8 space-y-4">
+                <div className="flex items-center justify-center gap-2 text-yellow-600">
+                  <AlertCircle className="h-5 w-5" />
+                  <span className="font-medium">Admin Access Required</span>
+                </div>
+                <p className="text-muted-foreground">This feature requires Google Workspace administrator privileges.</p>
+              </div>
+            ) : wsImportResult ? (
+              <div className="space-y-4">
+                <div className="p-4 border rounded-md space-y-3">
+                  <p className="font-medium">Import Results:</p>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-muted-foreground">Imported</p>
+                      <p className="text-2xl font-bold text-green-600">{wsImportResult.imported}</p>
+                    </div>
+                    <div>
+                      <p className="text-muted-foreground">Skipped (existing)</p>
+                      <p className="text-2xl font-bold text-gray-600">{wsImportResult.skipped}</p>
+                    </div>
+                  </div>
+                  {wsImportResult.errors.length > 0 && (
+                    <div className="mt-3 p-3 bg-destructive/10 rounded-md">
+                      <p className="font-medium text-destructive mb-2">Errors:</p>
+                      <ul className="list-disc list-inside text-sm text-destructive space-y-1">
+                        {wsImportResult.errors.slice(0, 10).map((err, i) => <li key={i}>{err}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-end">
+                  <Button onClick={() => setWsImportDialogOpen(false)}>Done</Button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-muted-foreground">
+                    Found {wsFilteredUsers.length} user{wsFilteredUsers.length !== 1 ? "s" : ""}
+                  </p>
+                  <Button variant="outline" size="sm" onClick={() => wsUsersRefetch()}>
+                    <RefreshCw className="h-4 w-4 mr-2" /> Refresh
+                  </Button>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Filter by Organizational Unit</Label>
+                    <Select value={wsImportOU} onValueChange={(v) => { setWsImportOU(v); setWsExcludedEmails(new Set()); }}>
+                      <SelectTrigger>
+                        <SelectValue placeholder={wsOULoading ? "Loading..." : "All Users"} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All Users</SelectItem>
+                        {wsOUs.map((ou) => (
+                          <SelectItem key={ou.orgUnitId} value={ou.orgUnitPath}>{ou.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label>Import as Role</Label>
+                    <Select value={wsImportRole} onValueChange={(v) => setWsImportRole(v as "teacher" | "school_admin")}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="teacher">Teacher</SelectItem>
+                        <SelectItem value="school_admin">School Admin</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {wsFilteredUsers.length > 0 && (
+                  <div className="border rounded-md divide-y max-h-64 overflow-auto">
+                    {wsFilteredUsers.map((user) => {
+                      const excluded = wsExcludedEmails.has(user.email.toLowerCase());
+                      return (
+                        <div key={user.id} className="flex items-center gap-3 p-2 text-sm">
+                          <Checkbox
+                            checked={!excluded}
+                            onCheckedChange={(checked) => {
+                              setWsExcludedEmails(prev => {
+                                const next = new Set(prev);
+                                if (checked) next.delete(user.email.toLowerCase());
+                                else next.add(user.email.toLowerCase());
+                                return next;
+                              });
+                            }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-medium truncate">{user.name}</p>
+                            <p className="text-muted-foreground text-xs truncate">{user.email}</p>
+                          </div>
+                          {user.orgUnitPath && (
+                            <span className="text-xs text-muted-foreground">{user.orgUnitPath}</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2">
+                  <Button variant="outline" onClick={() => setWsImportDialogOpen(false)}>Cancel</Button>
+                  <Button
+                    onClick={() => {
+                      const excludeArr = wsExcludedEmails.size > 0 ? Array.from(wsExcludedEmails) : undefined;
+                      wsImportMutation.mutate({
+                        orgUnitPath: wsImportOU && wsImportOU !== "__all__" ? wsImportOU : undefined,
+                        role: wsImportRole,
+                        excludeEmails: excludeArr,
+                      });
+                    }}
+                    disabled={wsImportMutation.isPending || wsFilteredUsers.length - wsExcludedEmails.size === 0}
+                  >
+                    {wsImportMutation.isPending ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Importing...</>
+                    ) : (
+                      <><Users className="h-4 w-4 mr-2" />Import {wsFilteredUsers.length - wsExcludedEmails.size} Staff</>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

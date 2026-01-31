@@ -4825,14 +4825,21 @@ export async function registerRoutes(
       }
       const schoolId = sessionSchoolId;
 
-      const { importStudentsFromDirectory } = await import("./directory");
-      const { domain, orgUnitPath, gradeLevel } = req.body;
+      const { importStudentsFromDirectory, importStudentsMultiOU } = await import("./directory");
+      const { domain, orgUnitPath, gradeLevel, excludeEmails, entries } = req.body;
 
-      const result = await importStudentsFromDirectory(user.id, schoolId, {
-        domain,
-        orgUnitPath,
-        gradeLevel,
-      });
+      // Support multi-OU import: { entries: [{ orgUnitPath, gradeLevel, excludeEmails }] }
+      let result;
+      if (Array.isArray(entries) && entries.length > 0) {
+        result = await importStudentsMultiOU(user.id, schoolId, entries, domain);
+      } else {
+        result = await importStudentsFromDirectory(user.id, schoolId, {
+          domain,
+          orgUnitPath,
+          gradeLevel,
+          excludeEmails,
+        });
+      }
 
       res.json({
         success: true,
@@ -4871,6 +4878,48 @@ export async function registerRoutes(
     } catch (error: any) {
       console.error("Org units error:", error);
       res.status(500).json({ error: error.message || "Failed to fetch org units" });
+    }
+  });
+
+  // Import staff/teachers from Google Workspace Directory
+  app.post("/api/directory/import-staff", requireAuth, requireSchoolContext, requireActiveSchoolMiddleware, requireSchoolAdminRole, async (req, res) => {
+    try {
+      const user = await storage.getUser(req.session.userId!);
+      if (!user || !user.schoolId) {
+        return res.status(400).json({ error: "User must belong to a school" });
+      }
+      const sessionSchoolId = res.locals.schoolId ?? req.session.schoolId!;
+      if (!assertSameSchool(sessionSchoolId, user.schoolId)) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      const { importStaffFromDirectory } = await import("./directory");
+      const { domain, orgUnitPath, role, excludeEmails } = req.body;
+
+      const validRole = role === "school_admin" ? "school_admin" : "teacher";
+
+      const result = await importStaffFromDirectory(user.id, sessionSchoolId, {
+        domain,
+        orgUnitPath,
+        role: validRole,
+        excludeEmails,
+      });
+
+      res.json({
+        success: true,
+        imported: result.imported,
+        skipped: result.skipped,
+        errors: result.errors,
+      });
+    } catch (error: any) {
+      console.error("Directory staff import error:", error);
+      if (error.code === "NO_TOKENS") {
+        return res.status(403).json({ error: error.message, code: "NO_TOKENS" });
+      }
+      if (error.code === "INSUFFICIENT_PERMISSIONS") {
+        return res.status(403).json({ error: error.message, code: "INSUFFICIENT_PERMISSIONS" });
+      }
+      res.status(500).json({ error: error.message || "Failed to import staff" });
     }
   });
 
