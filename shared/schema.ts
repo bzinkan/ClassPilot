@@ -150,7 +150,10 @@ export const students = pgTable("students", {
   emailLc: text("email_lc"), // Existing field - lowercase email for case-insensitive lookups
   googleUserId: text("google_user_id"),
   studentStatus: text("student_status").notNull(), // Existing field in database
-});
+}, (table) => ({
+  schoolIdIdx: index("students_school_id_idx").on(table.schoolId),
+  schoolEmailIdx: index("students_school_email_idx").on(table.schoolId, table.emailLc),
+}));
 
 export const insertStudentSchema = createInsertSchema(students).omit({ id: true, createdAt: true });
 export type InsertStudent = z.infer<typeof insertStudentSchema>;
@@ -251,6 +254,8 @@ export const studentSessions = pgTable("student_sessions", {
   // Composite index for fast lookups
   index("student_sessions_student_device_active_idx")
     .on(table.studentId, table.deviceId, table.isActive),
+  index("student_sessions_last_seen_active_idx")
+    .on(table.lastSeenAt, table.isActive),
 ]);
 
 export const insertStudentSessionSchema = createInsertSchema(studentSessions).omit({ 
@@ -365,6 +370,7 @@ export const heartbeats = pgTable("heartbeats", {
   studentTimestampIdx: index("heartbeats_student_timestamp_idx").on(table.studentId, table.timestamp),
   emailTimestampIdx: index("heartbeats_email_timestamp_idx").on(table.studentEmail, table.timestamp), // NEW: Email+time lookup
   schoolEmailIdx: index("heartbeats_school_email_idx").on(table.schoolId, table.studentEmail), // NEW: Multi-tenant email lookup
+  schoolDeviceTimestampIdx: index("heartbeats_school_device_timestamp_idx").on(table.schoolId, table.deviceId, table.timestamp),
 }));
 
 // Email normalization helper for consistent lookups
@@ -551,7 +557,9 @@ export const session = pgTable("session", {
   sid: varchar("sid").primaryKey(),
   sess: jsonb("sess").notNull(),
   expire: timestamp("expire").notNull(),
-});
+}, (table) => ({
+  expireIdx: index("session_expire_idx").on(table.expire),
+}));
 
 // Settings
 export const settings = pgTable("settings", {
@@ -665,7 +673,9 @@ export const sessions = pgTable("sessions", {
   startTime: timestamp("start_time").notNull().default(sql`now()`),
   endTime: timestamp("end_time"), // NULL means currently active, timestamp means ended
   createdAt: timestamp("created_at").notNull().default(sql`now()`),
-});
+}, (table) => ({
+  groupIdIdx: index("sessions_group_id_idx").on(table.groupId),
+}));
 
 export const insertSessionSchema = createInsertSchema(sessions).omit({ id: true, createdAt: true, startTime: true });
 export type InsertSession = z.infer<typeof insertSessionSchema>;

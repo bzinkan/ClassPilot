@@ -1808,42 +1808,29 @@ export async function registerRoutes(
   app.get("/api/super-admin/schools", requireAuth, requireSuperAdminRole, async (req, res) => {
     try {
       const { search, status, includeDeleted } = req.query;
+
+      // Search/filter schools at the database level (avoids loading all into memory)
+      const searchTerm = typeof search === 'string' ? search.trim() : undefined;
+      const statusFilter = typeof status === 'string' ? status.trim() : undefined;
+      const schools = await storage.searchSchools({
+        search: searchTerm || undefined,
+        status: statusFilter || undefined,
+        includeDeleted: includeDeleted === 'true',
+      });
       
-      // Get all schools (with deleted if requested)
-      let schools = await storage.getAllSchools(includeDeleted === 'true');
-      
-      // Apply search filter (name or domain) - only if search is not empty
-      const searchTerm = typeof search === 'string' ? search.trim() : '';
-      if (searchTerm) {
-        const searchLower = searchTerm.toLowerCase();
-        schools = schools.filter(school => 
-          school.name.toLowerCase().includes(searchLower) ||
-          school.domain.toLowerCase().includes(searchLower)
-        );
-      }
-      
-      // Apply status filter - only if status is not "all" or empty
-      const statusFilter = typeof status === 'string' ? status.trim() : '';
-      if (statusFilter && statusFilter !== 'all') {
-        schools = schools.filter(school => school.status === statusFilter);
-      }
-      
-      // Get counts for each school
-      const schoolsWithCounts = await Promise.all(
-        schools.map(async (school) => {
-          const users = await storage.getUsersBySchool(school.id);
-          const students = await storage.getStudentsBySchool(school.id);
-          const teachers = users.filter(u => u.role === 'teacher');
-          const admins = users.filter(u => u.role === 'school_admin');
-          
-          return {
-            ...school,
-            teacherCount: teachers.length,
-            studentCount: students.length,
-            adminCount: admins.length,
-          };
-        })
-      );
+      // Get counts for all schools in a single query (avoids N+1)
+      const allCounts = await storage.getSchoolCounts();
+      const countsMap = new Map(allCounts.map(c => [c.schoolId, c]));
+
+      const schoolsWithCounts = schools.map(school => {
+        const counts = countsMap.get(school.id);
+        return {
+          ...school,
+          teacherCount: counts?.teacherCount ?? 0,
+          studentCount: counts?.studentCount ?? 0,
+          adminCount: counts?.adminCount ?? 0,
+        };
+      });
       
       // Calculate summary stats
       const summary = {
@@ -2734,18 +2721,23 @@ export async function registerRoutes(
       const users = await storage.getUsersBySchool(sessionSchoolId);
       const students = await storage.getStudentsBySchool(sessionSchoolId);
       
-      // Get assignments for each teacher
+      // Get all assignments in a single query (avoids N+1)
       const teachers = users.filter(user => user.role === 'teacher');
-      const assignments = [];
-      
-      for (const teacher of teachers) {
-        const studentIds = await storage.getTeacherStudents(teacher.id);
-        assignments.push({
-          teacherId: teacher.id,
-          teacherName: teacher.username,
-          studentIds,
-        });
+      const allAssignments = await storage.getAllTeacherStudentsBySchool(sessionSchoolId);
+
+      // Group assignments by teacher
+      const assignmentsByTeacher = new Map<string, string[]>();
+      for (const a of allAssignments) {
+        const list = assignmentsByTeacher.get(a.teacherId) ?? [];
+        list.push(a.studentId);
+        assignmentsByTeacher.set(a.teacherId, list);
       }
+
+      const assignments = teachers.map(teacher => ({
+        teacherId: teacher.id,
+        teacherName: teacher.username,
+        studentIds: assignmentsByTeacher.get(teacher.id) ?? [],
+      }));
       
       res.json({ 
         success: true, 
@@ -3982,14 +3974,18 @@ export async function registerRoutes(
         if (offlineStudentIds.length > 0) {
           console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
           
-          // Create offline placeholders for roster students not yet connected
-          const offlinePlaceholders = await Promise.all(
-            offlineStudentIds.map(async (studentId) => {
-              const student = await storage.getStudent(studentId);
-              if (!student || !assertSameSchool(sessionSchoolId, student.schoolId)) return null;
-              
-              const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
-              
+          // Batch fetch offline students and their devices (avoids N+1)
+          const offlineStudents = await storage.getStudentsByIds(offlineStudentIds);
+          const deviceIds = offlineStudents
+            .map(s => s.deviceId)
+            .filter((id): id is string => id !== null && id !== undefined);
+          const offlineDevices = await storage.getDevicesByIds(deviceIds);
+          const deviceMap = new Map(offlineDevices.map(d => [d.deviceId, d]));
+
+          const validPlaceholders = offlineStudents
+            .filter(student => assertSameSchool(sessionSchoolId, student.schoolId))
+            .map(student => {
+              const device = student.deviceId ? deviceMap.get(student.deviceId) : undefined;
               return {
                 studentId: student.id,
                 deviceId: student.deviceId,
@@ -4011,11 +4007,7 @@ export async function registerRoutes(
                 viewMode: 'url' as const,
                 status: 'offline' as const,
               };
-            })
-          );
-          
-          // Filter out nulls and add to filtered statuses
-          const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
+            });
           filteredStatuses = [...filteredStatuses, ...validPlaceholders];
           console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
@@ -4096,30 +4088,28 @@ export async function registerRoutes(
         if (offlineStudentIds.length > 0) {
           console.log('  - Creating offline placeholders for', offlineStudentIds.length, 'students');
           
-          // Create offline placeholders for roster students not yet connected
-          const offlinePlaceholders = await Promise.all(
-            offlineStudentIds.map(async (studentId) => {
-              const student = await storage.getStudent(studentId);
-              if (!student || !assertSameSchool(sessionSchoolId, student.schoolId)) return null;
-              
-              const device = student.deviceId ? await storage.getDevice(student.deviceId) : null;
-              
+          // Batch fetch offline students and their devices (avoids N+1)
+          const offlineStudents = await storage.getStudentsByIds(offlineStudentIds);
+          const deviceIds = offlineStudents
+            .map(s => s.deviceId)
+            .filter((id): id is string => id !== null && id !== undefined);
+          const offlineDevices = await storage.getDevicesByIds(deviceIds);
+          const deviceMap = new Map(offlineDevices.map(d => [d.deviceId, d]));
+
+          const validPlaceholders = offlineStudents
+            .filter(student => assertSameSchool(sessionSchoolId, student.schoolId))
+            .map(student => {
+              const device = student.deviceId ? deviceMap.get(student.deviceId) : undefined;
               return {
                 studentId: student.id,
                 studentEmail: student.studentEmail || undefined,
                 studentName: student.studentName,
                 classId: device?.classId || '',
                 gradeLevel: student.gradeLevel ?? undefined,
-                
-                // Multi-device info
                 deviceCount: 0,
                 devices: [],
-                
-                // Aggregated status
                 status: 'offline' as const,
                 lastSeenAt: 0,
-                
-                // Primary device data (placeholder)
                 primaryDeviceId: student.deviceId,
                 activeTabTitle: '',
                 activeTabUrl: '',
@@ -4132,11 +4122,7 @@ export async function registerRoutes(
                 currentUrlDuration: undefined,
                 viewMode: 'url' as const,
               };
-            })
-          );
-          
-          // Filter out nulls and add to filtered statuses
-          const validPlaceholders = offlinePlaceholders.filter((p): p is NonNullable<typeof p> => p !== null);
+            });
           filteredStatuses = [...filteredStatuses, ...validPlaceholders];
           console.log('  - Total students (active + offline):', filteredStatuses.length);
         }
@@ -5573,10 +5559,8 @@ export async function registerRoutes(
       }
       
       const studentIds = await storage.getTeacherStudents(teacherId);
-      const students = await Promise.all(
-        studentIds.map(id => storage.getStudent(id))
-      );
-      res.json(students.filter(s => s !== undefined && assertSameSchool(sessionSchoolId, s.schoolId)));
+      const students = await storage.getStudentsByIds(studentIds);
+      res.json(students.filter(s => assertSameSchool(sessionSchoolId, s.schoolId)));
     } catch (error) {
       console.error("Get teacher students error:", error);
       res.status(500).json({ error: "Internal server error" });
@@ -5914,8 +5898,8 @@ export async function registerRoutes(
       }
       
       const studentIds = await storage.getGroupStudents(groupId);
-      const students = await Promise.all(studentIds.map(id => storage.getStudent(id)));
-      res.json(students.filter(s => s !== undefined && assertSameSchool(sessionSchoolId, s.schoolId)));
+      const students = await storage.getStudentsByIds(studentIds);
+      res.json(students.filter(s => assertSameSchool(sessionSchoolId, s.schoolId)));
     } catch (error) {
       console.error("Get group students error:", error);
       res.status(500).json({ error: "Internal server error" });

@@ -142,13 +142,15 @@ export default function Dashboard() {
   const { data: students = [], refetch } = useQuery<AggregatedStudentStatus[]>({
     queryKey: ['/api/students-aggregated'],
     // Custom refetch interval that respects optimistic update period
+    // WebSocket handles real-time updates; polling is a fallback
     refetchInterval: () => {
       // Skip polling during optimistic update period to prevent flickering
       if (Date.now() < optimisticUpdateUntilRef.current) {
         return false; // Don't refetch
       }
-      return 10000; // Poll every 10 seconds
+      return 30000; // Poll every 30 seconds (WebSocket handles real-time)
     },
+    staleTime: 10000, // Consider data fresh for 10 seconds
   });
 
   const { data: urlHistory = [] } = useQuery<Heartbeat[]>({

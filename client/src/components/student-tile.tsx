@@ -123,11 +123,11 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
   }>({
     queryKey: ['/api/device/screenshot', student.primaryDeviceId],
     enabled: !!student.primaryDeviceId && student.status !== 'offline' && !liveStream,
-    refetchInterval: 10000, // Refresh every 10 seconds
-    refetchIntervalInBackground: true, // Keep refetching even when tab is not focused
+    refetchInterval: 30000, // Refresh every 30 seconds (reduces server load at scale)
+    refetchIntervalInBackground: false, // Don't refetch when browser tab is not focused
     retry: false, // Don't retry on 404 (no screenshot available)
-    staleTime: 0, // Always consider data stale so refetch happens
-    gcTime: 30000, // Keep in cache for 30 seconds (formerly cacheTime)
+    staleTime: 15000, // Consider data fresh for 15 seconds
+    gcTime: 60000, // Keep in cache for 60 seconds (formerly cacheTime)
   });
   
   // Get unique recent domains (last 5)

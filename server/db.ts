@@ -23,7 +23,7 @@ if (isTest) {
   pool = createTestSessionPool();
   db = {} as ReturnType<typeof drizzle<typeof schema>>;
 } else {
-  const pgPool = new Pool({ connectionString: process.env.DATABASE_URL });
+  const pgPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 50, idleTimeoutMillis: 30000 });
   pool = pgPool;
   db = drizzle(pgPool, { schema });
 }

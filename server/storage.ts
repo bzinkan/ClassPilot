@@ -199,6 +199,7 @@ export interface IStorage {
   getSchool(id: string): Promise<School | undefined>;
   getSchoolByDomain(domain: string): Promise<School | undefined>;
   getAllSchools(includeDeleted?: boolean): Promise<School[]>;
+  searchSchools(opts: { search?: string; status?: string; includeDeleted?: boolean }): Promise<School[]>;
   createSchool(school: InsertSchool): Promise<School>;
   updateSchool(id: string, updates: Partial<InsertSchool>): Promise<School | undefined>;
   bumpSchoolSessionVersion(schoolId: string): Promise<number>;
@@ -304,6 +305,12 @@ export interface IStorage {
   unassignStudentFromTeacher(teacherId: string, studentId: string): Promise<boolean>;
   getTeacherStudents(teacherId: string): Promise<string[]>; // Returns student IDs
   getStudentTeachers(studentId: string): Promise<string[]>; // Returns teacher IDs
+  getAllTeacherStudentsBySchool(schoolId: string): Promise<Array<{ teacherId: string; studentId: string }>>;
+
+  // Batch methods for scalability
+  getStudentsByIds(ids: string[]): Promise<Student[]>;
+  getDevicesByIds(deviceIds: string[]): Promise<Device[]>;
+  getSchoolCounts(): Promise<Array<{ schoolId: string; teacherCount: number; adminCount: number; studentCount: number }>>;
 
   // Dashboard Tabs
   getDashboardTabs(teacherId: string): Promise<DashboardTab[]>;
@@ -498,6 +505,18 @@ export class MemStorage implements IStorage {
       return allSchools;
     }
     return allSchools.filter(school => !school.deletedAt);
+  }
+
+  async searchSchools(opts: { search?: string; status?: string; includeDeleted?: boolean }): Promise<School[]> {
+    let result = await this.getAllSchools(opts.includeDeleted);
+    if (opts.search) {
+      const searchLower = opts.search.toLowerCase();
+      result = result.filter(s => s.name.toLowerCase().includes(searchLower) || s.domain.toLowerCase().includes(searchLower));
+    }
+    if (opts.status && opts.status !== 'all') {
+      result = result.filter(s => s.status === opts.status);
+    }
+    return result;
   }
 
   async createSchool(insertSchool: InsertSchool): Promise<School> {
@@ -813,6 +832,28 @@ export class MemStorage implements IStorage {
 
   async getStudentsBySchool(schoolId: string): Promise<Student[]> {
     return Array.from(this.students.values()).filter((student) => student.schoolId === schoolId);
+  }
+
+  async getStudentsByIds(ids: string[]): Promise<Student[]> {
+    if (ids.length === 0) return [];
+    return ids.map(id => this.students.get(id)).filter((s): s is Student => s !== undefined);
+  }
+
+  async getDevicesByIds(deviceIds: string[]): Promise<Device[]> {
+    if (deviceIds.length === 0) return [];
+    return deviceIds.map(id => this.devices.get(id)).filter((d): d is Device => d !== undefined);
+  }
+
+  async getSchoolCounts(): Promise<Array<{ schoolId: string; teacherCount: number; adminCount: number; studentCount: number }>> {
+    const result: Array<{ schoolId: string; teacherCount: number; adminCount: number; studentCount: number }> = [];
+    for (const schoolId of Array.from(this.schools.keys())) {
+      const schoolUsers = Array.from(this.users.values()).filter(u => u.schoolId === schoolId);
+      const teacherCount = schoolUsers.filter(u => u.role === 'teacher').length;
+      const adminCount = schoolUsers.filter(u => u.role === 'school_admin').length;
+      const studentCount = Array.from(this.students.values()).filter(s => s.schoolId === schoolId).length;
+      result.push({ schoolId, teacherCount, adminCount, studentCount });
+    }
+    return result;
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
@@ -1576,6 +1617,17 @@ export class MemStorage implements IStorage {
       .map((ts) => ts.teacherId);
   }
 
+  async getAllTeacherStudentsBySchool(schoolId: string): Promise<Array<{ teacherId: string; studentId: string }>> {
+    const schoolTeacherIds = new Set(
+      Array.from(this.users.values())
+        .filter(u => u.schoolId === schoolId && u.role === 'teacher')
+        .map(u => u.id)
+    );
+    return this.teacherStudents
+      .filter(ts => schoolTeacherIds.has(ts.teacherId))
+      .map(ts => ({ teacherId: ts.teacherId, studentId: ts.studentId }));
+  }
+
   // Flight Paths
   async getFlightPath(id: string): Promise<FlightPath | undefined> {
     return this.flightPaths.get(id);
@@ -2142,6 +2194,24 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(schools).where(isNull(schools.deletedAt));
   }
 
+  async searchSchools(opts: { search?: string; status?: string; includeDeleted?: boolean }): Promise<School[]> {
+    const conditions = [];
+    if (!opts.includeDeleted) {
+      conditions.push(isNull(schools.deletedAt));
+    }
+    if (opts.search) {
+      const pattern = `%${opts.search}%`;
+      conditions.push(drizzleSql`(${schools.name} ILIKE ${pattern} OR ${schools.domain} ILIKE ${pattern})`);
+    }
+    if (opts.status && opts.status !== 'all') {
+      conditions.push(eq(schools.status, opts.status));
+    }
+    if (conditions.length === 0) {
+      return await db.select().from(schools);
+    }
+    return await db.select().from(schools).where(and(...conditions));
+  }
+
   async createSchool(insertSchool: InsertSchool): Promise<School> {
     const status = insertSchool.status ?? "trial";
     const planStatus = insertSchool.planStatus ?? "active";
@@ -2487,6 +2557,28 @@ export class DatabaseStorage implements IStorage {
 
   async getStudentsBySchool(schoolId: string): Promise<Student[]> {
     return await db.select().from(students).where(eq(students.schoolId, schoolId));
+  }
+
+  async getStudentsByIds(ids: string[]): Promise<Student[]> {
+    if (ids.length === 0) return [];
+    return await db.select().from(students).where(inArray(students.id, ids));
+  }
+
+  async getDevicesByIds(deviceIds: string[]): Promise<Device[]> {
+    if (deviceIds.length === 0) return [];
+    return await db.select().from(devices).where(inArray(devices.deviceId, deviceIds));
+  }
+
+  async getSchoolCounts(): Promise<Array<{ schoolId: string; teacherCount: number; adminCount: number; studentCount: number }>> {
+    const result = await db.execute(drizzleSql`
+      SELECT
+        s.id AS "schoolId",
+        COALESCE((SELECT COUNT(*) FROM users u WHERE u.school_id = s.id AND u.role = 'teacher'), 0)::int AS "teacherCount",
+        COALESCE((SELECT COUNT(*) FROM users u WHERE u.school_id = s.id AND u.role = 'school_admin'), 0)::int AS "adminCount",
+        COALESCE((SELECT COUNT(*) FROM students st WHERE st.school_id = s.id), 0)::int AS "studentCount"
+      FROM schools s
+    `);
+    return result.rows as Array<{ schoolId: string; teacherCount: number; adminCount: number; studentCount: number }>;
   }
 
   async createStudent(insertStudent: InsertStudent): Promise<Student> {
@@ -3215,13 +3307,21 @@ export class DatabaseStorage implements IStorage {
 
   async cleanupOldHeartbeats(retentionHours: number): Promise<number> {
     const cutoffTime = new Date(Date.now() - retentionHours * 60 * 60 * 1000);
-    
-    const deleted = await db
-      .delete(heartbeats)
-      .where(lt(heartbeats.timestamp, cutoffTime))
-      .returning();
-    
-    return deleted.length;
+    let totalDeleted = 0;
+
+    // Delete in batches of 1000 to avoid locking the table and OOM from .returning()
+    while (true) {
+      const result = await db.execute(drizzleSql`
+        DELETE FROM heartbeats WHERE id IN (
+          SELECT id FROM heartbeats WHERE timestamp < ${cutoffTime} LIMIT 1000
+        )
+      `);
+      const count = result.rowCount ?? 0;
+      totalDeleted += count;
+      if (count < 1000) break;
+    }
+
+    return totalDeleted;
   }
 
   // Events
@@ -3436,6 +3536,15 @@ export class DatabaseStorage implements IStorage {
       .from(teacherStudents)
       .where(eq(teacherStudents.studentId, studentId));
     return results.map((row: { teacherId: string }) => row.teacherId);
+  }
+
+  async getAllTeacherStudentsBySchool(schoolId: string): Promise<Array<{ teacherId: string; studentId: string }>> {
+    const results = await db
+      .select({ teacherId: teacherStudents.teacherId, studentId: teacherStudents.studentId })
+      .from(teacherStudents)
+      .innerJoin(users, eq(teacherStudents.teacherId, users.id))
+      .where(eq(users.schoolId, schoolId));
+    return results;
   }
 
   // Flight Paths
