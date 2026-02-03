@@ -64,6 +64,9 @@ export const AuditAction = {
   SCHOOL_CREATE: 'school.create',
   SCHOOL_UPDATE: 'school.update',
   SCHOOL_DELETE: 'school.delete',
+
+  // AI Safety
+  AI_SAFETY_ALERT: 'ai.safety_alert',
 } as const;
 
 export type AuditActionType = (typeof AuditAction)[keyof typeof AuditAction];

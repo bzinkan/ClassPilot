@@ -50,6 +50,7 @@ const settingsSchema = z.object({
   allowedDomains: z.string(),
   ipAllowlist: z.string(),
   gradeLevels: z.string().min(1, "At least one grade level is required"),
+  aiSafetyEmailsEnabled: z.boolean().optional(),
 });
 
 type SettingsForm = z.infer<typeof settingsSchema>;
@@ -89,6 +90,7 @@ export default function Settings() {
       allowedDomains: settings?.allowedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
       gradeLevels: settings?.gradeLevels?.join(", ") || "5th, 6th, 7th, 8th, 9th, 10th, 11th, 12th",
+      aiSafetyEmailsEnabled: settings?.aiSafetyEmailsEnabled !== false,
     },
   });
 
@@ -104,6 +106,7 @@ export default function Settings() {
         allowedDomains: settings.allowedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
         gradeLevels: settings.gradeLevels?.join(", ") || "5th, 6th, 7th, 8th, 9th, 10th, 11th, 12th",
+        aiSafetyEmailsEnabled: settings.aiSafetyEmailsEnabled !== false,
       });
     }
   }, [settings, form]);
@@ -143,6 +146,7 @@ export default function Settings() {
           .map((ip) => ip.trim())
           .filter(Boolean),
         gradeLevels,
+        aiSafetyEmailsEnabled: data.aiSafetyEmailsEnabled !== false,
       };
       return await apiRequest("POST", "/api/settings", payload);
     },
@@ -469,6 +473,21 @@ export default function Settings() {
                   These grade levels will appear as filter tabs on the dashboard. Customize based on your school's grade structure.
                 </p>
               </div>
+
+              <div className="flex items-center space-x-3">
+                <input
+                  type="checkbox"
+                  id="aiSafetyEmailsEnabled"
+                  className="h-4 w-4 rounded border-gray-300"
+                  {...form.register("aiSafetyEmailsEnabled")}
+                />
+                <Label htmlFor="aiSafetyEmailsEnabled">
+                  AI Safety Alert Emails
+                </Label>
+              </div>
+              <p className="text-xs text-muted-foreground -mt-4 ml-7">
+                Send email notifications to school admins when dangerous content (self-harm, violence, sexual) is detected.
+              </p>
 
               <Button
                 type="submit"

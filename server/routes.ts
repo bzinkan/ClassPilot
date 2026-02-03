@@ -69,7 +69,8 @@ import { parseCsv, stringifyCsv } from "./util/csv";
 import { assertEmailMatchesDomain, EmailDomainError } from "./util/emailDomain";
 import { assertTierAtLeast, PLAN_STATUS_VALUES, PLAN_TIER_ORDER } from "./util/entitlements";
 import { logAudit, logAuditFromRequest, AuditAction } from "./audit";
-import { sendTrialRequestNotification } from "./util/email";
+import { sendTrialRequestNotification, sendSafetyAlertEmail } from "./util/email";
+import { classifyUrl } from "./util/ai-classify";
 import { getTimezoneFromZip } from "./util/zipToTimezone";
 import { createCheckoutSession, createCustomInvoice, handleWebhookEvent, constructWebhookEvent, stripe as stripeClient } from "./stripe";
 
@@ -3538,6 +3539,60 @@ export async function registerRoutes(
 
       if (!persisted && deviceKey) {
         heartbeatLastPersistedAt.delete(deviceKey);
+      }
+
+      // Non-blocking AI classification — runs after response is sent
+      if (data.activeTabUrl && data.studentId && process.env.OPENAI_API_KEY) {
+        const classifyStudentId = data.studentId;
+        const classifySchoolId = data.schoolId;
+        classifyUrl(data.activeTabUrl).then(async (classification) => {
+          if (!classification) return;
+
+          // Attach to in-memory student status
+          const status = await storage.getStudentStatus(classifyStudentId);
+          if (status) {
+            status.aiClassification = classification;
+            await storage.updateStudentStatus(status);
+          }
+
+          // Safety alert → broadcast + audit + optional email
+          if (classification.safetyAlert && classifySchoolId) {
+            broadcastToTeachers(classifySchoolId, {
+              type: "safety-alert",
+              deviceId: data.deviceId,
+              studentId: classifyStudentId,
+              alert: classification.safetyAlert,
+              domain: classification.domain,
+            });
+
+            logAudit(
+              { userId: 'system', schoolId: classifySchoolId, userEmail: 'system', userRole: 'system' },
+              AuditAction.AI_SAFETY_ALERT,
+              { entityType: 'student', entityId: classifyStudentId, metadata: { domain: classification.domain, alertType: classification.safetyAlert } }
+            );
+
+            // Send email if enabled
+            try {
+              const schoolSettings = await storage.getSettingsBySchoolId(classifySchoolId);
+              if (schoolSettings?.aiSafetyEmailsEnabled !== false) {
+                const admins = await storage.getSchoolAdmins(classifySchoolId);
+                const adminEmails = admins.map(a => a.email).filter(Boolean) as string[];
+                if (adminEmails.length > 0) {
+                  const studentName = status?.studentName || classifyStudentId;
+                  sendSafetyAlertEmail({
+                    adminEmails,
+                    studentName,
+                    domain: classification.domain,
+                    alertType: classification.safetyAlert,
+                    timestamp: Date.now(),
+                  }).catch(err => console.error('[AI] Safety email error:', err));
+                }
+              }
+            } catch (err) {
+              console.error('[AI] Safety alert email lookup error:', err);
+            }
+          }
+        }).catch(err => console.error('[AI] Classification error:', err));
       }
 
       if (dropHeavyPayload) {

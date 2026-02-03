@@ -475,9 +475,15 @@ export function StudentTile({ student, onClick, blockedDomains = [], isOffTask =
         </div>
 
         {/* Alert Badges */}
-        {(isOffTask || isBlocked || isBlockedByFlightPath || student.flightPathActive) && (
+        {(isOffTask || isBlocked || isBlockedByFlightPath || student.flightPathActive || student.aiClassification?.safetyAlert) && (
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap gap-1.5">
+              {student.aiClassification?.safetyAlert && (
+                <Badge variant="outline" className="text-xs px-2 py-0.5 bg-red-100 text-red-900 border-red-400 animate-pulse dark:bg-red-950 dark:text-red-400 dark:border-red-800" data-testid={`badge-safety-${student.primaryDeviceId}`}>
+                  <AlertTriangle className="h-3 w-3 mr-1" />
+                  Safety Alert: {student.aiClassification.safetyAlert}
+                </Badge>
+              )}
               {student.flightPathActive && student.activeFlightPathName && !isBlockedByFlightPath && (
                 <Badge variant="outline" className="text-xs px-2 py-0.5 bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-800" data-testid={`badge-scene-${student.primaryDeviceId}`}>
                   <Layers className="h-3 w-3 mr-1" />

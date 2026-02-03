@@ -298,6 +298,12 @@ export interface StudentStatus {
   viewMode?: 'url' | 'thumb' | 'live'; // Display mode for the student tile
   status: 'online' | 'idle' | 'offline';
   statusKey?: string; // Composite key: studentId-deviceId (for multi-device tracking)
+  aiClassification?: {
+    category: 'educational' | 'non-educational' | 'unknown';
+    safetyAlert: 'self-harm' | 'violence' | 'sexual' | null;
+    domain: string;
+    classifiedAt: number;
+  };
 }
 
 // Helper function to create consistent composite keys for student status tracking
@@ -342,6 +348,12 @@ export interface AggregatedStudentStatus {
   cameraActive: boolean;
   currentUrlDuration?: number;
   viewMode?: 'url' | 'thumb' | 'live';
+  aiClassification?: {
+    category: 'educational' | 'non-educational' | 'unknown';
+    safetyAlert: 'self-harm' | 'violence' | 'sexual' | null;
+    domain: string;
+    classifiedAt: number;
+  };
 }
 
 // Heartbeat data
@@ -582,6 +594,7 @@ export const settings = pgTable("settings", {
   afterHoursMode: text("after_hours_mode").notNull().default("off").$type<"off" | "limited" | "full">(),
   handRaisingEnabled: boolean("hand_raising_enabled").default(true), // Allow students to raise hands
   studentMessagingEnabled: boolean("student_messaging_enabled").default(true), // Allow students to send messages
+  aiSafetyEmailsEnabled: boolean("ai_safety_emails_enabled").default(true), // Send email to admins on AI safety alerts
 });
 
 export const insertSettingsSchema = createInsertSchema(settings)

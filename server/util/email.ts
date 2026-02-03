@@ -377,3 +377,99 @@ Need help? Contact us at support@school-pilot.net
     return false;
   }
 }
+
+interface SafetyAlertEmailData {
+  adminEmails: string[];
+  studentName: string;
+  domain: string;
+  alertType: 'self-harm' | 'violence' | 'sexual';
+  timestamp: number;
+}
+
+export async function sendSafetyAlertEmail(data: SafetyAlertEmailData): Promise<boolean> {
+  if (data.adminEmails.length === 0) return false;
+
+  const alertLabels: Record<string, string> = {
+    'self-harm': 'Self-Harm',
+    'violence': 'Violence',
+    'sexual': 'Sexual Content',
+  };
+  const alertLabel = alertLabels[data.alertType] || data.alertType;
+  const time = new Date(data.timestamp).toLocaleString();
+
+  const subject = `[ClassPilot] Safety Alert: ${alertLabel} content detected`;
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+      <div style="background: #dc2626; padding: 24px; text-align: center;">
+        <h1 style="color: white; margin: 0; font-size: 24px;">⚠ Safety Alert</h1>
+      </div>
+
+      <div style="padding: 32px; background: #fef2f2;">
+        <p style="color: #0f172a; font-size: 16px; line-height: 1.6;">
+          A student has accessed content flagged as <strong>${escapeHtml(alertLabel)}</strong>.
+        </p>
+
+        <table style="width: 100%; border-collapse: collapse; margin-top: 16px;">
+          <tr>
+            <td style="padding: 8px 0; color: #64748b; width: 120px;">Student:</td>
+            <td style="padding: 8px 0; color: #0f172a; font-weight: 500;">${escapeHtml(data.studentName)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #64748b;">Domain:</td>
+            <td style="padding: 8px 0; color: #0f172a;">${escapeHtml(data.domain)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #64748b;">Alert Type:</td>
+            <td style="padding: 8px 0; color: #dc2626; font-weight: 500;">${escapeHtml(alertLabel)}</td>
+          </tr>
+          <tr>
+            <td style="padding: 8px 0; color: #64748b;">Time:</td>
+            <td style="padding: 8px 0; color: #0f172a;">${escapeHtml(time)}</td>
+          </tr>
+        </table>
+
+        <p style="color: #475569; margin-top: 24px; font-size: 14px;">
+          Please review this activity in the ClassPilot dashboard immediately.
+        </p>
+      </div>
+
+      <div style="background: #0f172a; padding: 16px; text-align: center;">
+        <p style="color: #64748b; margin: 0; font-size: 12px;">
+          © ${new Date().getFullYear()} ClassPilot. All rights reserved.
+        </p>
+      </div>
+    </div>
+  `;
+
+  const text = `SAFETY ALERT: ${alertLabel} content detected
+
+Student: ${data.studentName}
+Domain: ${data.domain}
+Alert Type: ${alertLabel}
+Time: ${time}
+
+Please review this activity in the ClassPilot dashboard immediately.`.trim();
+
+  if (!transporter) {
+    console.log(`[Email] SMTP not configured. Safety alert for ${data.studentName} on ${data.domain}`);
+    return true;
+  }
+
+  try {
+    for (const email of data.adminEmails) {
+      await transporter.sendMail({
+        from: FROM_EMAIL,
+        to: email,
+        subject,
+        text,
+        html,
+      });
+    }
+    console.log(`[Email] Safety alert sent to ${data.adminEmails.length} admins`);
+    return true;
+  } catch (error) {
+    console.error("[Email] Failed to send safety alert:", error);
+    return false;
+  }
+}

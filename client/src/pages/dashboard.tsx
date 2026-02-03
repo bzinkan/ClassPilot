@@ -558,7 +558,10 @@ export default function Dashboard() {
   const isStudentOffTask = (student: AggregatedStudentStatus): boolean => {
     // Camera active = always off-task
     if (student.cameraActive) return true;
-    
+
+    // AI classified as non-educational = off-task
+    if (student.aiClassification?.category === 'non-educational') return true;
+
     // Only check if allowedDomains is configured and has entries
     if (!settings?.allowedDomains || settings.allowedDomains.length === 0) return false;
     if (!student.activeTabUrl) return false;
