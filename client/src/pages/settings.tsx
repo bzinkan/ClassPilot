@@ -43,13 +43,11 @@ function normalizeDomain(domain: string): string {
 
 const settingsSchema = z.object({
   schoolName: z.string().min(1, "School name is required"),
-  wsSharedKey: z.string().min(8, "WebSocket key must be at least 8 characters"),
   retentionDays: z.string().min(1, "Retention period is required"),
   maxTabsPerStudent: z.string().optional(),
   blockedDomains: z.string(),
   allowedDomains: z.string(),
   ipAllowlist: z.string(),
-  gradeLevels: z.string().min(1, "At least one grade level is required"),
   aiSafetyEmailsEnabled: z.boolean().optional(),
 });
 
@@ -83,13 +81,11 @@ export default function Settings() {
     resolver: zodResolver(settingsSchema),
     defaultValues: {
       schoolName: settings?.schoolName || "",
-      wsSharedKey: settings?.wsSharedKey || "",
       retentionDays: settings?.retentionHours ? String(Math.round(parseInt(settings.retentionHours) / 24)) : "30",
       maxTabsPerStudent: settings?.maxTabsPerStudent || "",
       blockedDomains: settings?.blockedDomains?.join(", ") || "",
       allowedDomains: settings?.allowedDomains?.join(", ") || "",
       ipAllowlist: settings?.ipAllowlist?.join(", ") || "",
-      gradeLevels: settings?.gradeLevels?.join(", ") || "5th, 6th, 7th, 8th, 9th, 10th, 11th, 12th",
       aiSafetyEmailsEnabled: settings?.aiSafetyEmailsEnabled !== false,
     },
   });
@@ -99,13 +95,11 @@ export default function Settings() {
     if (settings) {
       form.reset({
         schoolName: settings.schoolName,
-        wsSharedKey: settings.wsSharedKey,
         retentionDays: String(Math.round(parseInt(settings.retentionHours) / 24)),
         maxTabsPerStudent: settings.maxTabsPerStudent || "",
         blockedDomains: settings.blockedDomains?.join(", ") || "",
         allowedDomains: settings.allowedDomains?.join(", ") || "",
         ipAllowlist: settings.ipAllowlist?.join(", ") || "",
-        gradeLevels: settings.gradeLevels?.join(", ") || "5th, 6th, 7th, 8th, 9th, 10th, 11th, 12th",
         aiSafetyEmailsEnabled: settings.aiSafetyEmailsEnabled !== false,
       });
     }
@@ -113,15 +107,6 @@ export default function Settings() {
 
   const updateSettingsMutation = useMutation({
     mutationFn: async (data: SettingsForm) => {
-      const gradeLevels = data.gradeLevels
-        .split(",")
-        .map((g) => g.trim())
-        .filter(Boolean);
-      
-      if (gradeLevels.length === 0) {
-        throw new Error("At least one grade level is required");
-      }
-      
       // Use schoolId from loaded settings, or default for initial creation
       const schoolId = settings?.schoolId || "default-school";
       
@@ -145,7 +130,6 @@ export default function Settings() {
           .split(",")
           .map((ip) => ip.trim())
           .filter(Boolean),
-        gradeLevels,
         aiSafetyEmailsEnabled: data.aiSafetyEmailsEnabled !== false,
       };
       return await apiRequest("POST", "/api/settings", payload);
@@ -366,25 +350,6 @@ export default function Settings() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="wsSharedKey">WebSocket Shared Key</Label>
-                <Input
-                  id="wsSharedKey"
-                  data-testid="input-ws-key"
-                  type="password"
-                  {...form.register("wsSharedKey")}
-                  placeholder="Enter WebSocket authentication key"
-                />
-                {form.formState.errors.wsSharedKey && (
-                  <p className="text-sm text-destructive">
-                    {form.formState.errors.wsSharedKey.message}
-                  </p>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  This key is used to authenticate WebSocket connections from the extension
-                </p>
-              </div>
-
-              <div className="space-y-2">
                 <Label htmlFor="retentionDays">Data Retention (days)</Label>
                 <Input
                   id="retentionDays"
@@ -458,19 +423,6 @@ export default function Settings() {
                 />
                 <p className="text-xs text-muted-foreground">
                   Only these IPs can access the teacher dashboard (enforced in production only). Leave empty to allow all IPs.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="gradeLevels">Grade Levels (comma-separated)</Label>
-                <Input
-                  id="gradeLevels"
-                  data-testid="input-grade-levels"
-                  {...form.register("gradeLevels")}
-                  placeholder="5th, 6th, 7th, 8th, 9th, 10th, 11th, 12th"
-                />
-                <p className="text-xs text-muted-foreground">
-                  These grade levels will appear as filter tabs on the dashboard. Customize based on your school's grade structure.
                 </p>
               </div>
 

@@ -530,7 +530,7 @@ export function TeacherFab({
           "w-14 h-14 rounded-full shadow-xl flex items-center justify-center transition-all duration-300 relative select-none",
           expanded
             ? "bg-gray-600 dark:bg-gray-700 rotate-45"
-            : "bg-gradient-to-br from-amber-400 to-amber-500",
+            : "bg-[#E9A31E]",
           isDragging ? "cursor-grabbing scale-110" : "cursor-grab hover:scale-110"
         )}
       >
