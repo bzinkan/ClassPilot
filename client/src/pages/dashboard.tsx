@@ -1835,78 +1835,70 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen">
-      {/* Header */}
-      <header className="sticky top-0 z-40 glass-panel border-b border-white/20">
-        <div className="max-w-screen-2xl mx-auto px-6 py-4">
+      {/* Header - Always dark with amber accent */}
+      <header className="sticky top-0 z-40 bg-slate-900 border-b border-slate-700 relative">
+        {/* Amber accent line at top */}
+        <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-amber-400 to-amber-500" />
+
+        <div className="max-w-screen-2xl mx-auto px-6 py-3">
           <div className="flex items-center justify-between gap-4">
+            {/* Left: Logo & School */}
             <div className="flex items-center gap-3">
-              <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-primary to-accent flex items-center justify-center shadow-lg">
-                <Monitor className="h-7 w-7 text-primary-foreground" />
-              </div>
+              <img
+                src="/logo.png"
+                alt="ClassPilot"
+                className="h-10 w-10 rounded-xl shadow-lg"
+              />
               <div>
-                <h1 className="text-2xl font-bold bg-gradient-to-r from-primary to-accent bg-clip-text text-transparent">ClassPilot</h1>
-                <p className="text-xs text-muted-foreground font-medium">
-                  {currentUser?.schoolName && <span className="font-semibold">{currentUser.schoolName}</span>}
+                <h1 className="text-lg font-bold text-slate-100 tracking-tight">ClassPilot</h1>
+                <p className="text-xs text-slate-400">
+                  {currentUser?.schoolName && <span className="font-medium">{currentUser.schoolName}</span>}
                   {currentUser?.schoolName && ' • '}
                   {currentUser?.role === 'school_admin' ? 'Admin Dashboard' : 'Teacher Dashboard'}
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <Badge
-                variant={wsConnected ? "default" : "secondary"}
-                className="text-xs"
+            {/* Center: Status badges */}
+            <div className="flex items-center gap-3">
+              {/* Connection status badge - pill style */}
+              <div
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium ${
+                  wsConnected
+                    ? 'bg-green-500/15 border border-green-500/30 text-green-400'
+                    : 'bg-slate-600/30 border border-slate-500/30 text-slate-400'
+                }`}
                 data-testid="badge-connection-status"
               >
-                <div className={`h-2 w-2 rounded-full mr-1.5 ${wsConnected ? 'bg-status-online animate-pulse' : 'bg-status-offline'}`} />
+                <div className={`h-2 w-2 rounded-full ${wsConnected ? 'bg-green-400 animate-pulse' : 'bg-slate-500'}`} />
                 {wsConnected ? 'Connected' : 'Disconnected'}
-              </Badge>
-              {settings?.enableTrackingHours && (
-                <Badge
-                  variant={isWithinTrackingHours(
-                    settings.enableTrackingHours,
-                    settings.trackingStartTime,
-                    settings.trackingEndTime,
-                    settings.schoolTimezone,
-                    settings.trackingDays
-                  ) ? "default" : "secondary"}
-                  className="text-xs"
-                  data-testid="badge-tracking-status"
+              </div>
+              {/* Current class badge - amber accent like mockup */}
+              {currentUser?.role === 'teacher' && activeSession && (
+                <div
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-400/15 border border-amber-400/30 text-amber-400"
+                  data-testid="badge-active-session"
                 >
-                  <div className={`h-2 w-2 rounded-full mr-1.5 ${isWithinTrackingHours(
-                    settings.enableTrackingHours,
-                    settings.trackingStartTime,
-                    settings.trackingEndTime,
-                    settings.schoolTimezone,
-                    settings.trackingDays
-                  ) ? 'bg-status-online animate-pulse' : 'bg-amber-500'}`} />
-                  {isWithinTrackingHours(
-                    settings.enableTrackingHours,
-                    settings.trackingStartTime,
-                    settings.trackingEndTime,
-                    settings.schoolTimezone,
-                    settings.trackingDays
-                  ) ? 'Tracking Active' : 'Tracking Paused'}
-                </Badge>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                  </svg>
+                  {groups.find(g => g.id === activeSession.groupId)?.name || 'Active Class'}
+                </div>
               )}
               {currentUser?.role === 'teacher' && (
                 <>
                   {activeSession ? (
                     <>
-                      <Badge variant="default" className="text-xs" data-testid="badge-active-session">
-                        <div className="h-2 w-2 rounded-full mr-1.5 bg-green-500 animate-pulse" />
-                        {groups.find(g => g.id === activeSession.groupId)?.name || 'Active Class'}
-                      </Badge>
-                      <Button
-                        variant="destructive"
-                        size="sm"
+                      {/* End Class button - red pill style */}
+                      <button
                         onClick={() => endSessionMutation.mutate()}
                         disabled={endSessionMutation.isPending}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
                         data-testid="button-end-session"
                       >
-                        <X className="h-4 w-4 mr-2" />
+                        <X className="h-3.5 w-3.5" />
                         End Class
-                      </Button>
+                      </button>
                     </>
                   ) : (
                     <DropdownMenu>
@@ -1952,39 +1944,47 @@ export default function Dashboard() {
               {/* Admin Class Selection */}
               {currentUser?.role === 'school_admin' && (
                 <>
-                  {/* Admin's own active session controls */}
+                  {/* Admin's own active session controls - amber badge style */}
                   {activeSession && (
                     <>
-                      <Badge variant="default" className="text-xs" data-testid="badge-admin-teaching">
-                        <div className="h-2 w-2 rounded-full mr-1.5 bg-green-500 animate-pulse" />
+                      <div
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold bg-amber-400/15 border border-amber-400/30 text-amber-400"
+                        data-testid="badge-admin-teaching"
+                      >
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0">
+                          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
                         Teaching: {groups.find(g => g.id === activeSession.groupId)?.name || 'Active Class'}
-                      </Badge>
-                      <Button
-                        variant="destructive"
-                        size="sm"
+                      </div>
+                      <button
                         onClick={() => endSessionMutation.mutate()}
                         disabled={endSessionMutation.isPending}
+                        className="flex items-center gap-1.5 px-4 py-1.5 rounded-full text-xs font-semibold bg-red-500 text-white hover:bg-red-600 transition-colors disabled:opacity-50"
                         data-testid="button-admin-end-session"
                       >
-                        <X className="h-4 w-4 mr-2" />
+                        <X className="h-3.5 w-3.5" />
                         End Class
-                      </Button>
+                      </button>
                     </>
                   )}
                   {/* Observe other active sessions dropdown */}
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                      <Button
-                        variant={observedSession ? "secondary" : "outline"}
-                        size="sm"
+                      <button
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                          observedSession
+                            ? 'bg-slate-700 border-slate-600 text-slate-200'
+                            : 'bg-transparent border-slate-600 text-slate-400 hover:bg-slate-800'
+                        }`}
                         data-testid="button-admin-observe"
                       >
-                        <Eye className="h-4 w-4 mr-2" />
+                        <Eye className="h-4 w-4" />
                         {observedSession
                           ? `Observing: ${groups.find(g => g.id === observedSession.groupId)?.name || 'Class'}`
                           : 'Observe Class'
                         }
-                      </Button>
+                      </button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="end" className="w-72">
                       <DropdownMenuLabel>Active Classes</DropdownMenuLabel>
@@ -2061,55 +2061,54 @@ export default function Dashboard() {
                   Stop Impersonating
                 </Button>
               )}
-              <Button
-                variant="outline"
-                size="sm"
+            </div>
+
+            {/* Right: Actions */}
+            <div className="flex items-center gap-2">
+              <button
                 onClick={handleOpenExportDialog}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
                 data-testid="button-export-excel"
               >
-                <Download className="h-4 w-4 mr-2" />
+                <Download className="h-4 w-4" />
                 Export CSV
-              </Button>
+              </button>
               {currentUser?.role === 'teacher' && (
-                <Button
-                  variant="ghost"
-                  size="icon"
+                <button
                   onClick={() => setLocation("/my-settings")}
+                  className="w-9 h-9 flex items-center justify-center rounded-lg bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
                   data-testid="button-my-settings"
                   title="My Settings"
                 >
-                  <User className="h-5 w-5" />
-                </Button>
+                  <User className="h-[18px] w-[18px]" />
+                </button>
               )}
               {currentUser?.role === 'school_admin' && (
                 <>
-                  <Button
-                    variant="ghost"
-                    size="icon"
+                  <button
                     onClick={() => setLocation("/admin")}
+                    className="w-9 h-9 flex items-center justify-center rounded-lg bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
                     data-testid="button-admin"
                   >
-                    <Shield className="h-5 w-5" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
+                    <Shield className="h-[18px] w-[18px]" />
+                  </button>
+                  <button
                     onClick={() => setLocation("/settings")}
+                    className="w-9 h-9 flex items-center justify-center rounded-lg bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
                     data-testid="button-settings"
                   >
-                    <SettingsIcon className="h-5 w-5" />
-                  </Button>
+                    <SettingsIcon className="h-[18px] w-[18px]" />
+                  </button>
                 </>
               )}
               <ThemeToggle />
-              <Button
-                variant="ghost"
-                size="icon"
+              <button
                 onClick={handleLogout}
+                className="w-9 h-9 flex items-center justify-center rounded-lg bg-slate-700 text-slate-400 hover:bg-slate-600 transition-colors"
                 data-testid="button-logout"
               >
-                <LogOut className="h-5 w-5" />
-              </Button>
+                <LogOut className="h-[18px] w-[18px]" />
+              </button>
             </div>
           </div>
         </div>
@@ -2130,83 +2129,92 @@ export default function Dashboard() {
           />
         )}
         
-        {/* Stats Cards - only show if admin OR teacher with active session */}
+        {/* Stats Cards - mockup style with semi-transparent backgrounds */}
         {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-          <div className="p-5 rounded-xl bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/30 dark:to-emerald-950/30 border border-green-200 dark:border-green-800/50 shadow-lg hover-elevate transition-all duration-300">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-green-500 flex items-center justify-center shadow-md">
-                <Users className="h-7 w-7 text-white" />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-green-700 dark:text-green-400" data-testid="text-online-count">{onlineCount}</p>
-                <p className="text-sm text-green-600 dark:text-green-500 font-medium">Online Now</p>
-              </div>
-            </div>
-          </div>
-          <div className="p-5 rounded-xl bg-gradient-to-br from-amber-50 to-yellow-50 dark:from-amber-950/30 dark:to-yellow-950/30 border border-amber-200 dark:border-amber-800/50 shadow-lg hover-elevate transition-all duration-300">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-amber-500 flex items-center justify-center shadow-md">
-                <Activity className="h-7 w-7 text-white" />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-amber-700 dark:text-amber-400" data-testid="text-idle-count">{idleCount}</p>
-                <p className="text-sm text-amber-600 dark:text-amber-500 font-medium">Idle</p>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            {/* Online Now */}
+            <div className="p-5 rounded-xl bg-green-500/10 border border-green-500/20 dark:bg-green-500/10 dark:border-green-500/20 transition-all duration-300">
+              <div className="flex items-center gap-4">
+                <div className="h-12 w-12 rounded-xl bg-green-500 flex items-center justify-center">
+                  <Users className="h-6 w-6 text-white" />
+                </div>
+                <div>
+                  <p className="text-[28px] font-bold text-foreground" data-testid="text-online-count">{onlineCount}</p>
+                  <p className="text-[13px] text-green-500 font-medium">Online Now</p>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="p-5 rounded-xl bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-950/30 dark:to-slate-950/30 border border-gray-200 dark:border-gray-800/50 shadow-lg hover-elevate transition-all duration-300">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-gray-500 flex items-center justify-center shadow-md">
-                <WifiOff className="h-7 w-7 text-white" />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-gray-700 dark:text-gray-400" data-testid="text-offline-count">{offlineCount}</p>
-                <p className="text-sm text-gray-600 dark:text-gray-500 font-medium">Offline</p>
-              </div>
-            </div>
-          </div>
-          <div className="p-5 rounded-xl bg-gradient-to-br from-red-50 to-rose-50 dark:from-red-950/30 dark:to-rose-950/30 border border-red-200 dark:border-red-800/50 shadow-lg hover-elevate transition-all duration-300">
-            <div className="flex items-center gap-4">
-              <div className="h-14 w-14 rounded-xl bg-red-500 flex items-center justify-center shadow-md">
-                <AlertTriangle className="h-7 w-7 text-white" />
-              </div>
-              <div>
-                <p className="text-3xl font-bold text-red-700 dark:text-red-400" data-testid="text-offtask-count">{offTaskCount}</p>
-                <p className="text-sm text-red-600 dark:text-red-500 font-medium">Off-Task Alert</p>
+            {/* Idle */}
+            <div className="p-5 rounded-xl bg-amber-500/10 border border-amber-500/20 dark:bg-amber-500/10 dark:border-amber-500/20 transition-all duration-300">
+              <div className="flex items-center gap-4">
+                <div className="h-12 w-12 rounded-xl bg-amber-500 flex items-center justify-center">
+                  <Activity className="h-6 w-6 text-slate-900" />
+                </div>
+                <div>
+                  <p className="text-[28px] font-bold text-foreground" data-testid="text-idle-count">{idleCount}</p>
+                  <p className="text-[13px] text-amber-500 font-medium">Idle</p>
+                </div>
               </div>
             </div>
-          </div>
+            {/* Offline */}
+            <div className="p-5 rounded-xl bg-slate-500/10 border border-slate-500/20 dark:bg-slate-500/10 dark:border-slate-500/20 transition-all duration-300">
+              <div className="flex items-center gap-4">
+                <div className="h-12 w-12 rounded-xl bg-slate-500 flex items-center justify-center">
+                  <WifiOff className="h-6 w-6 text-white" />
+                </div>
+                <div>
+                  <p className="text-[28px] font-bold text-foreground" data-testid="text-offline-count">{offlineCount}</p>
+                  <p className="text-[13px] text-muted-foreground font-medium">Offline</p>
+                </div>
+              </div>
+            </div>
+            {/* Off-Task Alert */}
+            <div className="p-5 rounded-xl bg-red-500/10 border border-red-500/20 dark:bg-red-500/10 dark:border-red-500/20 transition-all duration-300">
+              <div className="flex items-center gap-4">
+                <div className="h-12 w-12 rounded-xl bg-red-500 flex items-center justify-center">
+                  <AlertTriangle className="h-6 w-6 text-white" />
+                </div>
+                <div>
+                  <p className="text-[28px] font-bold text-foreground" data-testid="text-offtask-count">{offTaskCount}</p>
+                  <p className="text-[13px] text-red-500 font-medium">Off-Task Alert</p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
         {/* Search Bar + Selection Controls - only show if admin OR teacher with active session */}
         {(currentUser?.role === 'school_admin' || (currentUser?.role === 'teacher' && activeSession)) && (
-          <div className="flex items-center justify-between gap-4 flex-wrap mb-8">
-          <Input
-            placeholder="Search student"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            data-testid="input-search-students"
-            className="max-w-md h-12 text-base shadow-sm"
-          />
-          
-          <div className="flex items-center gap-2">
-            <Badge variant="secondary" className="text-sm px-3 py-1" data-testid="badge-selection-count">
-              Target: {selectedStudentIds.size > 0 ? `${selectedStudentIds.size} selected` : "All students"}
-            </Badge>
-            
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  data-testid="button-select-students"
-                >
-                  <Users className="h-4 w-4 mr-1" />
-                  Select
-                </Button>
-              </DropdownMenuTrigger>
+          <div className="flex items-center justify-between gap-4 flex-wrap mb-5">
+            {/* Search input - dark theme style */}
+            <input
+              type="text"
+              placeholder="Search student"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              data-testid="input-search-students"
+              className="w-[300px] px-4 py-3 text-sm rounded-lg border border-border bg-card text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-amber-400 transition-colors"
+            />
+
+            <div className="flex items-center gap-3">
+              {/* Target badge - amber like mockup */}
+              <div
+                className="px-4 py-2 rounded-lg text-[13px] font-semibold bg-amber-400 text-slate-900"
+                data-testid="badge-selection-count"
+              >
+                Target: {selectedStudentIds.size > 0 ? `${selectedStudentIds.size} selected` : "All students"}
+              </div>
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-medium bg-transparent border border-border text-muted-foreground hover:bg-card transition-colors"
+                    data-testid="button-select-students"
+                  >
+                    <Users className="h-4 w-4" />
+                    Select
+                  </button>
+                </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-64 max-h-96 overflow-y-auto">
                 <DropdownMenuLabel>Select Students</DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -2253,17 +2261,15 @@ export default function Dashboard() {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={clearSelection}
-              disabled={selectedStudentIds.size === 0}
-              data-testid="button-clear-selection"
-            >
-              <XSquare className="h-4 w-4 mr-1" />
-              Clear Selection
-            </Button>
-          </div>
+              <button
+                onClick={clearSelection}
+                disabled={selectedStudentIds.size === 0}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-[13px] font-medium bg-transparent border border-border text-muted-foreground hover:bg-card transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                data-testid="button-clear-selection"
+              >
+                Clear Selection
+              </button>
+            </div>
           </div>
         )}
 

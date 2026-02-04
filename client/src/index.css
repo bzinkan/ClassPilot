@@ -132,17 +132,18 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  --background: 220 15% 8%;
+  /* ClassPilot dark theme - matches mockup: #0f172a bg, #1e293b card */
+  --background: 222 47% 11%;  /* #0f172a */
 
-  --foreground: 220 10% 95%;
+  --foreground: 210 40% 96%;  /* #f1f5f9 */
 
-  --border: 220 10% 20%;
+  --border: 217 33% 17%;  /* #334155 */
 
-  --card: 220 12% 10%;
+  --card: 217 33% 17%;  /* #1e293b */
 
-  --card-foreground: 220 10% 92%;
+  --card-foreground: 210 40% 96%;  /* #f1f5f9 */
 
-  --card-border: 220 10% 18%;
+  --card-border: 217 33% 17%;  /* #334155 */
 
   --sidebar: 220 15% 12%;
 
