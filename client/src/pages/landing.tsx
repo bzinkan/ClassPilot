@@ -241,20 +241,7 @@ export default function LandingPage() {
         zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <div style={{
-            width: '36px',
-            height: '36px',
-            background: '#fbbf24',
-            borderRadius: '10px',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" strokeWidth="2.5" strokeLinecap="round">
-              <rect x="2" y="3" width="20" height="14" rx="2"/>
-              <path d="M8 21h8M12 17v4"/>
-            </svg>
-          </div>
+          <img src="/logo.png" alt="ClassPilot" style={{ width: '36px', height: '36px', borderRadius: '10px' }} />
           <span style={{ fontSize: '20px', fontWeight: 600, letterSpacing: '-0.5px' }}>ClassPilot</span>
         </div>
 
@@ -919,20 +906,7 @@ export default function LandingPage() {
         }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '20px' }}>
-              <div style={{
-                width: '36px',
-                height: '36px',
-                background: '#fbbf24',
-                borderRadius: '10px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0f172a" strokeWidth="2.5">
-                  <rect x="2" y="3" width="20" height="14" rx="2"/>
-                  <path d="M8 21h8M12 17v4"/>
-                </svg>
-              </div>
+              <img src="/logo.png" alt="ClassPilot" style={{ width: '36px', height: '36px', borderRadius: '10px' }} />
               <span style={{ fontSize: '20px', fontWeight: 600 }}>ClassPilot</span>
             </div>
             <p style={{ fontSize: '14px', color: '#64748b', lineHeight: 1.7, maxWidth: '280px' }}>
