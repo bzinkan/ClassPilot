@@ -829,7 +829,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     // Clear auth and redirect to login
-    setLocation("/");
+    setLocation("/login");
   };
 
   const handleOpenExportDialog = () => {
@@ -2087,10 +2087,11 @@ export default function Dashboard() {
                 <>
                   <button
                     onClick={() => setLocation("/admin")}
-                    className="w-9 h-9 flex items-center justify-center rounded-lg bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium bg-transparent border border-slate-600 text-slate-400 hover:bg-slate-800 transition-colors"
                     data-testid="button-admin"
                   >
-                    <Shield className="h-[18px] w-[18px]" />
+                    <Shield className="h-4 w-4" />
+                    Admin Panel
                   </button>
                   <button
                     onClick={() => setLocation("/settings")}

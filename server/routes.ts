@@ -1192,12 +1192,15 @@ export async function registerRoutes(
         }
       }
 
+      // Normalize role: DB stores 'admin' but frontend expects 'school_admin'
+      const normalizedRole = user.role === 'admin' ? 'school_admin' : user.role;
+
       res.json({
         success: true,
         user: {
           id: user.id,
           username: user.username,
-          role: user.role,
+          role: normalizedRole,
           schoolName: schoolName,
           impersonating: req.session.impersonating || false,
         },

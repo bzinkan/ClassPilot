@@ -524,7 +524,7 @@ export default function Admin() {
           <Button
             variant="ghost"
             size="icon"
-            onClick={() => setLocation("/")}
+            onClick={() => setLocation("/login")}
             data-testid="button-logout"
             title="Log out"
           >
