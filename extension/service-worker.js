@@ -96,7 +96,7 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
 }
 
 // Production server URL - can be overridden in extension settings
-const DEFAULT_SERVER_URL = 'https://www.classpilot.net';
+const DEFAULT_SERVER_URL = 'https://school-pilot.net';
 const INJECTED_SERVER_URL = typeof globalThis.CLASSPILOT_SERVER_URL === 'string'
   ? globalThis.CLASSPILOT_SERVER_URL
   : '';
@@ -157,6 +157,10 @@ let lastObservedSentAt = 0;
 let licenseActive = true;
 let offHoursNetworkPaused = false;
 let isScheduleHardOff = false;
+
+// General-purpose message dedup: track recent _msgId values to prevent double-processing
+const recentMsgIds = new Set();
+const MSG_DEDUP_TTL = 30_000; // 30 seconds
 
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
@@ -374,7 +378,7 @@ function isWithinTrackingHours(
     const currentTime = schoolTimeString.split(', ')[1] || schoolTimeString;
     return currentTime >= startTime && currentTime <= endTime;
   } catch (error) {
-    console.error('[School Hours] Error checking tracking hours:', error);
+    console.warn('[School Hours] Error checking tracking hours:', error);
     return true;
   }
 }
@@ -611,13 +615,13 @@ async function updateTrackingState(reason = 'state-check') {
   if (trackingState === TRACKING_STATES.ACTIVE) {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
     scheduleScreenshotCapture(true);  // Enable screenshot capture when active
-    connectWebSocket();
+    connectWebSocket().catch(() => {});
   } else if (trackingState === TRACKING_STATES.IDLE) {
     // Keep same heartbeat frequency and WebSocket connected even when Chrome reports idle
     // Chrome's idle detection (no keyboard/mouse) doesn't mean student is away
     scheduleHeartbeat(HEARTBEAT_IDLE_MINUTES);
     scheduleScreenshotCapture(true);  // Keep screenshots even when idle
-    connectWebSocket();
+    connectWebSocket().catch(() => {});
   } else {
     scheduleHeartbeat(null);
     scheduleScreenshotCapture(false);  // Disable screenshots when tracking is off
@@ -702,7 +706,7 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
         await disableForInactiveLicense(data.planStatus);
       }
     } catch (error) {
-      console.error('Event logging error:', error);
+      console.warn('Event logging error:', error);
     }
   }, NAVIGATION_DEBOUNCE_MS));
 }
@@ -732,7 +736,7 @@ function normalizeEmail(raw) {
     const baseLocal = local.split('+')[0];
     return `${baseLocal}@${domain}`;
   } catch (err) {
-    console.error('[Service Worker] Email normalization failed:', err);
+    console.warn('[Service Worker] Email normalization failed:', err);
     return null;
   }
 }
@@ -837,7 +841,7 @@ async function ensureRegistered() {
           await kv.set({ activeStudentId: data.student.id });
         }
       } catch (error) {
-        console.error('[Service Worker] Student registration error:', error);
+        console.warn('[Service Worker] Student registration error:', error);
         // ✅ JWT FIX: Clear BOTH registered flag AND token so we retry next time
         // This prevents getting stuck if re-registration fails after token expiry
         await kv.set({ registered: false, studentToken: null });
@@ -846,7 +850,7 @@ async function ensureRegistered() {
         // Schedule retry with backoff to prevent infinite loops
         setTimeout(() => {
           console.log('[Service Worker] Retrying registration after error...');
-          ensureRegistered();
+          ensureRegistered().catch(() => {});
         }, 5000); // 5 second delay before retry
       }
     } else if (stored.studentEmail) {
@@ -859,7 +863,7 @@ async function ensureRegistered() {
     
     return stored;
   } catch (error) {
-    console.error('[Service Worker] Registration failed:', error);
+    console.warn('[Service Worker] Registration failed:', error);
     // Don't throw - extension can still work with defaults
     return {};
   }
@@ -871,8 +875,10 @@ chrome.runtime.onInstalled.addListener(() => {
   resolveServerUrl().then((serverUrl) => {
     CONFIG.serverUrl = serverUrl;
     scheduleLicenseCheck();
-    ensureRegistered();
-    setTimeout(() => initializeAdaptiveTracking('install'), 2000);
+    ensureRegistered().catch(() => {});
+    setTimeout(() => initializeAdaptiveTracking('install').catch(() => {}), 2000);
+  }).catch(err => {
+    console.warn('[Service Worker] Install init error (will retry):', err?.message || err);
   });
 });
 
@@ -882,8 +888,10 @@ if (chrome.runtime.onStartup) {
     resolveServerUrl().then((serverUrl) => {
       CONFIG.serverUrl = serverUrl;
       scheduleLicenseCheck();
-      ensureRegistered();
-      setTimeout(() => initializeAdaptiveTracking('startup'), 2000);
+      ensureRegistered().catch(() => {});
+      setTimeout(() => initializeAdaptiveTracking('startup').catch(() => {}), 2000);
+    }).catch(err => {
+      console.warn('[Service Worker] Startup init error (will retry):', err?.message || err);
     });
   });
 }
@@ -922,14 +930,14 @@ if (chrome.runtime.onStartup) {
   if (stored.studentEmail) {
     CONFIG.studentEmail = stored.studentEmail;
   }
-  
+
   // Restore Flight Path state if it was active
   if (stored.flightPathState) {
     console.log('[Service Worker] Restoring Flight Path state:', stored.flightPathState);
     screenLocked = stored.flightPathState.screenLocked;
     allowedDomains = stored.flightPathState.allowedDomains || [];
     activeFlightPathName = stored.flightPathState.activeFlightPathName;
-    
+
     // Re-apply blocking rules if Flight Path was active
     if (allowedDomains.length > 0) {
       await updateBlockingRules(allowedDomains);
@@ -942,14 +950,14 @@ if (chrome.runtime.onStartup) {
     screenLocked = stored.lockScreenState.screenLocked;
     lockedUrl = stored.lockScreenState.lockedUrl;
     lockedDomain = stored.lockScreenState.lockedDomain;
-    
+
     // Re-apply blocking rules if screen was locked
     if (lockedDomain) {
       await updateBlockingRules([lockedDomain]);
       console.log('[Service Worker] Lock Screen blocking rules re-applied');
     }
   }
-  
+
   // Restore global blacklist state
   if (stored.globalBlockedDomains && stored.globalBlockedDomains.length > 0) {
     globalBlockedDomains = stored.globalBlockedDomains;
@@ -984,13 +992,17 @@ if (chrome.runtime.onStartup) {
   }
 
   await ensureRegistered();
-  
+
   // Initialize adaptive tracking after state is restored
   setTimeout(() => {
     console.log('[Service Worker] Initializing adaptive tracking...');
-    initializeAdaptiveTracking('wake');
+    initializeAdaptiveTracking('wake').catch(() => {});
   }, 2000);
-})();
+})().catch(err => {
+  // Silently handle wake-up errors (network issues, server deploys)
+  // The extension will self-heal via alarms and retries
+  console.warn('[Service Worker] Wake-up error (will retry):', err?.message || err);
+});
 
 // Centralized, safe notifications (never throw, never produce red errors)
 async function safeNotify(opts) {
@@ -1017,7 +1029,7 @@ async function safeNotify(opts) {
       });
     });
   } catch (e) {
-    // Never use console.error for expected conditions; keep the Errors panel clean
+    // Never use console.warn for expected conditions; keep the Errors panel clean
     console.warn('notify skipped:', e?.message || e);
   }
 }
@@ -1140,7 +1152,7 @@ async function updateGlobalBlacklistRules(blockedDomains) {
     
     console.log('[Blacklist] Updated. Blocked domains:', blockedDomains);
   } catch (error) {
-    console.error('[Blacklist] Error updating rules:', error.message);
+    console.warn('[Blacklist] Error updating rules:', error.message);
   }
 }
 
@@ -1188,7 +1200,7 @@ async function updateTeacherBlockListRules(blockedDomains) {
     
     console.log('[Teacher Block List] Updated. Blocked domains:', blockedDomains);
   } catch (error) {
-    console.error('[Teacher Block List] Error updating rules:', error.message);
+    console.warn('[Teacher Block List] Error updating rules:', error.message);
   }
 }
 
@@ -1206,7 +1218,7 @@ async function getLoggedInUserInfo() {
       id: userInfo.id || null,
     };
   } catch (error) {
-    console.error('Error getting logged-in user info:', error);
+    console.warn('Error getting logged-in user info:', error);
     return { email: null, id: null };
   }
 }
@@ -1241,7 +1253,7 @@ async function autoDetectAndRegister() {
         await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
         console.log('Auto-registered student:', userInfo.email);
       } catch (error) {
-        console.error('Auto-registration failed:', error);
+        console.warn('Auto-registration failed:', error);
       }
     }
   } else {
@@ -1251,40 +1263,44 @@ async function autoDetectAndRegister() {
 
 // Load config from storage on startup
 chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentToken'], async (result) => {
-  const resolvedServerUrl = await resolveServerUrl();
+  try {
+    const resolvedServerUrl = await resolveServerUrl();
 
-  if (result.config) {
-    const { serverUrl, ...safeConfig } = result.config;
-    CONFIG = { ...CONFIG, ...safeConfig };
-    console.log('Loaded config:', CONFIG);
-  }
+    if (result.config) {
+      const { serverUrl, ...safeConfig } = result.config;
+      CONFIG = { ...CONFIG, ...safeConfig };
+      console.log('Loaded config:', CONFIG);
+    }
 
-  CONFIG.serverUrl = resolvedServerUrl;
-  console.log('Using server URL:', CONFIG.serverUrl);
+    CONFIG.serverUrl = resolvedServerUrl;
+    console.log('Using server URL:', CONFIG.serverUrl);
 
-  // Load active student ID
-  if (result.activeStudentId) {
-    CONFIG.activeStudentId = result.activeStudentId;
-    console.log('Loaded active student ID:', CONFIG.activeStudentId);
-  }
+    // Load active student ID
+    if (result.activeStudentId) {
+      CONFIG.activeStudentId = result.activeStudentId;
+      console.log('Loaded active student ID:', CONFIG.activeStudentId);
+    }
 
-  // Load student email
-  if (result.studentEmail) {
-    CONFIG.studentEmail = result.studentEmail;
-  }
+    // Load student email
+    if (result.studentEmail) {
+      CONFIG.studentEmail = result.studentEmail;
+    }
 
-  // ✅ JWT AUTHENTICATION: Load studentToken from storage
-  if (result.studentToken) {
-    CONFIG.studentToken = result.studentToken;
-    console.log('✅ [JWT] Loaded studentToken from storage');
-  }
+    // ✅ JWT AUTHENTICATION: Load studentToken from storage
+    if (result.studentToken) {
+      CONFIG.studentToken = result.studentToken;
+      console.log('✅ [JWT] Loaded studentToken from storage');
+    }
 
-  // Auto-detect logged-in user and register
-  await autoDetectAndRegister();
+    // Auto-detect logged-in user and register
+    await autoDetectAndRegister();
 
-  // Initialize adaptive tracking once config is loaded
-  if (CONFIG.deviceId) {
-    initializeAdaptiveTracking('config-loaded');
+    // Initialize adaptive tracking once config is loaded
+    if (CONFIG.deviceId) {
+      initializeAdaptiveTracking('config-loaded');
+    }
+  } catch (error) {
+    console.warn('[Service Worker] Config load error (will retry):', error?.message || error);
   }
 });
 
@@ -1338,7 +1354,7 @@ async function registerDevice(deviceId, deviceName, classId) {
     
     return data;
   } catch (error) {
-    console.error('Registration error:', error);
+    console.warn('Registration error:', error);
     throw error;
   }
 }
@@ -1392,7 +1408,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
     
     return data;
   } catch (error) {
-    console.error('Student registration error:', error);
+    console.warn('Student registration error:', error);
     throw error;
   }
 }
@@ -1536,7 +1552,7 @@ async function sendHeartbeat(reason = 'manual') {
       await kv.set({ studentToken: null, registered: false });
       CONFIG.studentToken = null;
       // Trigger re-registration (with backoff to prevent infinite loops)
-      setTimeout(() => ensureRegistered(), 2000); // 2 second delay before re-registering
+      setTimeout(() => ensureRegistered().catch(() => {}), 2000); // 2 second delay before re-registering
       return; // Skip rest of error handling
     } else if (response.status >= 500) {
       // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
@@ -1546,7 +1562,7 @@ async function sendHeartbeat(reason = 'manual') {
       chrome.action.setBadgeText({ text: '●' });
     } else {
       // Client error (400s) - log but don't retry
-      console.error('Heartbeat client error:', response.status);
+      console.warn('Heartbeat client error:', response.status);
       chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
       chrome.action.setBadgeText({ text: '!' });
     }
@@ -1575,6 +1591,12 @@ async function healthCheck() {
   } else if (trackingState === TRACKING_STATES.OFF && heartbeatAlarm) {
     scheduleHeartbeat(null);
   }
+
+  // Re-schedule screenshot capture if interval was lost (setInterval doesn't survive MV3 service worker restarts)
+  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotIntervalId) {
+    scheduleScreenshotCapture(true);
+  }
+
   console.log('[Health Check] Complete - tracking state checked');
 }
 
@@ -1582,24 +1604,28 @@ async function healthCheck() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     safeSendHeartbeat('alarm');
+    // Re-schedule screenshot interval if lost after service worker restart
+    if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotIntervalId) {
+      scheduleScreenshotCapture(true);
+    }
   } else if (alarm.name === 'ws-reconnect') {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
     console.log('WebSocket reconnection alarm triggered');
-    connectWebSocket();
+    connectWebSocket().catch(() => {});
   } else if (alarm.name === 'health-check') {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
-    healthCheck();
+    healthCheck().catch(() => {});
   } else if (alarm.name === 'wake-up') {
     loadCachedSchoolSettings().then(() => {
       updateTrackingState('wake-up');
-    });
+    }).catch(() => {});
   } else if (alarm.name === 'settings-refresh') {
     refreshSchoolSettings({ force: false }).then(() => {
       updateTrackingState('settings-refresh');
-    });
+    }).catch(() => {});
   } else if (alarm.name === 'license-check') {
-    checkLicenseStatus('alarm');
+    checkLicenseStatus('alarm').catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot();
   }
@@ -1691,6 +1717,7 @@ let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
+const seenPollIds = new Set(); // dedup: prevent broadcasting same poll twice
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
@@ -1704,7 +1731,7 @@ function extractDomain(url) {
     // Remove 'www.' prefix for consistent matching
     return urlObj.hostname.replace(/^www\./, '');
   } catch (error) {
-    console.error('Invalid URL:', url, error);
+    console.warn('Invalid URL:', url, error);
     return null;
   }
 }
@@ -2093,6 +2120,20 @@ async function handleRemoteControl(command) {
         const pollQuestion = command.data.question;
         const pollOptions = command.data.options;
 
+        // Dedup: skip if we already processed this exact poll start
+        if (pollAction === 'start' && seenPollIds.has(pollId)) {
+          console.log('Poll dedup: already shown', pollId);
+          break;
+        }
+        if (pollAction === 'start') {
+          seenPollIds.add(pollId);
+          // Clean up after 60 seconds
+          setTimeout(() => seenPollIds.delete(pollId), 60000);
+        }
+        if (pollAction === 'close') {
+          seenPollIds.delete(pollId);
+        }
+
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('poll', { action: pollAction, pollId, question: pollQuestion, options: pollOptions });
 
@@ -2151,7 +2192,7 @@ async function handleRemoteControl(command) {
         break;
     }
   } catch (error) {
-    console.error('Error handling remote control command:', error);
+    console.warn('Error handling remote control command:', error);
   }
 }
 
@@ -2253,8 +2294,8 @@ async function handleChatMessage(message) {
       const unreadCount = messages.filter(m => !m.read).length;
       chrome.action.setBadgeText({ text: unreadCount > 0 ? String(unreadCount) : '' });
       chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
-    });
-  });
+    }).catch(() => {});
+  }).catch(() => {});
 }
 
 // Check-in Request Handler (Phase 3)
@@ -2281,6 +2322,7 @@ async function handleCheckInRequest(request) {
 
 // Prevent navigation when screen is locked (domain-based blocking)
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  try {
   // Only check main frame navigations
   if (details.frameId !== 0) return;
 
@@ -2406,71 +2448,82 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       return;
     }
   }
+  } catch (error) {
+    console.warn('[Service Worker] Navigation handler error:', error?.message || error);
+  }
 });
 
 // Track navigation commits for instant URL updates (fires immediately when navigation commits)
 chrome.webNavigation.onCommitted.addListener(async (details) => {
-  // Only track main frame navigations
-  if (details.frameId !== 0) return;
-  if (trackingState === TRACKING_STATES.OFF) return;
+  try {
+    // Only track main frame navigations
+    if (details.frameId !== 0) return;
+    if (trackingState === TRACKING_STATES.OFF) return;
 
-  // Skip Chrome internal pages
-  if (!details.url.startsWith('http')) return;
+    // Skip Chrome internal pages
+    if (!details.url.startsWith('http')) return;
 
-  // Send immediate heartbeat - this fires the moment navigation commits
-  // (before page is loaded, so teacher sees URL change instantly)
-  safeSendHeartbeat('navigation-committed');
+    // Send immediate heartbeat - this fires the moment navigation commits
+    // (before page is loaded, so teacher sees URL change instantly)
+    safeSendHeartbeat('navigation-committed');
+  } catch (error) {
+    console.warn('[Service Worker] Navigation committed handler error:', error?.message || error);
+  }
 });
 
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
-  // Block new tabs when attention mode is active
-  if (attentionModeActive) {
-    if (tab.id) {
-      chrome.tabs.remove(tab.id);
-      console.log('[Attention Mode] Blocked new tab creation');
+  try {
+    // Block new tabs when attention mode is active
+    if (attentionModeActive) {
+      if (tab.id) {
+        chrome.tabs.remove(tab.id);
+        console.log('[Attention Mode] Blocked new tab creation');
+      }
+      return;
     }
-    return;
-  }
 
-  // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
-  // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
-  if (screenLocked && lockedDomain && allowedDomains.length === 0) {
-    // Single domain lock mode - block all new tabs
-    if (tab.id) {
-      chrome.tabs.remove(tab.id);
+    // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
+    // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
+    if (screenLocked && lockedDomain && allowedDomains.length === 0) {
+      // Single domain lock mode - block all new tabs
+      if (tab.id) {
+        chrome.tabs.remove(tab.id);
 
-      let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
+        let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
 
-      safeNotify({
-        title: 'Screen Locked',
-        message: message,
-        priority: 2,
-      });
+        safeNotify({
+          title: 'Screen Locked',
+          message: message,
+          priority: 2,
+        });
+      }
+      return; // Don't check tab limit if screen is locked
     }
-    return; // Don't check tab limit if screen is locked
-  }
-  
-  // For scene mode (allowedDomains.length > 0), allow new tabs
-  // Navigation restrictions will be enforced by onBeforeNavigate listener
-  
-  // Second check: enforce tab limit (only if screen is not locked)
-  if (currentMaxTabs) {
-    const tabs = await chrome.tabs.query({});
-    if (tabs.length > currentMaxTabs) {
-      // Close the newly created tab if over limit
-      chrome.tabs.remove(tab.id);
-      
-      safeNotify({
-        title: 'Tab Limit Reached',
-        message: `You can only have ${currentMaxTabs} tabs open at a time.`,
-        priority: 1,
-      });
-    }
-  }
 
-  // Refresh tab cache when a new tab is created
-  refreshTabCache();
+    // For scene mode (allowedDomains.length > 0), allow new tabs
+    // Navigation restrictions will be enforced by onBeforeNavigate listener
+
+    // Second check: enforce tab limit (only if screen is not locked)
+    if (currentMaxTabs) {
+      const tabs = await chrome.tabs.query({});
+      if (tabs.length > currentMaxTabs) {
+        // Close the newly created tab if over limit
+        chrome.tabs.remove(tab.id);
+
+        safeNotify({
+          title: 'Tab Limit Reached',
+          message: `You can only have ${currentMaxTabs} tabs open at a time.`,
+          priority: 1,
+        });
+      }
+    }
+
+    // Refresh tab cache when a new tab is created
+    refreshTabCache();
+  } catch (error) {
+    console.warn('[Service Worker] Tab created handler error:', error?.message || error);
+  }
 });
 
 // Refresh tab cache when tabs are removed
@@ -2494,14 +2547,13 @@ async function ensureOffscreenDocument() {
   if (!creatingOffscreen) {
     creatingOffscreen = chrome.offscreen.createDocument({
       url: 'offscreen.html',
-      reasons: ['USER_MEDIA'],
+      reasons: ['USER_MEDIA', 'DISPLAY_MEDIA'],
       justification: 'Screen capture and WebRTC must run in page context for MV3 compatibility'
     }).then(() => {
       console.log('[Service Worker] Offscreen document created');
     }).catch(error => {
-      console.error('[Service Worker] Error creating offscreen document:', error);
+      console.warn('[Service Worker] Offscreen document creation failed (will retry):', error?.message || error);
       creatingOffscreen = null;
-      throw error;
     });
   }
   
@@ -2539,33 +2591,47 @@ async function handleScreenShareRequest(mode = 'auto') {
   try {
     console.log('[WebRTC] Teacher requested screen share, mode:', mode);
     setObservedState(true, 'teacher-request');
-    
+
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
-    
-    // Tell offscreen to start capture
-    // mode: 'auto' = try silent tab capture, fallback to picker
-    // mode: 'tab' = only silent tab capture
-    // mode: 'screen' = only picker
+
+    // MV3: Get a stream ID from the service worker via tabCapture.getMediaStreamId
+    // This is the correct MV3 approach - tabCapture.capture() doesn't work in offscreen docs
+    let streamId = null;
+    if (mode === 'auto' || mode === 'tab') {
+      try {
+        // Get the student's active tab
+        const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        if (activeTab?.id) {
+          streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+          console.log('[WebRTC] Got tab capture stream ID for tab:', activeTab.id);
+        } else {
+          console.info('[WebRTC] No active tab found for tab capture');
+        }
+      } catch (tabErr) {
+        console.info('[WebRTC] tabCapture.getMediaStreamId failed (expected on some devices):', tabErr.message);
+      }
+    }
+
+    // Tell offscreen to start capture with the streamId (if available)
     const result = await sendToOffscreen({
       type: 'START_SHARE',
       deviceId: CONFIG.deviceId,
-      mode: mode
+      mode: mode,
+      streamId: streamId
     });
-    
+
     if (!result?.success) {
       // Check if this is an expected failure (user denied, etc.)
       if (result?.status === 'user-denied') {
         console.info('[WebRTC] User denied screen share (expected behavior)');
-        // Don't notify - this is normal
         return;
       } else if (result?.status === 'tab-capture-unavailable') {
         console.info('[WebRTC] Silent tab capture not available (expected on unmanaged devices)');
-        // This is expected, just log it
         return;
       } else {
         // Unexpected error
-        console.error('[WebRTC] Unexpected screen share error:', result?.error);
+        console.warn('[WebRTC] Unexpected screen share error:', result?.error);
         safeNotify({
           title: 'Screen Sharing Error',
           message: 'Unable to share screen: ' + (result?.error || 'Unknown error'),
@@ -2573,12 +2639,12 @@ async function handleScreenShareRequest(mode = 'auto') {
         return;
       }
     }
-    
+
     console.log('[WebRTC] Screen capture initiated in offscreen document');
-    
+
   } catch (error) {
     // Only unexpected errors reach here
-    console.error('[WebRTC] Unexpected screen share request error:', error);
+    console.warn('[WebRTC] Unexpected screen share request error:', error);
     safeNotify({
       title: 'Screen Sharing Error',
       message: 'Unable to share screen: ' + error.message,
@@ -2604,7 +2670,7 @@ async function handleStopScreenShare() {
     }
     
   } catch (error) {
-    console.error('[WebRTC] Error stopping screen share:', error);
+    console.warn('[WebRTC] Error stopping screen share:', error);
   }
 }
 
@@ -2630,14 +2696,14 @@ async function handleOffer(sdp, from) {
         return;
       }
       // Unexpected error only
-      console.error('[WebRTC] Unexpected offer handling error:', response?.error);
+      console.warn('[WebRTC] Unexpected offer handling error:', response?.error);
       return;
     }
     
     console.log('[WebRTC] Offer handled in offscreen document');
   } catch (error) {
     // Only unexpected errors reach here
-    console.error('[WebRTC] Unexpected error handling offer:', error);
+    console.warn('[WebRTC] Unexpected error handling offer:', error);
   }
 }
 
@@ -2670,7 +2736,7 @@ async function stopScreenShare() {
     });
     await closeOffscreenDocument();
   } catch (error) {
-    console.error('[WebRTC] Error stopping screen share:', error);
+    console.warn('[WebRTC] Error stopping screen share:', error);
   }
 }
 
@@ -2785,6 +2851,16 @@ async function connectWebSocket() {
   // Clear any pending reconnection alarm since we're connecting now
   chrome.alarms.clear('ws-reconnect');
 
+  // Close any existing WebSocket to prevent duplicate connections
+  if (ws) {
+    try {
+      ws.onclose = null; // Prevent reconnect scheduling from old socket
+      ws.onerror = null;
+      ws.close();
+    } catch (e) { /* ignore */ }
+    ws = null;
+  }
+
   const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
   const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
 
@@ -2818,7 +2894,7 @@ async function connectWebSocket() {
         console.warn('WebSocket not ready yet, will retry on next connection');
       }
     } catch (error) {
-      console.error('Failed to send auth message:', error);
+      console.warn('Failed to send auth message:', error);
     }
   };
   
@@ -2867,7 +2943,7 @@ async function connectWebSocket() {
                   });
                 }
               } catch (error) {
-                console.error('Error enforcing tab limit:', error);
+                console.warn('Error enforcing tab limit:', error);
               }
             })();
           }
@@ -2885,7 +2961,7 @@ async function connectWebSocket() {
               await chrome.storage.local.set({ globalBlockedDomains });
               console.log('[Blacklist] Persisted to storage');
             } catch (error) {
-              console.error('[Blacklist] Error applying rules:', error);
+              console.warn('[Blacklist] Error applying rules:', error);
             }
           })();
         }
@@ -2900,7 +2976,7 @@ async function connectWebSocket() {
             try {
               await clearTeacherBlockListRules();
             } catch (error) {
-              console.error('[Block List] Error clearing rules on auth:', error);
+              console.warn('[Block List] Error clearing rules on auth:', error);
             }
           })();
         }
@@ -2927,7 +3003,7 @@ async function connectWebSocket() {
               });
             }
           } catch (error) {
-            console.error('[Blacklist] Error applying updated rules:', error);
+            console.warn('[Blacklist] Error applying updated rules:', error);
           }
         })();
       }
@@ -2980,6 +3056,16 @@ async function connectWebSocket() {
       
       // Handle remote control commands (Phase 1: GoGuardian-style features)
       if (message.type === 'remote-control') {
+        // General _msgId dedup: skip if this exact message was already processed
+        const msgId = message._msgId;
+        if (msgId) {
+          if (recentMsgIds.has(msgId)) {
+            console.log('Dedup: skipping duplicate remote-control _msgId', msgId);
+            return;
+          }
+          recentMsgIds.add(msgId);
+          setTimeout(() => recentMsgIds.delete(msgId), MSG_DEDUP_TTL);
+        }
         handleRemoteControl(message.command);
       }
       
@@ -2987,7 +3073,42 @@ async function connectWebSocket() {
       if (message.type === 'chat') {
         handleChatMessage(message);
       }
-      
+
+      // Handle teacher reply messages — send to chat thread
+      // Dedup: local + Redis both deliver the same message; skip if already seen
+      if (message.type === 'teacher-message') {
+        const dedupKey = message._msgId || ('tm:' + (message.message || '') + ':' + (message.fromName || ''));
+        if (recentMsgIds.has(dedupKey)) {
+          console.log('Dedup: skipping duplicate teacher-message', dedupKey);
+        } else {
+          recentMsgIds.add(dedupKey);
+          setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
+          safeNotify({
+            title: 'Reply from Teacher',
+            body: message.message || 'New message',
+            priority: 2,
+            requireInteraction: false,
+          });
+          broadcastToAllTabs('chat-reply', {
+            _msgId: dedupKey,
+            message: message.message,
+            fromName: message.fromName || 'Teacher',
+            timestamp: Date.now(),
+          });
+        }
+      }
+
+      // Handle teacher closing the chat
+      // Dedup: local + Redis both deliver the same message
+      if (message.type === 'chat-closed') {
+        const dedupKey = message._msgId || ('cc:' + Date.now().toString().slice(0, -3));
+        if (!recentMsgIds.has(dedupKey)) {
+          recentMsgIds.add(dedupKey);
+          setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
+          broadcastToAllTabs('chat-closed', {});
+        }
+      }
+
       // Handle check-in requests (Phase 3)
       if (message.type === 'check-in-request') {
         handleCheckInRequest(message);
@@ -3025,7 +3146,7 @@ async function connectWebSocket() {
         }
       }
     } catch (error) {
-      console.error('Error processing WebSocket message:', error);
+      console.warn('Error processing WebSocket message:', error);
     }
   };
   
@@ -3058,13 +3179,17 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
-  // Allow both ACTIVE and IDLE states
-  if (trackingState === TRACKING_STATES.OFF) return;
-  if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
-  if (changeInfo.url) {
-    queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
-    // Send immediate heartbeat to update teacher dashboard quickly
-    safeSendHeartbeat('url-changed');
+  try {
+    // Allow both ACTIVE and IDLE states
+    if (trackingState === TRACKING_STATES.OFF) return;
+    if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
+    if (changeInfo.url) {
+      queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
+      // Send immediate heartbeat to update teacher dashboard quickly
+      safeSendHeartbeat('url-changed');
+    }
+  } catch (error) {
+    console.warn('[Service Worker] Tab updated handler error:', error?.message || error);
   }
 });
 
@@ -3122,7 +3247,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             chrome.tabs.reload(tabs[0].id);
           }
         } catch (error) {
-          console.error('Failed to refresh tab:', error);
+          console.warn('Failed to refresh tab:', error);
         }
         
         sendResponse({ success: true, data });
@@ -3162,7 +3287,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.log('Poll response submitted:', data);
         })
         .catch(err => {
-          console.error('Failed to submit poll response:', err);
+          console.warn('Failed to submit poll response:', err);
         });
     }
 
@@ -3198,7 +3323,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, data });
       })
       .catch(err => {
-        console.error('Failed to raise hand:', err);
+        console.warn('Failed to raise hand:', err);
         sendResponse({ success: false, error: err.message });
       });
 
@@ -3231,7 +3356,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true, data });
       })
       .catch(err => {
-        console.error('Failed to lower hand:', err);
+        console.warn('Failed to lower hand:', err);
         sendResponse({ success: false, error: err.message });
       });
 
@@ -3266,7 +3391,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(res => res.json())
       .then(data => {
         if (data.error) {
-          console.error('Failed to send message:', data.error);
+          console.warn('Failed to send message:', data.error);
           sendResponse({ success: false, error: data.error });
         } else {
           console.log('Message sent:', data);
@@ -3274,7 +3399,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       })
       .catch(err => {
-        console.error('Failed to send message:', err);
+        console.warn('Failed to send message:', err);
         sendResponse({ success: false, error: err.message });
       });
 
@@ -3290,7 +3415,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Refresh school settings and tracking state with new server URL
         refreshSchoolSettings({ force: true }).then(() => {
           updateTrackingState('server-url-update');
-        });
+        }).catch(() => {});
         sendResponse({ success: true });
       });
     } else {
@@ -3333,7 +3458,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           await disableForInactiveLicense(data.planStatus);
         }
       }).catch(error => {
-        console.error('Error logging student_switched event:', error);
+        console.warn('Error logging student_switched event:', error);
       });
     }
     

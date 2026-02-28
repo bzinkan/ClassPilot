@@ -18,20 +18,57 @@ let attentionModeActive = false;
 let timerInterval = null;
 let timerEndTime = null;
 let activePollId = null;
+const respondedPollIds = new Set(); // prevent re-showing polls already answered
+const seenChatMsgIds = new Set(); // dedup chat-reply messages
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'show-message') {
-    showMessageModal(message.data);
+    // Broadcast messages (not replies) still show as modal
+    if (!message.data.isTeacherReply) {
+      showMessageModal(message.data);
+    }
+  }
+
+  // Teacher reply — add to chat thread (ignore if teacher already closed the chat)
+  if (message.type === 'chat-reply' && !chatClosed) {
+    // Dedup: skip if we've already processed this exact message
+    const msgId = message.data?._msgId;
+    if (msgId) {
+      if (seenChatMsgIds.has(msgId)) {
+        console.log('[ClassPilot] Dedup: skipping duplicate chat-reply', msgId);
+        return;
+      }
+      seenChatMsgIds.add(msgId);
+      setTimeout(() => seenChatMsgIds.delete(msgId), 60000);
+    }
+    chatMessages.push({ sender: 'teacher', text: message.data.message, time: Date.now() });
+    const chatBox = document.getElementById('classpilot-fab-message-box');
+    if (!chatBox?.classList.contains('classpilot-fab-message-box-open')) {
+      showMessageBox();
+    }
+    renderChatMessages();
+  }
+
+  // Teacher closed the chat — only act if chat is active (dedup replays)
+  if (message.type === 'chat-closed' && !chatClosed) {
+    chatMessages = [];
+    chatClosed = true;
+    renderChatMessages();
+    hideMessageBox();
+    closeFabMenu();
+    showFabNotification('Teacher ended the chat.');
   }
 
   if (message.type === 'check-blocked-domain') {
     const currentDomain = window.location.hostname;
     sendResponse({ domain: currentDomain });
+    return true; // async sendResponse
   }
 
   if (message.type === 'get-camera-status') {
     sendResponse({ cameraActive: cameraActive });
+    return true; // async sendResponse
   }
 
   if (message.type === 'CLASSPILOT_LICENSE_INACTIVE') {
@@ -74,19 +111,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     showChatNotification(message.data.message, message.data.fromName);
   }
 
-  // Hand dismissed notification
-  if (message.type === 'hand-dismissed') {
-    // Clear raised hand state
+  // Hand dismissed notification — only show if hand was actually raised (dedup replays)
+  if (message.type === 'hand-dismissed' && handRaised) {
     chrome.storage.local.set({ handRaised: false });
     showChatNotification('Your teacher acknowledged your raised hand.', 'Teacher');
   }
 
-  // Messaging toggle (enable/disable hand raising)
+  // Messaging toggle (enable/disable messaging)
   if (message.type === 'messaging-toggle') {
     chrome.storage.local.set({ messagingEnabled: message.data.enabled });
+    if (message.data.enabled) chatClosed = false;
   }
-
-  return true;
 });
 
 // Monitor camera usage by wrapping getUserMedia
@@ -182,23 +217,29 @@ function removeLicenseBanner() {
 
 // Show regular message as modal
 function showMessageModal(data) {
-  const { message, fromName, timestamp } = data;
-  
+  const { message, fromName, timestamp, isTeacherReply } = data;
+
   // Remove any existing message modal first
   const existingModal = document.getElementById('classpilot-message-modal');
   if (existingModal) {
     existingModal.remove();
   }
-  
+
+  const icon = isTeacherReply ? '📩' : '💬';
+  const headerStyle = isTeacherReply
+    ? 'background: linear-gradient(135deg, #10b981, #059669); border-left: 4px solid #10b981;'
+    : '';
+  const title = isTeacherReply ? 'Reply from Teacher' : `Message from ${escapeHtml(fromName || 'Teacher')}`;
+
   // Create modal overlay
   const modal = document.createElement('div');
   modal.id = 'classpilot-message-modal';
   modal.innerHTML = `
     <div class="classpilot-modal-overlay">
       <div class="classpilot-modal-content classpilot-message">
-        <div class="classpilot-modal-header">
-          <div class="classpilot-modal-icon">💬</div>
-          <h2>Message from ${escapeHtml(fromName || 'Teacher')}</h2>
+        <div class="classpilot-modal-header" style="${headerStyle}">
+          <div class="classpilot-modal-icon">${icon}</div>
+          <h2>${title}</h2>
         </div>
         <div class="classpilot-modal-body">
           <p>${escapeHtml(message)}</p>
@@ -665,6 +706,10 @@ function addTimerStyles() {
 // ============================================
 
 function showPollOverlay(pollId, question, options) {
+  // Skip if student already responded to this poll
+  if (respondedPollIds.has(pollId)) {
+    return;
+  }
   activePollId = pollId;
 
   // Remove any existing poll overlay
@@ -710,6 +755,9 @@ function showPollOverlay(pollId, question, options) {
 }
 
 function submitPollResponse(pollId, selectedIndex, button) {
+  // Mark as responded so duplicates are ignored
+  respondedPollIds.add(pollId);
+
   // Visual feedback
   const allButtons = document.querySelectorAll('.classpilot-poll-option');
   allButtons.forEach(btn => {
@@ -1072,6 +1120,8 @@ let fabExpanded = false;
 let handRaised = false;
 let messagingEnabled = true;
 let handRaisingEnabled = true;
+let chatMessages = []; // { sender: 'student'|'teacher', text: string, time: number }
+let chatClosed = false; // Set when teacher closes chat — prevents re-opening old conversation
 
 function createFloatingActionButton() {
   // Don't create FAB on extension pages or special pages
@@ -1105,13 +1155,13 @@ function createFloatingActionButton() {
     </button>
     <div class="classpilot-fab-message-box" id="classpilot-fab-message-box">
       <div class="classpilot-fab-message-header">
-        <span>💬 Message Teacher</span>
+        <span>💬 Chat with Teacher</span>
         <button class="classpilot-fab-message-close" id="classpilot-fab-message-close">×</button>
       </div>
-      <textarea class="classpilot-fab-message-input" id="classpilot-fab-message-input" placeholder="Type your message..."></textarea>
-      <div class="classpilot-fab-message-actions">
-        <button class="classpilot-fab-message-btn classpilot-fab-message-question" id="classpilot-fab-send-question">❓ Question</button>
-        <button class="classpilot-fab-message-btn classpilot-fab-message-send" id="classpilot-fab-send-message">💬 Send</button>
+      <div class="classpilot-fab-chat-messages" id="classpilot-fab-chat-messages"></div>
+      <div class="classpilot-fab-chat-input-area">
+        <input type="text" class="classpilot-fab-chat-input" id="classpilot-fab-chat-input" placeholder="Type a message..." />
+        <button class="classpilot-fab-chat-send-btn" id="classpilot-fab-chat-send-btn">➤</button>
       </div>
     </div>
   `;
@@ -1155,6 +1205,11 @@ function createFloatingActionButton() {
       showFabNotification('Messaging is currently disabled by your teacher.', true);
       return;
     }
+    // If teacher closed the previous chat, start fresh
+    if (chatClosed) {
+      chatClosed = false;
+      chatMessages = [];
+    }
     showMessageBox();
   });
 
@@ -1164,14 +1219,17 @@ function createFloatingActionButton() {
     hideMessageBox();
   });
 
-  // Send question
-  document.getElementById('classpilot-fab-send-question').addEventListener('click', () => {
-    sendMessage('question');
+  // Send message via button click
+  document.getElementById('classpilot-fab-chat-send-btn').addEventListener('click', () => {
+    sendMessage();
   });
 
-  // Send message
-  document.getElementById('classpilot-fab-send-message').addEventListener('click', () => {
-    sendMessage('message');
+  // Send message via Enter key
+  document.getElementById('classpilot-fab-chat-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
   });
 
   // Prevent clicks on message box from closing it
@@ -1179,23 +1237,10 @@ function createFloatingActionButton() {
     e.stopPropagation();
   });
 
-  // Prevent textarea interactions from closing the message box
-  const messageInput = document.getElementById('classpilot-fab-message-input');
-  messageInput.addEventListener('click', (e) => {
-    e.stopPropagation();
-  });
-  messageInput.addEventListener('focus', (e) => {
-    e.stopPropagation();
-  });
-  messageInput.addEventListener('mousedown', (e) => {
-    e.stopPropagation();
-  });
-
-  // Close menu when clicking outside
+  // Close menu when clicking outside (but keep chat open)
   document.addEventListener('click', (e) => {
     if (!fabContainer.contains(e.target)) {
       closeFabMenu();
-      hideMessageBox();
     }
   });
 }
@@ -1211,7 +1256,6 @@ function toggleFabMenu() {
   } else {
     menu.classList.remove('classpilot-fab-menu-open');
     main.classList.remove('classpilot-fab-main-active');
-    hideMessageBox();
   }
 }
 
@@ -1226,7 +1270,8 @@ function closeFabMenu() {
 function showMessageBox() {
   const messageBox = document.getElementById('classpilot-fab-message-box');
   messageBox?.classList.add('classpilot-fab-message-box-open');
-  document.getElementById('classpilot-fab-message-input')?.focus();
+  renderChatMessages();
+  document.getElementById('classpilot-fab-chat-input')?.focus();
 }
 
 function hideMessageBox() {
@@ -1235,29 +1280,45 @@ function hideMessageBox() {
 }
 
 function raiseHand() {
-  chrome.runtime.sendMessage({ type: 'raise-hand' }, (response) => {
-    if (response?.success) {
-      handRaised = true;
-      chrome.storage.local.set({ handRaised: true });
-      updateFabHandState();
-      showFabNotification('✋ Hand raised! Your teacher has been notified.');
-      closeFabMenu();
-    } else {
-      showFabNotification('Could not raise hand. Please try again.', true);
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ type: 'raise-hand' }, (response) => {
+      if (chrome.runtime.lastError) {
+        showFabNotification('Extension updated — please refresh the page.', true);
+        return;
+      }
+      if (response?.success) {
+        handRaised = true;
+        chrome.storage.local.set({ handRaised: true });
+        updateFabHandState();
+        showFabNotification('✋ Hand raised! Your teacher has been notified.');
+        closeFabMenu();
+      } else {
+        showFabNotification('Could not raise hand. Please try again.', true);
+      }
+    });
+  } catch (e) {
+    showFabNotification('Extension updated — please refresh the page.', true);
+  }
 }
 
 function lowerHand() {
-  chrome.runtime.sendMessage({ type: 'lower-hand' }, (response) => {
-    if (response?.success) {
-      handRaised = false;
-      chrome.storage.local.set({ handRaised: false });
-      updateFabHandState();
-      showFabNotification('Hand lowered.');
-      closeFabMenu();
-    }
-  });
+  try {
+    chrome.runtime.sendMessage({ type: 'lower-hand' }, (response) => {
+      if (chrome.runtime.lastError) {
+        showFabNotification('Extension updated — please refresh the page.', true);
+        return;
+      }
+      if (response?.success) {
+        handRaised = false;
+        chrome.storage.local.set({ handRaised: false });
+        updateFabHandState();
+        showFabNotification('Hand lowered.');
+        closeFabMenu();
+      }
+    });
+  } catch (e) {
+    showFabNotification('Extension updated — please refresh the page.', true);
+  }
 }
 
 function updateFabHandState() {
@@ -1296,29 +1357,61 @@ function updateFabMessageState() {
   }
 }
 
-function sendMessage(type) {
-  const input = document.getElementById('classpilot-fab-message-input');
+function sendMessage() {
+  const input = document.getElementById('classpilot-fab-chat-input');
   const message = input?.value?.trim();
 
   if (!message) {
-    showFabNotification('Please enter a message.', true);
     return;
   }
 
-  chrome.runtime.sendMessage({
-    type: 'send-student-message',
-    message: message,
-    messageType: type
-  }, (response) => {
-    if (response?.success) {
-      input.value = '';
-      hideMessageBox();
-      closeFabMenu();
-      showFabNotification(type === 'question' ? '❓ Question sent!' : '💬 Message sent!');
-    } else {
-      showFabNotification('Could not send message. Please try again.', true);
-    }
-  });
+  // Disable input while sending
+  input.disabled = true;
+
+  try {
+    chrome.runtime.sendMessage({
+      type: 'send-student-message',
+      message: message,
+      messageType: 'message'
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        input.disabled = false;
+        showFabNotification('Extension updated — please refresh the page.', true);
+        return;
+      }
+      input.disabled = false;
+      if (response?.success) {
+        chatMessages.push({ sender: 'student', text: message, time: Date.now() });
+        input.value = '';
+        renderChatMessages();
+        input.focus();
+      } else {
+        showFabNotification('Could not send message. Please try again.', true);
+      }
+    });
+  } catch (e) {
+    input.disabled = false;
+    showFabNotification('Extension updated — please refresh the page.', true);
+  }
+}
+
+function renderChatMessages() {
+  const container = document.getElementById('classpilot-fab-chat-messages');
+  if (!container) return;
+
+  if (chatMessages.length === 0) {
+    container.innerHTML = '<div class="classpilot-chat-empty">Send a message to your teacher</div>';
+    return;
+  }
+
+  container.innerHTML = chatMessages.map(msg => {
+    const isStudent = msg.sender === 'student';
+    const bubbleClass = isStudent ? 'classpilot-chat-bubble-student' : 'classpilot-chat-bubble-teacher';
+    const text = msg.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}</div>`;
+  }).join('');
+
+  container.scrollTop = container.scrollHeight;
 }
 
 function showFabNotification(message, isError = false) {
@@ -1466,7 +1559,8 @@ function addFabStyles() {
       position: absolute;
       bottom: 70px;
       right: 0;
-      width: 300px;
+      width: 320px;
+      height: 400px;
       background: white;
       border-radius: 16px;
       box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
@@ -1475,6 +1569,8 @@ function addFabStyles() {
       transform: translateY(20px) scale(0.95);
       transition: all 0.3s ease;
       overflow: hidden;
+      display: flex;
+      flex-direction: column;
     }
 
     .classpilot-fab-message-box.classpilot-fab-message-box-open {
@@ -1487,11 +1583,12 @@ function addFabStyles() {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 14px 16px;
+      padding: 12px 16px;
       background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
       color: white;
       font-weight: 600;
       font-size: 14px;
+      flex-shrink: 0;
     }
 
     .classpilot-fab-message-close {
@@ -1509,56 +1606,88 @@ function addFabStyles() {
       opacity: 1;
     }
 
-    .classpilot-fab-message-input {
-      width: 100%;
-      padding: 14px 16px;
-      border: none;
-      border-bottom: 1px solid #e2e8f0;
-      font-size: 14px;
-      resize: none;
-      height: 80px;
-      font-family: inherit;
-      box-sizing: border-box;
-    }
-
-    .classpilot-fab-message-input:focus {
-      outline: none;
+    .classpilot-fab-chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
       background: #f8fafc;
     }
 
-    .classpilot-fab-message-actions {
-      display: flex;
-      gap: 8px;
-      padding: 12px;
-    }
-
-    .classpilot-fab-message-btn {
-      flex: 1;
-      padding: 10px 12px;
-      border: none;
-      border-radius: 8px;
+    .classpilot-chat-empty {
+      text-align: center;
+      color: #94a3b8;
       font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
+      padding: 40px 16px;
     }
 
-    .classpilot-fab-message-question {
-      background: #8b5cf6;
+    .classpilot-chat-bubble {
+      max-width: 80%;
+      padding: 8px 12px;
+      border-radius: 12px;
+      font-size: 13px;
+      line-height: 1.4;
+      word-wrap: break-word;
+    }
+
+    .classpilot-chat-bubble-student {
+      align-self: flex-end;
+      background: #3b82f6;
       color: white;
+      border-bottom-right-radius: 4px;
     }
 
-    .classpilot-fab-message-question:hover {
-      background: #7c3aed;
-    }
-
-    .classpilot-fab-message-send {
+    .classpilot-chat-bubble-teacher {
+      align-self: flex-start;
       background: #10b981;
       color: white;
+      border-bottom-left-radius: 4px;
     }
 
-    .classpilot-fab-message-send:hover {
-      background: #059669;
+    .classpilot-fab-chat-input-area {
+      display: flex;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid #e2e8f0;
+      background: white;
+      flex-shrink: 0;
+    }
+
+    .classpilot-fab-chat-input {
+      flex: 1;
+      padding: 8px 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 20px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+      box-sizing: border-box;
+    }
+
+    .classpilot-fab-chat-input:focus {
+      border-color: #3b82f6;
+    }
+
+    .classpilot-fab-chat-send-btn {
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 50%;
+      background: #3b82f6;
+      color: white;
+      font-size: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.2s;
+    }
+
+    .classpilot-fab-chat-send-btn:hover {
+      background: #2563eb;
     }
 
     #classpilot-fab-notification {
