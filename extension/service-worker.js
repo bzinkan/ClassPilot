@@ -1571,6 +1571,11 @@ async function sendHeartbeat(reason = 'manual') {
     } else if (response.ok) {
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
+      // Capture screenshot immediately after first successful heartbeat
+      // This avoids waiting for the chrome.alarms delay on cold start
+      if (screenshotScheduled) {
+        captureAndSendScreenshot();
+      }
       // Check for pending messages missed during WebSocket disconnection
       try {
         const data = await response.json();
