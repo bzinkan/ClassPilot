@@ -111,7 +111,15 @@ let CONFIG = {
   activeStudentId: null,
 };
 
-let ws = null;
+let ws = null; // Legacy reference, kept for compatibility checks
+let wsConnected = false; // Tracks WebSocket connection state (actual WS lives in offscreen doc)
+
+// Send a message via the WebSocket proxy in the offscreen document
+function wsSend(data) {
+  if (!wsConnected) return;
+  const str = typeof data === 'string' ? data : JSON.stringify(data);
+  sendToOffscreen({ type: 'WS_SEND', data: str }).catch(() => {});
+}
 let cameraActive = false; // Track camera usage across all tabs
 
 // Adaptive tracking state machine
@@ -469,6 +477,9 @@ function determineTrackingState() {
 
 function disconnectWebSocket() {
   chrome.alarms.clear('ws-reconnect');
+  wsConnected = false;
+  // Tell offscreen document to close the WebSocket
+  sendToOffscreen({ type: 'WS_CLOSE' }).catch(() => {});
   if (ws) {
     try {
       ws.close();
@@ -1592,9 +1603,15 @@ async function healthCheck() {
     scheduleHeartbeat(null);
   }
 
-  // Re-schedule screenshot capture if interval was lost (setInterval doesn't survive MV3 service worker restarts)
-  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotIntervalId) {
+  // Re-schedule screenshot capture if alarm was lost after service worker restart
+  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
     scheduleScreenshotCapture(true);
+  }
+
+  // Reconnect WebSocket if lost (e.g. after service worker restart where ws is null but tracking is still ACTIVE)
+  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !wsConnected) {
+    console.log('[Health Check] WebSocket not connected, reconnecting...');
+    connectWebSocket().catch(() => {});
   }
 
   console.log('[Health Check] Complete - tracking state checked');
@@ -1604,8 +1621,8 @@ async function healthCheck() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     safeSendHeartbeat('alarm');
-    // Re-schedule screenshot interval if lost after service worker restart
-    if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotIntervalId) {
+    // Re-schedule screenshot alarm if lost after service worker restart
+    if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
       scheduleScreenshotCapture(true);
     }
   } else if (alarm.name === 'ws-reconnect') {
@@ -1632,21 +1649,22 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // Screenshot Thumbnail Capture (for teacher dashboard grid view)
-const SCREENSHOT_INTERVAL_MS = 10000; // 10 seconds
-let screenshotIntervalId = null;
+// Uses chrome.alarms (30s minimum) instead of setInterval so it survives
+// MV3 service worker termination. setInterval dies when the SW goes inactive.
+const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
+let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
-  if (enable && !screenshotIntervalId) {
-    // Use setInterval for 10-second captures (Chrome alarms minimum is 30 seconds)
-    screenshotIntervalId = setInterval(() => {
-      captureAndSendScreenshot();
-    }, SCREENSHOT_INTERVAL_MS);
+  if (enable && !screenshotScheduled) {
+    screenshotScheduled = true;
+    // chrome.alarms minimum is 30 seconds; use 0.5 min (30s) for near-real-time
+    chrome.alarms.create(SCREENSHOT_ALARM_NAME, { periodInMinutes: 0.5 });
     // Also capture immediately when enabled
     captureAndSendScreenshot();
-    console.log('[Screenshot] Scheduled periodic capture every 10 seconds');
-  } else if (!enable && screenshotIntervalId) {
-    clearInterval(screenshotIntervalId);
-    screenshotIntervalId = null;
+    console.log('[Screenshot] Scheduled periodic capture via chrome.alarms (every 30s)');
+  } else if (!enable && screenshotScheduled) {
+    screenshotScheduled = false;
+    chrome.alarms.clear(SCREENSHOT_ALARM_NAME);
     console.log('[Screenshot] Stopped periodic capture');
   }
 }
@@ -2547,8 +2565,8 @@ async function ensureOffscreenDocument() {
   if (!creatingOffscreen) {
     creatingOffscreen = chrome.offscreen.createDocument({
       url: 'offscreen.html',
-      reasons: ['USER_MEDIA', 'DISPLAY_MEDIA'],
-      justification: 'Screen capture and WebRTC must run in page context for MV3 compatibility'
+      reasons: ['USER_MEDIA', 'DISPLAY_MEDIA', 'BLOBS'],
+      justification: 'Screen capture, WebRTC, and WebSocket must run in page context for MV3 compatibility'
     }).then(() => {
       console.log('[Service Worker] Offscreen document created');
     }).catch(error => {
@@ -2757,34 +2775,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   console.log('[Service Worker] Message from offscreen:', message.type);
   
-  // Forward ICE candidates to teacher
-  if (message.type === 'ICE_CANDIDATE') {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'ice',
-        to: 'teacher',
-        candidate: message.candidate,
-      }));
-    }
+  // Handle WebSocket events from offscreen proxy
+  if (message.type === 'WS_EVENT') {
+    handleWsEvent(message.event, message.data);
     sendResponse({ success: true });
   }
-  
+
+  // Forward ICE candidates to teacher
+  if (message.type === 'ICE_CANDIDATE') {
+    wsSend({ type: 'ice', to: 'teacher', candidate: message.candidate });
+    sendResponse({ success: true });
+  }
+
   // Forward answer to teacher
   if (message.type === 'ANSWER') {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: 'answer',
-        to: 'teacher',
-        sdp: message.sdp,
-      }));
-    }
+    wsSend({ type: 'answer', to: 'teacher', sdp: message.sdp });
     sendResponse({ success: true });
   }
   
   // Handle connection failures
   if (message.type === 'CONNECTION_FAILED') {
     console.log('[WebRTC] Connection failed, cleaning up');
-    closeOffscreenDocument();
+    // Don't close offscreen document — it also hosts the WebSocket proxy
     setObservedState(false, 'connection-failed');
     sendResponse({ success: true });
   }
@@ -2818,7 +2830,9 @@ function scheduleWsReconnect() {
   wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 120000);
 }
 
-// Connect to WebSocket for signaling
+// Connect to WebSocket via offscreen document proxy
+// MV3 service workers can't maintain persistent WebSocket connections (Chrome 145+),
+// so the actual WebSocket lives in the offscreen document and relays messages here.
 async function connectWebSocket() {
   if (trackingState !== TRACKING_STATES.ACTIVE) {
     console.log('Skipping WebSocket - tracking state is not ACTIVE');
@@ -2830,77 +2844,62 @@ async function connectWebSocket() {
     return;
   }
 
-  // Pre-flight health check: verify server is reachable before attempting WebSocket
-  // This prevents browser-level 503 errors from appearing in console during deploys
-  try {
-    const healthResponse = await fetch(`${CONFIG.serverUrl}/health`, {
-      method: 'GET',
-      cache: 'no-store',
-    });
-    if (!healthResponse.ok) {
-      console.log('Skipping WebSocket - server health check failed');
-      scheduleWsReconnect();
-      return;
-    }
-  } catch (error) {
-    console.log('Skipping WebSocket - server unreachable');
-    scheduleWsReconnect();
-    return;
-  }
-
   // Clear any pending reconnection alarm since we're connecting now
   chrome.alarms.clear('ws-reconnect');
 
-  // Close any existing WebSocket to prevent duplicate connections
-  if (ws) {
-    try {
-      ws.onclose = null; // Prevent reconnect scheduling from old socket
-      ws.onerror = null;
-      ws.close();
-    } catch (e) { /* ignore */ }
-    ws = null;
-  }
+  // Ensure offscreen document exists (it hosts the WebSocket)
+  await ensureOffscreenDocument();
 
   const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
   const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
 
-  ws = new WebSocket(wsUrl);
-  
-  ws.onopen = () => {
-    console.log('WebSocket connected');
-    wsReconnectBackoffMs = 10000; // Reset backoff on successful connection
-    // Authenticate as student - prefer JWT token (faster), fallback to email lookup
-    try {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const authPayload = {
-          type: 'auth',
-          role: 'student',
-          deviceId: CONFIG.deviceId,
-        };
-
-        // Prefer JWT token authentication (avoids email domain lookup)
-        if (CONFIG.studentToken) {
-          authPayload.studentToken = CONFIG.studentToken;
-          console.log('WebSocket auth: using JWT token');
-        } else {
-          // Fallback to email-based authentication
-          authPayload.studentEmail = CONFIG.studentEmail;
-          console.log('WebSocket auth: using email (no JWT token)');
-        }
-
-        ws.send(JSON.stringify(authPayload));
-        console.log('WebSocket auth sent');
-      } else {
-        console.warn('WebSocket not ready yet, will retry on next connection');
-      }
-    } catch (error) {
-      console.warn('Failed to send auth message:', error);
-    }
+  // Build auth payload to send immediately on connection
+  const authPayload = {
+    type: 'auth',
+    role: 'student',
+    deviceId: CONFIG.deviceId,
   };
-  
-  ws.onmessage = (event) => {
+  if (CONFIG.studentToken) {
+    authPayload.studentToken = CONFIG.studentToken;
+    console.log('WebSocket auth: using JWT token');
+  } else {
+    authPayload.studentEmail = CONFIG.studentEmail;
+    console.log('WebSocket auth: using email (no JWT token)');
+  }
+
+  // Tell offscreen document to create the WebSocket
+  wsConnected = false;
+  try {
+    await sendToOffscreen({ type: 'WS_CONNECT', url: wsUrl, authPayload });
+    console.log('[WebSocket] Connection request sent to offscreen document');
+  } catch (error) {
+    console.warn('[WebSocket] Failed to send connect request to offscreen:', error?.message || error);
+    scheduleWsReconnect();
+  }
+}
+
+// Handle WebSocket events relayed from offscreen document
+function handleWsEvent(event, data) {
+  if (event === 'open') {
+    console.log('WebSocket connected (via offscreen)');
+    wsConnected = true;
+    wsReconnectBackoffMs = 10000;
+  } else if (event === 'error') {
+    console.warn('WebSocket connection issue');
+  } else if (event === 'close') {
+    console.log('WebSocket disconnected');
+    wsConnected = false;
+    setObservedState(false, 'ws-closed');
+    scheduleWsReconnect();
+  } else if (event === 'message') {
+    handleWsMessage(data);
+  }
+}
+
+// Process incoming WebSocket message (same logic as before, just extracted)
+function handleWsMessage(rawData) {
     try {
-      const message = JSON.parse(event.data);
+      const message = JSON.parse(rawData);
       console.log('WebSocket message:', message);
       
       // Handle authentication success with settings
@@ -3121,9 +3120,7 @@ async function connectWebSocket() {
       // Teacher started broadcasting - request to join
       if (message.type === 'teacher-broadcast-start') {
         console.log('[Broadcast] Teacher started broadcasting, requesting to join');
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'broadcast-join' }));
-        }
+        wsSend({ type: 'broadcast-join' });
       }
 
       // Teacher stopped broadcasting
@@ -3148,19 +3145,6 @@ async function connectWebSocket() {
     } catch (error) {
       console.warn('Error processing WebSocket message:', error);
     }
-  };
-  
-  ws.onerror = (error) => {
-    // Expected during off-hours, deploys, or connectivity blips — don't surface as errors
-    console.warn('WebSocket connection issue');
-  };
-  
-  ws.onclose = () => {
-    console.log('WebSocket disconnected');
-    ws = null; // Clear the reference
-    setObservedState(false, 'ws-closed');
-    scheduleWsReconnect();
-  };
 }
 
 // Tab change listener - send immediate heartbeat when user switches tabs
