@@ -1621,9 +1621,10 @@ async function healthCheck() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     safeSendHeartbeat('alarm');
-    // Re-schedule screenshot alarm if lost after service worker restart
-    if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
-      scheduleScreenshotCapture(true);
+    // Capture screenshot on every heartbeat (30s) — piggybacks on heartbeat alarm
+    // which fires more frequently than chrome.alarms minimum for standalone alarms
+    if (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) {
+      captureAndSendScreenshot();
     }
   } else if (alarm.name === 'ws-reconnect') {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
@@ -1655,17 +1656,14 @@ const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
 let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
-  if (enable && !screenshotScheduled) {
-    screenshotScheduled = true;
-    // chrome.alarms minimum is 30 seconds; use 0.5 min (30s) for near-real-time
-    chrome.alarms.create(SCREENSHOT_ALARM_NAME, { periodInMinutes: 0.5 });
-    // Also capture immediately when enabled
+  // Screenshots are captured on every heartbeat alarm (30s) - no separate alarm needed
+  screenshotScheduled = enable;
+  if (enable) {
+    // Capture immediately when enabled
     captureAndSendScreenshot();
-    console.log('[Screenshot] Scheduled periodic capture via chrome.alarms (every 30s)');
-  } else if (!enable && screenshotScheduled) {
-    screenshotScheduled = false;
-    chrome.alarms.clear(SCREENSHOT_ALARM_NAME);
-    console.log('[Screenshot] Stopped periodic capture');
+    console.log('[Screenshot] Enabled - captures on every heartbeat (30s)');
+  } else {
+    console.log('[Screenshot] Disabled');
   }
 }
 
@@ -2615,19 +2613,31 @@ async function handleScreenShareRequest(mode = 'auto') {
 
     // MV3: Get a stream ID from the service worker via tabCapture.getMediaStreamId
     // This is the correct MV3 approach - tabCapture.capture() doesn't work in offscreen docs
+    // On managed browsers with TabCaptureAllowedByOrigins policy, this enables silent capture
     let streamId = null;
     if (mode === 'auto' || mode === 'tab') {
       try {
-        // Get the student's active tab
         const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (activeTab?.id) {
-          streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
-          console.log('[WebRTC] Got tab capture stream ID for tab:', activeTab.id);
+          // Try without consumerTabId first (for offscreen document consumption)
+          try {
+            streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
+            console.log('[WebRTC] Got tab capture stream ID (method 1) for tab:', activeTab.id);
+          } catch (e1) {
+            console.info('[WebRTC] Method 1 failed:', e1.message, '- trying without targetTabId');
+            // Some Chrome versions need no targetTabId for offscreen docs
+            try {
+              streamId = await chrome.tabCapture.getMediaStreamId({});
+              console.log('[WebRTC] Got tab capture stream ID (method 2, no target)');
+            } catch (e2) {
+              console.info('[WebRTC] Method 2 also failed:', e2.message);
+            }
+          }
         } else {
           console.info('[WebRTC] No active tab found for tab capture');
         }
       } catch (tabErr) {
-        console.info('[WebRTC] tabCapture.getMediaStreamId failed (expected on some devices):', tabErr.message);
+        console.info('[WebRTC] tabCapture.getMediaStreamId failed:', tabErr.message);
       }
     }
 
