@@ -1571,6 +1571,27 @@ async function sendHeartbeat(reason = 'manual') {
     } else if (response.ok) {
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
+      // Check for pending messages missed during WebSocket disconnection
+      try {
+        const data = await response.json();
+        if (data.pendingMessages && data.pendingMessages.length > 0) {
+          for (const msg of data.pendingMessages) {
+            // Store message for popup display (same format as WebSocket messages)
+            const stored = await kv.get(['messages']) || {};
+            const messages = stored.messages || [];
+            messages.push({
+              id: msg.id,
+              message: msg.message,
+              fromName: 'Teacher',
+              timestamp: Date.now(),
+            });
+            await kv.set({ messages: messages.slice(-50) });
+            console.log('[Heartbeat] Delivered pending message:', msg.id);
+          }
+          // Notify popup to refresh
+          chrome.runtime.sendMessage({ type: 'messages-updated' }).catch(() => {});
+        }
+      } catch { /* response may not be JSON in some edge cases */ }
     } else {
       // Client error (400s) - log but don't retry
       console.warn('Heartbeat client error:', response.status);
@@ -1772,6 +1793,8 @@ async function handleRemoteControl(command) {
         if (command.data.url) {
           await chrome.tabs.create({ url: command.data.url, active: true });
           console.log('Opened tab:', command.data.url);
+          // Capture screenshot after tab loads so dashboard updates fast
+          setTimeout(() => captureAndSendScreenshot(), 2000);
         }
         break;
         
@@ -1841,8 +1864,10 @@ async function handleRemoteControl(command) {
             }
           }
         }
+        // Capture screenshot immediately after closing tabs so dashboard updates fast
+        setTimeout(() => captureAndSendScreenshot(), 1500);
         break;
-        
+
       case 'lock-screen':
         screenLocked = true;
         
