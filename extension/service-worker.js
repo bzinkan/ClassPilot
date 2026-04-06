@@ -1642,10 +1642,9 @@ async function healthCheck() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
     safeSendHeartbeat('alarm');
-    // Capture screenshot on every heartbeat (30s) — piggybacks on heartbeat alarm
-    // which fires more frequently than chrome.alarms minimum for standalone alarms
-    if (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) {
-      captureAndSendScreenshot();
+    // Re-schedule screenshot alarm if lost after service worker restart
+    if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
+      scheduleScreenshotCapture(true);
     }
   } else if (alarm.name === 'ws-reconnect') {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
@@ -1677,14 +1676,17 @@ const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
 let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
-  // Screenshots are captured on every heartbeat alarm (30s) - no separate alarm needed
-  screenshotScheduled = enable;
-  if (enable) {
-    // Capture immediately when enabled
+  if (enable && !screenshotScheduled) {
+    screenshotScheduled = true;
+    // chrome.alarms minimum is 30 seconds; use 0.5 min (30s) for near-real-time
+    chrome.alarms.create(SCREENSHOT_ALARM_NAME, { periodInMinutes: 0.5 });
+    // Also capture immediately when enabled
     captureAndSendScreenshot();
-    console.log('[Screenshot] Enabled - captures on every heartbeat (30s)');
-  } else {
-    console.log('[Screenshot] Disabled');
+    console.log('[Screenshot] Scheduled periodic capture via chrome.alarms (every 30s)');
+  } else if (!enable && screenshotScheduled) {
+    screenshotScheduled = false;
+    chrome.alarms.clear(SCREENSHOT_ALARM_NAME);
+    console.log('[Screenshot] Stopped periodic capture');
   }
 }
 
