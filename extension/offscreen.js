@@ -25,8 +25,80 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
   chrome.runtime.sendMessage({ type: 'OFFSCREEN_READY' });
 }
 
+// ============================================================================
+// WebSocket proxy — runs here because MV3 service workers can't maintain
+// persistent WebSocket connections (Chrome 145+ enforces this strictly).
+// The service worker sends WS_CONNECT / WS_SEND / WS_CLOSE messages here,
+// and we relay incoming WS messages back via chrome.runtime.sendMessage.
+// ============================================================================
+let proxyWs = null;
+let wsKeepAliveTimer = null;
+
+function handleWsConnect(url, authPayload) {
+  // Close any existing connection and keepalive
+  if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  if (proxyWs) {
+    try { proxyWs.onclose = null; proxyWs.close(); } catch (e) { /* ignore */ }
+    proxyWs = null;
+  }
+
+  console.log('[Offscreen-WS] Connecting to', url);
+  proxyWs = new WebSocket(url);
+
+  proxyWs.onopen = () => {
+    console.log('[Offscreen-WS] Connected');
+    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'open' });
+    // Send auth immediately if provided
+    if (authPayload && proxyWs.readyState === WebSocket.OPEN) {
+      proxyWs.send(JSON.stringify(authPayload));
+      console.log('[Offscreen-WS] Auth sent');
+    }
+    // Start application-level keepalive ping every 25 seconds.
+    // This serves two purposes:
+    // 1. Prevents Chrome from considering the offscreen document "inactive" and killing it
+    // 2. Keeps the WebSocket connection alive through proxies/load balancers
+    if (wsKeepAliveTimer) clearInterval(wsKeepAliveTimer);
+    wsKeepAliveTimer = setInterval(() => {
+      if (proxyWs && proxyWs.readyState === WebSocket.OPEN) {
+        proxyWs.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25000);
+  };
+
+  proxyWs.onmessage = (event) => {
+    // Relay raw message to service worker
+    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'message', data: event.data });
+  };
+
+  proxyWs.onerror = () => {
+    console.warn('[Offscreen-WS] Connection issue');
+    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'error' });
+  };
+
+  proxyWs.onclose = () => {
+    console.log('[Offscreen-WS] Disconnected');
+    if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+    proxyWs = null;
+    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'close' });
+  };
+}
+
+function handleWsSend(data) {
+  if (proxyWs && proxyWs.readyState === WebSocket.OPEN) {
+    proxyWs.send(data);
+  }
+}
+
+function handleWsClose() {
+  if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  if (proxyWs) {
+    try { proxyWs.onclose = null; proxyWs.close(); } catch (e) { /* ignore */ }
+    proxyWs = null;
+  }
+}
+
 // Listen for messages from service worker (only handle types meant for offscreen)
-const OFFSCREEN_MESSAGE_TYPES = new Set(['START_SHARE', 'SIGNAL', 'STOP_SHARE']);
+const OFFSCREEN_MESSAGE_TYPES = new Set(['START_SHARE', 'SIGNAL', 'STOP_SHARE', 'WS_CONNECT', 'WS_SEND', 'WS_CLOSE']);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Ignore messages not intended for the offscreen document
@@ -52,6 +124,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'STOP_SHARE') {
         stopScreenShare();
+        sendResponse({ success: true });
+        return;
+      }
+
+      if (message.type === 'WS_CONNECT') {
+        handleWsConnect(message.url, message.authPayload);
+        sendResponse({ success: true });
+        return;
+      }
+
+      if (message.type === 'WS_SEND') {
+        handleWsSend(message.data);
+        sendResponse({ success: true });
+        return;
+      }
+
+      if (message.type === 'WS_CLOSE') {
+        handleWsClose();
         sendResponse({ success: true });
         return;
       }
