@@ -164,6 +164,8 @@ let lastObservedSignature = null;
 let lastObservedSentAt = 0;
 let licenseActive = true;
 let offHoursNetworkPaused = false;
+let registrationRetryCount = 0;
+const MAX_REGISTRATION_RETRIES = 5;
 let isScheduleHardOff = false;
 
 // General-purpose message dedup: track recent _msgId values to prevent double-processing
@@ -833,6 +835,7 @@ async function ensureRegistered() {
         
         const data = await response.json();
         console.log('[Service Worker] Student registered successfully');
+        registrationRetryCount = 0; // Reset on success
         
         // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
         if (data.studentToken) {
@@ -853,16 +856,18 @@ async function ensureRegistered() {
         }
       } catch (error) {
         console.warn('[Service Worker] Student registration error:', error);
-        // ✅ JWT FIX: Clear BOTH registered flag AND token so we retry next time
-        // This prevents getting stuck if re-registration fails after token expiry
         await kv.set({ registered: false, studentToken: null });
         CONFIG.studentToken = null;
-        // Don't throw - extension can still try to send heartbeats
-        // Schedule retry with backoff to prevent infinite loops
-        setTimeout(() => {
-          console.log('[Service Worker] Retrying registration after error...');
-          ensureRegistered().catch(() => {});
-        }, 5000); // 5 second delay before retry
+        // Retry with exponential backoff, max 5 retries to prevent server flooding
+        registrationRetryCount++;
+        if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
+          const backoff = Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000); // 5s, 10s, 20s, 40s, 80s max 5min
+          console.log(`[Service Worker] Retrying registration (${registrationRetryCount}/${MAX_REGISTRATION_RETRIES}) in ${backoff/1000}s`);
+          setTimeout(() => ensureRegistered().catch(() => {}), backoff);
+        } else {
+          console.warn(`[Service Worker] Registration failed after ${MAX_REGISTRATION_RETRIES} retries — will retry on next heartbeat`);
+          registrationRetryCount = 0; // Reset for next heartbeat cycle
+        }
       }
     } else if (stored.studentEmail) {
       console.log('[Service Worker] Already registered');
@@ -1562,8 +1567,12 @@ async function sendHeartbeat(reason = 'manual') {
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });
       CONFIG.studentToken = null;
-      // Trigger re-registration (with backoff to prevent infinite loops)
-      setTimeout(() => ensureRegistered().catch(() => {}), 2000); // 2 second delay before re-registering
+      // Trigger re-registration with backoff (shares retry counter with registration)
+      registrationRetryCount++;
+      if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
+        const backoff = Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000);
+        setTimeout(() => ensureRegistered().catch(() => {}), backoff);
+      }
       return; // Skip rest of error handling
     } else if (response.status >= 500) {
       // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
