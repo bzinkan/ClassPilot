@@ -768,25 +768,48 @@ async function ensureRegistered() {
     let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);
     
     // Get student email from Chrome profile (managed devices)
+    // Retry up to 3 times with delay — Chrome may not have profile ready immediately on startup
     if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
-      try {
-        const profile = await new Promise(resolve => 
-          chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
-        );
-        if (profile?.email) {
-          stored.studentEmail = normalizeEmail(profile.email);
-          console.log('[Service Worker] Auto-detected email');
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const profile = await new Promise(resolve =>
+            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+          );
+          if (profile?.email) {
+            stored.studentEmail = normalizeEmail(profile.email);
+            console.log(`[Service Worker] Auto-detected email (attempt ${attempt + 1})`);
+            break;
+          }
+        } catch (err) {
+          console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
         }
-      } catch (err) {
-        console.log('[Service Worker] Could not get profile info:', err);
+        if (!stored.studentEmail && attempt < 2) {
+          await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
+        }
+      }
+      // Fallback: try getAuthToken to detect signed-in user
+      if (!stored.studentEmail && chrome.identity?.getAuthToken) {
+        try {
+          const token = await new Promise((resolve, reject) =>
+            chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
+          );
+          if (token) {
+            const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            const info = await resp.json();
+            if (info?.email) {
+              stored.studentEmail = normalizeEmail(info.email);
+              console.log('[Service Worker] Detected email via getAuthToken fallback');
+            }
+          }
+        } catch { /* fallback failed, continue without email */ }
       }
     }
-    
-    // If we still have no email, this is probably a dev machine
-    // For production, bail out. For dev, use a test email.
+
+    // If we still have no email after retries
     if (!stored.studentEmail) {
-      console.warn('[Service Worker] No studentEmail detected – running in dev mode');
-      // Uncomment for dev testing: stored.studentEmail = 'dev-student@example.com';
+      console.warn('[Service Worker] No studentEmail detected after retries — will retry on next alarm');
     }
     
     // Always create a deviceId internally (never exposed to teachers)
