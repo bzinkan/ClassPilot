@@ -151,6 +151,13 @@ let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
 let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
+
+// Screenshot health tracking (sent with heartbeat for dashboard diagnostics)
+let lastScreenshotSuccessAt = 0;
+let lastScreenshotErrorAt = 0;
+let lastScreenshotError = '';
+let screenshotAttemptCount = 0;
+let screenshotSuccessCount = 0;
 let wsReconnectBackoffMs = 10000; // Start with 10s to reduce console noise during deploys
 let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
@@ -1555,6 +1562,15 @@ async function sendHeartbeat(reason = 'manual') {
       isSharing: false,
       cameraActive: cameraActive,
       status: trackingState.toLowerCase(),
+      // Screenshot health diagnostics (helps dashboard show why screenshots may be missing)
+      screenshotHealth: {
+        lastSuccessAt: lastScreenshotSuccessAt,
+        lastErrorAt: lastScreenshotErrorAt,
+        lastError: lastScreenshotError,
+        attempts: screenshotAttemptCount,
+        successes: screenshotSuccessCount,
+        alarmActive: screenshotScheduled,
+      },
     };
     
     const headers = buildDeviceAuthHeaders();
@@ -1603,9 +1619,13 @@ async function sendHeartbeat(reason = 'manual') {
     } else if (response.ok) {
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
-      // Capture screenshot immediately after first successful heartbeat
-      // This avoids waiting for the chrome.alarms delay on cold start
-      if (screenshotScheduled) {
+      // Ensure screenshot alarm is running after every successful heartbeat
+      // This recovers from cases where the alarm was lost (SW restart, Chrome killed it)
+      if (!screenshotScheduled && (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE)) {
+        console.log('[Screenshot] Recovering lost screenshot alarm after heartbeat');
+        scheduleScreenshotCapture(true);
+      } else if (screenshotScheduled) {
+        // Capture immediately on first heartbeat (avoids chrome.alarms delay on cold start)
         captureAndSendScreenshot();
       }
       // Check for pending messages missed during WebSocket disconnection
@@ -1728,10 +1748,16 @@ function scheduleScreenshotCapture(enable) {
 }
 
 async function captureAndSendScreenshot() {
+  screenshotAttemptCount++;
+
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
+    lastScreenshotError = 'tracking_off';
+    lastScreenshotErrorAt = Date.now();
     return;
   }
   if (!CONFIG.studentEmail || !CONFIG.deviceId) {
+    lastScreenshotError = 'no_config';
+    lastScreenshotErrorAt = Date.now();
     return;
   }
 
@@ -1739,13 +1765,17 @@ async function captureAndSendScreenshot() {
     // Get the last focused window
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !tab.windowId) {
+      lastScreenshotError = 'no_active_tab';
+      lastScreenshotErrorAt = Date.now();
       console.log('[Screenshot] No active tab in focused window');
       return;
     }
 
     // Skip chrome:// and other non-HTTP pages
     if (!tab.url || !tab.url.startsWith('http')) {
-      console.log('[Screenshot] Skipping non-HTTP page');
+      lastScreenshotError = 'non_http_page';
+      lastScreenshotErrorAt = Date.now();
+      console.log('[Screenshot] Skipping non-HTTP page:', tab.url?.slice(0, 30));
       return;
     }
 
@@ -1756,6 +1786,8 @@ async function captureAndSendScreenshot() {
     });
 
     if (!dataUrl) {
+      lastScreenshotError = 'capture_empty';
+      lastScreenshotErrorAt = Date.now();
       console.log('[Screenshot] Capture returned empty');
       return;
     }
@@ -1776,13 +1808,19 @@ async function captureAndSendScreenshot() {
     });
 
     if (!response.ok) {
+      lastScreenshotError = `upload_${response.status}`;
+      lastScreenshotErrorAt = Date.now();
       console.warn('[Screenshot] Upload failed:', response.status);
     } else {
+      lastScreenshotSuccessAt = Date.now();
+      lastScreenshotError = '';
+      screenshotSuccessCount++;
       console.log('[Screenshot] Uploaded successfully');
     }
   } catch (error) {
-    // Common errors: tab might be closed, permission denied for some pages
-    console.log('[Screenshot] Capture error:', error.message);
+    lastScreenshotError = `exception: ${error.message}`;
+    lastScreenshotErrorAt = Date.now();
+    console.warn('[Screenshot] Capture error:', error.message);
   }
 }
 
@@ -2890,7 +2928,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Schedule WebSocket reconnection with exponential backoff
 function scheduleWsReconnect() {
-  if (trackingState !== TRACKING_STATES.ACTIVE) {
+  if (trackingState === TRACKING_STATES.OFF) {
     return;
   }
   const delay = Math.min(wsReconnectBackoffMs, 120000);
@@ -2908,8 +2946,8 @@ function scheduleWsReconnect() {
 // MV3 service workers can't maintain persistent WebSocket connections (Chrome 145+),
 // so the actual WebSocket lives in the offscreen document and relays messages here.
 async function connectWebSocket() {
-  if (trackingState !== TRACKING_STATES.ACTIVE) {
-    console.log('Skipping WebSocket - tracking state is not ACTIVE');
+  if (trackingState === TRACKING_STATES.OFF) {
+    console.log('Skipping WebSocket - tracking state is OFF');
     return;
   }
   // EMAIL-FIRST: Require both email and deviceId for WebSocket
