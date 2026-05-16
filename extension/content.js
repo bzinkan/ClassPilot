@@ -23,6 +23,11 @@ const seenChatMsgIds = new Set(); // dedup chat-reply messages
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'PERSONAL_ACCOUNT_LOCKDOWN') {
+    showPersonalAccountLockdownOverlay(message.domain, message.message);
+    return;
+  }
+
   if (message.type === 'show-message') {
     // Broadcast messages (not replies) still show as modal
     if (!message.data.isTeacherReply) {
@@ -179,6 +184,47 @@ function updateCameraStatus(isActive) {
       console.log('[ClassPilot] Could not notify service worker:', err);
     });
   }
+}
+
+// Full-screen lockdown overlay shown when a student signs into a managed school
+// Chromebook with a personal Google account. Defense-in-depth backstop for the
+// primary mitigation, which is Google Workspace "Restrict sign-in to a list of
+// users" policy on the device.
+function showPersonalAccountLockdownOverlay(domain, message) {
+  if (document.getElementById('classpilot-personal-lockdown')) return;
+  const overlay = document.createElement('div');
+  overlay.id = 'classpilot-personal-lockdown';
+  overlay.style.cssText = `
+    position: fixed; inset: 0; z-index: 2147483647;
+    background: rgba(15, 23, 42, 0.97);
+    color: white; display: flex; align-items: center; justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    padding: 24px;
+  `;
+  overlay.innerHTML = `
+    <div style="max-width: 560px; text-align: center;">
+      <div style="font-size: 56px; margin-bottom: 16px;">🔒</div>
+      <h1 style="font-size: 28px; font-weight: 700; margin: 0 0 16px 0;">
+        School Device Sign-In Required
+      </h1>
+      <p style="font-size: 17px; line-height: 1.6; color: #cbd5e1; margin: 0 0 24px 0;">
+        ${(message || '').replace(/&/g, '&amp;').replace(/</g, '&lt;')}
+      </p>
+      <div style="background: rgba(251, 191, 36, 0.12); border: 1px solid rgba(251, 191, 36, 0.4); border-radius: 8px; padding: 16px; margin-bottom: 24px; text-align: left;">
+        <p style="margin: 0 0 8px 0; font-weight: 600; color: #fbbf24;">How to fix this:</p>
+        <ol style="margin: 0; padding-left: 20px; line-height: 1.7; color: #cbd5e1;">
+          <li>Click your profile picture in the bottom-right of the screen</li>
+          <li>Sign out of the personal account (${(domain || '').replace(/</g, '&lt;')})</li>
+          <li>Sign back in using your school Google account</li>
+        </ol>
+      </div>
+      <p style="font-size: 13px; color: #94a3b8; margin: 0;">
+        School administrators have been notified.<br>
+        Contact your teacher if you believe this is an error.
+      </p>
+    </div>
+  `;
+  document.documentElement.appendChild(overlay);
 }
 
 function showLicenseBanner(planStatus) {
