@@ -99,6 +99,116 @@ async function updateLicenseBanner() {
   }
 }
 
+async function loadStudents(deviceId) {
+  try {
+    const serverUrl = currentConfig.serverUrl;
+    const response = await fetch(`${serverUrl}/api/device/${deviceId}/students`);
+    
+    if (!response.ok) {
+      throw new Error('Failed to load students');
+    }
+    
+    const data = await response.json();
+    const { students, activeStudentId } = data;
+    
+    const selectElement = document.getElementById('student-select');
+    const currentStudentDisplay = document.getElementById('current-student-display');
+    const currentStudentName = document.getElementById('current-student-name');
+    const noStudentsMessage = document.getElementById('no-students-message');
+    
+    if (!students || students.length === 0) {
+      selectElement.innerHTML = '<option value="">No students assigned</option>';
+      selectElement.disabled = true;
+      noStudentsMessage.classList.remove('hidden');
+      currentStudentDisplay.classList.add('hidden');
+      return;
+    }
+    
+    // Populate dropdown
+    selectElement.innerHTML = '<option value="">Select your name...</option>';
+    students.forEach(student => {
+      const option = document.createElement('option');
+      option.value = student.id;
+      option.textContent = student.studentName;
+      selectElement.appendChild(option);
+    });
+    
+    selectElement.disabled = false;
+    noStudentsMessage.classList.add('hidden');
+    
+    // If there's an active student, show it
+    if (activeStudentId) {
+      const activeStudent = students.find(s => s.id === activeStudentId);
+      if (activeStudent) {
+        selectElement.value = activeStudentId;
+        currentStudentName.textContent = activeStudent.studentName;
+        currentStudentDisplay.classList.remove('hidden');
+      }
+    }
+    
+  } catch (error) {
+    console.error('Error loading students:', error);
+    const selectElement = document.getElementById('student-select');
+    selectElement.innerHTML = '<option value="">Error loading students</option>';
+    selectElement.disabled = true;
+  }
+}
+
+async function setActiveStudent(studentId) {
+  if (!currentConfig || !currentConfig.deviceId) {
+    console.error('No device ID available');
+    return;
+  }
+  
+  try {
+    const serverUrl = currentConfig.serverUrl;
+    const response = await fetch(`${serverUrl}/api/device/${currentConfig.deviceId}/active-student`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ studentId }),
+    });
+    
+    if (!response.ok) {
+      throw new Error('Failed to set active student');
+    }
+    
+    // Save to chrome.storage.local
+    await chrome.storage.local.set({ activeStudentId: studentId });
+    
+    // Notify background to send immediate heartbeat with new studentId
+    chrome.runtime.sendMessage({ 
+      type: 'student-changed',
+      studentId 
+    });
+    
+    console.log('Active student set:', studentId);
+    
+  } catch (error) {
+    console.error('Error setting active student:', error);
+    alert('Failed to set active student. Please try again.');
+  }
+}
+
+async function handleStudentSelection(event) {
+  const studentId = event.target.value;
+  
+  if (!studentId) {
+    document.getElementById('current-student-display').classList.add('hidden');
+    return;
+  }
+  
+  // Get student name from selected option
+  const selectedOption = event.target.options[event.target.selectedIndex];
+  const studentName = selectedOption.textContent;
+  
+  // Update UI immediately
+  document.getElementById('current-student-name').textContent = studentName;
+  document.getElementById('current-student-display').classList.remove('hidden');
+  
+  // Call API to set active student
+  await setActiveStudent(studentId);
+}
+
 async function loadMessages() {
   const stored = await chrome.storage.local.get(['messages']);
   const messages = stored.messages || [];
@@ -323,18 +433,19 @@ function showPrivacyInfo() {
 - Keystrokes or what you type
 - Microphone or camera access
 - Private messages or passwords
+- Screen captures (unless you opt-in to screen sharing)
 - Anything from incognito/private windows
 
 Automatic Monitoring:
 - Tab titles and URLs are automatically collected and sent to your teacher
 - This happens every 10 seconds while you browse
-- Screenshot thumbnails of your active tab are captured periodically
 - This is required by your school policy for classroom management
 
-Live Screen Sharing:
-- Your teacher may request to view your screen in real time
-- A notification shows when live sharing is active
-- This is separate from periodic screenshot thumbnails
+Screen Sharing (Optional):
+- You can optionally share your screen with your teacher
+- Click "Share My Screen" to begin
+- A red indicator shows when sharing is active
+- You can stop sharing at any time
 
 Data Retention:
 - Your activity data is automatically deleted after 24 hours

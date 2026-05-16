@@ -761,69 +761,6 @@ function normalizeEmail(raw) {
   }
 }
 
-// Personal email-domain detection.
-// Known consumer email providers — students signing in with these on a managed
-// school Chromebook are bypassing monitoring. Backstop for missing Chrome OS
-// "Restrict sign-in to a list of users" policy.
-const PERSONAL_EMAIL_DOMAINS = new Set([
-  'gmail.com', 'googlemail.com',
-  'yahoo.com', 'yahoo.co.uk', 'ymail.com', 'rocketmail.com',
-  'outlook.com', 'hotmail.com', 'live.com', 'msn.com',
-  'icloud.com', 'me.com', 'mac.com',
-  'aol.com',
-  'proton.me', 'protonmail.com', 'pm.me',
-  'duck.com', 'duckduckgo.com',
-  'tutanota.com', 'tutanota.de',
-  'fastmail.com', 'fastmail.fm',
-  'zoho.com',
-  'gmx.com', 'gmx.us',
-  'mail.com',
-]);
-
-function isPersonalEmailDomain(domain) {
-  return PERSONAL_EMAIL_DOMAINS.has(domain);
-}
-
-// Tier 3: Read managed Chromebook directory device ID via chrome.enterprise.deviceAttributes.
-// Only available to extensions force-installed via Google Workspace policy on
-// managed devices. Returns null on unmanaged devices or development.
-async function getDirectoryDeviceId() {
-  try {
-    if (chrome?.enterprise?.deviceAttributes?.getDirectoryDeviceId) {
-      return await new Promise((resolve) => {
-        chrome.enterprise.deviceAttributes.getDirectoryDeviceId((id) => {
-          resolve(id || null);
-        });
-      });
-    }
-  } catch (err) {
-    console.log('[Tier3] deviceAttributes unavailable:', err?.message || err);
-  }
-  return null;
-}
-
-// Show a full-screen lockdown overlay to the student. Best-effort — students
-// can technically close tabs, but the overlay reappears on every new tab.
-async function showPersonalAccountLockdown(domain) {
-  try {
-    const tabs = await chrome.tabs.query({});
-    const messageContent = {
-      type: 'PERSONAL_ACCOUNT_LOCKDOWN',
-      domain,
-      message: `This Chromebook is school property and requires sign-in with your school Google account. Please sign out of your personal account (${domain}) and sign back in with your school email. School administrators have been notified.`,
-    };
-    for (const tab of tabs) {
-      if (tab.id && tab.url && tab.url.startsWith('http')) {
-        try {
-          await chrome.tabs.sendMessage(tab.id, messageContent);
-        } catch { /* tab may not have content script yet — ignore */ }
-      }
-    }
-  } catch (err) {
-    console.warn('[Personal-email defense] Failed to show lockdown overlay:', err);
-  }
-}
-
 // Auto-registration: ensures extension always has IDs before sharing
 // EMAIL-FIRST IDENTITY: Email is required, deviceId is internal tracking only
 async function ensureRegistered() {
@@ -881,49 +818,10 @@ async function ensureRegistered() {
     if (!stored.studentEmail) {
       console.warn('[Service Worker] No studentEmail detected after retries — will retry on next alarm');
     }
-
+    
     // Always create a deviceId internally (never exposed to teachers)
     if (!stored.deviceId) {
       stored.deviceId = 'device-' + crypto.randomUUID().slice(0, 11);
-    }
-
-    // Personal-email detection (Tier 2 defense-in-depth).
-    // If the signed-in Google account is on a known consumer domain, AND this
-    // device was previously enrolled with a school account, send an alert to the
-    // school and surface a lockdown overlay. Primary mitigation is still
-    // Chrome OS "Restrict sign-in to a list of users" policy.
-    if (stored.studentEmail) {
-      const domain = stored.studentEmail.split('@')[1]?.toLowerCase();
-      if (domain && isPersonalEmailDomain(domain)) {
-        // Try Tier 3: get the managed device's directory ID. Only works on
-        // policy-installed extensions on managed Chromebooks.
-        const directoryDeviceId = await getDirectoryDeviceId();
-        try {
-          await fetch(`${CONFIG.serverUrl}/api/classpilot/non-school-account-alert`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              deviceId: stored.deviceId,
-              directoryDeviceId,
-              accountDomain: domain,
-            }),
-          });
-        } catch (err) {
-          console.warn('[Personal-email defense] Alert post failed:', err);
-        }
-        // Show lockdown overlay (content script). Persist a flag so the popup
-        // and any opened tab knows we're in lockdown state.
-        await kv.set({ personalAccountLockdown: true, personalAccountDomain: domain });
-        await showPersonalAccountLockdown(domain);
-        // Do not proceed with registration — extension stays in lockdown mode.
-        return stored;
-      } else {
-        // Clear the flag if we were previously in lockdown but the user signed
-        // back into the school account.
-        if (stored.personalAccountLockdown) {
-          await kv.set({ personalAccountLockdown: false, personalAccountDomain: null });
-        }
-      }
     }
     
     // Save to storage
@@ -985,28 +883,6 @@ async function ensureRegistered() {
         if (data.student?.id) {
           CONFIG.activeStudentId = data.student.id;
           await kv.set({ activeStudentId: data.student.id });
-        }
-
-        // Tier 3: opportunistically bind this managed device to the school.
-        // Only succeeds on policy-installed extensions on managed Chromebooks.
-        try {
-          const directoryDeviceId = await getDirectoryDeviceId();
-          if (directoryDeviceId && data.studentToken) {
-            await fetch(`${CONFIG.serverUrl}/api/classpilot/device-enrollment-register`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${data.studentToken}`,
-              },
-              body: JSON.stringify({
-                directoryDeviceId,
-                accountDomain: stored.studentEmail?.split('@')[1] || null,
-              }),
-            });
-            console.log('[Tier3] Device enrollment registered with directory ID');
-          }
-        } catch (err) {
-          console.log('[Tier3] Device enrollment skipped:', err?.message || err);
         }
       } catch (error) {
         console.warn('[Service Worker] Student registration error:', error);
