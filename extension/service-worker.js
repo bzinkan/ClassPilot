@@ -3838,7 +3838,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
-    if (changeInfo.status === 'loading' || changeInfo.status === 'complete' || changeInfo.url) {
+    if (changeInfo.status === 'complete') {
       enforceAuthGateForTab(tab).catch(() => {});
     }
     // Allow both ACTIVE and IDLE states
@@ -3955,7 +3955,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'student-sign-out') {
-    clearStudentAuth('explicit-sign-out', { notifyBackend: true, pauseAutoRegistration: true })
+    clearStudentAuth('explicit-sign-out', { notifyBackend: true, pauseAutoRegistration: isManualIdentitySource() })
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;

@@ -27,19 +27,19 @@ let authGateBlockerInstalled = false;
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender?.id && sender.id !== chrome.runtime.id) {
     sendResponse?.({ success: false, error: 'Invalid sender' });
-    return true;
+    return false;
   }
 
   if (message.type === 'CLASSPILOT_AUTH_REQUIRED') {
     showAuthGate(message.state || {});
     sendResponse?.({ success: true });
-    return true;
+    return false;
   }
 
   if (message.type === 'CLASSPILOT_AUTH_COMPLETE') {
     removeAuthGate();
     sendResponse?.({ success: true });
-    return true;
+    return false;
   }
 
   if (message.type === 'show-message') {
