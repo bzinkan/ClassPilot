@@ -117,6 +117,7 @@ let CONFIG = {
   stationGroupId: null,
   identitySource: null,
   manualLoginLastSeenAt: null,
+  autoRegistrationPaused: false,
 };
 
 let ws = null; // Legacy reference, kept for compatibility checks
@@ -902,6 +903,7 @@ async function enforceAuthGateForTab(tabOrId) {
 
 async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   const tokenToEnd = CONFIG.studentToken;
+  const pauseAutoRegistration = options.pauseAutoRegistration === true;
 
   if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
     try {
@@ -924,6 +926,7 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   CONFIG.activeStudentId = null;
   CONFIG.identitySource = null;
   CONFIG.manualLoginLastSeenAt = null;
+  CONFIG.autoRegistrationPaused = pauseAutoRegistration;
 
   await kv.set({
     studentToken: null,
@@ -934,6 +937,7 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
     lastRegisteredEmail: null,
     identitySource: null,
     manualLoginLastSeenAt: null,
+    autoRegistrationPaused: pauseAutoRegistration,
   });
 
   scheduleHeartbeat(null);
@@ -1035,6 +1039,7 @@ async function manualStudentLogin(payload) {
   CONFIG.classId = 'auto';
   CONFIG.identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
   CONFIG.manualLoginLastSeenAt = now;
+  CONFIG.autoRegistrationPaused = false;
 
   await kv.set({
     deviceId,
@@ -1047,6 +1052,7 @@ async function manualStudentLogin(payload) {
     lastRegisteredEmail: studentEmail,
     identitySource: CONFIG.identitySource,
     manualLoginLastSeenAt: now,
+    autoRegistrationPaused: false,
   });
 
   await checkLicenseStatus('manual-login');
@@ -1104,6 +1110,7 @@ async function ensureRegistered() {
       'activeStudentId',
       'identitySource',
       'manualLoginLastSeenAt',
+      'autoRegistrationPaused',
     ]);
     
     // Get student email from Chrome profile (managed devices)
@@ -1167,6 +1174,7 @@ async function ensureRegistered() {
     CONFIG.activeStudentId = stored.activeStudentId || CONFIG.activeStudentId;
     CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
+    CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
 
     if (await expireManualAuthIfStale('ensure-registered-storage')) {
       return await kv.get(['deviceId']);
@@ -1177,6 +1185,12 @@ async function ensureRegistered() {
     if (stored.studentToken) {
       CONFIG.studentToken = stored.studentToken;
       console.log('✅ [JWT] Loaded existing studentToken in ensureRegistered()');
+    }
+
+    if (CONFIG.autoRegistrationPaused && !CONFIG.studentToken) {
+      console.log('[Auth] Auto-registration paused until the student signs in again');
+      await notifyAuthGateStateToTabs();
+      return stored;
     }
     
     // Register with server if we have email and haven't registered yet (or email changed)
@@ -1212,10 +1226,11 @@ async function ensureRegistered() {
         // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
         if (data.studentToken) {
           console.log('✅ [JWT] Received studentToken from server - storing for future heartbeats');
-          await kv.set({ studentToken: data.studentToken, identitySource: 'chrome_profile', manualLoginLastSeenAt: null });
+          await kv.set({ studentToken: data.studentToken, identitySource: 'chrome_profile', manualLoginLastSeenAt: null, autoRegistrationPaused: false });
           CONFIG.studentToken = data.studentToken; // Cache in memory too
           CONFIG.identitySource = 'chrome_profile';
           CONFIG.manualLoginLastSeenAt = null;
+          CONFIG.autoRegistrationPaused = false;
         } else {
           console.warn('⚠️  No studentToken in registration response - legacy mode');
         }
@@ -1300,6 +1315,7 @@ if (chrome.runtime.onStartup) {
     'studentToken',
     'identitySource',
     'manualLoginLastSeenAt',
+    'autoRegistrationPaused',
     'flightPathState',
     'lockScreenState',
     'licenseActive',
@@ -1337,6 +1353,7 @@ if (chrome.runtime.onStartup) {
   if (stored.manualLoginLastSeenAt) {
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
   }
+  CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
 
   // Restore Flight Path state if it was active
   if (stored.flightPathState) {
@@ -1632,6 +1649,13 @@ async function getLoggedInUserInfo() {
 
 // Auto-detect and register student based on Chromebook login
 async function autoDetectAndRegister() {
+  const authPause = await chrome.storage.local.get(['autoRegistrationPaused']);
+  if (authPause.autoRegistrationPaused) {
+    console.log('[Auth] Auto-detect registration paused until manual sign-in');
+    await notifyAuthGateStateToTabs();
+    return;
+  }
+
   const userInfo = await getLoggedInUserInfo();
   
   if (userInfo.email) {
@@ -1677,6 +1701,7 @@ chrome.storage.local.get([
   'studentToken',
   'identitySource',
   'manualLoginLastSeenAt',
+  'autoRegistrationPaused',
 ], async (result) => {
   try {
     const resolvedServerUrl = await resolveServerUrl();
@@ -1709,6 +1734,7 @@ chrome.storage.local.get([
     if (result.manualLoginLastSeenAt) {
       CONFIG.manualLoginLastSeenAt = result.manualLoginLastSeenAt;
     }
+    CONFIG.autoRegistrationPaused = result.autoRegistrationPaused === true;
 
     // ✅ JWT AUTHENTICATION: Load studentToken from storage
     if (result.studentToken) {
@@ -1721,8 +1747,10 @@ chrome.storage.local.get([
     }
 
     // Auto-detect logged-in user and register
-    if (!isManualIdentitySource(CONFIG.identitySource)) {
+    if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
       await autoDetectAndRegister();
+    } else if (CONFIG.autoRegistrationPaused) {
+      await notifyAuthGateStateToTabs();
     }
 
     // Initialize adaptive tracking once config is loaded
@@ -1989,6 +2017,15 @@ async function sendHeartbeat(reason = 'manual') {
     if (response.status === 402) {
       const data = await response.json().catch(() => ({}));
       await disableForInactiveLicense(data.planStatus);
+      return;
+    } else if (response.status === 409) {
+      const data = await response.json().catch(() => ({}));
+      if (data?.error === 'student_session_replaced') {
+        console.warn('[Auth] Student session was replaced on another Chromebook');
+        await clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true });
+        return;
+      }
+      console.warn('Heartbeat conflict:', data?.error || response.status);
       return;
     } else if (response.status === 401 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
@@ -3542,6 +3579,11 @@ function handleWsMessage(rawData) {
         console.log('[WebRTC] Teacher requested to stop screen share');
         handleStopScreenShare();
       }
+
+      if (message.type === 'student-session-replaced') {
+        console.warn('[Auth] This student signed in on another Chromebook');
+        clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true }).catch(() => {});
+      }
       
       // Handle WebRTC offer from teacher
       if (message.type === 'offer') {
@@ -3801,7 +3843,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'student-sign-out') {
-    clearStudentAuth('explicit-sign-out', { notifyBackend: true })
+    clearStudentAuth('explicit-sign-out', { notifyBackend: true, pauseAutoRegistration: true })
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
