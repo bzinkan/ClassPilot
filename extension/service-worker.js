@@ -964,15 +964,24 @@ async function expireManualAuthIfStale(reason = 'stale-check') {
   return true;
 }
 
-async function fetchLoginRosterForGate() {
+async function fetchLoginRosterForGate(options = {}) {
   if (!(CONFIG.schoolId || CONFIG.schoolSlug) || !CONFIG.enrollmentKey) {
     return { success: false, setupRequired: true, error: 'Station setup required' };
+  }
+  const requestedGradeLevel = String(options.gradeLevel || '').trim();
+  const effectiveGradeLevel = CONFIG.stationGradeLevel || requestedGradeLevel;
+  if (!(effectiveGradeLevel || CONFIG.stationGroupId)) {
+    return {
+      success: false,
+      setupRequired: false,
+      error: 'Select a grade to load the roster',
+    };
   }
 
   const params = new URLSearchParams({
     enrollmentKey: CONFIG.enrollmentKey,
   });
-  if (CONFIG.stationGradeLevel) params.set('gradeLevel', CONFIG.stationGradeLevel);
+  if (effectiveGradeLevel) params.set('gradeLevel', effectiveGradeLevel);
   if (CONFIG.stationGroupId) params.set('groupId', CONFIG.stationGroupId);
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
@@ -3829,7 +3838,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-login-roster') {
-    fetchLoginRosterForGate()
+    fetchLoginRosterForGate({ gradeLevel: message.gradeLevel })
       .then((data) => sendResponse(data))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not load roster' }));
     return true;

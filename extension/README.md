@@ -59,9 +59,15 @@ Create a policy JSON file with the server URL:
 ```json
 {
   "serverUrl": "https://your-replit-app-url.replit.dev",
-  "schoolId": "your-school-id"
+  "schoolId": "your-school-id",
+  "enrollmentKey": "your-classpilot-enrollment-key"
 }
 ```
+
+`schoolId` may be replaced with `schoolSlug`. When Name + PIN login is enabled,
+the extension asks the student to choose a grade before loading the roster. IT
+may optionally add `stationGradeLevel` or `stationGroupId` to lock a Chromebook
+station to one grade or one ClassPilot class/group.
 
 In Google Admin Console:
 1. Find the uploaded extension

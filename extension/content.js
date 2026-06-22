@@ -216,7 +216,7 @@ function buildAuthGateMarkup(state) {
     ? 'Ask your teacher to set up this Chromebook'
     : 'Sign in to ClassPilot';
   const subtitle = state.setupRequired
-    ? 'This station needs its school and grade settings before browsing can start.'
+    ? 'This station needs its school and grade or class settings before browsing can start.'
     : 'School browsing requires ClassPilot sign-in on this shared Chromebook.';
 
   return `
@@ -407,15 +407,17 @@ function buildEmailLoginMarkup() {
 }
 
 function buildPinLoginMarkup(state) {
+  const needsGradeChoice = !state.stationGradeLevel && !state.stationGroupId;
   return `
     <form class="classpilot-auth-form" id="classpilot-auth-pin-form" style="display:none !important;">
       <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status">
-        Loading roster...
+        ${needsGradeChoice ? 'Select your grade to load your roster.' : 'Loading roster...'}
       </div>
+      ${needsGradeChoice ? buildGradeChoiceMarkup() : ''}
       <div class="classpilot-auth-field">
         <label for="classpilot-auth-student">Student</label>
         <select id="classpilot-auth-student" disabled required>
-          <option value="">Loading students...</option>
+          <option value="">${needsGradeChoice ? 'Select a grade first...' : 'Loading students...'}</option>
         </select>
       </div>
       <div class="classpilot-auth-field">
@@ -424,6 +426,33 @@ function buildPinLoginMarkup(state) {
       </div>
       <button class="classpilot-auth-button" id="classpilot-auth-pin-submit" type="submit" disabled>Sign In</button>
     </form>
+  `;
+}
+
+function buildGradeChoiceMarkup() {
+  const grades = [
+    ['K', 'Kindergarten'],
+    ['1', 'Grade 1'],
+    ['2', 'Grade 2'],
+    ['3', 'Grade 3'],
+    ['4', 'Grade 4'],
+    ['5', 'Grade 5'],
+    ['6', 'Grade 6'],
+    ['7', 'Grade 7'],
+    ['8', 'Grade 8'],
+    ['9', 'Grade 9'],
+    ['10', 'Grade 10'],
+    ['11', 'Grade 11'],
+    ['12', 'Grade 12'],
+  ];
+  return `
+    <div class="classpilot-auth-field">
+      <label for="classpilot-auth-grade">Grade</label>
+      <select id="classpilot-auth-grade" required>
+        <option value="">Select your grade...</option>
+        ${grades.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
+      </select>
+    </div>
   `;
 }
 
@@ -452,7 +481,12 @@ function attachAuthGateHandlers(state) {
   }
 
   if (pinForm) {
-    loadAuthGateRoster();
+    const gradeSelect = document.getElementById('classpilot-auth-grade');
+    if (gradeSelect) {
+      gradeSelect.addEventListener('change', () => loadAuthGateRoster());
+    } else {
+      loadAuthGateRoster();
+    }
     const pinInput = document.getElementById('classpilot-auth-pin');
     pinInput?.addEventListener('input', () => {
       pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 3);
@@ -482,13 +516,28 @@ function showAuthGatePane(mode) {
 }
 
 function loadAuthGateRoster() {
-  chrome.runtime.sendMessage({ type: 'get-login-roster' }, (response) => {
-    const select = document.getElementById('classpilot-auth-student');
-    const status = document.getElementById('classpilot-auth-roster-status');
-    const submit = document.getElementById('classpilot-auth-pin-submit');
-    const tabs = document.getElementById('classpilot-auth-tabs');
-    if (!select || !status || !submit) return;
+  const select = document.getElementById('classpilot-auth-student');
+  const status = document.getElementById('classpilot-auth-roster-status');
+  const submit = document.getElementById('classpilot-auth-pin-submit');
+  const tabs = document.getElementById('classpilot-auth-tabs');
+  const gradeSelect = document.getElementById('classpilot-auth-grade');
+  const selectedGrade = gradeSelect?.value || '';
+  if (!select || !status || !submit) return;
 
+  if (gradeSelect && !selectedGrade) {
+    status.textContent = 'Select your grade to load your roster.';
+    select.innerHTML = '<option value="">Select a grade first...</option>';
+    select.disabled = true;
+    submit.disabled = true;
+    return;
+  }
+
+  status.textContent = 'Loading roster...';
+  select.innerHTML = '<option value="">Loading students...</option>';
+  select.disabled = true;
+  submit.disabled = true;
+
+  chrome.runtime.sendMessage({ type: 'get-login-roster', gradeLevel: selectedGrade }, (response) => {
     if (chrome.runtime.lastError || !response?.success) {
       status.textContent = response?.error || 'Could not load the classroom roster.';
       select.innerHTML = '<option value="">Roster unavailable</option>';
