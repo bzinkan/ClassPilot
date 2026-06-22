@@ -1019,6 +1019,8 @@ async function manualStudentLogin(payload) {
   } else {
     body.studentEmail = normalizeEmail(payload.studentEmail);
     body.studentIdNumber = String(payload.studentIdNumber || '').trim();
+    body.schoolId = CONFIG.schoolId || undefined;
+    body.schoolSlug = CONFIG.schoolSlug || undefined;
     if (CONFIG.enrollmentKey) body.enrollmentKey = CONFIG.enrollmentKey;
   }
 
@@ -1095,6 +1097,47 @@ function normalizeEmail(raw) {
   }
 }
 
+async function detectChromeProfileEmail() {
+  if (chrome.identity?.getProfileUserInfo) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const profile = await new Promise(resolve =>
+          chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+        );
+        if (profile?.email) {
+          return normalizeEmail(profile.email);
+        }
+      } catch (err) {
+        console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
+      }
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  if (chrome.identity?.getAuthToken) {
+    try {
+      const token = await new Promise((resolve, reject) =>
+        chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
+      );
+      if (token) {
+        const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const info = await resp.json();
+        if (info?.email) {
+          return normalizeEmail(info.email);
+        }
+      }
+    } catch {
+      // Fallback failed; continue without email.
+    }
+  }
+
+  return null;
+}
+
 // Auto-registration: ensures extension always has IDs before sharing
 // EMAIL-FIRST IDENTITY: Email is required, deviceId is internal tracking only
 async function ensureRegistered() {
@@ -1121,44 +1164,40 @@ async function ensureRegistered() {
       'manualLoginLastSeenAt',
       'autoRegistrationPaused',
     ]);
+
+    if (stored.studentToken) {
+      CONFIG.studentToken = stored.studentToken;
+    }
+    if (stored.deviceId) {
+      CONFIG.deviceId = stored.deviceId;
+    }
     
-    // Get student email from Chrome profile (managed devices)
-    // Retry up to 3 times with delay — Chrome may not have profile ready immediately on startup
-    if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const profile = await new Promise(resolve =>
-            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
-          );
-          if (profile?.email) {
-            stored.studentEmail = normalizeEmail(profile.email);
-            console.log(`[Service Worker] Auto-detected email (attempt ${attempt + 1})`);
-            break;
-          }
-        } catch (err) {
-          console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
-        }
-        if (!stored.studentEmail && attempt < 2) {
-          await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
-        }
-      }
-      // Fallback: try getAuthToken to detect signed-in user
-      if (!stored.studentEmail && chrome.identity?.getAuthToken) {
-        try {
-          const token = await new Promise((resolve, reject) =>
-            chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
-          );
-          if (token) {
-            const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
-              headers: { Authorization: `Bearer ${token}` }
-            });
-            const info = await resp.json();
-            if (info?.email) {
-              stored.studentEmail = normalizeEmail(info.email);
-              console.log('[Service Worker] Detected email via getAuthToken fallback');
-            }
-          }
-        } catch { /* fallback failed, continue without email */ }
+    // Get the current Chrome profile email on every Chrome-profile auth pass.
+    // If student A signs out and student B signs in, stale stored email/token
+    // must not keep attributing B's browsing to A.
+    if (!isManualIdentitySource(stored.identitySource)) {
+      const profileEmail = await detectChromeProfileEmail();
+      if (profileEmail && stored.studentEmail && stored.studentEmail !== profileEmail) {
+        console.log(`[Service Worker] Chrome profile changed from ${stored.studentEmail} to ${profileEmail}; re-registering`);
+        await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
+        stored = {
+          ...stored,
+          studentEmail: profileEmail,
+          studentName: null,
+          registered: false,
+          lastRegisteredEmail: null,
+          studentToken: null,
+          activeStudentId: null,
+          identitySource: null,
+          manualLoginLastSeenAt: null,
+          autoRegistrationPaused: false,
+        };
+      } else if (profileEmail) {
+        stored.studentEmail = profileEmail;
+      } else if (stored.identitySource === 'chrome_profile' && stored.studentEmail) {
+        console.log('[Service Worker] Chrome profile email disappeared; clearing Chrome-profile student auth');
+        await clearStudentAuth('chrome-profile-email-missing', { notifyBackend: true });
+        return await kv.get(['deviceId']);
       }
     }
 
@@ -1644,11 +1683,10 @@ async function clearTeacherBlockListRules() {
 // Get logged-in Chromebook user info using Chrome Identity API
 async function getLoggedInUserInfo() {
   try {
-    const userInfo = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-    console.log('Logged-in user info:', userInfo);
+    const email = await detectChromeProfileEmail();
     return {
-      email: userInfo.email || null,
-      id: userInfo.id || null,
+      email: email || null,
+      id: null,
     };
   } catch (error) {
     console.warn('Error getting logged-in user info:', error);
@@ -1674,24 +1712,29 @@ async function autoDetectAndRegister() {
     const emailName = userInfo.email.split('@')[0];
     const displayName = emailName.replace(/\./g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     
-    CONFIG.studentEmail = userInfo.email;
+    const normalizedEmail = normalizeEmail(userInfo.email);
+    CONFIG.studentEmail = normalizedEmail;
     CONFIG.studentName = displayName;
     
     await chrome.storage.local.set({ 
-      studentEmail: userInfo.email,
+      studentEmail: normalizedEmail,
       studentName: displayName,
     });
     
-    // Auto-register if not already registered
-    const stored = await chrome.storage.local.get(['registered']);
-    if (!stored.registered) {
+    // Auto-register if not already registered or if the Chrome profile changed.
+    const stored = await chrome.storage.local.get(['registered', 'lastRegisteredEmail', 'studentEmail', 'identitySource']);
+    const emailChanged = stored.lastRegisteredEmail && stored.lastRegisteredEmail !== normalizedEmail;
+    if (emailChanged && !isManualIdentitySource(stored.identitySource)) {
+      await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
+    }
+    if (!stored.registered || emailChanged) {
       try {
         // Get or create device ID
         const deviceId = await getOrCreateDeviceId();
         
         // Register with auto-detected info
-        await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
-        console.log('Auto-registered student:', userInfo.email);
+        await registerDeviceWithStudent(deviceId, null, 'default-class', normalizedEmail, displayName);
+        console.log('Auto-registered student:', normalizedEmail);
       } catch (error) {
         console.warn('Auto-registration failed:', error);
       }
@@ -1699,6 +1742,19 @@ async function autoDetectAndRegister() {
   } else {
     console.warn('Could not detect logged-in user email - manual registration required');
   }
+}
+
+if (chrome.identity?.onSignInChanged) {
+  chrome.identity.onSignInChanged.addListener(async () => {
+    try {
+      if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
+        await ensureRegistered();
+        await notifyAuthGateStateToTabs();
+      }
+    } catch (error) {
+      console.warn('[Auth] Failed to refresh registration after Chrome sign-in change:', error?.message || error);
+    }
+  });
 }
 
 // Load config from storage on startup
@@ -1873,8 +1929,10 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
       registered: true,
       activeStudentId: data.student?.id || null,
       studentToken: data.studentToken || null,
+      lastRegisteredEmail: studentEmail,
       identitySource: 'chrome_profile',
       manualLoginLastSeenAt: null,
+      autoRegistrationPaused: false,
     });
     
     // Start adaptive tracking after registration

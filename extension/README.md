@@ -64,10 +64,12 @@ Create a policy JSON file with the server URL:
 }
 ```
 
-`schoolId` may be replaced with `schoolSlug`. When Name + PIN login is enabled,
-the extension asks the student to choose a grade before loading the roster. IT
-may optionally add `stationGradeLevel` or `stationGroupId` to lock a Chromebook
-station to one grade or one ClassPilot class/group.
+`schoolId` may be replaced with `schoolSlug`. SchoolPilot admins must enable
+Shared Chromebook Sign-In before manual Email + Student ID login works. When
+Name + PIN login is also enabled, the extension asks the student to choose a
+grade before loading the roster and requires that student's 4-digit ClassPilot
+PIN. IT may optionally add `stationGradeLevel` or `stationGroupId` to lock a
+Chromebook station to one grade or one ClassPilot class/group.
 
 In Google Admin Console:
 1. Find the uploaded extension

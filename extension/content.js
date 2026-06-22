@@ -25,6 +25,11 @@ let authGateBlockerInstalled = false;
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (sender?.id && sender.id !== chrome.runtime.id) {
+    sendResponse?.({ success: false, error: 'Invalid sender' });
+    return true;
+  }
+
   if (message.type === 'CLASSPILOT_AUTH_REQUIRED') {
     showAuthGate(message.state || {});
     sendResponse?.({ success: true });
@@ -421,8 +426,8 @@ function buildPinLoginMarkup(state) {
         </select>
       </div>
       <div class="classpilot-auth-field">
-        <label for="classpilot-auth-pin">3-digit PIN</label>
-        <input id="classpilot-auth-pin" inputmode="numeric" maxlength="3" autocomplete="off" placeholder="123" required />
+        <label for="classpilot-auth-pin">4-digit PIN</label>
+        <input id="classpilot-auth-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="1234" required />
       </div>
       <button class="classpilot-auth-button" id="classpilot-auth-pin-submit" type="submit" disabled>Sign In</button>
     </form>
@@ -489,7 +494,7 @@ function attachAuthGateHandlers(state) {
     }
     const pinInput = document.getElementById('classpilot-auth-pin');
     pinInput?.addEventListener('input', () => {
-      pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 3);
+      pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 4);
     });
     pinForm.addEventListener('submit', (event) => {
       event.preventDefault();
