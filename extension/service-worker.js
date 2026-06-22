@@ -106,9 +106,17 @@ let CONFIG = {
   deviceId: null,
   studentName: null,
   studentEmail: null,
+  studentToken: null,
   classId: null,
   isSharing: false,
   activeStudentId: null,
+  schoolId: null,
+  schoolSlug: null,
+  enrollmentKey: null,
+  stationGradeLevel: null,
+  stationGroupId: null,
+  identitySource: null,
+  manualLoginLastSeenAt: null,
 };
 
 let ws = null; // Legacy reference, kept for compatibility checks
@@ -146,6 +154,24 @@ const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - fallback for Chrome alarm
 const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
+const MANAGED_CONFIG_KEYS = [
+  'serverUrl',
+  'schoolId',
+  'classpilotSchoolId',
+  'schoolSlug',
+  'classpilotSchoolSlug',
+  'enrollmentKey',
+  'classpilotEnrollmentKey',
+  'stationGradeLevel',
+  'classpilotStationGradeLevel',
+  'gradeLevel',
+  'classroomGradeLevel',
+  'stationGroupId',
+  'classpilotStationGroupId',
+  'groupId',
+  'classpilotGroupId',
+];
 
 let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
@@ -215,6 +241,47 @@ function extractManagedValue(value) {
     return value.Value;
   }
   return value;
+}
+
+function normalizeManagedString(value) {
+  const extracted = extractManagedValue(value);
+  if (extracted === undefined || extracted === null) return null;
+  const normalized = String(extracted).trim();
+  return normalized || null;
+}
+
+async function readManagedConfig() {
+  if (!chrome.storage?.managed) {
+    return {};
+  }
+  try {
+    return await new Promise(resolve => chrome.storage.managed.get(MANAGED_CONFIG_KEYS, resolve));
+  } catch (error) {
+    console.warn('[Service Worker] Managed config read failed:', error);
+    return {};
+  }
+}
+
+function applyManagedStationConfig(managedConfig = {}) {
+  CONFIG.schoolId = normalizeManagedString(managedConfig.schoolId) ||
+    normalizeManagedString(managedConfig.classpilotSchoolId) ||
+    CONFIG.schoolId;
+  CONFIG.schoolSlug = normalizeManagedString(managedConfig.schoolSlug) ||
+    normalizeManagedString(managedConfig.classpilotSchoolSlug) ||
+    CONFIG.schoolSlug;
+  CONFIG.enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey) ||
+    normalizeManagedString(managedConfig.classpilotEnrollmentKey) ||
+    CONFIG.enrollmentKey;
+  CONFIG.stationGradeLevel = normalizeManagedString(managedConfig.stationGradeLevel) ||
+    normalizeManagedString(managedConfig.classpilotStationGradeLevel) ||
+    normalizeManagedString(managedConfig.gradeLevel) ||
+    normalizeManagedString(managedConfig.classroomGradeLevel) ||
+    CONFIG.stationGradeLevel;
+  CONFIG.stationGroupId = normalizeManagedString(managedConfig.stationGroupId) ||
+    normalizeManagedString(managedConfig.classpilotStationGroupId) ||
+    normalizeManagedString(managedConfig.groupId) ||
+    normalizeManagedString(managedConfig.classpilotGroupId) ||
+    CONFIG.stationGroupId;
 }
 
 function scheduleLicenseCheck() {
@@ -299,14 +366,8 @@ async function checkLicenseStatus(reason = 'manual') {
 }
 
 async function resolveServerUrl() {
-  let managedConfig = {};
-  if (chrome.storage?.managed) {
-    try {
-      managedConfig = await new Promise(resolve => chrome.storage.managed.get(['serverUrl'], resolve));
-    } catch (error) {
-      console.warn('[Service Worker] Managed config read failed:', error);
-    }
-  }
+  const managedConfig = await readManagedConfig();
+  applyManagedStationConfig(managedConfig);
 
   const managedUrl = extractManagedValue(managedConfig?.serverUrl);
   if (isHttpUrl(managedUrl)) {
@@ -609,6 +670,22 @@ async function updateTrackingState(reason = 'state-check') {
     return;
   }
 
+  if (await expireManualAuthIfStale(`tracking:${reason}`)) {
+    return;
+  }
+
+  if (!hasStudentAuth()) {
+    if (trackingState !== TRACKING_STATES.OFF) {
+      trackingState = TRACKING_STATES.OFF;
+      scheduleHeartbeat(null);
+      scheduleScreenshotCapture(false);
+      disconnectWebSocket();
+      syncObservedHeartbeat('auth-required');
+    }
+    await notifyAuthGateStateToTabs();
+    return;
+  }
+
   const nextState = determineTrackingState();
   if (nextState === TRACKING_STATES.OFF && isScheduleHardOff) {
     if (trackingState !== nextState) {
@@ -681,6 +758,10 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
     return;
   }
+  if (!hasStudentAuth()) {
+    notifyAuthGateStateToTabs().catch(() => {});
+    return;
+  }
   if (!isHttpUrl(url)) {
     return;
   }
@@ -745,6 +826,244 @@ function attachLegacyStudentToken(payload, headers) {
   }
 }
 
+function isManualIdentitySource(source = CONFIG.identitySource) {
+  return source === 'manual_email_id' || source === 'manual_pin';
+}
+
+function hasStudentAuth() {
+  return Boolean(CONFIG.deviceId && CONFIG.studentToken && (CONFIG.activeStudentId || CONFIG.studentEmail));
+}
+
+function getAuthGateState() {
+  const hasPinStationConfig = Boolean(
+    (CONFIG.schoolId || CONFIG.schoolSlug) &&
+    CONFIG.enrollmentKey
+  );
+  return {
+    authRequired: !hasStudentAuth(),
+    setupRequired: false,
+    studentName: CONFIG.studentName || null,
+    studentEmail: CONFIG.studentEmail || null,
+    stationGradeLevel: CONFIG.stationGradeLevel || null,
+    stationGroupId: CONFIG.stationGroupId || null,
+    hasPinStationConfig,
+    manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+  };
+}
+
+async function ensureDeviceId() {
+  if (CONFIG.deviceId) return CONFIG.deviceId;
+  const stored = await kv.get(['deviceId']);
+  const deviceId = stored.deviceId || ('device-' + crypto.randomUUID().slice(0, 11));
+  CONFIG.deviceId = deviceId;
+  await kv.set({ deviceId });
+  return deviceId;
+}
+
+async function notifyAuthGateStateToTabs() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(tabs.map((tab) => enforceAuthGateForTab(tab)));
+  } catch (error) {
+    console.warn('[Auth Gate] Failed to notify tabs:', error?.message || error);
+  }
+}
+
+async function enforceAuthGateForTab(tabOrId) {
+  try {
+    const tab = typeof tabOrId === 'number' ? await chrome.tabs.get(tabOrId) : tabOrId;
+    if (!tab?.id || !isHttpUrl(tab.url || '')) {
+      return;
+    }
+
+    const message = hasStudentAuth()
+      ? { type: 'CLASSPILOT_AUTH_COMPLETE', state: getAuthGateState() }
+      : { type: 'CLASSPILOT_AUTH_REQUIRED', state: getAuthGateState() };
+
+    try {
+      await chrome.tabs.sendMessage(tab.id, message);
+    } catch (error) {
+      if (!hasStudentAuth() && chrome.scripting) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content.js'],
+          });
+          await chrome.tabs.sendMessage(tab.id, message);
+        } catch {
+          // Some pages reject extension scripts; the gate will apply on the next normal page.
+        }
+      }
+    }
+  } catch {
+    // Tabs can disappear while we are enforcing the gate.
+  }
+}
+
+async function clearStudentAuth(reason = 'manual-clear', options = {}) {
+  const tokenToEnd = CONFIG.studentToken;
+
+  if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
+    try {
+      await fetch(`${CONFIG.serverUrl}/api/extension/sign-out`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${tokenToEnd}`,
+        },
+        body: JSON.stringify({ deviceId: CONFIG.deviceId, reason }),
+      });
+    } catch (error) {
+      console.warn('[Auth] Session-end call failed:', error?.message || error);
+    }
+  }
+
+  CONFIG.studentToken = null;
+  CONFIG.studentEmail = null;
+  CONFIG.studentName = null;
+  CONFIG.activeStudentId = null;
+  CONFIG.identitySource = null;
+  CONFIG.manualLoginLastSeenAt = null;
+
+  await kv.set({
+    studentToken: null,
+    studentEmail: null,
+    studentName: null,
+    activeStudentId: null,
+    registered: false,
+    lastRegisteredEmail: null,
+    identitySource: null,
+    manualLoginLastSeenAt: null,
+  });
+
+  scheduleHeartbeat(null);
+  scheduleScreenshotCapture(false);
+  disconnectWebSocket();
+  chrome.action.setBadgeText({ text: 'AUTH' });
+  chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+  await notifyAuthGateStateToTabs();
+}
+
+async function expireManualAuthIfStale(reason = 'stale-check') {
+  const source = CONFIG.identitySource;
+  if (!isManualIdentitySource(source)) {
+    return false;
+  }
+
+  const lastSeen = Number(CONFIG.manualLoginLastSeenAt || 0);
+  if (lastSeen && Date.now() - lastSeen <= MANUAL_LOGIN_STALE_MS) {
+    return false;
+  }
+
+  console.log(`[Auth] Manual login expired (${reason})`);
+  await clearStudentAuth('manual-stale-expired', { notifyBackend: false });
+  return true;
+}
+
+async function fetchLoginRosterForGate() {
+  if (!(CONFIG.schoolId || CONFIG.schoolSlug) || !CONFIG.enrollmentKey) {
+    return { success: false, setupRequired: true, error: 'Station setup required' };
+  }
+
+  const params = new URLSearchParams({
+    enrollmentKey: CONFIG.enrollmentKey,
+  });
+  if (CONFIG.stationGradeLevel) params.set('gradeLevel', CONFIG.stationGradeLevel);
+  if (CONFIG.stationGroupId) params.set('groupId', CONFIG.stationGroupId);
+  if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
+  if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
+
+  const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
+    cache: 'no-store',
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      success: false,
+      setupRequired: response.status === 401 || response.status === 404,
+      pinLoginEnabled: data.pinLoginEnabled === true,
+      error: data.error || 'Could not load roster',
+    };
+  }
+  return { success: true, students: data.students || [], pinLoginEnabled: data.pinLoginEnabled === true };
+}
+
+async function manualStudentLogin(payload) {
+  const deviceId = await ensureDeviceId();
+  const isPinLogin = payload.mode === 'pin';
+  const body = {
+    deviceId,
+    deviceName: null,
+    classId: 'auto',
+  };
+
+  if (isPinLogin) {
+    body.studentId = payload.studentId;
+    body.pin = payload.pin;
+    body.schoolId = CONFIG.schoolId || undefined;
+    body.schoolSlug = CONFIG.schoolSlug || undefined;
+    body.enrollmentKey = CONFIG.enrollmentKey || undefined;
+  } else {
+    body.studentEmail = normalizeEmail(payload.studentEmail);
+    body.studentIdNumber = String(payload.studentIdNumber || '').trim();
+    if (CONFIG.enrollmentKey) body.enrollmentKey = CONFIG.enrollmentKey;
+  }
+
+  const response = await fetch(`${CONFIG.serverUrl}/api/extension/student-login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.studentToken) {
+    throw new Error(data.error || 'Invalid student credentials');
+  }
+
+  const student = data.student || {};
+  const studentName = [student.firstName, student.lastName].filter(Boolean).join(' ') ||
+    student.studentName ||
+    student.email ||
+    body.studentEmail ||
+    'Student';
+  const studentEmail = student.email || body.studentEmail || null;
+  const now = Date.now();
+
+  CONFIG.studentToken = data.studentToken;
+  CONFIG.activeStudentId = student.id || null;
+  CONFIG.studentEmail = studentEmail;
+  CONFIG.studentName = studentName;
+  CONFIG.classId = 'auto';
+  CONFIG.identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
+  CONFIG.manualLoginLastSeenAt = now;
+
+  await kv.set({
+    deviceId,
+    studentToken: data.studentToken,
+    activeStudentId: CONFIG.activeStudentId,
+    studentEmail,
+    studentName,
+    classId: 'auto',
+    registered: true,
+    lastRegisteredEmail: studentEmail,
+    identitySource: CONFIG.identitySource,
+    manualLoginLastSeenAt: now,
+  });
+
+  await checkLicenseStatus('manual-login');
+  await initializeAdaptiveTracking('manual-login');
+  await notifyAuthGateStateToTabs();
+
+  return {
+    success: true,
+    student: {
+      id: CONFIG.activeStudentId,
+      name: studentName,
+      email: studentEmail,
+    },
+    manualExpiresInSeconds: data.manualExpiresInSeconds || Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+  };
+}
+
 // Email normalization: ensures consistent student identity
 function normalizeEmail(raw) {
   if (!raw) return null;
@@ -767,12 +1086,25 @@ async function ensureRegistered() {
   console.log('[Service Worker] Ensuring registration...');
   
   try {
+    await expireManualAuthIfStale('ensure-registered');
+
     // Load config from server
     const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
     await fetchClientConfig(serverUrl);
+    applyManagedStationConfig(await readManagedConfig());
     
     // Get or create IDs (including studentToken for consistent state)
-    let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);
+    let stored = await kv.get([
+      'studentEmail',
+      'studentName',
+      'deviceId',
+      'registered',
+      'lastRegisteredEmail',
+      'studentToken',
+      'activeStudentId',
+      'identitySource',
+      'manualLoginLastSeenAt',
+    ]);
     
     // Get student email from Chrome profile (managed devices)
     // Retry up to 3 times with delay — Chrome may not have profile ready immediately on startup
@@ -816,7 +1148,7 @@ async function ensureRegistered() {
 
     // If we still have no email after retries
     if (!stored.studentEmail) {
-      console.warn('[Service Worker] No studentEmail detected after retries — will retry on next alarm');
+      console.warn('[Service Worker] No Chrome profile email detected — shared sign-in gate will be required');
     }
     
     // Always create a deviceId internally (never exposed to teachers)
@@ -829,9 +1161,16 @@ async function ensureRegistered() {
     
     // Update CONFIG (email is primary identity - backend will determine schoolId from email domain)
     CONFIG.studentEmail = stored.studentEmail;
-    CONFIG.studentName = stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail;
+    CONFIG.studentName = stored.studentName || (stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail);
     CONFIG.deviceId = stored.deviceId;
     CONFIG.classId = 'auto'; // Backend determines this from email domain
+    CONFIG.activeStudentId = stored.activeStudentId || CONFIG.activeStudentId;
+    CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
+    CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
+
+    if (await expireManualAuthIfStale('ensure-registered-storage')) {
+      return await kv.get(['deviceId']);
+    }
     
     // ✅ JWT FIX: Load existing studentToken BEFORE deciding to skip registration
     // This prevents timing issues where service worker wakes up without token in memory
@@ -842,7 +1181,10 @@ async function ensureRegistered() {
     
     // Register with server if we have email and haven't registered yet (or email changed)
     const emailChanged = stored.lastRegisteredEmail !== stored.studentEmail;
-    const needsRegistration = stored.studentEmail && (!stored.registered || emailChanged);
+    const needsRegistration =
+      stored.studentEmail &&
+      !isManualIdentitySource(stored.identitySource) &&
+      (!stored.registered || emailChanged);
     
     if (needsRegistration) {
       try {
@@ -870,8 +1212,10 @@ async function ensureRegistered() {
         // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
         if (data.studentToken) {
           console.log('✅ [JWT] Received studentToken from server - storing for future heartbeats');
-          await kv.set({ studentToken: data.studentToken });
+          await kv.set({ studentToken: data.studentToken, identitySource: 'chrome_profile', manualLoginLastSeenAt: null });
           CONFIG.studentToken = data.studentToken; // Cache in memory too
+          CONFIG.identitySource = 'chrome_profile';
+          CONFIG.manualLoginLastSeenAt = null;
         } else {
           console.warn('⚠️  No studentToken in registration response - legacy mode');
         }
@@ -906,6 +1250,7 @@ async function ensureRegistered() {
     console.log('[Service Worker] Registration complete');
 
     await checkLicenseStatus('registration');
+    await notifyAuthGateStateToTabs();
     
     return stored;
   } catch (error) {
@@ -951,6 +1296,10 @@ if (chrome.runtime.onStartup) {
     'config',
     'activeStudentId',
     'studentEmail',
+    'studentName',
+    'studentToken',
+    'identitySource',
+    'manualLoginLastSeenAt',
     'flightPathState',
     'lockScreenState',
     'licenseActive',
@@ -975,6 +1324,18 @@ if (chrome.runtime.onStartup) {
   }
   if (stored.studentEmail) {
     CONFIG.studentEmail = stored.studentEmail;
+  }
+  if (stored.studentName) {
+    CONFIG.studentName = stored.studentName;
+  }
+  if (stored.studentToken) {
+    CONFIG.studentToken = stored.studentToken;
+  }
+  if (stored.identitySource) {
+    CONFIG.identitySource = stored.identitySource;
+  }
+  if (stored.manualLoginLastSeenAt) {
+    CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
   }
 
   // Restore Flight Path state if it was active
@@ -1308,7 +1669,15 @@ async function autoDetectAndRegister() {
 }
 
 // Load config from storage on startup
-chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentToken'], async (result) => {
+chrome.storage.local.get([
+  'config',
+  'activeStudentId',
+  'studentEmail',
+  'studentName',
+  'studentToken',
+  'identitySource',
+  'manualLoginLastSeenAt',
+], async (result) => {
   try {
     const resolvedServerUrl = await resolveServerUrl();
 
@@ -1331,6 +1700,15 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentT
     if (result.studentEmail) {
       CONFIG.studentEmail = result.studentEmail;
     }
+    if (result.studentName) {
+      CONFIG.studentName = result.studentName;
+    }
+    if (result.identitySource) {
+      CONFIG.identitySource = result.identitySource;
+    }
+    if (result.manualLoginLastSeenAt) {
+      CONFIG.manualLoginLastSeenAt = result.manualLoginLastSeenAt;
+    }
 
     // ✅ JWT AUTHENTICATION: Load studentToken from storage
     if (result.studentToken) {
@@ -1338,13 +1716,20 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentT
       console.log('✅ [JWT] Loaded studentToken from storage');
     }
 
+    if (await expireManualAuthIfStale('config-loaded')) {
+      return;
+    }
+
     // Auto-detect logged-in user and register
-    await autoDetectAndRegister();
+    if (!isManualIdentitySource(CONFIG.identitySource)) {
+      await autoDetectAndRegister();
+    }
 
     // Initialize adaptive tracking once config is loaded
     if (CONFIG.deviceId) {
       initializeAdaptiveTracking('config-loaded');
     }
+    await notifyAuthGateStateToTabs();
   } catch (error) {
     console.warn('[Service Worker] Config load error (will retry):', error?.message || error);
   }
@@ -1442,11 +1827,17 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
     CONFIG.studentEmail = studentEmail;
     CONFIG.classId = classId;
     CONFIG.activeStudentId = data.student?.id || null;
+    CONFIG.studentToken = data.studentToken || CONFIG.studentToken;
+    CONFIG.identitySource = 'chrome_profile';
+    CONFIG.manualLoginLastSeenAt = null;
     
     await chrome.storage.local.set({ 
       config: CONFIG,
       registered: true,
       activeStudentId: data.student?.id || null,
+      studentToken: data.studentToken || null,
+      identitySource: 'chrome_profile',
+      manualLoginLastSeenAt: null,
     });
     
     // Start adaptive tracking after registration
@@ -1467,9 +1858,12 @@ async function sendHeartbeat(reason = 'manual') {
   if (trackingState === TRACKING_STATES.OFF) {
     return;
   }
-  // EMAIL-FIRST: Require email before sending heartbeats
-  if (!CONFIG.studentEmail) {
-    console.log('Skipping heartbeat - no studentEmail (dev mode or not logged in)');
+  if (await expireManualAuthIfStale(`heartbeat:${reason}`)) {
+    return;
+  }
+  if (!hasStudentAuth()) {
+    console.log('Skipping heartbeat - student authentication required');
+    await notifyAuthGateStateToTabs();
     return;
   }
   
@@ -1550,7 +1944,7 @@ async function sendHeartbeat(reason = 'manual') {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity - backend determines schoolId from domain
+      studentEmail: CONFIG.studentEmail || '', // JWT is the authority for manual shared-device login
       deviceId: CONFIG.deviceId,            // Internal device tracking
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
@@ -1602,6 +1996,10 @@ async function sendHeartbeat(reason = 'manual') {
         await disableForInactiveLicense(data.planStatus);
         return;
       }
+      if (isManualIdentitySource()) {
+        await clearStudentAuth('manual-token-invalid', { notifyBackend: false });
+        return;
+      }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });
@@ -1617,6 +2015,10 @@ async function sendHeartbeat(reason = 'manual') {
       // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
       console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
+      if (isManualIdentitySource()) {
+        CONFIG.manualLoginLastSeenAt = Date.now();
+        await kv.set({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
+      }
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
       // Ensure screenshot alarm is running after every successful heartbeat
@@ -1755,9 +2157,10 @@ async function captureAndSendScreenshot() {
     lastScreenshotErrorAt = Date.now();
     return;
   }
-  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
+  if (!hasStudentAuth()) {
     lastScreenshotError = 'no_config';
     lastScreenshotErrorAt = Date.now();
+    await notifyAuthGateStateToTabs();
     return;
   }
 
@@ -2576,6 +2979,9 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   try {
     // Only track main frame navigations
     if (details.frameId !== 0) return;
+    if (isHttpUrl(details.url)) {
+      enforceAuthGateForTab(details.tabId).catch(() => {});
+    }
     if (trackingState === TRACKING_STATES.OFF) return;
 
     // Skip Chrome internal pages
@@ -2592,6 +2998,8 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
   try {
+    enforceAuthGateForTab(tab).catch(() => {});
+
     // Block new tabs when attention mode is active
     if (attentionModeActive) {
       if (tab.id) {
@@ -2950,9 +3358,9 @@ async function connectWebSocket() {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
   }
-  // EMAIL-FIRST: Require both email and deviceId for WebSocket
-  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
-    console.log('Skipping WebSocket - missing email or deviceId');
+  if (!hasStudentAuth()) {
+    console.log('Skipping WebSocket - student authentication required');
+    await notifyAuthGateStateToTabs();
     return;
   }
 
@@ -2974,7 +3382,7 @@ async function connectWebSocket() {
   if (CONFIG.studentToken) {
     authPayload.studentToken = CONFIG.studentToken;
     console.log('WebSocket auth: using JWT token');
-  } else {
+  } else if (CONFIG.studentEmail) {
     authPayload.studentEmail = CONFIG.studentEmail;
     console.log('WebSocket auth: using email (no JWT token)');
   }
@@ -3261,6 +3669,7 @@ function handleWsMessage(rawData) {
 
 // Tab change listener - send immediate heartbeat when user switches tabs
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  enforceAuthGateForTab(activeInfo.tabId).catch(() => {});
   // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
   if (trackingState === TRACKING_STATES.OFF) return;
   try {
@@ -3276,6 +3685,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
+    if (changeInfo.status === 'loading' || changeInfo.status === 'complete' || changeInfo.url) {
+      enforceAuthGateForTab(tab).catch(() => {});
+    }
     // Allow both ACTIVE and IDLE states
     if (trackingState === TRACKING_STATES.OFF) return;
     if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
@@ -3356,6 +3768,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === 'get-config') {
     sendResponse({ config: CONFIG });
+    return true;
+  }
+
+  if (message.type === 'get-auth-state') {
+    expireManualAuthIfStale('get-auth-state')
+      .then(() => {
+        const response = { success: true, state: getAuthGateState() };
+        if (message.includeConfig) response.config = CONFIG;
+        sendResponse(response);
+      })
+      .catch((error) => {
+        const response = { success: false, error: error.message, state: getAuthGateState() };
+        if (message.includeConfig) response.config = CONFIG;
+        sendResponse(response);
+      });
+    return true;
+  }
+
+  if (message.type === 'get-login-roster') {
+    fetchLoginRosterForGate()
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Could not load roster' }));
+    return true;
+  }
+
+  if (message.type === 'manual-student-login') {
+    manualStudentLogin(message.payload || {})
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Invalid student credentials' }));
+    return true;
+  }
+
+  if (message.type === 'student-sign-out') {
+    clearStudentAuth('explicit-sign-out', { notifyBackend: true })
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
   }
 

@@ -2,6 +2,8 @@
 // EMAIL-FIRST: No manual registration - auto-detect from Chrome profile
 
 let currentConfig = null;
+let currentAuthState = null;
+let statusIntervalId = null;
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
@@ -12,6 +14,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // ALWAYS show main view with auto-detected info (no manual registration)
     showMainView(config);
+    refreshAuthState();
     updateLicenseBanner();
   });
 
@@ -24,6 +27,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Initialize chat UI
   initChatUI();
 
+  document.getElementById('sign-out-btn')?.addEventListener('click', signOutStudent);
+
   // Listen for storage changes to update messages in real-time
   chrome.storage.onChanged.addListener((changes, namespace) => {
     if (namespace === 'local' && changes.messages) {
@@ -31,6 +36,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (namespace === 'local' && (changes.licenseActive || changes.planStatus)) {
       updateLicenseBanner();
+    }
+    if (namespace === 'local' && (changes.studentToken || changes.studentEmail || changes.studentName)) {
+      refreshAuthState();
     }
   });
 });
@@ -49,6 +57,9 @@ function showMainView(config) {
   if (config.studentEmail) {
     document.getElementById('detected-student-name').textContent = config.studentName || 'Auto-detected Student';
     document.getElementById('detected-student-email').textContent = config.studentEmail;
+  } else if (config.studentToken && config.studentName) {
+    document.getElementById('detected-student-name').textContent = config.studentName;
+    document.getElementById('detected-student-email').textContent = 'ClassPilot shared sign-in';
   } else {
     // Fallback if no email detected
     document.getElementById('detected-student-name').textContent = config.studentName || '-';
@@ -59,7 +70,61 @@ function showMainView(config) {
   updateStatus();
   
   // Update status every 5 seconds
-  setInterval(updateStatus, 5000);
+  if (!statusIntervalId) {
+    statusIntervalId = setInterval(updateStatus, 5000);
+  }
+}
+
+function refreshAuthState() {
+  chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) return;
+    currentAuthState = response.state;
+    if (response.config) {
+      currentConfig = response.config;
+      showMainView(currentConfig);
+    }
+    updateAuthUI();
+  });
+}
+
+function updateAuthUI() {
+  const signOutBtn = document.getElementById('sign-out-btn');
+  const authRequiredCard = document.getElementById('auth-required-card');
+  const raiseHandSection = document.getElementById('raise-hand-section');
+  const chatSection = document.getElementById('chat-section');
+  if (!signOutBtn || !authRequiredCard) return;
+
+  if (currentAuthState?.authRequired) {
+    authRequiredCard.classList.remove('hidden');
+    signOutBtn.classList.add('hidden');
+    raiseHandSection?.classList.add('hidden');
+    chatSection?.classList.add('hidden');
+  } else {
+    authRequiredCard.classList.add('hidden');
+    signOutBtn.classList.remove('hidden');
+    raiseHandSection?.classList.remove('hidden');
+    chatSection?.classList.remove('hidden');
+  }
+}
+
+function signOutStudent() {
+  const signOutBtn = document.getElementById('sign-out-btn');
+  if (signOutBtn) {
+    signOutBtn.disabled = true;
+    signOutBtn.textContent = 'Signing out...';
+  }
+
+  chrome.runtime.sendMessage({ type: 'student-sign-out' }, (response) => {
+    if (signOutBtn) {
+      signOutBtn.disabled = false;
+      signOutBtn.textContent = 'Sign Out';
+    }
+    if (chrome.runtime.lastError || !response?.success) {
+      alert(response?.error || 'Could not sign out. Please try again.');
+      return;
+    }
+    refreshAuthState();
+  });
 }
 
 function updateStatus() {

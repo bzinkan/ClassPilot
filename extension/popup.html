@@ -297,6 +297,37 @@
       transform: none;
       box-shadow: none;
     }
+
+    .sign-out-btn {
+      width: 100%;
+      padding: 10px 14px;
+      background: #fee2e2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+    }
+
+    .sign-out-btn:hover {
+      background: #fecaca;
+    }
+
+    .auth-required-card {
+      padding: 12px;
+      background: #fff7ed;
+      border-left: 4px solid #f97316;
+      border-radius: 4px;
+      margin-top: 12px;
+    }
+
+    .auth-required-card p {
+      font-size: 12px;
+      line-height: 1.4;
+      color: #9a3412;
+    }
   </style>
 </head>
 <body>
@@ -328,6 +359,12 @@
         <p style="font-size: 11px; color: #64748b; margin-top: 8px; font-style: italic;">
           ✓ Automatically linked to your Chromebook login
         </p>
+        <div id="auth-required-card" class="auth-required-card hidden">
+          <p>ClassPilot sign-in is required before browsing can start.</p>
+        </div>
+        <button id="sign-out-btn" class="sign-out-btn hidden">
+          Sign Out
+        </button>
       </div>
     </div>
     

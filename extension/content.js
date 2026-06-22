@@ -20,9 +20,23 @@ let timerEndTime = null;
 let activePollId = null;
 const respondedPollIds = new Set(); // prevent re-showing polls already answered
 const seenChatMsgIds = new Set(); // dedup chat-reply messages
+let authGateActive = false;
+let authGateBlockerInstalled = false;
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'CLASSPILOT_AUTH_REQUIRED') {
+    showAuthGate(message.state || {});
+    sendResponse?.({ success: true });
+    return true;
+  }
+
+  if (message.type === 'CLASSPILOT_AUTH_COMPLETE') {
+    removeAuthGate();
+    sendResponse?.({ success: true });
+    return true;
+  }
+
   if (message.type === 'show-message') {
     // Broadcast messages (not replies) still show as modal
     if (!message.data.isTeacherReply) {
@@ -123,6 +137,404 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.data.enabled) chatClosed = false;
   }
 });
+
+function requestAuthGateState() {
+  chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
+    if (chrome.runtime.lastError) return;
+    if (response?.state?.authRequired) {
+      showAuthGate(response.state);
+    } else {
+      removeAuthGate();
+    }
+  });
+}
+
+function installAuthGateBlockers() {
+  if (authGateBlockerInstalled) return;
+  const blockBehindGate = (event) => {
+    const gate = document.getElementById('classpilot-auth-gate');
+    if (!gate) return;
+    if (gate.contains(event.target)) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  };
+  document.addEventListener('keydown', blockBehindGate, true);
+  document.addEventListener('wheel', blockBehindGate, { capture: true, passive: false });
+  document.addEventListener('touchmove', blockBehindGate, { capture: true, passive: false });
+  window.__classpilotAuthGateBlocker = blockBehindGate;
+  authGateBlockerInstalled = true;
+}
+
+function removeAuthGateBlockers() {
+  if (!authGateBlockerInstalled || !window.__classpilotAuthGateBlocker) return;
+  const blockBehindGate = window.__classpilotAuthGateBlocker;
+  document.removeEventListener('keydown', blockBehindGate, true);
+  document.removeEventListener('wheel', blockBehindGate, true);
+  document.removeEventListener('touchmove', blockBehindGate, true);
+  delete window.__classpilotAuthGateBlocker;
+  authGateBlockerInstalled = false;
+}
+
+function showAuthGate(state = {}) {
+  if (window.location.protocol === 'chrome-extension:' ||
+      window.location.protocol === 'chrome:' ||
+      window.location.protocol === 'about:') {
+    return;
+  }
+
+  authGateActive = true;
+  document.documentElement.classList.add('classpilot-auth-locked');
+  document.body?.classList.add('classpilot-auth-locked');
+  const fab = document.getElementById('classpilot-fab-container');
+  if (fab) fab.style.display = 'none';
+
+  const existing = document.getElementById('classpilot-auth-gate');
+  if (existing) existing.remove();
+
+  const gate = document.createElement('div');
+  gate.id = 'classpilot-auth-gate';
+  gate.innerHTML = buildAuthGateMarkup(state);
+  (document.body || document.documentElement).appendChild(gate);
+  installAuthGateBlockers();
+  attachAuthGateHandlers(state);
+}
+
+function removeAuthGate() {
+  authGateActive = false;
+  const gate = document.getElementById('classpilot-auth-gate');
+  if (gate) gate.remove();
+  document.documentElement.classList.remove('classpilot-auth-locked');
+  document.body?.classList.remove('classpilot-auth-locked');
+  const fab = document.getElementById('classpilot-fab-container');
+  if (fab) fab.style.display = '';
+  removeAuthGateBlockers();
+}
+
+function buildAuthGateMarkup(state) {
+  const canCheckPinFlow = state.hasPinStationConfig;
+  const title = state.setupRequired
+    ? 'Ask your teacher to set up this Chromebook'
+    : 'Sign in to ClassPilot';
+  const subtitle = state.setupRequired
+    ? 'This station needs its school and grade settings before browsing can start.'
+    : 'School browsing requires ClassPilot sign-in on this shared Chromebook.';
+
+  return `
+    <style>
+      html.classpilot-auth-locked,
+      body.classpilot-auth-locked {
+        overflow: hidden !important;
+      }
+      #classpilot-auth-gate {
+        position: fixed !important;
+        inset: 0 !important;
+        z-index: 2147483647 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        min-height: 100vh !important;
+        padding: 24px !important;
+        background: rgba(15, 23, 42, 0.78) !important;
+        backdrop-filter: blur(6px) !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        color: #0f172a !important;
+        box-sizing: border-box !important;
+      }
+      #classpilot-auth-gate * {
+        box-sizing: border-box !important;
+      }
+      .classpilot-auth-panel {
+        width: min(440px, calc(100vw - 32px)) !important;
+        background: #ffffff !important;
+        border-radius: 14px !important;
+        box-shadow: 0 24px 80px rgba(15, 23, 42, 0.38) !important;
+        border: 1px solid rgba(148, 163, 184, 0.35) !important;
+        padding: 28px !important;
+      }
+      .classpilot-auth-mark {
+        width: 44px !important;
+        height: 44px !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 12px !important;
+        background: #1d4ed8 !important;
+        color: white !important;
+        font-size: 22px !important;
+        margin-bottom: 16px !important;
+      }
+      .classpilot-auth-panel h1 {
+        margin: 0 0 8px !important;
+        font-size: 24px !important;
+        line-height: 1.2 !important;
+        font-weight: 700 !important;
+        color: #0f172a !important;
+      }
+      .classpilot-auth-panel p {
+        margin: 0 0 18px !important;
+        font-size: 14px !important;
+        line-height: 1.5 !important;
+        color: #475569 !important;
+      }
+      .classpilot-auth-form {
+        display: grid !important;
+        gap: 14px !important;
+      }
+      .classpilot-auth-tabs {
+        display: none;
+        gap: 8px !important;
+        margin-bottom: 14px !important;
+      }
+      .classpilot-auth-tab {
+        flex: 1 !important;
+        min-height: 36px !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 8px !important;
+        background: #f8fafc !important;
+        color: #334155 !important;
+        font-size: 13px !important;
+        font-weight: 700 !important;
+        cursor: pointer !important;
+      }
+      .classpilot-auth-tab.is-active {
+        border-color: #2563eb !important;
+        background: #eff6ff !important;
+        color: #1d4ed8 !important;
+      }
+      .classpilot-auth-field {
+        display: grid !important;
+        gap: 6px !important;
+      }
+      .classpilot-auth-field label {
+        font-size: 12px !important;
+        font-weight: 700 !important;
+        color: #334155 !important;
+      }
+      .classpilot-auth-field input,
+      .classpilot-auth-field select {
+        width: 100% !important;
+        min-height: 42px !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 8px !important;
+        padding: 9px 11px !important;
+        font-size: 15px !important;
+        color: #0f172a !important;
+        background: #ffffff !important;
+        outline: none !important;
+      }
+      .classpilot-auth-field input:focus,
+      .classpilot-auth-field select:focus {
+        border-color: #2563eb !important;
+        box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16) !important;
+      }
+      .classpilot-auth-button {
+        min-height: 44px !important;
+        border: 0 !important;
+        border-radius: 8px !important;
+        background: #2563eb !important;
+        color: white !important;
+        font-weight: 700 !important;
+        font-size: 15px !important;
+        cursor: pointer !important;
+      }
+      .classpilot-auth-button:disabled {
+        opacity: 0.65 !important;
+        cursor: not-allowed !important;
+      }
+      .classpilot-auth-error {
+        display: none;
+        padding: 10px 12px !important;
+        border-radius: 8px !important;
+        background: #fef2f2 !important;
+        color: #991b1b !important;
+        font-size: 13px !important;
+        line-height: 1.4 !important;
+      }
+      .classpilot-auth-roster-note {
+        min-height: 38px !important;
+        border-radius: 8px !important;
+        background: #f8fafc !important;
+        color: #64748b !important;
+        padding: 10px 12px !important;
+        font-size: 13px !important;
+      }
+    </style>
+    <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title">
+      <div class="classpilot-auth-mark">CP</div>
+      <h1 id="classpilot-auth-title">${escapeHtml(title)}</h1>
+      <p>${escapeHtml(subtitle)}</p>
+      <div class="classpilot-auth-error" id="classpilot-auth-error"></div>
+      ${state.setupRequired ? buildSetupRequiredMarkup() : `
+        ${canCheckPinFlow ? buildAuthTabsMarkup() : ''}
+        ${buildEmailLoginMarkup()}
+        ${canCheckPinFlow ? buildPinLoginMarkup(state) : ''}
+      `}
+    </div>
+  `;
+}
+
+function buildAuthTabsMarkup() {
+  return `
+    <div class="classpilot-auth-tabs" id="classpilot-auth-tabs">
+      <button class="classpilot-auth-tab is-active" id="classpilot-auth-tab-email" type="button">Email + ID</button>
+      <button class="classpilot-auth-tab" id="classpilot-auth-tab-pin" type="button">Name + PIN</button>
+    </div>
+  `;
+}
+
+function buildSetupRequiredMarkup() {
+  return `
+    <div class="classpilot-auth-roster-note">
+      This Chromebook is missing managed ClassPilot station settings.
+    </div>
+  `;
+}
+
+function buildEmailLoginMarkup() {
+  return `
+    <form class="classpilot-auth-form" id="classpilot-auth-email-form">
+      <div class="classpilot-auth-field">
+        <label for="classpilot-auth-email">School email</label>
+        <input id="classpilot-auth-email" type="email" autocomplete="username" placeholder="student@school.edu" required />
+      </div>
+      <div class="classpilot-auth-field">
+        <label for="classpilot-auth-student-id">Student ID Number</label>
+        <input id="classpilot-auth-student-id" type="text" autocomplete="off" placeholder="Student ID" required />
+      </div>
+      <button class="classpilot-auth-button" id="classpilot-auth-email-submit" type="submit">Sign In</button>
+    </form>
+  `;
+}
+
+function buildPinLoginMarkup(state) {
+  return `
+    <form class="classpilot-auth-form" id="classpilot-auth-pin-form" style="display:none !important;">
+      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status">
+        Loading roster...
+      </div>
+      <div class="classpilot-auth-field">
+        <label for="classpilot-auth-student">Student</label>
+        <select id="classpilot-auth-student" disabled required>
+          <option value="">Loading students...</option>
+        </select>
+      </div>
+      <div class="classpilot-auth-field">
+        <label for="classpilot-auth-pin">3-digit PIN</label>
+        <input id="classpilot-auth-pin" inputmode="numeric" maxlength="3" autocomplete="off" placeholder="123" required />
+      </div>
+      <button class="classpilot-auth-button" id="classpilot-auth-pin-submit" type="submit" disabled>Sign In</button>
+    </form>
+  `;
+}
+
+function setAuthGateError(message) {
+  const errorEl = document.getElementById('classpilot-auth-error');
+  if (!errorEl) return;
+  errorEl.textContent = message || '';
+  errorEl.style.display = message ? 'block' : 'none';
+}
+
+function attachAuthGateHandlers(state) {
+  const emailForm = document.getElementById('classpilot-auth-email-form');
+  const pinForm = document.getElementById('classpilot-auth-pin-form');
+  document.getElementById('classpilot-auth-tab-email')?.addEventListener('click', () => showAuthGatePane('email'));
+  document.getElementById('classpilot-auth-tab-pin')?.addEventListener('click', () => showAuthGatePane('pin'));
+
+  if (emailForm) {
+    emailForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitAuthGateLogin({
+        mode: 'email_id',
+        studentEmail: document.getElementById('classpilot-auth-email')?.value || '',
+        studentIdNumber: document.getElementById('classpilot-auth-student-id')?.value || '',
+      }, event.submitter);
+    });
+  }
+
+  if (pinForm) {
+    loadAuthGateRoster();
+    const pinInput = document.getElementById('classpilot-auth-pin');
+    pinInput?.addEventListener('input', () => {
+      pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 3);
+    });
+    pinForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      submitAuthGateLogin({
+        mode: 'pin',
+        studentId: document.getElementById('classpilot-auth-student')?.value || '',
+        pin: pinInput?.value || '',
+      }, event.submitter);
+    });
+  }
+}
+
+function showAuthGatePane(mode) {
+  const emailForm = document.getElementById('classpilot-auth-email-form');
+  const pinForm = document.getElementById('classpilot-auth-pin-form');
+  const emailTab = document.getElementById('classpilot-auth-tab-email');
+  const pinTab = document.getElementById('classpilot-auth-tab-pin');
+  const showPin = mode === 'pin';
+  if (emailForm) emailForm.style.setProperty('display', showPin ? 'none' : 'grid', 'important');
+  if (pinForm) pinForm.style.setProperty('display', showPin ? 'grid' : 'none', 'important');
+  emailTab?.classList.toggle('is-active', !showPin);
+  pinTab?.classList.toggle('is-active', showPin);
+  setAuthGateError('');
+}
+
+function loadAuthGateRoster() {
+  chrome.runtime.sendMessage({ type: 'get-login-roster' }, (response) => {
+    const select = document.getElementById('classpilot-auth-student');
+    const status = document.getElementById('classpilot-auth-roster-status');
+    const submit = document.getElementById('classpilot-auth-pin-submit');
+    const tabs = document.getElementById('classpilot-auth-tabs');
+    if (!select || !status || !submit) return;
+
+    if (chrome.runtime.lastError || !response?.success) {
+      status.textContent = response?.error || 'Could not load the classroom roster.';
+      select.innerHTML = '<option value="">Roster unavailable</option>';
+      select.disabled = true;
+      submit.disabled = true;
+      return;
+    }
+
+    const students = response.students || [];
+    if (tabs) tabs.style.setProperty('display', 'flex', 'important');
+    if (!students.length) {
+      status.textContent = 'No students are ready for PIN sign-in on this station.';
+      select.innerHTML = '<option value="">No students available</option>';
+      select.disabled = true;
+      submit.disabled = true;
+      return;
+    }
+
+    status.textContent = 'Choose your name and enter your PIN.';
+    select.innerHTML = '<option value="">Select your name...</option>' +
+      students.map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name)}${student.hasPin ? '' : ' (PIN missing)'}</option>`).join('');
+    select.disabled = false;
+    submit.disabled = false;
+  });
+}
+
+function submitAuthGateLogin(payload, submitButton) {
+  setAuthGateError('');
+  const submit = submitButton || document.getElementById(payload.mode === 'pin' ? 'classpilot-auth-pin-submit' : 'classpilot-auth-email-submit');
+  if (submit) {
+    submit.disabled = true;
+    submit.textContent = 'Signing In...';
+  }
+
+  chrome.runtime.sendMessage({ type: 'manual-student-login', payload }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) {
+      setAuthGateError(response?.error || 'Invalid student credentials');
+      if (submit) {
+        submit.disabled = false;
+        submit.textContent = 'Sign In';
+      }
+      return;
+    }
+    removeAuthGate();
+  });
+}
 
 // Monitor camera usage by wrapping getUserMedia
 (function() {
@@ -1149,6 +1561,10 @@ function createFloatingActionButton() {
         <span class="classpilot-fab-icon">✋</span>
         <span class="classpilot-fab-label">Raise Hand</span>
       </button>
+      <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Sign Out">
+        <span class="classpilot-fab-icon">⎋</span>
+        <span class="classpilot-fab-label">Sign Out</span>
+      </button>
     </div>
     <button class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot">
       <span class="classpilot-fab-main-icon">🎓</span>
@@ -1211,6 +1627,11 @@ function createFloatingActionButton() {
       chatMessages = [];
     }
     showMessageBox();
+  });
+
+  document.getElementById('classpilot-fab-signout').addEventListener('click', (e) => {
+    e.stopPropagation();
+    signOutStudent();
   });
 
   // Close message box
@@ -1530,6 +1951,10 @@ function addFabStyles() {
       background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
     }
 
+    .classpilot-fab-signout {
+      background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+    }
+
     .classpilot-fab-disabled {
       background: linear-gradient(135deg, #e5e7eb 0%, #d1d5db 100%) !important;
       opacity: 0.6;
@@ -1748,9 +2173,26 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
 
 // Initialize FAB when DOM is ready
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', createFloatingActionButton);
+  document.addEventListener('DOMContentLoaded', () => {
+    createFloatingActionButton();
+    requestAuthGateState();
+  });
 } else {
   createFloatingActionButton();
+  requestAuthGateState();
+}
+
+function signOutStudent() {
+  closeFabMenu();
+  hideMessageBox();
+  chrome.runtime.sendMessage({ type: 'student-sign-out' }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) {
+      showFabNotification(response?.error || 'Could not sign out. Please try again.', true);
+      return;
+    }
+    showFabNotification('Signed out.');
+    requestAuthGateState();
+  });
 }
 
 console.log('ClassPilot content script loaded');
