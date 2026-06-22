@@ -113,8 +113,6 @@ let CONFIG = {
   schoolId: null,
   schoolSlug: null,
   enrollmentKey: null,
-  stationGradeLevel: null,
-  stationGroupId: null,
   identitySource: null,
   manualLoginLastSeenAt: null,
   autoRegistrationPaused: false,
@@ -156,6 +154,7 @@ const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watchi
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
+const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const MANAGED_CONFIG_KEYS = [
   'serverUrl',
   'schoolId',
@@ -164,14 +163,6 @@ const MANAGED_CONFIG_KEYS = [
   'classpilotSchoolSlug',
   'enrollmentKey',
   'classpilotEnrollmentKey',
-  'stationGradeLevel',
-  'classpilotStationGradeLevel',
-  'gradeLevel',
-  'classroomGradeLevel',
-  'stationGroupId',
-  'classpilotStationGroupId',
-  'groupId',
-  'classpilotGroupId',
 ];
 
 let trackingState = TRACKING_STATES.OFF;
@@ -201,6 +192,13 @@ let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
 let isScheduleHardOff = false;
+let sharedSignInLoginConfig = {
+  fetchedAt: 0,
+  setupRequired: false,
+  sharedSignInEnabled: false,
+  pinLoginEnabled: false,
+};
+let sharedSignInConfigPromise = null;
 
 // General-purpose message dedup: track recent _msgId values to prevent double-processing
 const recentMsgIds = new Set();
@@ -263,7 +261,7 @@ async function readManagedConfig() {
   }
 }
 
-function applyManagedStationConfig(managedConfig = {}) {
+function applyManagedSchoolConfig(managedConfig = {}) {
   CONFIG.schoolId = normalizeManagedString(managedConfig.schoolId) ||
     normalizeManagedString(managedConfig.classpilotSchoolId) ||
     CONFIG.schoolId;
@@ -273,16 +271,6 @@ function applyManagedStationConfig(managedConfig = {}) {
   CONFIG.enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey) ||
     normalizeManagedString(managedConfig.classpilotEnrollmentKey) ||
     CONFIG.enrollmentKey;
-  CONFIG.stationGradeLevel = normalizeManagedString(managedConfig.stationGradeLevel) ||
-    normalizeManagedString(managedConfig.classpilotStationGradeLevel) ||
-    normalizeManagedString(managedConfig.gradeLevel) ||
-    normalizeManagedString(managedConfig.classroomGradeLevel) ||
-    CONFIG.stationGradeLevel;
-  CONFIG.stationGroupId = normalizeManagedString(managedConfig.stationGroupId) ||
-    normalizeManagedString(managedConfig.classpilotStationGroupId) ||
-    normalizeManagedString(managedConfig.groupId) ||
-    normalizeManagedString(managedConfig.classpilotGroupId) ||
-    CONFIG.stationGroupId;
 }
 
 function scheduleLicenseCheck() {
@@ -368,7 +356,7 @@ async function checkLicenseStatus(reason = 'manual') {
 
 async function resolveServerUrl() {
   const managedConfig = await readManagedConfig();
-  applyManagedStationConfig(managedConfig);
+  applyManagedSchoolConfig(managedConfig);
 
   const managedUrl = extractManagedValue(managedConfig?.serverUrl);
   if (isHttpUrl(managedUrl)) {
@@ -835,19 +823,74 @@ function hasStudentAuth() {
   return Boolean(CONFIG.deviceId && CONFIG.studentToken && (CONFIG.activeStudentId || CONFIG.studentEmail));
 }
 
+function hasManagedSchoolSetup() {
+  return Boolean((CONFIG.schoolId || CONFIG.schoolSlug) && CONFIG.enrollmentKey);
+}
+
+async function refreshSharedSignInLoginConfig(options = {}) {
+  const force = options.force === true;
+  const now = Date.now();
+  if (!force && sharedSignInLoginConfig.fetchedAt && now - sharedSignInLoginConfig.fetchedAt < SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS) {
+    return sharedSignInLoginConfig;
+  }
+  if (sharedSignInConfigPromise) {
+    return sharedSignInConfigPromise;
+  }
+
+  sharedSignInConfigPromise = (async () => {
+    if (!hasManagedSchoolSetup()) {
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        pinLoginEnabled: false,
+      };
+      return sharedSignInLoginConfig;
+    }
+
+    const params = new URLSearchParams({ enrollmentKey: CONFIG.enrollmentKey });
+    if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
+    if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
+
+    try {
+      const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`, {
+        cache: 'no-store',
+      });
+      const data = await response.json().catch(() => ({}));
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: !response.ok,
+        sharedSignInEnabled: response.ok && data.sharedSignInEnabled === true,
+        pinLoginEnabled: response.ok && data.pinLoginEnabled === true,
+      };
+      return sharedSignInLoginConfig;
+    } catch (error) {
+      console.warn('[Auth Gate] Shared sign-in config check failed:', error?.message || error);
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        pinLoginEnabled: false,
+      };
+      return sharedSignInLoginConfig;
+    }
+  })().finally(() => {
+    sharedSignInConfigPromise = null;
+  });
+
+  return sharedSignInConfigPromise;
+}
+
 function getAuthGateState() {
-  const hasPinStationConfig = Boolean(
-    (CONFIG.schoolId || CONFIG.schoolSlug) &&
-    CONFIG.enrollmentKey
-  );
+  const hasSchoolSetup = hasManagedSchoolSetup();
   return {
     authRequired: !hasStudentAuth(),
-    setupRequired: false,
+    setupRequired: !hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true,
     studentName: CONFIG.studentName || null,
     studentEmail: CONFIG.studentEmail || null,
-    stationGradeLevel: CONFIG.stationGradeLevel || null,
-    stationGroupId: CONFIG.stationGroupId || null,
-    hasPinStationConfig,
+    sharedSignInEnabled: sharedSignInLoginConfig.sharedSignInEnabled === true,
+    pinLoginEnabled: sharedSignInLoginConfig.pinLoginEnabled === true,
+    hasManagedSchoolSetup: hasSchoolSetup,
     manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
   };
 }
@@ -875,6 +918,9 @@ async function enforceAuthGateForTab(tabOrId) {
     const tab = typeof tabOrId === 'number' ? await chrome.tabs.get(tabOrId) : tabOrId;
     if (!tab?.id || !isHttpUrl(tab.url || '')) {
       return;
+    }
+    if (!hasStudentAuth()) {
+      await refreshSharedSignInLoginConfig();
     }
 
     const message = hasStudentAuth()
@@ -965,12 +1011,11 @@ async function expireManualAuthIfStale(reason = 'stale-check') {
 }
 
 async function fetchLoginRosterForGate(options = {}) {
-  if (!(CONFIG.schoolId || CONFIG.schoolSlug) || !CONFIG.enrollmentKey) {
-    return { success: false, setupRequired: true, error: 'Station setup required' };
+  if (!hasManagedSchoolSetup()) {
+    return { success: false, setupRequired: true, error: 'Shared Chromebook setup required' };
   }
   const requestedGradeLevel = String(options.gradeLevel || '').trim();
-  const effectiveGradeLevel = CONFIG.stationGradeLevel || requestedGradeLevel;
-  if (!(effectiveGradeLevel || CONFIG.stationGroupId)) {
+  if (!requestedGradeLevel) {
     return {
       success: false,
       setupRequired: false,
@@ -980,9 +1025,8 @@ async function fetchLoginRosterForGate(options = {}) {
 
   const params = new URLSearchParams({
     enrollmentKey: CONFIG.enrollmentKey,
+    gradeLevel: requestedGradeLevel,
   });
-  if (effectiveGradeLevel) params.set('gradeLevel', effectiveGradeLevel);
-  if (CONFIG.stationGroupId) params.set('groupId', CONFIG.stationGroupId);
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
@@ -1149,7 +1193,7 @@ async function ensureRegistered() {
     // Load config from server
     const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
     await fetchClientConfig(serverUrl);
-    applyManagedStationConfig(await readManagedConfig());
+    applyManagedSchoolConfig(await readManagedConfig());
     
     // Get or create IDs (including studentToken for consistent state)
     let stored = await kv.get([
@@ -3882,6 +3926,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'get-auth-state') {
     expireManualAuthIfStale('get-auth-state')
+      .then(() => hasStudentAuth() ? null : refreshSharedSignInLoginConfig())
       .then(() => {
         const response = { success: true, state: getAuthGateState() };
         if (message.includeConfig) response.config = CONFIG;

@@ -216,12 +216,12 @@ function removeAuthGate() {
 }
 
 function buildAuthGateMarkup(state) {
-  const canCheckPinFlow = state.hasPinStationConfig;
+  const canUsePinFlow = state.pinLoginEnabled === true;
   const title = state.setupRequired
     ? 'Ask your teacher to set up this Chromebook'
     : 'Sign in to ClassPilot';
   const subtitle = state.setupRequired
-    ? 'This station needs its school and grade or class settings before browsing can start.'
+    ? 'This Chromebook needs the school setup key and Shared Chromebook Sign-In enabled before browsing can start.'
     : 'School browsing requires ClassPilot sign-in on this shared Chromebook.';
 
   return `
@@ -286,7 +286,7 @@ function buildAuthGateMarkup(state) {
         gap: 14px !important;
       }
       .classpilot-auth-tabs {
-        display: none;
+        display: flex !important;
         gap: 8px !important;
         margin-bottom: 14px !important;
       }
@@ -370,9 +370,9 @@ function buildAuthGateMarkup(state) {
       <p>${escapeHtml(subtitle)}</p>
       <div class="classpilot-auth-error" id="classpilot-auth-error"></div>
       ${state.setupRequired ? buildSetupRequiredMarkup() : `
-        ${canCheckPinFlow ? buildAuthTabsMarkup() : ''}
+        ${canUsePinFlow ? buildAuthTabsMarkup() : ''}
         ${buildEmailLoginMarkup()}
-        ${canCheckPinFlow ? buildPinLoginMarkup(state) : ''}
+        ${canUsePinFlow ? buildPinLoginMarkup() : ''}
       `}
     </div>
   `;
@@ -390,7 +390,7 @@ function buildAuthTabsMarkup() {
 function buildSetupRequiredMarkup() {
   return `
     <div class="classpilot-auth-roster-note">
-      This Chromebook is missing managed ClassPilot station settings.
+      This Chromebook is missing the managed ClassPilot school setup policy, or Shared Chromebook Sign-In is turned off.
     </div>
   `;
 }
@@ -411,18 +411,17 @@ function buildEmailLoginMarkup() {
   `;
 }
 
-function buildPinLoginMarkup(state) {
-  const needsGradeChoice = !state.stationGradeLevel && !state.stationGroupId;
+function buildPinLoginMarkup() {
   return `
     <form class="classpilot-auth-form" id="classpilot-auth-pin-form" style="display:none !important;">
       <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status">
-        ${needsGradeChoice ? 'Select your grade to load your roster.' : 'Loading roster...'}
+        Select your grade to load your roster.
       </div>
-      ${needsGradeChoice ? buildGradeChoiceMarkup() : ''}
+      ${buildGradeChoiceMarkup()}
       <div class="classpilot-auth-field">
         <label for="classpilot-auth-student">Student</label>
         <select id="classpilot-auth-student" disabled required>
-          <option value="">${needsGradeChoice ? 'Select a grade first...' : 'Loading students...'}</option>
+          <option value="">Select a grade first...</option>
         </select>
       </div>
       <div class="classpilot-auth-field">
@@ -489,8 +488,6 @@ function attachAuthGateHandlers(state) {
     const gradeSelect = document.getElementById('classpilot-auth-grade');
     if (gradeSelect) {
       gradeSelect.addEventListener('change', () => loadAuthGateRoster());
-    } else {
-      loadAuthGateRoster();
     }
     const pinInput = document.getElementById('classpilot-auth-pin');
     pinInput?.addEventListener('input', () => {
@@ -554,7 +551,7 @@ function loadAuthGateRoster() {
     const students = response.students || [];
     if (tabs) tabs.style.setProperty('display', 'flex', 'important');
     if (!students.length) {
-      status.textContent = 'No students are ready for PIN sign-in on this station.';
+      status.textContent = 'No students are ready for PIN sign-in in this grade.';
       select.innerHTML = '<option value="">No students available</option>';
       select.disabled = true;
       submit.disabled = true;
