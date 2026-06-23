@@ -196,6 +196,7 @@ let sharedSignInLoginConfig = {
   fetchedAt: 0,
   setupRequired: false,
   sharedSignInEnabled: false,
+  loginMethod: 'name_pin',
   pinLoginEnabled: false,
 };
 let sharedSignInConfigPromise = null;
@@ -890,6 +891,7 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         fetchedAt: Date.now(),
         setupRequired: true,
         sharedSignInEnabled: false,
+        loginMethod: 'name_pin',
         pinLoginEnabled: false,
       };
       return sharedSignInLoginConfig;
@@ -911,7 +913,8 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         fetchedAt: Date.now(),
         setupRequired: !response.ok,
         sharedSignInEnabled: response.ok && data.sharedSignInEnabled === true,
-        pinLoginEnabled: response.ok && data.pinLoginEnabled === true,
+        loginMethod: response.ok && data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+        pinLoginEnabled: response.ok && data.loginMethod !== 'email_id',
       };
       return sharedSignInLoginConfig;
     } catch (error) {
@@ -920,6 +923,7 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         fetchedAt: Date.now(),
         setupRequired: true,
         sharedSignInEnabled: false,
+        loginMethod: 'name_pin',
         pinLoginEnabled: false,
       };
       return sharedSignInLoginConfig;
@@ -939,7 +943,8 @@ function getAuthGateState() {
     studentName: CONFIG.studentName || null,
     studentEmail: CONFIG.studentEmail || null,
     sharedSignInEnabled: sharedSignInLoginConfig.sharedSignInEnabled === true,
-    pinLoginEnabled: sharedSignInLoginConfig.pinLoginEnabled === true,
+    loginMethod: sharedSignInLoginConfig.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+    pinLoginEnabled: sharedSignInLoginConfig.loginMethod === 'name_pin',
     hasManagedSchoolSetup: hasSchoolSetup,
     manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
   };
@@ -1081,11 +1086,17 @@ async function fetchLoginRosterForGate(options = {}) {
     return {
       success: false,
       setupRequired: response.status === 401 || response.status === 404,
-      pinLoginEnabled: data.pinLoginEnabled === true,
+      pinLoginEnabled: data.loginMethod !== 'email_id',
+      loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
       error: data.error || 'Could not load roster',
     };
   }
-  return { success: true, students: data.students || [], pinLoginEnabled: data.pinLoginEnabled === true };
+  return {
+    success: true,
+    students: data.students || [],
+    loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+    pinLoginEnabled: data.loginMethod !== 'email_id',
+  };
 }
 
 async function manualStudentLogin(payload) {
