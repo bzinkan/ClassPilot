@@ -54,14 +54,22 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 
 ### Configure Extension Policy
 
-Create a policy JSON file with the server URL:
+After SchoolPilot admin enables **Shared Chromebook Sign-In**, copy the managed
+policy JSON shown in ClassPilot Settings. It should look like this:
 
 ```json
 {
-  "serverUrl": "https://your-replit-app-url.replit.dev",
-  "schoolId": "your-school-id"
+  "serverUrl": "https://school-pilot.net",
+  "schoolSlug": "your-school-slug",
+  "enrollmentKey": "your-shared-chromebook-setup-key"
 }
 ```
+
+`schoolId` may be used instead of `schoolSlug` if needed. This is a one-time
+school-level policy for the student Chromebook organizational unit. Do not add
+grade, class, or Chromebook-specific fields. When Name + PIN login is enabled,
+the student chooses their grade during sign-in, then selects their name and
+enters their 4-digit ClassPilot PIN.
 
 In Google Admin Console:
 1. Find the uploaded extension

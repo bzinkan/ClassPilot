@@ -106,9 +106,16 @@ let CONFIG = {
   deviceId: null,
   studentName: null,
   studentEmail: null,
+  studentToken: null,
   classId: null,
   isSharing: false,
   activeStudentId: null,
+  schoolId: null,
+  schoolSlug: null,
+  enrollmentKey: null,
+  identitySource: null,
+  manualLoginLastSeenAt: null,
+  autoRegistrationPaused: false,
 };
 
 let ws = null; // Legacy reference, kept for compatibility checks
@@ -146,6 +153,17 @@ const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - fallback for Chrome alarm
 const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
+const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
+const MANAGED_CONFIG_KEYS = [
+  'serverUrl',
+  'schoolId',
+  'classpilotSchoolId',
+  'schoolSlug',
+  'classpilotSchoolSlug',
+  'enrollmentKey',
+  'classpilotEnrollmentKey',
+];
 
 let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
@@ -174,6 +192,14 @@ let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
 let isScheduleHardOff = false;
+let sharedSignInLoginConfig = {
+  fetchedAt: 0,
+  setupRequired: false,
+  sharedSignInEnabled: false,
+  loginMethod: 'name_pin',
+  pinLoginEnabled: false,
+};
+let sharedSignInConfigPromise = null;
 
 // General-purpose message dedup: track recent _msgId values to prevent double-processing
 const recentMsgIds = new Set();
@@ -188,7 +214,54 @@ let offscreenReady = false;
 const kv = {
   get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
+  remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
 };
+
+const AUTH_STATE_KEYS = [
+  'studentToken',
+  'activeStudentId',
+  'studentEmail',
+  'studentName',
+  'registered',
+  'lastRegisteredEmail',
+  'identitySource',
+  'manualLoginLastSeenAt',
+  'autoRegistrationPaused',
+];
+
+function hasSessionStorage() {
+  return Boolean(chrome.storage?.session);
+}
+
+const sessionKv = {
+  get: (keys) => new Promise(resolve => chrome.storage.session.get(keys, resolve)),
+  set: (obj) => new Promise(resolve => chrome.storage.session.set(obj, resolve)),
+  remove: (keys) => new Promise(resolve => chrome.storage.session.remove(keys, resolve)),
+};
+
+async function getStoredAuthState(keys) {
+  const local = await kv.get(keys);
+  if (!hasSessionStorage()) return local;
+  const session = await sessionKv.get(keys);
+  return { ...local, ...session };
+}
+
+async function setManualAuthState(obj) {
+  if (hasSessionStorage()) {
+    await sessionKv.set(obj);
+    await kv.remove(Object.keys(obj));
+  } else {
+    await kv.set(obj);
+  }
+}
+
+async function clearStoredAuthState(localOverrides = {}) {
+  const cleared = Object.fromEntries(AUTH_STATE_KEYS.map((key) => [key, null]));
+  await kv.set({ ...cleared, ...localOverrides });
+  if (hasSessionStorage()) {
+    await sessionKv.remove(AUTH_STATE_KEYS);
+  }
+}
 
 function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
@@ -215,6 +288,37 @@ function extractManagedValue(value) {
     return value.Value;
   }
   return value;
+}
+
+function normalizeManagedString(value) {
+  const extracted = extractManagedValue(value);
+  if (extracted === undefined || extracted === null) return null;
+  const normalized = String(extracted).trim();
+  return normalized || null;
+}
+
+async function readManagedConfig() {
+  if (!chrome.storage?.managed) {
+    return {};
+  }
+  try {
+    return await new Promise(resolve => chrome.storage.managed.get(MANAGED_CONFIG_KEYS, resolve));
+  } catch (error) {
+    console.warn('[Service Worker] Managed config read failed:', error);
+    return {};
+  }
+}
+
+function applyManagedSchoolConfig(managedConfig = {}) {
+  CONFIG.schoolId = normalizeManagedString(managedConfig.schoolId) ||
+    normalizeManagedString(managedConfig.classpilotSchoolId) ||
+    CONFIG.schoolId;
+  CONFIG.schoolSlug = normalizeManagedString(managedConfig.schoolSlug) ||
+    normalizeManagedString(managedConfig.classpilotSchoolSlug) ||
+    CONFIG.schoolSlug;
+  CONFIG.enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey) ||
+    normalizeManagedString(managedConfig.classpilotEnrollmentKey) ||
+    CONFIG.enrollmentKey;
 }
 
 function scheduleLicenseCheck() {
@@ -299,14 +403,8 @@ async function checkLicenseStatus(reason = 'manual') {
 }
 
 async function resolveServerUrl() {
-  let managedConfig = {};
-  if (chrome.storage?.managed) {
-    try {
-      managedConfig = await new Promise(resolve => chrome.storage.managed.get(['serverUrl'], resolve));
-    } catch (error) {
-      console.warn('[Service Worker] Managed config read failed:', error);
-    }
-  }
+  const managedConfig = await readManagedConfig();
+  applyManagedSchoolConfig(managedConfig);
 
   const managedUrl = extractManagedValue(managedConfig?.serverUrl);
   if (isHttpUrl(managedUrl)) {
@@ -609,6 +707,22 @@ async function updateTrackingState(reason = 'state-check') {
     return;
   }
 
+  if (await expireManualAuthIfStale(`tracking:${reason}`)) {
+    return;
+  }
+
+  if (!hasStudentAuth()) {
+    if (trackingState !== TRACKING_STATES.OFF) {
+      trackingState = TRACKING_STATES.OFF;
+      scheduleHeartbeat(null);
+      scheduleScreenshotCapture(false);
+      disconnectWebSocket();
+      syncObservedHeartbeat('auth-required');
+    }
+    await notifyAuthGateStateToTabs();
+    return;
+  }
+
   const nextState = determineTrackingState();
   if (nextState === TRACKING_STATES.OFF && isScheduleHardOff) {
     if (trackingState !== nextState) {
@@ -681,6 +795,10 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
     return;
   }
+  if (!hasStudentAuth()) {
+    notifyAuthGateStateToTabs().catch(() => {});
+    return;
+  }
   if (!isHttpUrl(url)) {
     return;
   }
@@ -745,6 +863,327 @@ function attachLegacyStudentToken(payload, headers) {
   }
 }
 
+function isManualIdentitySource(source = CONFIG.identitySource) {
+  return source === 'manual_email_id' || source === 'manual_pin';
+}
+
+function hasStudentAuth() {
+  return Boolean(CONFIG.deviceId && CONFIG.studentToken && (CONFIG.activeStudentId || CONFIG.studentEmail));
+}
+
+function hasManagedSchoolSetup() {
+  return Boolean((CONFIG.schoolId || CONFIG.schoolSlug) && CONFIG.enrollmentKey);
+}
+
+async function refreshSharedSignInLoginConfig(options = {}) {
+  const force = options.force === true;
+  const now = Date.now();
+  if (!force && sharedSignInLoginConfig.fetchedAt && now - sharedSignInLoginConfig.fetchedAt < SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS) {
+    return sharedSignInLoginConfig;
+  }
+  if (sharedSignInConfigPromise) {
+    return sharedSignInConfigPromise;
+  }
+
+  sharedSignInConfigPromise = (async () => {
+    if (!hasManagedSchoolSetup()) {
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        loginMethod: 'name_pin',
+        pinLoginEnabled: false,
+      };
+      return sharedSignInLoginConfig;
+    }
+
+    const params = new URLSearchParams();
+    if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
+    if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
+
+    try {
+      const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`, {
+        cache: 'no-store',
+        headers: {
+          'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
+        },
+      });
+      const data = await response.json().catch(() => ({}));
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: !response.ok,
+        sharedSignInEnabled: response.ok && data.sharedSignInEnabled === true,
+        loginMethod: response.ok && data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+        pinLoginEnabled: response.ok && data.loginMethod !== 'email_id',
+      };
+      return sharedSignInLoginConfig;
+    } catch (error) {
+      console.warn('[Auth Gate] Shared sign-in config check failed:', error?.message || error);
+      sharedSignInLoginConfig = {
+        fetchedAt: Date.now(),
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        loginMethod: 'name_pin',
+        pinLoginEnabled: false,
+      };
+      return sharedSignInLoginConfig;
+    }
+  })().finally(() => {
+    sharedSignInConfigPromise = null;
+  });
+
+  return sharedSignInConfigPromise;
+}
+
+function getAuthGateState() {
+  const hasSchoolSetup = hasManagedSchoolSetup();
+  return {
+    authRequired: !hasStudentAuth(),
+    setupRequired: !hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true,
+    studentName: CONFIG.studentName || null,
+    studentEmail: CONFIG.studentEmail || null,
+    sharedSignInEnabled: sharedSignInLoginConfig.sharedSignInEnabled === true,
+    loginMethod: sharedSignInLoginConfig.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+    pinLoginEnabled: sharedSignInLoginConfig.loginMethod === 'name_pin',
+    hasManagedSchoolSetup: hasSchoolSetup,
+    manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+  };
+}
+
+async function ensureDeviceId() {
+  if (CONFIG.deviceId) return CONFIG.deviceId;
+  const stored = await kv.get(['deviceId']);
+  const deviceId = stored.deviceId || ('device-' + crypto.randomUUID().slice(0, 11));
+  CONFIG.deviceId = deviceId;
+  await kv.set({ deviceId });
+  return deviceId;
+}
+
+async function notifyAuthGateStateToTabs() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    await Promise.all(tabs.map((tab) => enforceAuthGateForTab(tab)));
+  } catch (error) {
+    console.warn('[Auth Gate] Failed to notify tabs:', error?.message || error);
+  }
+}
+
+async function enforceAuthGateForTab(tabOrId) {
+  try {
+    const tab = typeof tabOrId === 'number' ? await chrome.tabs.get(tabOrId) : tabOrId;
+    if (!tab?.id || !isHttpUrl(tab.url || '')) {
+      return;
+    }
+    if (!hasStudentAuth()) {
+      await refreshSharedSignInLoginConfig();
+    }
+
+    const message = hasStudentAuth()
+      ? { type: 'CLASSPILOT_AUTH_COMPLETE', state: getAuthGateState() }
+      : { type: 'CLASSPILOT_AUTH_REQUIRED', state: getAuthGateState() };
+
+    try {
+      await chrome.tabs.sendMessage(tab.id, message);
+    } catch (error) {
+      if (!hasStudentAuth() && chrome.scripting) {
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content.js'],
+          });
+          await chrome.tabs.sendMessage(tab.id, message);
+        } catch {
+          // Some pages reject extension scripts; the gate will apply on the next normal page.
+        }
+      }
+    }
+  } catch {
+    // Tabs can disappear while we are enforcing the gate.
+  }
+}
+
+async function clearStudentAuth(reason = 'manual-clear', options = {}) {
+  const tokenToEnd = CONFIG.studentToken;
+  const pauseAutoRegistration = options.pauseAutoRegistration === true;
+
+  if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
+    try {
+      await fetch(`${CONFIG.serverUrl}/api/extension/sign-out`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${tokenToEnd}`,
+        },
+        body: JSON.stringify({ deviceId: CONFIG.deviceId, reason }),
+      });
+    } catch (error) {
+      console.warn('[Auth] Session-end call failed:', error?.message || error);
+    }
+  }
+
+  CONFIG.studentToken = null;
+  CONFIG.studentEmail = null;
+  CONFIG.studentName = null;
+  CONFIG.activeStudentId = null;
+  CONFIG.identitySource = null;
+  CONFIG.manualLoginLastSeenAt = null;
+  CONFIG.autoRegistrationPaused = pauseAutoRegistration;
+
+  await clearStoredAuthState({
+    registered: false,
+    autoRegistrationPaused: pauseAutoRegistration,
+  });
+
+  scheduleHeartbeat(null);
+  scheduleScreenshotCapture(false);
+  disconnectWebSocket();
+  chrome.action.setBadgeText({ text: 'AUTH' });
+  chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+  await notifyAuthGateStateToTabs();
+}
+
+async function expireManualAuthIfStale(reason = 'stale-check') {
+  const source = CONFIG.identitySource;
+  if (!isManualIdentitySource(source)) {
+    return false;
+  }
+
+  const lastSeen = Number(CONFIG.manualLoginLastSeenAt || 0);
+  if (lastSeen && Date.now() - lastSeen <= MANUAL_LOGIN_STALE_MS) {
+    return false;
+  }
+
+  console.log(`[Auth] Manual login expired (${reason})`);
+  await clearStudentAuth('manual-stale-expired', { notifyBackend: false });
+  return true;
+}
+
+async function fetchLoginRosterForGate(options = {}) {
+  if (!hasManagedSchoolSetup()) {
+    return { success: false, setupRequired: true, error: 'Shared Chromebook setup required' };
+  }
+  const requestedGradeLevel = String(options.gradeLevel || '').trim();
+  if (!requestedGradeLevel) {
+    return {
+      success: false,
+      setupRequired: false,
+      error: 'Select a grade to load the roster',
+    };
+  }
+
+  const params = new URLSearchParams({ gradeLevel: requestedGradeLevel });
+  if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
+  if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
+
+  const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
+    cache: 'no-store',
+    headers: {
+      'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    return {
+      success: false,
+      setupRequired: response.status === 401 || response.status === 404,
+      pinLoginEnabled: data.loginMethod !== 'email_id',
+      loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+      error: data.error || 'Could not load roster',
+    };
+  }
+  return {
+    success: true,
+    students: data.students || [],
+    loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+    pinLoginEnabled: data.loginMethod !== 'email_id',
+  };
+}
+
+async function manualStudentLogin(payload) {
+  const deviceId = await ensureDeviceId();
+  const isPinLogin = payload.mode === 'pin';
+  const body = {
+    deviceId,
+    deviceName: null,
+    classId: 'auto',
+  };
+
+  if (isPinLogin) {
+    body.studentId = payload.studentId;
+    body.pin = payload.pin;
+    body.schoolId = CONFIG.schoolId || undefined;
+    body.schoolSlug = CONFIG.schoolSlug || undefined;
+    body.enrollmentKey = CONFIG.enrollmentKey || undefined;
+  } else {
+    body.studentEmail = normalizeEmail(payload.studentEmail);
+    body.studentIdNumber = String(payload.studentIdNumber || '').trim();
+    body.schoolId = CONFIG.schoolId || undefined;
+    body.schoolSlug = CONFIG.schoolSlug || undefined;
+    if (CONFIG.enrollmentKey) body.enrollmentKey = CONFIG.enrollmentKey;
+  }
+
+  const response = await fetch(`${CONFIG.serverUrl}/api/extension/student-login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.studentToken) {
+    throw new Error(data.error || 'Invalid student credentials');
+  }
+
+  const student = data.student || {};
+  const studentName = [student.firstName, student.lastName].filter(Boolean).join(' ') ||
+    student.studentName ||
+    student.email ||
+    body.studentEmail ||
+    'Student';
+  const studentEmail = student.email || body.studentEmail || null;
+  const now = Date.now();
+
+  CONFIG.studentToken = data.studentToken;
+  CONFIG.activeStudentId = student.id || null;
+  CONFIG.studentEmail = studentEmail;
+  CONFIG.studentName = studentName;
+  CONFIG.classId = 'auto';
+  CONFIG.identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
+  CONFIG.manualLoginLastSeenAt = now;
+  CONFIG.autoRegistrationPaused = false;
+
+  await kv.set({
+    deviceId,
+    classId: 'auto',
+  });
+  await setManualAuthState({
+    studentToken: data.studentToken,
+    activeStudentId: CONFIG.activeStudentId,
+    studentEmail,
+    studentName,
+    registered: true,
+    lastRegisteredEmail: studentEmail,
+    identitySource: CONFIG.identitySource,
+    manualLoginLastSeenAt: now,
+    autoRegistrationPaused: false,
+  });
+
+  await checkLicenseStatus('manual-login');
+  await initializeAdaptiveTracking('manual-login');
+  await notifyAuthGateStateToTabs();
+
+  return {
+    success: true,
+    student: {
+      id: CONFIG.activeStudentId,
+      name: studentName,
+      email: studentEmail,
+    },
+    manualExpiresInSeconds: data.manualExpiresInSeconds || Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+  };
+}
+
 // Email normalization: ensures consistent student identity
 function normalizeEmail(raw) {
   if (!raw) return null;
@@ -761,62 +1200,113 @@ function normalizeEmail(raw) {
   }
 }
 
+async function detectChromeProfileEmail() {
+  if (chrome.identity?.getProfileUserInfo) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const profile = await new Promise(resolve =>
+          chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
+        );
+        if (profile?.email) {
+          return normalizeEmail(profile.email);
+        }
+      } catch (err) {
+        console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
+      }
+      if (attempt < 2) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+
+  if (chrome.identity?.getAuthToken) {
+    try {
+      const token = await new Promise((resolve, reject) =>
+        chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
+      );
+      if (token) {
+        const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const info = await resp.json();
+        if (info?.email) {
+          return normalizeEmail(info.email);
+        }
+      }
+    } catch {
+      // Fallback failed; continue without email.
+    }
+  }
+
+  return null;
+}
+
 // Auto-registration: ensures extension always has IDs before sharing
 // EMAIL-FIRST IDENTITY: Email is required, deviceId is internal tracking only
 async function ensureRegistered() {
   console.log('[Service Worker] Ensuring registration...');
   
   try {
+    await expireManualAuthIfStale('ensure-registered');
+
     // Load config from server
     const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
     await fetchClientConfig(serverUrl);
+    applyManagedSchoolConfig(await readManagedConfig());
     
     // Get or create IDs (including studentToken for consistent state)
-    let stored = await kv.get(['studentEmail', 'deviceId', 'registered', 'lastRegisteredEmail', 'studentToken']);
+    let stored = await getStoredAuthState([
+      'studentEmail',
+      'studentName',
+      'deviceId',
+      'registered',
+      'lastRegisteredEmail',
+      'studentToken',
+      'activeStudentId',
+      'identitySource',
+      'manualLoginLastSeenAt',
+      'autoRegistrationPaused',
+    ]);
+
+    if (stored.studentToken) {
+      CONFIG.studentToken = stored.studentToken;
+    }
+    if (stored.deviceId) {
+      CONFIG.deviceId = stored.deviceId;
+    }
     
-    // Get student email from Chrome profile (managed devices)
-    // Retry up to 3 times with delay — Chrome may not have profile ready immediately on startup
-    if (!stored.studentEmail && chrome.identity?.getProfileUserInfo) {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          const profile = await new Promise(resolve =>
-            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, resolve)
-          );
-          if (profile?.email) {
-            stored.studentEmail = normalizeEmail(profile.email);
-            console.log(`[Service Worker] Auto-detected email (attempt ${attempt + 1})`);
-            break;
-          }
-        } catch (err) {
-          console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
-        }
-        if (!stored.studentEmail && attempt < 2) {
-          await new Promise(r => setTimeout(r, 2000)); // Wait 2s before retry
-        }
-      }
-      // Fallback: try getAuthToken to detect signed-in user
-      if (!stored.studentEmail && chrome.identity?.getAuthToken) {
-        try {
-          const token = await new Promise((resolve, reject) =>
-            chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
-          );
-          if (token) {
-            const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
-              headers: { Authorization: `Bearer ${token}` }
-            });
-            const info = await resp.json();
-            if (info?.email) {
-              stored.studentEmail = normalizeEmail(info.email);
-              console.log('[Service Worker] Detected email via getAuthToken fallback');
-            }
-          }
-        } catch { /* fallback failed, continue without email */ }
+    // Get the current Chrome profile email on every Chrome-profile auth pass.
+    // If student A signs out and student B signs in, stale stored email/token
+    // must not keep attributing B's browsing to A.
+    if (!isManualIdentitySource(stored.identitySource)) {
+      const profileEmail = await detectChromeProfileEmail();
+      if (profileEmail && stored.studentEmail && stored.studentEmail !== profileEmail) {
+        console.log(`[Service Worker] Chrome profile changed from ${stored.studentEmail} to ${profileEmail}; re-registering`);
+        await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
+        stored = {
+          ...stored,
+          studentEmail: profileEmail,
+          studentName: null,
+          registered: false,
+          lastRegisteredEmail: null,
+          studentToken: null,
+          activeStudentId: null,
+          identitySource: null,
+          manualLoginLastSeenAt: null,
+          autoRegistrationPaused: false,
+        };
+      } else if (profileEmail) {
+        stored.studentEmail = profileEmail;
+      } else if (stored.identitySource === 'chrome_profile' && stored.studentEmail) {
+        console.log('[Service Worker] Chrome profile email disappeared; clearing Chrome-profile student auth');
+        await clearStudentAuth('chrome-profile-email-missing', { notifyBackend: true });
+        return await kv.get(['deviceId']);
       }
     }
 
     // If we still have no email after retries
     if (!stored.studentEmail) {
-      console.warn('[Service Worker] No studentEmail detected after retries — will retry on next alarm');
+      console.warn('[Service Worker] No Chrome profile email detected — shared sign-in gate will be required');
     }
     
     // Always create a deviceId internally (never exposed to teachers)
@@ -825,13 +1315,30 @@ async function ensureRegistered() {
     }
     
     // Save to storage
-    await kv.set(stored);
+    if (isManualIdentitySource(stored.identitySource)) {
+      const manualState = {};
+      for (const key of AUTH_STATE_KEYS) {
+        if (key in stored) manualState[key] = stored[key];
+      }
+      await setManualAuthState(manualState);
+      await kv.set({ deviceId: stored.deviceId });
+    } else {
+      await kv.set(stored);
+    }
     
     // Update CONFIG (email is primary identity - backend will determine schoolId from email domain)
     CONFIG.studentEmail = stored.studentEmail;
-    CONFIG.studentName = stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail;
+    CONFIG.studentName = stored.studentName || (stored.studentEmail ? stored.studentEmail.split('@')[0] : stored.studentEmail);
     CONFIG.deviceId = stored.deviceId;
     CONFIG.classId = 'auto'; // Backend determines this from email domain
+    CONFIG.activeStudentId = stored.activeStudentId || CONFIG.activeStudentId;
+    CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
+    CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
+    CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
+
+    if (await expireManualAuthIfStale('ensure-registered-storage')) {
+      return await kv.get(['deviceId']);
+    }
     
     // ✅ JWT FIX: Load existing studentToken BEFORE deciding to skip registration
     // This prevents timing issues where service worker wakes up without token in memory
@@ -839,22 +1346,37 @@ async function ensureRegistered() {
       CONFIG.studentToken = stored.studentToken;
       console.log('✅ [JWT] Loaded existing studentToken in ensureRegistered()');
     }
+
+    if (CONFIG.autoRegistrationPaused && !CONFIG.studentToken) {
+      console.log('[Auth] Auto-registration paused until the student signs in again');
+      await notifyAuthGateStateToTabs();
+      return stored;
+    }
     
     // Register with server if we have email and haven't registered yet (or email changed)
     const emailChanged = stored.lastRegisteredEmail !== stored.studentEmail;
-    const needsRegistration = stored.studentEmail && (!stored.registered || emailChanged);
+    const needsRegistration =
+      stored.studentEmail &&
+      !isManualIdentitySource(stored.identitySource) &&
+      (!stored.registered || emailChanged);
     
     if (needsRegistration) {
       try {
         console.log('[Service Worker] Registering student with server');
         const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+          },
           body: JSON.stringify({
             deviceId: stored.deviceId,
             deviceName: null, // No device name needed
             studentEmail: stored.studentEmail,
             studentName: CONFIG.studentName,
+            schoolId: CONFIG.schoolId || undefined,
+            schoolSlug: CONFIG.schoolSlug || undefined,
+            enrollmentKey: CONFIG.enrollmentKey || undefined,
           }),
         });
         
@@ -870,8 +1392,11 @@ async function ensureRegistered() {
         // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
         if (data.studentToken) {
           console.log('✅ [JWT] Received studentToken from server - storing for future heartbeats');
-          await kv.set({ studentToken: data.studentToken });
+          await kv.set({ studentToken: data.studentToken, identitySource: 'chrome_profile', manualLoginLastSeenAt: null, autoRegistrationPaused: false });
           CONFIG.studentToken = data.studentToken; // Cache in memory too
+          CONFIG.identitySource = 'chrome_profile';
+          CONFIG.manualLoginLastSeenAt = null;
+          CONFIG.autoRegistrationPaused = false;
         } else {
           console.warn('⚠️  No studentToken in registration response - legacy mode');
         }
@@ -887,6 +1412,7 @@ async function ensureRegistered() {
       } catch (error) {
         console.warn('[Service Worker] Student registration error:', error);
         await kv.set({ registered: false, studentToken: null });
+        if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
         CONFIG.studentToken = null;
         // Retry with exponential backoff, max 5 retries to prevent server flooding
         registrationRetryCount++;
@@ -906,6 +1432,7 @@ async function ensureRegistered() {
     console.log('[Service Worker] Registration complete');
 
     await checkLicenseStatus('registration');
+    await notifyAuthGateStateToTabs();
     
     return stored;
   } catch (error) {
@@ -946,11 +1473,16 @@ if (chrome.runtime.onStartup) {
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
-  const stored = await chrome.storage.local.get([
+  const stored = await getStoredAuthState([
     'deviceId',
     'config',
     'activeStudentId',
     'studentEmail',
+    'studentName',
+    'studentToken',
+    'identitySource',
+    'manualLoginLastSeenAt',
+    'autoRegistrationPaused',
     'flightPathState',
     'lockScreenState',
     'licenseActive',
@@ -976,6 +1508,19 @@ if (chrome.runtime.onStartup) {
   if (stored.studentEmail) {
     CONFIG.studentEmail = stored.studentEmail;
   }
+  if (stored.studentName) {
+    CONFIG.studentName = stored.studentName;
+  }
+  if (stored.studentToken) {
+    CONFIG.studentToken = stored.studentToken;
+  }
+  if (stored.identitySource) {
+    CONFIG.identitySource = stored.identitySource;
+  }
+  if (stored.manualLoginLastSeenAt) {
+    CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
+  }
+  CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
 
   // Restore Flight Path state if it was active
   if (stored.flightPathState) {
@@ -1257,11 +1802,10 @@ async function clearTeacherBlockListRules() {
 // Get logged-in Chromebook user info using Chrome Identity API
 async function getLoggedInUserInfo() {
   try {
-    const userInfo = await chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' });
-    console.log('Logged-in user info:', userInfo);
+    const email = await detectChromeProfileEmail();
     return {
-      email: userInfo.email || null,
-      id: userInfo.id || null,
+      email: email || null,
+      id: null,
     };
   } catch (error) {
     console.warn('Error getting logged-in user info:', error);
@@ -1271,6 +1815,14 @@ async function getLoggedInUserInfo() {
 
 // Auto-detect and register student based on Chromebook login
 async function autoDetectAndRegister() {
+  applyManagedSchoolConfig(await readManagedConfig());
+  const authPause = await chrome.storage.local.get(['autoRegistrationPaused']);
+  if (authPause.autoRegistrationPaused) {
+    console.log('[Auth] Auto-detect registration paused until manual sign-in');
+    await notifyAuthGateStateToTabs();
+    return;
+  }
+
   const userInfo = await getLoggedInUserInfo();
   
   if (userInfo.email) {
@@ -1280,24 +1832,29 @@ async function autoDetectAndRegister() {
     const emailName = userInfo.email.split('@')[0];
     const displayName = emailName.replace(/\./g, ' ').replace(/\b\w/g, l => l.toUpperCase());
     
-    CONFIG.studentEmail = userInfo.email;
+    const normalizedEmail = normalizeEmail(userInfo.email);
+    CONFIG.studentEmail = normalizedEmail;
     CONFIG.studentName = displayName;
     
     await chrome.storage.local.set({ 
-      studentEmail: userInfo.email,
+      studentEmail: normalizedEmail,
       studentName: displayName,
     });
     
-    // Auto-register if not already registered
-    const stored = await chrome.storage.local.get(['registered']);
-    if (!stored.registered) {
+    // Auto-register if not already registered or if the Chrome profile changed.
+    const stored = await chrome.storage.local.get(['registered', 'lastRegisteredEmail', 'studentEmail', 'identitySource']);
+    const emailChanged = stored.lastRegisteredEmail && stored.lastRegisteredEmail !== normalizedEmail;
+    if (emailChanged && !isManualIdentitySource(stored.identitySource)) {
+      await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
+    }
+    if (!stored.registered || emailChanged) {
       try {
         // Get or create device ID
         const deviceId = await getOrCreateDeviceId();
         
         // Register with auto-detected info
-        await registerDeviceWithStudent(deviceId, null, 'default-class', userInfo.email, displayName);
-        console.log('Auto-registered student:', userInfo.email);
+        await registerDeviceWithStudent(deviceId, null, 'default-class', normalizedEmail, displayName);
+        console.log('Auto-registered student:', normalizedEmail);
       } catch (error) {
         console.warn('Auto-registration failed:', error);
       }
@@ -1307,8 +1864,30 @@ async function autoDetectAndRegister() {
   }
 }
 
+if (chrome.identity?.onSignInChanged) {
+  chrome.identity.onSignInChanged.addListener(async () => {
+    try {
+      if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
+        await ensureRegistered();
+        await notifyAuthGateStateToTabs();
+      }
+    } catch (error) {
+      console.warn('[Auth] Failed to refresh registration after Chrome sign-in change:', error?.message || error);
+    }
+  });
+}
+
 // Load config from storage on startup
-chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentToken'], async (result) => {
+getStoredAuthState([
+  'config',
+  'activeStudentId',
+  'studentEmail',
+  'studentName',
+  'studentToken',
+  'identitySource',
+  'manualLoginLastSeenAt',
+  'autoRegistrationPaused',
+]).then(async (result) => {
   try {
     const resolvedServerUrl = await resolveServerUrl();
 
@@ -1331,6 +1910,16 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentT
     if (result.studentEmail) {
       CONFIG.studentEmail = result.studentEmail;
     }
+    if (result.studentName) {
+      CONFIG.studentName = result.studentName;
+    }
+    if (result.identitySource) {
+      CONFIG.identitySource = result.identitySource;
+    }
+    if (result.manualLoginLastSeenAt) {
+      CONFIG.manualLoginLastSeenAt = result.manualLoginLastSeenAt;
+    }
+    CONFIG.autoRegistrationPaused = result.autoRegistrationPaused === true;
 
     // ✅ JWT AUTHENTICATION: Load studentToken from storage
     if (result.studentToken) {
@@ -1338,13 +1927,22 @@ chrome.storage.local.get(['config', 'activeStudentId', 'studentEmail', 'studentT
       console.log('✅ [JWT] Loaded studentToken from storage');
     }
 
+    if (await expireManualAuthIfStale('config-loaded')) {
+      return;
+    }
+
     // Auto-detect logged-in user and register
-    await autoDetectAndRegister();
+    if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
+      await autoDetectAndRegister();
+    } else if (CONFIG.autoRegistrationPaused) {
+      await notifyAuthGateStateToTabs();
+    }
 
     // Initialize adaptive tracking once config is loaded
     if (CONFIG.deviceId) {
       initializeAdaptiveTracking('config-loaded');
     }
+    await notifyAuthGateStateToTabs();
   } catch (error) {
     console.warn('[Service Worker] Config load error (will retry):', error?.message || error);
   }
@@ -1418,13 +2016,19 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
   try {
     const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+      },
       body: JSON.stringify({
         deviceId,
         deviceName,
         classId,
         studentEmail,
         studentName,
+        schoolId: CONFIG.schoolId || undefined,
+        schoolSlug: CONFIG.schoolSlug || undefined,
+        enrollmentKey: CONFIG.enrollmentKey || undefined,
       }),
     });
     
@@ -1442,11 +2046,19 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
     CONFIG.studentEmail = studentEmail;
     CONFIG.classId = classId;
     CONFIG.activeStudentId = data.student?.id || null;
+    CONFIG.studentToken = data.studentToken || CONFIG.studentToken;
+    CONFIG.identitySource = 'chrome_profile';
+    CONFIG.manualLoginLastSeenAt = null;
     
     await chrome.storage.local.set({ 
       config: CONFIG,
       registered: true,
       activeStudentId: data.student?.id || null,
+      studentToken: data.studentToken || null,
+      lastRegisteredEmail: studentEmail,
+      identitySource: 'chrome_profile',
+      manualLoginLastSeenAt: null,
+      autoRegistrationPaused: false,
     });
     
     // Start adaptive tracking after registration
@@ -1467,9 +2079,12 @@ async function sendHeartbeat(reason = 'manual') {
   if (trackingState === TRACKING_STATES.OFF) {
     return;
   }
-  // EMAIL-FIRST: Require email before sending heartbeats
-  if (!CONFIG.studentEmail) {
-    console.log('Skipping heartbeat - no studentEmail (dev mode or not logged in)');
+  if (await expireManualAuthIfStale(`heartbeat:${reason}`)) {
+    return;
+  }
+  if (!hasStudentAuth()) {
+    console.log('Skipping heartbeat - student authentication required');
+    await notifyAuthGateStateToTabs();
     return;
   }
   
@@ -1550,7 +2165,7 @@ async function sendHeartbeat(reason = 'manual') {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      studentEmail: CONFIG.studentEmail,    // 🟢 Primary identity - backend determines schoolId from domain
+      studentEmail: CONFIG.studentEmail || '', // JWT is the authority for manual shared-device login
       deviceId: CONFIG.deviceId,            // Internal device tracking
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
@@ -1596,15 +2211,29 @@ async function sendHeartbeat(reason = 'manual') {
       const data = await response.json().catch(() => ({}));
       await disableForInactiveLicense(data.planStatus);
       return;
+    } else if (response.status === 409) {
+      const data = await response.json().catch(() => ({}));
+      if (data?.error === 'student_session_replaced') {
+        console.warn('[Auth] Student session was replaced on another Chromebook');
+        await clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true });
+        return;
+      }
+      console.warn('Heartbeat conflict:', data?.error || response.status);
+      return;
     } else if (response.status === 401 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
       if (data?.error === "school_not_entitled") {
         await disableForInactiveLicense(data.planStatus);
         return;
       }
+      if (isManualIdentitySource()) {
+        await clearStudentAuth('manual-token-invalid', { notifyBackend: false });
+        return;
+      }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });
+      if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
       CONFIG.studentToken = null;
       // Trigger re-registration with backoff (shares retry counter with registration)
       registrationRetryCount++;
@@ -1617,6 +2246,10 @@ async function sendHeartbeat(reason = 'manual') {
       // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
       console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
+      if (isManualIdentitySource()) {
+        CONFIG.manualLoginLastSeenAt = Date.now();
+        await setManualAuthState({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
+      }
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
       // Ensure screenshot alarm is running after every successful heartbeat
@@ -1755,9 +2388,10 @@ async function captureAndSendScreenshot() {
     lastScreenshotErrorAt = Date.now();
     return;
   }
-  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
+  if (!hasStudentAuth()) {
     lastScreenshotError = 'no_config';
     lastScreenshotErrorAt = Date.now();
+    await notifyAuthGateStateToTabs();
     return;
   }
 
@@ -2576,6 +3210,9 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   try {
     // Only track main frame navigations
     if (details.frameId !== 0) return;
+    if (isHttpUrl(details.url)) {
+      enforceAuthGateForTab(details.tabId).catch(() => {});
+    }
     if (trackingState === TRACKING_STATES.OFF) return;
 
     // Skip Chrome internal pages
@@ -2592,6 +3229,8 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
   try {
+    enforceAuthGateForTab(tab).catch(() => {});
+
     // Block new tabs when attention mode is active
     if (attentionModeActive) {
       if (tab.id) {
@@ -2950,9 +3589,9 @@ async function connectWebSocket() {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
   }
-  // EMAIL-FIRST: Require both email and deviceId for WebSocket
-  if (!CONFIG.studentEmail || !CONFIG.deviceId) {
-    console.log('Skipping WebSocket - missing email or deviceId');
+  if (!hasStudentAuth()) {
+    console.log('Skipping WebSocket - student authentication required');
+    await notifyAuthGateStateToTabs();
     return;
   }
 
@@ -2975,8 +3614,9 @@ async function connectWebSocket() {
     authPayload.studentToken = CONFIG.studentToken;
     console.log('WebSocket auth: using JWT token');
   } else {
-    authPayload.studentEmail = CONFIG.studentEmail;
-    console.log('WebSocket auth: using email (no JWT token)');
+    console.log('Skipping WebSocket - student token required');
+    await notifyAuthGateStateToTabs();
+    return;
   }
 
   // Tell offscreen document to create the WebSocket
@@ -3134,6 +3774,11 @@ function handleWsMessage(rawData) {
         console.log('[WebRTC] Teacher requested to stop screen share');
         handleStopScreenShare();
       }
+
+      if (message.type === 'student-session-replaced') {
+        console.warn('[Auth] This student signed in on another Chromebook');
+        clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true }).catch(() => {});
+      }
       
       // Handle WebRTC offer from teacher
       if (message.type === 'offer') {
@@ -3261,6 +3906,7 @@ function handleWsMessage(rawData) {
 
 // Tab change listener - send immediate heartbeat when user switches tabs
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  enforceAuthGateForTab(activeInfo.tabId).catch(() => {});
   // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
   if (trackingState === TRACKING_STATES.OFF) return;
   try {
@@ -3276,6 +3922,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
+    if (changeInfo.status === 'complete') {
+      enforceAuthGateForTab(tab).catch(() => {});
+    }
     // Allow both ACTIVE and IDLE states
     if (trackingState === TRACKING_STATES.OFF) return;
     if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
@@ -3356,6 +4005,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === 'get-config') {
     sendResponse({ config: CONFIG });
+    return true;
+  }
+
+  if (message.type === 'get-auth-state') {
+    expireManualAuthIfStale('get-auth-state')
+      .then(() => hasStudentAuth() ? null : refreshSharedSignInLoginConfig())
+      .then(() => {
+        const response = { success: true, state: getAuthGateState() };
+        if (message.includeConfig) response.config = CONFIG;
+        sendResponse(response);
+      })
+      .catch((error) => {
+        const response = { success: false, error: error.message, state: getAuthGateState() };
+        if (message.includeConfig) response.config = CONFIG;
+        sendResponse(response);
+      });
+    return true;
+  }
+
+  if (message.type === 'get-login-roster') {
+    fetchLoginRosterForGate({ gradeLevel: message.gradeLevel })
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Could not load roster' }));
+    return true;
+  }
+
+  if (message.type === 'manual-student-login') {
+    manualStudentLogin(message.payload || {})
+      .then((data) => sendResponse(data))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Invalid student credentials' }));
+    return true;
+  }
+
+  if (message.type === 'student-sign-out') {
+    clearStudentAuth('explicit-sign-out', { notifyBackend: true, pauseAutoRegistration: isManualIdentitySource() })
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
   }
 
