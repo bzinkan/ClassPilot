@@ -59,9 +59,9 @@ policy JSON shown in ClassPilot Settings. It should look like this:
 
 ```json
 {
-  "serverUrl": "https://school-pilot.net",
-  "schoolSlug": "your-school-slug",
-  "enrollmentKey": "your-shared-chromebook-setup-key"
+  "serverUrl": { "Value": "https://school-pilot.net" },
+  "schoolSlug": { "Value": "your-school-slug" },
+  "enrollmentKey": { "Value": "your-shared-chromebook-setup-key" }
 }
 ```
 

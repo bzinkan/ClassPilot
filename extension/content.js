@@ -677,7 +677,10 @@ function loadAuthGateRoster() {
 
     status.textContent = '';
     select.innerHTML = '<option value="">Select your name...</option>' +
-      students.map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name)}${student.hasPin ? '' : ' (PIN missing)'}</option>`).join('');
+      students
+        .filter((student) => student && student.id)
+        .map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name || 'Unknown')}${student.hasPin ? '' : ' (PIN missing)'}</option>`)
+        .join('');
     select.disabled = false;
     submit.disabled = false;
   });
