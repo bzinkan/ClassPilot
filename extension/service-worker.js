@@ -1104,15 +1104,9 @@ async function fetchLoginRosterForGate(options = {}) {
     return { success: false, setupRequired: true, error: 'Shared Chromebook setup required' };
   }
   const requestedGradeLevel = String(options.gradeLevel || '').trim();
-  if (!requestedGradeLevel) {
-    return {
-      success: false,
-      setupRequired: false,
-      error: 'Select a grade to load the roster',
-    };
-  }
 
-  const params = new URLSearchParams({ gradeLevel: requestedGradeLevel });
+  const params = new URLSearchParams();
+  if (requestedGradeLevel) params.set('gradeLevel', requestedGradeLevel);
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
@@ -1135,6 +1129,7 @@ async function fetchLoginRosterForGate(options = {}) {
   return {
     success: true,
     students: data.students || [],
+    grades: Array.isArray(data.grades) ? data.grades : [],
     loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
     pinLoginEnabled: data.loginMethod !== 'email_id',
   };

@@ -568,27 +568,11 @@ function buildPinLoginMarkup() {
 }
 
 function buildGradeChoiceMarkup() {
-  const grades = [
-    ['K', 'Kindergarten'],
-    ['1', 'Grade 1'],
-    ['2', 'Grade 2'],
-    ['3', 'Grade 3'],
-    ['4', 'Grade 4'],
-    ['5', 'Grade 5'],
-    ['6', 'Grade 6'],
-    ['7', 'Grade 7'],
-    ['8', 'Grade 8'],
-    ['9', 'Grade 9'],
-    ['10', 'Grade 10'],
-    ['11', 'Grade 11'],
-    ['12', 'Grade 12'],
-  ];
   return `
     <div class="classpilot-auth-field">
       <label for="classpilot-auth-grade"><span class="classpilot-auth-field-icon">${authIcon('graduation')}</span><span>Grade</span></label>
-      <select id="classpilot-auth-grade" required>
-        <option value="">Select your grade</option>
-        ${grades.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
+      <select id="classpilot-auth-grade" disabled required>
+        <option value="">Loading grades...</option>
       </select>
     </div>
   `;
@@ -633,7 +617,52 @@ function attachAuthGateHandlers(state) {
         pin: pinInput?.value || '',
       }, event.submitter);
     });
+    loadAuthGateGradeOptions();
   }
+}
+
+function loadAuthGateGradeOptions() {
+  const gradeSelect = document.getElementById('classpilot-auth-grade');
+  const studentSelect = document.getElementById('classpilot-auth-student');
+  const status = document.getElementById('classpilot-auth-roster-status');
+  const submit = document.getElementById('classpilot-auth-pin-submit');
+  if (!gradeSelect || !studentSelect || !status || !submit) return;
+
+  status.textContent = 'Loading grades...';
+  gradeSelect.innerHTML = '<option value="">Loading grades...</option>';
+  gradeSelect.disabled = true;
+  studentSelect.innerHTML = '<option value="">Select a grade first...</option>';
+  studentSelect.disabled = true;
+  submit.disabled = true;
+
+  chrome.runtime.sendMessage({ type: 'get-login-roster' }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) {
+      status.textContent = response?.error || 'Could not load roster grades.';
+      gradeSelect.innerHTML = '<option value="">Grades unavailable</option>';
+      gradeSelect.disabled = true;
+      return;
+    }
+
+    const grades = Array.isArray(response.grades) ? response.grades.filter((grade) => grade?.value) : [];
+    if (!grades.length) {
+      status.textContent = 'No roster grades are ready for PIN sign-in.';
+      gradeSelect.innerHTML = '<option value="">No grades available</option>';
+      gradeSelect.disabled = true;
+      return;
+    }
+
+    status.textContent = '';
+    gradeSelect.innerHTML = '<option value="">Select your grade</option>' +
+      grades
+        .map((grade) => `<option value="${escapeHtml(grade.value)}">${escapeHtml(grade.label || `Grade ${grade.value}`)}</option>`)
+        .join('');
+    gradeSelect.disabled = false;
+
+    if (grades.length === 1) {
+      gradeSelect.value = grades[0].value;
+      loadAuthGateRoster();
+    }
+  });
 }
 
 function loadAuthGateRoster() {
