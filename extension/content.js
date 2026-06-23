@@ -270,14 +270,6 @@ function buildAuthGateMarkup(state) {
         flex-direction: column !important;
         justify-content: space-between !important;
       }
-      .classpilot-auth-brand {
-        display: flex !important;
-        align-items: flex-start !important;
-        gap: 12px !important;
-        font-size: 18px !important;
-        font-weight: 700 !important;
-      }
-      .classpilot-auth-logo,
       .classpilot-auth-small-logo {
         flex: 0 0 auto !important;
         width: 44px !important;
@@ -291,20 +283,17 @@ function buildAuthGateMarkup(state) {
         font-weight: 900 !important;
         letter-spacing: 0 !important;
       }
-      .classpilot-auth-promise {
-        margin-top: 72px !important;
+      .classpilot-auth-small-logo svg,
+      .classpilot-auth-safe-note svg,
+      .classpilot-auth-field-icon svg,
+      .classpilot-auth-footnote svg {
+        width: 1em !important;
+        height: 1em !important;
+        display: block !important;
+        stroke: currentColor !important;
       }
-      .classpilot-auth-orbit {
-        width: 56px !important;
-        height: 56px !important;
-        border-radius: 999px !important;
-        background: rgba(245, 184, 31, 0.12) !important;
-        color: #f5b81f !important;
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        font-size: 28px !important;
-        margin-bottom: 24px !important;
+      .classpilot-auth-promise {
+        margin-top: 96px !important;
       }
       .classpilot-auth-side h2 {
         margin: 0 !important;
@@ -452,6 +441,9 @@ function buildAuthGateMarkup(state) {
         font-size: 13px !important;
         line-height: 1.45 !important;
       }
+      .classpilot-auth-roster-note:empty {
+        display: none !important;
+      }
       .classpilot-auth-footnote {
         margin: 28px 0 0 !important;
         display: flex !important;
@@ -490,22 +482,17 @@ function buildAuthGateMarkup(state) {
     <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title">
       <div class="classpilot-auth-side" aria-hidden="true">
         <div>
-          <div class="classpilot-auth-brand">
-            <div class="classpilot-auth-logo">CP</div>
-            <div>ClassPilot</div>
-          </div>
           <div class="classpilot-auth-promise">
-            <div class="classpilot-auth-orbit">✓</div>
             <h2>Safe. Focused.<br />Ready to learn.</h2>
             <p>ClassPilot helps your school keep browsing safe, on-task, and distraction-free.</p>
           </div>
         </div>
-        <div class="classpilot-auth-safe-note"><span>✓</span><span>Protected student browsing</span></div>
+        <div class="classpilot-auth-safe-note"><span>${authIcon('shield')}</span><span>Protected student browsing</span></div>
       </div>
       <div class="classpilot-auth-main">
         <div class="classpilot-auth-content">
           <div class="classpilot-auth-product">
-            <div class="classpilot-auth-small-logo">CP</div>
+            <div class="classpilot-auth-small-logo">${authIcon('send')}</div>
             <span>ClassPilot</span>
           </div>
           <h1 id="classpilot-auth-title">${escapeHtml(title)}</h1>
@@ -515,11 +502,25 @@ function buildAuthGateMarkup(state) {
           ${state.setupRequired ? buildSetupRequiredMarkup() : (
             loginMethod === 'name_pin' ? buildPinLoginMarkup() : buildEmailLoginMarkup()
           )}
-          <div class="classpilot-auth-footnote"><span>✓</span><span>Shared Chromebook sign-in</span></div>
+          <div class="classpilot-auth-footnote"><span>${authIcon('shield')}</span><span>Shared Chromebook sign-in</span></div>
         </div>
       </div>
     </div>
   `;
+}
+
+function authIcon(name) {
+  const iconAttrs = 'viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"';
+  const icons = {
+    send: '<path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path>',
+    shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.68 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1Z"></path><path d="m9 12 2 2 4-4"></path>',
+    graduation: '<path d="M22 10v6"></path><path d="M2 10l10-5 10 5-10 5Z"></path><path d="M6 12v5c3 3 9 3 12 0v-5"></path>',
+    user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle>',
+    lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path>',
+    mail: '<rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-10 6L2 7"></path>',
+    badge: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10"></path><path d="m9 12 2 2 4-4"></path>',
+  };
+  return `<svg ${iconAttrs}>${icons[name] || icons.shield}</svg>`;
 }
 
 function buildSetupRequiredMarkup() {
@@ -534,11 +535,11 @@ function buildEmailLoginMarkup() {
   return `
     <form class="classpilot-auth-form" id="classpilot-auth-email-form">
       <div class="classpilot-auth-field">
-        <label for="classpilot-auth-email"><span class="classpilot-auth-field-icon">@</span><span>School email</span></label>
+        <label for="classpilot-auth-email"><span class="classpilot-auth-field-icon">${authIcon('mail')}</span><span>School email</span></label>
         <input id="classpilot-auth-email" type="email" autocomplete="username" placeholder="student@school.edu" required />
       </div>
       <div class="classpilot-auth-field">
-        <label for="classpilot-auth-student-id"><span class="classpilot-auth-field-icon">ID</span><span>Student ID Number</span></label>
+        <label for="classpilot-auth-student-id"><span class="classpilot-auth-field-icon">${authIcon('badge')}</span><span>Student ID Number</span></label>
         <input id="classpilot-auth-student-id" type="text" autocomplete="off" placeholder="Student ID" required />
       </div>
       <button class="classpilot-auth-button" id="classpilot-auth-email-submit" type="submit">Sign In</button>
@@ -549,19 +550,17 @@ function buildEmailLoginMarkup() {
 function buildPinLoginMarkup() {
   return `
     <form class="classpilot-auth-form" id="classpilot-auth-pin-form">
-      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status">
-        Select your grade to load your roster.
-      </div>
       ${buildGradeChoiceMarkup()}
+      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite"></div>
       <div class="classpilot-auth-field">
-        <label for="classpilot-auth-student"><span class="classpilot-auth-field-icon">N</span><span>Student</span></label>
+        <label for="classpilot-auth-student"><span class="classpilot-auth-field-icon">${authIcon('user')}</span><span>Student</span></label>
         <select id="classpilot-auth-student" disabled required>
           <option value="">Select a grade first...</option>
         </select>
       </div>
       <div class="classpilot-auth-field">
-        <label for="classpilot-auth-pin"><span class="classpilot-auth-field-icon">#</span><span>4-digit PIN</span></label>
-        <input id="classpilot-auth-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="1234" required />
+        <label for="classpilot-auth-pin"><span class="classpilot-auth-field-icon">${authIcon('lock')}</span><span>4-digit PIN</span></label>
+        <input id="classpilot-auth-pin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="Enter your 4-digit PIN" required />
       </div>
       <button class="classpilot-auth-button" id="classpilot-auth-pin-submit" type="submit" disabled>Sign In</button>
     </form>
@@ -586,9 +585,9 @@ function buildGradeChoiceMarkup() {
   ];
   return `
     <div class="classpilot-auth-field">
-      <label for="classpilot-auth-grade"><span class="classpilot-auth-field-icon">G</span><span>Grade</span></label>
+      <label for="classpilot-auth-grade"><span class="classpilot-auth-field-icon">${authIcon('graduation')}</span><span>Grade</span></label>
       <select id="classpilot-auth-grade" required>
-        <option value="">Select your grade...</option>
+        <option value="">Select your grade</option>
         ${grades.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
       </select>
     </div>
@@ -646,7 +645,7 @@ function loadAuthGateRoster() {
   if (!select || !status || !submit) return;
 
   if (gradeSelect && !selectedGrade) {
-    status.textContent = 'Select your grade to load your roster.';
+    status.textContent = '';
     select.innerHTML = '<option value="">Select a grade first...</option>';
     select.disabled = true;
     submit.disabled = true;
@@ -676,7 +675,7 @@ function loadAuthGateRoster() {
       return;
     }
 
-    status.textContent = 'Choose your name and enter your PIN.';
+    status.textContent = '';
     select.innerHTML = '<option value="">Select your name...</option>' +
       students.map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name)}${student.hasPin ? '' : ' (PIN missing)'}</option>`).join('');
     select.disabled = false;
