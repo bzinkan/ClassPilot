@@ -157,6 +157,7 @@ const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const MANAGED_CONFIG_KEYS = [
   'serverUrl',
+  'classpilotServerUrl',
   'schoolId',
   'classpilotSchoolId',
   'schoolSlug',
@@ -200,6 +201,16 @@ let sharedSignInLoginConfig = {
   pinLoginEnabled: false,
 };
 let sharedSignInConfigPromise = null;
+
+function resetSharedSignInLoginConfigCache() {
+  sharedSignInLoginConfig = {
+    fetchedAt: 0,
+    setupRequired: false,
+    sharedSignInEnabled: false,
+    loginMethod: 'name_pin',
+    pinLoginEnabled: false,
+  };
+}
 
 // General-purpose message dedup: track recent _msgId values to prevent double-processing
 const recentMsgIds = new Set();
@@ -310,6 +321,11 @@ async function readManagedConfig() {
 }
 
 function applyManagedSchoolConfig(managedConfig = {}) {
+  const managedServerUrl = normalizeManagedString(managedConfig.serverUrl) ||
+    normalizeManagedString(managedConfig.classpilotServerUrl);
+  if (isHttpUrl(managedServerUrl)) {
+    CONFIG.serverUrl = managedServerUrl;
+  }
   CONFIG.schoolId = normalizeManagedString(managedConfig.schoolId) ||
     normalizeManagedString(managedConfig.classpilotSchoolId) ||
     CONFIG.schoolId;
@@ -877,8 +893,16 @@ function hasManagedSchoolSetup() {
 
 async function refreshSharedSignInLoginConfig(options = {}) {
   const force = options.force === true;
+  applyManagedSchoolConfig(await readManagedConfig());
+
   const now = Date.now();
-  if (!force && sharedSignInLoginConfig.fetchedAt && now - sharedSignInLoginConfig.fetchedAt < SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS) {
+  const hasSchoolSetup = hasManagedSchoolSetup();
+  const canUseCachedConfig = !force &&
+    hasSchoolSetup &&
+    sharedSignInLoginConfig.setupRequired !== true &&
+    sharedSignInLoginConfig.fetchedAt &&
+    now - sharedSignInLoginConfig.fetchedAt < SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS;
+  if (canUseCachedConfig) {
     return sharedSignInLoginConfig;
   }
   if (sharedSignInConfigPromise) {
@@ -966,6 +990,23 @@ async function notifyAuthGateStateToTabs() {
   } catch (error) {
     console.warn('[Auth Gate] Failed to notify tabs:', error?.message || error);
   }
+}
+
+if (chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'managed') return;
+
+    const managedConfig = {};
+    for (const [key, change] of Object.entries(changes)) {
+      if (MANAGED_CONFIG_KEYS.includes(key)) {
+        managedConfig[key] = change.newValue;
+      }
+    }
+
+    applyManagedSchoolConfig(managedConfig);
+    resetSharedSignInLoginConfigCache();
+    notifyAuthGateStateToTabs().catch(() => {});
+  });
 }
 
 async function enforceAuthGateForTab(tabOrId) {
@@ -1222,7 +1263,15 @@ async function detectChromeProfileEmail() {
   if (chrome.identity?.getAuthToken) {
     try {
       const token = await new Promise((resolve, reject) =>
-        chrome.identity.getAuthToken({ interactive: false }, (t) => t ? resolve(t) : reject())
+        chrome.identity.getAuthToken({ interactive: false }, (t) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (t) {
+            resolve(t);
+          } else {
+            reject(new Error('No token retrieved'));
+          }
+        })
       );
       if (token) {
         const resp = await fetch('https://www.googleapis.com/oauth2/v1/userinfo?alt=json', {
