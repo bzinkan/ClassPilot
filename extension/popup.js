@@ -118,7 +118,7 @@ function signOutStudent() {
   chrome.runtime.sendMessage({ type: 'student-sign-out' }, (response) => {
     if (signOutBtn) {
       signOutBtn.disabled = false;
-      signOutBtn.textContent = 'Switch student';
+      signOutBtn.textContent = 'Log out';
     }
     if (chrome.runtime.lastError || !response?.success) {
       alert(response?.error || 'Could not sign out. Please try again.');

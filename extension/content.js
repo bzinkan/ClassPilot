@@ -1618,9 +1618,9 @@ function createFloatingActionButton() {
         <span class="classpilot-fab-icon">✋</span>
         <span class="classpilot-fab-label">Raise Hand</span>
       </button>
-      <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Switch student">
+      <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Log out">
         <span class="classpilot-fab-icon">⎋</span>
-        <span class="classpilot-fab-label">Switch student</span>
+        <span class="classpilot-fab-label">Log out</span>
       </button>
     </div>
     <button class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot">
