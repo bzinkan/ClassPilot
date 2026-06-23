@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "serverUrl": {
+      "title": "SchoolPilot server URL",
+      "description": "Base URL for the SchoolPilot/ClassPilot backend.",
+      "type": "string"
+    },
+    "schoolSlug": {
+      "title": "School slug",
+      "description": "SchoolPilot slug for the school this managed Chromebook OU belongs to.",
+      "type": "string"
+    },
+    "schoolId": {
+      "title": "School ID",
+      "description": "Optional SchoolPilot school ID. Use schoolSlug when possible.",
+      "type": "string"
+    },
+    "enrollmentKey": {
+      "title": "Shared Chromebook setup key",
+      "description": "Enrollment/setup key generated in the ClassPilot admin panel.",
+      "type": "string"
+    }
+  }
+}

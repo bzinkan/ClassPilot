@@ -36,7 +36,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 1. Navigate to the extension directory
 2. Create a ZIP file containing all extension files:
    ```bash
-   zip -r classroom-screen-awareness.zip manifest.json service-worker.js popup.html popup.js content.js icons/
+   zip -r classroom-screen-awareness.zip manifest.json managed_schema.json service-worker.js popup.html popup.js content.js icons/
    ```
 
 ### Upload to Google Admin Console
@@ -74,8 +74,14 @@ enters their 4-digit ClassPilot PIN.
 In Google Admin Console:
 1. Find the uploaded extension
 2. Click **Configure**
-3. Paste the policy JSON
-4. Save changes
+3. Find **Policy for extensions**
+4. Paste the policy JSON
+5. Save changes
+
+If **Policy for extensions** does not appear, confirm the uploaded extension
+version includes `managed_schema.json` and the manifest `storage.managed_schema`
+entry. Google Admin only exposes managed policy configuration for extensions
+that declare a managed storage schema.
 
 The extension will now be force-installed on all Chromebooks in the selected organizational unit.
 
@@ -142,6 +148,7 @@ The extension logs the following events to the server:
 ```
 extension/
 ├── manifest.json          # Extension manifest (MV3)
+├── managed_schema.json    # Google Admin managed policy schema
 ├── service-worker.js      # Background service worker
 ├── popup.html            # Extension popup UI
 ├── popup.js              # Popup logic
