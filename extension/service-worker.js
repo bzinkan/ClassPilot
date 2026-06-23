@@ -213,7 +213,54 @@ let offscreenReady = false;
 const kv = {
   get: (keys) => new Promise(resolve => chrome.storage.local.get(keys, resolve)),
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
+  remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
 };
+
+const AUTH_STATE_KEYS = [
+  'studentToken',
+  'activeStudentId',
+  'studentEmail',
+  'studentName',
+  'registered',
+  'lastRegisteredEmail',
+  'identitySource',
+  'manualLoginLastSeenAt',
+  'autoRegistrationPaused',
+];
+
+function hasSessionStorage() {
+  return Boolean(chrome.storage?.session);
+}
+
+const sessionKv = {
+  get: (keys) => new Promise(resolve => chrome.storage.session.get(keys, resolve)),
+  set: (obj) => new Promise(resolve => chrome.storage.session.set(obj, resolve)),
+  remove: (keys) => new Promise(resolve => chrome.storage.session.remove(keys, resolve)),
+};
+
+async function getStoredAuthState(keys) {
+  const local = await kv.get(keys);
+  if (!hasSessionStorage()) return local;
+  const session = await sessionKv.get(keys);
+  return { ...local, ...session };
+}
+
+async function setManualAuthState(obj) {
+  if (hasSessionStorage()) {
+    await sessionKv.set(obj);
+    await kv.remove(Object.keys(obj));
+  } else {
+    await kv.set(obj);
+  }
+}
+
+async function clearStoredAuthState(localOverrides = {}) {
+  const cleared = Object.fromEntries(AUTH_STATE_KEYS.map((key) => [key, null]));
+  await kv.set({ ...cleared, ...localOverrides });
+  if (hasSessionStorage()) {
+    await sessionKv.remove(AUTH_STATE_KEYS);
+  }
+}
 
 function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
@@ -848,13 +895,16 @@ async function refreshSharedSignInLoginConfig(options = {}) {
       return sharedSignInLoginConfig;
     }
 
-    const params = new URLSearchParams({ enrollmentKey: CONFIG.enrollmentKey });
+    const params = new URLSearchParams();
     if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
     if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
     try {
       const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`, {
         cache: 'no-store',
+        headers: {
+          'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
+        },
       });
       const data = await response.json().catch(() => ({}));
       sharedSignInLoginConfig = {
@@ -974,15 +1024,8 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   CONFIG.manualLoginLastSeenAt = null;
   CONFIG.autoRegistrationPaused = pauseAutoRegistration;
 
-  await kv.set({
-    studentToken: null,
-    studentEmail: null,
-    studentName: null,
-    activeStudentId: null,
+  await clearStoredAuthState({
     registered: false,
-    lastRegisteredEmail: null,
-    identitySource: null,
-    manualLoginLastSeenAt: null,
     autoRegistrationPaused: pauseAutoRegistration,
   });
 
@@ -1023,15 +1066,15 @@ async function fetchLoginRosterForGate(options = {}) {
     };
   }
 
-  const params = new URLSearchParams({
-    enrollmentKey: CONFIG.enrollmentKey,
-    gradeLevel: requestedGradeLevel,
-  });
+  const params = new URLSearchParams({ gradeLevel: requestedGradeLevel });
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
   const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
     cache: 'no-store',
+    headers: {
+      'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
+    },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -1070,7 +1113,10 @@ async function manualStudentLogin(payload) {
 
   const response = await fetch(`${CONFIG.serverUrl}/api/extension/student-login`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+    },
     body: JSON.stringify(body),
   });
   const data = await response.json().catch(() => ({}));
@@ -1098,11 +1144,13 @@ async function manualStudentLogin(payload) {
 
   await kv.set({
     deviceId,
+    classId: 'auto',
+  });
+  await setManualAuthState({
     studentToken: data.studentToken,
     activeStudentId: CONFIG.activeStudentId,
     studentEmail,
     studentName,
-    classId: 'auto',
     registered: true,
     lastRegisteredEmail: studentEmail,
     identitySource: CONFIG.identitySource,
@@ -1196,7 +1244,7 @@ async function ensureRegistered() {
     applyManagedSchoolConfig(await readManagedConfig());
     
     // Get or create IDs (including studentToken for consistent state)
-    let stored = await kv.get([
+    let stored = await getStoredAuthState([
       'studentEmail',
       'studentName',
       'deviceId',
@@ -1256,7 +1304,16 @@ async function ensureRegistered() {
     }
     
     // Save to storage
-    await kv.set(stored);
+    if (isManualIdentitySource(stored.identitySource)) {
+      const manualState = {};
+      for (const key of AUTH_STATE_KEYS) {
+        if (key in stored) manualState[key] = stored[key];
+      }
+      await setManualAuthState(manualState);
+      await kv.set({ deviceId: stored.deviceId });
+    } else {
+      await kv.set(stored);
+    }
     
     // Update CONFIG (email is primary identity - backend will determine schoolId from email domain)
     CONFIG.studentEmail = stored.studentEmail;
@@ -1297,12 +1354,18 @@ async function ensureRegistered() {
         console.log('[Service Worker] Registering student with server');
         const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+          },
           body: JSON.stringify({
             deviceId: stored.deviceId,
             deviceName: null, // No device name needed
             studentEmail: stored.studentEmail,
             studentName: CONFIG.studentName,
+            schoolId: CONFIG.schoolId || undefined,
+            schoolSlug: CONFIG.schoolSlug || undefined,
+            enrollmentKey: CONFIG.enrollmentKey || undefined,
           }),
         });
         
@@ -1338,6 +1401,7 @@ async function ensureRegistered() {
       } catch (error) {
         console.warn('[Service Worker] Student registration error:', error);
         await kv.set({ registered: false, studentToken: null });
+        if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
         CONFIG.studentToken = null;
         // Retry with exponential backoff, max 5 retries to prevent server flooding
         registrationRetryCount++;
@@ -1398,7 +1462,7 @@ if (chrome.runtime.onStartup) {
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
-  const stored = await chrome.storage.local.get([
+  const stored = await getStoredAuthState([
     'deviceId',
     'config',
     'activeStudentId',
@@ -1740,6 +1804,7 @@ async function getLoggedInUserInfo() {
 
 // Auto-detect and register student based on Chromebook login
 async function autoDetectAndRegister() {
+  applyManagedSchoolConfig(await readManagedConfig());
   const authPause = await chrome.storage.local.get(['autoRegistrationPaused']);
   if (authPause.autoRegistrationPaused) {
     console.log('[Auth] Auto-detect registration paused until manual sign-in');
@@ -1802,7 +1867,7 @@ if (chrome.identity?.onSignInChanged) {
 }
 
 // Load config from storage on startup
-chrome.storage.local.get([
+getStoredAuthState([
   'config',
   'activeStudentId',
   'studentEmail',
@@ -1811,7 +1876,7 @@ chrome.storage.local.get([
   'identitySource',
   'manualLoginLastSeenAt',
   'autoRegistrationPaused',
-], async (result) => {
+]).then(async (result) => {
   try {
     const resolvedServerUrl = await resolveServerUrl();
 
@@ -1940,13 +2005,19 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
   try {
     const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+      },
       body: JSON.stringify({
         deviceId,
         deviceName,
         classId,
         studentEmail,
         studentName,
+        schoolId: CONFIG.schoolId || undefined,
+        schoolSlug: CONFIG.schoolSlug || undefined,
+        enrollmentKey: CONFIG.enrollmentKey || undefined,
       }),
     });
     
@@ -2151,6 +2222,7 @@ async function sendHeartbeat(reason = 'manual') {
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await kv.set({ studentToken: null, registered: false });
+      if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
       CONFIG.studentToken = null;
       // Trigger re-registration with backoff (shares retry counter with registration)
       registrationRetryCount++;
@@ -2165,7 +2237,7 @@ async function sendHeartbeat(reason = 'manual') {
     } else if (response.ok) {
       if (isManualIdentitySource()) {
         CONFIG.manualLoginLastSeenAt = Date.now();
-        await kv.set({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
+        await setManualAuthState({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
       }
       chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
       chrome.action.setBadgeText({ text: '●' });
@@ -3530,9 +3602,10 @@ async function connectWebSocket() {
   if (CONFIG.studentToken) {
     authPayload.studentToken = CONFIG.studentToken;
     console.log('WebSocket auth: using JWT token');
-  } else if (CONFIG.studentEmail) {
-    authPayload.studentEmail = CONFIG.studentEmail;
-    console.log('WebSocket auth: using email (no JWT token)');
+  } else {
+    console.log('Skipping WebSocket - student token required');
+    await notifyAuthGateStateToTabs();
+    return;
   }
 
   // Tell offscreen document to create the WebSocket

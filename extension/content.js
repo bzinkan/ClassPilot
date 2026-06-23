@@ -38,6 +38,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'CLASSPILOT_AUTH_COMPLETE') {
     removeAuthGate();
+    updateFabIdentityState();
     sendResponse?.({ success: true });
     return false;
   }
@@ -151,6 +152,7 @@ function requestAuthGateState() {
     } else {
       removeAuthGate();
     }
+    updateFabIdentityState(response?.state);
   });
 }
 
@@ -1604,6 +1606,10 @@ function createFloatingActionButton() {
   fabContainer.id = 'classpilot-fab-container';
   fabContainer.innerHTML = `
     <div class="classpilot-fab-menu" id="classpilot-fab-menu">
+      <div class="classpilot-fab-identity" id="classpilot-fab-identity" style="display:none;">
+        <span class="classpilot-fab-identity-kicker">Monitoring as</span>
+        <span class="classpilot-fab-identity-name" id="classpilot-fab-identity-name"></span>
+      </div>
       <button class="classpilot-fab-item classpilot-fab-message" id="classpilot-fab-message" title="Message Teacher">
         <span class="classpilot-fab-icon">💬</span>
         <span class="classpilot-fab-label">Message</span>
@@ -1612,9 +1618,9 @@ function createFloatingActionButton() {
         <span class="classpilot-fab-icon">✋</span>
         <span class="classpilot-fab-label">Raise Hand</span>
       </button>
-      <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Sign Out">
+      <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Switch student">
         <span class="classpilot-fab-icon">⎋</span>
-        <span class="classpilot-fab-label">Sign Out</span>
+        <span class="classpilot-fab-label">Switch student</span>
       </button>
     </div>
     <button class="classpilot-fab-main" id="classpilot-fab-main" title="ClassPilot">
@@ -1643,6 +1649,7 @@ function createFloatingActionButton() {
     handRaisingEnabled = result.handRaisingEnabled !== false;
     updateFabHandState();
     updateFabMessageState();
+    updateFabIdentityState();
   });
 
   // Main FAB click - toggle menu
@@ -1725,6 +1732,7 @@ function toggleFabMenu() {
   if (fabExpanded) {
     menu.classList.add('classpilot-fab-menu-open');
     main.classList.add('classpilot-fab-main-active');
+    updateFabIdentityState();
   } else {
     menu.classList.remove('classpilot-fab-menu-open');
     main.classList.remove('classpilot-fab-main-active');
@@ -1827,6 +1835,42 @@ function updateFabMessageState() {
     messageBtn?.classList.remove('classpilot-fab-disabled');
     if (label) label.textContent = 'Message';
   }
+}
+
+function updateFabIdentityState(state) {
+  const identity = document.getElementById('classpilot-fab-identity');
+  const nameEl = document.getElementById('classpilot-fab-identity-name');
+  if (!identity || !nameEl) return;
+
+  const applyState = (nextState, config = {}) => {
+    const authRequired = nextState?.authRequired === true;
+    const name =
+      nextState?.studentName ||
+      config.studentName ||
+      nextState?.studentEmail ||
+      config.studentEmail ||
+      '';
+    if (!authRequired && name) {
+      nameEl.textContent = name;
+      identity.style.display = 'grid';
+    } else {
+      nameEl.textContent = '';
+      identity.style.display = 'none';
+    }
+  };
+
+  if (state) {
+    applyState(state);
+    return;
+  }
+
+  chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) {
+      identity.style.display = 'none';
+      return;
+    }
+    applyState(response.state, response.config || {});
+  });
 }
 
 function sendMessage() {
@@ -1969,6 +2013,36 @@ function addFabStyles() {
       opacity: 1;
       visibility: visible;
       transform: translateY(0);
+    }
+
+    .classpilot-fab-identity {
+      min-width: 220px;
+      max-width: 280px;
+      padding: 12px 14px;
+      background: #0f172a;
+      color: white;
+      border-radius: 18px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.18);
+      gap: 2px;
+      justify-items: end;
+    }
+
+    .classpilot-fab-identity-kicker {
+      font-size: 11px;
+      font-weight: 700;
+      color: #cbd5e1;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .classpilot-fab-identity-name {
+      max-width: 252px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 700;
+      color: #ffffff;
     }
 
     .classpilot-fab-item {
@@ -2219,6 +2293,10 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
       handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;
       updateFabHandState();
     }
+  }
+  if ((namespace === 'local' || namespace === 'session') &&
+      (changes.studentToken || changes.studentEmail || changes.studentName || changes.activeStudentId)) {
+    updateFabIdentityState();
   }
 });
 

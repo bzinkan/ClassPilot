@@ -37,7 +37,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (namespace === 'local' && (changes.licenseActive || changes.planStatus)) {
       updateLicenseBanner();
     }
-    if (namespace === 'local' && (changes.studentToken || changes.studentEmail || changes.studentName)) {
+    if ((namespace === 'local' || namespace === 'session') &&
+        (changes.studentToken || changes.studentEmail || changes.studentName)) {
       refreshAuthState();
     }
   });
@@ -117,7 +118,7 @@ function signOutStudent() {
   chrome.runtime.sendMessage({ type: 'student-sign-out' }, (response) => {
     if (signOutBtn) {
       signOutBtn.disabled = false;
-      signOutBtn.textContent = 'Sign Out';
+      signOutBtn.textContent = 'Switch student';
     }
     if (chrome.runtime.lastError || !response?.success) {
       alert(response?.error || 'Could not sign out. Please try again.');
