@@ -1767,6 +1767,7 @@ function updateFabChatControls() {
 function applyFabState(state = {}) {
   const reason = state.reason || '';
   const wasMessagingEnabled = messagingEnabled;
+  const sessionEnded = reason === 'session-ended' || reason === 'session-replaced';
 
   if (typeof state.messagingEnabled === 'boolean') {
     messagingEnabled = state.messagingEnabled;
@@ -1778,31 +1779,25 @@ function applyFabState(state = {}) {
     handRaised = state.handRaised;
   }
 
-  const storageUpdates = {
-    ...(typeof state.messagingEnabled === 'boolean' ? { messagingEnabled } : {}),
-    ...(typeof state.handRaisingEnabled === 'boolean' ? { handRaisingEnabled } : {}),
-    ...(typeof state.handRaised === 'boolean' ? { handRaised } : {}),
-  };
-  if (Object.keys(storageUpdates).length > 0) {
-    chrome.storage.local.set(storageUpdates);
-  }
-
-  if (!messagingEnabled) {
-    hideMessageBox();
-    closeFabMenu();
-    if (reason === 'session-ended' || reason === 'session-replaced') {
-      chatMessages = [];
-      chatClosed = true;
-      persistFabChatState();
-      renderChatMessages();
-    }
-  } else if (!wasMessagingEnabled || reason === 'session-started' || reason === 'messaging-toggle') {
+  if (reason === 'session-started') {
+    chatMessages = [];
     chatClosed = false;
-    if (reason === 'session-started') {
-      chatMessages = [];
-    }
     persistFabChatState();
     renderChatMessages();
+  } else if (sessionEnded) {
+    chatMessages = [];
+    chatClosed = true;
+    persistFabChatState();
+    renderChatMessages();
+  } else if (messagingEnabled && (!wasMessagingEnabled || reason === 'messaging-toggle')) {
+    chatClosed = false;
+    persistFabChatState();
+    renderChatMessages();
+  }
+
+  if (!messagingEnabled || sessionEnded) {
+    hideMessageBox();
+    closeFabMenu();
   }
 
   updateFabHandState();
