@@ -625,7 +625,7 @@ async function parseJsonResponse(response) {
 }
 
 async function applyFabSettings(fabState) {
-  if (!fabState || typeof fabState !== 'object') return;
+  if (!fabState || typeof fabState !== 'object') return {};
   const updates = {};
   if (typeof fabState.messagingEnabled === 'boolean') {
     updates.messagingEnabled = fabState.messagingEnabled;
@@ -636,9 +636,25 @@ async function applyFabSettings(fabState) {
   if (typeof fabState.handRaised === 'boolean') {
     updates.handRaised = fabState.handRaised;
   }
+  if (Array.isArray(fabState.activeSessionIds)) {
+    updates.fabActiveSessionIds = fabState.activeSessionIds;
+  }
+  if (Array.isArray(fabState.activeHands)) {
+    updates.fabActiveHands = fabState.activeHands;
+  }
+  if (Array.isArray(fabState.sessions)) {
+    updates.fabSessions = fabState.sessions;
+  }
+  if (typeof fabState.sessionId === 'string') {
+    updates.fabLifecycleSessionId = fabState.sessionId;
+  }
+  if (typeof fabState.reason === 'string') {
+    updates.fabLifecycleReason = fabState.reason;
+  }
   if (Object.keys(updates).length > 0) {
     await chrome.storage.local.set(updates);
   }
+  return updates;
 }
 
 function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
@@ -3203,6 +3219,18 @@ async function executeRemoteControlCommand(command) {
 
         result.handRaisingEnabled = handRaisingEnabled;
         console.log('Hand raising toggle sent:', handRaisingEnabled);
+        break;
+
+      case 'fab-state':
+        // Apply session lifecycle state pushed by SchoolPilot when classes start/end.
+        const fabStateData = command.data || {};
+        const appliedFabState = await applyFabSettings(fabStateData);
+
+        // Fire-and-forget - content scripts update open FAB UI immediately.
+        broadcastToAllTabs('fab-state', fabStateData);
+
+        result.fabState = appliedFabState;
+        console.log('FAB state updated:', fabStateData.reason || 'state-refresh');
         break;
 
       default:
