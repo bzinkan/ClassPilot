@@ -595,6 +595,7 @@ async function refreshSchoolSettings({ force = false } = {}) {
     const settings = await response.json();
     schoolSettings = settings;
     schoolSettingsFetchedAt = now;
+    await applyFabSettings(settings.fab || settings);
     await kv.set({
       [SCHOOL_SETTINGS_CACHE_KEY]: settings,
       [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
@@ -608,6 +609,50 @@ async function refreshSchoolSettings({ force = false } = {}) {
     }
     return schoolSettings;
   }
+}
+
+async function parseJsonResponse(response) {
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+async function applyFabSettings(fabState) {
+  if (!fabState || typeof fabState !== 'object') return;
+  const updates = {};
+  if (typeof fabState.messagingEnabled === 'boolean') {
+    updates.messagingEnabled = fabState.messagingEnabled;
+  }
+  if (typeof fabState.handRaisingEnabled === 'boolean') {
+    updates.handRaisingEnabled = fabState.handRaisingEnabled;
+  }
+  if (typeof fabState.handRaised === 'boolean') {
+    updates.handRaised = fabState.handRaised;
+  }
+  if (Object.keys(updates).length > 0) {
+    await chrome.storage.local.set(updates);
+  }
+}
+
+function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
+  const messageId = message.chatMessageId || message.messageId;
+  if (!messageId) return;
+  wsSend({
+    type: 'chat-message-ack',
+    messageId,
+    chatMessageId: messageId,
+    sessionId: message.sessionId,
+    deliveryStatus,
+    status: deliveryStatus,
+    errorMessage: errorMessage || null,
+  });
 }
 
 function determineTrackingState() {
@@ -3130,7 +3175,7 @@ async function executeRemoteControlCommand(command) {
         chrome.storage.local.set({ handRaised: false });
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('hand-dismissed', {});
+        broadcastToAllTabs('hand-dismissed', command.data || {});
 
         result.handRaised = false;
         console.log('Hand dismissed notification sent');
@@ -3142,7 +3187,7 @@ async function executeRemoteControlCommand(command) {
         chrome.storage.local.set({ messagingEnabled });
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
+        broadcastToAllTabs('messaging-toggle', { ...(command.data || {}), enabled: messagingEnabled });
 
         result.messagingEnabled = messagingEnabled;
         console.log('Messaging toggle sent:', messagingEnabled);
@@ -3154,7 +3199,7 @@ async function executeRemoteControlCommand(command) {
         chrome.storage.local.set({ handRaisingEnabled });
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('hand-raising-toggle', { enabled: handRaisingEnabled });
+        broadcastToAllTabs('hand-raising-toggle', { ...(command.data || {}), enabled: handRaisingEnabled });
 
         result.handRaisingEnabled = handRaisingEnabled;
         console.log('Hand raising toggle sent:', handRaisingEnabled);
@@ -3939,6 +3984,12 @@ function handleWsMessage(rawData) {
           })();
         }
 
+        if (message.settings?.fab) {
+          applyFabSettings(message.settings.fab).catch((error) => {
+            console.warn('[FAB] Failed to apply initial state:', error);
+          });
+        }
+
         // Clear any existing teacher block list on new auth
         // Teacher block lists are session-based and tied to specific teacher sessions
         if (teacherBlockedDomains.length > 0) {
@@ -4064,6 +4115,7 @@ function handleWsMessage(rawData) {
         const dedupKey = message._msgId || ('tm:' + (message.message || '') + ':' + (message.fromName || ''));
         if (recentMsgIds.has(dedupKey)) {
           console.log('Dedup: skipping duplicate teacher-message', dedupKey);
+          sendChatDeliveryAck(message, 'delivered');
           if (commandId) {
             getClassroomCommandStateSnapshot().then((state) => {
               sendCommandAck(commandId, 'completed', {
@@ -4084,10 +4136,15 @@ function handleWsMessage(rawData) {
           });
           broadcastToAllTabs('chat-reply', {
             _msgId: dedupKey,
+            chatMessageId: message.chatMessageId || message.messageId,
+            messageId: message.chatMessageId || message.messageId,
+            sessionId: message.sessionId,
+            studentId: message.studentId,
             message: message.message,
             fromName: message.fromName || 'Teacher',
             timestamp: Date.now(),
           });
+          sendChatDeliveryAck(message, 'delivered');
           if (commandId) {
             getClassroomCommandStateSnapshot().then((state) => {
               sendCommandAck(commandId, 'completed', {
@@ -4110,7 +4167,10 @@ function handleWsMessage(rawData) {
         if (!recentMsgIds.has(dedupKey)) {
           recentMsgIds.add(dedupKey);
           setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
-          broadcastToAllTabs('chat-closed', {});
+          broadcastToAllTabs('chat-closed', {
+            sessionId: message.sessionId,
+            studentId: message.studentId,
+          });
         }
       }
 
@@ -4348,9 +4408,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         studentName: CONFIG.studentName,
       }),
     })
-      .then(res => res.json())
+      .then(parseJsonResponse)
       .then(data => {
         console.log('Hand raised:', data);
+        chrome.storage.local.set({ handRaised: true });
         sendResponse({ success: true, data });
       })
       .catch(err => {
@@ -4381,9 +4442,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         studentId: CONFIG.activeStudentId,
       }),
     })
-      .then(res => res.json())
+      .then(parseJsonResponse)
       .then(data => {
         console.log('Hand lowered:', data);
+        chrome.storage.local.set({ handRaised: false });
         sendResponse({ success: true, data });
       })
       .catch(err => {
@@ -4419,7 +4481,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         messageType: message.messageType || 'message',
       }),
     })
-      .then(res => res.json())
+      .then(parseJsonResponse)
       .then(data => {
         if (data.error) {
           console.warn('Failed to send message:', data.error);

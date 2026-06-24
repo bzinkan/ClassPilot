@@ -62,7 +62,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       seenChatMsgIds.add(msgId);
       setTimeout(() => seenChatMsgIds.delete(msgId), 60000);
     }
-    chatMessages.push({ sender: 'teacher', text: message.data.message, time: Date.now() });
+    chatMessages.push({
+      id: message.data?.chatMessageId || message.data?.messageId || msgId,
+      sessionId: message.data?.sessionId,
+      sender: 'teacher',
+      text: message.data.message,
+      fromName: message.data.fromName,
+      time: Date.now(),
+    });
+    persistFabChatState();
     const chatBox = document.getElementById('classpilot-fab-message-box');
     if (!chatBox?.classList.contains('classpilot-fab-message-box-open')) {
       showMessageBox();
@@ -74,6 +82,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'chat-closed' && !chatClosed) {
     chatMessages = [];
     chatClosed = true;
+    persistFabChatState();
     renderChatMessages();
     hideMessageBox();
     closeFabMenu();
@@ -140,7 +149,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Messaging toggle (enable/disable messaging)
   if (message.type === 'messaging-toggle') {
     chrome.storage.local.set({ messagingEnabled: message.data.enabled });
-    if (message.data.enabled) chatClosed = false;
+    if (message.data.enabled) {
+      chatClosed = false;
+      persistFabChatState();
+    }
   }
 });
 
@@ -1734,6 +1746,15 @@ let messagingEnabled = true;
 let handRaisingEnabled = true;
 let chatMessages = []; // { sender: 'student'|'teacher', text: string, time: number }
 let chatClosed = false; // Set when teacher closes chat — prevents re-opening old conversation
+const FAB_CHAT_MESSAGES_KEY = 'fabChatMessages';
+const FAB_CHAT_CLOSED_KEY = 'fabChatClosed';
+
+function persistFabChatState() {
+  chrome.storage.local.set({
+    [FAB_CHAT_MESSAGES_KEY]: chatMessages.slice(-50),
+    [FAB_CHAT_CLOSED_KEY]: chatClosed,
+  });
+}
 
 function createFloatingActionButton() {
   // Don't create FAB on extension pages or special pages
@@ -1790,13 +1811,16 @@ function createFloatingActionButton() {
   document.body.appendChild(fabContainer);
 
   // Get initial state
-  chrome.storage.local.get(['handRaised', 'messagingEnabled', 'handRaisingEnabled'], (result) => {
+  chrome.storage.local.get(['handRaised', 'messagingEnabled', 'handRaisingEnabled', FAB_CHAT_MESSAGES_KEY, FAB_CHAT_CLOSED_KEY], (result) => {
     handRaised = result.handRaised || false;
     messagingEnabled = result.messagingEnabled !== false;
     handRaisingEnabled = result.handRaisingEnabled !== false;
+    chatMessages = Array.isArray(result[FAB_CHAT_MESSAGES_KEY]) ? result[FAB_CHAT_MESSAGES_KEY] : [];
+    chatClosed = result[FAB_CHAT_CLOSED_KEY] === true;
     updateFabHandState();
     updateFabMessageState();
     updateFabIdentityState();
+    renderChatMessages();
   });
 
   // Main FAB click - toggle menu
@@ -1830,6 +1854,7 @@ function createFloatingActionButton() {
     if (chatClosed) {
       chatClosed = false;
       chatMessages = [];
+      persistFabChatState();
     }
     showMessageBox();
   });
@@ -2044,7 +2069,13 @@ function sendMessage() {
       }
       input.disabled = false;
       if (response?.success) {
-        chatMessages.push({ sender: 'student', text: message, time: Date.now() });
+        chatMessages.push({
+          id: response.messageId,
+          sender: 'student',
+          text: message,
+          time: Date.now(),
+        });
+        persistFabChatState();
         input.value = '';
         renderChatMessages();
         input.focus();
@@ -2439,6 +2470,15 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     if (changes.handRaisingEnabled) {
       handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;
       updateFabHandState();
+    }
+    if (changes[FAB_CHAT_MESSAGES_KEY]) {
+      chatMessages = Array.isArray(changes[FAB_CHAT_MESSAGES_KEY].newValue)
+        ? changes[FAB_CHAT_MESSAGES_KEY].newValue
+        : [];
+      renderChatMessages();
+    }
+    if (changes[FAB_CHAT_CLOSED_KEY]) {
+      chatClosed = changes[FAB_CHAT_CLOSED_KEY].newValue === true;
     }
   }
   if ((namespace === 'local' || namespace === 'session') &&
