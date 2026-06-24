@@ -1,7 +1,11 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
-importScripts('config.js');
+try {
+  importScripts('config.js');
+} catch (error) {
+  console.info('[Config] No config.js override loaded; using managed policy or defaults');
+}
 importScripts('vendor/sentry.browser.min.js');
 
 const SENTRY_DSN_EXTENSION = globalThis.SENTRY_DSN_EXTENSION || '';
@@ -126,6 +130,43 @@ function wsSend(data) {
   if (!wsConnected) return;
   const str = typeof data === 'string' ? data : JSON.stringify(data);
   sendToOffscreen({ type: 'WS_SEND', data: str }).catch(() => {});
+}
+
+function normalizeCommandId(commandId) {
+  return String(commandId || '').trim();
+}
+
+function getCommandIdFromMessage(message, command) {
+  return normalizeCommandId(
+    message?.commandId ||
+    message?.data?.commandId ||
+    message?.command?.commandId ||
+    command?.commandId ||
+    command?.data?.commandId
+  );
+}
+
+function commandErrorMessage(error) {
+  return error?.message || String(error || 'Command failed');
+}
+
+function sendCommandAck(commandId, ackState, options = {}) {
+  const normalizedCommandId = normalizeCommandId(commandId);
+  if (!normalizedCommandId) return;
+
+  wsSend({
+    type: 'command-ack',
+    commandId: normalizedCommandId,
+    ackState,
+    commandType: options.commandType,
+    studentId: CONFIG.activeStudentId || undefined,
+    deviceId: CONFIG.deviceId || undefined,
+    result: options.result,
+    state: options.state,
+    error: options.error,
+    extensionVersion: chrome.runtime.getManifest().version,
+    timestamp: new Date().toISOString(),
+  });
 }
 let cameraActive = false; // Track camera usage across all tabs
 
@@ -2516,6 +2557,40 @@ let activeBlockListName = null; // Name of the currently active teacher block li
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
 let attentionModeActive = false; // When true, blocks navigation and new tabs
 
+async function getClassroomCommandStateSnapshot() {
+  const snapshot = {
+    screenLocked,
+    lockedUrl,
+    lockedDomain,
+    allowedDomains,
+    activeFlightPathName,
+    activeBlockListName,
+    teacherBlockedDomains,
+    temporaryAllowedDomains,
+    attentionModeActive,
+    currentMaxTabs,
+  };
+
+  try {
+    const tabs = await chrome.tabs.query({});
+    const activeTab = tabs.find(tab => tab.active) || tabs[0];
+    return {
+      ...snapshot,
+      tabCount: tabs.length,
+      activeTab: activeTab ? {
+        id: activeTab.id,
+        url: activeTab.url || null,
+        title: activeTab.title || null,
+      } : null,
+    };
+  } catch (error) {
+    return {
+      ...snapshot,
+      tabError: commandErrorMessage(error),
+    };
+  }
+}
+
 // Helper function to extract domain from URL
 function extractDomain(url) {
   try {
@@ -2539,14 +2614,54 @@ function isOnSameDomain(url, domain) {
   return urlDomain === domain;
 }
 
-async function handleRemoteControl(command) {
-  console.log('Remote control command received:', command);
-  
+async function handleRemoteControl(command, envelope = {}) {
+  const commandId = getCommandIdFromMessage(envelope, command);
+  const commandType = command?.type || 'unknown';
+
+  if (commandId) {
+    sendCommandAck(commandId, 'received', {
+      commandType,
+    });
+  }
+
   try {
-    switch (command.type) {
+    const result = await executeRemoteControlCommand(command || {});
+    if (commandId) {
+      sendCommandAck(commandId, 'completed', {
+        commandType,
+        result,
+        state: await getClassroomCommandStateSnapshot(),
+      });
+    }
+  } catch (error) {
+    console.warn('Error handling remote control command:', error);
+    if (commandId) {
+      sendCommandAck(commandId, 'failed', {
+        commandType,
+        error: commandErrorMessage(error),
+        state: await getClassroomCommandStateSnapshot(),
+      });
+    }
+  }
+}
+
+async function executeRemoteControlCommand(command) {
+  console.log('Remote control command received:', command);
+  const result = {
+    commandType: command.type || 'unknown',
+    completedAt: new Date().toISOString(),
+  };
+  command.data = command.data || {};
+
+  switch (command.type) {
       case 'open-tab':
-        if (command.data.url) {
-          await chrome.tabs.create({ url: command.data.url, active: true });
+        if (!command.data.url) {
+          throw new Error('Missing URL for open-tab command');
+        }
+        {
+          const tab = await chrome.tabs.create({ url: command.data.url, active: true });
+          result.openedUrl = command.data.url;
+          result.tabId = tab.id;
           console.log('Opened tab:', command.data.url);
           // Capture screenshot after tab loads so dashboard updates fast
           setTimeout(() => captureAndSendScreenshot(), 2000);
@@ -2582,6 +2697,9 @@ async function handleRemoteControl(command) {
               console.warn('Could not close tab:', tab.id, error);
             }
           }
+          result.closeAll = true;
+          result.closedCount = closedCount;
+          result.allowedDomains = allowedDomains;
           console.log(`Closed ${closedCount} tabs (allowed domains: ${allowedDomains.length > 0 ? allowedDomains.join(', ') : 'none'})`);
         } else if (command.data.specificUrls && Array.isArray(command.data.specificUrls)) {
           // Close tabs matching specific URLs
@@ -2604,28 +2722,34 @@ async function handleRemoteControl(command) {
               }
             }
           }
+          result.specificUrls = command.data.specificUrls;
+          result.closedCount = closedCount;
           console.log(`Closed ${closedCount} specific tabs`);
         } else if (command.data.pattern) {
           // Close tabs matching pattern
           const tabs = await chrome.tabs.query({});
+          let closedCount = 0;
           for (const tab of tabs) {
             if (tab.url && tab.url.includes(command.data.pattern)) {
               try {
                 await chrome.tabs.remove(tab.id);
+                closedCount++;
                 console.log('Closed tab matching pattern:', tab.url);
               } catch (error) {
                 console.warn('Could not close tab:', tab.id, error);
               }
             }
           }
+          result.pattern = command.data.pattern;
+          result.closedCount = closedCount;
+        } else {
+          throw new Error('Missing close-tab target');
         }
         // Capture screenshot immediately after closing tabs so dashboard updates fast
         setTimeout(() => captureAndSendScreenshot(), 1500);
         break;
 
       case 'lock-screen':
-        screenLocked = true;
-        
         // Handle "CURRENT_URL" special marker - lock to current active tab
         let urlToLock = command.data.url;
         if (urlToLock === "CURRENT_URL") {
@@ -2635,13 +2759,19 @@ async function handleRemoteControl(command) {
             urlToLock = activeTab.url;
             console.log('[Lock Screen] Using current tab URL:', urlToLock);
           } else {
-            console.warn('[Lock Screen] No active tab found, cannot lock to current URL');
-            break;
+            throw new Error('No active tab found to lock to current URL');
           }
+        }
+        if (!urlToLock) {
+          throw new Error('Missing URL for lock-screen command');
         }
         
         lockedUrl = urlToLock;
         lockedDomain = extractDomain(lockedUrl); // Extract domain for domain-based locking
+        if (!lockedDomain) {
+          throw new Error('Could not determine locked domain');
+        }
+        screenLocked = true;
         allowedDomains = []; // Clear scene domains when locking to single domain
         
         // Persist lock-screen state to survive service worker restarts
@@ -2684,6 +2814,9 @@ async function handleRemoteControl(command) {
           priority: 2,
         });
         
+        result.screenLocked = true;
+        result.lockedUrl = lockedUrl;
+        result.lockedDomain = lockedDomain;
         console.log('Screen locked to domain:', lockedDomain, '(from URL:', lockedUrl + ')');
         break;
         
@@ -2707,17 +2840,24 @@ async function handleRemoteControl(command) {
           priority: 1,
         });
         
+        result.screenLocked = false;
+        result.clearedStates = ['screen-lock', 'flight-path'];
         console.log('Screen unlocked');
         break;
         
       case 'apply-flight-path':
+        {
+          const requestedAllowedDomains = command.data.allowedDomains || [];
+          if (!Array.isArray(requestedAllowedDomains) || requestedAllowedDomains.length === 0) {
+            throw new Error('Missing allowed domains for Flight Path');
+          }
+
+          allowedDomains = requestedAllowedDomains;
+          activeFlightPathName = command.data.flightPathName || null;
+        }
         screenLocked = true;
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
         lockedDomain = null; // Clear single domain when applying Flight Path
-        
-        // Store allowed domains and Flight Path name
-        allowedDomains = command.data.allowedDomains || [];
-        activeFlightPathName = command.data.flightPathName || null;
         
         // Persist Flight Path state to survive service worker restarts
         await chrome.storage.local.set({
@@ -2764,6 +2904,9 @@ async function handleRemoteControl(command) {
           });
         }
         
+        result.screenLocked = true;
+        result.allowedDomains = allowedDomains;
+        result.activeFlightPathName = activeFlightPathName;
         console.log('Flight Path applied with allowed domains:', allowedDomains, 'Name:', activeFlightPathName);
         break;
         
@@ -2787,6 +2930,8 @@ async function handleRemoteControl(command) {
           priority: 1,
         });
         
+        result.screenLocked = false;
+        result.clearedStates = ['flight-path'];
         console.log('Flight Path removed - all restrictions cleared');
         break;
 
@@ -2795,6 +2940,9 @@ async function handleRemoteControl(command) {
         const tempDomain = command.data.domain;
         const tempExpiresAt = command.data.expiresAt || (Date.now() + 5 * 60 * 1000);
         const tempDuration = command.data.durationMinutes || 5;
+        if (!tempDomain) {
+          throw new Error('Missing domain for temporary unblock');
+        }
 
         // Add to temporary allowed list
         temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.domain !== tempDomain);
@@ -2806,10 +2954,16 @@ async function handleRemoteControl(command) {
           priority: 1,
         });
 
+        result.domain = tempDomain;
+        result.expiresAt = tempExpiresAt;
+        result.durationMinutes = tempDuration;
         console.log('[Temp Unblock] Temporarily allowed domain:', tempDomain, 'until', new Date(tempExpiresAt));
         break;
 
       case 'apply-block-list':
+        if (!Array.isArray(command.data.blockedDomains || [])) {
+          throw new Error('Invalid block list domains');
+        }
         teacherBlockedDomains = command.data.blockedDomains || [];
         activeBlockListName = command.data.blockListName || null;
 
@@ -2828,6 +2982,8 @@ async function handleRemoteControl(command) {
           });
         }
 
+        result.activeBlockListName = activeBlockListName;
+        result.blockedDomains = teacherBlockedDomains;
         console.log('[Block List] Teacher block list applied (session-based):', activeBlockListName, teacherBlockedDomains);
         break;
 
@@ -2844,6 +3000,9 @@ async function handleRemoteControl(command) {
           priority: 1,
         });
         
+        result.activeBlockListName = null;
+        result.blockedDomains = [];
+        result.clearedStates = ['block-list'];
         console.log('[Block List] Teacher block list removed');
         break;
         
@@ -2864,6 +3023,7 @@ async function handleRemoteControl(command) {
           }
         }
         
+        result.currentMaxTabs = currentMaxTabs;
         console.log('Tab limit set to:', currentMaxTabs);
         break;
 
@@ -2886,6 +3046,8 @@ async function handleRemoteControl(command) {
           });
         }
 
+        result.active = attentionActive;
+        result.message = attentionMessage;
         console.log('Attention mode:', attentionActive ? 'ON' : 'OFF', attentionMessage);
         break;
 
@@ -2906,6 +3068,9 @@ async function handleRemoteControl(command) {
           });
         }
 
+        result.action = timerAction;
+        result.seconds = timerSeconds;
+        result.message = timerMessage;
         console.log('Timer:', timerAction, timerSeconds, 'seconds');
         break;
 
@@ -2941,6 +3106,9 @@ async function handleRemoteControl(command) {
           });
         }
 
+        result.action = pollAction;
+        result.pollId = pollId;
+        result.question = pollQuestion;
         console.log('Poll:', pollAction, pollId);
         break;
 
@@ -2952,6 +3120,8 @@ async function handleRemoteControl(command) {
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('chat-notification', { message: chatMessage, fromName: chatFromName });
 
+        result.messageDelivered = true;
+        result.fromName = chatFromName;
         console.log('Chat notification sent:', chatFromName, chatMessage);
         break;
 
@@ -2962,6 +3132,7 @@ async function handleRemoteControl(command) {
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-dismissed', {});
 
+        result.handRaised = false;
         console.log('Hand dismissed notification sent');
         break;
 
@@ -2973,6 +3144,7 @@ async function handleRemoteControl(command) {
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('messaging-toggle', { enabled: messagingEnabled });
 
+        result.messagingEnabled = messagingEnabled;
         console.log('Messaging toggle sent:', messagingEnabled);
         break;
 
@@ -2984,12 +3156,18 @@ async function handleRemoteControl(command) {
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-raising-toggle', { enabled: handRaisingEnabled });
 
+        result.handRaisingEnabled = handRaisingEnabled;
         console.log('Hand raising toggle sent:', handRaisingEnabled);
         break;
+
+      default:
+        throw new Error(`Unsupported remote control command: ${command.type || 'unknown'}`);
     }
-  } catch (error) {
-    console.warn('Error handling remote control command:', error);
-  }
+
+  return {
+    ...result,
+    state: await getClassroomCommandStateSnapshot(),
+  };
 }
 
 // Track which tabs have content script injected to avoid repeated injection attempts
@@ -3866,7 +4044,9 @@ function handleWsMessage(rawData) {
           recentMsgIds.add(msgId);
           setTimeout(() => recentMsgIds.delete(msgId), MSG_DEDUP_TTL);
         }
-        handleRemoteControl(message.command);
+        handleRemoteControl(message.command, message).catch((error) => {
+          console.warn('Unhandled remote control command error:', error);
+        });
       }
       
       // Handle chat messages (Phase 2)
@@ -3877,9 +4057,22 @@ function handleWsMessage(rawData) {
       // Handle teacher reply messages — send to chat thread
       // Dedup: local + Redis both deliver the same message; skip if already seen
       if (message.type === 'teacher-message') {
+        const commandId = getCommandIdFromMessage(message);
+        if (commandId) {
+          sendCommandAck(commandId, 'received', { commandType: 'teacher-message' });
+        }
         const dedupKey = message._msgId || ('tm:' + (message.message || '') + ':' + (message.fromName || ''));
         if (recentMsgIds.has(dedupKey)) {
           console.log('Dedup: skipping duplicate teacher-message', dedupKey);
+          if (commandId) {
+            getClassroomCommandStateSnapshot().then((state) => {
+              sendCommandAck(commandId, 'completed', {
+                commandType: 'teacher-message',
+                result: { deduplicated: true },
+                state,
+              });
+            }).catch(() => {});
+          }
         } else {
           recentMsgIds.add(dedupKey);
           setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
@@ -3895,6 +4088,18 @@ function handleWsMessage(rawData) {
             fromName: message.fromName || 'Teacher',
             timestamp: Date.now(),
           });
+          if (commandId) {
+            getClassroomCommandStateSnapshot().then((state) => {
+              sendCommandAck(commandId, 'completed', {
+                commandType: 'teacher-message',
+                result: {
+                  delivered: true,
+                  messageLength: String(message.message || '').length,
+                },
+                state,
+              });
+            }).catch(() => {});
+          }
         }
       }
 
