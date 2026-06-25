@@ -148,11 +148,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Messaging toggle (enable/disable messaging)
   if (message.type === 'messaging-toggle') {
-    chrome.storage.local.set({ messagingEnabled: message.data.enabled });
-    if (message.data.enabled) {
-      chatClosed = false;
-      persistFabChatState();
-    }
+    applyFabState({ messagingEnabled: message.data.enabled, reason: 'messaging-toggle' });
+  }
+
+  // Complete FAB state pushed when a class session starts/ends.
+  if (message.type === 'fab-state') {
+    applyFabState(message.data || {});
   }
 });
 
@@ -1756,6 +1757,54 @@ function persistFabChatState() {
   });
 }
 
+function updateFabChatControls() {
+  const input = document.getElementById('classpilot-fab-chat-input');
+  const sendButton = document.getElementById('classpilot-fab-chat-send-btn');
+  if (input) input.disabled = !messagingEnabled;
+  if (sendButton) sendButton.disabled = !messagingEnabled;
+}
+
+function applyFabState(state = {}) {
+  const reason = state.reason || '';
+  const wasMessagingEnabled = messagingEnabled;
+  const sessionEnded = reason === 'session-ended' || reason === 'session-replaced';
+
+  if (typeof state.messagingEnabled === 'boolean') {
+    messagingEnabled = state.messagingEnabled;
+  }
+  if (typeof state.handRaisingEnabled === 'boolean') {
+    handRaisingEnabled = state.handRaisingEnabled;
+  }
+  if (typeof state.handRaised === 'boolean') {
+    handRaised = state.handRaised;
+  }
+
+  if (reason === 'session-started') {
+    chatMessages = [];
+    chatClosed = false;
+    persistFabChatState();
+    renderChatMessages();
+  } else if (sessionEnded) {
+    chatMessages = [];
+    chatClosed = true;
+    persistFabChatState();
+    renderChatMessages();
+  } else if (messagingEnabled && (!wasMessagingEnabled || reason === 'messaging-toggle')) {
+    chatClosed = false;
+    persistFabChatState();
+    renderChatMessages();
+  }
+
+  if (!messagingEnabled || sessionEnded) {
+    hideMessageBox();
+    closeFabMenu();
+  }
+
+  updateFabHandState();
+  updateFabMessageState();
+  updateFabChatControls();
+}
+
 function createFloatingActionButton() {
   // Don't create FAB on extension pages or special pages
   if (window.location.protocol === 'chrome-extension:' ||
@@ -1819,6 +1868,7 @@ function createFloatingActionButton() {
     chatClosed = result[FAB_CHAT_CLOSED_KEY] === true;
     updateFabHandState();
     updateFabMessageState();
+    updateFabChatControls();
     updateFabIdentityState();
     renderChatMessages();
   });
@@ -1920,9 +1970,14 @@ function closeFabMenu() {
 }
 
 function showMessageBox() {
+  if (!messagingEnabled) {
+    showFabNotification('Messaging is currently disabled by your teacher.', true);
+    return;
+  }
   const messageBox = document.getElementById('classpilot-fab-message-box');
   messageBox?.classList.add('classpilot-fab-message-box-open');
   renderChatMessages();
+  updateFabChatControls();
   document.getElementById('classpilot-fab-chat-input')?.focus();
 }
 
@@ -2048,6 +2103,11 @@ function updateFabIdentityState(state) {
 function sendMessage() {
   const input = document.getElementById('classpilot-fab-chat-input');
   const message = input?.value?.trim();
+
+  if (!messagingEnabled) {
+    showFabNotification('Messaging is currently disabled by your teacher.', true);
+    return;
+  }
 
   if (!message) {
     return;
@@ -2466,6 +2526,11 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     if (changes.messagingEnabled) {
       messagingEnabled = changes.messagingEnabled.newValue !== false;
       updateFabMessageState();
+      updateFabChatControls();
+      if (!messagingEnabled) {
+        hideMessageBox();
+        closeFabMenu();
+      }
     }
     if (changes.handRaisingEnabled) {
       handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;

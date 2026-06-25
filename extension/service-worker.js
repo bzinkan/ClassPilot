@@ -629,7 +629,7 @@ async function parseJsonResponse(response) {
 }
 
 async function applyFabSettings(fabState) {
-  if (!fabState || typeof fabState !== 'object') return;
+  if (!fabState || typeof fabState !== 'object') return {};
   const updates = {};
   if (typeof fabState.messagingEnabled === 'boolean') {
     updates.messagingEnabled = fabState.messagingEnabled;
@@ -640,9 +640,25 @@ async function applyFabSettings(fabState) {
   if (typeof fabState.handRaised === 'boolean') {
     updates.handRaised = fabState.handRaised;
   }
+  if (Array.isArray(fabState.activeSessionIds)) {
+    updates.fabActiveSessionIds = fabState.activeSessionIds;
+  }
+  if (Array.isArray(fabState.activeHands)) {
+    updates.fabActiveHands = fabState.activeHands;
+  }
+  if (Array.isArray(fabState.sessions)) {
+    updates.fabSessions = fabState.sessions;
+  }
+  if (typeof fabState.sessionId === 'string') {
+    updates.fabLifecycleSessionId = fabState.sessionId;
+  }
+  if (typeof fabState.reason === 'string') {
+    updates.fabLifecycleReason = fabState.reason;
+  }
   if (Object.keys(updates).length > 0) {
     await chrome.storage.local.set(updates);
   }
+  return updates;
 }
 
 function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
@@ -1144,6 +1160,7 @@ async function enforceAuthGateForTab(tabOrId) {
 async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   const tokenToEnd = CONFIG.studentToken;
   const pauseAutoRegistration = options.pauseAutoRegistration === true;
+  const disconnect = options.disconnectWebSocket !== false;
   sharedAuthLockedSinceAt = 0;
   chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
 
@@ -1178,7 +1195,9 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
 
   scheduleHeartbeat(null);
   scheduleScreenshotCapture(false);
-  disconnectWebSocket();
+  if (disconnect) {
+    disconnectWebSocket();
+  }
   chrome.action.setBadgeText({ text: 'AUTH' });
   chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
   await notifyAuthGateStateToTabs();
@@ -1917,6 +1936,16 @@ async function updateBlockingRules(allowedDomains) {
 
 async function clearBlockingRules() {
   await updateBlockingRules([]);
+}
+
+async function clearClassroomBlockingRule() {
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [BLOCK_RULE_ID],
+    });
+  } catch (error) {
+    console.warn('[Sign Out] Error clearing classroom blocking rule:', error?.message || error);
+  }
 }
 
 // Global Blacklist - blocks specific domains school-wide (independent of Flight Path)
@@ -2735,6 +2764,28 @@ async function getClassroomCommandStateSnapshot() {
   }
 }
 
+async function clearTeacherSessionStateForSignOut() {
+  screenLocked = false;
+  lockedUrl = null;
+  lockedDomain = null;
+  allowedDomains = [];
+  activeFlightPathName = null;
+  currentMaxTabs = null;
+  teacherBlockedDomains = [];
+  activeBlockListName = null;
+  temporaryAllowedDomains = [];
+  attentionModeActive = false;
+  seenPollIds.clear();
+
+  await chrome.storage.local.remove(['lockScreenState', 'flightPathState']);
+  await clearClassroomBlockingRule();
+  await clearTeacherBlockListRules();
+
+  broadcastToAllTabs('attention-mode', { active: false, message: '' });
+  broadcastToAllTabs('timer', { action: 'stop' });
+  broadcastToAllTabs('poll', { action: 'close' });
+}
+
 // Helper function to extract domain from URL
 function extractDomain(url) {
   try {
@@ -3302,6 +3353,52 @@ async function executeRemoteControlCommand(command) {
 
         result.handRaisingEnabled = handRaisingEnabled;
         console.log('Hand raising toggle sent:', handRaisingEnabled);
+        break;
+
+      case 'fab-state':
+        // Apply session lifecycle state pushed by SchoolPilot when classes start/end.
+        const fabStateData = command.data || {};
+        const appliedFabState = await applyFabSettings(fabStateData);
+
+        // Fire-and-forget - content scripts update open FAB UI immediately.
+        broadcastToAllTabs('fab-state', fabStateData);
+
+        result.fabState = appliedFabState;
+        console.log('FAB state updated:', fabStateData.reason || 'state-refresh');
+        break;
+
+      case 'student-sign-out':
+        {
+          const signOutReason = command.data.reason || 'teacher-sign-out';
+          await clearTeacherSessionStateForSignOut();
+          await applyFabSettings({
+            messagingEnabled: false,
+            handRaisingEnabled: false,
+            handRaised: false,
+            activeSessionIds: [],
+            activeHands: [],
+            sessions: [],
+            sessionId: command.data.sessionId || '',
+            reason: signOutReason,
+          });
+          await chrome.storage.local.set({
+            fabChatMessages: [],
+            fabChatClosed: false,
+          });
+          await clearStudentAuth(signOutReason, {
+            notifyBackend: false,
+            pauseAutoRegistration: true,
+            disconnectWebSocket: false,
+          });
+          setTimeout(() => {
+            disconnectWebSocket();
+          }, 250);
+
+          result.signedOut = true;
+          result.reason = signOutReason;
+          result.sessionId = command.data.sessionId || null;
+          console.log('[Sign Out] Teacher-forced student sign-out applied');
+        }
         break;
 
       default:
