@@ -195,6 +195,8 @@ const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watchi
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
+const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
+const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const MANAGED_CONFIG_KEYS = [
   'serverUrl',
@@ -234,6 +236,7 @@ let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
 let isScheduleHardOff = false;
+let sharedAuthLockedSinceAt = 0;
 let sharedSignInLoginConfig = {
   fetchedAt: 0,
   setupRequired: false,
@@ -279,6 +282,7 @@ const AUTH_STATE_KEYS = [
   'identitySource',
   'manualLoginLastSeenAt',
   'autoRegistrationPaused',
+  'sharedAuthLockedSinceAt',
 ];
 
 function hasSessionStorage() {
@@ -874,12 +878,10 @@ async function initializeAdaptiveTracking(reason) {
   if (!idleListenerReady && chrome.idle) {
     chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
     chrome.idle.queryState(IDLE_DETECTION_SECONDS, (state) => {
-      idleState = state;
-      updateTrackingState('idle-initial'); // Idle behavior: switch states based on idle/locked signal.
+      handleIdleStateChanged(state, 'idle-initial').catch(() => {});
     });
     chrome.idle.onStateChanged.addListener((state) => {
-      idleState = state;
-      updateTrackingState('idle-change'); // Idle behavior: switch states based on idle/locked signal.
+      handleIdleStateChanged(state, 'idle-change').catch(() => {});
     });
     idleListenerReady = true;
   }
@@ -971,6 +973,16 @@ function isManualIdentitySource(source = CONFIG.identitySource) {
 
 function hasStudentAuth() {
   return Boolean(CONFIG.deviceId && CONFIG.studentToken && (CONFIG.activeStudentId || CONFIG.studentEmail));
+}
+
+function disableToolbarAction() {
+  try {
+    if (!chrome.action?.disable) return;
+    const maybePromise = chrome.action.disable();
+    if (maybePromise?.catch) maybePromise.catch(() => {});
+  } catch {
+    // Toolbar action disablement is best-effort; the in-page FAB remains active.
+  }
 }
 
 function hasManagedSchoolSetup() {
@@ -1132,6 +1144,8 @@ async function enforceAuthGateForTab(tabOrId) {
 async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   const tokenToEnd = CONFIG.studentToken;
   const pauseAutoRegistration = options.pauseAutoRegistration === true;
+  sharedAuthLockedSinceAt = 0;
+  chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
 
   if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
     try {
@@ -1155,6 +1169,7 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   CONFIG.identitySource = null;
   CONFIG.manualLoginLastSeenAt = null;
   CONFIG.autoRegistrationPaused = pauseAutoRegistration;
+  CONFIG.sharedAuthLockedSinceAt = null;
 
   await clearStoredAuthState({
     registered: false,
@@ -1181,8 +1196,76 @@ async function expireManualAuthIfStale(reason = 'stale-check') {
   }
 
   console.log(`[Auth] Manual login expired (${reason})`);
-  await clearStudentAuth('manual-stale-expired', { notifyBackend: false });
+  await clearStudentAuth('auto_stale_wake', { notifyBackend: true, pauseAutoRegistration: true });
   return true;
+}
+
+async function clearSharedAuthLockTimer() {
+  sharedAuthLockedSinceAt = 0;
+  chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
+  if (isManualIdentitySource()) {
+    await setManualAuthState({ sharedAuthLockedSinceAt: null });
+  } else {
+    await kv.set({ sharedAuthLockedSinceAt: null });
+    if (hasSessionStorage()) await sessionKv.remove(['sharedAuthLockedSinceAt']);
+  }
+}
+
+async function scheduleSharedAuthLockTimer(reason = 'locked') {
+  if (!hasStudentAuth() || !isManualIdentitySource()) {
+    await clearSharedAuthLockTimer();
+    return;
+  }
+  if (!sharedAuthLockedSinceAt) {
+    sharedAuthLockedSinceAt = Date.now();
+    await setManualAuthState({ sharedAuthLockedSinceAt });
+  }
+  chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, {
+    delayInMinutes: SHARED_AUTH_LOCK_TIMEOUT_MS / 60000,
+  });
+  console.log(`[Auth] Shared-device lock timeout scheduled (${reason})`);
+}
+
+async function handleIdleStateChanged(state, reason = 'idle-change') {
+  idleState = state;
+  if (state === 'locked') {
+    await scheduleSharedAuthLockTimer(reason);
+  } else {
+    await clearSharedAuthLockTimer();
+  }
+  await updateTrackingState(reason);
+}
+
+async function handleSharedAuthLockTimeout() {
+  if (!hasStudentAuth() || !isManualIdentitySource()) {
+    await clearSharedAuthLockTimer();
+    return;
+  }
+  const currentState = await new Promise(resolve => {
+    if (!chrome.idle?.queryState) {
+      resolve(idleState);
+      return;
+    }
+    chrome.idle.queryState(IDLE_DETECTION_SECONDS, resolve);
+  });
+  idleState = currentState || idleState;
+  if (idleState !== 'locked') {
+    await clearSharedAuthLockTimer();
+    await updateTrackingState('lock-timeout-cancelled');
+    return;
+  }
+
+  const stored = await getStoredAuthState(['sharedAuthLockedSinceAt']);
+  const lockedSince = Number(sharedAuthLockedSinceAt || stored.sharedAuthLockedSinceAt || 0);
+  if (!lockedSince || Date.now() - lockedSince < SHARED_AUTH_LOCK_TIMEOUT_MS) {
+    chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, {
+      delayInMinutes: SHARED_AUTH_LOCK_TIMEOUT_MS / 60000,
+    });
+    return;
+  }
+
+  console.log('[Auth] Shared-device student auth cleared after lock timeout');
+  await clearStudentAuth('auto_locked_timeout', { notifyBackend: true, pauseAutoRegistration: true });
 }
 
 async function fetchLoginRosterForGate(options = {}) {
@@ -1396,6 +1479,7 @@ async function ensureRegistered() {
       'identitySource',
       'manualLoginLastSeenAt',
       'autoRegistrationPaused',
+      'sharedAuthLockedSinceAt',
     ]);
 
     if (stored.studentToken) {
@@ -1465,6 +1549,7 @@ async function ensureRegistered() {
     CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
     CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
+    sharedAuthLockedSinceAt = Number(stored.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
 
     if (await expireManualAuthIfStale('ensure-registered-storage')) {
       return await kv.get(['deviceId']);
@@ -1575,6 +1660,7 @@ async function ensureRegistered() {
 // Run auto-registration on install and startup
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
+  disableToolbarAction();
   resolveServerUrl().then((serverUrl) => {
     CONFIG.serverUrl = serverUrl;
     scheduleLicenseCheck();
@@ -1588,6 +1674,7 @@ chrome.runtime.onInstalled.addListener(() => {
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
+    disableToolbarAction();
     resolveServerUrl().then((serverUrl) => {
       CONFIG.serverUrl = serverUrl;
       scheduleLicenseCheck();
@@ -1603,6 +1690,7 @@ if (chrome.runtime.onStartup) {
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
+  disableToolbarAction();
   const stored = await getStoredAuthState([
     'deviceId',
     'config',
@@ -1613,6 +1701,7 @@ if (chrome.runtime.onStartup) {
     'identitySource',
     'manualLoginLastSeenAt',
     'autoRegistrationPaused',
+    'sharedAuthLockedSinceAt',
     'flightPathState',
     'lockScreenState',
     'licenseActive',
@@ -1651,6 +1740,7 @@ if (chrome.runtime.onStartup) {
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
   }
   CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
+  sharedAuthLockedSinceAt = Number(stored.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
 
   // Restore Flight Path state if it was active
   if (stored.flightPathState) {
@@ -2017,6 +2107,7 @@ getStoredAuthState([
   'identitySource',
   'manualLoginLastSeenAt',
   'autoRegistrationPaused',
+  'sharedAuthLockedSinceAt',
 ]).then(async (result) => {
   try {
     const resolvedServerUrl = await resolveServerUrl();
@@ -2050,6 +2141,7 @@ getStoredAuthState([
       CONFIG.manualLoginLastSeenAt = result.manualLoginLastSeenAt;
     }
     CONFIG.autoRegistrationPaused = result.autoRegistrationPaused === true;
+    sharedAuthLockedSinceAt = Number(result.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
 
     // ✅ JWT AUTHENTICATION: Load studentToken from storage
     if (result.studentToken) {
@@ -2484,6 +2576,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }).catch(() => {});
   } else if (alarm.name === 'license-check') {
     checkLicenseStatus('alarm').catch(() => {});
+  } else if (alarm.name === SHARED_AUTH_LOCK_ALARM_NAME) {
+    handleSharedAuthLockTimeout().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot();
   }
@@ -2515,6 +2609,11 @@ async function captureAndSendScreenshot() {
 
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
     lastScreenshotError = 'tracking_off';
+    lastScreenshotErrorAt = Date.now();
+    return;
+  }
+  if (await expireManualAuthIfStale('screenshot-capture')) {
+    lastScreenshotError = 'auth_stale';
     lastScreenshotErrorAt = Date.now();
     return;
   }
@@ -3856,6 +3955,9 @@ async function connectWebSocket() {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
   }
+  if (await expireManualAuthIfStale('websocket-connect')) {
+    return;
+  }
   if (!hasStudentAuth()) {
     console.log('Skipping WebSocket - student authentication required');
     await notifyAuthGateStateToTabs();
@@ -4348,7 +4450,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'student-sign-out') {
-    clearStudentAuth('explicit-sign-out', { notifyBackend: true, pauseAutoRegistration: isManualIdentitySource() })
+    clearStudentAuth('explicit_sign_out', { notifyBackend: true, pauseAutoRegistration: isManualIdentitySource() })
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
