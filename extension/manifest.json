@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClassPilot",
-  "version": "2.5.2",
+  "version": "2.5.4",
   "description": "Privacy-aware classroom monitoring for managed Chromebooks. Displays active tab information to teachers with transparent disclosure.",
   "icons": {
     "16": "icons/icon16.png",
@@ -37,7 +37,7 @@
     "service_worker": "service-worker.js"
   },
   "action": {
-    "default_popup": "popup.html",
+    "default_state": "disabled",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
