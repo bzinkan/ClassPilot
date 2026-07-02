@@ -67,3 +67,5 @@ Before each Chrome Web Store upload:
   zips, helper scripts, or generated icon sources.
 - Confirm the Chrome Web Store listing and school notices disclose tab/URL
   monitoring and periodic screen thumbnails.
+- Use the hosted SchoolPilot privacy policy URL in Chrome Web Store:
+  `https://school-pilot.net/privacy`.

@@ -12,30 +12,108 @@ VERSION="$(node -p "require('./extension/manifest.json').version")"
 OUTPUT="dist/ClassPilot-v${VERSION}.zip"
 COMPAT_OUTPUT="dist/classpilot-extension.zip"
 
-# Remove old package if exists
-rm -f "$OUTPUT" "$COMPAT_OUTPUT"
+# Remove old packages if they exist
+rm -f dist/ClassPilot-v*.zip "$COMPAT_OUTPUT"
 
-# Navigate to extension directory
-cd extension
+EXCLUDES=(
+  "*.DS_Store"
+  "__MACOSX/*"
+  "dist/*"
+  "README.md"
+  "COMPLIANCE.md"
+  "config.js"
+  "config.example.js"
+  "create-simple-icons.cjs"
+  "icons/generate-icons.js"
+  "icons/create_icons.html"
+  "icons/README.md"
+  ".git/*"
+  "*.sh"
+)
+
+create_zip_with_powershell() {
+  if ! command -v powershell.exe >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local source_dir output_path
+  source_dir="$(cygpath -w "extension")"
+  output_path="$(cygpath -w "$OUTPUT")"
+
+  CLASSPILOT_SOURCE_DIR="$source_dir" CLASSPILOT_OUTPUT_PATH="$output_path" powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+    $SourceDir = $env:CLASSPILOT_SOURCE_DIR
+    $OutputPath = $env:CLASSPILOT_OUTPUT_PATH
+    $excludePatterns = @(
+      "*.DS_Store",
+      "__MACOSX/*",
+      "dist/*",
+      "README.md",
+      "COMPLIANCE.md",
+      "config.js",
+      "config.example.js",
+      "create-simple-icons.cjs",
+      "icons/generate-icons.js",
+      "icons/create_icons.html",
+      "icons/README.md",
+      ".git/*",
+      "*.sh"
+    )
+
+    function Test-Excluded([string]$RelativePath) {
+      $normalized = $RelativePath -replace "\\", "/"
+      foreach ($pattern in $excludePatterns) {
+        $regex = "^" + [regex]::Escape($pattern).Replace("\*", ".*") + "$"
+        if ($normalized -match $regex) {
+          return $true
+        }
+      }
+      return $false
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path -LiteralPath $OutputPath) {
+      Remove-Item -LiteralPath $OutputPath -Force
+    }
+
+    $zip = [System.IO.Compression.ZipFile]::Open($OutputPath, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+      $sourceFull = (Resolve-Path -LiteralPath $SourceDir).Path
+      Get-ChildItem -LiteralPath $sourceFull -File -Recurse | ForEach-Object {
+        $relative = $_.FullName.Substring($sourceFull.Length).TrimStart([char[]]"\/")
+        $entryName = $relative -replace "\\", "/"
+        if (-not (Test-Excluded $entryName)) {
+          [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zip,
+            $_.FullName,
+            $entryName,
+            [System.IO.Compression.CompressionLevel]::Optimal
+          ) | Out-Null
+        }
+      }
+    } finally {
+      $zip.Dispose()
+    }
+  '
+}
 
 # Create ZIP with proper structure (files at root, not in subfolder)
-# Exclude unnecessary files
-zip -r "../$OUTPUT" . \
-  -x "*.DS_Store" \
-  -x "__MACOSX/*" \
-  -x "dist/*" \
-  -x "README.md" \
-  -x "COMPLIANCE.md" \
-  -x "config.js" \
-  -x "config.example.js" \
-  -x "create-simple-icons.cjs" \
-  -x "icons/generate-icons.js" \
-  -x "icons/create_icons.html" \
-  -x "icons/README.md" \
-  -x ".git/*" \
-  -x "*.sh"
-
-cd ..
+# Exclude unnecessary files.
+if command -v zip >/dev/null 2>&1; then
+  zip_args=()
+  for pattern in "${EXCLUDES[@]}"; do
+    zip_args+=("-x" "$pattern")
+  done
+  (
+    cd extension
+    zip -r "../$OUTPUT" . "${zip_args[@]}"
+  )
+elif create_zip_with_powershell; then
+  echo "ℹ️  Created package with PowerShell fallback because zip was not available."
+else
+  echo "❌ Package creation failed: neither zip nor PowerShell fallback is available"
+  exit 1
+fi
 
 # Verify package
 if [ -f "$OUTPUT" ]; then

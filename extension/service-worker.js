@@ -202,6 +202,7 @@ const HEALTH_CHECK_ALARM_NAME = 'health-check';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const API_RETRY_MAX_ATTEMPTS = 3;
 const API_RETRY_BASE_DELAY_MS = 1000;
+const API_RETRY_RATE_LIMIT_DELAY_MS = 10000;
 const API_RETRY_MAX_DELAY_MS = 30000;
 const STARTUP_JITTER_MIN_MS = 1500;
 const STARTUP_JITTER_MAX_MS = 12000;
@@ -290,8 +291,10 @@ function parseRetryAfterMs(response) {
 
 function calculateRetryDelayMs(response, attempt) {
   const retryAfterMs = parseRetryAfterMs(response);
+  const isRateLimited = response?.status === 429;
+  const baseRetryDelayMs = isRateLimited ? API_RETRY_RATE_LIMIT_DELAY_MS : API_RETRY_BASE_DELAY_MS;
   const exponentialMs = Math.min(
-    API_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1)),
+    baseRetryDelayMs * Math.pow(2, Math.max(0, attempt - 1)),
     API_RETRY_MAX_DELAY_MS
   );
   const baseDelay = retryAfterMs || exponentialMs;
@@ -1318,6 +1321,7 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
       }, {
         context: 'student sign-out',
         maxAttempts: 1,
+        respectGlobalBackoff: false,
       });
     } catch (error) {
       console.warn('[Auth] Session-end call failed:', error?.message || error);
@@ -1451,6 +1455,7 @@ async function fetchLoginRosterForGate(options = {}) {
   }, {
     context: 'login roster',
     maxAttempts: 2,
+    respectGlobalBackoff: false,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -1504,6 +1509,7 @@ async function manualStudentLogin(payload) {
   }, {
     context: 'student login',
     maxAttempts: 1,
+    respectGlobalBackoff: false,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.studentToken) {
@@ -4817,6 +4823,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }, {
         context: 'poll response',
         maxAttempts: 2,
+        respectGlobalBackoff: false,
       })
         .then(res => res.json())
         .then(data => {
@@ -4855,6 +4862,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }, {
       context: 'raise hand',
       maxAttempts: 2,
+      respectGlobalBackoff: false,
     })
       .then(parseJsonResponse)
       .then(data => {
@@ -4892,6 +4900,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }, {
       context: 'lower hand',
       maxAttempts: 2,
+      respectGlobalBackoff: false,
     })
       .then(parseJsonResponse)
       .then(data => {
@@ -4934,6 +4943,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }, {
       context: 'student message',
       maxAttempts: 2,
+      respectGlobalBackoff: false,
     })
       .then(parseJsonResponse)
       .then(data => {

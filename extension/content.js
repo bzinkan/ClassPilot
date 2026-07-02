@@ -2236,7 +2236,6 @@ function addFabStyles() {
       font-weight: 700;
       letter-spacing: 0;
       white-space: nowrap;
-      pointer-events: none;
     }
 
     .classpilot-monitoring-dot {

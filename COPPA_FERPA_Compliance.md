@@ -148,8 +148,8 @@ ClassPilot does **not**:
 | Grade level | Demographic | Admin entry | PostgreSQL | Until school requests deletion |
 | Google User ID | Identifier | Google OAuth | PostgreSQL | Until school requests deletion |
 | Device ID | Identifier | Chrome Extension | PostgreSQL | Until school requests deletion |
-| Active tab title | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 24 hours |
-| Active tab URL | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 24 hours |
+| Active tab title | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 30 days |
+| Active tab URL | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 30 days |
 | Periodic screen thumbnails | Browsing activity | Chrome Extension screenshot upload | Redis/transient screenshot store | Short-lived operational retention |
 | Screen lock status | Device state | Chrome Extension | In-memory only | Not persisted |
 | Open tab list | Browsing activity | Chrome Extension | In-memory only | Not persisted; real-time only |
@@ -334,7 +334,7 @@ ClassPilot uses a multi-tenant architecture where each school is a separate logi
 
 | Data Category | Default Retention | Configurable | Notes |
 |---|---|---|---|
-| Student browsing activity (heartbeats) | 24 hours | Yes — school admin configurable | Automatic cleanup job runs on schedule |
+| Student browsing activity (heartbeats) | 30 days | Yes — school admin configurable | Automatic cleanup job runs on schedule |
 | Periodic screen thumbnails | Short-lived operational retention | Yes — server-side policy | Used for live classroom dashboard visibility; not a recording archive |
 | Session logs | 90 days | Yes | Login/logout timestamps |
 | Student account data | Duration of contract | N/A | Retained while school's account is active |
@@ -344,7 +344,7 @@ ClassPilot uses a multi-tenant architecture where each school is a separate logi
 
 ### 9.2 Automatic Data Cleanup
 
-- Browsing activity (heartbeat) records are automatically purged based on the school's configured retention period (default: 24 hours).
+- Browsing activity (heartbeat) records are automatically purged based on the school's configured retention period (default: 30 days).
 - The cleanup process runs automatically without manual intervention.
 - Schools can adjust their retention period through the school settings dashboard.
 
@@ -571,7 +571,7 @@ ClassPilot is designed to comply with state-level student privacy statutes inclu
 **A:** No. Schools configure tracking hours (e.g., 7:00 AM – 4:00 PM). The extension does not transmit browsing data outside these configured hours. Schools set their tracking window based on their local timezone, which is auto-detected from the school's zip code.
 
 ### Q: How long is browsing data retained?
-**A:** By default, browsing activity (heartbeat data) is retained for 24 hours and then automatically purged. School administrators can adjust the retention period. Real-time status data (which student is online, open tabs list) exists only in memory and is not persisted to any database.
+**A:** By default, browsing activity (heartbeat data) is retained for 30 days and then automatically purged. School administrators can adjust the retention period. Real-time status data (which student is online, open tabs list) exists only in memory and is not persisted to any database.
 
 ### Q: Does ClassPilot use AI or machine learning on student data?
 **A:** No. ClassPilot does not use artificial intelligence, machine learning, or automated decision-making on student data.
