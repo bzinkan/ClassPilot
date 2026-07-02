@@ -8,8 +8,8 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 - **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Optional Screen Sharing**: Students can opt-in to share their screen with teacher
-- **Visible Indicators**: Shows badge icon indicating monitoring/sharing status
+- **Periodic Screen Thumbnails**: Captures bounded active-tab screenshots for the teacher dashboard while tracking is active
+- **Visible Indicators**: Shows in-page and popup indicators when school-managed monitoring is active
 - **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
 ## Installation for Testing
@@ -33,11 +33,11 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 
 ### Create ZIP for Force-Install
 
-1. Navigate to the extension directory
-2. Create a ZIP file containing all extension files:
+1. From the repository root, run:
    ```bash
-   zip -r classroom-screen-awareness.zip manifest.json managed_schema.json service-worker.js popup.html popup.js content.js icons/
+   ./extension/package-extension.sh
    ```
+2. Upload the versioned zip from `dist/`.
 
 ### Upload to Google Admin Console
 
@@ -47,7 +47,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 4. Select the organizational unit (e.g., "Students" or specific classes)
 5. Click the **+** (Add) button
 6. Choose **Upload private app**
-7. Upload the `classroom-screen-awareness.zip` file
+7. Upload the versioned `ClassPilot-vX.Y.Z.zip` file from `dist/`
 8. Configure installation settings:
    - Installation: **Force install**
    - Permission: **Allow**
@@ -104,43 +104,48 @@ git rm --cached extension/config.js
 
 ## Privacy & Transparency
 
-### What's Monitored (Automatically)
-- ✓ Active tab title
-- ✓ Active tab URL
-- ✓ Timestamps of activity
-- ✓ Website favicon (icon)
+### What's Monitored Automatically
+- Active tab title
+- Active tab URL
+- Timestamps of activity
+- Website favicon URL
+- Heartbeat, connection, and device health state
+- Periodic JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab while tracking is active
 
 ### What's NOT Monitored
-- ✗ Keystrokes or typed content
-- ✗ Microphone or camera
-- ✗ Private messages
-- ✗ Incognito/private windows
-- ✗ Screenshots (unless screen sharing is active)
+- Keystrokes or typed content
+- Microphone audio or camera video
+- Passwords
+- Incognito/private windows
+- Personal browsing from unmanaged profiles
 
 ### Automatic Monitoring
 - **Tab titles and URLs are collected automatically** - No student action required
 - Heartbeat sends data every 10 seconds
+- Screen thumbnails are captured about every 30 seconds while tracking is active
 - Teacher sees current tab and URL history in real-time
 - Complies with school district monitoring policies for managed Chromebooks
 
-### Screen Sharing (Optional)
-- Requires explicit student click on "Share My Screen" button
-- Shows visible "Sharing Active" indicator with pulsing red dot
-- Can be stopped anytime with "Stop Sharing" button
-- Logs consent granted/revoked events for audit
+### Live Screen Viewing
+- Teachers may request live viewing during active class sessions
+- Managed ChromeOS devices can allow silent tab capture through school Chrome policy
+- On unmanaged devices, Chrome may show a picker instead
+- Live streams are not recorded by the extension
 
 ### Transparency & Disclosure
 The extension popup clearly displays:
 - Banner stating "Monitoring Active"
+- A school-managed monitoring disclosure
 - Current connection status
-- Screen sharing section with opt-in button
-- Privacy information accessible via "What's being collected?" link
+- In-page FAB indicator stating "Monitored by school"
 
 ### Events Logged
 The extension logs the following events to the server:
 - `consent_granted` - When student starts screen sharing
 - `consent_revoked` - When student stops screen sharing
 - `tab_change` - When student switches tabs
+
+See `COMPLIANCE.md` for Chrome Web Store and school privacy review notes.
 
 ## Development
 

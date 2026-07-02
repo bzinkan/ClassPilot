@@ -198,6 +198,13 @@ const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
 const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
+const HEALTH_CHECK_ALARM_NAME = 'health-check';
+const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
+const API_RETRY_MAX_ATTEMPTS = 3;
+const API_RETRY_BASE_DELAY_MS = 1000;
+const API_RETRY_MAX_DELAY_MS = 30000;
+const STARTUP_JITTER_MIN_MS = 1500;
+const STARTUP_JITTER_MAX_MS = 12000;
 const MANAGED_CONFIG_KEYS = [
   'serverUrl',
   'classpilotServerUrl',
@@ -235,6 +242,9 @@ let licenseActive = true;
 let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
+let apiBackoffUntilMs = 0;
+let heartbeatInFlight = false;
+let screenshotCaptureInFlight = false;
 let isScheduleHardOff = false;
 let sharedAuthLockedSinceAt = 0;
 let sharedSignInLoginConfig = {
@@ -254,6 +264,97 @@ function resetSharedSignInLoginConfigCache() {
     loginMethod: 'name_pin',
     pinLoginEnabled: false,
   };
+}
+
+function sleepMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function randomIntBetween(min, max) {
+  return Math.floor(min + Math.random() * (max - min + 1));
+}
+
+function parseRetryAfterMs(response) {
+  const rawValue = response?.headers?.get?.('Retry-After');
+  if (!rawValue) return 0;
+  const numericValue = Number(rawValue);
+  if (Number.isFinite(numericValue)) {
+    return Math.max(0, numericValue * 1000);
+  }
+  const dateValue = Date.parse(rawValue);
+  if (Number.isFinite(dateValue)) {
+    return Math.max(0, dateValue - Date.now());
+  }
+  return 0;
+}
+
+function calculateRetryDelayMs(response, attempt) {
+  const retryAfterMs = parseRetryAfterMs(response);
+  const exponentialMs = Math.min(
+    API_RETRY_BASE_DELAY_MS * Math.pow(2, Math.max(0, attempt - 1)),
+    API_RETRY_MAX_DELAY_MS
+  );
+  const baseDelay = retryAfterMs || exponentialMs;
+  const jitterMs = randomIntBetween(0, Math.min(1000, Math.floor(baseDelay * 0.2)));
+  return Math.min(baseDelay + jitterMs, API_RETRY_MAX_DELAY_MS);
+}
+
+function noteApiBackoff(response, context) {
+  if (response?.status !== 429) return 0;
+  const delayMs = calculateRetryDelayMs(response, 1);
+  apiBackoffUntilMs = Math.max(apiBackoffUntilMs, Date.now() + delayMs);
+  console.warn(`[Rate Limit] ${context || 'request'} received 429; backing off for ${Math.ceil(delayMs / 1000)}s`);
+  return delayMs;
+}
+
+async function waitForApiBackoff(context) {
+  const delayMs = apiBackoffUntilMs - Date.now();
+  if (delayMs > 0) {
+    console.warn(`[Rate Limit] Delaying ${context || 'request'} for ${Math.ceil(delayMs / 1000)}s`);
+    await sleepMs(Math.min(delayMs, API_RETRY_MAX_DELAY_MS));
+  }
+}
+
+async function fetchWithBackoff(url, init = {}, options = {}) {
+  const maxAttempts = options.maxAttempts || API_RETRY_MAX_ATTEMPTS;
+  const context = options.context || 'request';
+  const retryStatuses = options.retryStatuses || API_RETRY_STATUS_CODES;
+  const respectGlobalBackoff = options.respectGlobalBackoff !== false;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (respectGlobalBackoff) {
+      await waitForApiBackoff(context);
+    }
+
+    try {
+      const response = await fetch(url, init);
+      if (response.status === 429) {
+        noteApiBackoff(response, context);
+      }
+      if (!retryStatuses.has(response.status) || attempt >= maxAttempts) {
+        return response;
+      }
+      await sleepMs(calculateRetryDelayMs(response, attempt));
+    } catch (error) {
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+      console.warn(`[Network] ${context} failed; retrying (${attempt}/${maxAttempts})`, error?.message || error);
+      await sleepMs(calculateRetryDelayMs(null, attempt));
+    }
+  }
+
+  throw new Error(`${context} failed`);
+}
+
+function scheduleHealthCheckAlarm() {
+  chrome.alarms.create(HEALTH_CHECK_ALARM_NAME, { periodInMinutes: 1 });
+}
+
+function scheduleJitteredStartup(reason, callback) {
+  const delayMs = randomIntBetween(STARTUP_JITTER_MIN_MS, STARTUP_JITTER_MAX_MS);
+  console.log(`[Startup] Scheduling ${reason} initialization in ${Math.round(delayMs / 1000)}s`);
+  setTimeout(callback, delayMs);
 }
 
 // General-purpose message dedup: track recent _msgId values to prevent double-processing
@@ -411,7 +512,7 @@ async function disableForInactiveLicense(planStatus) {
   scheduleHeartbeat(null);
   disconnectWebSocket();
   chrome.alarms.clear('ws-reconnect');
-  chrome.alarms.clear('health-check');
+  chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
   chrome.alarms.clear('settings-refresh');
   settingsAlarmScheduled = false;
   chrome.action.setBadgeText({ text: 'OFF' });
@@ -426,13 +527,16 @@ async function checkLicenseStatus(reason = 'manual') {
   }
 
   try {
-    const response = await fetch(`${CONFIG.serverUrl}/api/school/status`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/school/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         studentToken: CONFIG.studentToken || null,
         studentEmail: CONFIG.studentEmail || null,
       }),
+    }, {
+      context: 'license status',
+      maxAttempts: 2,
     });
 
     if (response.status === 402 || response.status === 403) {
@@ -499,12 +603,18 @@ async function fetchClientConfig(serverUrl) {
   const fallbackUrl = `${serverUrl}/client-config.json`;
 
   try {
-    const response = await fetch(primaryUrl, { cache: 'no-store' });
+    const response = await fetchWithBackoff(primaryUrl, { cache: 'no-store' }, {
+      context: 'client config',
+      maxAttempts: 2,
+    });
     if (response.ok) {
       return await response.json();
     }
     if (response.status === 404) {
-      const fallbackResponse = await fetch(fallbackUrl, { cache: 'no-store' });
+      const fallbackResponse = await fetchWithBackoff(fallbackUrl, { cache: 'no-store' }, {
+        context: 'client config fallback',
+        maxAttempts: 2,
+      });
       if (fallbackResponse.ok) {
         return await fallbackResponse.json();
       }
@@ -587,11 +697,14 @@ async function refreshSchoolSettings({ force = false } = {}) {
       }
       return schoolSettings;
     }
-    const response = await fetch(`${CONFIG.serverUrl}/api/extension/settings`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/settings`, {
       cache: 'no-store',
       headers: {
         'Authorization': `Bearer ${CONFIG.studentToken}`,
       },
+    }, {
+      context: 'extension settings',
+      maxAttempts: 2,
     });
     if (!response.ok) {
       throw new Error(`Settings fetch failed (${response.status})`);
@@ -623,9 +736,18 @@ async function parseJsonResponse(response) {
     data = {};
   }
   if (!response.ok) {
-    throw new Error(data.error || `Request failed (${response.status})`);
+    throw buildResponseError(response, data, `Request failed (${response.status})`);
   }
   return data;
+}
+
+function buildResponseError(response, data = {}, fallbackMessage = 'Request failed') {
+  const error = new Error(data.error || data.message || fallbackMessage);
+  error.status = response?.status;
+  if (response?.status === 429) {
+    error.retryAfterMs = parseRetryAfterMs(response) || API_RETRY_BASE_DELAY_MS;
+  }
+  return error;
 }
 
 async function applyFabSettings(fabState) {
@@ -706,6 +828,7 @@ function determineTrackingState() {
 
 function disconnectWebSocket() {
   chrome.alarms.clear('ws-reconnect');
+  cleanupTeacherBroadcast('websocket-disconnect', { notifyTeacher: false });
   wsConnected = false;
   // Tell offscreen document to close the WebSocket
   sendToOffscreen({ type: 'WS_CLOSE' }).catch(() => {});
@@ -742,7 +865,7 @@ function clearNetworkAlarms() {
   chrome.alarms.clear('settings-refresh');
   chrome.alarms.clear('license-check');
   chrome.alarms.clear('ws-reconnect');
-  chrome.alarms.clear('health-check');
+  chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
   chrome.alarms.clear('heartbeat');
   // Also clear setInterval-based heartbeat
   if (heartbeatIntervalId) {
@@ -773,6 +896,7 @@ async function resumeNetworkAfterOffHours(reason) {
   chrome.alarms.create('settings-refresh', { periodInMinutes: 60 });
   settingsAlarmScheduled = true;
   scheduleLicenseCheck();
+  scheduleHealthCheckAlarm();
   offHoursNetworkPaused = false;
   await refreshSchoolSettings({ force: true });
   await checkLicenseStatus('resume');
@@ -780,6 +904,15 @@ async function resumeNetworkAfterOffHours(reason) {
 }
 
 async function safeSendHeartbeat(reason) {
+  if (heartbeatInFlight) {
+    console.log(`[Heartbeat] Skipping ${reason}; previous heartbeat still in flight`);
+    return;
+  }
+  if (Date.now() < apiBackoffUntilMs) {
+    console.log(`[Heartbeat] Skipping ${reason}; API backoff active`);
+    return;
+  }
+  heartbeatInFlight = true;
   try {
     await sendHeartbeat(reason);
   } catch (error) {
@@ -787,6 +920,8 @@ async function safeSendHeartbeat(reason) {
       globalThis.Sentry.captureException(error);
     }
     console.warn(`[Heartbeat] Failed (${reason}):`, error?.message || error);
+  } finally {
+    heartbeatInFlight = false;
   }
 }
 
@@ -906,6 +1041,7 @@ async function initializeAdaptiveTracking(reason) {
     chrome.alarms.create('settings-refresh', { periodInMinutes: 60 });
     settingsAlarmScheduled = true;
   }
+  scheduleHealthCheckAlarm();
 
   updateTrackingState(reason);
 }
@@ -954,10 +1090,13 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
       };
       attachLegacyStudentToken(payload, headers);
 
-      const response = await fetch(`${CONFIG.serverUrl}/api/device/event`, {
+      const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/event`, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
+      }, {
+        context: 'device event',
+        maxAttempts: 2,
       });
       if (response.status === 402) {
         const data = await response.json().catch(() => ({}));
@@ -1040,11 +1179,14 @@ async function refreshSharedSignInLoginConfig(options = {}) {
     if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
     try {
-      const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`, {
+      const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`, {
         cache: 'no-store',
         headers: {
           'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
         },
+      }, {
+        context: 'login config',
+        maxAttempts: 2,
       });
       const data = await response.json().catch(() => ({}));
       sharedSignInLoginConfig = {
@@ -1166,13 +1308,16 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
 
   if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
     try {
-      await fetch(`${CONFIG.serverUrl}/api/extension/sign-out`, {
+      await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/sign-out`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${tokenToEnd}`,
         },
         body: JSON.stringify({ deviceId: CONFIG.deviceId, reason }),
+      }, {
+        context: 'student sign-out',
+        maxAttempts: 1,
       });
     } catch (error) {
       console.warn('[Auth] Session-end call failed:', error?.message || error);
@@ -1298,11 +1443,14 @@ async function fetchLoginRosterForGate(options = {}) {
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
-  const response = await fetch(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
+  const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
     cache: 'no-store',
     headers: {
       'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
     },
+  }, {
+    context: 'login roster',
+    maxAttempts: 2,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -1346,17 +1494,20 @@ async function manualStudentLogin(payload) {
     if (CONFIG.enrollmentKey) body.enrollmentKey = CONFIG.enrollmentKey;
   }
 
-  const response = await fetch(`${CONFIG.serverUrl}/api/extension/student-login`, {
+  const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/student-login`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
     },
     body: JSON.stringify(body),
+  }, {
+    context: 'student login',
+    maxAttempts: 1,
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || !data.studentToken) {
-    throw new Error(data.error || 'Invalid student credentials');
+    throw buildResponseError(response, data, 'Invalid student credentials');
   }
 
   const student = data.student || {};
@@ -1597,7 +1748,7 @@ async function ensureRegistered() {
     if (needsRegistration) {
       try {
         console.log('[Service Worker] Registering student with server');
-        const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
+        const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/register`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1612,11 +1763,14 @@ async function ensureRegistered() {
             schoolSlug: CONFIG.schoolSlug || undefined,
             enrollmentKey: CONFIG.enrollmentKey || undefined,
           }),
+        }, {
+          context: 'student registration',
+          maxAttempts: 1,
         });
         
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
-          throw new Error(errorData.error || 'Student registration failed');
+          throw buildResponseError(response, errorData, 'Student registration failed');
         }
         
         const data = await response.json();
@@ -1651,7 +1805,8 @@ async function ensureRegistered() {
         // Retry with exponential backoff, max 5 retries to prevent server flooding
         registrationRetryCount++;
         if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
-          const backoff = Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000); // 5s, 10s, 20s, 40s, 80s max 5min
+          const retryAfterMs = error?.retryAfterMs || 0;
+          const backoff = Math.max(retryAfterMs, Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000)); // 5s, 10s, 20s, 40s, 80s max 5min
           console.log(`[Service Worker] Retrying registration (${registrationRetryCount}/${MAX_REGISTRATION_RETRIES}) in ${backoff/1000}s`);
           setTimeout(() => ensureRegistered().catch(() => {}), backoff);
         } else {
@@ -1684,7 +1839,7 @@ chrome.runtime.onInstalled.addListener(() => {
     CONFIG.serverUrl = serverUrl;
     scheduleLicenseCheck();
     ensureRegistered().catch(() => {});
-    setTimeout(() => initializeAdaptiveTracking('install').catch(() => {}), 2000);
+    scheduleJitteredStartup('install', () => initializeAdaptiveTracking('install').catch(() => {}));
   }).catch(err => {
     console.warn('[Service Worker] Install init error (will retry):', err?.message || err);
   });
@@ -1698,7 +1853,7 @@ if (chrome.runtime.onStartup) {
       CONFIG.serverUrl = serverUrl;
       scheduleLicenseCheck();
       ensureRegistered().catch(() => {});
-      setTimeout(() => initializeAdaptiveTracking('startup').catch(() => {}), 2000);
+      scheduleJitteredStartup('startup', () => initializeAdaptiveTracking('startup').catch(() => {}));
     }).catch(err => {
       console.warn('[Service Worker] Startup init error (will retry):', err?.message || err);
     });
@@ -1824,10 +1979,10 @@ if (chrome.runtime.onStartup) {
   await ensureRegistered();
 
   // Initialize adaptive tracking after state is restored
-  setTimeout(() => {
+  scheduleJitteredStartup('wake', () => {
     console.log('[Service Worker] Initializing adaptive tracking...');
     initializeAdaptiveTracking('wake').catch(() => {});
-  }, 2000);
+  });
 })().catch(err => {
   // Silently handle wake-up errors (network issues, server deploys)
   // The extension will self-heal via alarms and retries
@@ -2222,7 +2377,7 @@ async function registerDevice(deviceId, deviceName, classId) {
   }
   
   try {
-    const response = await fetch(`${CONFIG.serverUrl}/api/register`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -2230,9 +2385,15 @@ async function registerDevice(deviceId, deviceName, classId) {
         deviceName, // Device name instead of student name
         classId,
       }),
+    }, {
+      context: 'legacy device registration',
+      maxAttempts: 1,
     });
     
-    if (!response.ok) throw new Error('Registration failed');
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw buildResponseError(response, errorData, 'Registration failed');
+    }
     
     const data = await response.json();
     console.log('Device registered:', data);
@@ -2265,7 +2426,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
   }
   
   try {
-    const response = await fetch(`${CONFIG.serverUrl}/api/extension/register`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/register`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2281,11 +2442,14 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
         schoolSlug: CONFIG.schoolSlug || undefined,
         enrollmentKey: CONFIG.enrollmentKey || undefined,
       }),
+    }, {
+      context: 'student registration',
+      maxAttempts: 1,
     });
     
     if (!response.ok) {
       const errorData = await response.json();
-      throw new Error(errorData.message || 'Student registration failed');
+      throw buildResponseError(response, errorData, 'Student registration failed');
     }
     
     const data = await response.json();
@@ -2452,10 +2616,13 @@ async function sendHeartbeat(reason = 'manual') {
       lastObservedSentAt = now;
     }
     
-    const response = await fetch(`${CONFIG.serverUrl}/api/device/heartbeat`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/heartbeat`, {
       method: 'POST',
       headers,
       body: JSON.stringify(heartbeatData),
+    }, {
+      context: 'device heartbeat',
+      maxAttempts: 2,
     });
     
     if (response.status === 402) {
@@ -2591,7 +2758,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // WebSocket reconnection alarm - reliable even if service worker was terminated
     console.log('WebSocket reconnection alarm triggered');
     connectWebSocket().catch(() => {});
-  } else if (alarm.name === 'health-check') {
+  } else if (alarm.name === HEALTH_CHECK_ALARM_NAME) {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
     healthCheck().catch(() => {});
@@ -2634,6 +2801,16 @@ function scheduleScreenshotCapture(enable) {
 }
 
 async function captureAndSendScreenshot() {
+  if (screenshotCaptureInFlight) {
+    console.log('[Screenshot] Skipping capture; previous capture still in flight');
+    return;
+  }
+  if (Date.now() < apiBackoffUntilMs) {
+    lastScreenshotError = 'rate_limited_backoff';
+    lastScreenshotErrorAt = Date.now();
+    console.log('[Screenshot] Skipping capture during API backoff');
+    return;
+  }
   screenshotAttemptCount++;
 
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
@@ -2653,6 +2830,7 @@ async function captureAndSendScreenshot() {
     return;
   }
 
+  screenshotCaptureInFlight = true;
   try {
     // Get the last focused window
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -2686,7 +2864,7 @@ async function captureAndSendScreenshot() {
 
     // Send screenshot to server with tab metadata
     const headers = buildDeviceAuthHeaders();
-    const response = await fetch(`${CONFIG.serverUrl}/api/device/screenshot`, {
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/screenshot`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -2697,6 +2875,9 @@ async function captureAndSendScreenshot() {
         tabUrl: tab.url || '',
         tabFavicon: tab.favIconUrl || '',
       }),
+    }, {
+      context: 'screenshot upload',
+      maxAttempts: 2,
     });
 
     if (!response.ok) {
@@ -2713,6 +2894,8 @@ async function captureAndSendScreenshot() {
     lastScreenshotError = `exception: ${error.message}`;
     lastScreenshotErrorAt = Date.now();
     console.warn('[Screenshot] Capture error:', error.message);
+  } finally {
+    screenshotCaptureInFlight = false;
   }
 }
 
@@ -2729,6 +2912,65 @@ let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
 let attentionModeActive = false; // When true, blocks navigation and new tabs
+let teacherBroadcastActive = false;
+let teacherBroadcastSessionId = null;
+
+function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
+  if (!teacherBroadcastActive && !teacherBroadcastSessionId) {
+    return;
+  }
+  const previousSessionId = teacherBroadcastSessionId;
+  teacherBroadcastActive = false;
+  teacherBroadcastSessionId = null;
+  if (options.notifyTeacher && wsConnected) {
+    wsSend({
+      type: 'broadcast-leave',
+      sessionId: previousSessionId || undefined,
+      reason,
+    });
+  }
+  broadcastToAllTabs('teacher-broadcast-stop', {
+    sessionId: previousSessionId,
+    reason,
+  });
+}
+
+function handleBroadcastStart(message = {}) {
+  const nextSessionId = message.sessionId || message.broadcastSessionId || null;
+  if (teacherBroadcastActive && teacherBroadcastSessionId !== nextSessionId) {
+    cleanupTeacherBroadcast('replaced-by-new-broadcast', { notifyTeacher: true });
+  }
+  teacherBroadcastActive = true;
+  teacherBroadcastSessionId = nextSessionId;
+  wsSend({
+    type: 'broadcast-join',
+    sessionId: nextSessionId || undefined,
+  });
+}
+
+function handleBroadcastStop() {
+  cleanupTeacherBroadcast('teacher-stop', { notifyTeacher: false });
+}
+
+function handleBroadcastOffer(sdp) {
+  if (!teacherBroadcastActive) {
+    console.warn('[Broadcast] Ignoring offer because no broadcast session is active');
+    return;
+  }
+  if (!sdp) {
+    console.warn('[Broadcast] Ignoring empty broadcast offer');
+    return;
+  }
+  console.warn('[Broadcast] Student-side teacher broadcast viewing is not available in this extension build; leaving broadcast');
+  cleanupTeacherBroadcast('unsupported-broadcast-offer', { notifyTeacher: true });
+}
+
+function handleBroadcastIce(candidate) {
+  if (!teacherBroadcastActive || !candidate) {
+    return;
+  }
+  console.log('[Broadcast] Ignoring broadcast ICE after cleanup-only handling');
+}
 
 async function getClassroomCommandStateSnapshot() {
   const snapshot = {
@@ -4108,6 +4350,7 @@ function handleWsEvent(event, data) {
     console.log('WebSocket disconnected');
     wsConnected = false;
     setObservedState(false, 'ws-closed');
+    cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
     scheduleWsReconnect();
   } else if (event === 'message') {
     handleWsMessage(data);
@@ -4385,7 +4628,7 @@ function handleWsMessage(rawData) {
       // Teacher started broadcasting - request to join
       if (message.type === 'teacher-broadcast-start') {
         console.log('[Broadcast] Teacher started broadcasting, requesting to join');
-        wsSend({ type: 'broadcast-join' });
+        handleBroadcastStart(message);
       }
 
       // Teacher stopped broadcasting
@@ -4563,7 +4806,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const headers = buildDeviceAuthHeaders();
       headers['Content-Type'] = 'application/json';
 
-      fetch(`${CONFIG.serverUrl}/api/polls/${pollId}/respond`, {
+      fetchWithBackoff(`${CONFIG.serverUrl}/api/polls/${pollId}/respond`, {
         method: 'POST',
         headers,
         body: JSON.stringify({
@@ -4571,6 +4814,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           studentId: CONFIG.activeStudentId,
           selectedOption,
         }),
+      }, {
+        context: 'poll response',
+        maxAttempts: 2,
       })
         .then(res => res.json())
         .then(data => {
@@ -4597,7 +4843,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
 
-    fetch(`${CONFIG.serverUrl}/api/student/raise-hand`, {
+    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/raise-hand`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -4606,6 +4852,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         studentEmail: CONFIG.studentEmail,
         studentName: CONFIG.studentName,
       }),
+    }, {
+      context: 'raise hand',
+      maxAttempts: 2,
     })
       .then(parseJsonResponse)
       .then(data => {
@@ -4633,13 +4882,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
 
-    fetch(`${CONFIG.serverUrl}/api/student/lower-hand`, {
+    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/lower-hand`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         deviceId: CONFIG.deviceId,
         studentId: CONFIG.activeStudentId,
       }),
+    }, {
+      context: 'lower hand',
+      maxAttempts: 2,
     })
       .then(parseJsonResponse)
       .then(data => {
@@ -4672,13 +4924,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
 
-    fetch(`${CONFIG.serverUrl}/api/student/send-message`, {
+    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/send-message`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
         message: message.message.trim(),
         messageType: message.messageType || 'message',
       }),
+    }, {
+      context: 'student message',
+      maxAttempts: 2,
     })
       .then(parseJsonResponse)
       .then(data => {
@@ -4740,10 +4995,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       };
       attachLegacyStudentToken(payload, headers);
 
-      fetch(`${CONFIG.serverUrl}/api/device/event`, {
+      fetchWithBackoff(`${CONFIG.serverUrl}/api/device/event`, {
         method: 'POST',
         headers,
         body: JSON.stringify(payload),
+      }, {
+        context: 'student switched event',
+        maxAttempts: 2,
       }).then(async (response) => {
         if (response.status === 402) {
           const data = await response.json().catch(() => ({}));

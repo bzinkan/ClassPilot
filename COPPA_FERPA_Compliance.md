@@ -65,6 +65,7 @@ ClassPilot may receive or generate the following data that constitutes "educatio
 | Student email | Directly identifying PII | Authentication, identification |
 | Grade level | Education record | Classroom grouping |
 | Browsing activity (tab titles, URLs) | Education record | Real-time classroom monitoring |
+| Periodic screen thumbnails | Education record | Classroom monitoring and safety visibility |
 | Session logs (login/logout times) | Education record | Attendance and engagement |
 | Check-in responses (mood, messages) | Education record | Student well-being monitoring |
 | Poll responses | Education record | Formative assessment |
@@ -149,6 +150,7 @@ ClassPilot does **not**:
 | Device ID | Identifier | Chrome Extension | PostgreSQL | Until school requests deletion |
 | Active tab title | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 24 hours |
 | Active tab URL | Browsing activity | Chrome Extension heartbeat | PostgreSQL | Configurable; default 24 hours |
+| Periodic screen thumbnails | Browsing activity | Chrome Extension screenshot upload | Redis/transient screenshot store | Short-lived operational retention |
 | Screen lock status | Device state | Chrome Extension | In-memory only | Not persisted |
 | Open tab list | Browsing activity | Chrome Extension | In-memory only | Not persisted; real-time only |
 | Session start/end times | Session metadata | Chrome Extension | PostgreSQL | Configurable retention |
@@ -333,6 +335,7 @@ ClassPilot uses a multi-tenant architecture where each school is a separate logi
 | Data Category | Default Retention | Configurable | Notes |
 |---|---|---|---|
 | Student browsing activity (heartbeats) | 24 hours | Yes — school admin configurable | Automatic cleanup job runs on schedule |
+| Periodic screen thumbnails | Short-lived operational retention | Yes — server-side policy | Used for live classroom dashboard visibility; not a recording archive |
 | Session logs | 90 days | Yes | Login/logout timestamps |
 | Student account data | Duration of contract | N/A | Retained while school's account is active |
 | Audit logs | 1 year | No | Required for compliance accountability |
@@ -562,7 +565,7 @@ ClassPilot is designed to comply with state-level student privacy statutes inclu
 **A:** No. The ClassPilot Chrome Extension is deployed via Google Admin Console to school-managed Chromebooks only. It cannot be installed on personal devices, and it does not collect any data outside the school's managed device fleet.
 
 ### Q: Does ClassPilot record student screens?
-**A:** No. The optional screen-sharing feature uses real-time WebRTC streaming. No recordings are made or stored. Screen sharing requires active student consent via an in-extension prompt and can be ended by the student at any time.
+**A:** ClassPilot captures periodic screenshot thumbnails of the active visible browser tab while school-managed tracking is active. These thumbnails are used for live classroom dashboard visibility and are not a long-term video recording archive. Live screen viewing uses WebRTC streaming and is not recorded by the extension.
 
 ### Q: Can teachers see student activity outside school hours?
 **A:** No. Schools configure tracking hours (e.g., 7:00 AM – 4:00 PM). The extension does not transmit browsing data outside these configured hours. Schools set their tracking window based on their local timezone, which is auto-detected from the school's zip code.

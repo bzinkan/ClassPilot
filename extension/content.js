@@ -1822,6 +1822,10 @@ function createFloatingActionButton() {
   const fabContainer = document.createElement('div');
   fabContainer.id = 'classpilot-fab-container';
   fabContainer.innerHTML = `
+    <div class="classpilot-monitoring-indicator" title="ClassPilot is active. Your school can see active tab titles, URLs, timestamps, and periodic screen thumbnails.">
+      <span class="classpilot-monitoring-dot" aria-hidden="true"></span>
+      <span>Monitored by school</span>
+    </div>
     <div class="classpilot-fab-menu" id="classpilot-fab-menu">
       <div class="classpilot-fab-identity" id="classpilot-fab-identity" style="display:none;">
         <span class="classpilot-fab-identity-kicker">Monitoring as</span>
@@ -2215,6 +2219,35 @@ function addFabStyles() {
       transition: all 0.3s ease;
     }
 
+    .classpilot-monitoring-indicator {
+      position: absolute;
+      right: 0;
+      bottom: 66px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 176px;
+      padding: 8px 11px;
+      border-radius: 999px;
+      background: #0f172a;
+      color: #ffffff;
+      box-shadow: 0 4px 18px rgba(15, 23, 42, 0.22);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .classpilot-monitoring-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #22c55e;
+      box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.18);
+      flex: 0 0 auto;
+    }
+
     .classpilot-fab-main:hover {
       transform: scale(1.1);
       box-shadow: 0 6px 25px rgba(233, 163, 30, 0.5);
@@ -2236,7 +2269,7 @@ function addFabStyles() {
 
     .classpilot-fab-menu {
       position: absolute;
-      bottom: 70px;
+      bottom: 104px;
       right: 0;
       display: flex;
       flex-direction: column;
