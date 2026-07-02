@@ -68,6 +68,27 @@
       color: #78350f;
       line-height: 1.4;
     }
+
+    .monitoring-disclosure {
+      padding: 12px 16px;
+      background: #ecfdf5;
+      border-bottom: 1px solid #bbf7d0;
+      color: #064e3b;
+    }
+
+    .monitoring-disclosure h2 {
+      font-size: 12px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .monitoring-disclosure p {
+      font-size: 11px;
+      line-height: 1.45;
+    }
     
     .section {
       padding: 16px;
@@ -344,8 +365,13 @@
       </svg>
       <div class="banner-content">
         <h3 id="license-banner-title">Monitoring Active</h3>
-        <p id="license-banner-text">Your tab titles and URLs are shared with your teacher as permitted by school policy.</p>
+        <p id="license-banner-text">Your school can see active tab titles, URLs, timestamps, and periodic screen thumbnails while ClassPilot is active.</p>
       </div>
+    </div>
+
+    <div class="monitoring-disclosure" aria-label="ClassPilot monitoring disclosure">
+      <h2><span class="status-dot online"></span><span>School-managed monitoring is visible</span></h2>
+      <p>ClassPilot does not collect keystrokes, typed passwords, microphone audio, camera video, or private-window activity.</p>
     </div>
     
     <div class="section">

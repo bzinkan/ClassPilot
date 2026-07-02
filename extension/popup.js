@@ -161,7 +161,7 @@ async function updateLicenseBanner() {
     bannerText.textContent = `ClassPilot disabled: school license inactive${planStatus}.`;
   } else {
     bannerTitle.textContent = 'Monitoring Active';
-    bannerText.textContent = 'Your tab titles and URLs are shared with your teacher as permitted by school policy.';
+    bannerText.textContent = 'Your school can see active tab titles, URLs, timestamps, and periodic screen thumbnails while ClassPilot is active.';
   }
 }
 
@@ -494,27 +494,27 @@ function showPrivacyInfo() {
 ✓ Active Tab URL - The web address you're visiting
 ✓ Timestamps - When you visited each page
 ✓ Favicon - The small icon from the website
+✓ Periodic screen thumbnails - Images of the active visible tab while ClassPilot tracking is active
 
 ✗ NOT Collected:
 - Keystrokes or what you type
 - Microphone or camera access
 - Private messages or passwords
-- Screen captures (unless you opt-in to screen sharing)
 - Anything from incognito/private windows
 
 Automatic Monitoring:
 - Tab titles and URLs are automatically collected and sent to your teacher
 - This happens every 10 seconds while you browse
+- Screen thumbnails are captured about every 30 seconds while tracking is active
 - This is required by your school policy for classroom management
 
-Screen Sharing (Optional):
-- You can optionally share your screen with your teacher
-- Click "Share My Screen" to begin
-- A red indicator shows when sharing is active
-- You can stop sharing at any time
+Live Screen Viewing:
+- Teachers may request live screen viewing during active class sessions
+- Managed devices can allow silent tab capture under school Chrome policy
+- ClassPilot keeps visible monitoring indicators active while monitoring is on
 
 Data Retention:
-- Your activity data is automatically deleted after 24 hours
+- Raw activity and screenshots are retained only for the periods configured by your school and SchoolPilot
 - Your teacher can export reports for educational purposes
 
 This monitoring is required by your school for classroom management. All activity is visible and disclosed to you through this extension.`);
