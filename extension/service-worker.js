@@ -6,7 +6,10 @@ try {
 } catch (error) {
   console.info('[Config] No config.js override loaded; using managed policy or defaults');
 }
+importScripts('classroom-runtime-core.js');
 importScripts('vendor/sentry.browser.min.js');
+
+const RuntimeCore = globalThis.ClassPilotRuntimeCore;
 
 const SENTRY_DSN_EXTENSION = globalThis.SENTRY_DSN_EXTENSION || '';
 const SENTRY_ENV = globalThis.SENTRY_ENV || 'development';
@@ -150,9 +153,21 @@ function commandErrorMessage(error) {
   return error?.message || String(error || 'Command failed');
 }
 
+function currentChromiumVersion() {
+  const match = /(?:Chrome|Chromium)\/([0-9.]+)/.exec(globalThis.navigator?.userAgent || '');
+  return match?.[1] || null;
+}
+
 function sendCommandAck(commandId, ackState, options = {}) {
   const normalizedCommandId = normalizeCommandId(commandId);
   if (!normalizedCommandId) return;
+
+  const defaultOutcome = {
+    received: 'pending',
+    completed: 'applied',
+    failed: 'failed',
+    expired: 'expired',
+  }[ackState] || 'pending';
 
   wsSend({
     type: 'command-ack',
@@ -164,6 +179,10 @@ function sendCommandAck(commandId, ackState, options = {}) {
     result: options.result,
     state: options.state,
     error: options.error,
+    deliveryPolicy: options.deliveryPolicy,
+    expiresAt: options.expiresAt,
+    appliedRevision: options.appliedRevision ?? currentClassroomState?.revision ?? 0,
+    outcome: options.outcome || defaultOutcome,
     extensionVersion: chrome.runtime.getManifest().version,
     timestamp: new Date().toISOString(),
   });
@@ -199,6 +218,12 @@ const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
 const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const HEALTH_CHECK_ALARM_NAME = 'health-check';
+const CONNECTIVITY_HEALTH_STORAGE_KEY = 'connectivityHealthV1';
+const CONNECTIVITY_HEALTH_ALARM_NAME = 'connectivity-health-boundary';
+const SCREENSHOT_HEALTH_STORAGE_KEY = 'screenshotHealthV1';
+const MESSAGE_INBOX_STORAGE_KEY = 'messages';
+const MESSAGE_INBOX_BINDING_KEY = 'messageInboxAuthBindingV1';
+const MESSAGE_INBOX_DEDUP_KEY = 'messageInboxSeenIdsV1';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const API_RETRY_MAX_ATTEMPTS = 3;
 const API_RETRY_BASE_DELAY_MS = 1000;
@@ -221,8 +246,18 @@ let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
 let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
+const MONITORING_STATE_STORAGE_KEY = 'monitoringStateV1';
+let persistedMonitoringState = {
+  state: TRACKING_STATES.OFF,
+  changedAt: Date.now(),
+  reason: 'worker_default',
+};
+
+let connectivityHealth = RuntimeCore.emptyConnectivityHealth();
+let screenshotHealth = RuntimeCore.emptyScreenshotHealth();
 
 // Screenshot health tracking (sent with heartbeat for dashboard diagnostics)
+let lastScreenshotAttemptAt = 0;
 let lastScreenshotSuccessAt = 0;
 let lastScreenshotErrorAt = 0;
 let lastScreenshotError = '';
@@ -306,6 +341,7 @@ function noteApiBackoff(response, context) {
   if (response?.status !== 429) return 0;
   const delayMs = calculateRetryDelayMs(response, 1);
   apiBackoffUntilMs = Math.max(apiBackoffUntilMs, Date.now() + delayMs);
+  setConnectivityBadge(connectivityStatus()).catch(() => {});
   console.warn(`[Rate Limit] ${context || 'request'} received 429; backing off for ${Math.ceil(delayMs / 1000)}s`);
   return delayMs;
 }
@@ -375,6 +411,138 @@ const kv = {
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
   remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
 };
+
+function connectivityStatus(nowValue = Date.now(), options = {}) {
+  if (!licenseActive) {
+    return { state: 'inactive', label: 'Monitoring disabled', health: connectivityHealth };
+  }
+  if (!hasStudentAuth()) {
+    return { state: 'auth_required', label: 'Authentication required', health: connectivityHealth };
+  }
+  if (nowValue < apiBackoffUntilMs) {
+    return { state: 'rate_limited', label: 'School server retry scheduled', health: connectivityHealth };
+  }
+  const persistedMonitoringExpected = options.allowPersistedMonitoring === true
+    && (persistedMonitoringState.state === TRACKING_STATES.ACTIVE
+      || persistedMonitoringState.state === TRACKING_STATES.IDLE);
+  if (trackingState === TRACKING_STATES.OFF && !persistedMonitoringExpected) {
+    return { state: 'inactive', label: 'Monitoring inactive', health: connectivityHealth };
+  }
+
+  const derived = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
+  const labels = {
+    checking: 'Checking school server',
+    connected: 'Connected',
+    reconnecting: 'Reconnecting',
+    unreachable: 'School server unreachable',
+  };
+  return { ...derived, label: labels[derived.state] };
+}
+
+async function setConnectivityBadge(status = connectivityStatus()) {
+  const styles = {
+    connected: { text: '●', color: '#22c55e' },
+    reconnecting: { text: '…', color: '#f59e0b' },
+    unreachable: { text: '!', color: '#ef4444' },
+    checking: { text: '…', color: '#94a3b8' },
+    rate_limited: { text: '429', color: '#f59e0b' },
+    auth_required: { text: 'AUTH', color: '#f59e0b' },
+    inactive: { text: 'OFF', color: '#64748b' },
+  };
+  const style = styles[status.state] || styles.checking;
+  try {
+    await Promise.all([
+      Promise.resolve(chrome.action.setBadgeBackgroundColor({ color: style.color })),
+      Promise.resolve(chrome.action.setBadgeText({ text: style.text })),
+      Promise.resolve(chrome.action.setTitle({ title: `ClassPilot — ${status.label}` })),
+    ]);
+  } catch {
+    // Badge state is advisory; heartbeat and classroom enforcement continue.
+  }
+  return status;
+}
+
+async function scheduleConnectivityHealthBoundary(nowValue = Date.now()) {
+  await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
+  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !licenseActive) return;
+  const { boundaryAt } = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
+  if (!boundaryAt) return;
+  if (boundaryAt <= nowValue) {
+    await setConnectivityBadge(connectivityStatus(nowValue));
+    return;
+  }
+  chrome.alarms.create(CONNECTIVITY_HEALTH_ALARM_NAME, { when: boundaryAt });
+}
+
+async function recordHeartbeatSuccess(nowValue = Date.now()) {
+  const prior = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
+  const recovered = connectivityHealth.consecutiveFailures > 0 || prior.state === 'unreachable';
+  apiBackoffUntilMs = 0;
+  connectivityHealth = RuntimeCore.connectivityHealthAfterSuccess(connectivityHealth, nowValue);
+  await kv.set({ [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth });
+  await setConnectivityBadge(connectivityStatus(nowValue));
+  await scheduleConnectivityHealthBoundary(nowValue);
+
+  if (recovered) {
+    flushMonitoringEventOutbox().catch(() => {});
+    requestClassroomStateSync('heartbeat-recovery', true);
+    // If WebSocket recovery trails HTTP recovery, force the next heartbeat to
+    // ask for the authoritative full snapshot as well.
+    lastClassroomHeartbeatSyncRequestAt = 0;
+  }
+  return recovered;
+}
+
+async function recordHeartbeatFailure(errorCategory, nowValue = Date.now()) {
+  connectivityHealth = RuntimeCore.connectivityHealthAfterFailure(
+    connectivityHealth,
+    errorCategory,
+    nowValue
+  );
+  await kv.set({ [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth });
+  await setConnectivityBadge(connectivityStatus(nowValue));
+  await scheduleConnectivityHealthBoundary(nowValue);
+  return connectivityHealth;
+}
+
+function syncScreenshotHealthGlobals() {
+  lastScreenshotAttemptAt = screenshotHealth.lastAttemptAt || 0;
+  lastScreenshotSuccessAt = screenshotHealth.lastSuccessAt || 0;
+  lastScreenshotErrorAt = screenshotHealth.lastErrorAt || 0;
+  lastScreenshotError = screenshotHealth.lastErrorCode || '';
+}
+
+async function persistScreenshotHealth(nextHealth) {
+  screenshotHealth = RuntimeCore.normalizeScreenshotHealth(nextHealth);
+  syncScreenshotHealthGlobals();
+  await kv.set({ [SCREENSHOT_HEALTH_STORAGE_KEY]: screenshotHealth });
+  return screenshotHealth;
+}
+
+async function recordScreenshotAttempt(nowValue = Date.now()) {
+  return persistScreenshotHealth({
+    ...screenshotHealth,
+    schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
+    lastAttemptAt: nowValue,
+  });
+}
+
+async function recordScreenshotError(errorCode, nowValue = Date.now()) {
+  return persistScreenshotHealth({
+    ...screenshotHealth,
+    schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
+    lastErrorAt: nowValue,
+    lastErrorCode: errorCode,
+  });
+}
+
+async function recordScreenshotSuccess(nowValue = Date.now()) {
+  return persistScreenshotHealth({
+    ...screenshotHealth,
+    schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
+    lastSuccessAt: nowValue,
+  });
+}
 
 const AUTH_STATE_KEYS = [
   'studentToken',
@@ -506,8 +674,11 @@ async function disableForInactiveLicense(planStatus) {
     return;
   }
 
+  // Persist and attempt delivery while the authenticated device context is
+  // still available. A retryable failure remains in the bounded outbox and
+  // can be delivered after the license/session recovers.
+  await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
   licenseActive = false;
-  trackingState = TRACKING_STATES.OFF;
   if (observedHeartbeatTimer) {
     clearInterval(observedHeartbeatTimer);
     observedHeartbeatTimer = null;
@@ -516,9 +687,10 @@ async function disableForInactiveLicense(planStatus) {
   disconnectWebSocket();
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
+  chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   chrome.alarms.clear('settings-refresh');
   settingsAlarmScheduled = false;
-  chrome.action.setBadgeText({ text: 'OFF' });
+  await setConnectivityBadge(connectivityStatus());
 
   await kv.set({ licenseActive: false, planStatus, licenseDisabledAt: Date.now() });
   notifyLicenseState({ type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus });
@@ -637,35 +809,15 @@ function isWithinTrackingHours(
   schoolTimezone,
   trackingDays
 ) {
-  if (!enableTrackingHours) {
-    return true;
-  }
-
-  const startTime = trackingStartTime || '00:00';
-  const endTime = trackingEndTime || '23:59';
-  const timezone = schoolTimezone || 'America/New_York';
-  const activeDays = trackingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
-
   try {
-    const now = new Date();
-    const schoolDayName = now.toLocaleString('en-US', {
-      timeZone: timezone,
-      weekday: 'long',
+    return RuntimeCore.isWithinTrackingWindow({
+      enabled: enableTrackingHours,
+      startTime: trackingStartTime || '00:00',
+      endTime: trackingEndTime || '23:59',
+      timezone: schoolTimezone || 'America/New_York',
+      activeDays: trackingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      now: Date.now(),
     });
-
-    if (!activeDays.includes(schoolDayName)) {
-      return false;
-    }
-
-    const schoolTimeString = now.toLocaleString('en-US', {
-      timeZone: timezone,
-      hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-
-    const currentTime = schoolTimeString.split(', ')[1] || schoolTimeString;
-    return currentTime >= startTime && currentTime <= endTime;
   } catch (error) {
     console.warn('[School Hours] Error checking tracking hours:', error);
     return true;
@@ -869,6 +1021,7 @@ function clearNetworkAlarms() {
   chrome.alarms.clear('license-check');
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
+  chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   chrome.alarms.clear('heartbeat');
   // Also clear setInterval-based heartbeat
   if (heartbeatIntervalId) {
@@ -955,10 +1108,35 @@ function setObservedState(isObserved, reason) {
   syncObservedHeartbeat(reason);
 }
 
+async function transitionTrackingState(nextState, reason) {
+  if (trackingState === nextState && persistedMonitoringState.state === nextState) return false;
+  const changedAt = Date.now();
+  trackingState = nextState;
+  persistedMonitoringState = { state: nextState, changedAt, reason };
+  await kv.set({ [MONITORING_STATE_STORAGE_KEY]: persistedMonitoringState });
+  const queued = await enqueueMonitoringEvent('monitoring_state_changed', {
+    state: nextState.toLowerCase(),
+    reason,
+  }, { occurredAt: changedAt });
+  // Make a best-effort authenticated delivery while the socket/token/network
+  // context is still intact. A retryable failure remains in the outbox.
+  if (nextState === TRACKING_STATES.OFF && queued) {
+    await flushMonitoringEventOutbox();
+  }
+  if (nextState === TRACKING_STATES.OFF) {
+    await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
+  } else {
+    await scheduleConnectivityHealthBoundary();
+  }
+  await setConnectivityBadge(connectivityStatus());
+  console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
+  return true;
+}
+
 async function updateTrackingState(reason = 'state-check') {
   if (!licenseActive) {
     if (trackingState !== TRACKING_STATES.OFF) {
-      trackingState = TRACKING_STATES.OFF;
+      await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);  // Disable screenshots when license inactive
       disconnectWebSocket();
@@ -973,7 +1151,7 @@ async function updateTrackingState(reason = 'state-check') {
 
   if (!hasStudentAuth()) {
     if (trackingState !== TRACKING_STATES.OFF) {
-      trackingState = TRACKING_STATES.OFF;
+      await transitionTrackingState(TRACKING_STATES.OFF, 'auth_required');
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);
       disconnectWebSocket();
@@ -986,8 +1164,7 @@ async function updateTrackingState(reason = 'state-check') {
   const nextState = determineTrackingState();
   if (nextState === TRACKING_STATES.OFF && isScheduleHardOff) {
     if (trackingState !== nextState) {
-      trackingState = nextState;
-      console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
+      await transitionTrackingState(nextState, reason);
     }
     pauseNetworkForOffHours(reason);
     syncObservedHeartbeat('tracking-state');
@@ -1003,8 +1180,7 @@ async function updateTrackingState(reason = 'state-check') {
     return;
   }
 
-  trackingState = nextState;
-  console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
+  await transitionTrackingState(nextState, reason);
 
   if (trackingState === TRACKING_STATES.ACTIVE) {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
@@ -1049,65 +1225,375 @@ async function initializeAdaptiveTracking(reason) {
   updateTrackingState(reason);
 }
 
-function queueNavigationEvent(eventType, url, title, metadata = {}) {
-  // Allow both ACTIVE and IDLE states (IDLE just means no keyboard/mouse, not away)
-  if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
-    return;
+const MONITORING_EVENT_OUTBOX_KEY = 'monitoringEventOutboxV1';
+const MONITORING_EVENT_DROPPED_KEY = 'monitoringEventOutboxDropped';
+const MONITORING_EVENT_AUTH_BINDING_KEY = 'monitoringEventOutboxAuthBindingV1';
+const MONITORING_EVENT_FLUSH_ALARM = 'monitoring-event-flush';
+const MONITORING_EVENT_FLUSH_MS = 5000;
+let monitoringEventFlushTimer = null;
+let monitoringEventFlushInFlight = false;
+let monitoringEventMutation = Promise.resolve();
+let messageInboxMutation = Promise.resolve();
+
+function generateMonitoringEventId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `evt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function monitoringEventAuthBinding() {
+  if (!CONFIG.studentToken || !CONFIG.deviceId || !CONFIG.activeStudentId) return null;
+  // This is a local correlation guard, not an authentication primitive. Hash
+  // the already-authenticated token so the outbox never persists another copy
+  // of the credential, especially for session-only manual sign-ins.
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < CONFIG.studentToken.length; index += 1) {
+    const code = CONFIG.studentToken.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
   }
-  if (!hasStudentAuth()) {
-    notifyAuthGateStateToTabs().catch(() => {});
-    return;
-  }
-  if (!isHttpUrl(url)) {
-    return;
+  return [
+    'v1',
+    CONFIG.activeStudentId,
+    CONFIG.deviceId,
+    first.toString(16).padStart(8, '0'),
+    second.toString(16).padStart(8, '0'),
+  ].join(':');
+}
+
+function messageInboxAuthBinding() {
+  // The monitoring binding already captures the exact student, device, and
+  // token-backed session without persisting the raw credential.
+  return monitoringEventAuthBinding();
+}
+
+function enqueueMessageInboxMutation(operation) {
+  messageInboxMutation = messageInboxMutation.then(operation, operation);
+  return messageInboxMutation;
+}
+
+function messageWithStableLocalId(rawMessage, prefix = 'message') {
+  const stableId = RuntimeCore.teacherMessageId(rawMessage);
+  return {
+    ...(rawMessage || {}),
+    id: stableId
+      || `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`}`,
+  };
+}
+
+function notifyStudentMessageStateCleared(reason) {
+  broadcastToAllTabs('student-message-state-cleared', { reason });
+}
+
+async function reconcileMessageInboxIdentityNow(reason = 'identity-check') {
+  const binding = messageInboxAuthBinding();
+  const stored = await kv.get([
+    MESSAGE_INBOX_STORAGE_KEY,
+    MESSAGE_INBOX_BINDING_KEY,
+    MESSAGE_INBOX_DEDUP_KEY,
+    'fabChatMessages',
+    'fabChatClosed',
+  ]);
+  const storedBinding = stored[MESSAGE_INBOX_BINDING_KEY] || null;
+  const bindingChanged = storedBinding !== binding;
+
+  if (!binding || bindingChanged) {
+    await kv.set({
+      [MESSAGE_INBOX_STORAGE_KEY]: [],
+      [MESSAGE_INBOX_DEDUP_KEY]: [],
+      fabChatMessages: [],
+      fabChatClosed: false,
+      ...(binding ? { [MESSAGE_INBOX_BINDING_KEY]: binding } : {}),
+    });
+    if (!binding) await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+    if (
+      storedBinding
+      || (Array.isArray(stored[MESSAGE_INBOX_STORAGE_KEY]) && stored[MESSAGE_INBOX_STORAGE_KEY].length > 0)
+      || (Array.isArray(stored.fabChatMessages) && stored.fabChatMessages.length > 0)
+    ) {
+      notifyStudentMessageStateCleared(reason);
+    }
+    return { binding, bindingChanged, messages: [], seenIds: [] };
   }
 
-  const key = `${eventType}:${metadata.tabId ?? 'unknown'}`;
-  pendingNavigationEvents.set(key, { eventType, url, title, metadata });
+  return {
+    binding,
+    bindingChanged: false,
+    messages: Array.isArray(stored[MESSAGE_INBOX_STORAGE_KEY])
+      ? stored[MESSAGE_INBOX_STORAGE_KEY]
+      : [],
+    seenIds: Array.isArray(stored[MESSAGE_INBOX_DEDUP_KEY])
+      ? stored[MESSAGE_INBOX_DEDUP_KEY]
+      : [],
+  };
+}
 
-  if (navigationDebounceTimers.has(key)) {
-    clearTimeout(navigationDebounceTimers.get(key));
+function reconcileMessageInboxIdentity(reason = 'identity-check') {
+  return enqueueMessageInboxMutation(() => reconcileMessageInboxIdentityNow(reason));
+}
+
+function persistTeacherMessages(rawMessages, options = {}) {
+  return enqueueMessageInboxMutation(async () => {
+    const identity = await reconcileMessageInboxIdentityNow(options.reason || 'message-delivery');
+    if (!identity.binding) {
+      return { messages: [], seenIds: [], addedMessageIds: [] };
+    }
+    if (
+      Object.prototype.hasOwnProperty.call(options, 'expectedBinding')
+      && options.expectedBinding !== identity.binding
+    ) {
+      // The response belonged to an earlier authenticated student/session.
+      // Never attach its inbox rows to whoever is signed in now.
+      return { messages: identity.messages, seenIds: identity.seenIds, addedMessageIds: [] };
+    }
+    const merged = RuntimeCore.mergeTeacherMessageInbox(
+      identity.messages,
+      identity.seenIds,
+      rawMessages,
+      options.nowValue ?? Date.now()
+    );
+    await kv.set({
+      [MESSAGE_INBOX_STORAGE_KEY]: merged.messages,
+      [MESSAGE_INBOX_DEDUP_KEY]: merged.seenIds,
+      [MESSAGE_INBOX_BINDING_KEY]: identity.binding,
+    });
+    if (merged.addedMessageIds.length > 0) {
+      chrome.runtime.sendMessage({ type: 'messages-updated' }).catch(() => {});
+    }
+    return merged;
+  });
+}
+
+function persistHeartbeatPendingMessages(rawMessages, expectedBinding = messageInboxAuthBinding()) {
+  // Heartbeat inbox rows must carry a backend-stable id. Do not synthesize an
+  // id here: a malformed row repeated on every heartbeat would otherwise be
+  // displayed repeatedly.
+  return persistTeacherMessages(rawMessages, {
+    reason: 'heartbeat-pending-messages',
+    expectedBinding,
+  });
+}
+
+function getCurrentMessageInbox() {
+  return enqueueMessageInboxMutation(async () => {
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read');
+    return identity.messages;
+  });
+}
+
+function markCurrentMessageInboxRead() {
+  return enqueueMessageInboxMutation(async () => {
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read-state');
+    if (!identity.binding || !identity.messages.some((message) => message?.read !== true)) {
+      return identity.messages;
+    }
+    const messages = identity.messages.map((message) => ({ ...message, read: true }));
+    await kv.set({ [MESSAGE_INBOX_STORAGE_KEY]: messages });
+    return messages;
+  });
+}
+
+function clearCurrentMessageInboxDisplay() {
+  return enqueueMessageInboxMutation(async () => {
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-clear-display');
+    if (!identity.binding) return [];
+    // Keep the bounded seen-id ledger so a backend retry cannot resurrect a
+    // message the student deliberately cleared from the display.
+    await kv.set({ [MESSAGE_INBOX_STORAGE_KEY]: [] });
+    return [];
+  });
+}
+
+function clearStudentMessageState(reason = 'student-auth-cleared') {
+  return enqueueMessageInboxMutation(async () => {
+    await kv.set({
+      [MESSAGE_INBOX_STORAGE_KEY]: [],
+      [MESSAGE_INBOX_DEDUP_KEY]: [],
+      fabChatMessages: [],
+      fabChatClosed: false,
+    });
+    await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+    notifyStudentMessageStateCleared(reason);
+  });
+}
+
+function getMonitoringEventScope() {
+  return {
+    teachingSessionId: currentClassroomState?.teachingSessionId || null,
+    supervisionContextId: currentClassroomState?.supervisionContextId || null,
+  };
+}
+
+function scheduleMonitoringEventFlush(delayMs = MONITORING_EVENT_FLUSH_MS) {
+  const normalizedDelay = Math.max(0, delayMs);
+  // This is a bounded flush interval, not a trailing debounce. Continuous tab
+  // activity must not keep moving delivery five seconds into the future.
+  if (!monitoringEventFlushTimer) {
+    monitoringEventFlushTimer = setTimeout(() => {
+      monitoringEventFlushTimer = null;
+      flushMonitoringEventOutbox().catch(() => {});
+    }, normalizedDelay);
   }
+  chrome.alarms.get(MONITORING_EVENT_FLUSH_ALARM, (existing) => {
+    if (existing) return;
+    chrome.alarms.create(MONITORING_EVENT_FLUSH_ALARM, {
+      when: Date.now() + Math.max(MONITORING_EVENT_FLUSH_MS, normalizedDelay),
+    });
+  });
+}
 
-  navigationDebounceTimers.set(key, setTimeout(async () => {
-    const event = pendingNavigationEvents.get(key);
-    pendingNavigationEvents.delete(key);
-    navigationDebounceTimers.delete(key);
+function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
+  if (!hasStudentAuth() && !options.allowWithoutAuth) return Promise.resolve(false);
+  const authBinding = monitoringEventAuthBinding();
+  if (!authBinding) return Promise.resolve(false);
+  const scope = getMonitoringEventScope();
+  const event = RuntimeCore.createMonitoringEvent({
+    type,
+    metadata,
+    occurredAt: options.occurredAt,
+    teachingSessionId: options.teachingSessionId ?? scope.teachingSessionId,
+    supervisionContextId: options.supervisionContextId ?? scope.supervisionContextId,
+  }, generateMonitoringEventId);
+  if (!event) return Promise.resolve(false);
 
-    if (!event || trackingState === TRACKING_STATES.OFF) {
+  monitoringEventMutation = monitoringEventMutation.then(async () => {
+    const stored = await kv.get([
+      MONITORING_EVENT_OUTBOX_KEY,
+      MONITORING_EVENT_DROPPED_KEY,
+      MONITORING_EVENT_AUTH_BINDING_KEY,
+    ]);
+    const storedEntries = Array.isArray(stored[MONITORING_EVENT_OUTBOX_KEY])
+      ? stored[MONITORING_EVENT_OUTBOX_KEY]
+      : [];
+    const bindingMatches = stored[MONITORING_EVENT_AUTH_BINDING_KEY] === authBinding;
+    const discardedForIdentityChange = storedEntries.length > 0 && !bindingMatches
+      ? storedEntries.length
+      : 0;
+    const bounded = RuntimeCore.boundEventOutbox(bindingMatches ? storedEntries : [], event);
+    await kv.set({
+      [MONITORING_EVENT_OUTBOX_KEY]: bounded.entries,
+      [MONITORING_EVENT_DROPPED_KEY]: Number(stored[MONITORING_EVENT_DROPPED_KEY] || 0)
+        + discardedForIdentityChange
+        + bounded.dropped,
+      [MONITORING_EVENT_AUTH_BINDING_KEY]: authBinding,
+    });
+    scheduleMonitoringEventFlush();
+    return true;
+  }).catch((error) => {
+    console.warn('[Monitoring Events] Failed to queue event:', error?.message || error);
+    return false;
+  });
+  return monitoringEventMutation;
+}
+
+async function removeMonitoringEventBatch(sourceEventIds) {
+  const acknowledged = new Set(sourceEventIds);
+  monitoringEventMutation = monitoringEventMutation.then(async () => {
+    const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY]);
+    const remaining = (stored[MONITORING_EVENT_OUTBOX_KEY] || [])
+      .filter((event) => !acknowledged.has(event?.sourceEventId));
+    await kv.set({ [MONITORING_EVENT_OUTBOX_KEY]: remaining });
+    if (remaining.length === 0) await kv.remove(MONITORING_EVENT_AUTH_BINDING_KEY);
+    return remaining.length;
+  });
+  return monitoringEventMutation;
+}
+
+async function discardMonitoringEventOutbox() {
+  monitoringEventMutation = monitoringEventMutation.then(async () => {
+    const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_DROPPED_KEY]);
+    const discarded = Array.isArray(stored[MONITORING_EVENT_OUTBOX_KEY])
+      ? stored[MONITORING_EVENT_OUTBOX_KEY].length
+      : 0;
+    await kv.set({
+      [MONITORING_EVENT_OUTBOX_KEY]: [],
+      [MONITORING_EVENT_DROPPED_KEY]: Number(stored[MONITORING_EVENT_DROPPED_KEY] || 0) + discarded,
+    });
+    await kv.remove(MONITORING_EVENT_AUTH_BINDING_KEY);
+    return discarded;
+  });
+  return monitoringEventMutation;
+}
+
+async function flushMonitoringEventOutbox() {
+  if (monitoringEventFlushInFlight || !hasStudentAuth()) return;
+  monitoringEventFlushInFlight = true;
+  try {
+    await monitoringEventMutation;
+    const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_AUTH_BINDING_KEY]);
+    const batch = (stored[MONITORING_EVENT_OUTBOX_KEY] || []).slice(0, 50);
+    if (batch.length === 0) {
+      chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
+      return;
+    }
+    const currentBinding = monitoringEventAuthBinding();
+    if (!currentBinding || stored[MONITORING_EVENT_AUTH_BINDING_KEY] !== currentBinding) {
+      await discardMonitoringEventOutbox();
+      chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
       return;
     }
 
-    if (!CONFIG.deviceId) return;
+    const payload = { events: batch };
+    const headers = buildDeviceAuthHeaders();
+    attachLegacyStudentToken(payload, headers);
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/events`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    }, {
+      context: 'device event',
+      maxAttempts: 1,
+      retryStatuses: new Set([429, 503]),
+    });
 
-    try {
-      const headers = buildDeviceAuthHeaders();
-      const payload = {
-        deviceId: CONFIG.deviceId,
-        eventType: event.eventType,
-        metadata: {
-          url: event.url,
-          title: event.title,
-          ...event.metadata,
-        },
-      };
-      attachLegacyStudentToken(payload, headers);
-
-      const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/event`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      }, {
-        context: 'device event',
-        maxAttempts: 2,
-      });
-      if (response.status === 402) {
-        const data = await response.json().catch(() => ({}));
-        await disableForInactiveLicense(data.planStatus);
-      }
-    } catch (error) {
-      console.warn('Event logging error:', error);
+    if (response.status === 429 || response.status === 503) {
+      scheduleMonitoringEventFlush();
+      return;
     }
+    if (response.status === 402) {
+      const data = await response.json().catch(() => ({}));
+      await disableForInactiveLicense(data.planStatus);
+    }
+
+    // A successful batch acknowledges each source event independently. Keep
+    // any event omitted from the response queued: ingestion is idempotent, so
+    // retrying it is safer than silently losing telemetry after a partial or
+    // malformed response. Other non-retryable responses are discarded so one
+    // rejected batch cannot permanently block later telemetry.
+    let acknowledgedIds = batch.map((event) => event.sourceEventId);
+    if (response.ok) {
+      const data = await response.json().catch(() => null);
+      acknowledgedIds = RuntimeCore.acknowledgedMonitoringEventIds(batch, data);
+      if (acknowledgedIds.length === 0) {
+        scheduleMonitoringEventFlush();
+        return;
+      }
+    }
+    const remaining = await removeMonitoringEventBatch(acknowledgedIds);
+    if (remaining > 0) scheduleMonitoringEventFlush();
+  } catch (error) {
+    console.warn('[Monitoring Events] Flush deferred:', error?.message || error);
+    scheduleMonitoringEventFlush();
+  } finally {
+    monitoringEventFlushInFlight = false;
+  }
+}
+
+function queueNavigationEvent(eventType, url, title, metadata = {}) {
+  if (!licenseActive || trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !isHttpUrl(url)) {
+    return;
+  }
+  const normalizedType = eventType === 'tab_change' ? 'tab_changed' : 'navigation_changed';
+  const key = `${normalizedType}:${metadata.tabId ?? 'unknown'}`;
+  pendingNavigationEvents.set(key, { eventType: normalizedType, url, title });
+
+  if (navigationDebounceTimers.has(key)) clearTimeout(navigationDebounceTimers.get(key));
+  navigationDebounceTimers.set(key, setTimeout(() => {
+    const event = pendingNavigationEvents.get(key);
+    pendingNavigationEvents.delete(key);
+    navigationDebounceTimers.delete(key);
+    if (!event || trackingState === TRACKING_STATES.OFF) return;
+    enqueueMonitoringEvent(event.eventType, { url: event.url, title: event.title }).catch(() => {});
   }, NAVIGATION_DEBOUNCE_MS));
 }
 
@@ -1309,6 +1795,20 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   sharedAuthLockedSinceAt = 0;
   chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
 
+  // A confirmed student sign-out/profile change ends the student-bound
+  // classroom context. Clear only teacher-session ranges; school policy stays.
+  await clearTeacherSessionStateForSignOut().catch((error) => {
+    console.warn('[Auth] Classroom state clear failed:', error?.message || error);
+  });
+  await clearStudentMessageState(reason).catch((error) => {
+    console.warn('[Auth] Student message state clear failed:', error?.message || error);
+  });
+  // Best-effort the final bounded batch while the old token is still valid,
+  // then discard anything unsent. Retrying it under a later student's token
+  // would misattribute the prior student's activity.
+  await flushMonitoringEventOutbox().catch(() => {});
+  await discardMonitoringEventOutbox().catch(() => {});
+
   if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
     try {
       await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/sign-out`, {
@@ -1337,6 +1837,11 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   CONFIG.autoRegistrationPaused = pauseAutoRegistration;
   CONFIG.sharedAuthLockedSinceAt = null;
 
+  // A heartbeat begun under the old token may still finish while sign-out is
+  // unwinding. Clear again after invalidating the in-memory identity so that
+  // no late response can repopulate the old student's inbox.
+  await clearStudentMessageState(`${reason}-final`);
+
   await clearStoredAuthState({
     registered: false,
     autoRegistrationPaused: pauseAutoRegistration,
@@ -1344,11 +1849,11 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
 
   scheduleHeartbeat(null);
   scheduleScreenshotCapture(false);
+  chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   if (disconnect) {
     disconnectWebSocket();
   }
-  chrome.action.setBadgeText({ text: 'AUTH' });
-  chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
+  await setConnectivityBadge(connectivityStatus());
   await notifyAuthGateStateToTabs();
 }
 
@@ -1476,6 +1981,43 @@ async function fetchLoginRosterForGate(options = {}) {
   };
 }
 
+async function applyClassroomStateFromAuthResponse(data, reason) {
+  if (!data || !Object.prototype.hasOwnProperty.call(data, 'classroomState')) return;
+  const snapshot = data.classroomState;
+  await classroomStateRestorePromise;
+  const storedBinding = await kv.get(CLASSROOM_STATE_STUDENT_BINDING_KEY);
+  const boundStudentId = storedBinding[CLASSROOM_STATE_STUDENT_BINDING_KEY] || null;
+  if (
+    currentClassroomState
+    && (!boundStudentId || boundStudentId !== CONFIG.activeStudentId)
+  ) {
+    await clearTeacherSessionStateForSignOut({ emitEvent: false, reason: `${reason}_student_changed` });
+  }
+  if (!snapshot) {
+    await clearTeacherSessionStateForSignOut({ emitEvent: false, reason: `${reason}_no_state` });
+    if (CONFIG.activeStudentId) {
+      await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
+    }
+    return;
+  }
+  try {
+    // This response was read only after the server revalidated the exact new
+    // student/session/device token binding. It is authoritative across student
+    // changes on a shared device, where revisions are not comparable between
+    // the old and new student's independent control rows.
+    await applyClassroomState(snapshot, { reason });
+    if (CONFIG.activeStudentId) {
+      await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
+    }
+  } catch (error) {
+    // Authentication remains valid even if local enforcement fails. The
+    // failed ACK/heartbeat outcome tells the server the restriction is not
+    // synchronized, and the normal reconciliation loop can retry it.
+    console.warn('[Classroom State] Login snapshot failed:', error?.message || error);
+    requestClassroomStateSync(`${reason}-failed`, true);
+  }
+}
+
 async function manualStudentLogin(payload) {
   const deviceId = await ensureDeviceId();
   const isPinLogin = payload.mode === 'pin';
@@ -1549,6 +2091,9 @@ async function manualStudentLogin(payload) {
     manualLoginLastSeenAt: now,
     autoRegistrationPaused: false,
   });
+  await reconcileMessageInboxIdentity('student-login');
+
+  await applyClassroomStateFromAuthResponse(data, 'student_login');
 
   await checkLicenseStatus('manual-login');
   await initializeAdaptiveTracking('manual-login');
@@ -1803,6 +2348,8 @@ async function ensureRegistered() {
           CONFIG.activeStudentId = data.student.id;
           await kv.set({ activeStudentId: data.student.id });
         }
+        await reconcileMessageInboxIdentity('student-registration');
+        await applyClassroomStateFromAuthResponse(data, 'student_registration');
       } catch (error) {
         console.warn('[Service Worker] Student registration error:', error);
         await kv.set({ registered: false, studentToken: null });
@@ -1866,6 +2413,16 @@ if (chrome.runtime.onStartup) {
   });
 }
 
+let markClassroomStateRestored;
+const classroomStateRestorePromise = new Promise((resolve) => {
+  let settled = false;
+  markClassroomStateRestored = () => {
+    if (settled) return;
+    settled = true;
+    resolve();
+  };
+});
+
 // Run immediately on service worker load/wake-up
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
@@ -1888,6 +2445,13 @@ if (chrome.runtime.onStartup) {
     'planStatus',
     'globalBlockedDomains',
     'teacherBlockListState',
+    'classroomControlStateV1',
+    'classroomStateFailSafeExpiryAt',
+    'classroomStateStudentBindingV1',
+    MONITORING_STATE_STORAGE_KEY,
+    MONITORING_EVENT_OUTBOX_KEY,
+    CONNECTIVITY_HEALTH_STORAGE_KEY,
+    SCREENSHOT_HEALTH_STORAGE_KEY,
   ]);
   const resolvedServerUrl = await resolveServerUrl();
 
@@ -1898,6 +2462,27 @@ if (chrome.runtime.onStartup) {
   }
   CONFIG.serverUrl = resolvedServerUrl;
   scheduleLicenseCheck();
+  const storedMonitoringState = stored[MONITORING_STATE_STORAGE_KEY];
+  if (
+    storedMonitoringState
+    && Object.values(TRACKING_STATES).includes(storedMonitoringState.state)
+    && Number.isFinite(Number(storedMonitoringState.changedAt))
+  ) {
+    persistedMonitoringState = {
+      state: storedMonitoringState.state,
+      changedAt: Number(storedMonitoringState.changedAt),
+      reason: typeof storedMonitoringState.reason === 'string'
+        ? storedMonitoringState.reason.slice(0, 80)
+        : 'restored',
+    };
+  }
+  connectivityHealth = RuntimeCore.normalizeConnectivityHealth(
+    stored[CONNECTIVITY_HEALTH_STORAGE_KEY]
+  );
+  screenshotHealth = RuntimeCore.normalizeScreenshotHealth(
+    stored[SCREENSHOT_HEALTH_STORAGE_KEY]
+  );
+  syncScreenshotHealthGlobals();
   if (stored.deviceId) {
     CONFIG.deviceId = stored.deviceId;
   }
@@ -1921,53 +2506,92 @@ if (chrome.runtime.onStartup) {
   }
   CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
   sharedAuthLockedSinceAt = Number(stored.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
+  await reconcileMessageInboxIdentity('worker-wake');
 
-  // Restore Flight Path state if it was active
-  if (stored.flightPathState) {
-    console.log('[Service Worker] Restoring Flight Path state:', stored.flightPathState);
-    screenLocked = stored.flightPathState.screenLocked;
-    allowedDomains = stored.flightPathState.allowedDomains || [];
-    activeFlightPathName = stored.flightPathState.activeFlightPathName;
+  // Load school policy into memory first. The classroom-state composer will
+  // include it in the same atomic DNR update without allowing the two ranges
+  // to erase one another.
+  try {
+    if (!Object.prototype.hasOwnProperty.call(stored, 'globalBlockedDomains')) {
+      throw new Error('Stored school block list is unavailable');
+    }
+    globalBlockedDomains = RuntimeCore.normalizeDomainList(
+      stored.globalBlockedDomains,
+      'school block list'
+    );
+    globalBlockedDomainsStateTrusted = true;
+  } catch (error) {
+    globalBlockedDomainsStateTrusted = false;
+    console.warn('[Service Worker] Stored school block list is invalid; retaining existing Chrome rules');
+  }
 
-    // Re-apply blocking rules if Flight Path was active
-    if (allowedDomains.length > 0) {
-      await updateBlockingRules(allowedDomains);
-      console.log('[Service Worker] Flight Path blocking rules re-applied');
+  if (stored[CLASSROOM_STATE_STORAGE_KEY]) {
+    try {
+      await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], { force: true, reason: 'worker_wake' });
+      console.log('[Service Worker] Restored revisioned classroom state');
+    } catch (error) {
+      // DNR rules survive an MV3 worker restart. If storage is corrupt, do not
+      // clear those rules; request the authoritative server snapshot instead.
+      // A separately stored deadline still prevents orphaned rules from
+      // surviving forever if the server remains unreachable.
+      const storedFailSafeExpiryAt = Number(stored.classroomStateFailSafeExpiryAt);
+      const failSafeExpiryAt = Number.isFinite(storedFailSafeExpiryAt) && storedFailSafeExpiryAt > 0
+        ? storedFailSafeExpiryAt
+        : Date.now();
+      await kv.set({ classroomStateFailSafeExpiryAt: failSafeExpiryAt });
+      if (failSafeExpiryAt > Date.now()) {
+        chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, { when: failSafeExpiryAt });
+      } else {
+        // Never invent a fresh twelve-hour window when the independently
+        // stored original cutoff is missing or already elapsed.
+        await checkClassroomStateExpiry();
+        await kv.remove(CLASSROOM_STATE_STORAGE_KEY);
+      }
+      console.warn('[Service Worker] Stored classroom state is invalid; existing rules retained:', error?.message || error);
+    }
+  } else if (stored.flightPathState || stored.lockScreenState || stored.teacherBlockListState) {
+    // One-time migration for controls persisted by older extension versions.
+    const legacyTimestamp = Number(
+      stored.flightPathState?.timestamp || stored.lockScreenState?.timestamp || Date.now()
+    );
+    const legacyState = {
+      schemaVersion: 1,
+      revision: 0,
+      receivedAt: legacyTimestamp,
+      hardExpiresAt: legacyTimestamp + RuntimeCore.CLASSROOM_STATE_MAX_LIFETIME_MS,
+      restrictions: {
+        screenLock: stored.lockScreenState ? {
+          active: true,
+          url: stored.lockScreenState.lockedUrl,
+          domain: stored.lockScreenState.lockedDomain,
+        } : { active: false },
+        flightPath: stored.flightPathState ? {
+          active: true,
+          allowedDomains: stored.flightPathState.allowedDomains,
+          name: stored.flightPathState.activeFlightPathName,
+        } : { active: false },
+        blockList: stored.teacherBlockListState ? {
+          active: true,
+          blockedDomains: stored.teacherBlockListState.blockedDomains,
+          name: stored.teacherBlockListState.name,
+        } : { active: false },
+      },
+    };
+    try {
+      await applyClassroomState(legacyState, { force: true, reason: 'legacy_migration' });
+      console.log('[Service Worker] Migrated legacy classroom restrictions');
+    } catch (error) {
+      console.warn('[Service Worker] Legacy classroom state could not be restored:', error?.message || error);
+    }
+  } else {
+    // No teacher state is known. Reconcile only the school range; never clear
+    // teacher ranges merely because the worker was restarted.
+    if (globalBlockedDomainsStateTrusted) {
+      await updateGlobalBlacklistRules(globalBlockedDomains).catch((error) => {
+        console.warn('[Service Worker] School block list restore failed:', error?.message || error);
+      });
     }
   }
-  // Restore Lock Screen state if it was active
-  else if (stored.lockScreenState) {
-    console.log('[Service Worker] Restoring Lock Screen state:', stored.lockScreenState);
-    screenLocked = stored.lockScreenState.screenLocked;
-    lockedUrl = stored.lockScreenState.lockedUrl;
-    lockedDomain = stored.lockScreenState.lockedDomain;
-
-    // Re-apply blocking rules if screen was locked
-    if (lockedDomain) {
-      await updateBlockingRules([lockedDomain]);
-      console.log('[Service Worker] Lock Screen blocking rules re-applied');
-    }
-  }
-
-  // Restore global blacklist state
-  if (stored.globalBlockedDomains && stored.globalBlockedDomains.length > 0) {
-    globalBlockedDomains = stored.globalBlockedDomains;
-    await updateGlobalBlacklistRules(globalBlockedDomains);
-    console.log('[Service Worker] Global blacklist rules re-applied:', globalBlockedDomains);
-  }
-
-  // Teacher block lists are SESSION-BASED and NOT restored on wake
-  // They only apply while the student is actively in a teacher's class session
-  // Clear any stale teacher block list state from storage
-  if (stored.teacherBlockListState) {
-    await chrome.storage.local.remove('teacherBlockListState');
-    console.log('[Service Worker] Cleared stale teacher block list state (session-based, not persisted)');
-  }
-  // Reset in-memory teacher block list state
-  teacherBlockedDomains = [];
-  activeBlockListName = null;
-  // Clear any existing teacher block list rules
-  await clearTeacherBlockListRules();
 
   console.log('[Service Worker] State restored:', {
     deviceId: CONFIG.deviceId,
@@ -1975,14 +2599,20 @@ if (chrome.runtime.onStartup) {
     flightPathActive: allowedDomains.length > 0,
     screenLocked: screenLocked,
     globalBlockedDomains: globalBlockedDomains.length,
-    teacherBlockedDomains: 0 // Always 0 on wake - session-based
+    teacherBlockedDomains: teacherBlockedDomains.length,
+    classroomRevision: currentClassroomState?.revision ?? 0,
   });
+  markClassroomStateRestored();
 
   if (stored.licenseActive === false) {
     await disableForInactiveLicense(stored.planStatus);
   }
 
   await ensureRegistered();
+  scheduleMonitoringEventFlush(1000);
+  requestClassroomStateSync('worker-wake', true);
+  await setConnectivityBadge(connectivityStatus());
+  await scheduleConnectivityHealthBoundary();
 
   // Initialize adaptive tracking after state is restored
   scheduleJitteredStartup('wake', () => {
@@ -1993,7 +2623,7 @@ if (chrome.runtime.onStartup) {
   // Silently handle wake-up errors (network issues, server deploys)
   // The extension will self-heal via alarms and retries
   console.warn('[Service Worker] Wake-up error (will retry):', err?.message || err);
-});
+}).finally(() => markClassroomStateRestored());
 
 // Centralized, safe notifications (never throw, never produce red errors)
 async function safeNotify(opts) {
@@ -2025,188 +2655,115 @@ async function safeNotify(opts) {
   }
 }
 
-// Declarative Net Request - Block unauthorized domains
-const BLOCK_RULE_ID = 1;
+// Declarative Net Request rules are composed through one serialized writer.
+// Each feature owns a half-open ID range, so changing teacher controls cannot
+// erase school policy or unrelated extension rules.
+let dynamicRuleCompositionTail = Promise.resolve();
 
-// Prevent race conditions with a simple lock
-let blockingRulesUpdateInProgress = false;
-let pendingBlockingRulesUpdate = null;
+function runtimeClassroomStateForRules() {
+  return {
+    restrictions: {
+      screenLock: { active: screenLocked && !allowedDomains.length, url: lockedUrl, domain: lockedDomain },
+      flightPath: { active: screenLocked && allowedDomains.length > 0, allowedDomains },
+      blockList: { active: teacherBlockedDomains.length > 0, blockedDomains: teacherBlockedDomains },
+      attentionMode: { active: attentionModeActive },
+      temporaryAllows: temporaryAllowedDomains,
+    },
+  };
+}
 
-async function updateBlockingRules(allowedDomains) {
-  // If an update is in progress, queue this one
-  if (blockingRulesUpdateInProgress) {
-    pendingBlockingRulesUpdate = allowedDomains;
-    return;
-  }
-  
-  blockingRulesUpdateInProgress = true;
-  
-  try {
-    // Remove existing rules first
+function composeDynamicRules(rangeNames) {
+  const requestedRanges = [...new Set(rangeNames)].filter((name) => RuntimeCore.DNR_RANGES[name]);
+  if (requestedRanges.length === 0) return Promise.resolve();
+
+  const run = async () => {
+    // Validate and build before changing Chrome state. Oversized or malformed
+    // lists therefore leave the previous complete ruleset intact.
+    const addRules = RuntimeCore.buildDnrRules({
+      classroomState: runtimeClassroomStateForRules(),
+      globalBlockedDomains,
+    }, requestedRanges, Date.now());
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
-    const ruleIdsToRemove = existingRules.map(rule => rule.id);
-    
-    if (ruleIdsToRemove.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: ruleIdsToRemove
-      });
-    }
-    
-    // If no allowed domains, we're done (unlocked state)
-    if (!allowedDomains || allowedDomains.length === 0) {
-      console.log('Blocking rules cleared - navigation is unrestricted');
-      return;
-    }
-    
-    // Create a blocking rule for everything EXCEPT allowed domains
-    const rules = [
-      {
-        id: BLOCK_RULE_ID,
-        priority: 1,
-        action: {
-          type: "block"
-        },
-        condition: {
-          resourceTypes: ["main_frame"],
-          excludedRequestDomains: allowedDomains.map(d => d.replace(/^https?:\/\//, '').replace(/\/$/, ''))
-        }
-      }
-    ];
-    
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      addRules: rules
-    });
-    
-    console.log('Blocking rules updated. Allowed domains:', allowedDomains);
-  } catch (error) {
-    // Only log if it's not a duplicate ID error (which we now prevent)
-    if (!error.message.includes('unique ID')) {
-      console.warn('Error updating blocking rules:', error.message);
-    }
-  } finally {
-    blockingRulesUpdateInProgress = false;
-    
-    // If there's a pending update, process it now
-    if (pendingBlockingRulesUpdate !== null) {
-      const pending = pendingBlockingRulesUpdate;
-      pendingBlockingRulesUpdate = null;
-      await updateBlockingRules(pending);
-    }
-  }
+    const removeRuleIds = existingRules
+      .filter((rule) => requestedRanges.some((range) => RuntimeCore.isRuleInRange(rule.id, range)))
+      .map((rule) => rule.id);
+    await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+  };
+
+  dynamicRuleCompositionTail = dynamicRuleCompositionTail.then(run, run);
+  return dynamicRuleCompositionTail;
+}
+
+async function updateBlockingRules(requestedAllowedDomains) {
+  RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'classroom allowed domains');
+  await composeDynamicRules(['classroom']);
 }
 
 async function clearBlockingRules() {
-  await updateBlockingRules([]);
+  await composeDynamicRules(['classroom']);
 }
 
 async function clearClassroomBlockingRule() {
-  try {
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [BLOCK_RULE_ID],
-    });
-  } catch (error) {
-    console.warn('[Sign Out] Error clearing classroom blocking rule:', error?.message || error);
-  }
+  await composeDynamicRules(['classroom']);
 }
-
-// Global Blacklist - blocks specific domains school-wide (independent of Flight Path)
-// Uses rule IDs starting from 1000 to avoid conflicts with Flight Path rules (ID 1)
-const BLACKLIST_RULE_START_ID = 1000;
 
 async function updateGlobalBlacklistRules(blockedDomains) {
+  const previous = globalBlockedDomains;
+  const previousTrusted = globalBlockedDomainsStateTrusted;
+  const normalized = RuntimeCore.normalizeDomainList(blockedDomains, 'school block list');
+  globalBlockedDomains = normalized;
+  globalBlockedDomainsStateTrusted = true;
   try {
-    // Get all existing rules to find blacklist rules (IDs >= 1000)
-    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
-    const blacklistRuleIds = existingRules
-      .filter(rule => rule.id >= BLACKLIST_RULE_START_ID)
-      .map(rule => rule.id);
-    
-    // Remove existing blacklist rules
-    if (blacklistRuleIds.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: blacklistRuleIds
-      });
-    }
-    
-    // If no blocked domains, we're done
-    if (!blockedDomains || blockedDomains.length === 0) {
-      console.log('[Blacklist] Cleared - no domains blocked');
-      return;
-    }
-    
-    // Create blocking rules for each domain
-    const rules = blockedDomains.map((domain, index) => ({
-      id: BLACKLIST_RULE_START_ID + index,
-      priority: 10, // Higher priority than Flight Path (priority 1)
-      action: {
-        type: "block"
-      },
-      condition: {
-        resourceTypes: ["main_frame"],
-        requestDomains: [domain.replace(/^https?:\/\//, '').replace(/\/$/, '')]
-      }
-    }));
-    
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      addRules: rules
-    });
-    
-    console.log('[Blacklist] Updated. Blocked domains:', blockedDomains);
+    await composeDynamicRules(['school']);
   } catch (error) {
-    console.warn('[Blacklist] Error updating rules:', error.message);
+    globalBlockedDomains = previous;
+    globalBlockedDomainsStateTrusted = previousTrusted;
+    throw error;
   }
 }
 
-// Teacher Block List - blocks specific domains during teacher session
-// Uses rule IDs starting from 2000 to avoid conflicts with global blacklist (1000+) and Flight Path (1)
-const TEACHER_BLOCKLIST_RULE_START_ID = 2000;
-
 async function updateTeacherBlockListRules(blockedDomains) {
+  const previous = teacherBlockedDomains;
+  const normalized = RuntimeCore.normalizeDomainList(blockedDomains, 'teacher block list');
+  teacherBlockedDomains = normalized;
   try {
-    // Get all existing rules to find teacher blocklist rules (IDs >= 2000)
-    const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
-    const teacherRuleIds = existingRules
-      .filter(rule => rule.id >= TEACHER_BLOCKLIST_RULE_START_ID)
-      .map(rule => rule.id);
-    
-    // Remove existing teacher blocklist rules
-    if (teacherRuleIds.length > 0) {
-      await chrome.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: teacherRuleIds
-      });
-    }
-    
-    // If no blocked domains, we're done
-    if (!blockedDomains || blockedDomains.length === 0) {
-      console.log('[Teacher Block List] Cleared - no domains blocked');
-      return;
-    }
-    
-    // Create blocking rules for each domain
-    const rules = blockedDomains.map((domain, index) => ({
-      id: TEACHER_BLOCKLIST_RULE_START_ID + index,
-      priority: 15, // Higher priority than global blacklist (10) and Flight Path (1)
-      action: {
-        type: "block"
-      },
-      condition: {
-        resourceTypes: ["main_frame"],
-        requestDomains: [domain.replace(/^https?:\/\//, '').replace(/\/$/, '')]
-      }
-    }));
-    
-    await chrome.declarativeNetRequest.updateDynamicRules({
-      addRules: rules
-    });
-    
-    console.log('[Teacher Block List] Updated. Blocked domains:', blockedDomains);
+    await composeDynamicRules(['teacher']);
   } catch (error) {
-    console.warn('[Teacher Block List] Error updating rules:', error.message);
+    teacherBlockedDomains = previous;
+    throw error;
   }
 }
 
 async function clearTeacherBlockListRules() {
-  await updateTeacherBlockListRules([]);
+  const previous = teacherBlockedDomains;
+  teacherBlockedDomains = [];
+  try {
+    await composeDynamicRules(['teacher']);
+  } catch (error) {
+    teacherBlockedDomains = previous;
+    throw error;
+  }
+}
+
+async function updateTemporaryAllowRules(temporaryAllows) {
+  const previous = temporaryAllowedDomains;
+  const normalized = RuntimeCore.normalizeTemporaryAllows(temporaryAllows, Date.now());
+  temporaryAllowedDomains = normalized;
+  try {
+    await composeDynamicRules(['temporary']);
+  } catch (error) {
+    temporaryAllowedDomains = previous;
+    throw error;
+  }
+}
+
+async function composeAllManagedDynamicRules() {
+  const ranges = ['classroom', 'teacher', 'temporary'];
+  // A malformed local school-policy snapshot must not turn an unrelated
+  // classroom-state restore into authority to delete DNR rules that survived
+  // the worker restart. Only an explicitly validated policy may replace them.
+  if (globalBlockedDomainsStateTrusted) ranges.push('school');
+  await composeDynamicRules(ranges);
 }
 
 // Get logged-in Chromebook user info using Chrome Identity API
@@ -2481,6 +3038,9 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
       manualLoginLastSeenAt: null,
       autoRegistrationPaused: false,
     });
+    await reconcileMessageInboxIdentity('student-registration');
+
+    await applyClassroomStateFromAuthResponse(data, 'student_registration');
     
     // Start adaptive tracking after registration
     initializeAdaptiveTracking('student-registered');
@@ -2494,6 +3054,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
 
 // Send heartbeat with current tab info
 async function sendHeartbeat(reason = 'manual') {
+  await classroomStateRestorePromise;
   if (!licenseActive) {
     return;
   }
@@ -2513,7 +3074,10 @@ async function sendHeartbeat(reason = 'manual') {
     console.log('Skipping heartbeat - no deviceId');
     return;
   }
-  
+
+  let heartbeatRequestStarted = false;
+  let heartbeatResponseReceived = false;
+
   try {
     // Get the active tab from the LAST FOCUSED window (the one the user is actually looking at)
     // Service workers don't have a "current window", so we must query for lastFocusedWindow
@@ -2598,11 +3162,21 @@ async function sendHeartbeat(reason = 'manual') {
       isSharing: false,
       cameraActive: cameraActive,
       status: trackingState.toLowerCase(),
+      extensionVersion: chrome.runtime.getManifest().version,
+      chromeVersion: currentChromiumVersion(),
+      classroomStateRevision: currentClassroomState?.revision ?? 0,
+      appliedClassroomStateRevision: lastClassroomStateAckRevision || currentClassroomState?.revision || 0,
+      classroomStateOutcome: lastClassroomStateOutcome,
+      classroomStateSessionId: currentClassroomState?.teachingSessionId || undefined,
+      classroomStateSupervisionContextId: currentClassroomState?.supervisionContextId || undefined,
+      requestClassroomState: requestClassroomStateOnHeartbeat(),
       // Screenshot health diagnostics (helps dashboard show why screenshots may be missing)
       screenshotHealth: {
+        lastAttemptAt: lastScreenshotAttemptAt,
         lastSuccessAt: lastScreenshotSuccessAt,
         lastErrorAt: lastScreenshotErrorAt,
         lastError: lastScreenshotError,
+        lastErrorCode: lastScreenshotError,
         attempts: screenshotAttemptCount,
         successes: screenshotSuccessCount,
         alarmActive: screenshotScheduled,
@@ -2610,6 +3184,7 @@ async function sendHeartbeat(reason = 'manual') {
     };
     
     const headers = buildDeviceAuthHeaders();
+    const heartbeatMessageBinding = messageInboxAuthBinding();
     attachLegacyStudentToken(heartbeatData, headers);
     if (headers.Authorization) {
       console.log('Sending JWT-authenticated heartbeat');
@@ -2622,6 +3197,7 @@ async function sendHeartbeat(reason = 'manual') {
       lastObservedSentAt = now;
     }
     
+    heartbeatRequestStarted = true;
     const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/heartbeat`, {
       method: 'POST',
       headers,
@@ -2630,7 +3206,24 @@ async function sendHeartbeat(reason = 'manual') {
       context: 'device heartbeat',
       maxAttempts: 2,
     });
-    
+    heartbeatResponseReceived = true;
+
+    const currentHeartbeatBinding = messageInboxAuthBinding();
+    if (heartbeatMessageBinding && heartbeatMessageBinding !== currentHeartbeatBinding) {
+      // Authentication changed while this request was in flight. Every field
+      // in the response belongs to the earlier student/session, including
+      // classroom controls, connectivity success, and pending messages.
+      console.warn('[Heartbeat] Ignoring response for a retired student/session binding');
+      if (currentHeartbeatBinding) {
+        lastClassroomHeartbeatSyncRequestAt = 0;
+        requestClassroomStateSync('heartbeat-identity-changed', true);
+        // safeSendHeartbeat is still marked in flight until this call returns.
+        // Queue the new identity's authoritative heartbeat for the next task.
+        setTimeout(() => safeSendHeartbeat('identity-changed-reconcile'), 0);
+      }
+      return;
+    }
+
     if (response.status === 402) {
       const data = await response.json().catch(() => ({}));
       await disableForInactiveLicense(data.planStatus);
@@ -2656,6 +3249,7 @@ async function sendHeartbeat(reason = 'manual') {
       }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
+      await clearStudentMessageState('student-token-invalid');
       await kv.set({ studentToken: null, registered: false });
       if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
       CONFIG.studentToken = null;
@@ -2666,16 +3260,15 @@ async function sendHeartbeat(reason = 'manual') {
         setTimeout(() => ensureRegistered().catch(() => {}), backoff);
       }
       return; // Skip rest of error handling
-    } else if (response.status >= 500) {
-      // Server error (e.g. deploy in progress, outside super-admin tracking hours) - silently wait for next heartbeat
+    } else if (response.status === 408 || response.status >= 500) {
+      await recordHeartbeatFailure('server_unavailable');
       console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
+      await recordHeartbeatSuccess();
       if (isManualIdentitySource()) {
         CONFIG.manualLoginLastSeenAt = Date.now();
         await setManualAuthState({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
       }
-      chrome.action.setBadgeBackgroundColor({ color: '#22c55e' });
-      chrome.action.setBadgeText({ text: '●' });
       // Ensure screenshot alarm is running after every successful heartbeat
       // This recovers from cases where the alarm was lost (SW restart, Chrome killed it)
       if (!screenshotScheduled && (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE)) {
@@ -2688,33 +3281,28 @@ async function sendHeartbeat(reason = 'manual') {
       // Check for pending messages missed during WebSocket disconnection
       try {
         const data = await response.json();
-        if (data.pendingMessages && data.pendingMessages.length > 0) {
-          for (const msg of data.pendingMessages) {
-            // Store message for popup display (same format as WebSocket messages)
-            const stored = await kv.get(['messages']) || {};
-            const messages = stored.messages || [];
-            messages.push({
-              id: msg.id,
-              message: msg.message,
-              fromName: 'Teacher',
-              timestamp: Date.now(),
-            });
-            await kv.set({ messages: messages.slice(-50) });
-            console.log('[Heartbeat] Delivered pending message:', msg.id);
+        await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
+        if (Array.isArray(data.pendingMessages) && data.pendingMessages.length > 0) {
+          const inboxResult = await persistHeartbeatPendingMessages(
+            data.pendingMessages,
+            heartbeatMessageBinding
+          );
+          if (inboxResult.addedMessageIds.length > 0) {
+            console.log('[Heartbeat] Stored new pending messages:', inboxResult.addedMessageIds.length);
           }
-          // Notify popup to refresh
-          chrome.runtime.sendMessage({ type: 'messages-updated' }).catch(() => {});
         }
       } catch { /* response may not be JSON in some edge cases */ }
     } else {
       // Client error (400s) - log but don't retry
       console.warn('Heartbeat client error:', response.status);
-      chrome.action.setBadgeBackgroundColor({ color: '#ef4444' });
-      chrome.action.setBadgeText({ text: '!' });
     }
     
   } catch (error) {
-    // Network errors are expected during off-hours, deploys, or connectivity blips — don't surface as errors
+    if (heartbeatRequestStarted && !heartbeatResponseReceived) {
+      await recordHeartbeatFailure('network_error').catch(() => {});
+    }
+    // This means only that the school server could not be reached. It is not
+    // evidence that Wi-Fi was intentionally disabled or that a student acted.
     console.warn('Heartbeat network issue:', error?.message || error);
   }
 }
@@ -2727,7 +3315,9 @@ async function healthCheck() {
     return;
   }
   await refreshSchoolSettings({ force: false });
-  updateTrackingState('health-check');
+  await updateTrackingState('health-check');
+  await setConnectivityBadge(connectivityStatus());
+  await scheduleConnectivityHealthBoundary();
 
   const heartbeatAlarm = await chrome.alarms.get('heartbeat');
   if (trackingState === TRACKING_STATES.ACTIVE && !heartbeatAlarm) {
@@ -2768,6 +3358,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     // Periodic health check to ensure heartbeat and WebSocket are running
     // This recovers from service worker restarts without needing manual reload
     healthCheck().catch(() => {});
+  } else if (alarm.name === CONNECTIVITY_HEALTH_ALARM_NAME) {
+    classroomStateRestorePromise.then(() => setConnectivityBadge(connectivityStatus(Date.now(), {
+      allowPersistedMonitoring: true,
+    }))).catch(() => {});
   } else if (alarm.name === 'wake-up') {
     loadCachedSchoolSettings().then(() => {
       updateTrackingState('wake-up');
@@ -2780,6 +3374,23 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     checkLicenseStatus('alarm').catch(() => {});
   } else if (alarm.name === SHARED_AUTH_LOCK_ALARM_NAME) {
     handleSharedAuthLockTimeout().catch(() => {});
+  } else if (alarm.name === CLASSROOM_STATE_EXPIRY_ALARM) {
+    classroomStateRestorePromise.then(() => checkClassroomStateExpiry()).catch((error) => {
+      console.warn('[Classroom State] Expiry check failed:', error?.message || error);
+    });
+  } else if (alarm.name === CLASSROOM_STATE_RECONCILE_ALARM) {
+    classroomStateRestorePromise.then(() => enqueueClassroomStateOperation(async () => {
+      if (!currentClassroomState) {
+        await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
+        return;
+      }
+      await reconcileClassroomStateTabsBestEffort(currentClassroomState);
+    })).catch((error) => {
+      console.warn('[Classroom State] Reconciliation retry failed:', error?.message || error);
+      scheduleClassroomStateReconciliationRetry();
+    });
+  } else if (alarm.name === MONITORING_EVENT_FLUSH_ALARM) {
+    flushMonitoringEventOutbox().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot();
   }
@@ -2811,46 +3422,42 @@ async function captureAndSendScreenshot() {
     console.log('[Screenshot] Skipping capture; previous capture still in flight');
     return;
   }
+  screenshotAttemptCount++;
+  await recordScreenshotAttempt();
   if (Date.now() < apiBackoffUntilMs) {
-    lastScreenshotError = 'rate_limited_backoff';
-    lastScreenshotErrorAt = Date.now();
+    await recordScreenshotError('rate_limited_backoff');
     console.log('[Screenshot] Skipping capture during API backoff');
     return;
   }
-  screenshotAttemptCount++;
 
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
-    lastScreenshotError = 'tracking_off';
-    lastScreenshotErrorAt = Date.now();
+    await recordScreenshotError('tracking_off');
     return;
   }
   if (await expireManualAuthIfStale('screenshot-capture')) {
-    lastScreenshotError = 'auth_stale';
-    lastScreenshotErrorAt = Date.now();
+    await recordScreenshotError('auth_stale');
     return;
   }
   if (!hasStudentAuth()) {
-    lastScreenshotError = 'no_config';
-    lastScreenshotErrorAt = Date.now();
+    await recordScreenshotError('no_config');
     await notifyAuthGateStateToTabs();
     return;
   }
 
   screenshotCaptureInFlight = true;
+  let screenshotPhase = 'capture';
   try {
     // Get the last focused window
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (!tab || !tab.windowId) {
-      lastScreenshotError = 'no_active_tab';
-      lastScreenshotErrorAt = Date.now();
+      await recordScreenshotError('no_active_tab');
       console.log('[Screenshot] No active tab in focused window');
       return;
     }
 
     // Skip chrome:// and other non-HTTP pages
     if (!tab.url || !tab.url.startsWith('http')) {
-      lastScreenshotError = 'non_http_page';
-      lastScreenshotErrorAt = Date.now();
+      await recordScreenshotError('non_http_page');
       console.log('[Screenshot] Skipping non-HTTP page:', tab.url?.slice(0, 30));
       return;
     }
@@ -2862,13 +3469,13 @@ async function captureAndSendScreenshot() {
     });
 
     if (!dataUrl) {
-      lastScreenshotError = 'capture_empty';
-      lastScreenshotErrorAt = Date.now();
+      await recordScreenshotError('capture_empty');
       console.log('[Screenshot] Capture returned empty');
       return;
     }
 
     // Send screenshot to server with tab metadata
+    screenshotPhase = 'upload';
     const headers = buildDeviceAuthHeaders();
     const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/screenshot`, {
       method: 'POST',
@@ -2887,18 +3494,17 @@ async function captureAndSendScreenshot() {
     });
 
     if (!response.ok) {
-      lastScreenshotError = `upload_${response.status}`;
-      lastScreenshotErrorAt = Date.now();
+      await recordScreenshotError(response.status >= 500
+        ? 'upload_server_error'
+        : 'upload_client_error');
       console.warn('[Screenshot] Upload failed:', response.status);
     } else {
-      lastScreenshotSuccessAt = Date.now();
-      lastScreenshotError = '';
+      await recordScreenshotSuccess();
       screenshotSuccessCount++;
       console.log('[Screenshot] Uploaded successfully');
     }
   } catch (error) {
-    lastScreenshotError = `exception: ${error.message}`;
-    lastScreenshotErrorAt = Date.now();
+    await recordScreenshotError(screenshotPhase === 'upload' ? 'upload_failed' : 'capture_failed');
     console.warn('[Screenshot] Capture error:', error.message);
   } finally {
     screenshotCaptureInFlight = false;
@@ -2912,14 +3518,577 @@ let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
+let teacherMaxTabs = null;
+let schoolMaxTabs = null;
 const seenPollIds = new Set(); // dedup: prevent broadcasting same poll twice
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
+let globalBlockedDomainsStateTrusted = false;
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
 let attentionModeActive = false; // When true, blocks navigation and new tabs
 let teacherBroadcastActive = false;
 let teacherBroadcastSessionId = null;
+const CLASSROOM_STATE_STORAGE_KEY = 'classroomControlStateV1';
+const CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY = 'classroomStateFailSafeExpiryAt';
+const CLASSROOM_STATE_STUDENT_BINDING_KEY = 'classroomStateStudentBindingV1';
+const CLASSROOM_STATE_EXPIRY_ALARM = 'classroom-state-expiry';
+const CLASSROOM_STATE_RECONCILE_ALARM = 'classroom-state-reconcile';
+const CLASSROOM_STATE_RECONCILE_RETRY_MS = 15 * 1000;
+const CLASSROOM_STATE_EXPIRY_RETRY_MS = 15 * 1000;
+const CLASSROOM_STATE_SYNC_INTERVAL_MS = 30 * 1000;
+const STATEFUL_COMMAND_TYPES = new Set([
+  'lock-screen',
+  'unlock-screen',
+  'apply-flight-path',
+  'remove-flight-path',
+  'temp-unblock',
+  'apply-block-list',
+  'remove-block-list',
+  'limit-tabs',
+  'attention-mode',
+]);
+let currentClassroomState = null;
+let lastClassroomStateSyncRequestAt = 0;
+let lastClassroomHeartbeatSyncRequestAt = 0;
+let lastClassroomStateOutcome = 'pending';
+let lastClassroomStateAckRevision = 0;
+let classroomStateApplicationTail = Promise.resolve();
+
+function enqueueClassroomStateOperation(operation) {
+  const run = () => operation();
+  classroomStateApplicationTail = classroomStateApplicationTail.then(run, run);
+  return classroomStateApplicationTail;
+}
+
+function effectiveTabLimit() {
+  const limits = [teacherMaxTabs, schoolMaxTabs]
+    .filter((value) => Number.isSafeInteger(value) && value > 0);
+  return limits.length ? Math.min(...limits) : null;
+}
+
+function classroomRuntimeBackup() {
+  return {
+    screenLocked,
+    lockedUrl,
+    lockedDomain,
+    allowedDomains: [...allowedDomains],
+    activeFlightPathName,
+    currentMaxTabs,
+    teacherMaxTabs,
+    teacherBlockedDomains: [...teacherBlockedDomains],
+    activeBlockListName,
+    temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
+    attentionModeActive,
+  };
+}
+
+function restoreClassroomRuntimeBackup(backup) {
+  screenLocked = backup.screenLocked;
+  lockedUrl = backup.lockedUrl;
+  lockedDomain = backup.lockedDomain;
+  allowedDomains = backup.allowedDomains;
+  activeFlightPathName = backup.activeFlightPathName;
+  currentMaxTabs = backup.currentMaxTabs;
+  teacherMaxTabs = backup.teacherMaxTabs;
+  teacherBlockedDomains = backup.teacherBlockedDomains;
+  activeBlockListName = backup.activeBlockListName;
+  temporaryAllowedDomains = backup.temporaryAllowedDomains;
+  attentionModeActive = backup.attentionModeActive;
+}
+
+function classroomRestrictionTypes(state = currentClassroomState) {
+  const restrictions = state?.restrictions;
+  if (!restrictions) return [];
+  const types = [];
+  if (restrictions.screenLock?.active) types.push('screen_lock');
+  if (restrictions.flightPath?.active) types.push('flight_path');
+  if (restrictions.blockList?.active) types.push('block_list');
+  if (restrictions.attentionMode?.active) types.push('attention_mode');
+  if (restrictions.tabLimit) types.push('tab_limit');
+  if (restrictions.temporaryAllows?.length) types.push('temporary_allow');
+  return types;
+}
+
+function classroomStateAckTarget(rawState) {
+  const rawRevision = rawState?.revision
+    ?? rawState?.studentControlRevision
+    ?? rawState?.student_control_revision;
+  const parsedRevision = Number(rawRevision);
+  const session = rawState?.session && typeof rawState.session === 'object' ? rawState.session : {};
+  const safeScopeId = (value) => typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, 128)
+    : null;
+  return {
+    revision: Number.isSafeInteger(parsedRevision) && parsedRevision >= 0
+      ? parsedRevision
+      : currentClassroomState?.revision ?? 0,
+    teachingSessionId: safeScopeId(
+      rawState?.teachingSessionId ?? rawState?.sessionId ?? session.teachingSessionId ?? session.id
+    ),
+    supervisionContextId: safeScopeId(
+      rawState?.supervisionContextId ?? session.supervisionContextId
+    ),
+  };
+}
+
+function sendClassroomStateAck(state, outcome, error) {
+  lastClassroomStateOutcome = outcome;
+  if (Number.isSafeInteger(Number(state?.revision)) && Number(state.revision) >= 0) {
+    lastClassroomStateAckRevision = Number(state.revision);
+  }
+  if (!wsConnected || !state) return;
+  wsSend({
+    type: 'classroom-state-ack',
+    appliedRevision: state.revision,
+    outcome,
+    teachingSessionId: state.teachingSessionId || undefined,
+    supervisionContextId: state.supervisionContextId || undefined,
+    error: error ? commandErrorMessage(error).slice(0, 200) : undefined,
+    extensionVersion: chrome.runtime.getManifest().version,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function classroomRestrictionsFromRuntime() {
+  return {
+    screenLock: {
+      active: screenLocked && !allowedDomains.length,
+      url: lockedUrl,
+      domain: lockedDomain,
+    },
+    flightPath: {
+      active: screenLocked && allowedDomains.length > 0,
+      allowedDomains,
+      name: activeFlightPathName,
+    },
+    blockList: {
+      active: teacherBlockedDomains.length > 0,
+      blockedDomains: teacherBlockedDomains,
+      name: activeBlockListName,
+    },
+    attentionMode: {
+      active: attentionModeActive,
+      message: currentClassroomState?.restrictions?.attentionMode?.message || '',
+    },
+    tabLimit: teacherMaxTabs,
+    temporaryAllows: temporaryAllowedDomains,
+  };
+}
+
+function scheduleClassroomStateExpiry(state = currentClassroomState) {
+  chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+  if (!state) return;
+  const stateExpiry = RuntimeCore.classroomStateExpiry(state, Date.now()).expiresAt;
+  const temporaryExpiry = (state.restrictions?.temporaryAllows || [])
+    .map((item) => Number(item.expiresAt))
+    .filter((value) => Number.isFinite(value) && value > Date.now())
+    .sort((a, b) => a - b)[0];
+  const nextExpiry = [stateExpiry, temporaryExpiry]
+    .filter((value) => Number.isFinite(value) && value > Date.now())
+    .sort((a, b) => a - b)[0];
+  if (nextExpiry) chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, { when: nextExpiry });
+}
+
+function scheduleClassroomStateExpiryRetry() {
+  chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, {
+    when: Date.now() + CLASSROOM_STATE_EXPIRY_RETRY_MS,
+  });
+}
+
+async function enforceCurrentTabLimit() {
+  if (!currentMaxTabs || currentMaxTabs < 1) return;
+  const tabs = await chrome.tabs.query({});
+  const closeable = tabs.filter((tab) => tab.id && !tab.url?.startsWith('chrome://'));
+  const excess = Math.max(0, tabs.length - currentMaxTabs);
+  for (const tab of closeable.slice(0, excess)) {
+    await chrome.tabs.remove(tab.id).catch(() => {});
+  }
+}
+
+async function setRuntimeFromClassroomState(state) {
+  const restrictions = state.restrictions;
+  const backup = classroomRuntimeBackup();
+  screenLocked = Boolean(restrictions.flightPath.active || restrictions.screenLock.active);
+  allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
+  activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
+  lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
+  lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
+  teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
+  activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
+  temporaryAllowedDomains = restrictions.temporaryAllows.map((item) => ({ ...item }));
+  attentionModeActive = restrictions.attentionMode.active;
+  teacherMaxTabs = restrictions.tabLimit;
+  currentMaxTabs = effectiveTabLimit();
+
+  try {
+    await composeAllManagedDynamicRules();
+  } catch (error) {
+    restoreClassroomRuntimeBackup(backup);
+    throw error;
+  }
+
+  try {
+    broadcastToAllTabs('attention-mode', {
+      active: attentionModeActive,
+      message: restrictions.attentionMode.message || 'Please look up!',
+    });
+  } catch (error) {
+    console.warn('[Classroom State] Attention overlay reconciliation failed:', error?.message || error);
+  }
+  // DNR is the durable enforcement boundary. Browser tabs are inherently
+  // racy, so failure to query/update one must never roll back or clear the
+  // newly composed rules. Retry tab reconciliation independently instead.
+  await reconcileClassroomStateTabsBestEffort(state);
+}
+
+function scheduleClassroomStateReconciliationRetry() {
+  chrome.alarms.create(CLASSROOM_STATE_RECONCILE_ALARM, {
+    when: Date.now() + CLASSROOM_STATE_RECONCILE_RETRY_MS,
+  });
+}
+
+async function reconcileClassroomStateTabsBestEffort(state) {
+  try {
+    await reconcileExistingTabsForClassroomState(state);
+    await enforceCurrentTabLimit();
+    await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
+    return true;
+  } catch (error) {
+    console.warn('[Classroom State] Existing-tab reconciliation deferred:', error?.message || error);
+    scheduleClassroomStateReconciliationRetry();
+    return false;
+  }
+}
+
+async function reconcileExistingTabsForClassroomState(state) {
+  const tabs = await chrome.tabs.query({});
+  const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs);
+  let updateSucceeded = plan.updates.length === 0;
+  for (const update of plan.updates) {
+    try {
+      await chrome.tabs.update(update.tabId, { url: update.url });
+      updateSucceeded = true;
+    } catch (error) {
+      // A tab may disappear between query and update. A replacement below
+      // prevents that race from leaving the student without the lock target.
+      console.warn('[Classroom State] Retained tab disappeared during reconciliation:', error?.message || error);
+    }
+  }
+  for (const tabId of plan.removeTabIds) {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch (error) {
+      // Closed-by-user races are already compliant with the desired state.
+      console.info('[Classroom State] Tab already closed during reconciliation:', tabId);
+    }
+  }
+  const fallbackUrl = plan.createUrl || (!updateSucceeded ? plan.updates[0]?.url : null);
+  if (fallbackUrl) await chrome.tabs.create({ url: fallbackUrl, active: true });
+  await refreshTabCache();
+}
+
+async function resolveCurrentUrlMarker(rawState) {
+  const cloned = JSON.parse(JSON.stringify(rawState));
+  const restrictions = cloned.restrictions || cloned.desiredRestrictions || cloned.desiredState;
+  const screenLock = restrictions?.screenLock || restrictions?.screen_lock;
+  if (screenLock?.url !== 'CURRENT_URL' && screenLock?.lockedUrl !== 'CURRENT_URL') return cloned;
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const activeTab = tabs.find((tab) => isHttpUrl(tab.url));
+  if (!activeTab?.url) throw new Error('No active web tab is available for the screen lock');
+  screenLock.url = activeTab.url;
+  screenLock.lockedUrl = activeTab.url;
+  screenLock.domain = extractDomain(activeTab.url);
+  screenLock.lockedDomain = screenLock.domain;
+  return cloned;
+}
+
+async function applyClassroomStateNow(rawState, options = {}) {
+  let normalized;
+  try {
+    const prepared = await resolveCurrentUrlMarker(rawState);
+    normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+  } catch (error) {
+    const ackState = classroomStateAckTarget(rawState);
+    const outcome = error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA'
+      ? 'unsupported'
+      : 'failed';
+    sendClassroomStateAck(ackState, outcome, error);
+    enqueueMonitoringEvent('restriction_state_failed', {
+      revision: ackState.revision,
+      restrictionTypes: [],
+      errorCode: error?.code || error?.name || 'invalid_snapshot',
+    }, {
+      teachingSessionId: ackState.teachingSessionId,
+      supervisionContextId: ackState.supervisionContextId,
+    }).catch(() => {});
+    throw error;
+  }
+  const previousState = currentClassroomState;
+  if (!options.force && !RuntimeCore.shouldApplyClassroomState(currentClassroomState, normalized)) {
+    const currentExpiry = RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now());
+    const outcome = currentExpiry.expired
+      ? 'expired'
+      : normalized.revision === currentClassroomState?.revision
+        ? 'applied'
+        : 'stale';
+    // `stale` is useful to the command caller but is not an enforcement-health
+    // state. Acknowledge the higher revision that remains actively applied.
+    sendClassroomStateAck(currentClassroomState, currentExpiry.expired ? 'expired' : 'applied');
+    return {
+      outcome,
+      appliedRevision: currentClassroomState?.revision ?? 0,
+    };
+  }
+
+  const expiry = RuntimeCore.classroomStateExpiry(normalized, Date.now());
+  if (expiry.expired) {
+    currentClassroomState = normalized;
+    await expireClassroomState(expiry.reason);
+    return { outcome: 'expired', appliedRevision: normalized.revision };
+  }
+
+  const runtimeBackup = classroomRuntimeBackup();
+  let statePersisted = false;
+  try {
+    await setRuntimeFromClassroomState(normalized);
+    currentClassroomState = normalized;
+    await kv.set({
+      [CLASSROOM_STATE_STORAGE_KEY]: normalized,
+      [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: normalized.hardExpiresAt,
+      ...(CONFIG.activeStudentId
+        ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
+        : {}),
+    });
+    statePersisted = true;
+    await kv.remove([
+      'lockScreenState',
+      'flightPathState',
+      'teacherBlockListState',
+    ]).catch((error) => {
+      console.warn('[Classroom State] Legacy state cleanup failed:', error?.message || error);
+    });
+    scheduleClassroomStateExpiry(normalized);
+    sendClassroomStateAck(normalized, 'applied');
+    const restrictionTypes = classroomRestrictionTypes(normalized);
+    const eventScope = normalized.teachingSessionId || normalized.supervisionContextId
+      ? {
+          teachingSessionId: normalized.teachingSessionId,
+          supervisionContextId: normalized.supervisionContextId,
+        }
+      : {
+          teachingSessionId: previousState?.teachingSessionId || null,
+          supervisionContextId: previousState?.supervisionContextId || null,
+        };
+    enqueueMonitoringEvent(
+      restrictionTypes.length ? 'restriction_state_applied' : 'restriction_state_cleared',
+      { revision: normalized.revision, restrictionTypes, reason: options.reason || 'state_sync' },
+      eventScope
+    ).catch(() => {});
+    const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
+      || normalized.supervisionContextId !== previousState?.supervisionContextId;
+    if (scopeChanged && (normalized.teachingSessionId || normalized.supervisionContextId)) {
+      await enqueueMonitoringEvent('monitoring_state_changed', {
+        state: persistedMonitoringState.state.toLowerCase(),
+        reason: 'scope_initialized',
+      }, {
+        teachingSessionId: normalized.teachingSessionId,
+        supervisionContextId: normalized.supervisionContextId,
+        // This is a snapshot of the current state in the new scope. Using the
+        // old transition timestamp could precede the scope and be rejected by
+        // the server's authoritative scope resolver.
+        occurredAt: Date.now(),
+      }).catch((error) => {
+        console.warn('[Classroom State] Scope monitoring event was deferred:', error?.message || error);
+      });
+    }
+    return { outcome: 'applied', appliedRevision: normalized.revision };
+  } catch (error) {
+    // Once the snapshot and its fail-safe deadline are durable, retain them.
+    // Non-critical notification/event failures must never clear enforcement
+    // or resurrect the previous revision.
+    if (statePersisted) {
+      currentClassroomState = normalized;
+      scheduleClassroomStateExpiry(normalized);
+      sendClassroomStateAck(normalized, 'applied');
+      console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', error?.message || error);
+      return { outcome: 'applied', appliedRevision: normalized.revision };
+    }
+    restoreClassroomRuntimeBackup(runtimeBackup);
+    currentClassroomState = previousState;
+    await composeAllManagedDynamicRules().catch((rollbackError) => {
+      console.warn('[Classroom State] Snapshot rule rollback failed:', rollbackError?.message || rollbackError);
+    });
+    broadcastToAllTabs('attention-mode', {
+      active: attentionModeActive,
+      message: previousState?.restrictions?.attentionMode?.message || '',
+    });
+    if (previousState) {
+      await kv.set({
+        [CLASSROOM_STATE_STORAGE_KEY]: previousState,
+        [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: previousState.hardExpiresAt,
+        ...(CONFIG.activeStudentId
+          ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
+          : {}),
+      }).catch(() => {});
+      scheduleClassroomStateExpiry(previousState);
+    } else {
+      await kv.remove([
+        CLASSROOM_STATE_STORAGE_KEY,
+        CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+        CLASSROOM_STATE_STUDENT_BINDING_KEY,
+      ]).catch(() => {});
+      chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+    }
+    sendClassroomStateAck(normalized, 'failed', error);
+    enqueueMonitoringEvent('restriction_state_failed', {
+      revision: normalized.revision,
+      restrictionTypes: classroomRestrictionTypes(normalized),
+      errorCode: error?.name || 'apply_failed',
+    }, {
+      teachingSessionId: normalized.teachingSessionId,
+      supervisionContextId: normalized.supervisionContextId,
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+function applyClassroomState(rawState, options = {}) {
+  return enqueueClassroomStateOperation(() => applyClassroomStateNow(rawState, options));
+}
+
+async function expireClassroomState(reason = 'hard_expiry') {
+  if (!currentClassroomState) return;
+  const expiredState = {
+    ...currentClassroomState,
+    restrictions: RuntimeCore.emptyRestrictions(),
+    expiredAt: Date.now(),
+    expiryReason: reason,
+  };
+  await setRuntimeFromClassroomState(expiredState);
+  currentClassroomState = expiredState;
+  await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: expiredState });
+  await kv.remove(CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY);
+  scheduleClassroomStateExpiry(expiredState);
+  sendClassroomStateAck(expiredState, 'expired');
+  enqueueMonitoringEvent('restriction_state_cleared', {
+    revision: expiredState.revision,
+    restrictionTypes: [],
+    reason,
+  }).catch(() => {});
+}
+
+async function checkClassroomStateExpiryNow() {
+  if (!currentClassroomState) {
+    const stored = await kv.get([CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]);
+    const failSafeExpiryAt = Number(stored[CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY] || 0);
+    if (!failSafeExpiryAt) return;
+    if (Date.now() < failSafeExpiryAt) {
+      chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, { when: failSafeExpiryAt });
+      return;
+    }
+    screenLocked = false;
+    lockedUrl = null;
+    lockedDomain = null;
+    allowedDomains = [];
+    activeFlightPathName = null;
+    teacherMaxTabs = null;
+    currentMaxTabs = effectiveTabLimit();
+    teacherBlockedDomains = [];
+    activeBlockListName = null;
+    temporaryAllowedDomains = [];
+    attentionModeActive = false;
+    await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+    broadcastToAllTabs('attention-mode', { active: false, message: '' });
+    await kv.remove(CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY);
+    return;
+  }
+  const expiry = RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now());
+  if (expiry.expired) {
+    await expireClassroomState(expiry.reason);
+    return;
+  }
+  const validAllows = RuntimeCore.normalizeTemporaryAllows(
+    currentClassroomState.restrictions.temporaryAllows,
+    Date.now()
+  );
+  if (validAllows.length !== currentClassroomState.restrictions.temporaryAllows.length) {
+    const stateWithoutExpiredAllows = {
+      ...currentClassroomState,
+      restrictions: { ...currentClassroomState.restrictions, temporaryAllows: validAllows },
+    };
+    await updateTemporaryAllowRules(validAllows);
+    // Commit the durable snapshot only after Chrome accepted the corresponding
+    // DNR update. On failure, the retry must still see the expired entry and
+    // attempt the clear again rather than treating the in-memory mutation as
+    // already enforced.
+    currentClassroomState = stateWithoutExpiredAllows;
+    await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: currentClassroomState });
+  }
+  scheduleClassroomStateExpiry(currentClassroomState);
+}
+
+function checkClassroomStateExpiry() {
+  return enqueueClassroomStateOperation(checkClassroomStateExpiryNow).catch((error) => {
+    // A transient DNR/storage failure must not turn a scheduled or absolute
+    // cutoff into a permanent restriction. Retain the original deadline and
+    // retry the teacher/class/temporary range clear until it succeeds.
+    scheduleClassroomStateExpiryRetry();
+    throw error;
+  });
+}
+
+async function persistLegacyClassroomState(command, envelope = {}) {
+  const now = Date.now();
+  const base = currentClassroomState || {
+    schemaVersion: 1,
+    revision: 0,
+    receivedAt: now,
+    hardExpiresAt: now + RuntimeCore.CLASSROOM_STATE_MAX_LIFETIME_MS,
+  };
+  const normalized = RuntimeCore.normalizeClassroomState({
+    ...base,
+    teachingSessionId: envelope.teachingSessionId || envelope.sessionId || command?.data?.teachingSessionId || base.teachingSessionId,
+    restrictions: classroomRestrictionsFromRuntime(),
+  }, now);
+  currentClassroomState = normalized;
+  await kv.set({
+    [CLASSROOM_STATE_STORAGE_KEY]: normalized,
+    [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: normalized.hardExpiresAt,
+    ...(CONFIG.activeStudentId
+      ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
+      : {}),
+  });
+  await kv.remove([
+    'lockScreenState',
+    'flightPathState',
+    'teacherBlockListState',
+  ]);
+  scheduleClassroomStateExpiry(normalized);
+}
+
+function requestClassroomStateSync(reason = 'periodic', force = false) {
+  const now = Date.now();
+  if (!force && now - lastClassroomStateSyncRequestAt < CLASSROOM_STATE_SYNC_INTERVAL_MS) return false;
+  if (wsConnected) {
+    lastClassroomStateSyncRequestAt = now;
+    wsSend({
+      type: 'classroom-state-request',
+      appliedRevision: currentClassroomState?.revision ?? 0,
+      teachingSessionId: currentClassroomState?.teachingSessionId || undefined,
+      supervisionContextId: currentClassroomState?.supervisionContextId || undefined,
+      reason,
+    });
+  }
+  return true;
+}
+
+function requestClassroomStateOnHeartbeat() {
+  const now = Date.now();
+  if (now - lastClassroomHeartbeatSyncRequestAt < CLASSROOM_STATE_SYNC_INTERVAL_MS) return false;
+  lastClassroomHeartbeatSyncRequestAt = now;
+  return true;
+}
 
 function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
   if (!teacherBroadcastActive && !teacherBroadcastSessionId) {
@@ -3012,26 +4181,48 @@ async function getClassroomCommandStateSnapshot() {
   }
 }
 
-async function clearTeacherSessionStateForSignOut() {
+async function clearTeacherSessionStateForSignOutNow(options = {}) {
+  const eventScope = getMonitoringEventScope();
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
   allowedDomains = [];
   activeFlightPathName = null;
-  currentMaxTabs = null;
+  teacherMaxTabs = null;
+  currentMaxTabs = effectiveTabLimit();
   teacherBlockedDomains = [];
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
   seenPollIds.clear();
 
-  await chrome.storage.local.remove(['lockScreenState', 'flightPathState']);
-  await clearClassroomBlockingRule();
-  await clearTeacherBlockListRules();
+  const clearedRevision = currentClassroomState?.revision ?? 0;
+  await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+  currentClassroomState = null;
+  await chrome.storage.local.remove([
+    'lockScreenState',
+    'flightPathState',
+    'teacherBlockListState',
+    CLASSROOM_STATE_STORAGE_KEY,
+    CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+    CLASSROOM_STATE_STUDENT_BINDING_KEY,
+  ]);
+  chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+  if (options.emitEvent !== false) {
+    enqueueMonitoringEvent('restriction_state_cleared', {
+      revision: clearedRevision,
+      restrictionTypes: [],
+      reason: options.reason || 'student_sign_out',
+    }, eventScope).catch(() => {});
+  }
 
   broadcastToAllTabs('attention-mode', { active: false, message: '' });
   broadcastToAllTabs('timer', { action: 'stop' });
   broadcastToAllTabs('poll', { action: 'close' });
+}
+
+function clearTeacherSessionStateForSignOut(options = {}) {
+  return enqueueClassroomStateOperation(() => clearTeacherSessionStateForSignOutNow(options));
 }
 
 // Helper function to extract domain from URL
@@ -3060,20 +4251,91 @@ function isOnSameDomain(url, domain) {
 async function handleRemoteControl(command, envelope = {}) {
   const commandId = getCommandIdFromMessage(envelope, command);
   const commandType = command?.type || 'unknown';
+  const delivery = RuntimeCore.commandDeliveryState(command, envelope, Date.now());
+
+  // One-shot actions never become a reconnect queue. If the device did not
+  // receive the envelope before its deadline, report expiry without executing.
+  if (delivery.expired) {
+    if (commandId) {
+      sendCommandAck(commandId, 'expired', {
+        commandType,
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
+        state: await getClassroomCommandStateSnapshot(),
+        outcome: 'expired',
+      });
+    }
+    return { expired: true, expiresAt: delivery.expiresAt };
+  }
 
   if (commandId) {
     sendCommandAck(commandId, 'received', {
       commandType,
+      deliveryPolicy: delivery.deliveryPolicy,
+      expiresAt: delivery.expiresAt,
     });
   }
 
   try {
-    const result = await executeRemoteControlCommand(command || {});
+    const classroomState = envelope?.classroomState
+      || envelope?.stateSnapshot
+      || command?.classroomState
+      || command?.data?.classroomState;
+    let application = null;
+    let result;
+    if (classroomState && STATEFUL_COMMAND_TYPES.has(commandType)) {
+      application = await applyClassroomState(classroomState, { reason: 'stateful_command' });
+      result = {
+        commandType,
+        stateReconciled: true,
+        appliedRevision: application.appliedRevision,
+        outcome: application.outcome,
+        completedAt: new Date().toISOString(),
+      };
+    } else if (STATEFUL_COMMAND_TYPES.has(commandType)) {
+      result = await enqueueClassroomStateOperation(async () => {
+        const runtimeBackup = classroomRuntimeBackup();
+        const stateBackup = currentClassroomState;
+        try {
+          const legacyResult = await executeRemoteControlCommand(command || {});
+          await persistLegacyClassroomState(command, envelope);
+          application = {
+            outcome: 'applied',
+            appliedRevision: currentClassroomState?.revision ?? 0,
+          };
+          enqueueMonitoringEvent('restriction_state_applied', {
+            revision: application.appliedRevision,
+            restrictionTypes: classroomRestrictionTypes(),
+            reason: 'legacy_command',
+          }).catch(() => {});
+          return legacyResult;
+        } catch (error) {
+          restoreClassroomRuntimeBackup(runtimeBackup);
+          currentClassroomState = stateBackup;
+          await composeAllManagedDynamicRules().catch((rollbackError) => {
+            console.warn('[Classroom State] Legacy command rule rollback failed:', rollbackError?.message || rollbackError);
+          });
+          broadcastToAllTabs('attention-mode', {
+            active: attentionModeActive,
+            message: stateBackup?.restrictions?.attentionMode?.message || '',
+          });
+          await kv.remove(['lockScreenState', 'flightPathState', 'teacherBlockListState']);
+          scheduleClassroomStateExpiry(stateBackup);
+          throw error;
+        }
+      });
+    } else {
+      result = await executeRemoteControlCommand(command || {});
+    }
     if (commandId) {
       sendCommandAck(commandId, 'completed', {
         commandType,
         result,
         state: await getClassroomCommandStateSnapshot(),
+        appliedRevision: application?.appliedRevision,
+        outcome: application?.outcome || 'applied',
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
       });
     }
   } catch (error) {
@@ -3083,6 +4345,10 @@ async function handleRemoteControl(command, envelope = {}) {
         commandType,
         error: commandErrorMessage(error),
         state: await getClassroomCommandStateSnapshot(),
+        appliedRevision: currentClassroomState?.revision ?? 0,
+        outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
       });
     }
   }
@@ -3295,7 +4561,7 @@ async function executeRemoteControlCommand(command) {
             throw new Error('Missing allowed domains for Flight Path');
           }
 
-          allowedDomains = requestedAllowedDomains;
+          allowedDomains = RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'Flight Path domains');
           activeFlightPathName = command.data.flightPathName || null;
         }
         screenLocked = true;
@@ -3380,7 +4646,7 @@ async function executeRemoteControlCommand(command) {
 
       case 'temp-unblock':
         // Temporarily allow access to a blocked domain
-        const tempDomain = command.data.domain;
+        const tempDomain = RuntimeCore.normalizeDomain(command.data.domain);
         const tempExpiresAt = command.data.expiresAt || (Date.now() + 5 * 60 * 1000);
         const tempDuration = command.data.durationMinutes || 5;
         if (!tempDomain) {
@@ -3390,6 +4656,7 @@ async function executeRemoteControlCommand(command) {
         // Add to temporary allowed list
         temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.domain !== tempDomain);
         temporaryAllowedDomains.push({ domain: tempDomain, expiresAt: tempExpiresAt });
+        await updateTemporaryAllowRules(temporaryAllowedDomains);
 
         safeNotify({
           title: 'Temporary Access Granted',
@@ -3407,14 +4674,13 @@ async function executeRemoteControlCommand(command) {
         if (!Array.isArray(command.data.blockedDomains || [])) {
           throw new Error('Invalid block list domains');
         }
-        teacherBlockedDomains = command.data.blockedDomains || [];
+        teacherBlockedDomains = RuntimeCore.normalizeDomainList(
+          command.data.blockedDomains || [],
+          'teacher block list'
+        );
         activeBlockListName = command.data.blockListName || null;
 
-        // NOTE: Teacher block lists are SESSION-BASED and NOT persisted to storage
-        // They only apply while the student is in the teacher's active session
-        // When service worker restarts or student joins another class, they're cleared
-
-        // Update blocking rules (merges with global blacklist)
+        // The revisioned full snapshot is persisted after this legacy command.
         await updateTeacherBlockListRules(teacherBlockedDomains);
 
         if (teacherBlockedDomains.length > 0) {
@@ -3450,7 +4716,13 @@ async function executeRemoteControlCommand(command) {
         break;
         
       case 'limit-tabs':
-        currentMaxTabs = command.data.maxTabs;
+        {
+          const requestedLimit = Number(command.data.maxTabs);
+          teacherMaxTabs = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+            ? Math.min(requestedLimit, 1000)
+            : null;
+          currentMaxTabs = effectiveTabLimit();
+        }
         
         // Close excess tabs if over limit
         if (currentMaxTabs) {
@@ -3477,6 +4749,7 @@ async function executeRemoteControlCommand(command) {
 
         // Update attention mode state (blocks navigation and new tabs when active)
         attentionModeActive = attentionActive;
+        await composeDynamicRules(['classroom']);
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
@@ -3618,7 +4891,6 @@ async function executeRemoteControlCommand(command) {
       case 'student-sign-out':
         {
           const signOutReason = command.data.reason || 'teacher-sign-out';
-          await clearTeacherSessionStateForSignOut();
           await applyFabSettings({
             messagingEnabled: false,
             handRaisingEnabled: false,
@@ -3723,42 +4995,106 @@ async function broadcastToAllTabs(messageType, messageData) {
 async function handleChatMessage(message) {
   console.log('Chat message received:', message);
 
+  const expectedBinding = messageInboxAuthBinding();
+  const inboxMessage = messageWithStableLocalId(message, 'chat');
+  const inboxResult = await persistTeacherMessages([inboxMessage], {
+    reason: 'websocket-chat',
+    expectedBinding,
+  });
+  if (!inboxResult.addedMessageIds.includes(inboxMessage.id)) {
+    console.log('Dedup: skipping duplicate chat message', inboxMessage.id);
+    return;
+  }
+
   // Show browser notification immediately (fastest feedback)
   safeNotify({
-    title: `Message from ${message.fromName || 'Teacher'}`,
-    message: message.message,
+    title: `Message from ${inboxMessage.fromName || 'Teacher'}`,
+    message: inboxMessage.message,
     priority: 2,
     requireInteraction: false,
   });
 
   // Fire-and-forget broadcast to all tabs for instant delivery
   broadcastToAllTabs('show-message', {
-    message: message.message,
-    fromName: message.fromName || 'Teacher',
-    timestamp: message.timestamp || Date.now(),
+    id: inboxMessage.id,
+    message: inboxMessage.message,
+    fromName: inboxMessage.fromName || 'Teacher',
+    timestamp: inboxMessage.timestamp || Date.now(),
   });
+}
 
-  // Store message in local storage (async, non-blocking)
-  chrome.storage.local.get(['messages']).then(stored => {
-    const messages = stored.messages || [];
-    messages.push({
-      ...message,
-      timestamp: Date.now(),
-      read: false,
+async function handleDurableTeacherMessage(message) {
+  const expectedBinding = messageInboxAuthBinding();
+  const commandId = getCommandIdFromMessage(message);
+  const delivery = RuntimeCore.commandDeliveryState(
+    { type: 'teacher-message', ...message.command },
+    message,
+    Date.now()
+  );
+  if (commandId) {
+    sendCommandAck(commandId, 'received', {
+      commandType: 'teacher-message',
+      deliveryPolicy: delivery.deliveryPolicy,
+      expiresAt: delivery.expiresAt,
     });
+  }
 
-    // Keep only last 50 messages
-    if (messages.length > 50) {
-      messages.shift();
+  try {
+    const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
+    const inboxResult = await persistTeacherMessages([inboxMessage], {
+      reason: 'websocket-teacher-message',
+      expectedBinding,
+    });
+    const deduplicated = !inboxResult.addedMessageIds.includes(inboxMessage.id);
+
+    if (deduplicated) {
+      console.log('Dedup: skipping duplicate teacher-message', inboxMessage.id);
+    } else {
+      safeNotify({
+        title: 'Reply from Teacher',
+        message: inboxMessage.message || 'New message',
+        priority: 2,
+        requireInteraction: false,
+      });
+      broadcastToAllTabs('chat-reply', {
+        _msgId: inboxMessage.id,
+        chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
+        messageId: message.chatMessageId || message.messageId || inboxMessage.id,
+        sessionId: message.sessionId,
+        studentId: message.studentId,
+        message: inboxMessage.message,
+        fromName: inboxMessage.fromName || 'Teacher',
+        timestamp: inboxMessage.timestamp || Date.now(),
+      });
     }
 
-    chrome.storage.local.set({ messages }).then(() => {
-      // Update badge to show unread count
-      const unreadCount = messages.filter(m => !m.read).length;
-      chrome.action.setBadgeText({ text: unreadCount > 0 ? String(unreadCount) : '' });
-      chrome.action.setBadgeBackgroundColor({ color: '#3b82f6' }); // Blue for messages
-    }).catch(() => {});
-  }).catch(() => {});
+    sendChatDeliveryAck(message, 'delivered');
+    if (commandId) {
+      sendCommandAck(commandId, 'completed', {
+        commandType: 'teacher-message',
+        result: deduplicated
+          ? { deduplicated: true }
+          : {
+              delivered: true,
+              messageLength: String(inboxMessage.message || '').length,
+            },
+        state: await getClassroomCommandStateSnapshot(),
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
+      });
+    }
+  } catch (error) {
+    if (commandId) {
+      sendCommandAck(commandId, 'failed', {
+        commandType: 'teacher-message',
+        error: commandErrorMessage(error),
+        state: await getClassroomCommandStateSnapshot(),
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
+      });
+    }
+    throw error;
+  }
 }
 
 // Check-in Request Handler (Phase 3)
@@ -3786,6 +5122,7 @@ async function handleCheckInRequest(request) {
 // Prevent navigation when screen is locked (domain-based blocking)
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   try {
+  await classroomStateRestorePromise;
   // Only check main frame navigations
   if (details.frameId !== 0) return;
 
@@ -3797,6 +5134,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // Block ALL navigation when attention mode is active
   if (attentionModeActive) {
     console.log('[Attention Mode] Blocked navigation to:', details.url);
+    enqueueMonitoringEvent('navigation_blocked', {
+      url: details.url,
+      title: '',
+      policySource: 'attention_mode',
+    }).catch(() => {});
 
     chrome.tabs.goBack(details.tabId).catch(() => {
       // If can't go back, just stay on current page
@@ -3810,20 +5152,13 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
   // Clean up expired temporary allowed domains
   const now = Date.now();
-  temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.expiresAt > now);
-
-  // Check if domain is temporarily allowed (bypass blocking)
-  const isTempAllowed = temporaryAllowedDomains.some(d => {
-    const normalizedAllowed = d.domain.replace(/^www\./, '');
-    return targetDomain === normalizedAllowed || targetDomain.endsWith('.' + normalizedAllowed);
-  });
-
-  if (isTempAllowed) {
-    console.log('[Temp Unblock] Allowing temporarily unblocked domain:', targetDomain);
-    return; // Allow navigation
+  if (temporaryAllowedDomains.some((item) => item.expiresAt <= now)) {
+    await checkClassroomStateExpiry();
   }
 
-  // Check global blacklist first (school-wide blocked domains)
+  // School policy is authoritative. A teacher temporary allow may bypass a
+  // teacher block, but it must never bypass a school-wide block. Keep this
+  // imperative fallback in the same order as the serialized DNR priorities.
   if (globalBlockedDomains.length > 0) {
     const isBlacklisted = globalBlockedDomains.some(blockedDomain => {
       const normalizedBlocked = blockedDomain.replace(/^www./, '');
@@ -3832,6 +5167,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     
     if (isBlacklisted) {
       console.log('[Blacklist] Blocked navigation to:', details.url);
+      enqueueMonitoringEvent('navigation_blocked', {
+        url: details.url,
+        title: '',
+        policySource: 'school',
+      }).catch(() => {});
       
       // Go back or close the tab
       chrome.tabs.goBack(details.tabId).catch(() => {
@@ -3849,6 +5189,18 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
   }
 
+  // Check if domain is temporarily allowed after school policy has had the
+  // opportunity to block it.
+  const isTempAllowed = temporaryAllowedDomains.some(d => {
+    const normalizedAllowed = d.domain.replace(/^www\./, '');
+    return targetDomain === normalizedAllowed || targetDomain.endsWith('.' + normalizedAllowed);
+  });
+
+  if (isTempAllowed) {
+    console.log('[Temp Unblock] Allowing temporarily unblocked domain:', targetDomain);
+    return; // Allow navigation
+  }
+
   // Check teacher block list (session-based)
   if (teacherBlockedDomains.length > 0) {
     const isTeacherBlocked = teacherBlockedDomains.some(blockedDomain => {
@@ -3858,6 +5210,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     
     if (isTeacherBlocked) {
       console.log('[Teacher Block List] Blocked navigation to:', details.url);
+      enqueueMonitoringEvent('navigation_blocked', {
+        url: details.url,
+        title: '',
+        policySource: 'teacher',
+      }).catch(() => {});
       
       chrome.tabs.goBack(details.tabId).catch(() => {
         chrome.tabs.update(details.tabId, { url: 'about:blank' });
@@ -3891,6 +5248,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     if (!isAllowed) {
       // Redirect back to locked URL or prevent navigation
       console.log('Blocked navigation to:', details.url);
+      enqueueMonitoringEvent('navigation_blocked', {
+        url: details.url,
+        title: '',
+        policySource: allowedDomains.length > 0 ? 'flight_path' : 'screen_lock',
+      }).catch(() => {});
       
       // If we have a single locked URL, redirect to it
       if (lockedUrl) {
@@ -3919,6 +5281,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 // Track navigation commits for instant URL updates (fires immediately when navigation commits)
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   try {
+    await classroomStateRestorePromise;
     // Only track main frame navigations
     if (details.frameId !== 0) return;
     if (isHttpUrl(details.url)) {
@@ -3940,11 +5303,17 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 // Enforce tab limit and screen lock
 chrome.tabs.onCreated.addListener(async (tab) => {
   try {
+    await classroomStateRestorePromise;
     enforceAuthGateForTab(tab).catch(() => {});
 
     // Block new tabs when attention mode is active
     if (attentionModeActive) {
       if (tab.id) {
+        enqueueMonitoringEvent('navigation_blocked', {
+          url: tab.pendingUrl || tab.url || '',
+          title: tab.title || '',
+          policySource: 'attention_mode',
+        }).catch(() => {});
         chrome.tabs.remove(tab.id);
         console.log('[Attention Mode] Blocked new tab creation');
       }
@@ -3956,6 +5325,11 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     if (screenLocked && lockedDomain && allowedDomains.length === 0) {
       // Single domain lock mode - block all new tabs
       if (tab.id) {
+        enqueueMonitoringEvent('navigation_blocked', {
+          url: tab.pendingUrl || tab.url || '',
+          title: tab.title || '',
+          policySource: 'screen_lock',
+        }).catch(() => {});
         chrome.tabs.remove(tab.id);
 
         let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
@@ -3977,6 +5351,11 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       const tabs = await chrome.tabs.query({});
       if (tabs.length > currentMaxTabs) {
         // Close the newly created tab if over limit
+        enqueueMonitoringEvent('navigation_blocked', {
+          url: tab.pendingUrl || tab.url || '',
+          title: tab.title || '',
+          policySource: 'tab_limit',
+        }).catch(() => {});
         chrome.tabs.remove(tab.id);
 
         safeNotify({
@@ -4359,12 +5738,14 @@ function handleWsEvent(event, data) {
     cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
     scheduleWsReconnect();
   } else if (event === 'message') {
-    handleWsMessage(data);
+    handleWsMessage(data).catch((error) => {
+      console.warn('Error processing WebSocket message:', error);
+    });
   }
 }
 
 // Process incoming WebSocket message (same logic as before, just extracted)
-function handleWsMessage(rawData) {
+async function handleWsMessage(rawData) {
     try {
       const message = JSON.parse(rawData);
       console.log('WebSocket message:', message);
@@ -4379,7 +5760,8 @@ function handleWsMessage(rawData) {
           
           // Update currentMaxTabs (null or non-positive means unlimited)
           // Treat 0 and negative as unlimited by converting to null
-          currentMaxTabs = (newLimit !== null && newLimit > 0) ? newLimit : null;
+          schoolMaxTabs = (newLimit !== null && newLimit > 0) ? Math.min(Number(newLimit), 1000) : null;
+          currentMaxTabs = effectiveTabLimit();
           console.log('Applied tab limit from settings:', currentMaxTabs === null ? 'unlimited' : currentMaxTabs);
           
           // Immediately enforce the limit if set (null or non-positive means no limit)
@@ -4417,13 +5799,13 @@ function handleWsMessage(rawData) {
 
         // Handle global blocked domains (school-wide blacklist)
         if (message.settings && message.settings.globalBlockedDomains) {
-          globalBlockedDomains = message.settings.globalBlockedDomains;
-          console.log('[Blacklist] Received from server:', globalBlockedDomains);
+          const receivedGlobalBlockedDomains = message.settings.globalBlockedDomains;
+          console.log('[Blacklist] Received from server:', receivedGlobalBlockedDomains);
 
           // Apply blacklist rules and persist to storage
           (async () => {
             try {
-              await updateGlobalBlacklistRules(globalBlockedDomains);
+              await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
               await chrome.storage.local.set({ globalBlockedDomains });
               console.log('[Blacklist] Persisted to storage');
             } catch (error) {
@@ -4438,31 +5820,42 @@ function handleWsMessage(rawData) {
           });
         }
 
-        // Clear any existing teacher block list on new auth
-        // Teacher block lists are session-based and tied to specific teacher sessions
-        if (teacherBlockedDomains.length > 0) {
-          console.log('[Block List] Clearing teacher block list on new auth (session-based)');
-          teacherBlockedDomains = [];
-          activeBlockListName = null;
-          (async () => {
-            try {
-              await clearTeacherBlockListRules();
-            } catch (error) {
-              console.warn('[Block List] Error clearing rules on auth:', error);
-            }
-          })();
+        const authStateEnvelope = Object.prototype.hasOwnProperty.call(message, 'classroomState')
+          ? message
+          : message.settings && Object.prototype.hasOwnProperty.call(message.settings, 'classroomState')
+            ? { classroomState: message.settings.classroomState }
+            : null;
+        if (authStateEnvelope) {
+          await applyClassroomStateFromAuthResponse(authStateEnvelope, 'websocket_auth').catch((error) => {
+            console.warn('[Classroom State] Auth snapshot failed:', error?.message || error);
+          });
+        }
+        requestClassroomStateSync('websocket-auth', true);
+      }
+
+      if (['classroom-state', 'classroom-state-sync', 'student-control-state'].includes(message.type)) {
+        if (Object.prototype.hasOwnProperty.call(message, 'classroomState')) {
+          await applyClassroomStateFromAuthResponse(message, 'websocket_reconcile').catch((error) => {
+            console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
+          });
+        } else {
+          const snapshot = message.state || message.snapshot;
+          if (!snapshot) return;
+          applyClassroomState(snapshot, { reason: 'websocket_reconcile' }).catch((error) => {
+            console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
+          });
         }
       }
 
       // Handle global blacklist updates from server
       if (message.type === 'update-global-blacklist') {
-        globalBlockedDomains = message.blockedDomains || [];
-        console.log('[Blacklist] Update received from server:', globalBlockedDomains);
+        const receivedGlobalBlockedDomains = message.blockedDomains || [];
+        console.log('[Blacklist] Update received from server:', receivedGlobalBlockedDomains);
         
         // Apply updated blacklist rules and persist to storage
         (async () => {
           try {
-            await updateGlobalBlacklistRules(globalBlockedDomains);
+            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
             await chrome.storage.local.set({ globalBlockedDomains });
             console.log('[Blacklist] Persisted updated blacklist to storage');
             
@@ -4554,58 +5947,12 @@ function handleWsMessage(rawData) {
       }
 
       // Handle teacher reply messages — send to chat thread
-      // Dedup: local + Redis both deliver the same message; skip if already seen
+      // A storage-backed, identity-bound ledger deduplicates local + Redis
+      // delivery as well as later heartbeat inbox retries across worker restarts.
       if (message.type === 'teacher-message') {
-        const commandId = getCommandIdFromMessage(message);
-        if (commandId) {
-          sendCommandAck(commandId, 'received', { commandType: 'teacher-message' });
-        }
-        const dedupKey = message._msgId || ('tm:' + (message.message || '') + ':' + (message.fromName || ''));
-        if (recentMsgIds.has(dedupKey)) {
-          console.log('Dedup: skipping duplicate teacher-message', dedupKey);
-          sendChatDeliveryAck(message, 'delivered');
-          if (commandId) {
-            getClassroomCommandStateSnapshot().then((state) => {
-              sendCommandAck(commandId, 'completed', {
-                commandType: 'teacher-message',
-                result: { deduplicated: true },
-                state,
-              });
-            }).catch(() => {});
-          }
-        } else {
-          recentMsgIds.add(dedupKey);
-          setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
-          safeNotify({
-            title: 'Reply from Teacher',
-            body: message.message || 'New message',
-            priority: 2,
-            requireInteraction: false,
-          });
-          broadcastToAllTabs('chat-reply', {
-            _msgId: dedupKey,
-            chatMessageId: message.chatMessageId || message.messageId,
-            messageId: message.chatMessageId || message.messageId,
-            sessionId: message.sessionId,
-            studentId: message.studentId,
-            message: message.message,
-            fromName: message.fromName || 'Teacher',
-            timestamp: Date.now(),
-          });
-          sendChatDeliveryAck(message, 'delivered');
-          if (commandId) {
-            getClassroomCommandStateSnapshot().then((state) => {
-              sendCommandAck(commandId, 'completed', {
-                commandType: 'teacher-message',
-                result: {
-                  delivered: true,
-                  messageLength: String(message.message || '').length,
-                },
-                state,
-              });
-            }).catch(() => {});
-          }
-        }
+        handleDurableTeacherMessage(message).catch((error) => {
+          console.warn('Teacher message delivery failed:', error?.message || error);
+        });
       }
 
       // Handle teacher closing the chat
@@ -4663,6 +6010,7 @@ function handleWsMessage(rawData) {
 
 // Tab change listener - send immediate heartbeat when user switches tabs
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  await classroomStateRestorePromise;
   enforceAuthGateForTab(activeInfo.tabId).catch(() => {});
   // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
   if (trackingState === TRACKING_STATES.OFF) return;
@@ -4679,6 +6027,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   try {
+    await classroomStateRestorePromise;
     if (changeInfo.status === 'complete') {
       enforceAuthGateForTab(tab).catch(() => {});
     }
@@ -4762,6 +6111,54 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   if (message.type === 'get-config') {
     sendResponse({ config: CONFIG });
+    return true;
+  }
+
+  if (message.type === 'get-connectivity-health') {
+    sendResponse({ success: true, ...connectivityStatus() });
+    return true;
+  }
+
+  if (message.type === 'refresh-connectivity-badge') {
+    setConnectivityBadge(connectivityStatus())
+      .then((status) => sendResponse({ success: true, ...status }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Status unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'get-message-inbox') {
+    classroomStateRestorePromise
+      .then(() => getCurrentMessageInbox())
+      .then((messages) => sendResponse({ success: true, messages }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'mark-message-inbox-read') {
+    classroomStateRestorePromise
+      .then(() => markCurrentMessageInboxRead())
+      .then((messages) => sendResponse({ success: true, messages }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'clear-message-inbox-display') {
+    classroomStateRestorePromise
+      .then(() => clearCurrentMessageInboxDisplay())
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'get-classroom-state') {
+    classroomStateRestorePromise
+      .then(() => checkClassroomStateExpiry())
+      .then(() => sendResponse({
+        success: true,
+        classroomState: currentClassroomState,
+        appliedRevision: currentClassroomState?.revision ?? 0,
+      }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'State unavailable' }));
     return true;
   }
 
@@ -4988,41 +6385,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     
     console.log('Student changed:', previousStudentId, '->', message.studentId);
     
-    // Send immediate heartbeat with new studentId
-    safeSendHeartbeat('student-changed');
-    
-    // Log student_switched event
-    if (licenseActive && CONFIG.deviceId) {
-      const headers = buildDeviceAuthHeaders();
-      const payload = {
-        deviceId: CONFIG.deviceId,
-        eventType: 'student_switched',
-        metadata: { 
-          previousStudentId,
-          newStudentId: message.studentId,
-          timestamp: new Date().toISOString(),
-        },
-      };
-      attachLegacyStudentToken(payload, headers);
-
-      fetchWithBackoff(`${CONFIG.serverUrl}/api/device/event`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload),
-      }, {
-        context: 'student switched event',
-        maxAttempts: 2,
-      }).then(async (response) => {
-        if (response.status === 402) {
-          const data = await response.json().catch(() => ({}));
-          await disableForInactiveLicense(data.planStatus);
-        }
-      }).catch(error => {
-        console.warn('Error logging student_switched event:', error);
-      });
-    }
-    
-    sendResponse({ success: true });
+    reconcileMessageInboxIdentity('student-changed')
+      .then(() => {
+        // Send immediate heartbeat only after prior-student messages are gone.
+        safeSendHeartbeat('student-changed');
+        sendResponse({ success: true });
+      })
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Could not change student' }));
     return true;
   }
   
