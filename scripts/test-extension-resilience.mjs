@@ -411,6 +411,18 @@ async function main() {
       flightAllowed: tabUrl('flight', '/already-allowed'),
     };
     const existingTabReconciliation = await worker.evaluate(async ({ now, urls }) => {
+      const effectiveUrl = (tab) => tab.pendingUrl || tab.url || '';
+      const waitForTabState = async (predicate, timeoutMs = 5_000) => {
+        const deadline = Date.now() + timeoutMs;
+        let tabs = [];
+        do {
+          tabs = await chrome.tabs.query({});
+          if (predicate(tabs)) return tabs;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        } while (Date.now() < deadline);
+        return tabs;
+      };
+
       await chrome.tabs.create({ url: 'chrome://version/', active: false });
       await chrome.tabs.create({ url: urls.outsideOne, active: true });
       await chrome.tabs.create({ url: urls.otherTwo, active: false });
@@ -428,7 +440,10 @@ async function main() {
           },
         },
       });
-      const afterLock = await chrome.tabs.query({});
+      const afterLock = await waitForTabState((tabs) => {
+        const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
+        return webUrls.length === 1 && webUrls[0] === urls.lock;
+      });
 
       await applyClassroomState({
         schemaVersion: 1,
@@ -451,8 +466,12 @@ async function main() {
           flightPath: { active: true, allowedDomains: ['flight.localhost'] },
         },
       });
-      const afterFlightPath = await chrome.tabs.query({});
-      const effectiveUrl = (tab) => tab.pendingUrl || tab.url || '';
+      const afterFlightPath = await waitForTabState((tabs) => {
+        const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
+        return webUrls.length === 2 && webUrls.every((url) =>
+          new URL(url).hostname === 'flight.localhost'
+        );
+      });
       const summary = (tabs) => ({
         internal: tabs
           .map(effectiveUrl)
