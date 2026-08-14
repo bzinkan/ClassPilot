@@ -10,6 +10,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:extension:chrome": "node scripts/test-extension-resilience.mjs",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
@@ -119,6 +120,7 @@
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.20",
+    "playwright": "^1.62.0",
     "drizzle-kit": "^0.31.4",
     "esbuild": "^0.25.0",
     "postcss": "^8.4.47",

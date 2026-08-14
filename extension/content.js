@@ -43,6 +43,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'student-message-state-cleared') {
+    seenChatMsgIds.clear();
+    chatMessages = [];
+    chatClosed = false;
+    persistFabChatState();
+    document.getElementById('classpilot-message-modal')?.remove();
+    renderChatMessages();
+    hideMessageBox();
+    sendResponse?.({ success: true });
+    return false;
+  }
+
   if (message.type === 'show-message') {
     // Broadcast messages (not replies) still show as modal
     if (!message.data.isTeacherReply) {
@@ -166,6 +178,18 @@ function requestAuthGateState() {
       removeAuthGate();
     }
     updateFabIdentityState(response?.state);
+  });
+}
+
+function requestClassroomOverlayState() {
+  chrome.runtime.sendMessage({ type: 'get-classroom-state' }, (response) => {
+    if (chrome.runtime.lastError || !response?.success) return;
+    const attention = response.classroomState?.restrictions?.attentionMode;
+    if (attention?.active) {
+      showAttentionOverlay(attention.message || 'Please look up!');
+    } else {
+      hideAttentionOverlay();
+    }
   });
 }
 
@@ -2589,10 +2613,12 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
     createFloatingActionButton();
     requestAuthGateState();
+    requestClassroomOverlayState();
   });
 } else {
   createFloatingActionButton();
   requestAuthGateState();
+  requestClassroomOverlayState();
 }
 
 function signOutStudent() {

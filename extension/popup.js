@@ -37,6 +37,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (namespace === 'local' && (changes.licenseActive || changes.planStatus)) {
       updateLicenseBanner();
     }
+    if (namespace === 'local' && changes.connectivityHealthV1) {
+      updateStatus();
+    }
     if ((namespace === 'local' || namespace === 'session') &&
         (changes.studentToken || changes.studentEmail || changes.studentName)) {
       refreshAuthState();
@@ -129,22 +132,30 @@ function signOutStudent() {
 }
 
 function updateStatus() {
-  chrome.action.getBadgeText({}, (text) => {
+  chrome.runtime.sendMessage({ type: 'get-connectivity-health' }, (response) => {
     const statusDot = document.getElementById('status-dot');
     const statusText = document.getElementById('status-text');
-    
-    if (text === '●') {
-      statusDot.className = 'status-dot online';
-      statusText.textContent = 'Connected';
-    } else {
+
+    if (chrome.runtime.lastError || !response?.success) {
       statusDot.className = 'status-dot offline';
-      statusText.textContent = 'Disconnected';
+      statusText.textContent = 'Checking school server';
+      return;
     }
+
+    const dotClass = {
+      connected: 'online',
+      reconnecting: 'reconnecting',
+      unreachable: 'unreachable',
+      rate_limited: 'reconnecting',
+    }[response.state] || 'offline';
+    statusDot.className = `status-dot ${dotClass}`;
+    statusText.textContent = response.label || 'Checking school server';
+
+    const lastSuccessAt = Number(response.health?.lastSuccessAt || 0);
+    document.getElementById('last-update').textContent = lastSuccessAt
+      ? new Date(lastSuccessAt).toLocaleString()
+      : 'No successful heartbeat yet';
   });
-  
-  // Update last update time
-  const now = new Date();
-  document.getElementById('last-update').textContent = now.toLocaleTimeString();
 }
 
 async function updateLicenseBanner() {
@@ -275,9 +286,21 @@ async function handleStudentSelection(event) {
   await setActiveStudent(studentId);
 }
 
+function requestServiceWorker(payload) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(payload, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+        return;
+      }
+      resolve(response || null);
+    });
+  });
+}
+
 async function loadMessages() {
-  const stored = await chrome.storage.local.get(['messages']);
-  const messages = stored.messages || [];
+  const response = await requestServiceWorker({ type: 'get-message-inbox' });
+  const messages = response?.success && Array.isArray(response.messages) ? response.messages : [];
   
   const container = document.getElementById('messages-container');
   
@@ -333,21 +356,15 @@ async function loadMessages() {
 }
 
 async function markMessagesAsRead() {
-  const stored = await chrome.storage.local.get(['messages']);
-  const messages = stored.messages || [];
+  await requestServiceWorker({ type: 'mark-message-inbox-read' });
   
-  // Mark all as read
-  const updatedMessages = messages.map(msg => ({ ...msg, read: true }));
-  
-  await chrome.storage.local.set({ messages: updatedMessages });
-  
-  // Clear badge
-  chrome.action.setBadgeText({ text: '' });
+  // Connectivity owns the badge; reading messages must not erase its warning.
+  chrome.runtime.sendMessage({ type: 'refresh-connectivity-badge' }, () => {});
 }
 
 async function clearMessages() {
   if (confirm('Are you sure you want to clear all messages?')) {
-    await chrome.storage.local.set({ messages: [] });
+    await requestServiceWorker({ type: 'clear-message-inbox-display' });
     loadMessages();
   }
 }
