@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,6 +46,27 @@ function launchTestContext(executablePath) {
   });
 }
 
+async function startNavigationFixtureServer() {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>ClassPilot tab fixture</title>');
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    const onError = (error) => rejectListen(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolveListen();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    server.close();
+    throw new Error('Navigation fixture server did not expose a TCP port');
+  }
+  return { server, port: address.port };
+}
+
 async function waitForRestoredRevision(worker, expectedRevision) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -67,8 +89,11 @@ async function main() {
   }
 
   let context;
+  let navigationFixtureServer;
   const serviceWorkerErrors = [];
   try {
+    const fixture = await startNavigationFixtureServer();
+    navigationFixtureServer = fixture.server;
     context = await launchTestContext(executablePath);
 
     let worker = await waitForInitialWorker(context);
@@ -376,10 +401,19 @@ async function main() {
     assert.equal(concurrent.revision, 45);
     assert.deepEqual(concurrent.teacherBlockedDomains, ['newer.example']);
 
-    const existingTabReconciliation = await worker.evaluate(async ({ now }) => {
+    const tabUrl = (host, path) => `http://${host}.localhost:${fixture.port}${path}`;
+    const reconciliationUrls = {
+      lock: tabUrl('lock', '/assignment'),
+      outsideOne: tabUrl('outside', '/one'),
+      outsideActive: tabUrl('outside', '/active'),
+      otherTwo: tabUrl('other', '/two'),
+      otherRemove: tabUrl('other', '/remove'),
+      flightAllowed: tabUrl('flight', '/already-allowed'),
+    };
+    const existingTabReconciliation = await worker.evaluate(async ({ now, urls }) => {
       await chrome.tabs.create({ url: 'chrome://version/', active: false });
-      await chrome.tabs.create({ url: 'https://outside.example/one', active: true });
-      await chrome.tabs.create({ url: 'https://other.example/two', active: false });
+      await chrome.tabs.create({ url: urls.outsideOne, active: true });
+      await chrome.tabs.create({ url: urls.otherTwo, active: false });
       await applyClassroomState({
         schemaVersion: 1,
         revision: 46,
@@ -389,8 +423,8 @@ async function main() {
         restrictions: {
           screenLock: {
             active: true,
-            url: 'https://lock.example/assignment',
-            domain: 'lock.example',
+            url: urls.lock,
+            domain: 'lock.localhost',
           },
         },
       });
@@ -404,9 +438,9 @@ async function main() {
         hardExpiresAt: now + 60 * 60 * 1000,
         restrictions: {},
       });
-      await chrome.tabs.create({ url: 'https://flight.example/already-allowed', active: false });
-      await chrome.tabs.create({ url: 'https://outside.example/active', active: true });
-      await chrome.tabs.create({ url: 'https://other.example/remove', active: false });
+      await chrome.tabs.create({ url: urls.flightAllowed, active: false });
+      await chrome.tabs.create({ url: urls.outsideActive, active: true });
+      await chrome.tabs.create({ url: urls.otherRemove, active: false });
       await applyClassroomState({
         schemaVersion: 1,
         revision: 48,
@@ -414,7 +448,7 @@ async function main() {
         receivedAt: now,
         hardExpiresAt: now + 60 * 60 * 1000,
         restrictions: {
-          flightPath: { active: true, allowedDomains: ['flight.example'] },
+          flightPath: { active: true, allowedDomains: ['flight.localhost'] },
         },
       });
       const afterFlightPath = await chrome.tabs.query({});
@@ -431,13 +465,13 @@ async function main() {
         afterLock: summary(afterLock),
         afterFlightPath: summary(afterFlightPath),
       };
-    }, { now: Date.now() });
+    }, { now: Date.now(), urls: reconciliationUrls });
     assert.ok(existingTabReconciliation.afterLock.internal.length >= 1);
-    assert.deepEqual(existingTabReconciliation.afterLock.web, ['https://lock.example/assignment']);
+    assert.deepEqual(existingTabReconciliation.afterLock.web, [reconciliationUrls.lock]);
     assert.ok(existingTabReconciliation.afterFlightPath.internal.length >= 1);
     assert.equal(existingTabReconciliation.afterFlightPath.web.length, 2);
     assert.ok(existingTabReconciliation.afterFlightPath.web.every((url) =>
-      new URL(url).hostname === 'flight.example'
+      new URL(url).hostname === 'flight.localhost'
     ));
 
     const bestEffortTabFailure = await worker.evaluate(async ({ now }) => {
@@ -1023,6 +1057,9 @@ async function main() {
     console.log('Verified restart/tab restore, connectivity and screenshot diagnostics, transient-command expiry, pre-expiry completion, best-effort tab failure safety, explicit-null reconciliation, expiry retry, missing/corrupt school-policy preservation, DNR/revision safety, oversized-list failure, auth-bound event outbox isolation, and restart-safe identity-bound teacher-message dedup.');
   } finally {
     await context?.close();
+    if (navigationFixtureServer) {
+      await new Promise((resolveClose) => navigationFixtureServer.close(resolveClose));
+    }
     rmSync(profilePath, { recursive: true, force: true });
   }
 }
