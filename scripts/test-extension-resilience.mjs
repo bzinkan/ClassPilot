@@ -418,9 +418,14 @@ async function main() {
         },
       });
       const afterFlightPath = await chrome.tabs.query({});
+      const effectiveUrl = (tab) => tab.pendingUrl || tab.url || '';
       const summary = (tabs) => ({
-        internal: tabs.filter((tab) => tab.url?.startsWith('chrome://')).map((tab) => tab.url),
-        web: tabs.filter((tab) => /^https?:\/\//.test(tab.url || '')).map((tab) => tab.url),
+        internal: tabs
+          .map(effectiveUrl)
+          .filter((url) => url.startsWith('chrome://')),
+        web: tabs
+          .map(effectiveUrl)
+          .filter((url) => /^https?:\/\//.test(url)),
       });
       return {
         afterLock: summary(afterLock),
