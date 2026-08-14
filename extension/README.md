@@ -140,10 +140,40 @@ The extension popup clearly displays:
 - In-page FAB indicator stating "Monitored by school"
 
 ### Events Logged
-The extension logs the following events to the server:
-- `consent_granted` - When student starts screen sharing
-- `consent_revoked` - When student stops screen sharing
-- `tab_change` - When student switches tabs
+The extension keeps a bounded retry outbox for authorized teaching-session or
+supervision-context events. It sends only these typed events:
+
+- `tab_changed` and `navigation_changed`
+- `navigation_blocked`, including the policy source
+- `monitoring_state_changed`
+- `restriction_state_applied`, `restriction_state_failed`, and
+  `restriction_state_cleared`
+
+Navigation metadata is limited to the normalized domain, sanitized path, and a
+bounded title. Credentials, query strings, fragments, keystrokes, clipboard or
+form content, DOM content, screenshots, and arbitrary metadata are not stored
+in the event outbox.
+
+### Connectivity and command delivery
+
+The toolbar badge and popup report heartbeat health without trying to infer why
+the network path failed:
+
+- Green `Connected` after a successful school-server heartbeat
+- Amber `Reconnecting` after a retryable network or server failure
+- Red `School server unreachable` when no heartbeat has succeeded for 60 seconds
+
+Authentication and rate-limit states remain separate. The extension never
+labels a connectivity gap as Wi-Fi disablement, tampering, cheating, or AI use.
+On recovery it drains the identity-bound monitoring-event outbox and requests
+the authoritative classroom restriction snapshot.
+
+One-shot teacher actions honor the server-provided `transient_action` deadline
+and acknowledge `expired` without execution once that deadline passes.
+Persistent classroom controls continue to reconcile from their full stored
+snapshot. Screenshot image bodies are never queued or written to local storage;
+only bounded attempt, success, and error diagnostic timestamps/codes survive a
+worker restart.
 
 See `COMPLIANCE.md` for Chrome Web Store and school privacy review notes.
 
