@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 const repoRoot = resolve(__dirname, "../..");
 
 function readRepoFile(path: string) {
-  return readFileSync(resolve(repoRoot, path), "utf8");
+  return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
 function optionsAround(source: string, context: string) {
