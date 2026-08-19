@@ -117,6 +117,7 @@ let CONFIG = {
   classId: null,
   isSharing: false,
   activeStudentId: null,
+  activeStudentSessionId: null,
   schoolId: null,
   schoolSlug: null,
   enrollmentKey: null,
@@ -126,13 +127,54 @@ let CONFIG = {
 };
 
 let ws = null; // Legacy reference, kept for compatibility checks
-let wsConnected = false; // Tracks WebSocket connection state (actual WS lives in offscreen doc)
+let wsConnected = false; // True only after the current WebSocket generation is authenticated
+let wsTransportConnected = false;
+let wsConnectionGeneration = 0;
+let wsAuthenticatedGeneration = 0;
+let wsConnectInFlight = null;
+let wsMessageProcessingGeneration = 0;
+let wsMessageProcessingTail = Promise.resolve();
+let studentAuthInvalidating = false;
+let studentAuthMutationGeneration = 0;
+let studentAuthMutationTail = Promise.resolve();
+let chromeProfileRegistrationInFlight = null;
+let manualStudentLoginPendingGeneration = 0;
+
+const CLIENT_PROTOCOL_VERSION = 2;
+const EXTENSION_CAPABILITIES = Object.freeze([
+  'classroomStateV1',
+  'fabStateRevisionV1',
+  'exactTabCloseV1',
+  'screenOnlyUnlockV1',
+  'durableChatAckV1',
+  'commandAckReceiptV1',
+  'classroomOverlayRestoreV1',
+  'liveViewNegotiationV1',
+]);
+
+function extensionProtocolDescriptor() {
+  return {
+    clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+    extensionVersion: chrome.runtime.getManifest().version,
+    capabilities: [...EXTENSION_CAPABILITIES],
+  };
+}
 
 // Send a message via the WebSocket proxy in the offscreen document
-function wsSend(data) {
-  if (!wsConnected) return;
+async function wsSend(data) {
+  if (!wsConnected || wsAuthenticatedGeneration !== wsConnectionGeneration) return false;
   const str = typeof data === 'string' ? data : JSON.stringify(data);
-  sendToOffscreen({ type: 'WS_SEND', data: str }).catch(() => {});
+  try {
+    const response = await sendToOffscreen({
+      type: 'WS_SEND',
+      data: str,
+      connectionGeneration: wsConnectionGeneration,
+    });
+    return response?.success === true;
+  } catch (error) {
+    console.warn('[WebSocket] Send deferred:', error?.message || error);
+    return false;
+  }
 }
 
 function normalizeCommandId(commandId) {
@@ -158,9 +200,9 @@ function currentChromiumVersion() {
   return match?.[1] || null;
 }
 
-function sendCommandAck(commandId, ackState, options = {}) {
+async function sendCommandAck(commandId, ackState, options = {}) {
   const normalizedCommandId = normalizeCommandId(commandId);
-  if (!normalizedCommandId) return;
+  if (!normalizedCommandId) return false;
 
   const defaultOutcome = {
     received: 'pending',
@@ -169,8 +211,9 @@ function sendCommandAck(commandId, ackState, options = {}) {
     expired: 'expired',
   }[ackState] || 'pending';
 
-  wsSend({
+  const ack = {
     type: 'command-ack',
+    ackId: `${normalizedCommandId}:${ackState}`,
     commandId: normalizedCommandId,
     ackState,
     commandType: options.commandType,
@@ -185,7 +228,12 @@ function sendCommandAck(commandId, ackState, options = {}) {
     outcome: options.outcome || defaultOutcome,
     extensionVersion: chrome.runtime.getManifest().version,
     timestamp: new Date().toISOString(),
-  });
+  };
+
+  await enqueueCommandAck(ack);
+  await wsSend(ack);
+  scheduleCommandAckFlush();
+  return true;
 }
 let cameraActive = false; // Track camera usage across all tabs
 
@@ -213,6 +261,8 @@ const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - fallback for Chrome alarm
 const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const LICENSE_CONTROL_CLEANUP_ALARM = 'license-control-cleanup';
+const LICENSE_CONTROL_CLEANUP_RETRY_MS = 15 * 1000;
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
 const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
@@ -224,6 +274,11 @@ const SCREENSHOT_HEALTH_STORAGE_KEY = 'screenshotHealthV1';
 const MESSAGE_INBOX_STORAGE_KEY = 'messages';
 const MESSAGE_INBOX_BINDING_KEY = 'messageInboxAuthBindingV1';
 const MESSAGE_INBOX_DEDUP_KEY = 'messageInboxSeenIdsV1';
+const FAB_STATE_STORAGE_KEY = 'fabStateV1';
+const FAB_CONTEXT_STORAGE_KEY = 'fabContextV1';
+const FAB_CHAT_CONTEXT_STORAGE_KEY = 'fabChatContextV1';
+const CLASSROOM_OVERLAY_STORAGE_KEY = 'classroomOverlayStateV1';
+const CLASSROOM_OVERLAY_EXPIRY_ALARM = 'classroom-overlay-expiry';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const API_RETRY_MAX_ATTEMPTS = 3;
 const API_RETRY_BASE_DELAY_MS = 1000;
@@ -268,6 +323,9 @@ let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
 let lastKnownTabs = []; // Cache tabs to prevent flickering when query returns partial results
+const TAB_SNAPSHOT_STORAGE_KEY = 'tabSnapshotV1';
+let tabSnapshotMutation = Promise.resolve();
+let currentTabSnapshotRevision = 0;
 let settingsAlarmScheduled = false;
 let heartbeatIntervalId = null;
 let observedHeartbeatTimer = null;
@@ -280,7 +338,9 @@ let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
 let apiBackoffUntilMs = 0;
 let heartbeatInFlight = false;
+let heartbeatPendingReason = null;
 let screenshotCaptureInFlight = false;
+let currentFabState = null;
 let isScheduleHardOff = false;
 let sharedAuthLockedSinceAt = 0;
 let sharedSignInLoginConfig = {
@@ -404,6 +464,8 @@ const MSG_DEDUP_TTL = 30_000; // 30 seconds
 // Service worker only orchestrates via messaging
 let creatingOffscreen = null;
 let offscreenReady = false;
+let activeLiveViewNegotiationId = null;
+let activeLiveViewTeachingSessionId = null;
 
 // Storage helpers
 const kv = {
@@ -489,6 +551,7 @@ async function recordHeartbeatSuccess(nowValue = Date.now()) {
     // If WebSocket recovery trails HTTP recovery, force the next heartbeat to
     // ask for the authoritative full snapshot as well.
     lastClassroomHeartbeatSyncRequestAt = 0;
+    lastFabHeartbeatSyncRequestAt = 0;
   }
   return recovered;
 }
@@ -544,9 +607,19 @@ async function recordScreenshotSuccess(nowValue = Date.now()) {
   });
 }
 
+const STUDENT_AUTH_INVALIDATING_KEY = 'studentAuthInvalidatingV1';
+const PERSISTED_CONFIG_KEYS = Object.freeze([
+  'serverUrl',
+  'deviceId',
+  'classId',
+  'schoolId',
+  'schoolSlug',
+  'enrollmentKey',
+]);
 const AUTH_STATE_KEYS = [
   'studentToken',
   'activeStudentId',
+  'activeStudentSessionId',
   'studentEmail',
   'studentName',
   'registered',
@@ -556,6 +629,12 @@ const AUTH_STATE_KEYS = [
   'autoRegistrationPaused',
   'sharedAuthLockedSinceAt',
 ];
+
+function persistedNonAuthConfig(raw = {}) {
+  return Object.fromEntries(PERSISTED_CONFIG_KEYS.flatMap((key) => (
+    Object.prototype.hasOwnProperty.call(raw, key) ? [[key, raw[key]]] : []
+  )));
+}
 
 function hasSessionStorage() {
   return Boolean(chrome.storage?.session);
@@ -571,7 +650,18 @@ async function getStoredAuthState(keys) {
   const local = await kv.get(keys);
   if (!hasSessionStorage()) return local;
   const session = await sessionKv.get(keys);
-  return { ...local, ...session };
+  const merged = { ...local, ...session };
+  if (Array.isArray(keys) && keys.includes(STUDENT_AUTH_INVALIDATING_KEY)) {
+    if (Object.prototype.hasOwnProperty.call(local, STUDENT_AUTH_INVALIDATING_KEY)) {
+      merged[STUDENT_AUTH_INVALIDATING_KEY] = local[STUDENT_AUTH_INVALIDATING_KEY];
+    } else {
+      delete merged[STUDENT_AUTH_INVALIDATING_KEY];
+    }
+    if (Object.prototype.hasOwnProperty.call(session, STUDENT_AUTH_INVALIDATING_KEY)) {
+      await sessionKv.remove(STUDENT_AUTH_INVALIDATING_KEY);
+    }
+  }
+  return merged;
 }
 
 async function setManualAuthState(obj) {
@@ -585,9 +675,15 @@ async function setManualAuthState(obj) {
 
 async function clearStoredAuthState(localOverrides = {}) {
   const cleared = Object.fromEntries(AUTH_STATE_KEYS.map((key) => [key, null]));
-  await kv.set({ ...cleared, ...localOverrides });
+  const stored = await kv.get(['config']);
+  await kv.set({
+    ...cleared,
+    config: persistedNonAuthConfig(stored.config || CONFIG),
+    ...localOverrides,
+  });
+  await kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
   if (hasSessionStorage()) {
-    await sessionKv.remove(AUTH_STATE_KEYS);
+    await sessionKv.remove([...AUTH_STATE_KEYS, STUDENT_AUTH_INVALIDATING_KEY]);
   }
 }
 
@@ -601,10 +697,8 @@ async function refreshTabCache() {
     const allTabs = await chrome.tabs.query({});
     const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
     if (httpTabs.length > 0) {
-      lastKnownTabs = httpTabs.slice(0, 20).map(tab => ({
-        url: (tab.url || '').substring(0, 512),
-        title: (tab.title || 'Untitled').substring(0, 512),
-      }));
+      const snapshot = await buildOpaqueTabSnapshot(httpTabs);
+      lastKnownTabs = snapshot.tabs;
     }
   } catch (error) {
     // Ignore errors - cache will be updated on next successful query
@@ -668,23 +762,44 @@ function notifyLicenseState(message) {
   });
 }
 
-async function disableForInactiveLicense(planStatus) {
-  if (!licenseActive) {
-    await kv.set({ licenseActive: false, planStatus });
-    return;
-  }
+function isClassPilotNotEntitledResponse(data = {}) {
+  const identifiers = [data?.code, data?.error]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  return identifiers.includes('CLASSPILOT_NOT_ENTITLED')
+    || identifiers.includes('school_not_entitled');
+}
 
+async function disableForInactiveLicense(planStatus) {
   // Persist and attempt delivery while the authenticated device context is
   // still available. A retryable failure remains in the bounded outbox and
   // can be delivered after the license/session recovers.
-  await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
+  if (licenseActive) {
+    await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
+  }
+  // Product entitlement revocation must remove teacher-authored controls even
+  // after a worker restart. Preserve the independently managed school policy
+  // range while clearing classroom, teacher, and temporary rules/state.
+  try {
+    await clearTeacherSessionStateForSignOut({
+      reason: 'entitlement-inactive',
+      emitEvent: false,
+    });
+    await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
+  } catch (error) {
+    console.warn('[License] Classroom control cleanup deferred:', error?.message || error);
+    chrome.alarms.create(LICENSE_CONTROL_CLEANUP_ALARM, {
+      when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
+    });
+  }
+  await clearFabAndOverlayState('entitlement-inactive', { closeChat: true }).catch(() => {});
   licenseActive = false;
   if (observedHeartbeatTimer) {
     clearInterval(observedHeartbeatTimer);
     observedHeartbeatTimer = null;
   }
   scheduleHeartbeat(null);
-  disconnectWebSocket();
+  await disconnectWebSocket();
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
   chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
@@ -716,7 +831,9 @@ async function checkLicenseStatus(reason = 'manual') {
 
     if (response.status === 402 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
-      await disableForInactiveLicense(data.planStatus);
+      if (response.status === 402 || isClassPilotNotEntitledResponse(data)) {
+        await disableForInactiveLicense(data.planStatus);
+      }
       return;
     }
 
@@ -732,6 +849,7 @@ async function checkLicenseStatus(reason = 'manual') {
 
     const wasInactive = !licenseActive;
     licenseActive = true;
+    await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
     await kv.set({ licenseActive: true, planStatus: data.planStatus });
     if (wasInactive) {
       notifyLicenseState({ type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: data.planStatus });
@@ -865,6 +983,7 @@ async function refreshSchoolSettings({ force = false } = {}) {
       throw new Error(`Settings fetch failed (${response.status})`);
     }
     const settings = await response.json();
+    await adoptAuthenticatedStudentBinding(settings, 'extension settings');
     schoolSettings = settings;
     schoolSettingsFetchedAt = now;
     await applyFabSettings(settings.fab || settings);
@@ -905,51 +1024,581 @@ function buildResponseError(response, data = {}, fallbackMessage = 'Request fail
   return error;
 }
 
-async function applyFabSettings(fabState) {
-  if (!fabState || typeof fabState !== 'object') return {};
-  const updates = {};
-  if (typeof fabState.messagingEnabled === 'boolean') {
-    updates.messagingEnabled = fabState.messagingEnabled;
-  }
-  if (typeof fabState.handRaisingEnabled === 'boolean') {
-    updates.handRaisingEnabled = fabState.handRaisingEnabled;
-  }
-  if (typeof fabState.handRaised === 'boolean') {
-    updates.handRaised = fabState.handRaised;
-  }
-  if (Array.isArray(fabState.activeSessionIds)) {
-    updates.fabActiveSessionIds = fabState.activeSessionIds;
-  }
-  if (Array.isArray(fabState.activeHands)) {
-    updates.fabActiveHands = fabState.activeHands;
-  }
-  if (Array.isArray(fabState.sessions)) {
-    updates.fabSessions = fabState.sessions;
-  }
-  if (typeof fabState.sessionId === 'string') {
-    updates.fabLifecycleSessionId = fabState.sessionId;
-  }
-  if (typeof fabState.reason === 'string') {
-    updates.fabLifecycleReason = fabState.reason;
-  }
-  if (Object.keys(updates).length > 0) {
-    await chrome.storage.local.set(updates);
-  }
-  return updates;
+function normalizeIdList(values) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean))].sort();
 }
 
-function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
+function fabIdentityBinding() {
+  if (!CONFIG.activeStudentId || !CONFIG.activeStudentSessionId || !CONFIG.deviceId) return null;
+  return [
+    'v2',
+    CONFIG.schoolId || 'school',
+    CONFIG.activeStudentId,
+    CONFIG.activeStudentSessionId,
+    CONFIG.deviceId,
+  ].join(':');
+}
+
+function exactStudentBinding(raw = {}) {
+  const candidates = [
+    raw,
+    raw?.data,
+    raw?.command,
+    raw?.command?.data,
+    raw?.fab,
+    raw?.fabState,
+    raw?.state,
+    raw?.settings?.fab,
+  ].filter((candidate) => candidate && typeof candidate === 'object');
+  const firstValue = (key) => {
+    for (const candidate of candidates) {
+      const value = String(candidate[key] || '').trim();
+      if (value) return value;
+    }
+    return null;
+  };
+  return {
+    studentId: firstValue('studentId'),
+    studentSessionId: firstValue('studentSessionId'),
+  };
+}
+
+function assertCurrentStudentBinding(raw = {}, label = 'message') {
+  const binding = exactStudentBinding(raw);
+  if (
+    studentAuthInvalidating
+    || !CONFIG.activeStudentId
+    || !CONFIG.activeStudentSessionId
+    || binding.studentId !== CONFIG.activeStudentId
+    || binding.studentSessionId !== CONFIG.activeStudentSessionId
+  ) {
+    const error = new Error(`${label} belongs to a retired student session`);
+    error.code = 'STUDENT_BINDING_MISMATCH';
+    throw error;
+  }
+  return binding;
+}
+
+function acceptsCurrentStudentBinding(raw = {}, label = 'message') {
+  try {
+    assertCurrentStudentBinding(raw, label);
+    return true;
+  } catch (error) {
+    console.warn(`[Binding] Ignoring ${label}:`, error?.message || error);
+    return false;
+  }
+}
+
+function authMutationSuperseded(reason) {
+  const error = new Error(`${reason} was superseded by a newer authentication mutation`);
+  error.code = 'AUTH_MUTATION_SUPERSEDED';
+  return error;
+}
+
+function assertChromeProfileRegistrationAllowed(reason) {
+  if (manualStudentLoginPendingGeneration) {
+    throw authMutationSuperseded(`${reason} while a manual login is pending`);
+  }
+}
+
+function assertAuthMutationCurrent(generation, reason, options = {}) {
+  if (
+    generation !== studentAuthMutationGeneration
+    || (studentAuthInvalidating && options.allowInvalidating !== true)
+  ) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+function adoptAuthenticatedStudentBinding(raw = {}, reason = 'authenticated-response') {
+  const mutationGeneration = studentAuthMutationGeneration;
+  return enqueueStudentAuthMutation(() => adoptAuthenticatedStudentBindingNow(
+    raw,
+    reason,
+    mutationGeneration,
+  ));
+}
+
+async function adoptAuthenticatedStudentBindingNow(raw, reason, mutationGeneration) {
+  assertAuthMutationCurrent(mutationGeneration, reason);
+  const binding = exactStudentBinding(raw);
+  const authenticatedSchoolId = String(
+    raw.schoolId || raw.settings?.schoolId || raw.school?.id || ''
+  ).trim() || null;
+  if (!binding.studentId || !binding.studentSessionId) {
+    throw new Error(`${reason} omitted the exact student binding`);
+  }
+  if (CONFIG.activeStudentId && CONFIG.activeStudentId !== binding.studentId) {
+    throw new Error(`${reason} returned a different student`);
+  }
+  if (
+    CONFIG.activeStudentSessionId
+    && CONFIG.activeStudentSessionId !== binding.studentSessionId
+  ) {
+    throw new Error(`${reason} returned a retired student session`);
+  }
+  const update = {
+    activeStudentId: binding.studentId,
+    activeStudentSessionId: binding.studentSessionId,
+  };
+  const persistedConfig = authenticatedSchoolId
+    ? persistedNonAuthConfig({ ...CONFIG, schoolId: authenticatedSchoolId })
+    : null;
+  if (isManualIdentitySource()) {
+    // Dispatch the local marker removal before awaiting session storage. A
+    // later clear writes `true` afterward and therefore remains fail-closed.
+    const markerCleared = kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
+    const configPersisted = persistedConfig
+      ? kv.set({ config: persistedConfig })
+      : Promise.resolve();
+    await setManualAuthState(update);
+    await Promise.all([markerCleared, configPersisted]);
+  } else {
+    await kv.set({
+      ...update,
+      ...(persistedConfig ? { config: persistedConfig } : {}),
+      [STUDENT_AUTH_INVALIDATING_KEY]: null,
+    });
+  }
+  assertAuthMutationCurrent(mutationGeneration, reason);
+  CONFIG.activeStudentId = binding.studentId;
+  CONFIG.activeStudentSessionId = binding.studentSessionId;
+  if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
+  studentAuthInvalidating = false;
+  return binding;
+}
+
+function normalizeFabState(rawState = {}, fallbackState = {}) {
+  const hasSessionField = Object.prototype.hasOwnProperty.call(rawState, 'teachingSessionId')
+    || Object.prototype.hasOwnProperty.call(rawState, 'sessionId');
+  const teachingSessionId = String(hasSessionField
+    ? (rawState.teachingSessionId || rawState.sessionId || '')
+    : (fallbackState.teachingSessionId || '')).trim() || null;
+  const activeSessionIds = normalizeIdList(
+    Array.isArray(rawState.activeSessionIds) || Array.isArray(rawState.sessionIds)
+      ? (rawState.activeSessionIds || rawState.sessionIds)
+      : hasSessionField
+        ? (rawState.teachingSessionId || rawState.sessionId ? [rawState.teachingSessionId || rawState.sessionId] : [])
+        : fallbackState.activeSessionIds
+  );
+  const revisionValue = rawState.revision ?? rawState.lifecycleRevision ?? fallbackState.revision ?? 0;
+  const revision = Number.isSafeInteger(Number(revisionValue)) && Number(revisionValue) >= 0
+    ? Number(revisionValue)
+    : 0;
+  const hasOwnershipRevision = [
+    'ownershipRevision',
+    'studentControlRevision',
+    'student_control_revision',
+  ].some((key) => Object.prototype.hasOwnProperty.call(rawState, key));
+  const ownershipRevisionValue = rawState.ownershipRevision
+    ?? rawState.studentControlRevision
+    ?? rawState.student_control_revision
+    ?? fallbackState.ownershipRevision
+    ?? 0;
+  const ownershipRevision = Number.isSafeInteger(Number(ownershipRevisionValue))
+    && Number(ownershipRevisionValue) >= 0
+    ? Number(ownershipRevisionValue)
+    : 0;
+  return {
+    schemaVersion: 1,
+    revision,
+    lifecycleRevision: revision,
+    ownershipRevision,
+    ownershipRevisionKnown: hasOwnershipRevision || fallbackState.ownershipRevisionKnown === true,
+    studentId: String(rawState.studentId || fallbackState.studentId || '').trim() || null,
+    studentSessionId: String(
+      rawState.studentSessionId || fallbackState.studentSessionId || ''
+    ).trim() || null,
+    teachingSessionId,
+    activeSessionIds,
+    messagingEnabled: typeof rawState.messagingEnabled === 'boolean'
+      ? rawState.messagingEnabled
+      : fallbackState.messagingEnabled !== false,
+    handRaisingEnabled: typeof rawState.handRaisingEnabled === 'boolean'
+      ? rawState.handRaisingEnabled
+      : fallbackState.handRaisingEnabled !== false,
+    handRaised: typeof rawState.handRaised === 'boolean'
+      ? rawState.handRaised
+      : fallbackState.handRaised === true,
+    activeHands: Array.isArray(rawState.activeHands)
+      ? rawState.activeHands.slice(0, 100)
+      : Array.isArray(fallbackState.activeHands) ? fallbackState.activeHands.slice(0, 100) : [],
+    sessions: Array.isArray(rawState.sessions)
+      ? rawState.sessions.slice(0, 100)
+      : Array.isArray(fallbackState.sessions) ? fallbackState.sessions.slice(0, 100) : [],
+    reason: String(rawState.reason || '').slice(0, 80),
+  };
+}
+
+let fabStateMutation = Promise.resolve();
+
+function enqueueFabStateMutation(operation) {
+  const next = fabStateMutation.then(operation, operation);
+  fabStateMutation = next.catch(() => {});
+  return next;
+}
+
+async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options = {}) {
+  const closeChat = options.closeChat === true;
+  currentFabState = null;
+  lastFabHeartbeatSyncRequestAt = 0;
+  await classroomOverlayMutation;
+  await chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+  await kv.set({
+    [FAB_STATE_STORAGE_KEY]: null,
+    [FAB_CONTEXT_STORAGE_KEY]: null,
+    [FAB_CHAT_CONTEXT_STORAGE_KEY]: null,
+    [CLASSROOM_OVERLAY_STORAGE_KEY]: null,
+    fabChatMessages: [],
+    fabChatClosed: closeChat,
+    handRaised: false,
+    messagingEnabled: false,
+    handRaisingEnabled: false,
+  });
+  notifyStudentMessageStateCleared(reason);
+  broadcastToAllTabs('fab-state', {
+    schemaVersion: 1,
+    revision: 0,
+    lifecycleRevision: 0,
+    activeSessionIds: [],
+    messagingEnabled: false,
+    handRaisingEnabled: false,
+    handRaised: false,
+    reason,
+  });
+  broadcastToAllTabs('timer', { action: 'stop', reason });
+  broadcastToAllTabs('poll', { action: 'close', reason });
+}
+
+function clearFabAndOverlayState(reason = 'identity-cleared', options = {}) {
+  return enqueueFabStateMutation(() => clearFabAndOverlayStateNow(reason, options));
+}
+
+async function applyFabSettingsNow(rawFabState, options = {}) {
+  if (!rawFabState || typeof rawFabState !== 'object') return {};
+  const binding = fabIdentityBinding();
+  if (!binding) return {};
+  const stored = await kv.get([
+    FAB_STATE_STORAGE_KEY,
+    FAB_CONTEXT_STORAGE_KEY,
+    FAB_CHAT_CONTEXT_STORAGE_KEY,
+  ]);
+  const rawBinding = exactStudentBinding(rawFabState);
+  if (rawBinding.studentId || rawBinding.studentSessionId) {
+    assertCurrentStudentBinding(rawFabState, 'FAB state');
+  }
+  const priorState = stored[FAB_STATE_STORAGE_KEY] || currentFabState || {};
+  const priorContext = stored[FAB_CONTEXT_STORAGE_KEY] || {};
+  const nextState = normalizeFabState(rawFabState, priorState);
+  const priorSessionIds = normalizeIdList(priorContext.activeSessionIds);
+  const sessionSetChanged = JSON.stringify(priorSessionIds) !== JSON.stringify(nextState.activeSessionIds);
+  if (priorContext.binding === binding) {
+    const priorOwnershipKnown = priorContext.ownershipRevisionKnown === true;
+    const nextOwnershipKnown = nextState.ownershipRevisionKnown === true;
+    const priorOwnershipRevision = Number(priorContext.ownershipRevision || 0);
+    const nextOwnershipRevision = Number(nextState.ownershipRevision || 0);
+
+    // Session FAB revisions are scoped to one teaching session and can reset
+    // when a replacement class starts. The student's control-state revision is
+    // the monotonic ownership watermark across class and coverage transitions.
+    // Once that watermark is available, never let a delayed snapshot for the
+    // previous owner replace the current session set.
+    if (priorOwnershipKnown && nextOwnershipKnown) {
+      if (nextOwnershipRevision < priorOwnershipRevision) return priorState;
+      if (nextOwnershipRevision === priorOwnershipRevision && sessionSetChanged) return priorState;
+      if (
+        nextOwnershipRevision === priorOwnershipRevision
+        && Number(priorContext.revision || 0) > Number(nextState.revision || 0)
+      ) return priorState;
+    } else if (priorOwnershipKnown && sessionSetChanged) {
+      // A legacy payload may still update toggles for the current owner, but it
+      // cannot replace an ownership-bound session set.
+      return priorState;
+    } else if (
+      !sessionSetChanged
+      && Number(nextState.revision || 0) > 0
+      && Number(priorContext.revision || 0) > Number(nextState.revision || 0)
+    ) {
+      return priorState;
+    }
+  }
+
+  const bindingChanged = priorContext.binding !== binding;
+  const lifecycleEnded = ['session-ended', 'entitlement-inactive']
+    .includes(nextState.reason) || nextState.activeSessionIds.length === 0;
+  const lifecycleChanged = bindingChanged || sessionSetChanged;
+  const context = {
+    schemaVersion: 1,
+    binding,
+    teachingSessionId: nextState.teachingSessionId,
+    activeSessionIds: nextState.activeSessionIds,
+    revision: nextState.revision,
+    lifecycleRevision: nextState.lifecycleRevision,
+    ownershipRevision: nextState.ownershipRevision,
+    ownershipRevisionKnown: nextState.ownershipRevisionKnown,
+  };
+  const updates = {
+    [FAB_STATE_STORAGE_KEY]: nextState,
+    [FAB_CONTEXT_STORAGE_KEY]: context,
+    messagingEnabled: nextState.messagingEnabled,
+    handRaisingEnabled: nextState.handRaisingEnabled,
+    handRaised: nextState.handRaised,
+    fabActiveSessionIds: nextState.activeSessionIds,
+    fabActiveHands: nextState.activeHands,
+    fabSessions: nextState.sessions,
+    fabLifecycleSessionId: nextState.teachingSessionId,
+    fabLifecycleReason: nextState.reason,
+  };
+  if (lifecycleChanged) {
+    updates.fabChatMessages = [];
+    updates.fabChatClosed = lifecycleEnded;
+    updates[FAB_CHAT_CONTEXT_STORAGE_KEY] = context;
+  } else if (!stored[FAB_CHAT_CONTEXT_STORAGE_KEY]) {
+    updates[FAB_CHAT_CONTEXT_STORAGE_KEY] = context;
+  }
+  if (lifecycleEnded) {
+    updates.handRaised = false;
+    nextState.handRaised = false;
+  }
+  await kv.set(updates);
+  currentFabState = nextState;
+  if (lifecycleChanged) {
+    await clearClassroomOverlayState(`fab:${nextState.reason || 'lifecycle-change'}`);
+  }
+  if (options.broadcast !== false) {
+    broadcastToAllTabs('fab-state', { ...nextState, context });
+  }
+  return nextState;
+}
+
+function applyFabSettings(rawFabState, options = {}) {
+  return enqueueFabStateMutation(() => applyFabSettingsNow(rawFabState, options));
+}
+
+async function updateLocalFabHandRaised(handRaised, reason) {
+  if (!currentFabState) {
+    await kv.set({ handRaised: handRaised === true });
+    return;
+  }
+  await applyFabSettings({
+    ...currentFabState,
+    handRaised: handRaised === true,
+    reason,
+  });
+}
+
+let classroomOverlayMutation = Promise.resolve();
+
+function activeTeachingSessionIds() {
+  const fabSessions = normalizeIdList(currentFabState?.activeSessionIds);
+  if (currentFabState) return fabSessions;
+  return normalizeIdList(currentClassroomState?.teachingSessionId
+    ? [currentClassroomState.teachingSessionId]
+    : []);
+}
+
+function commandTeachingSessionId(command = {}) {
+  return String(
+    command.data?.teachingSessionId ||
+    command.data?.sessionId ||
+    currentFabState?.teachingSessionId ||
+    currentClassroomState?.teachingSessionId ||
+    ''
+  ).trim() || null;
+}
+
+function overlayExpiresAt(value, fallback) {
+  const parsed = typeof value === 'number' ? value : Date.parse(value || '');
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function mutateClassroomOverlayState(operation) {
+  classroomOverlayMutation = classroomOverlayMutation.then(async () => {
+    const binding = fabIdentityBinding();
+    const stored = await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY);
+    const prior = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
+    const state = prior?.binding === binding
+      ? prior
+      : { schemaVersion: 1, binding, timer: null, poll: null, updatedAt: Date.now() };
+    const next = await operation(state, binding);
+    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
+    scheduleClassroomOverlayExpiry(next);
+    return next;
+  }, async () => null);
+  return classroomOverlayMutation;
+}
+
+function scheduleClassroomOverlayExpiry(state) {
+  chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+  const candidates = [
+    state?.timer?.endsAt ? Number(state.timer.endsAt) + 5000 : null,
+    state?.poll?.expiresAt ? Number(state.poll.expiresAt) : null,
+  ].filter((value) => Number.isFinite(value) && value > Date.now());
+  if (candidates.length > 0) {
+    chrome.alarms.create(CLASSROOM_OVERLAY_EXPIRY_ALARM, {
+      when: Math.min(...candidates),
+    });
+  }
+}
+
+function persistTimerOverlay(command, executionContext = {}) {
+  const action = command.data?.action;
+  return mutateClassroomOverlayState(async (state, binding) => {
+    if (!binding || action !== 'start') {
+      return { ...state, binding, timer: null, updatedAt: Date.now() };
+    }
+    const seconds = Math.max(0, Number(command.data?.seconds || 0));
+    const endsAt = overlayExpiresAt(
+      command.data?.endsAt ?? command.data?.endAt,
+      Date.now() + seconds * 1000
+    );
+    if (!Number.isFinite(endsAt) || endsAt <= Date.now()) {
+      throw new Error('Timer end time is missing or expired');
+    }
+    return {
+      ...state,
+      binding,
+      timer: {
+        commandId: executionContext.commandId || null,
+        teachingSessionId: commandTeachingSessionId(command),
+        endsAt,
+        message: String(command.data?.message || '').slice(0, 500),
+        receivedAt: Date.now(),
+      },
+      updatedAt: Date.now(),
+    };
+  });
+}
+
+function persistPollOverlay(command, executionContext = {}) {
+  const action = command.data?.action;
+  const pollId = String(command.data?.pollId || '').trim();
+  return mutateClassroomOverlayState(async (state, binding) => {
+    if (!binding || action !== 'start') {
+      if (pollId && state.poll?.pollId && state.poll.pollId !== pollId) return state;
+      return { ...state, binding, poll: null, updatedAt: Date.now() };
+    }
+    if (!pollId) throw new Error('Poll start requires a pollId');
+    const classExpiry = currentClassroomState
+      ? RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expiresAt
+      : null;
+    const defaultExpiry = Math.min(
+      Date.now() + 2 * 60 * 60 * 1000,
+      Number(classExpiry || Number.MAX_SAFE_INTEGER)
+    );
+    const expiresAt = overlayExpiresAt(
+      command.data?.pollExpiresAt ?? command.data?.expiresAt,
+      defaultExpiry
+    );
+    return {
+      ...state,
+      binding,
+      poll: {
+        commandId: executionContext.commandId || null,
+        pollId,
+        teachingSessionId: commandTeachingSessionId(command),
+        question: String(command.data?.question || '').slice(0, 1000),
+        options: (Array.isArray(command.data?.options) ? command.data.options : [])
+          .slice(0, 20)
+          .map((option) => String(option).slice(0, 500)),
+        expiresAt,
+        receivedAt: Date.now(),
+        response: null,
+      },
+      updatedAt: Date.now(),
+    };
+  });
+}
+
+async function clearClassroomOverlayState(reason = 'cleared') {
+  classroomOverlayMutation = classroomOverlayMutation.then(async () => {
+    await chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+  }, async () => {
+    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+  });
+  await classroomOverlayMutation;
+  broadcastToAllTabs('timer', { action: 'stop', reason });
+  broadcastToAllTabs('poll', { action: 'close', reason });
+}
+
+async function getRestorableClassroomOverlayState() {
+  await classroomOverlayMutation;
+  const binding = fabIdentityBinding();
+  const stored = await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY);
+  const state = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
+  if (!binding || state?.binding !== binding) {
+    if (state) await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+    return { timer: null, poll: null };
+  }
+  const now = Date.now();
+  const sessionIds = activeTeachingSessionIds();
+  const sessionMatches = (overlay) => !overlay?.teachingSessionId
+    || sessionIds.includes(overlay.teachingSessionId);
+  const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
+    ? state.timer
+    : null;
+  const poll = state.poll && Number(state.poll.expiresAt) > now && sessionMatches(state.poll)
+    ? state.poll
+    : null;
+  if (timer !== state.timer || poll !== state.poll) {
+    const next = { ...state, timer, poll, updatedAt: now };
+    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
+    scheduleClassroomOverlayExpiry(next);
+  }
+  return { timer, poll };
+}
+
+async function expireClassroomOverlays() {
+  await mutateClassroomOverlayState(async (state) => {
+    const now = Date.now();
+    const timerExpired = state.timer && Number(state.timer.endsAt) + 5000 <= now;
+    const pollExpired = state.poll && Number(state.poll.expiresAt) <= now;
+    if (timerExpired) broadcastToAllTabs('timer', { action: 'stop', reason: 'expired' });
+    if (pollExpired) broadcastToAllTabs('poll', { action: 'close', reason: 'expired' });
+    return {
+      ...state,
+      timer: timerExpired ? null : state.timer,
+      poll: pollExpired ? null : state.poll,
+      updatedAt: now,
+    };
+  });
+}
+
+function markPollResponsePersisted(pollId, selectedOption) {
+  return mutateClassroomOverlayState(async (state) => {
+    if (state.poll?.pollId !== pollId) return state;
+    return {
+      ...state,
+      poll: {
+        ...state.poll,
+        response: { selectedOption, submittedAt: Date.now() },
+      },
+      updatedAt: Date.now(),
+    };
+  });
+}
+
+async function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
   const messageId = message.chatMessageId || message.messageId;
-  if (!messageId) return;
-  wsSend({
+  if (!messageId) return false;
+  const ack = {
     type: 'chat-message-ack',
+    ackId: `chat:${messageId}:${deliveryStatus}`,
     messageId,
     chatMessageId: messageId,
     sessionId: message.sessionId,
     deliveryStatus,
     status: deliveryStatus,
     errorMessage: errorMessage || null,
-  });
+    timestamp: new Date().toISOString(),
+  };
+  await enqueueChatAck(ack);
+  await wsSend(ack);
+  scheduleChatAckFlush();
+  return true;
 }
 
 function determineTrackingState() {
@@ -984,9 +1633,22 @@ function determineTrackingState() {
 function disconnectWebSocket() {
   chrome.alarms.clear('ws-reconnect');
   cleanupTeacherBroadcast('websocket-disconnect', { notifyTeacher: false });
+  const hadActiveLiveView = Boolean(activeLiveViewNegotiationId);
+  if (hadActiveLiveView) {
+    setObservedState(false, 'websocket-disconnect');
+  }
   wsConnected = false;
+  wsTransportConnected = false;
+  wsAuthenticatedGeneration = 0;
   // Tell offscreen document to close the WebSocket
-  sendToOffscreen({ type: 'WS_CLOSE' }).catch(() => {});
+  const closePromise = sendToOffscreen({
+    type: 'WS_CLOSE',
+    connectionGeneration: wsConnectionGeneration,
+  }).then((response) => {
+    activeLiveViewNegotiationId = null;
+    activeLiveViewTeachingSessionId = null;
+    return response;
+  }).catch(() => {});
   if (ws) {
     try {
       ws.close();
@@ -995,6 +1657,7 @@ function disconnectWebSocket() {
     }
   }
   ws = null;
+  return closePromise;
 }
 
 function scheduleHeartbeat(periodInMinutes) {
@@ -1010,6 +1673,12 @@ function scheduleHeartbeat(periodInMinutes) {
     heartbeatIntervalId = setInterval(() => {
       safeSendHeartbeat('interval');
     }, HEARTBEAT_INTERVAL_MS);
+    // Chrome alarms survive MV3 worker suspension. They cannot provide the
+    // 10-second foreground cadence, so they are the independent 30-second
+    // recovery path rather than a replacement for the interval.
+    chrome.alarms.create('heartbeat', {
+      periodInMinutes: Math.max(0.5, Number(periodInMinutes) || 0.5),
+    });
     // Send immediately when starting
     safeSendHeartbeat('schedule');
     console.log('[Heartbeat] Scheduled every 10 seconds');
@@ -1031,14 +1700,14 @@ function clearNetworkAlarms() {
   settingsAlarmScheduled = false;
 }
 
-function pauseNetworkForOffHours(reason) {
+async function pauseNetworkForOffHours(reason) {
   if (offHoursNetworkPaused) {
     return;
   }
   console.log(`[Network] Pausing off-hours traffic (${reason})`);
   clearNetworkAlarms();
   scheduleHeartbeat(null);
-  disconnectWebSocket();
+  await disconnectWebSocket();
   chrome.alarms.create('wake-up', { periodInMinutes: 5 });
   offHoursNetworkPaused = true;
 }
@@ -1061,7 +1730,8 @@ async function resumeNetworkAfterOffHours(reason) {
 
 async function safeSendHeartbeat(reason) {
   if (heartbeatInFlight) {
-    console.log(`[Heartbeat] Skipping ${reason}; previous heartbeat still in flight`);
+    heartbeatPendingReason = reason;
+    console.log(`[Heartbeat] Coalescing ${reason}; previous heartbeat still in flight`);
     return;
   }
   if (Date.now() < apiBackoffUntilMs) {
@@ -1078,7 +1748,93 @@ async function safeSendHeartbeat(reason) {
     console.warn(`[Heartbeat] Failed (${reason}):`, error?.message || error);
   } finally {
     heartbeatInFlight = false;
+    if (heartbeatPendingReason) {
+      const pendingReason = heartbeatPendingReason;
+      heartbeatPendingReason = null;
+      setTimeout(() => safeSendHeartbeat(`coalesced:${pendingReason}`), 0);
+    }
   }
+}
+
+function generateOpaqueTabRef() {
+  const random = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `tab_${String(random).replace(/[^a-zA-Z0-9]/g, '')}`;
+}
+
+function tabSnapshotAuthBinding() {
+  return monitoringEventAuthBinding();
+}
+
+function buildOpaqueTabSnapshot(rawTabs) {
+  const tabs = (Array.isArray(rawTabs) ? rawTabs : [])
+    .filter((tab) => Number.isInteger(tab?.id) && isHttpUrl(tab?.url))
+    .slice(0, 20);
+  const binding = tabSnapshotAuthBinding();
+  if (!binding) {
+    return Promise.resolve({ schemaVersion: 1, revision: 0, tabs: [], localEntries: [] });
+  }
+
+  tabSnapshotMutation = tabSnapshotMutation.then(async () => {
+    const stored = await kv.get(TAB_SNAPSHOT_STORAGE_KEY);
+    const prior = stored[TAB_SNAPSHOT_STORAGE_KEY];
+    const bindingMatches = prior?.binding === binding;
+    const priorById = new Map((bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
+      .map((entry) => [entry.tabId, entry]));
+    const localEntries = tabs.map((tab) => ({
+      tabId: tab.id,
+      tabRef: priorById.get(tab.id)?.tabRef || generateOpaqueTabRef(),
+      url: String(tab.url || '').slice(0, 512),
+      title: String(tab.title || 'Untitled').slice(0, 512),
+    }));
+    const previousProjection = (bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
+      .map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }));
+    const changed = JSON.stringify(previousProjection) !== JSON.stringify(localEntries);
+    const priorRevision = bindingMatches ? Number(prior.revision || 0) : 0;
+    const revision = Math.max(1, priorRevision + (changed ? 1 : 0));
+    const next = {
+      schemaVersion: 1,
+      binding,
+      revision,
+      entries: localEntries,
+      updatedAt: Date.now(),
+    };
+    await kv.set({ [TAB_SNAPSHOT_STORAGE_KEY]: next });
+    currentTabSnapshotRevision = revision;
+    return {
+      schemaVersion: 1,
+      revision,
+      tabs: localEntries.map(({ tabRef, url, title }) => ({ tabRef, url, title })),
+      localEntries,
+    };
+  }, async () => ({ schemaVersion: 1, revision: 0, tabs: [], localEntries: [] }));
+  return tabSnapshotMutation;
+}
+
+async function resolveExactTabRefs(rawTabRefs, expectedRevision) {
+  const tabRefs = [...new Set((Array.isArray(rawTabRefs) ? rawTabRefs : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean))];
+  if (tabRefs.length === 0) throw new Error('Missing exact tab references');
+  const currentTabs = await chrome.tabs.query({});
+  const snapshot = await buildOpaqueTabSnapshot(currentTabs);
+  const parsedExpected = Number(expectedRevision);
+  if (Number.isSafeInteger(parsedExpected) && parsedExpected > 0 && parsedExpected !== snapshot.revision) {
+    const error = new Error('Tab snapshot is stale; refresh before closing tabs');
+    error.code = 'STALE_TAB_SNAPSHOT';
+    throw error;
+  }
+  const byRef = new Map(snapshot.localEntries.map((entry) => [entry.tabRef, entry.tabId]));
+  const missing = tabRefs.filter((tabRef) => !byRef.has(tabRef));
+  if (missing.length > 0) {
+    const error = new Error('One or more exact tab references are no longer open');
+    error.code = 'TAB_REF_NOT_FOUND';
+    throw error;
+  }
+  return {
+    revision: snapshot.revision,
+    targets: tabRefs.map((tabRef) => ({ tabRef, tabId: byRef.get(tabRef) })),
+  };
 }
 
 function syncObservedHeartbeat(reason) {
@@ -1139,7 +1895,7 @@ async function updateTrackingState(reason = 'state-check') {
       await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);  // Disable screenshots when license inactive
-      disconnectWebSocket();
+      await disconnectWebSocket();
       syncObservedHeartbeat('license-inactive');
     }
     return;
@@ -1154,7 +1910,7 @@ async function updateTrackingState(reason = 'state-check') {
       await transitionTrackingState(TRACKING_STATES.OFF, 'auth_required');
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);
-      disconnectWebSocket();
+      await disconnectWebSocket();
       syncObservedHeartbeat('auth-required');
     }
     await notifyAuthGateStateToTabs();
@@ -1166,7 +1922,7 @@ async function updateTrackingState(reason = 'state-check') {
     if (trackingState !== nextState) {
       await transitionTrackingState(nextState, reason);
     }
-    pauseNetworkForOffHours(reason);
+    await pauseNetworkForOffHours(reason);
     syncObservedHeartbeat('tracking-state');
     return;
   }
@@ -1195,7 +1951,7 @@ async function updateTrackingState(reason = 'state-check') {
   } else {
     scheduleHeartbeat(null);
     scheduleScreenshotCapture(false);  // Disable screenshots when tracking is off
-    disconnectWebSocket();
+    await disconnectWebSocket();
   }
 
   syncObservedHeartbeat('tracking-state');
@@ -1235,13 +1991,349 @@ let monitoringEventFlushInFlight = false;
 let monitoringEventMutation = Promise.resolve();
 let messageInboxMutation = Promise.resolve();
 
+const COMMAND_ACK_OUTBOX_KEY = 'commandAckOutboxV1';
+const COMMAND_ACK_BINDING_KEY = 'commandAckOutboxAuthBindingV1';
+const COMMAND_ACK_FLUSH_ALARM = 'command-ack-flush';
+const COMMAND_ACK_HTTP_FALLBACK_MS = 5000;
+const COMMAND_ACK_MAX_ENTRIES = 200;
+const COMMAND_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const COMMAND_ACK_MAX_BYTES = 512 * 1024;
+let commandAckMutation = Promise.resolve();
+let commandAckFlushInFlight = false;
+let commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
+const CHAT_ACK_OUTBOX_KEY = 'chatAckOutboxV1';
+const CHAT_ACK_BINDING_KEY = 'chatAckOutboxAuthBindingV1';
+const CHAT_ACK_FLUSH_ALARM = 'chat-ack-flush';
+let chatAckMutation = Promise.resolve();
+let chatAckFlushInFlight = false;
+
+function boundedAckObject(value, maxBytes = 16 * 1024) {
+  if (value === undefined) return undefined;
+  try {
+    const serialized = JSON.stringify(value);
+    if (RuntimeCore.utf8ByteLength(serialized) > maxBytes) {
+      return { truncated: true };
+    }
+    return JSON.parse(serialized);
+  } catch {
+    return { serializationError: true };
+  }
+}
+
+function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
+  const commandId = normalizeCommandId(rawAck?.commandId);
+  const ackState = String(rawAck?.ackState || '').trim();
+  if (!commandId || !['received', 'completed', 'failed', 'expired'].includes(ackState)) return null;
+  const ackId = String(rawAck?.ackId || `${commandId}:${ackState}`).trim().slice(0, 512);
+  return {
+    type: 'command-ack',
+    ackId,
+    commandId,
+    ackState,
+    commandType: String(rawAck?.commandType || '').slice(0, 80) || undefined,
+    studentId: CONFIG.activeStudentId || undefined,
+    deviceId: CONFIG.deviceId || undefined,
+    result: boundedAckObject(rawAck?.result),
+    state: boundedAckObject(rawAck?.state),
+    error: rawAck?.error ? String(rawAck.error).slice(0, 500) : undefined,
+    deliveryPolicy: rawAck?.deliveryPolicy,
+    expiresAt: rawAck?.expiresAt,
+    appliedRevision: Number(rawAck?.appliedRevision || 0),
+    outcome: String(rawAck?.outcome || 'pending').slice(0, 80),
+    extensionVersion: chrome.runtime.getManifest().version,
+    timestamp: rawAck?.timestamp || new Date(nowValue).toISOString(),
+    queuedAt: nowValue,
+    lastWsAttemptAt: null,
+  };
+}
+
+function boundCommandAckOutbox(entries, nowValue = Date.now()) {
+  let bounded = (Array.isArray(entries) ? entries : [])
+    .filter((ack) => ack?.ackId && Number(ack.queuedAt || 0) >= nowValue - COMMAND_ACK_MAX_AGE_MS)
+    .slice(-COMMAND_ACK_MAX_ENTRIES);
+  while (bounded.length > 0 && RuntimeCore.utf8ByteLength(bounded) > COMMAND_ACK_MAX_BYTES) {
+    bounded.shift();
+  }
+  return bounded;
+}
+
+function scheduleCommandAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
+  chrome.alarms.get(COMMAND_ACK_FLUSH_ALARM, (existing) => {
+    const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+    if (!existing || existing.scheduledTime > when) {
+      chrome.alarms.create(COMMAND_ACK_FLUSH_ALARM, { when });
+    }
+  });
+}
+
+function enqueueCommandAck(rawAck) {
+  const binding = monitoringEventAuthBinding();
+  const normalized = normalizeCommandAckForStorage(rawAck);
+  if (!binding || !normalized) return Promise.resolve(false);
+
+  commandAckMutation = commandAckMutation.then(async () => {
+    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    let entries = stored[COMMAND_ACK_BINDING_KEY] === binding
+      ? boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY])
+      : [];
+    const terminal = normalized.ackState !== 'received';
+    if (terminal) {
+      entries = entries.filter((ack) => ack.commandId !== normalized.commandId);
+    } else if (entries.some((ack) => ack.commandId === normalized.commandId && ack.ackState !== 'received')) {
+      return false;
+    } else {
+      entries = entries.filter((ack) => ack.ackId !== normalized.ackId);
+    }
+    entries = boundCommandAckOutbox([...entries, normalized]);
+    await kv.set({
+      [COMMAND_ACK_OUTBOX_KEY]: entries,
+      [COMMAND_ACK_BINDING_KEY]: binding,
+    });
+    return true;
+  }, async () => false);
+  return commandAckMutation;
+}
+
+function removeCommandAcks(ackIds) {
+  const acknowledged = new Set((Array.isArray(ackIds) ? ackIds : []).filter(Boolean));
+  commandAckMutation = commandAckMutation.then(async () => {
+    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY]);
+    const remaining = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY])
+      .filter((ack) => !acknowledged.has(ack.ackId));
+    await kv.set({ [COMMAND_ACK_OUTBOX_KEY]: remaining });
+    if (remaining.length === 0) {
+      commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
+      await kv.remove(COMMAND_ACK_BINDING_KEY);
+      await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+    }
+    return remaining.length;
+  });
+  return commandAckMutation;
+}
+
+async function discardCommandAckOutbox() {
+  commandAckMutation = commandAckMutation.then(async () => {
+    await kv.set({ [COMMAND_ACK_OUTBOX_KEY]: [] });
+    await kv.remove(COMMAND_ACK_BINDING_KEY);
+    await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+  });
+  return commandAckMutation;
+}
+
+async function flushCommandAckOutbox(options = {}) {
+  if (commandAckFlushInFlight || !hasStudentAuth()) return;
+  commandAckFlushInFlight = true;
+  try {
+    await commandAckMutation;
+    const binding = monitoringEventAuthBinding();
+    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    if (!binding || stored[COMMAND_ACK_BINDING_KEY] !== binding) {
+      await discardCommandAckOutbox();
+      return;
+    }
+    const batch = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY]).slice(0, 50);
+    if (batch.length === 0) {
+      await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+      return;
+    }
+
+    let wsAttempted = false;
+    if (wsConnected) {
+      for (const ack of batch) {
+        wsAttempted = (await wsSend(ack)) || wsAttempted;
+      }
+    }
+    const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
+    if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
+      scheduleCommandAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
+      return;
+    }
+
+    const payload = {
+      acks: batch.map(({ queuedAt, lastWsAttemptAt, ...ack }) => ack),
+    };
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/command-acks`, {
+      method: 'POST',
+      headers: buildDeviceAuthHeaders(),
+      body: JSON.stringify(payload),
+    }, {
+      context: 'command acknowledgement',
+      maxAttempts: 1,
+      retryStatuses: new Set([429, 503]),
+    });
+    if (!response.ok) {
+      commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+      scheduleCommandAckFlush(commandAckRetryDelayMs);
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    const receiptIds = (Array.isArray(data.receipts) ? data.receipts : [])
+      .map((receipt) => receipt?.ackId)
+      .filter(Boolean);
+    if (receiptIds.length === 0) {
+      commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+      scheduleCommandAckFlush(commandAckRetryDelayMs);
+      return;
+    }
+    if (binding !== monitoringEventAuthBinding()) {
+      await discardCommandAckOutbox();
+      return;
+    }
+    const remaining = await removeCommandAcks(receiptIds);
+    commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
+    if (remaining > 0) scheduleCommandAckFlush();
+  } catch (error) {
+    console.warn('[Command ACK] Flush deferred:', error?.message || error);
+    commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+    scheduleCommandAckFlush(commandAckRetryDelayMs);
+  } finally {
+    commandAckFlushInFlight = false;
+  }
+}
+
+function scheduleChatAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
+  chrome.alarms.get(CHAT_ACK_FLUSH_ALARM, (existing) => {
+    const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+    if (!existing || existing.scheduledTime > when) {
+      chrome.alarms.create(CHAT_ACK_FLUSH_ALARM, { when });
+    }
+  });
+}
+
+function enqueueChatAck(rawAck) {
+  const binding = monitoringEventAuthBinding();
+  if (!binding || !rawAck?.ackId || !rawAck?.messageId) return Promise.resolve(false);
+  const ack = {
+    type: 'chat-message-ack',
+    ackId: String(rawAck.ackId).slice(0, 512),
+    messageId: String(rawAck.messageId).slice(0, 256),
+    chatMessageId: String(rawAck.messageId).slice(0, 256),
+    sessionId: rawAck.sessionId ? String(rawAck.sessionId).slice(0, 256) : undefined,
+    deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
+    status: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
+    errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
+    timestamp: rawAck.timestamp || new Date().toISOString(),
+    queuedAt: Date.now(),
+  };
+  chatAckMutation = chatAckMutation.then(async () => {
+    const stored = await kv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    let entries = stored[CHAT_ACK_BINDING_KEY] === binding && Array.isArray(stored[CHAT_ACK_OUTBOX_KEY])
+      ? stored[CHAT_ACK_OUTBOX_KEY]
+      : [];
+    entries = entries.filter((item) => item.ackId !== ack.ackId);
+    if (ack.status === 'delivered') {
+      entries = entries.filter((item) => item.messageId !== ack.messageId);
+    }
+    entries.push(ack);
+    entries = entries
+      .filter((item) => Number(item.queuedAt || 0) >= Date.now() - COMMAND_ACK_MAX_AGE_MS)
+      .slice(-COMMAND_ACK_MAX_ENTRIES);
+    while (entries.length > 0 && RuntimeCore.utf8ByteLength(entries) > COMMAND_ACK_MAX_BYTES) entries.shift();
+    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: entries, [CHAT_ACK_BINDING_KEY]: binding });
+    return true;
+  });
+  return chatAckMutation;
+}
+
+function removeChatAcks(ackIds) {
+  const acknowledged = new Set(ackIds || []);
+  chatAckMutation = chatAckMutation.then(async () => {
+    const stored = await kv.get(CHAT_ACK_OUTBOX_KEY);
+    const remaining = (stored[CHAT_ACK_OUTBOX_KEY] || [])
+      .filter((ack) => !acknowledged.has(ack.ackId));
+    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: remaining });
+    if (remaining.length === 0) {
+      await kv.remove(CHAT_ACK_BINDING_KEY);
+      await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+    }
+    return remaining.length;
+  });
+  return chatAckMutation;
+}
+
+async function discardChatAckOutbox() {
+  chatAckMutation = chatAckMutation.then(async () => {
+    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: [] });
+    await kv.remove(CHAT_ACK_BINDING_KEY);
+    await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+  });
+  return chatAckMutation;
+}
+
+async function flushChatAckOutbox(options = {}) {
+  if (chatAckFlushInFlight || !hasStudentAuth()) return;
+  chatAckFlushInFlight = true;
+  try {
+    await chatAckMutation;
+    const binding = monitoringEventAuthBinding();
+    const stored = await kv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    if (!binding || stored[CHAT_ACK_BINDING_KEY] !== binding) {
+      await discardChatAckOutbox();
+      return;
+    }
+    const batch = (stored[CHAT_ACK_OUTBOX_KEY] || []).slice(0, 50);
+    if (batch.length === 0) {
+      await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+      return;
+    }
+    let wsAttempted = false;
+    if (wsConnected) {
+      for (const ack of batch) wsAttempted = (await wsSend(ack)) || wsAttempted;
+    }
+    const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
+    if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
+      scheduleChatAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
+      return;
+    }
+    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/chat-acks`, {
+      method: 'POST',
+      headers: buildDeviceAuthHeaders(),
+      body: JSON.stringify({
+        acks: batch.map(({ queuedAt, type, chatMessageId, deliveryStatus, timestamp, sessionId, ...ack }) => ack),
+      }),
+    }, {
+      context: 'chat acknowledgement',
+      maxAttempts: 1,
+      retryStatuses: new Set([429, 503]),
+    });
+    if (!response.ok) {
+      scheduleChatAckFlush(30 * 1000);
+      return;
+    }
+    const data = await response.json().catch(() => ({}));
+    const receiptIds = (Array.isArray(data.receipts) ? data.receipts : [])
+      .map((receipt) => receipt?.ackId)
+      .filter(Boolean);
+    if (binding !== monitoringEventAuthBinding()) {
+      await discardChatAckOutbox();
+      return;
+    }
+    if (receiptIds.length === 0) {
+      scheduleChatAckFlush(30 * 1000);
+      return;
+    }
+    const remaining = await removeChatAcks(receiptIds);
+    if (remaining > 0) scheduleChatAckFlush();
+  } catch (error) {
+    console.warn('[Chat ACK] Flush deferred:', error?.message || error);
+    scheduleChatAckFlush(30 * 1000);
+  } finally {
+    chatAckFlushInFlight = false;
+  }
+}
+
 function generateMonitoringEventId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return `evt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
 function monitoringEventAuthBinding() {
-  if (!CONFIG.studentToken || !CONFIG.deviceId || !CONFIG.activeStudentId) return null;
+  if (
+    !CONFIG.studentToken
+    || !CONFIG.deviceId
+    || !CONFIG.activeStudentId
+    || !CONFIG.activeStudentSessionId
+  ) return null;
   // This is a local correlation guard, not an authentication primitive. Hash
   // the already-authenticated token so the outbox never persists another copy
   // of the credential, especially for session-only manual sign-ins.
@@ -1253,8 +2345,9 @@ function monitoringEventAuthBinding() {
     second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
   }
   return [
-    'v1',
+    'v2',
     CONFIG.activeStudentId,
+    CONFIG.activeStudentSessionId,
     CONFIG.deviceId,
     first.toString(16).padStart(8, '0'),
     second.toString(16).padStart(8, '0'),
@@ -1616,7 +2709,12 @@ function isManualIdentitySource(source = CONFIG.identitySource) {
 }
 
 function hasStudentAuth() {
-  return Boolean(CONFIG.deviceId && CONFIG.studentToken && (CONFIG.activeStudentId || CONFIG.studentEmail));
+  return Boolean(
+    !studentAuthInvalidating
+    && CONFIG.deviceId
+    && CONFIG.studentToken
+    && (CONFIG.activeStudentId || CONFIG.studentEmail)
+  );
 }
 
 function disableToolbarAction() {
@@ -1788,10 +2886,83 @@ async function enforceAuthGateForTab(tabOrId) {
   }
 }
 
-async function clearStudentAuth(reason = 'manual-clear', options = {}) {
+function enqueueStudentAuthMutation(mutation) {
+  const run = studentAuthMutationTail.then(mutation, mutation);
+  studentAuthMutationTail = run.catch(() => undefined);
+  return run;
+}
+
+function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration) {
+  const interruptedAuthClear = stored?.[STUDENT_AUTH_INVALIDATING_KEY] === true;
+  return enqueueStudentAuthMutation(async () => {
+    const assertCurrent = () => assertAuthMutationCurrent(
+      restoreGeneration,
+      'worker wake auth restore',
+      { allowInvalidating: interruptedAuthClear },
+    );
+    assertCurrent();
+
+    if (interruptedAuthClear) {
+      studentAuthInvalidating = true;
+      CONFIG.autoRegistrationPaused = true;
+    }
+
+    if (stored?.config) {
+      const { serverUrl, ...safeConfig } = persistedNonAuthConfig(stored.config);
+      await kv.set({ config: { serverUrl, ...safeConfig } });
+      assertCurrent();
+      CONFIG = { ...CONFIG, ...safeConfig };
+    }
+
+    CONFIG.serverUrl = resolvedServerUrl;
+    if (stored?.deviceId) CONFIG.deviceId = stored.deviceId;
+    if (!interruptedAuthClear) {
+      if (stored?.activeStudentId) CONFIG.activeStudentId = stored.activeStudentId;
+      if (stored?.activeStudentSessionId) CONFIG.activeStudentSessionId = stored.activeStudentSessionId;
+      if (stored?.studentEmail) CONFIG.studentEmail = stored.studentEmail;
+      if (stored?.studentName) CONFIG.studentName = stored.studentName;
+      if (stored?.studentToken) CONFIG.studentToken = stored.studentToken;
+      if (stored?.identitySource) CONFIG.identitySource = stored.identitySource;
+      if (stored?.manualLoginLastSeenAt) CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
+    }
+    CONFIG.autoRegistrationPaused = interruptedAuthClear || stored?.autoRegistrationPaused === true;
+    sharedAuthLockedSinceAt = Number(stored?.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
+    if (
+      !interruptedAuthClear
+      && CONFIG.studentToken
+      && CONFIG.activeStudentId
+      && CONFIG.activeStudentSessionId
+    ) {
+      studentAuthInvalidating = false;
+    }
+    return { interruptedAuthClear };
+  });
+}
+
+function clearStudentAuth(reason = 'manual-clear', options = {}) {
+  // Reserve the mutation and revoke the current authority synchronously. A
+  // login already waiting on the network must not briefly reinstall its old
+  // response before this cleanup reaches the queue.
+  studentAuthMutationGeneration += 1;
+  studentAuthInvalidating = true;
+  if (options.disconnectWebSocket !== false) disconnectWebSocket();
+  const invalidationPersisted = kv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true });
+  return enqueueStudentAuthMutation(() => clearStudentAuthNow(
+    reason,
+    options,
+    invalidationPersisted,
+  ));
+}
+
+async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invalidationPersisted) {
+  await invalidationPersisted;
   const tokenToEnd = CONFIG.studentToken;
   const pauseAutoRegistration = options.pauseAutoRegistration === true;
   const disconnect = options.disconnectWebSocket !== false;
+  // Revoke the in-memory authority before the first await. Cleanup and the
+  // captured-token flush may take time; old exact-bound frames must fail
+  // closed throughout that window.
+  studentAuthInvalidating = true;
   sharedAuthLockedSinceAt = 0;
   chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
 
@@ -1799,6 +2970,9 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   // classroom context. Clear only teacher-session ranges; school policy stays.
   await clearTeacherSessionStateForSignOut().catch((error) => {
     console.warn('[Auth] Classroom state clear failed:', error?.message || error);
+  });
+  await clearFabAndOverlayState(reason, { closeChat: true }).catch((error) => {
+    console.warn('[Auth] FAB/overlay state clear failed:', error?.message || error);
   });
   await clearStudentMessageState(reason).catch((error) => {
     console.warn('[Auth] Student message state clear failed:', error?.message || error);
@@ -1808,6 +2982,13 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   // would misattribute the prior student's activity.
   await flushMonitoringEventOutbox().catch(() => {});
   await discardMonitoringEventOutbox().catch(() => {});
+  await flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
+  await discardCommandAckOutbox().catch(() => {});
+  await flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+  await discardChatAckOutbox().catch(() => {});
+  await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
+  currentTabSnapshotRevision = 0;
+  lastKnownTabs = [];
 
   if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
     try {
@@ -1832,6 +3013,7 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
   CONFIG.studentEmail = null;
   CONFIG.studentName = null;
   CONFIG.activeStudentId = null;
+  CONFIG.activeStudentSessionId = null;
   CONFIG.identitySource = null;
   CONFIG.manualLoginLastSeenAt = null;
   CONFIG.autoRegistrationPaused = pauseAutoRegistration;
@@ -1846,12 +3028,18 @@ async function clearStudentAuth(reason = 'manual-clear', options = {}) {
     registered: false,
     autoRegistrationPaused: pauseAutoRegistration,
   });
+  if (!pauseAutoRegistration) {
+    // Chrome-profile transitions immediately continue into a fresh,
+    // generation-fenced registration. Explicit/shared-device sign-outs keep
+    // the fence raised until the next deliberate student login.
+    studentAuthInvalidating = false;
+  }
 
   scheduleHeartbeat(null);
   scheduleScreenshotCapture(false);
   chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   if (disconnect) {
-    disconnectWebSocket();
+    await disconnectWebSocket();
   }
   await setConnectivityBadge(connectivityStatus());
   await notifyAuthGateStateToTabs();
@@ -1982,7 +3170,14 @@ async function fetchLoginRosterForGate(options = {}) {
 }
 
 async function applyClassroomStateFromAuthResponse(data, reason) {
-  if (!data || !Object.prototype.hasOwnProperty.call(data, 'classroomState')) return;
+  if (!data) return;
+  const fabState = data.fabState || data.fab || data.settings?.fab;
+  if (!Object.prototype.hasOwnProperty.call(data, 'classroomState')) {
+    if (fabState) {
+      await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
+    }
+    return;
+  }
   const snapshot = data.classroomState;
   await classroomStateRestorePromise;
   const storedBinding = await kv.get(CLASSROOM_STATE_STUDENT_BINDING_KEY);
@@ -1994,9 +3189,16 @@ async function applyClassroomStateFromAuthResponse(data, reason) {
     await clearTeacherSessionStateForSignOut({ emitEvent: false, reason: `${reason}_student_changed` });
   }
   if (!snapshot) {
-    await clearTeacherSessionStateForSignOut({ emitEvent: false, reason: `${reason}_no_state` });
+    await clearTeacherSessionStateForSignOut({
+      emitEvent: false,
+      reason: `${reason}_no_state`,
+      preserveTransientOverlays: true,
+    });
     if (CONFIG.activeStudentId) {
       await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
+    }
+    if (fabState) {
+      await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
     }
     return;
   }
@@ -2016,15 +3218,41 @@ async function applyClassroomStateFromAuthResponse(data, reason) {
     console.warn('[Classroom State] Login snapshot failed:', error?.message || error);
     requestClassroomStateSync(`${reason}-failed`, true);
   }
+  if (fabState) {
+    await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
+  }
 }
 
-async function manualStudentLogin(payload) {
+function manualStudentLogin(payload) {
+  const mutationGeneration = ++studentAuthMutationGeneration;
+  manualStudentLoginPendingGeneration = mutationGeneration;
+  CONFIG.autoRegistrationPaused = true;
+  const priorChromeProfileRegistration = chromeProfileRegistrationInFlight;
+  const login = (async () => {
+    // Let a request already accepted by the server finish before issuing the
+    // manual login, so the manual session is always the last server binding.
+    // Its client adoption is generation-rejected while the auth queue is free.
+    if (priorChromeProfileRegistration) {
+      await priorChromeProfileRegistration.catch(() => {});
+    }
+    assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
+    return enqueueStudentAuthMutation(() => manualStudentLoginNow(payload, mutationGeneration));
+  })();
+  return login.finally(() => {
+    if (manualStudentLoginPendingGeneration === mutationGeneration) {
+      manualStudentLoginPendingGeneration = 0;
+    }
+  });
+}
+
+async function manualStudentLoginNow(payload, mutationGeneration) {
   const deviceId = await ensureDeviceId();
   const isPinLogin = payload.mode === 'pin';
   const body = {
     deviceId,
     deviceName: null,
     classId: 'auto',
+    ...extensionProtocolDescriptor(),
   };
 
   if (isPinLogin) {
@@ -2065,37 +3293,64 @@ async function manualStudentLogin(payload) {
     body.studentEmail ||
     'Student';
   const studentEmail = student.email || body.studentEmail || null;
+  const authenticatedSchoolId = String(data.schoolId || student.schoolId || '').trim() || null;
   const now = Date.now();
 
-  CONFIG.studentToken = data.studentToken;
-  CONFIG.activeStudentId = student.id || null;
-  CONFIG.studentEmail = studentEmail;
-  CONFIG.studentName = studentName;
-  CONFIG.classId = 'auto';
-  CONFIG.identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
-  CONFIG.manualLoginLastSeenAt = now;
-  CONFIG.autoRegistrationPaused = false;
+  assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
+  const studentId = student.id || null;
+  const studentSessionId = String(
+    data.studentSessionId || data.fab?.studentSessionId || ''
+  ).trim() || null;
+  if (!studentId || !studentSessionId) {
+    throw new Error('Student login omitted the exact student binding');
+  }
+  const identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
 
+  // Clear the local crash-recovery marker before dispatching the session
+  // storage commit. A reset requested later writes `true` afterward and wins.
+  const markerCleared = kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
   await kv.set({
     deviceId,
     classId: 'auto',
+    config: persistedNonAuthConfig({
+      ...CONFIG,
+      deviceId,
+      classId: 'auto',
+      ...(authenticatedSchoolId ? { schoolId: authenticatedSchoolId } : {}),
+    }),
   });
   await setManualAuthState({
     studentToken: data.studentToken,
-    activeStudentId: CONFIG.activeStudentId,
+    activeStudentId: studentId,
+    activeStudentSessionId: studentSessionId,
     studentEmail,
     studentName,
     registered: true,
     lastRegisteredEmail: studentEmail,
-    identitySource: CONFIG.identitySource,
+    identitySource,
     manualLoginLastSeenAt: now,
     autoRegistrationPaused: false,
   });
+  await markerCleared;
+  assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
+  CONFIG.studentToken = data.studentToken;
+  CONFIG.activeStudentId = studentId;
+  CONFIG.activeStudentSessionId = studentSessionId;
+  CONFIG.studentEmail = studentEmail;
+  CONFIG.studentName = studentName;
+  CONFIG.classId = 'auto';
+  CONFIG.identitySource = identitySource;
+  if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
+  CONFIG.manualLoginLastSeenAt = now;
+  CONFIG.autoRegistrationPaused = false;
+  studentAuthInvalidating = false;
   await reconcileMessageInboxIdentity('student-login');
 
   await applyClassroomStateFromAuthResponse(data, 'student_login');
+  assertAuthMutationCurrent(mutationGeneration, 'student login');
 
   await checkLicenseStatus('manual-login');
+  assertAuthMutationCurrent(mutationGeneration, 'student login');
   await initializeAdaptiveTracking('manual-login');
   await notifyAuthGateStateToTabs();
 
@@ -2177,11 +3432,37 @@ async function detectChromeProfileEmail() {
 
 // Auto-registration: ensures extension always has IDs before sharing
 // EMAIL-FIRST IDENTITY: Email is required, deviceId is internal tracking only
-async function ensureRegistered() {
+function runChromeProfileRegistration(registration) {
+  if (chromeProfileRegistrationInFlight) return chromeProfileRegistrationInFlight;
+  const run = Promise.resolve().then(registration);
+  chromeProfileRegistrationInFlight = run.finally(() => {
+    if (chromeProfileRegistrationInFlight === runWithCleanup) {
+      chromeProfileRegistrationInFlight = null;
+    }
+  });
+  const runWithCleanup = chromeProfileRegistrationInFlight;
+  return runWithCleanup;
+}
+
+function ensureRegistered() {
+  return runChromeProfileRegistration(() => ensureRegisteredNow());
+}
+
+async function refreshRegistrationAfterIdentityChange() {
+  const inFlight = chromeProfileRegistrationInFlight;
+  if (inFlight) await inFlight.catch(() => {});
+  return ensureRegistered();
+}
+
+async function ensureRegisteredNow() {
   console.log('[Service Worker] Ensuring registration...');
   
   try {
+    assertChromeProfileRegistrationAllowed('student registration');
+    let registrationGeneration = studentAuthMutationGeneration;
     await expireManualAuthIfStale('ensure-registered');
+    registrationGeneration = studentAuthMutationGeneration;
+    assertAuthMutationCurrent(registrationGeneration, 'student registration restore');
 
     // Load config from server
     const serverUrl = CONFIG.serverUrl || DEFAULT_SERVER_URL;
@@ -2197,11 +3478,20 @@ async function ensureRegistered() {
       'lastRegisteredEmail',
       'studentToken',
       'activeStudentId',
+      'activeStudentSessionId',
       'identitySource',
       'manualLoginLastSeenAt',
       'autoRegistrationPaused',
       'sharedAuthLockedSinceAt',
+      STUDENT_AUTH_INVALIDATING_KEY,
     ]);
+    assertAuthMutationCurrent(registrationGeneration, 'student registration restore');
+
+    if (stored[STUDENT_AUTH_INVALIDATING_KEY] === true) {
+      studentAuthInvalidating = true;
+      CONFIG.autoRegistrationPaused = true;
+      return stored;
+    }
 
     if (stored.studentToken) {
       CONFIG.studentToken = stored.studentToken;
@@ -2215,9 +3505,12 @@ async function ensureRegistered() {
     // must not keep attributing B's browsing to A.
     if (!isManualIdentitySource(stored.identitySource)) {
       const profileEmail = await detectChromeProfileEmail();
+      assertAuthMutationCurrent(registrationGeneration, 'student registration profile lookup');
       if (profileEmail && stored.studentEmail && stored.studentEmail !== profileEmail) {
         console.log(`[Service Worker] Chrome profile changed from ${stored.studentEmail} to ${profileEmail}; re-registering`);
         await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
+        registrationGeneration = studentAuthMutationGeneration;
+        assertAuthMutationCurrent(registrationGeneration, 'student registration profile change');
         stored = {
           ...stored,
           studentEmail: profileEmail,
@@ -2226,6 +3519,7 @@ async function ensureRegistered() {
           lastRegisteredEmail: null,
           studentToken: null,
           activeStudentId: null,
+          activeStudentSessionId: null,
           identitySource: null,
           manualLoginLastSeenAt: null,
           autoRegistrationPaused: false,
@@ -2260,6 +3554,7 @@ async function ensureRegistered() {
     } else {
       await kv.set(stored);
     }
+    assertAuthMutationCurrent(registrationGeneration, 'student registration restore');
     
     // Update CONFIG (email is primary identity - backend will determine schoolId from email domain)
     CONFIG.studentEmail = stored.studentEmail;
@@ -2267,6 +3562,7 @@ async function ensureRegistered() {
     CONFIG.deviceId = stored.deviceId;
     CONFIG.classId = 'auto'; // Backend determines this from email domain
     CONFIG.activeStudentId = stored.activeStudentId || CONFIG.activeStudentId;
+    CONFIG.activeStudentSessionId = stored.activeStudentSessionId || CONFIG.activeStudentSessionId;
     CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
     CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
@@ -2298,6 +3594,7 @@ async function ensureRegistered() {
     
     if (needsRegistration) {
       try {
+        assertAuthMutationCurrent(registrationGeneration, 'student registration');
         console.log('[Service Worker] Registering student with server');
         const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/register`, {
           method: 'POST',
@@ -2313,6 +3610,7 @@ async function ensureRegistered() {
             schoolId: CONFIG.schoolId || undefined,
             schoolSlug: CONFIG.schoolSlug || undefined,
             enrollmentKey: CONFIG.enrollmentKey || undefined,
+            ...extensionProtocolDescriptor(),
           }),
         }, {
           context: 'student registration',
@@ -2326,35 +3624,67 @@ async function ensureRegistered() {
         
         const data = await response.json();
         console.log('[Service Worker] Student registered successfully');
-        registrationRetryCount = 0; // Reset on success
-        
-        // ✅ JWT AUTHENTICATION: Store studentToken for secure authentication
-        if (data.studentToken) {
-          console.log('✅ [JWT] Received studentToken from server - storing for future heartbeats');
-          await kv.set({ studentToken: data.studentToken, identitySource: 'chrome_profile', manualLoginLastSeenAt: null, autoRegistrationPaused: false });
-          CONFIG.studentToken = data.studentToken; // Cache in memory too
+        const studentId = String(data.student?.id || '').trim() || null;
+        const studentSessionId = String(
+          data.studentSessionId || data.fab?.studentSessionId || ''
+        ).trim() || null;
+        const authenticatedSchoolId = String(
+          data.schoolId || data.student?.schoolId || ''
+        ).trim() || null;
+        if (!data.studentToken || !studentId || !studentSessionId) {
+          throw new Error('Student registration omitted the exact authenticated binding');
+        }
+        await enqueueStudentAuthMutation(async () => {
+          assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          await kv.set({
+            studentToken: data.studentToken,
+            activeStudentId: studentId,
+            activeStudentSessionId: studentSessionId,
+            identitySource: 'chrome_profile',
+            manualLoginLastSeenAt: null,
+            autoRegistrationPaused: false,
+            registered: true,
+            lastRegisteredEmail: stored.studentEmail,
+            ...(authenticatedSchoolId ? {
+              config: persistedNonAuthConfig({ ...CONFIG, schoolId: authenticatedSchoolId }),
+            } : {}),
+            [STUDENT_AUTH_INVALIDATING_KEY]: null,
+          });
+          assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          CONFIG.studentToken = data.studentToken;
+          CONFIG.activeStudentId = studentId;
+          CONFIG.activeStudentSessionId = studentSessionId;
           CONFIG.identitySource = 'chrome_profile';
+          if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
           CONFIG.manualLoginLastSeenAt = null;
           CONFIG.autoRegistrationPaused = false;
-        } else {
-          console.warn('⚠️  No studentToken in registration response - legacy mode');
-        }
-        
-        // Mark as registered and save the email we registered with
-        await kv.set({ registered: true, lastRegisteredEmail: stored.studentEmail });
-        
-        // Update CONFIG with student ID from server
-        if (data.student?.id) {
-          CONFIG.activeStudentId = data.student.id;
-          await kv.set({ activeStudentId: data.student.id });
-        }
-        await reconcileMessageInboxIdentity('student-registration');
-        await applyClassroomStateFromAuthResponse(data, 'student_registration');
+          studentAuthInvalidating = false;
+          await reconcileMessageInboxIdentity('student-registration');
+          await applyClassroomStateFromAuthResponse(data, 'student_registration');
+          assertAuthMutationCurrent(registrationGeneration, 'student registration');
+        });
+        registrationRetryCount = 0; // Reset on success
       } catch (error) {
+        if (error?.code === 'AUTH_MUTATION_SUPERSEDED') {
+          console.info('[Auth] Ignoring superseded student registration response');
+          return stored;
+        }
         console.warn('[Service Worker] Student registration error:', error);
-        await kv.set({ registered: false, studentToken: null });
-        if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
-        CONFIG.studentToken = null;
+        await enqueueStudentAuthMutation(async () => {
+          assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
+          await kv.set({ registered: false, studentToken: null });
+          if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
+          assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
+          CONFIG.studentToken = null;
+        }).catch((mutationError) => {
+          if (mutationError?.code !== 'AUTH_MUTATION_SUPERSEDED') throw mutationError;
+        });
+        if (
+          registrationGeneration !== studentAuthMutationGeneration
+          || studentAuthInvalidating
+        ) {
+          return stored;
+        }
         // Retry with exponential backoff, max 5 retries to prevent server flooding
         registrationRetryCount++;
         if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
@@ -2428,10 +3758,12 @@ const classroomStateRestorePromise = new Promise((resolve) => {
 (async () => {
   console.log('[Service Worker] Waking up...');
   disableToolbarAction();
+  const workerWakeRestoreGeneration = studentAuthMutationGeneration;
   const stored = await getStoredAuthState([
     'deviceId',
     'config',
     'activeStudentId',
+    'activeStudentSessionId',
     'studentEmail',
     'studentName',
     'studentToken',
@@ -2452,15 +3784,27 @@ const classroomStateRestorePromise = new Promise((resolve) => {
     MONITORING_EVENT_OUTBOX_KEY,
     CONNECTIVITY_HEALTH_STORAGE_KEY,
     SCREENSHOT_HEALTH_STORAGE_KEY,
+    FAB_STATE_STORAGE_KEY,
+    FAB_CONTEXT_STORAGE_KEY,
+    CLASSROOM_OVERLAY_STORAGE_KEY,
+    COMMAND_ACK_OUTBOX_KEY,
+    COMMAND_ACK_BINDING_KEY,
+    CHAT_ACK_OUTBOX_KEY,
+    CHAT_ACK_BINDING_KEY,
+    TAB_SNAPSHOT_STORAGE_KEY,
+    STUDENT_AUTH_INVALIDATING_KEY,
   ]);
   const resolvedServerUrl = await resolveServerUrl();
-
-  // Restore state from storage (do not override resolved serverUrl)
-  if (stored.config) {
-    const { serverUrl, ...safeConfig } = stored.config;
-    CONFIG = { ...CONFIG, ...safeConfig };
-  }
-  CONFIG.serverUrl = resolvedServerUrl;
+  const { interruptedAuthClear } = await restoreWorkerWakeAuthState(
+    stored,
+    resolvedServerUrl,
+    workerWakeRestoreGeneration,
+  );
+  const assertWorkerWakeCurrent = () => assertAuthMutationCurrent(
+    workerWakeRestoreGeneration,
+    'worker wake restore',
+    { allowInvalidating: interruptedAuthClear },
+  );
   scheduleLicenseCheck();
   const storedMonitoringState = stored[MONITORING_STATE_STORAGE_KEY];
   if (
@@ -2483,30 +3827,24 @@ const classroomStateRestorePromise = new Promise((resolve) => {
     stored[SCREENSHOT_HEALTH_STORAGE_KEY]
   );
   syncScreenshotHealthGlobals();
-  if (stored.deviceId) {
-    CONFIG.deviceId = stored.deviceId;
-  }
-  if (stored.activeStudentId) {
-    CONFIG.activeStudentId = stored.activeStudentId;
-  }
-  if (stored.studentEmail) {
-    CONFIG.studentEmail = stored.studentEmail;
-  }
-  if (stored.studentName) {
-    CONFIG.studentName = stored.studentName;
-  }
-  if (stored.studentToken) {
-    CONFIG.studentToken = stored.studentToken;
-  }
-  if (stored.identitySource) {
-    CONFIG.identitySource = stored.identitySource;
-  }
-  if (stored.manualLoginLastSeenAt) {
-    CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
-  }
-  CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
-  sharedAuthLockedSinceAt = Number(stored.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
+  assertWorkerWakeCurrent();
   await reconcileMessageInboxIdentity('worker-wake');
+  assertWorkerWakeCurrent();
+  if (stored[FAB_CONTEXT_STORAGE_KEY]?.binding === fabIdentityBinding()) {
+    currentFabState = normalizeFabState(stored[FAB_STATE_STORAGE_KEY] || {});
+    scheduleClassroomOverlayExpiry(stored[CLASSROOM_OVERLAY_STORAGE_KEY]);
+  } else if (stored[FAB_STATE_STORAGE_KEY] || stored[CLASSROOM_OVERLAY_STORAGE_KEY]) {
+    await clearFabAndOverlayState('worker-identity-reconcile', { closeChat: true });
+  }
+  if (Array.isArray(stored[COMMAND_ACK_OUTBOX_KEY]) && stored[COMMAND_ACK_OUTBOX_KEY].length > 0) {
+    scheduleCommandAckFlush();
+  }
+  if (Array.isArray(stored[CHAT_ACK_OUTBOX_KEY]) && stored[CHAT_ACK_OUTBOX_KEY].length > 0) {
+    scheduleChatAckFlush();
+  }
+  if (stored[TAB_SNAPSHOT_STORAGE_KEY]?.binding === tabSnapshotAuthBinding()) {
+    currentTabSnapshotRevision = Number(stored[TAB_SNAPSHOT_STORAGE_KEY].revision || 0);
+  }
 
   // Load school policy into memory first. The classroom-state composer will
   // include it in the same atomic DNR update without allowing the two ranges
@@ -2525,6 +3863,7 @@ const classroomStateRestorePromise = new Promise((resolve) => {
     console.warn('[Service Worker] Stored school block list is invalid; retaining existing Chrome rules');
   }
 
+  assertWorkerWakeCurrent();
   if (stored[CLASSROOM_STATE_STORAGE_KEY]) {
     try {
       await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], { force: true, reason: 'worker_wake' });
@@ -2592,6 +3931,7 @@ const classroomStateRestorePromise = new Promise((resolve) => {
       });
     }
   }
+  assertWorkerWakeCurrent();
 
   console.log('[Service Worker] State restored:', {
     deviceId: CONFIG.deviceId,
@@ -2604,10 +3944,22 @@ const classroomStateRestorePromise = new Promise((resolve) => {
   });
   markClassroomStateRestored();
 
+  if (interruptedAuthClear) {
+    assertWorkerWakeCurrent();
+    await clearStudentAuth('interrupted-auth-clear', {
+      notifyBackend: false,
+      pauseAutoRegistration: true,
+    });
+    await setConnectivityBadge(connectivityStatus());
+    return;
+  }
+
   if (stored.licenseActive === false) {
+    assertWorkerWakeCurrent();
     await disableForInactiveLicense(stored.planStatus);
   }
 
+  assertWorkerWakeCurrent();
   await ensureRegistered();
   scheduleMonitoringEventFlush(1000);
   requestClassroomStateSync('worker-wake', true);
@@ -2663,8 +4015,8 @@ let dynamicRuleCompositionTail = Promise.resolve();
 function runtimeClassroomStateForRules() {
   return {
     restrictions: {
-      screenLock: { active: screenLocked && !allowedDomains.length, url: lockedUrl, domain: lockedDomain },
-      flightPath: { active: screenLocked && allowedDomains.length > 0, allowedDomains },
+      screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain },
+      flightPath: { active: allowedDomains.length > 0, allowedDomains },
       blockList: { active: teacherBlockedDomains.length > 0, blockedDomains: teacherBlockedDomains },
       attentionMode: { active: attentionModeActive },
       temporaryAllows: temporaryAllowedDomains,
@@ -2782,6 +4134,7 @@ async function getLoggedInUserInfo() {
 
 // Auto-detect and register student based on Chromebook login
 async function autoDetectAndRegister() {
+  assertChromeProfileRegistrationAllowed('student auto-detection');
   applyManagedSchoolConfig(await readManagedConfig());
   const authPause = await chrome.storage.local.get(['autoRegistrationPaused']);
   if (authPause.autoRegistrationPaused) {
@@ -2791,6 +4144,7 @@ async function autoDetectAndRegister() {
   }
 
   const userInfo = await getLoggedInUserInfo();
+  assertChromeProfileRegistrationAllowed('student auto-detection');
   
   if (userInfo.email) {
     console.log('Auto-detected student email:', userInfo.email);
@@ -2835,7 +4189,7 @@ if (chrome.identity?.onSignInChanged) {
   chrome.identity.onSignInChanged.addListener(async () => {
     try {
       if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
-        await ensureRegistered();
+        await refreshRegistrationAfterIdentityChange();
         await notifyAuthGateStateToTabs();
       }
     } catch (error) {
@@ -2843,79 +4197,6 @@ if (chrome.identity?.onSignInChanged) {
     }
   });
 }
-
-// Load config from storage on startup
-getStoredAuthState([
-  'config',
-  'activeStudentId',
-  'studentEmail',
-  'studentName',
-  'studentToken',
-  'identitySource',
-  'manualLoginLastSeenAt',
-  'autoRegistrationPaused',
-  'sharedAuthLockedSinceAt',
-]).then(async (result) => {
-  try {
-    const resolvedServerUrl = await resolveServerUrl();
-
-    if (result.config) {
-      const { serverUrl, ...safeConfig } = result.config;
-      CONFIG = { ...CONFIG, ...safeConfig };
-      console.log('Loaded config:', CONFIG);
-    }
-
-    CONFIG.serverUrl = resolvedServerUrl;
-    console.log('Using server URL:', CONFIG.serverUrl);
-
-    // Load active student ID
-    if (result.activeStudentId) {
-      CONFIG.activeStudentId = result.activeStudentId;
-      console.log('Loaded active student ID:', CONFIG.activeStudentId);
-    }
-
-    // Load student email
-    if (result.studentEmail) {
-      CONFIG.studentEmail = result.studentEmail;
-    }
-    if (result.studentName) {
-      CONFIG.studentName = result.studentName;
-    }
-    if (result.identitySource) {
-      CONFIG.identitySource = result.identitySource;
-    }
-    if (result.manualLoginLastSeenAt) {
-      CONFIG.manualLoginLastSeenAt = result.manualLoginLastSeenAt;
-    }
-    CONFIG.autoRegistrationPaused = result.autoRegistrationPaused === true;
-    sharedAuthLockedSinceAt = Number(result.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
-
-    // ✅ JWT AUTHENTICATION: Load studentToken from storage
-    if (result.studentToken) {
-      CONFIG.studentToken = result.studentToken;
-      console.log('✅ [JWT] Loaded studentToken from storage');
-    }
-
-    if (await expireManualAuthIfStale('config-loaded')) {
-      return;
-    }
-
-    // Auto-detect logged-in user and register
-    if (!CONFIG.autoRegistrationPaused && !isManualIdentitySource(CONFIG.identitySource)) {
-      await autoDetectAndRegister();
-    } else if (CONFIG.autoRegistrationPaused) {
-      await notifyAuthGateStateToTabs();
-    }
-
-    // Initialize adaptive tracking once config is loaded
-    if (CONFIG.deviceId) {
-      initializeAdaptiveTracking('config-loaded');
-    }
-    await notifyAuthGateStateToTabs();
-  } catch (error) {
-    console.warn('[Service Worker] Config load error (will retry):', error?.message || error);
-  }
-});
 
 // Generate unique device ID if not exists
 async function getOrCreateDeviceId() {
@@ -2967,7 +4248,7 @@ async function registerDevice(deviceId, deviceName, classId) {
     CONFIG.classId = classId;
     
     await chrome.storage.local.set({ 
-      config: CONFIG,
+      config: persistedNonAuthConfig(CONFIG),
       registered: true,
     });
     
@@ -2979,7 +4260,20 @@ async function registerDevice(deviceId, deviceName, classId) {
 }
 
 // Register device with student email auto-detection
-async function registerDeviceWithStudent(deviceId, deviceName, classId, studentEmail, studentName) {
+function registerDeviceWithStudent(deviceId, deviceName, classId, studentEmail, studentName) {
+  return runChromeProfileRegistration(() => registerDeviceWithStudentNow(
+    deviceId,
+    deviceName,
+    classId,
+    studentEmail,
+    studentName,
+  ));
+}
+
+async function registerDeviceWithStudentNow(deviceId, deviceName, classId, studentEmail, studentName) {
+  assertChromeProfileRegistrationAllowed('student auto-registration');
+  const registrationGeneration = studentAuthMutationGeneration;
+  assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
   // Use provided deviceId or generate new one
   if (!deviceId) {
     deviceId = await getOrCreateDeviceId();
@@ -3004,6 +4298,7 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
         schoolId: CONFIG.schoolId || undefined,
         schoolSlug: CONFIG.schoolSlug || undefined,
         enrollmentKey: CONFIG.enrollmentKey || undefined,
+        ...extensionProtocolDescriptor(),
       }),
     }, {
       context: 'student registration',
@@ -3017,30 +4312,53 @@ async function registerDeviceWithStudent(deviceId, deviceName, classId, studentE
     
     const data = await response.json();
     console.log('Student auto-registered:', data);
-    
-    // Save config with student info
-    CONFIG.deviceId = deviceId;
-    CONFIG.studentName = studentName;
-    CONFIG.studentEmail = studentEmail;
-    CONFIG.classId = classId;
-    CONFIG.activeStudentId = data.student?.id || null;
-    CONFIG.studentToken = data.studentToken || CONFIG.studentToken;
-    CONFIG.identitySource = 'chrome_profile';
-    CONFIG.manualLoginLastSeenAt = null;
-    
-    await chrome.storage.local.set({ 
-      config: CONFIG,
-      registered: true,
-      activeStudentId: data.student?.id || null,
-      studentToken: data.studentToken || null,
-      lastRegisteredEmail: studentEmail,
-      identitySource: 'chrome_profile',
-      manualLoginLastSeenAt: null,
-      autoRegistrationPaused: false,
+    const studentId = String(data.student?.id || '').trim() || null;
+    const studentSessionId = String(
+      data.studentSessionId || data.fab?.studentSessionId || ''
+    ).trim() || null;
+    const authenticatedSchoolId = String(
+      data.schoolId || data.student?.schoolId || ''
+    ).trim() || null;
+    if (!data.studentToken || !studentId || !studentSessionId) {
+      throw new Error('Student registration omitted the exact authenticated binding');
+    }
+    await enqueueStudentAuthMutation(async () => {
+      assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      const persistedConfig = persistedNonAuthConfig({
+        ...CONFIG,
+        deviceId,
+        classId,
+        ...(authenticatedSchoolId ? { schoolId: authenticatedSchoolId } : {}),
+      });
+      await chrome.storage.local.set({
+        config: persistedConfig,
+        registered: true,
+        activeStudentId: studentId,
+        activeStudentSessionId: studentSessionId,
+        studentToken: data.studentToken,
+        lastRegisteredEmail: studentEmail,
+        identitySource: 'chrome_profile',
+        manualLoginLastSeenAt: null,
+        autoRegistrationPaused: false,
+        [STUDENT_AUTH_INVALIDATING_KEY]: null,
+      });
+      assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      CONFIG.deviceId = deviceId;
+      CONFIG.studentName = studentName;
+      CONFIG.studentEmail = studentEmail;
+      CONFIG.classId = classId;
+      CONFIG.activeStudentId = studentId;
+      CONFIG.activeStudentSessionId = studentSessionId;
+      CONFIG.studentToken = data.studentToken;
+      CONFIG.identitySource = 'chrome_profile';
+      if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
+      CONFIG.manualLoginLastSeenAt = null;
+      CONFIG.autoRegistrationPaused = false;
+      studentAuthInvalidating = false;
+      await reconcileMessageInboxIdentity('student-registration');
+      await applyClassroomStateFromAuthResponse(data, 'student_registration');
+      assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
     });
-    await reconcileMessageInboxIdentity('student-registration');
-
-    await applyClassroomStateFromAuthResponse(data, 'student_registration');
     
     // Start adaptive tracking after registration
     initializeAdaptiveTracking('student-registered');
@@ -3088,6 +4406,7 @@ async function sendHeartbeat(reason = 'manual') {
     let activeTabUrl = '';
     let activeTabTitle = '';
     let activeTabId = null;
+    let activeTabRef = null;
     let favicon = null;
 
     // Get the active tab from the focused window
@@ -3119,25 +4438,15 @@ async function sendHeartbeat(reason = 'manual') {
     // Collect ALL open tabs for teacher dashboard
     // Use caching to prevent flickering when chrome.tabs.query returns inconsistent results
     let allOpenTabs = [];
+    let tabSnapshotRevision = currentTabSnapshotRevision;
     try {
       const allTabs = await chrome.tabs.query({});
       const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
-
-      if (httpTabs.length > 0) {
-        allOpenTabs = httpTabs
-          .slice(0, 20) // Limit to 20 tabs
-          .map(tab => ({
-            url: (tab.url || '').substring(0, 512),
-            title: (tab.title || 'Untitled').substring(0, 512),
-          }));
-        // Update cache with new tabs
-        lastKnownTabs = allOpenTabs;
-      } else if (lastKnownTabs.length > 0) {
-        // Query returned no HTTP tabs but we have cached tabs
-        // This can happen during tab loading or service worker restart
-        allOpenTabs = lastKnownTabs;
-        console.log(`[Heartbeat] Using cached ${lastKnownTabs.length} tabs (query returned 0 HTTP tabs)`);
-      }
+      const tabSnapshot = await buildOpaqueTabSnapshot(httpTabs);
+      allOpenTabs = tabSnapshot.tabs;
+      tabSnapshotRevision = tabSnapshot.revision;
+      activeTabRef = tabSnapshot.localEntries.find((entry) => entry.tabId === activeTabId)?.tabRef || null;
+      lastKnownTabs = allOpenTabs;
     } catch (error) {
       console.warn('[Heartbeat] Failed to collect tabs:', error);
       // Use cached tabs on error to prevent flickering
@@ -3156,13 +4465,19 @@ async function sendHeartbeat(reason = 'manual') {
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
       favicon: favicon,
       allOpenTabs: allOpenTabs,             // 🆕 ALL tabs (in-memory only, not persisted)
-      screenLocked: screenLocked,
-      flightPathActive: screenLocked && allowedDomains.length > 0,
+      activeTabRef,
+      tabSnapshotRevision,
+      tabSnapshot: {
+        schemaVersion: 1,
+        revision: tabSnapshotRevision,
+      },
+      screenLocked: screenLockIsActive(),
+      flightPathActive: flightPathIsActive(),
       activeFlightPathName: activeFlightPathName,
       isSharing: false,
       cameraActive: cameraActive,
       status: trackingState.toLowerCase(),
-      extensionVersion: chrome.runtime.getManifest().version,
+      ...extensionProtocolDescriptor(),
       chromeVersion: currentChromiumVersion(),
       classroomStateRevision: currentClassroomState?.revision ?? 0,
       appliedClassroomStateRevision: lastClassroomStateAckRevision || currentClassroomState?.revision || 0,
@@ -3170,6 +4485,8 @@ async function sendHeartbeat(reason = 'manual') {
       classroomStateSessionId: currentClassroomState?.teachingSessionId || undefined,
       classroomStateSupervisionContextId: currentClassroomState?.supervisionContextId || undefined,
       requestClassroomState: requestClassroomStateOnHeartbeat(),
+      fabStateRevision: currentFabState?.revision ?? 0,
+      requestFabState: requestFabStateOnHeartbeat(),
       // Screenshot health diagnostics (helps dashboard show why screenshots may be missing)
       screenshotHealth: {
         lastAttemptAt: lastScreenshotAttemptAt,
@@ -3216,6 +4533,7 @@ async function sendHeartbeat(reason = 'manual') {
       console.warn('[Heartbeat] Ignoring response for a retired student/session binding');
       if (currentHeartbeatBinding) {
         lastClassroomHeartbeatSyncRequestAt = 0;
+        lastFabHeartbeatSyncRequestAt = 0;
         requestClassroomStateSync('heartbeat-identity-changed', true);
         // safeSendHeartbeat is still marked in flight until this call returns.
         // Queue the new identity's authoritative heartbeat for the next task.
@@ -3239,7 +4557,7 @@ async function sendHeartbeat(reason = 'manual') {
       return;
     } else if (response.status === 401 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
-      if (data?.error === "school_not_entitled") {
+      if (isClassPilotNotEntitledResponse(data)) {
         await disableForInactiveLicense(data.planStatus);
         return;
       }
@@ -3274,16 +4592,20 @@ async function sendHeartbeat(reason = 'manual') {
       if (!screenshotScheduled && (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE)) {
         console.log('[Screenshot] Recovering lost screenshot alarm after heartbeat');
         scheduleScreenshotCapture(true);
-      } else if (screenshotScheduled) {
-        // Capture immediately on first heartbeat (avoids chrome.alarms delay on cold start)
-        captureAndSendScreenshot();
       }
       // Check for pending messages missed during WebSocket disconnection
       try {
         const data = await response.json();
+        await adoptAuthenticatedStudentBinding(data, 'heartbeat response');
         await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
+        if (Object.prototype.hasOwnProperty.call(data, 'fab')) {
+          await applyFabSettings(data.fab || {}, {
+            reason: 'heartbeat-reconcile',
+            broadcast: true,
+          });
+        }
         if (Array.isArray(data.pendingMessages) && data.pendingMessages.length > 0) {
-          const inboxResult = await persistHeartbeatPendingMessages(
+          const inboxResult = await handleHeartbeatPendingMessages(
             data.pendingMessages,
             heartbeatMessageBinding
           );
@@ -3328,8 +4650,10 @@ async function healthCheck() {
     scheduleHeartbeat(null);
   }
 
+  const screenshotAlarm = await chrome.alarms.get(SCREENSHOT_ALARM_NAME);
+  screenshotScheduled = Boolean(screenshotAlarm);
   // Re-schedule screenshot capture if alarm was lost after service worker restart
-  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
+  if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotAlarm) {
     scheduleScreenshotCapture(true);
   }
 
@@ -3372,6 +4696,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }).catch(() => {});
   } else if (alarm.name === 'license-check') {
     checkLicenseStatus('alarm').catch(() => {});
+  } else if (alarm.name === LICENSE_CONTROL_CLEANUP_ALARM) {
+    kv.get(['planStatus']).then((stored) => (
+      disableForInactiveLicense(stored.planStatus)
+    )).catch(() => {
+      chrome.alarms.create(LICENSE_CONTROL_CLEANUP_ALARM, {
+        when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
+      });
+    });
   } else if (alarm.name === SHARED_AUTH_LOCK_ALARM_NAME) {
     handleSharedAuthLockTimeout().catch(() => {});
   } else if (alarm.name === CLASSROOM_STATE_EXPIRY_ALARM) {
@@ -3391,8 +4723,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     });
   } else if (alarm.name === MONITORING_EVENT_FLUSH_ALARM) {
     flushMonitoringEventOutbox().catch(() => {});
+  } else if (alarm.name === COMMAND_ACK_FLUSH_ALARM) {
+    flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
+  } else if (alarm.name === CHAT_ACK_FLUSH_ALARM) {
+    flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+  } else if (alarm.name === CLASSROOM_OVERLAY_EXPIRY_ALARM) {
+    expireClassroomOverlays().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
-    captureAndSendScreenshot();
+    captureAndSendScreenshot({ reason: 'alarm' });
   }
 });
 
@@ -3400,6 +4738,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Uses chrome.alarms (30s minimum) instead of setInterval so it survives
 // MV3 service worker termination. setInterval dies when the SW goes inactive.
 const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
+const SCREENSHOT_PERIOD_MS = 30 * 1000;
+const SCREENSHOT_SCHEDULED_MIN_GAP_MS = 25 * 1000;
+const SCREENSHOT_COMMAND_MIN_GAP_MS = 5 * 1000;
 let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
@@ -3407,8 +4748,11 @@ function scheduleScreenshotCapture(enable) {
     screenshotScheduled = true;
     // chrome.alarms minimum is 30 seconds; use 0.5 min (30s) for near-real-time
     chrome.alarms.create(SCREENSHOT_ALARM_NAME, { periodInMinutes: 0.5 });
-    // Also capture immediately when enabled
-    captureAndSendScreenshot();
+    // A single cold-start capture is useful, but only if the persisted health
+    // proves the last attempt did not already occur in this cadence window.
+    if (!lastScreenshotAttemptAt || Date.now() - lastScreenshotAttemptAt >= SCREENSHOT_PERIOD_MS) {
+      captureAndSendScreenshot({ reason: 'startup' });
+    }
     console.log('[Screenshot] Scheduled periodic capture via chrome.alarms (every 30s)');
   } else if (!enable && screenshotScheduled) {
     screenshotScheduled = false;
@@ -3417,7 +4761,15 @@ function scheduleScreenshotCapture(enable) {
   }
 }
 
-async function captureAndSendScreenshot() {
+async function captureAndSendScreenshot(options = {}) {
+  const reason = options.reason || 'scheduled';
+  const minimumGap = reason === 'command'
+    ? SCREENSHOT_COMMAND_MIN_GAP_MS
+    : SCREENSHOT_SCHEDULED_MIN_GAP_MS;
+  if (lastScreenshotAttemptAt && Date.now() - lastScreenshotAttemptAt < minimumGap) {
+    console.log(`[Screenshot] Coalescing ${reason} capture; cadence guard active`);
+    return;
+  }
   if (screenshotCaptureInFlight) {
     console.log('[Screenshot] Skipping capture; previous capture still in flight');
     return;
@@ -3521,6 +4873,14 @@ let currentMaxTabs = null;
 let teacherMaxTabs = null;
 let schoolMaxTabs = null;
 const seenPollIds = new Set(); // dedup: prevent broadcasting same poll twice
+
+function screenLockIsActive() {
+  return screenLocked;
+}
+
+function flightPathIsActive() {
+  return allowedDomains.length > 0;
+}
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let globalBlockedDomainsStateTrusted = false;
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
@@ -3551,6 +4911,9 @@ const STATEFUL_COMMAND_TYPES = new Set([
 let currentClassroomState = null;
 let lastClassroomStateSyncRequestAt = 0;
 let lastClassroomHeartbeatSyncRequestAt = 0;
+let lastFabHeartbeatSyncRequestAt = 0;
+const FAB_HEARTBEAT_DISCONNECTED_SYNC_INTERVAL_MS = 30 * 1000;
+const FAB_HEARTBEAT_CONNECTED_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let lastClassroomStateOutcome = 'pending';
 let lastClassroomStateAckRevision = 0;
 let classroomStateApplicationTail = Promise.resolve();
@@ -3653,12 +5016,12 @@ function sendClassroomStateAck(state, outcome, error) {
 function classroomRestrictionsFromRuntime() {
   return {
     screenLock: {
-      active: screenLocked && !allowedDomains.length,
+      active: screenLocked,
       url: lockedUrl,
       domain: lockedDomain,
     },
     flightPath: {
-      active: screenLocked && allowedDomains.length > 0,
+      active: allowedDomains.length > 0,
       allowedDomains,
       name: activeFlightPathName,
     },
@@ -3709,7 +5072,7 @@ async function enforceCurrentTabLimit() {
 async function setRuntimeFromClassroomState(state) {
   const restrictions = state.restrictions;
   const backup = classroomRuntimeBackup();
-  screenLocked = Boolean(restrictions.flightPath.active || restrictions.screenLock.active);
+  screenLocked = Boolean(restrictions.screenLock.active);
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
@@ -3887,6 +5250,16 @@ async function applyClassroomStateNow(rawState, options = {}) {
     ).catch(() => {});
     const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
       || normalized.supervisionContextId !== previousState?.supervisionContextId;
+    if (
+      activeLiveViewNegotiationId
+      && (
+        scopeChanged
+        || normalized.supervisionContextId
+        || normalized.teachingSessionId !== activeLiveViewTeachingSessionId
+      )
+    ) {
+      await stopScreenShare({ reason: 'classroom-authority-changed' });
+    }
     if (scopeChanged && (normalized.teachingSessionId || normalized.supervisionContextId)) {
       await enqueueMonitoringEvent('monitoring_state_changed', {
         state: persistedMonitoringState.state.toLowerCase(),
@@ -3959,6 +5332,9 @@ function applyClassroomState(rawState, options = {}) {
 
 async function expireClassroomState(reason = 'hard_expiry') {
   if (!currentClassroomState) return;
+  if (activeLiveViewNegotiationId) {
+    await stopScreenShare({ reason: `classroom-state-${reason}` });
+  }
   const expiredState = {
     ...currentClassroomState,
     restrictions: RuntimeCore.emptyRestrictions(),
@@ -4090,7 +5466,7 @@ function requestClassroomStateOnHeartbeat() {
   return true;
 }
 
-function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
+async function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
   if (!teacherBroadcastActive && !teacherBroadcastSessionId) {
     return;
   }
@@ -4098,7 +5474,7 @@ function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
   teacherBroadcastActive = false;
   teacherBroadcastSessionId = null;
   if (options.notifyTeacher && wsConnected) {
-    wsSend({
+    await wsSend({
       type: 'broadcast-leave',
       sessionId: previousSessionId || undefined,
       reason,
@@ -4110,24 +5486,24 @@ function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
   });
 }
 
-function handleBroadcastStart(message = {}) {
+async function handleBroadcastStart(message = {}) {
   const nextSessionId = message.sessionId || message.broadcastSessionId || null;
   if (teacherBroadcastActive && teacherBroadcastSessionId !== nextSessionId) {
-    cleanupTeacherBroadcast('replaced-by-new-broadcast', { notifyTeacher: true });
+    await cleanupTeacherBroadcast('replaced-by-new-broadcast', { notifyTeacher: true });
   }
   teacherBroadcastActive = true;
   teacherBroadcastSessionId = nextSessionId;
-  wsSend({
+  await wsSend({
     type: 'broadcast-join',
     sessionId: nextSessionId || undefined,
   });
 }
 
-function handleBroadcastStop() {
-  cleanupTeacherBroadcast('teacher-stop', { notifyTeacher: false });
+async function handleBroadcastStop() {
+  await cleanupTeacherBroadcast('teacher-stop', { notifyTeacher: false });
 }
 
-function handleBroadcastOffer(sdp) {
+async function handleBroadcastOffer(sdp) {
   if (!teacherBroadcastActive) {
     console.warn('[Broadcast] Ignoring offer because no broadcast session is active');
     return;
@@ -4137,7 +5513,7 @@ function handleBroadcastOffer(sdp) {
     return;
   }
   console.warn('[Broadcast] Student-side teacher broadcast viewing is not available in this extension build; leaving broadcast');
-  cleanupTeacherBroadcast('unsupported-broadcast-offer', { notifyTeacher: true });
+  await cleanupTeacherBroadcast('unsupported-broadcast-offer', { notifyTeacher: true });
 }
 
 function handleBroadcastIce(candidate) {
@@ -4149,7 +5525,8 @@ function handleBroadcastIce(candidate) {
 
 async function getClassroomCommandStateSnapshot() {
   const snapshot = {
-    screenLocked,
+    screenLocked: screenLockIsActive(),
+    flightPathActive: flightPathIsActive(),
     lockedUrl,
     lockedDomain,
     allowedDomains,
@@ -4164,11 +5541,14 @@ async function getClassroomCommandStateSnapshot() {
   try {
     const tabs = await chrome.tabs.query({});
     const activeTab = tabs.find(tab => tab.active) || tabs[0];
+    const tabSnapshot = await buildOpaqueTabSnapshot(tabs);
+    const activeEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === activeTab?.id);
     return {
       ...snapshot,
       tabCount: tabs.length,
+      tabSnapshotRevision: tabSnapshot.revision,
       activeTab: activeTab ? {
-        id: activeTab.id,
+        tabRef: activeEntry?.tabRef || null,
         url: activeTab.url || null,
         title: activeTab.title || null,
       } : null,
@@ -4183,6 +5563,9 @@ async function getClassroomCommandStateSnapshot() {
 
 async function clearTeacherSessionStateForSignOutNow(options = {}) {
   const eventScope = getMonitoringEventScope();
+  if (activeLiveViewNegotiationId) {
+    await stopScreenShare({ reason: options.reason || 'student-sign-out' });
+  }
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
@@ -4217,8 +5600,19 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   }
 
   broadcastToAllTabs('attention-mode', { active: false, message: '' });
-  broadcastToAllTabs('timer', { action: 'stop' });
-  broadcastToAllTabs('poll', { action: 'close' });
+  if (options.preserveTransientOverlays !== true) {
+    await clearClassroomOverlayState(options.reason || 'classroom-state-cleared');
+  }
+}
+
+function requestFabStateOnHeartbeat() {
+  const now = Date.now();
+  const interval = wsConnected
+    ? FAB_HEARTBEAT_CONNECTED_SYNC_INTERVAL_MS
+    : FAB_HEARTBEAT_DISCONNECTED_SYNC_INTERVAL_MS;
+  if (now - lastFabHeartbeatSyncRequestAt < interval) return false;
+  lastFabHeartbeatSyncRequestAt = now;
+  return true;
 }
 
 function clearTeacherSessionStateForSignOut(options = {}) {
@@ -4242,10 +5636,109 @@ function isOnSameDomain(url, domain) {
   if (!url || !domain) return false;
   const urlDomain = extractDomain(url);
   if (!urlDomain) return false;
-  
+
   // Use exact domain matching for precise control
   // e.g., "classroom.google.com" only matches "classroom.google.com"
   return urlDomain === domain;
+}
+
+const AUTHORITY_BOUND_COMMAND_TYPES = new Set([
+  'open-tab',
+  'close-tabs',
+  'close-tab',
+  'lock-screen',
+  'unlock-screen',
+  'apply-flight-path',
+  'remove-flight-path',
+  'temp-unblock',
+  'apply-block-list',
+  'remove-block-list',
+  'limit-tabs',
+  'attention-mode',
+  'timer',
+  'poll',
+  'student-sign-out',
+  'messaging-toggle',
+  'hand-raising-toggle',
+  'hand-dismissed',
+  'teacher-message',
+]);
+
+function commandAuthority(command = {}, envelope = {}) {
+  const authority = command.authority || envelope.authority || {};
+  const state = envelope.classroomState || envelope.stateSnapshot || command.classroomState || {};
+  const teachingSessionId = String(
+    authority.teachingSessionId
+    || command.teachingSessionId
+    || envelope.teachingSessionId
+    || state.teachingSessionId
+    || ''
+  ).trim() || null;
+  const supervisionContextId = String(
+    authority.supervisionContextId
+    || command.supervisionContextId
+    || envelope.supervisionContextId
+    || state.supervisionContextId
+    || ''
+  ).trim() || null;
+  return {
+    kind: String(authority.kind || '').trim() || null,
+    schoolId: String(authority.schoolId || '').trim() || null,
+    source: String(authority.source || '').trim() || null,
+    teachingSessionId,
+    supervisionContextId,
+  };
+}
+
+function assertCurrentCommandAuthority(command = {}, envelope = {}) {
+  const commandType = String(command.type || '').trim();
+  if (!AUTHORITY_BOUND_COMMAND_TYPES.has(commandType)) return null;
+  const authority = commandAuthority(command, envelope);
+  if (authority.kind === 'school_policy') {
+    const allowedSource = (
+      (commandType === 'close-tab' || commandType === 'close-tabs')
+        && authority.source === 'ai_safety'
+    ) || (
+      commandType === 'limit-tabs'
+        && authority.source === 'school_settings'
+    );
+    if (!allowedSource || !authority.schoolId || authority.schoolId !== CONFIG.schoolId) {
+      const error = new Error('Command has invalid school-policy authority');
+      error.code = 'COMMAND_AUTHORITY_MISMATCH';
+      throw error;
+    }
+    return authority;
+  }
+  if (Boolean(authority.teachingSessionId) === Boolean(authority.supervisionContextId)) {
+    const error = new Error('Command is missing one immutable classroom authority');
+    error.code = 'COMMAND_AUTHORITY_MISSING';
+    throw error;
+  }
+
+  if (authority.teachingSessionId) {
+    const stateScope = currentClassroomState?.supervisionContextId
+      ? null
+      : currentClassroomState?.teachingSessionId || null;
+    const activeSessionIds = activeTeachingSessionIds();
+    if (
+      (stateScope
+        ? stateScope !== authority.teachingSessionId
+        : !activeSessionIds.includes(authority.teachingSessionId))
+      || currentClassroomState?.supervisionContextId
+    ) {
+      const error = new Error('Command belongs to an inactive teaching session');
+      error.code = 'COMMAND_AUTHORITY_MISMATCH';
+      throw error;
+    }
+    return authority;
+  }
+
+  if (currentClassroomState?.supervisionContextId !== authority.supervisionContextId) {
+    const error = new Error('Command belongs to an inactive supervision context');
+    error.code = 'COMMAND_AUTHORITY_MISMATCH';
+    throw error;
+  }
+  return authority;
 }
 
 async function handleRemoteControl(command, envelope = {}) {
@@ -4257,7 +5750,7 @@ async function handleRemoteControl(command, envelope = {}) {
   // receive the envelope before its deadline, report expiry without executing.
   if (delivery.expired) {
     if (commandId) {
-      sendCommandAck(commandId, 'expired', {
+      await sendCommandAck(commandId, 'expired', {
         commandType,
         deliveryPolicy: delivery.deliveryPolicy,
         expiresAt: delivery.expiresAt,
@@ -4268,8 +5761,27 @@ async function handleRemoteControl(command, envelope = {}) {
     return { expired: true, expiresAt: delivery.expiresAt };
   }
 
+  let authority = null;
+  try {
+    assertCurrentStudentBinding(envelope, 'remote-control command');
+    authority = assertCurrentCommandAuthority(command, envelope);
+  } catch (error) {
+    if (commandId) {
+      await sendCommandAck(commandId, 'failed', {
+        commandType,
+        error: commandErrorMessage(error),
+        errorCode: error?.code || 'COMMAND_AUTHORITY_MISMATCH',
+        state: await getClassroomCommandStateSnapshot(),
+        outcome: 'failed',
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
+      });
+    }
+    return { rejected: true, error: commandErrorMessage(error) };
+  }
+
   if (commandId) {
-    sendCommandAck(commandId, 'received', {
+    await sendCommandAck(commandId, 'received', {
       commandType,
       deliveryPolicy: delivery.deliveryPolicy,
       expiresAt: delivery.expiresAt,
@@ -4277,13 +5789,29 @@ async function handleRemoteControl(command, envelope = {}) {
   }
 
   try {
+    // Re-check after the asynchronous receipt write. A class replacement may
+    // have arrived while the durable ACK was being persisted.
+    assertCurrentStudentBinding(envelope, 'remote-control command');
+    assertCurrentCommandAuthority(command, envelope);
+    if (authority?.teachingSessionId) {
+      command.data = {
+        ...(command.data || {}),
+        teachingSessionId: authority.teachingSessionId,
+      };
+    }
     const classroomState = envelope?.classroomState
       || envelope?.stateSnapshot
       || command?.classroomState
       || command?.data?.classroomState;
+    // School-policy commands (currently the administrator's global tab limit)
+    // are not classroom state. Persisting them through the legacy classroom
+    // reducer would incorrectly attach a school setting to whichever class is
+    // active on the device.
+    const isClassroomStatefulCommand = STATEFUL_COMMAND_TYPES.has(commandType)
+      && authority?.kind !== 'school_policy';
     let application = null;
     let result;
-    if (classroomState && STATEFUL_COMMAND_TYPES.has(commandType)) {
+    if (classroomState && isClassroomStatefulCommand) {
       application = await applyClassroomState(classroomState, { reason: 'stateful_command' });
       result = {
         commandType,
@@ -4292,12 +5820,12 @@ async function handleRemoteControl(command, envelope = {}) {
         outcome: application.outcome,
         completedAt: new Date().toISOString(),
       };
-    } else if (STATEFUL_COMMAND_TYPES.has(commandType)) {
+    } else if (isClassroomStatefulCommand) {
       result = await enqueueClassroomStateOperation(async () => {
         const runtimeBackup = classroomRuntimeBackup();
         const stateBackup = currentClassroomState;
         try {
-          const legacyResult = await executeRemoteControlCommand(command || {});
+          const legacyResult = await executeRemoteControlCommand(command || {}, { commandId, envelope, delivery });
           await persistLegacyClassroomState(command, envelope);
           application = {
             outcome: 'applied',
@@ -4325,10 +5853,10 @@ async function handleRemoteControl(command, envelope = {}) {
         }
       });
     } else {
-      result = await executeRemoteControlCommand(command || {});
+      result = await executeRemoteControlCommand(command || {}, { commandId, envelope, delivery });
     }
     if (commandId) {
-      sendCommandAck(commandId, 'completed', {
+      await sendCommandAck(commandId, 'completed', {
         commandType,
         result,
         state: await getClassroomCommandStateSnapshot(),
@@ -4341,7 +5869,7 @@ async function handleRemoteControl(command, envelope = {}) {
   } catch (error) {
     console.warn('Error handling remote control command:', error);
     if (commandId) {
-      sendCommandAck(commandId, 'failed', {
+      await sendCommandAck(commandId, 'failed', {
         commandType,
         error: commandErrorMessage(error),
         state: await getClassroomCommandStateSnapshot(),
@@ -4351,10 +5879,11 @@ async function handleRemoteControl(command, envelope = {}) {
         expiresAt: delivery.expiresAt,
       });
     }
+    return { rejected: true, error: commandErrorMessage(error) };
   }
 }
 
-async function executeRemoteControlCommand(command) {
+async function executeRemoteControlCommand(command, executionContext = {}) {
   console.log('Remote control command received:', command);
   const result = {
     commandType: command.type || 'unknown',
@@ -4369,16 +5898,40 @@ async function executeRemoteControlCommand(command) {
         }
         {
           const tab = await chrome.tabs.create({ url: command.data.url, active: true });
+          const tabSnapshot = await buildOpaqueTabSnapshot(await chrome.tabs.query({}));
+          const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
           result.openedUrl = command.data.url;
-          result.tabId = tab.id;
+          result.tabRef = openedEntry?.tabRef || null;
+          result.tabSnapshotRevision = tabSnapshot.revision;
           console.log('Opened tab:', command.data.url);
           // Capture screenshot after tab loads so dashboard updates fast
-          setTimeout(() => captureAndSendScreenshot(), 2000);
+          setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 2000);
         }
         break;
         
+      case 'close-tabs':
       case 'close-tab':
-        if (command.data.closeAll) {
+        if (Array.isArray(command.data.tabRefs) || command.data.tabRef) {
+          const exact = await resolveExactTabRefs(
+            command.data.tabRefs || [command.data.tabRef],
+            command.data.snapshotRevision ?? command.data.tabSnapshotRevision
+          );
+          let closedCount = 0;
+          for (const target of exact.targets) {
+            try {
+              await chrome.tabs.remove(target.tabId);
+              closedCount += 1;
+            } catch (error) {
+              const closeError = new Error(`Exact tab ${target.tabRef} could not be closed`);
+              closeError.code = 'TAB_CLOSE_FAILED';
+              throw closeError;
+            }
+          }
+          result.closedTabRefs = exact.targets.map((target) => target.tabRef);
+          result.closedCount = closedCount;
+          result.tabSnapshotRevision = exact.revision;
+          await refreshTabCache();
+        } else if (command.data.closeAll) {
           // Close all tabs except chrome:// system tabs and optionally allowed domains
           const tabs = await chrome.tabs.query({});
           const allowedDomains = command.data.allowedDomains || [];
@@ -4455,7 +6008,7 @@ async function executeRemoteControlCommand(command) {
           throw new Error('Missing close-tab target');
         }
         // Capture screenshot immediately after closing tabs so dashboard updates fast
-        setTimeout(() => captureAndSendScreenshot(), 1500);
+        setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 1500);
         break;
 
       case 'lock-screen':
@@ -4481,7 +6034,6 @@ async function executeRemoteControlCommand(command) {
           throw new Error('Could not determine locked domain');
         }
         screenLocked = true;
-        allowedDomains = []; // Clear scene domains when locking to single domain
         
         // Persist lock-screen state to survive service worker restarts
         await chrome.storage.local.set({
@@ -4492,8 +6044,9 @@ async function executeRemoteControlCommand(command) {
             timestamp: Date.now()
           }
         });
-        // Clear Flight Path state when locking screen
-        await chrome.storage.local.remove('flightPathState');
+        // Keep any independently applied Flight Path durable underneath the
+        // screen-lock overlay. Screen Lock wins enforcement while active;
+        // screen-only Unlock recomposes the retained path.
         console.log('[Lock Screen] State persisted to storage');
         
         // Apply network-level blocking rules for single domain
@@ -4530,29 +6083,53 @@ async function executeRemoteControlCommand(command) {
         break;
         
       case 'unlock-screen':
+        {
+        const screenOnly = command.data.screenOnly === true || command.screenOnly === true;
+        const preserveFlightPath = screenOnly && allowedDomains.length > 0;
         screenLocked = false;
         lockedUrl = null;
         lockedDomain = null;
-        allowedDomains = []; // Clear all lock state
-        activeFlightPathName = null; // Clear Flight Path name
+        if (!screenOnly) {
+          allowedDomains = []; // Legacy full unlock clears all lock state
+          activeFlightPathName = null;
+        }
         
-        // Clear persisted lock-screen and Flight Path state
-        await chrome.storage.local.remove(['lockScreenState', 'flightPathState']);
+        // Screen-only unlock deliberately preserves an independently applied
+        // Flight Path. Legacy clients/commands retain the historical full
+        // unlock behavior for mixed 2.5.7 deployments.
+        await chrome.storage.local.remove(screenOnly
+          ? ['lockScreenState']
+          : ['lockScreenState', 'flightPathState']);
         console.log('[Unlock Screen] State cleared from storage');
         
-        // Clear network-level blocking rules
-        await clearBlockingRules();
+        // Recompose the retained Flight Path immediately. Clearing all
+        // classroom rules here would make a screen-only unlock silently lift
+        // the still-active path until a later reconciliation.
+        if (preserveFlightPath) {
+          await updateBlockingRules(allowedDomains);
+          await reconcileClassroomStateTabsBestEffort({
+            restrictions: classroomRestrictionsFromRuntime(),
+          });
+        } else {
+          await clearBlockingRules();
+        }
         
         safeNotify({
           title: 'Screen Unlocked',
-          message: 'Your screen has been unlocked. You can now browse freely.',
+          message: preserveFlightPath
+            ? 'Your screen lock was removed. Your class Flight Path is still active.'
+            : 'Your screen has been unlocked. You can now browse freely.',
           priority: 1,
         });
         
         result.screenLocked = false;
-        result.clearedStates = ['screen-lock', 'flight-path'];
+        result.flightPathActive = preserveFlightPath;
+        result.screenLockActive = false;
+        result.clearedStates = screenOnly ? ['screen-lock'] : ['screen-lock', 'flight-path'];
+        result.flightPathPreserved = preserveFlightPath;
         console.log('Screen unlocked');
         break;
+        }
         
       case 'apply-flight-path':
         {
@@ -4564,19 +6141,22 @@ async function executeRemoteControlCommand(command) {
           allowedDomains = RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'Flight Path domains');
           activeFlightPathName = command.data.flightPathName || null;
         }
-        screenLocked = true;
+        // Applying a Flight Path replaces the foreground screen lock while
+        // establishing its own independent browsing restriction.
+        screenLocked = false;
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
         lockedDomain = null; // Clear single domain when applying Flight Path
         
         // Persist Flight Path state to survive service worker restarts
         await chrome.storage.local.set({
           flightPathState: {
-            screenLocked: true,
+            screenLocked: false,
             allowedDomains,
             activeFlightPathName,
             timestamp: Date.now()
           }
         });
+        await chrome.storage.local.remove('lockScreenState');
         console.log('[Flight Path] State persisted to storage');
         
         // Apply network-level blocking rules
@@ -4613,16 +6193,14 @@ async function executeRemoteControlCommand(command) {
           });
         }
         
-        result.screenLocked = true;
+        result.screenLocked = false;
+        result.flightPathActive = true;
         result.allowedDomains = allowedDomains;
         result.activeFlightPathName = activeFlightPathName;
         console.log('Flight Path applied with allowed domains:', allowedDomains, 'Name:', activeFlightPathName);
         break;
         
       case 'remove-flight-path':
-        screenLocked = false;
-        lockedUrl = null;
-        lockedDomain = null;
         allowedDomains = []; // Clear all flight path domains
         activeFlightPathName = null; // Clear Flight Path name
         
@@ -4639,7 +6217,8 @@ async function executeRemoteControlCommand(command) {
           priority: 1,
         });
         
-        result.screenLocked = false;
+        result.screenLocked = screenLocked;
+        result.flightPathActive = false;
         result.clearedStates = ['flight-path'];
         console.log('Flight Path removed - all restrictions cleared');
         break;
@@ -4718,9 +6297,15 @@ async function executeRemoteControlCommand(command) {
       case 'limit-tabs':
         {
           const requestedLimit = Number(command.data.maxTabs);
-          teacherMaxTabs = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+          const normalizedLimit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
             ? Math.min(requestedLimit, 1000)
             : null;
+          const authority = commandAuthority(command, executionContext.envelope);
+          if (authority.kind === 'school_policy') {
+            schoolMaxTabs = normalizedLimit;
+          } else {
+            teacherMaxTabs = normalizedLimit;
+          }
           currentMaxTabs = effectiveTabLimit();
         }
         
@@ -4768,13 +6353,19 @@ async function executeRemoteControlCommand(command) {
         break;
 
       case 'timer':
-        // Start/stop timer overlay on all tabs (fire-and-forget for instant response)
         const timerAction = command.data.action;
         const timerSeconds = command.data.seconds;
         const timerMessage = command.data.message || '';
+        const timerState = await persistTimerOverlay(command, executionContext);
+        const timerEndsAt = timerState?.timer?.endsAt || null;
 
-        // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('timer', { action: timerAction, seconds: timerSeconds, message: timerMessage });
+        broadcastToAllTabs('timer', {
+          action: timerAction,
+          seconds: timerSeconds,
+          message: timerMessage,
+          endsAt: timerEndsAt,
+          teachingSessionId: timerState?.timer?.teachingSessionId || null,
+        });
 
         if (timerAction === 'start') {
           safeNotify({
@@ -4787,6 +6378,7 @@ async function executeRemoteControlCommand(command) {
         result.action = timerAction;
         result.seconds = timerSeconds;
         result.message = timerMessage;
+        result.endsAt = timerEndsAt;
         console.log('Timer:', timerAction, timerSeconds, 'seconds');
         break;
 
@@ -4797,9 +6389,13 @@ async function executeRemoteControlCommand(command) {
         const pollQuestion = command.data.question;
         const pollOptions = command.data.options;
 
-        // Dedup: skip if we already processed this exact poll start
+        // The persisted poll is the restart-safe dedup boundary. The short
+        // in-memory set only avoids duplicate same-turn broadcasts.
         if (pollAction === 'start' && seenPollIds.has(pollId)) {
           console.log('Poll dedup: already shown', pollId);
+          result.action = pollAction;
+          result.pollId = pollId;
+          result.deduplicated = true;
           break;
         }
         if (pollAction === 'start') {
@@ -4811,8 +6407,16 @@ async function executeRemoteControlCommand(command) {
           seenPollIds.delete(pollId);
         }
 
-        // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('poll', { action: pollAction, pollId, question: pollQuestion, options: pollOptions });
+        const pollState = await persistPollOverlay(command, executionContext);
+
+        broadcastToAllTabs('poll', {
+          action: pollAction,
+          pollId,
+          question: pollQuestion,
+          options: pollOptions,
+          expiresAt: pollState?.poll?.expiresAt || null,
+          teachingSessionId: pollState?.poll?.teachingSessionId || null,
+        });
 
         if (pollAction === 'start') {
           safeNotify({
@@ -4843,7 +6447,7 @@ async function executeRemoteControlCommand(command) {
 
       case 'hand-dismissed':
         // Notify student their hand was acknowledged
-        chrome.storage.local.set({ handRaised: false });
+        await updateLocalFabHandRaised(false, 'hand-dismissed');
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-dismissed', command.data || {});
@@ -4855,7 +6459,15 @@ async function executeRemoteControlCommand(command) {
       case 'messaging-toggle':
         // Update local storage with messaging enabled state
         const messagingEnabled = command.data.messagingEnabled ?? command.data.enabled;
-        chrome.storage.local.set({ messagingEnabled });
+        const messagingRevision = Number(command.data.revision);
+        await applyFabSettings({
+          ...(currentFabState || {}),
+          messagingEnabled,
+          ...(Number.isSafeInteger(messagingRevision) && messagingRevision >= 0
+            ? { revision: messagingRevision, lifecycleRevision: messagingRevision }
+            : {}),
+          reason: 'messaging-toggle',
+        });
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('messaging-toggle', { ...(command.data || {}), enabled: messagingEnabled });
@@ -4867,7 +6479,15 @@ async function executeRemoteControlCommand(command) {
       case 'hand-raising-toggle':
         // Update local storage with hand raising enabled state
         const handRaisingEnabled = command.data.enabled;
-        chrome.storage.local.set({ handRaisingEnabled });
+        const handRevision = Number(command.data.revision);
+        await applyFabSettings({
+          ...(currentFabState || {}),
+          handRaisingEnabled,
+          ...(Number.isSafeInteger(handRevision) && handRevision >= 0
+            ? { revision: handRevision, lifecycleRevision: handRevision }
+            : {}),
+          reason: 'hand-raising-toggle',
+        });
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-raising-toggle', { ...(command.data || {}), enabled: handRaisingEnabled });
@@ -4876,13 +6496,11 @@ async function executeRemoteControlCommand(command) {
         console.log('Hand raising toggle sent:', handRaisingEnabled);
         break;
 
+      case 'fab-state-sync':
       case 'fab-state':
         // Apply session lifecycle state pushed by SchoolPilot when classes start/end.
         const fabStateData = command.data || {};
         const appliedFabState = await applyFabSettings(fabStateData);
-
-        // Fire-and-forget - content scripts update open FAB UI immediately.
-        broadcastToAllTabs('fab-state', fabStateData);
 
         result.fabState = appliedFabState;
         console.log('FAB state updated:', fabStateData.reason || 'state-refresh');
@@ -4992,8 +6610,27 @@ async function broadcastToAllTabs(messageType, messageData) {
 }
 
 // Chat/Message Handlers (Phase 2)
+function messageMatchesActiveFabSession(message = {}) {
+  const sessionId = String(message.sessionId || message.teachingSessionId || '').trim();
+  if (!sessionId) return true; // Legacy 2.5.7-compatible announcements
+  if (currentClassroomState?.teachingSessionId || currentClassroomState?.supervisionContextId) {
+    return !currentClassroomState.supervisionContextId
+      && currentClassroomState.teachingSessionId === sessionId;
+  }
+  const activeSessions = activeTeachingSessionIds();
+  if (activeSessions.length === 0) return !currentFabState;
+  return activeSessions.includes(sessionId);
+}
+
 async function handleChatMessage(message) {
   console.log('Chat message received:', message);
+
+  if (!acceptsCurrentStudentBinding(message, 'teacher chat message')) return;
+
+  if (!messageMatchesActiveFabSession(message)) {
+    console.warn('[FAB] Ignoring chat for an inactive teaching session');
+    return;
+  }
 
   const expectedBinding = messageInboxAuthBinding();
   const inboxMessage = messageWithStableLocalId(message, 'chat');
@@ -5023,23 +6660,40 @@ async function handleChatMessage(message) {
   });
 }
 
-async function handleDurableTeacherMessage(message) {
-  const expectedBinding = messageInboxAuthBinding();
+async function handleDurableTeacherMessage(message, options = {}) {
+  const expectedBinding = options.expectedBinding || messageInboxAuthBinding();
   const commandId = getCommandIdFromMessage(message);
+  const hasChatDelivery = !commandId || Boolean(message.chatDeliveryId || message.deliveryId);
   const delivery = RuntimeCore.commandDeliveryState(
     { type: 'teacher-message', ...message.command },
     message,
     Date.now()
   );
-  if (commandId) {
-    sendCommandAck(commandId, 'received', {
-      commandType: 'teacher-message',
-      deliveryPolicy: delivery.deliveryPolicy,
-      expiresAt: delivery.expiresAt,
-    });
-  }
-
   try {
+    assertCurrentStudentBinding(message, 'durable teacher message');
+    if (!expectedBinding || expectedBinding !== messageInboxAuthBinding()) {
+      throw new Error('Teacher message belongs to a retired student session');
+    }
+    if (commandId) {
+      assertCurrentCommandAuthority({
+        type: 'teacher-message',
+        authority: message.authority,
+        teachingSessionId: message.teachingSessionId,
+        supervisionContextId: message.supervisionContextId,
+        ...message.command,
+      }, message);
+    }
+    if (!messageMatchesActiveFabSession(message)) {
+      throw new Error('Teacher message belongs to an inactive teaching session');
+    }
+    if (commandId) {
+      await sendCommandAck(commandId, 'received', {
+        commandType: 'teacher-message',
+        deliveryPolicy: delivery.deliveryPolicy,
+        expiresAt: delivery.expiresAt,
+      });
+    }
+    assertCurrentStudentBinding(message, 'durable teacher message');
     const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
     const inboxResult = await persistTeacherMessages([inboxMessage], {
       reason: 'websocket-teacher-message',
@@ -5068,9 +6722,13 @@ async function handleDurableTeacherMessage(message) {
       });
     }
 
-    sendChatDeliveryAck(message, 'delivered');
+    if (hasChatDelivery) {
+      await sendChatDeliveryAck(message, 'delivered').catch((error) => {
+        console.warn('[Chat ACK] Could not persist delivered acknowledgement:', error?.message || error);
+      });
+    }
     if (commandId) {
-      sendCommandAck(commandId, 'completed', {
+      await sendCommandAck(commandId, 'completed', {
         commandType: 'teacher-message',
         result: deduplicated
           ? { deduplicated: true }
@@ -5083,9 +6741,13 @@ async function handleDurableTeacherMessage(message) {
         expiresAt: delivery.expiresAt,
       });
     }
+    return { messageId: inboxMessage.id, deduplicated };
   } catch (error) {
+    if (hasChatDelivery) {
+      await sendChatDeliveryAck(message, 'failed', commandErrorMessage(error)).catch(() => {});
+    }
     if (commandId) {
-      sendCommandAck(commandId, 'failed', {
+      await sendCommandAck(commandId, 'failed', {
         commandType: 'teacher-message',
         error: commandErrorMessage(error),
         state: await getClassroomCommandStateSnapshot(),
@@ -5095,6 +6757,43 @@ async function handleDurableTeacherMessage(message) {
     }
     throw error;
   }
+}
+
+async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
+  const legacyMessages = [];
+  const addedMessageIds = [];
+  for (const rawMessage of rawMessages || []) {
+    if (!getCommandIdFromMessage(rawMessage)) {
+      legacyMessages.push(rawMessage);
+      continue;
+    }
+    const teachingSessionId = String(rawMessage.teachingSessionId || '').trim() || null;
+    const supervisionContextId = String(rawMessage.supervisionContextId || '').trim() || null;
+    try {
+      const result = await handleDurableTeacherMessage({
+        ...rawMessage,
+        type: 'teacher-message',
+        _msgId: rawMessage.id,
+        messageId: rawMessage.id,
+        chatMessageId: rawMessage.id,
+        sessionId: teachingSessionId,
+        teachingSessionId,
+        supervisionContextId,
+        authority: rawMessage.authority || { teachingSessionId, supervisionContextId },
+        studentId: CONFIG.activeStudentId,
+        fromName: rawMessage.fromName || 'Teacher',
+      }, { expectedBinding });
+      if (!result.deduplicated) addedMessageIds.push(result.messageId);
+    } catch (error) {
+      console.warn('[Heartbeat] Durable teacher message was not applied:', error?.message || error);
+    }
+  }
+
+  if (legacyMessages.length > 0) {
+    const legacyResult = await persistHeartbeatPendingMessages(legacyMessages, expectedBinding);
+    addedMessageIds.push(...legacyResult.addedMessageIds);
+  }
+  return { addedMessageIds };
 }
 
 // Check-in Request Handler (Phase 3)
@@ -5189,6 +6888,34 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
   }
 
+  // Screen Lock is the foreground teacher control. It permits only its exact
+  // target domain and cannot be widened by a retained temporary unblock or
+  // teacher block-list state. School policy above remains authoritative.
+  if (screenLocked) {
+    if (lockedDomain && isOnSameDomain(details.url, lockedDomain)) return;
+    console.log('[Screen Lock] Blocked navigation to:', details.url);
+    enqueueMonitoringEvent('navigation_blocked', {
+      url: details.url,
+      title: '',
+      policySource: 'screen_lock',
+    }).catch(() => {});
+    if (lockedUrl) {
+      chrome.tabs.update(details.tabId, { url: lockedUrl });
+    } else {
+      chrome.tabs.goBack(details.tabId).catch(() => {
+        chrome.tabs.update(details.tabId, { url: 'about:blank' });
+      });
+    }
+    safeNotify({
+      title: 'Navigation Blocked',
+      message: lockedDomain
+        ? `You can only browse within ${lockedDomain}`
+        : 'Your screen is locked by your teacher.',
+      priority: 2,
+    });
+    return;
+  }
+
   // Check if domain is temporarily allowed after school policy has had the
   // opportunity to block it.
   const isTempAllowed = temporaryAllowedDomains.some(d => {
@@ -5229,21 +6956,14 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
   }
   
-  // Check screen lock
-  if (screenLocked) {
+  // With no foreground Screen Lock, the independently retained Flight Path
+  // continues to constrain navigation (subject to temporary allows above).
+  if (allowedDomains.length > 0) {
     let isAllowed = false;
     let blockedMessage = '';
     
-    // Check if navigation is allowed based on lock type
-    if (allowedDomains.length > 0) {
-      // Scene mode: check against multiple allowed domains
-      isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
-      blockedMessage = `You can only access: ${allowedDomains.join(', ')}`;
-    } else if (lockedDomain) {
-      // Lock mode: check against single domain
-      isAllowed = isOnSameDomain(details.url, lockedDomain);
-      blockedMessage = `You can only browse within ${lockedDomain}`;
-    }
+    isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
+    blockedMessage = `You can only access: ${allowedDomains.join(', ')}`;
     
     if (!isAllowed) {
       // Redirect back to locked URL or prevent navigation
@@ -5251,7 +6971,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       enqueueMonitoringEvent('navigation_blocked', {
         url: details.url,
         title: '',
-        policySource: allowedDomains.length > 0 ? 'flight_path' : 'screen_lock',
+        policySource: 'flight_path',
       }).catch(() => {});
       
       // If we have a single locked URL, redirect to it
@@ -5322,7 +7042,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 
     // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
     // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
-    if (screenLocked && lockedDomain && allowedDomains.length === 0) {
+    if (screenLocked && lockedDomain) {
       // Single domain lock mode - block all new tabs
       if (tab.id) {
         enqueueMonitoringEvent('navigation_blocked', {
@@ -5385,30 +7105,52 @@ chrome.tabs.onRemoved.addListener(() => {
 // All WebRTC logic moved to offscreen.js which runs in a page context
 
 async function ensureOffscreenDocument() {
-  // Check if document already exists
-  if (await chrome.offscreen.hasDocument?.()) {
-    return;
-  }
-  
-  // Prevent multiple creation attempts
-  if (!creatingOffscreen) {
-    creatingOffscreen = chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['USER_MEDIA', 'DISPLAY_MEDIA', 'BLOBS'],
-      justification: 'Screen capture, WebRTC, and WebSocket must run in page context for MV3 compatibility'
-    }).then(() => {
+  if (await hasOffscreenDocument()) return;
+  if (creatingOffscreen) return creatingOffscreen;
+
+  creatingOffscreen = (async () => {
+    try {
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: ['USER_MEDIA', 'DISPLAY_MEDIA', 'BLOBS'],
+        justification: 'Screen capture, WebRTC, and WebSocket must run in page context for MV3 compatibility'
+      });
       console.log('[Service Worker] Offscreen document created');
-    }).catch(error => {
-      console.warn('[Service Worker] Offscreen document creation failed (will retry):', error?.message || error);
+    } catch (error) {
+      // Chrome reports an existing-document error if another worker wake won
+      // the race. Verify the context before treating it as a real failure.
+      if (!await hasOffscreenDocument()) {
+        console.warn('[Service Worker] Offscreen document creation failed:', error?.message || error);
+        throw error;
+      }
+    } finally {
       creatingOffscreen = null;
+    }
+  })();
+  return creatingOffscreen;
+}
+
+async function hasOffscreenDocument() {
+  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+  if (typeof chrome.runtime.getContexts === 'function') {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [offscreenUrl],
     });
+    return contexts.length > 0;
   }
-  
-  await creatingOffscreen;
+  if (typeof chrome.offscreen.hasDocument === 'function') {
+    return chrome.offscreen.hasDocument();
+  }
+  if (globalThis.clients?.matchAll) {
+    const clients = await globalThis.clients.matchAll();
+    return clients.some((client) => client.url === offscreenUrl);
+  }
+  return offscreenReady;
 }
 
 async function closeOffscreenDocument() {
-  if (await chrome.offscreen.hasDocument?.()) {
+  if (await hasOffscreenDocument()) {
     await chrome.offscreen.closeDocument();
   }
   creatingOffscreen = null;
@@ -5424,20 +7166,33 @@ async function sendToOffscreen(message) {
     await new Promise(resolve => setTimeout(resolve, 100));
   }
   
+  let response;
   try {
-    return await chrome.runtime.sendMessage(message);
+    response = await chrome.runtime.sendMessage(message);
   } catch (error) {
-    // Expected: offscreen might not be ready yet or connection lost
-    console.info('[Service Worker] Offscreen communication deferred (expected during initialization):', error.message);
-    return { success: false, error: error.message };
+    offscreenReady = false;
+    const rpcError = new Error(`Offscreen RPC failed: ${error?.message || error}`);
+    rpcError.code = 'OFFSCREEN_RPC_FAILED';
+    throw rpcError;
   }
+  if (!response || response.success !== true) {
+    const rpcError = new Error(response?.error || `Offscreen ${message.type} failed`);
+    rpcError.code = response?.code || 'OFFSCREEN_RPC_REJECTED';
+    throw rpcError;
+  }
+  return response;
 }
 
 // WebRTC: Handle screen share request from teacher (orchestrate via offscreen)
-async function handleScreenShareRequest(mode = 'auto') {
+async function handleScreenShareRequest(
+  mode = 'auto',
+  negotiationId = null,
+  setupExpiresAt = null,
+  expiresAt = null,
+) {
   try {
+    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
     console.log('[WebRTC] Teacher requested screen share, mode:', mode);
-    setObservedState(true, 'teacher-request');
 
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
@@ -5477,10 +7232,14 @@ async function handleScreenShareRequest(mode = 'auto') {
       type: 'START_SHARE',
       deviceId: CONFIG.deviceId,
       mode: mode,
-      streamId: streamId
+      streamId: streamId,
+      negotiationId,
+      setupExpiresAt,
+      expiresAt,
     });
 
     if (!result?.success) {
+      await stopScreenShare({ reason: result?.status || 'capture-start-failed' });
       // Check if this is an expected failure (user denied, etc.)
       if (result?.status === 'user-denied') {
         console.info('[WebRTC] User denied screen share (expected behavior)');
@@ -5499,9 +7258,15 @@ async function handleScreenShareRequest(mode = 'auto') {
       }
     }
 
+    if (negotiationId !== activeLiveViewNegotiationId) {
+      await sendToOffscreen({ type: 'STOP_SHARE' }).catch(() => {});
+      return;
+    }
+    setObservedState(true, 'teacher-request');
     console.log('[WebRTC] Screen capture initiated in offscreen document');
 
   } catch (error) {
+    await stopScreenShare({ reason: 'capture-start-error' });
     // Only unexpected errors reach here
     console.warn('[WebRTC] Unexpected screen share request error:', error);
     safeNotify({
@@ -5512,8 +7277,9 @@ async function handleScreenShareRequest(mode = 'auto') {
 }
 
 // WebRTC: Handle stop screen share request from teacher
-async function handleStopScreenShare() {
+async function handleStopScreenShare(negotiationId = null) {
   try {
+    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
     console.log('[WebRTC] Teacher requested to stop screen share');
     setObservedState(false, 'teacher-stop');
     
@@ -5527,20 +7293,30 @@ async function handleStopScreenShare() {
     } else {
       console.info('[WebRTC] Stop share completed with status:', result?.status);
     }
+    if (activeLiveViewNegotiationId === negotiationId) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+    }
     
   } catch (error) {
     console.warn('[WebRTC] Error stopping screen share:', error);
+  } finally {
+    if (activeLiveViewNegotiationId === negotiationId) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+    }
   }
 }
 
 // WebRTC: Handle offer from teacher (forward to offscreen)
-async function handleOffer(sdp, from) {
+async function handleOffer(sdp, from, negotiationId) {
   try {
+    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
     console.log('[WebRTC] Forwarding offer to offscreen document');
     
     const response = await sendToOffscreen({
       type: 'SIGNAL',
-      payload: { type: 'offer', sdp: sdp, from: from }
+      payload: { type: 'offer', sdp: sdp, from: from, negotiationId }
     });
     
     if (!response?.success) {
@@ -5567,11 +7343,12 @@ async function handleOffer(sdp, from) {
 }
 
 // WebRTC: Handle ICE candidate from teacher (forward to offscreen)
-async function handleIceCandidate(candidate) {
+async function handleIceCandidate(candidate, negotiationId) {
   try {
+    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
     const response = await sendToOffscreen({
       type: 'SIGNAL',
-      payload: { type: 'ice', candidate: candidate }
+      payload: { type: 'ice', candidate: candidate, negotiationId }
     });
     
     // Expected: ICE candidates can arrive before peer is ready or be queued
@@ -5587,19 +7364,107 @@ async function handleIceCandidate(candidate) {
 }
 
 // WebRTC: Stop screen sharing (cleanup in offscreen)
-async function stopScreenShare() {
+async function stopScreenShare(options = {}) {
+  const negotiationId = activeLiveViewNegotiationId;
+  if (negotiationId && options.notifyServer !== false) {
+    wsSend({
+      type: 'stop-share',
+      to: 'teacher',
+      negotiationId,
+      reason: options.reason || 'student-capture-stopped',
+    });
+  }
   try {
     console.log('[WebRTC] Stopping screen share');
     await sendToOffscreen({
       type: 'STOP_SHARE'
     });
-    await closeOffscreenDocument();
+    // The offscreen document also owns the durable student WebSocket. Keep it
+    // alive while monitoring is ACTIVE/IDLE; OFF/sign-out performs the close.
+    if (trackingState === TRACKING_STATES.OFF) {
+      await closeOffscreenDocument();
+    }
   } catch (error) {
     console.warn('[WebRTC] Error stopping screen share:', error);
+  } finally {
+    if (!negotiationId || activeLiveViewNegotiationId === negotiationId) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+    }
   }
 }
 
-// Listen for messages FROM offscreen document
+async function handleOffscreenMessage(message) {
+  if (message.type === 'WS_EVENT') {
+    await handleWsEvent(message.event, message.data, message.connectionGeneration);
+    return { success: true };
+  }
+
+  if (message.type === 'ICE_CANDIDATE') {
+    if (message.negotiationId && message.negotiationId === activeLiveViewNegotiationId) {
+      await wsSend({
+        type: 'ice',
+        to: 'teacher',
+        negotiationId: message.negotiationId,
+        candidate: message.candidate,
+      });
+    }
+    return { success: true };
+  }
+
+  if (message.type === 'ANSWER') {
+    if (message.negotiationId && message.negotiationId === activeLiveViewNegotiationId) {
+      await wsSend({
+        type: 'answer',
+        to: 'teacher',
+        negotiationId: message.negotiationId,
+        sdp: message.sdp,
+      });
+    }
+    return { success: true };
+  }
+
+  if (message.type === 'CONNECTION_FAILED') {
+    console.log('[WebRTC] Connection failed, cleaning up');
+    await stopScreenShare();
+    setObservedState(false, 'connection-failed');
+    return { success: true };
+  }
+
+  if (message.type === 'CAPTURE_ERROR') {
+    safeNotify({
+      title: 'Screen Sharing Error',
+      message: message.error || 'Failed to capture screen',
+    });
+    await stopScreenShare();
+    setObservedState(false, 'capture-error');
+    return { success: true };
+  }
+
+  if (message.type === 'LIVE_VIEW_EXPIRED') {
+    const negotiationId = String(message.negotiationId || '').trim();
+    if (negotiationId) {
+      await wsSend({
+        type: 'stop-share',
+        to: 'teacher',
+        negotiationId,
+        reason: message.reason || 'student-capture-expired',
+      });
+    }
+    if (negotiationId && negotiationId === activeLiveViewNegotiationId) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+    }
+    setObservedState(false, message.reason || 'live-view-expired');
+    return { success: true };
+  }
+
+  return { success: false, ignored: true };
+}
+
+// Listen for messages FROM offscreen document. Keep the response channel open
+// until the relayed event's storage, ACK, auth, or Live View work has settled;
+// otherwise MV3 may suspend the worker immediately after a premature reply.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle OFFSCREEN_READY from offscreen document
   if (message.type === 'OFFSCREEN_READY') {
@@ -5608,50 +7473,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
     return true;
   }
-  
+
   // Only handle other messages from offscreen document
   if (!sender.url?.includes('offscreen.html')) {
     return;
   }
-  
+
   console.log('[Service Worker] Message from offscreen:', message.type);
-  
-  // Handle WebSocket events from offscreen proxy
-  if (message.type === 'WS_EVENT') {
-    handleWsEvent(message.event, message.data);
-    sendResponse({ success: true });
-  }
 
-  // Forward ICE candidates to teacher
-  if (message.type === 'ICE_CANDIDATE') {
-    wsSend({ type: 'ice', to: 'teacher', candidate: message.candidate });
-    sendResponse({ success: true });
-  }
-
-  // Forward answer to teacher
-  if (message.type === 'ANSWER') {
-    wsSend({ type: 'answer', to: 'teacher', sdp: message.sdp });
-    sendResponse({ success: true });
-  }
-  
-  // Handle connection failures
-  if (message.type === 'CONNECTION_FAILED') {
-    console.log('[WebRTC] Connection failed, cleaning up');
-    // Don't close offscreen document — it also hosts the WebSocket proxy
-    setObservedState(false, 'connection-failed');
-    sendResponse({ success: true });
-  }
-  
-  // Handle capture errors
-  if (message.type === 'CAPTURE_ERROR') {
-    safeNotify({
-      title: 'Screen Sharing Error',
-      message: message.error || 'Failed to capture screen',
-    });
-    setObservedState(false, 'capture-error');
-    sendResponse({ success: true });
-  }
-  
+  handleOffscreenMessage(message)
+    .then(sendResponse)
+    .catch((error) => sendResponse({
+      success: false,
+      error: error?.message || 'Offscreen message failed',
+    }));
   return true;
 });
 
@@ -5674,7 +7509,48 @@ function scheduleWsReconnect() {
 // Connect to WebSocket via offscreen document proxy
 // MV3 service workers can't maintain persistent WebSocket connections (Chrome 145+),
 // so the actual WebSocket lives in the offscreen document and relays messages here.
+async function queryOffscreenWebSocketStatus() {
+  try {
+    return await sendToOffscreen({ type: 'WS_STATUS' });
+  } catch {
+    return null;
+  }
+}
+
+async function recoverOffscreenWebSocketStatus() {
+  const status = await queryOffscreenWebSocketStatus();
+  if (!status) return false;
+  const generation = Number(status.connectionGeneration || 0);
+  if (generation < wsConnectionGeneration) return false;
+  if (Number.isSafeInteger(generation) && generation > wsConnectionGeneration) {
+    wsConnectionGeneration = generation;
+  }
+  wsTransportConnected = status.transportOpen === true;
+  if (status.transportOpen === true && status.authenticated === true) {
+    wsConnected = true;
+    wsAuthenticatedGeneration = wsConnectionGeneration;
+    wsReconnectBackoffMs = 10000;
+    await chrome.alarms.clear('ws-reconnect');
+    flushCommandAckOutbox().catch(() => {});
+    flushChatAckOutbox().catch(() => {});
+    return true;
+  }
+  wsConnected = false;
+  wsAuthenticatedGeneration = 0;
+  return false;
+}
+
 async function connectWebSocket() {
+  if (wsConnectInFlight) return wsConnectInFlight;
+  wsConnectInFlight = connectWebSocketNow();
+  try {
+    return await wsConnectInFlight;
+  } finally {
+    wsConnectInFlight = null;
+  }
+}
+
+async function connectWebSocketNow() {
   if (trackingState === TRACKING_STATES.OFF) {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
@@ -5694,6 +7570,11 @@ async function connectWebSocket() {
   // Ensure offscreen document exists (it hosts the WebSocket)
   await ensureOffscreenDocument();
 
+  if (await recoverOffscreenWebSocketStatus()) {
+    console.log('[WebSocket] Recovered authenticated offscreen transport');
+    return true;
+  }
+
   const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
   const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
 
@@ -5702,6 +7583,7 @@ async function connectWebSocket() {
     type: 'auth',
     role: 'student',
     deviceId: CONFIG.deviceId,
+    ...extensionProtocolDescriptor(),
   };
   if (CONFIG.studentToken) {
     authPayload.studentToken = CONFIG.studentToken;
@@ -5714,45 +7596,129 @@ async function connectWebSocket() {
 
   // Tell offscreen document to create the WebSocket
   wsConnected = false;
+  wsTransportConnected = false;
+  wsAuthenticatedGeneration = 0;
+  wsConnectionGeneration += 1;
   try {
-    await sendToOffscreen({ type: 'WS_CONNECT', url: wsUrl, authPayload });
-    console.log('[WebSocket] Connection request sent to offscreen document');
+    const response = await sendToOffscreen({
+      type: 'WS_CONNECT',
+      url: wsUrl,
+      authPayload,
+      connectionGeneration: wsConnectionGeneration,
+    });
+    console.log('[WebSocket] Connection request sent to offscreen document, generation',
+      response.connectionGeneration);
+    return true;
   } catch (error) {
     console.warn('[WebSocket] Failed to send connect request to offscreen:', error?.message || error);
     scheduleWsReconnect();
+    return false;
   }
 }
 
-// Handle WebSocket events relayed from offscreen document
-function handleWsEvent(event, data) {
+// Handle WebSocket events relayed from the offscreen document in transport
+// order. Offscreen emits frames without awaiting runtime.sendMessage, so an
+// explicit per-generation tail is required to keep auth/state/commands causal.
+function handleWsEvent(event, data, connectionGeneration) {
+  const generation = Number(connectionGeneration || 0);
+  if (generation !== wsConnectionGeneration) {
+    console.info('[WebSocket] Ignoring stale transport event for generation', generation);
+    return Promise.resolve({ ignored: true });
+  }
+  if (wsMessageProcessingGeneration !== generation) {
+    wsMessageProcessingGeneration = generation;
+    wsMessageProcessingTail = Promise.resolve();
+  }
+  const processing = wsMessageProcessingTail.then(
+    () => processWsEvent(event, data, generation),
+    () => processWsEvent(event, data, generation),
+  );
+  wsMessageProcessingTail = processing.catch(() => undefined);
+  return processing;
+}
+
+async function processWsEvent(event, data, generation) {
+  if (generation !== wsConnectionGeneration) return { ignored: true };
   if (event === 'open') {
-    console.log('WebSocket connected (via offscreen)');
-    wsConnected = true;
-    wsReconnectBackoffMs = 10000;
+    console.log('WebSocket transport connected (via offscreen)');
+    wsTransportConnected = true;
+    wsConnected = false;
   } else if (event === 'error') {
     console.warn('WebSocket connection issue');
+    scheduleWsReconnect();
   } else if (event === 'close') {
     console.log('WebSocket disconnected');
     wsConnected = false;
+    wsTransportConnected = false;
+    wsAuthenticatedGeneration = 0;
     setObservedState(false, 'ws-closed');
-    cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
+    await cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
+    if (activeLiveViewNegotiationId) {
+      await stopScreenShare({ notifyServer: false, reason: 'student-websocket-closed' });
+    }
     scheduleWsReconnect();
   } else if (event === 'message') {
-    handleWsMessage(data).catch((error) => {
-      console.warn('Error processing WebSocket message:', error);
-    });
+    await handleWsMessage(data, generation);
   }
+  return { handled: true };
 }
 
 // Process incoming WebSocket message (same logic as before, just extracted)
-async function handleWsMessage(rawData) {
+async function handleWsMessage(rawData, connectionGeneration = wsConnectionGeneration) {
+    if (Number(connectionGeneration) !== wsConnectionGeneration) return;
     try {
       const message = JSON.parse(rawData);
       console.log('WebSocket message:', message);
+
+      if (message.type === 'command-ack-receipt') {
+        if (message.ackId) {
+          await removeCommandAcks([message.ackId]);
+          if (message.accepted === false) {
+            console.warn('[Command ACK] Server rejected acknowledgement:', message.ackId);
+          }
+        }
+        return;
+      }
+
+      if (message.type === 'chat-message-ack-receipt') {
+        if (message.ackId) {
+          await removeChatAcks([message.ackId]);
+          if (message.accepted === false) {
+            console.warn('[Chat ACK] Server rejected acknowledgement:', message.ackId);
+          }
+        }
+        return;
+      }
+
+      if (message.type === 'auth-error' || message.type === 'auth-failed') {
+        wsConnected = false;
+        wsAuthenticatedGeneration = 0;
+        if (activeLiveViewNegotiationId) {
+          await stopScreenShare({ notifyServer: false, reason: 'student-websocket-auth-rejected' });
+        }
+        scheduleWsReconnect();
+        return;
+      }
       
       // Handle authentication success with settings
       if (message.type === 'auth-success') {
         console.log('WebSocket authenticated successfully');
+        try {
+          await adoptAuthenticatedStudentBinding(message, 'websocket auth');
+        } catch (error) {
+          console.warn('[WebSocket] Exact student binding was rejected:', error?.message || error);
+          wsConnected = false;
+          wsAuthenticatedGeneration = 0;
+          await disconnectWebSocket();
+          return;
+        }
+        wsTransportConnected = true;
+        wsConnected = true;
+        wsAuthenticatedGeneration = wsConnectionGeneration;
+        wsReconnectBackoffMs = 10000;
+        chrome.alarms.clear('ws-reconnect');
+        await flushCommandAckOutbox().catch(() => {});
+        await flushChatAckOutbox().catch(() => {});
         
         // Always update maxTabsPerStudent setting (including null for unlimited)
         if (message.settings && message.settings.hasOwnProperty('maxTabsPerStudent')) {
@@ -5766,34 +7732,32 @@ async function handleWsMessage(rawData) {
           
           // Immediately enforce the limit if set (null or non-positive means no limit)
           if (currentMaxTabs !== null && currentMaxTabs > 0) {
-            (async () => {
-              try {
-                const tabs = await chrome.tabs.query({});
-                if (tabs.length > currentMaxTabs) {
-                  // Close oldest tabs first (keep most recent)
-                  const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
-                  for (const tab of tabsToClose) {
-                    try {
-                      // Only close if it's not a protected chrome:// URL and has a valid id
-                      if (tab.id && !tab.url?.startsWith('chrome://')) {
-                        await chrome.tabs.remove(tab.id);
-                      }
-                    } catch (tabError) {
-                      console.warn('Failed to close tab:', tab.id, tabError);
-                      // Continue closing other tabs even if one fails
+            try {
+              const tabs = await chrome.tabs.query({});
+              if (tabs.length > currentMaxTabs) {
+                // Close oldest tabs first (keep most recent)
+                const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
+                for (const tab of tabsToClose) {
+                  try {
+                    // Only close if it's not a protected chrome:// URL and has a valid id
+                    if (tab.id && !tab.url?.startsWith('chrome://')) {
+                      await chrome.tabs.remove(tab.id);
                     }
+                  } catch (tabError) {
+                    console.warn('Failed to close tab:', tab.id, tabError);
+                    // Continue closing other tabs even if one fails
                   }
-                  
-                  safeNotify({
-                    title: 'Tab Limit Enforced',
-                    message: `Your teacher has set a limit of ${currentMaxTabs} tab${currentMaxTabs === 1 ? '' : 's'}. Extra tabs have been closed.`,
-                    priority: 1,
-                  });
                 }
-              } catch (error) {
-                console.warn('Error enforcing tab limit:', error);
+
+                safeNotify({
+                  title: 'Tab Limit Enforced',
+                  message: `Your teacher has set a limit of ${currentMaxTabs} tab${currentMaxTabs === 1 ? '' : 's'}. Extra tabs have been closed.`,
+                  priority: 1,
+                });
               }
-            })();
+            } catch (error) {
+              console.warn('Error enforcing tab limit:', error);
+            }
           }
         }
 
@@ -5803,21 +7767,13 @@ async function handleWsMessage(rawData) {
           console.log('[Blacklist] Received from server:', receivedGlobalBlockedDomains);
 
           // Apply blacklist rules and persist to storage
-          (async () => {
-            try {
-              await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
-              await chrome.storage.local.set({ globalBlockedDomains });
-              console.log('[Blacklist] Persisted to storage');
-            } catch (error) {
-              console.warn('[Blacklist] Error applying rules:', error);
-            }
-          })();
-        }
-
-        if (message.settings?.fab) {
-          applyFabSettings(message.settings.fab).catch((error) => {
-            console.warn('[FAB] Failed to apply initial state:', error);
-          });
+          try {
+            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
+            await chrome.storage.local.set({ globalBlockedDomains });
+            console.log('[Blacklist] Persisted to storage');
+          } catch (error) {
+            console.warn('[Blacklist] Error applying rules:', error);
+          }
         }
 
         const authStateEnvelope = Object.prototype.hasOwnProperty.call(message, 'classroomState')
@@ -5829,11 +7785,16 @@ async function handleWsMessage(rawData) {
           await applyClassroomStateFromAuthResponse(authStateEnvelope, 'websocket_auth').catch((error) => {
             console.warn('[Classroom State] Auth snapshot failed:', error?.message || error);
           });
+        } else if (message.settings?.fab) {
+          await applyFabSettings(message.settings.fab).catch((error) => {
+            console.warn('[FAB] Failed to apply initial state:', error);
+          });
         }
         requestClassroomStateSync('websocket-auth', true);
       }
 
       if (['classroom-state', 'classroom-state-sync', 'student-control-state'].includes(message.type)) {
+        if (!acceptsCurrentStudentBinding(message, 'classroom state')) return;
         if (Object.prototype.hasOwnProperty.call(message, 'classroomState')) {
           await applyClassroomStateFromAuthResponse(message, 'websocket_reconcile').catch((error) => {
             console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
@@ -5841,8 +7802,53 @@ async function handleWsMessage(rawData) {
         } else {
           const snapshot = message.state || message.snapshot;
           if (!snapshot) return;
-          applyClassroomState(snapshot, { reason: 'websocket_reconcile' }).catch((error) => {
+          await applyClassroomState(snapshot, { reason: 'websocket_reconcile' }).catch((error) => {
             console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
+          });
+        }
+      }
+
+      if (message.type === 'fab-state-sync' || message.type === 'fab-state') {
+        if (!acceptsCurrentStudentBinding(message, 'FAB state')) return;
+        const fabState = message.fabState || message.state || message.data || message;
+        await applyFabSettings(fabState).catch((error) => {
+          console.warn('[FAB] WebSocket snapshot failed:', error?.message || error);
+        });
+      }
+
+      if (message.type === 'student-session-ended' || message.type === 'session-ended') {
+        if (!acceptsCurrentStudentBinding(message, 'student session lifecycle')) return;
+        const authoritativeFabState = message.fabState || message.state || null;
+        const endedSessionId = String(
+          message.teachingSessionId || message.sessionId || message.data?.teachingSessionId || ''
+        ).trim() || null;
+        const activeSessionIds = normalizeIdList(currentFabState?.activeSessionIds);
+        if (authoritativeFabState) {
+          await applyFabSettings({
+            ...authoritativeFabState,
+            reason: authoritativeFabState.reason || 'session-ended',
+          }).catch((error) => {
+            console.warn('[FAB] Session-end snapshot failed:', error?.message || error);
+          });
+        } else if (!endedSessionId || activeSessionIds.includes(endedSessionId)) {
+          const remainingSessionIds = endedSessionId
+            ? activeSessionIds.filter((sessionId) => sessionId !== endedSessionId)
+            : [];
+          await applyFabSettings({
+            ...(currentFabState || {}),
+            revision: message.revision ?? currentFabState?.revision ?? 0,
+            ownershipRevision: message.ownershipRevision
+              ?? message.studentControlRevision
+              ?? currentFabState?.ownershipRevision
+              ?? 0,
+            teachingSessionId: remainingSessionIds.length === 1 ? remainingSessionIds[0] : null,
+            activeSessionIds: remainingSessionIds,
+            messagingEnabled: remainingSessionIds.length > 0 && currentFabState?.messagingEnabled === true,
+            handRaisingEnabled: remainingSessionIds.length > 0 && currentFabState?.handRaisingEnabled === true,
+            handRaised: false,
+            reason: 'session-ended',
+          }).catch((error) => {
+            console.warn('[FAB] Session-end snapshot failed:', error?.message || error);
           });
         }
       }
@@ -5853,24 +7859,22 @@ async function handleWsMessage(rawData) {
         console.log('[Blacklist] Update received from server:', receivedGlobalBlockedDomains);
         
         // Apply updated blacklist rules and persist to storage
-        (async () => {
-          try {
-            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
-            await chrome.storage.local.set({ globalBlockedDomains });
-            console.log('[Blacklist] Persisted updated blacklist to storage');
-            
-            // Notify user if blacklist was updated
-            if (globalBlockedDomains.length > 0) {
-              safeNotify({
-                title: 'Website Restrictions Updated',
-                message: `Your school has blocked access to: ${globalBlockedDomains.slice(0, 3).join(', ')}${globalBlockedDomains.length > 3 ? '...' : ''}`,
-                priority: 1,
-              });
-            }
-          } catch (error) {
-            console.warn('[Blacklist] Error applying updated rules:', error);
+        try {
+          await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
+          await chrome.storage.local.set({ globalBlockedDomains });
+          console.log('[Blacklist] Persisted updated blacklist to storage');
+
+          // Notify user if blacklist was updated
+          if (globalBlockedDomains.length > 0) {
+            safeNotify({
+              title: 'Website Restrictions Updated',
+              message: `Your school has blocked access to: ${globalBlockedDomains.slice(0, 3).join(', ')}${globalBlockedDomains.length > 3 ? '...' : ''}`,
+              priority: 1,
+            });
           }
-        })();
+        } catch (error) {
+          console.warn('[Blacklist] Error applying updated rules:', error);
+        }
       }
       
       // Handle WebRTC signaling - teacher requesting to view screen
@@ -5880,36 +7884,75 @@ async function handleWsMessage(rawData) {
         // mode: 'tab' = only silent tab capture
         // mode: 'screen' = only picker
         const mode = message.mode || 'auto';
-        handleScreenShareRequest(mode);
+        const negotiationId = String(message.negotiationId || '').trim();
+        const teachingSessionId = String(message.teachingSessionId || '').trim();
+        const authorityMatches = Boolean(
+          acceptsCurrentStudentBinding(message, 'live-view request')
+          && negotiationId
+          && teachingSessionId
+          && currentClassroomState?.teachingSessionId === teachingSessionId
+          && !currentClassroomState?.supervisionContextId
+        );
+        if (authorityMatches) {
+          if (
+            activeLiveViewNegotiationId
+            && activeLiveViewNegotiationId !== negotiationId
+          ) {
+            await stopScreenShare({ reason: 'live-view-replaced' });
+          }
+          activeLiveViewNegotiationId = negotiationId;
+          activeLiveViewTeachingSessionId = teachingSessionId;
+          await handleScreenShareRequest(
+            mode,
+            negotiationId,
+            message.setupExpiresAt,
+            message.expiresAt,
+          );
+        } else if (negotiationId) {
+          wsSend({
+            type: 'stop-share',
+            to: 'teacher',
+            negotiationId,
+            reason: 'classroom-authority-mismatch',
+          });
+        }
       }
       
       // Handle stop-share request from teacher
       if (message.type === 'stop-share') {
+        if (!acceptsCurrentStudentBinding(message, 'live-view stop')) return;
         console.log('[WebRTC] Teacher requested to stop screen share');
-        handleStopScreenShare();
+        await handleStopScreenShare(String(message.negotiationId || '').trim());
       }
 
       if (message.type === 'student-session-replaced') {
+        if (!acceptsCurrentStudentBinding(message, 'student session replacement')) return;
         console.warn('[Auth] This student signed in on another Chromebook');
-        clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true }).catch(() => {});
+        await clearStudentAuth('session-replaced', {
+          notifyBackend: false,
+          pauseAutoRegistration: true,
+        });
       }
       
       // Handle WebRTC offer from teacher
       if (message.type === 'offer') {
+        if (!acceptsCurrentStudentBinding(message, 'live-view offer')) return;
         console.log('[WebRTC] Received offer from teacher');
-        handleOffer(message.sdp, message.from);
+        await handleOffer(message.sdp, message.from, String(message.negotiationId || '').trim());
       }
       
       // Handle WebRTC ICE candidate from teacher
       if (message.type === 'ice') {
+        if (!acceptsCurrentStudentBinding(message, 'live-view ICE')) return;
         console.log('[WebRTC] Received ICE candidate from teacher');
         if (message.candidate) {
-          handleIceCandidate(message.candidate);
+          await handleIceCandidate(message.candidate, String(message.negotiationId || '').trim());
         }
       }
       
       // Handle ping notifications
       if (message.type === 'ping') {
+        if (!acceptsCurrentStudentBinding(message, 'teacher notification')) return;
         const { message: pingMessage } = message.data;
         
         // Show browser notification
@@ -5936,21 +7979,21 @@ async function handleWsMessage(rawData) {
           recentMsgIds.add(msgId);
           setTimeout(() => recentMsgIds.delete(msgId), MSG_DEDUP_TTL);
         }
-        handleRemoteControl(message.command, message).catch((error) => {
+        await handleRemoteControl(message.command, message).catch((error) => {
           console.warn('Unhandled remote control command error:', error);
         });
       }
       
       // Handle chat messages (Phase 2)
       if (message.type === 'chat') {
-        handleChatMessage(message);
+        await handleChatMessage(message);
       }
 
       // Handle teacher reply messages — send to chat thread
       // A storage-backed, identity-bound ledger deduplicates local + Redis
       // delivery as well as later heartbeat inbox retries across worker restarts.
       if (message.type === 'teacher-message') {
-        handleDurableTeacherMessage(message).catch((error) => {
+        await handleDurableTeacherMessage(message).catch((error) => {
           console.warn('Teacher message delivery failed:', error?.message || error);
         });
       }
@@ -5958,6 +8001,11 @@ async function handleWsMessage(rawData) {
       // Handle teacher closing the chat
       // Dedup: local + Redis both deliver the same message
       if (message.type === 'chat-closed') {
+        if (!acceptsCurrentStudentBinding(message, 'chat close')) return;
+        if (!messageMatchesActiveFabSession(message)) {
+          console.warn('[FAB] Ignoring chat close for an inactive teaching session');
+          return;
+        }
         const dedupKey = message._msgId || ('cc:' + Date.now().toString().slice(0, -3));
         if (!recentMsgIds.has(dedupKey)) {
           recentMsgIds.add(dedupKey);
@@ -5971,7 +8019,8 @@ async function handleWsMessage(rawData) {
 
       // Handle check-in requests (Phase 3)
       if (message.type === 'check-in-request') {
-        handleCheckInRequest(message);
+        if (!acceptsCurrentStudentBinding(message, 'check-in request')) return;
+        await handleCheckInRequest(message);
       }
 
       // ====================================
@@ -5981,19 +8030,19 @@ async function handleWsMessage(rawData) {
       // Teacher started broadcasting - request to join
       if (message.type === 'teacher-broadcast-start') {
         console.log('[Broadcast] Teacher started broadcasting, requesting to join');
-        handleBroadcastStart(message);
+        await handleBroadcastStart(message);
       }
 
       // Teacher stopped broadcasting
       if (message.type === 'teacher-broadcast-stop') {
         console.log('[Broadcast] Teacher stopped broadcasting');
-        handleBroadcastStop();
+        await handleBroadcastStop();
       }
 
       // Received broadcast offer from teacher
       if (message.type === 'broadcast-offer') {
         console.log('[Broadcast] Received offer from teacher');
-        handleBroadcastOffer(message.sdp);
+        await handleBroadcastOffer(message.sdp);
       }
 
       // Received ICE candidate for broadcast
@@ -6162,6 +8211,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'get-classroom-overlay-state') {
+    Promise.all([
+      classroomStateRestorePromise,
+      getRestorableClassroomOverlayState(),
+      kv.get([FAB_STATE_STORAGE_KEY, FAB_CONTEXT_STORAGE_KEY]),
+    ])
+      .then(([, overlays, stored]) => sendResponse({
+        success: true,
+        classroomState: currentClassroomState,
+        overlays,
+        fabState: stored[FAB_STATE_STORAGE_KEY] || currentFabState,
+        fabContext: stored[FAB_CONTEXT_STORAGE_KEY] || null,
+      }))
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Overlay state unavailable' }));
+    return true;
+  }
+
   if (message.type === 'get-auth-state') {
     expireManualAuthIfStale('get-auth-state')
       .then(() => hasStudentAuth() ? null : refreshSharedSignInLoginConfig())
@@ -6204,34 +8270,52 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { pollId, selectedOption } = message;
     console.log('Poll response received:', pollId, selectedOption);
 
-    // Send poll response to server
-    if (CONFIG.deviceId && CONFIG.serverUrl) {
-      const headers = buildDeviceAuthHeaders();
-      headers['Content-Type'] = 'application/json';
+    (async () => {
+      if (!CONFIG.deviceId || !CONFIG.serverUrl || !hasStudentAuth()) {
+        throw new Error('Not connected to server');
+      }
 
-      fetchWithBackoff(`${CONFIG.serverUrl}/api/polls/${pollId}/respond`, {
+      const expectedBinding = fabIdentityBinding();
+      const overlays = await getRestorableClassroomOverlayState();
+      if (!overlays.poll || overlays.poll.pollId !== pollId) {
+        throw new Error('This poll is no longer active for the signed-in student');
+      }
+      const option = Number(selectedOption);
+      if (!Number.isSafeInteger(option) || option < 0 || option >= overlays.poll.options.length) {
+        throw new Error('Invalid poll option');
+      }
+      const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/polls/${encodeURIComponent(pollId)}/respond`, {
         method: 'POST',
-        headers,
+        headers: buildDeviceAuthHeaders(),
         body: JSON.stringify({
           deviceId: CONFIG.deviceId,
           studentId: CONFIG.activeStudentId,
-          selectedOption,
+          selectedOption: option,
         }),
       }, {
         context: 'poll response',
         maxAttempts: 2,
         respectGlobalBackoff: false,
-      })
-        .then(res => res.json())
-        .then(data => {
-          console.log('Poll response submitted:', data);
-        })
-        .catch(err => {
-          console.warn('Failed to submit poll response:', err);
-        });
-    }
-
-    sendResponse({ success: true });
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw buildResponseError(response, data, response.status === 409
+          ? 'A response was already recorded for this poll'
+          : 'Could not submit poll response');
+      }
+      if (expectedBinding !== fabIdentityBinding()) {
+        throw new Error('Student identity changed while submitting the poll');
+      }
+      await markPollResponsePersisted(pollId, option);
+      broadcastToAllTabs('poll-response-succeeded', { pollId, selectedOption: option });
+      console.log('Poll response submitted:', data);
+      return data;
+    })()
+      .then((data) => sendResponse({ success: true, data }))
+      .catch((error) => {
+        console.warn('Failed to submit poll response:', error?.message || error);
+        sendResponse({ success: false, error: error?.message || 'Could not submit poll response' });
+      });
     return true;
   }
 
@@ -6246,6 +8330,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
+    const fabBindingAtRaise = fabIdentityBinding();
+    const fabSessionsAtRaise = activeTeachingSessionIds();
+    if (currentFabState && fabSessionsAtRaise.length === 0) {
+      sendResponse({ success: false, error: 'No active class session for hand raising' });
+      return true;
+    }
 
     fetchWithBackoff(`${CONFIG.serverUrl}/api/student/raise-hand`, {
       method: 'POST',
@@ -6262,9 +8352,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       respectGlobalBackoff: false,
     })
       .then(parseJsonResponse)
-      .then(data => {
+      .then(async data => {
+        if (
+          fabBindingAtRaise !== fabIdentityBinding() ||
+          JSON.stringify(fabSessionsAtRaise) !== JSON.stringify(activeTeachingSessionIds())
+        ) throw new Error('Class session changed while raising the hand');
         console.log('Hand raised:', data);
-        chrome.storage.local.set({ handRaised: true });
+        await updateLocalFabHandRaised(true, 'student-raised-hand');
         sendResponse({ success: true, data });
       })
       .catch(err => {
@@ -6286,6 +8380,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
+    const fabBindingAtLower = fabIdentityBinding();
+    const fabSessionsAtLower = activeTeachingSessionIds();
 
     fetchWithBackoff(`${CONFIG.serverUrl}/api/student/lower-hand`, {
       method: 'POST',
@@ -6300,9 +8396,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       respectGlobalBackoff: false,
     })
       .then(parseJsonResponse)
-      .then(data => {
+      .then(async data => {
+        if (
+          fabBindingAtLower !== fabIdentityBinding() ||
+          JSON.stringify(fabSessionsAtLower) !== JSON.stringify(activeTeachingSessionIds())
+        ) throw new Error('Class session changed while lowering the hand');
         console.log('Hand lowered:', data);
-        chrome.storage.local.set({ handRaised: false });
+        await updateLocalFabHandRaised(false, 'student-lowered-hand');
         sendResponse({ success: true, data });
       })
       .catch(err => {
@@ -6327,6 +8427,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
+    const fabBindingAtSend = fabIdentityBinding();
+    const activeSessionIdsAtSend = activeTeachingSessionIds();
+    if (currentFabState && activeSessionIdsAtSend.length === 0) {
+      sendResponse({ success: false, error: 'No active class session for messaging' });
+      return true;
+    }
+
     const headers = buildDeviceAuthHeaders();
     headers['Content-Type'] = 'application/json';
 
@@ -6336,6 +8443,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       body: JSON.stringify({
         message: message.message.trim(),
         messageType: message.messageType || 'message',
+        sessionId: activeSessionIdsAtSend[0] || undefined,
       }),
     }, {
       context: 'student message',
@@ -6344,6 +8452,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })
       .then(parseJsonResponse)
       .then(data => {
+        if (
+          fabBindingAtSend !== fabIdentityBinding() ||
+          JSON.stringify(activeSessionIdsAtSend) !== JSON.stringify(activeTeachingSessionIds())
+        ) {
+          sendResponse({ success: false, error: 'Class session changed while sending the message' });
+          return;
+        }
         if (data.error) {
           console.warn('Failed to send message:', data.error);
           sendResponse({ success: false, error: data.error });
@@ -6364,7 +8479,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const newServerUrl = message.serverUrl;
     if (newServerUrl) {
       CONFIG.serverUrl = newServerUrl;
-      chrome.storage.local.set({ config: CONFIG }, () => {
+      chrome.storage.local.set({ config: persistedNonAuthConfig(CONFIG) }, () => {
         console.log('Server URL updated to:', newServerUrl);
         // Refresh school settings and tracking state with new server URL
         refreshSchoolSettings({ force: true }).then(() => {

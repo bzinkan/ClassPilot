@@ -91,8 +91,11 @@ describe("ClassPilot classroom runtime core", () => {
       globalBlockedDomains: ["lens.google.com"],
     }, ["classroom", "school", "teacher", "temporary"], NOW);
 
-    expect(rules.map((rule: any) => rule.id)).toEqual([1, 1000, 2000, 3000]);
+    expect(rules.map((rule: any) => rule.id)).toEqual([1, 2, 1000, 2000, 3000]);
     expect(rules.find((rule: any) => rule.id === 3000)?.action.type).toBe("allow");
+    expect(rules.find((rule: any) => rule.id === 1)?.priority)
+      .toBeGreaterThan(rules.find((rule: any) => rule.id === 3000)?.priority);
+    expect(rules.find((rule: any) => rule.id === 2)?.action.type).toBe("allow");
     expect(core.isRuleInRange(1999, "school")).toBe(true);
     expect(core.isRuleInRange(2000, "school")).toBe(false);
   });
@@ -108,6 +111,29 @@ describe("ClassPilot classroom runtime core", () => {
       action: { type: "block" },
       condition: { resourceTypes: ["main_frame"] },
     }]);
+  });
+
+  it("keeps Flight Path underneath a foreground screen-lock overlay", () => {
+    const normalized = state(4, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://attention.example/",
+          domain: "attention.example",
+        },
+        flightPath: {
+          active: true,
+          allowedDomains: ["khanacademy.org", "ixl.com"],
+          name: "Math",
+        },
+      },
+    });
+    const lockedRules = core.buildDnrRules({ classroomState: normalized }, ["classroom"], NOW);
+    expect(lockedRules[0]?.condition.excludedRequestDomains).toEqual(["attention.example"]);
+
+    normalized.restrictions.screenLock.active = false;
+    const unlockedRules = core.buildDnrRules({ classroomState: normalized }, ["classroom"], NOW);
+    expect(unlockedRules[0]?.condition.excludedRequestDomains).toEqual(["khanacademy.org", "ixl.com"]);
   });
 
   it("fails safely instead of partially applying more than 1,000 entries", () => {

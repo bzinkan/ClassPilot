@@ -24,31 +24,50 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 
 ### First Time Setup
 
-1. Click the extension icon in your Chrome toolbar
-2. Enter your name and class ID
-3. Click "Connect to Classroom"
-4. The extension will start sending heartbeats to the server
+1. On a managed single-user Chromebook, the extension attempts registration
+   from the signed-in Google Workspace profile and the school's configured
+   domain/enrollment policy.
+2. On a shared Chromebook, click the extension icon and use the school-enabled
+   sign-in flow (for example grade + name + PIN, email, or student ID).
+3. Confirm the popup shows the correct student and school-server connection.
+   Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
-## Google Admin Deployment
+## Chrome Web Store and Google Admin Deployment
 
-### Create ZIP for Force-Install
+### Create the Versioned Web Store ZIP
 
-1. From the repository root, run:
+1. Confirm the live Chrome Web Store version and bump `extension/manifest.json`
+   to the next version. The manifest is the release source of truth.
+2. From the repository root in Git Bash, run:
    ```bash
    ./extension/package-extension.sh
    ```
-2. Upload the versioned zip from `dist/`.
+3. Inspect the versioned `dist/ClassPilot-vX.Y.Z.zip`. It must contain
+   root-level `manifest.json` and `managed_schema.json`, and the embedded
+   manifest version must match the file name.
 
-### Upload to Google Admin Console
+For the currently prepared release, the upload artifact is
+`dist/ClassPilot-v2.6.1.zip`. `dist/classpilot-extension.zip` is only the
+compatibility copy produced by the same script.
+
+### Publish Through Chrome Web Store
+
+1. Open the Chrome Web Store Developer Dashboard for listing
+   `iggbfegfcjkfieoemeolfmfnapepalca`.
+2. Upload only the reviewed versioned ZIP from `dist/`.
+3. Complete the privacy/compliance review in `COMPLIANCE.md`, submit the update,
+   and wait for Chrome Web Store review/publication.
+4. Verify the published listing version before staging managed-device rollout.
+
+### Force-Install the Published Listing
 
 1. Log in to Google Admin Console (admin.google.com)
 2. Navigate to **Devices** → **Chrome** → **Apps & Extensions**
 3. Click **Chrome apps & extensions**
 4. Select the organizational unit (e.g., "Students" or specific classes)
 5. Click the **+** (Add) button
-6. Choose **Upload private app**
-7. Upload the versioned `ClassPilot-vX.Y.Z.zip` file from `dist/`
-8. Configure installation settings:
+6. Choose **Add from Chrome Web Store** and select the ClassPilot listing above
+7. Configure installation settings:
    - Installation: **Force install**
    - Permission: **Allow**
 
@@ -72,13 +91,13 @@ the student chooses their grade during sign-in, then selects their name and
 enters their 4-digit ClassPilot PIN.
 
 In Google Admin Console:
-1. Find the uploaded extension
+1. Find the force-installed ClassPilot listing
 2. Click **Configure**
 3. Find **Policy for extensions**
 4. Paste the policy JSON
 5. Save changes
 
-If **Policy for extensions** does not appear, confirm the uploaded extension
+If **Policy for extensions** does not appear, confirm the published extension
 version includes `managed_schema.json` and the manifest `storage.managed_schema`
 entry. Google Admin only exposes managed policy configuration for extensions
 that declare a managed storage schema.
@@ -92,7 +111,7 @@ The extension resolves the server URL in this order:
 1. **Managed policy** (`chrome.storage.managed` → `serverUrl`)
 2. **Saved overrides** (`chrome.storage.sync` or `chrome.storage.local`)
 3. **Injected build-time value** (`globalThis.CLASSPILOT_SERVER_URL` from `config.js`)
-4. **Default** `https://classpilot.replit.app`
+4. **Default** `https://school-pilot.net`
 
 For managed deployments, the Admin Console policy is the recommended source of truth. For custom builds, you can inject a URL in `extension/config.js` (copy from `config.example.js`).
 
@@ -197,11 +216,16 @@ extension/
 
 ### Testing Locally
 
-1. Update `serverUrl` in `service-worker.js` to point to your local or Replit server
-2. Load the extension as unpacked (see above)
-3. Open the extension popup and complete setup
-4. Check the browser console for heartbeat logs
-5. Verify data appears in the teacher dashboard
+1. Copy `extension/config.example.js` to the ignored
+   `extension/config.js` and set `globalThis.CLASSPILOT_SERVER_URL` to the local
+   or test server. Never edit the production default in `service-worker.js`.
+2. Load the extension as unpacked (see above).
+3. Open the extension popup and complete the applicable managed-profile or
+   shared-Chromebook sign-in flow.
+4. Check the service-worker/offscreen consoles for heartbeat and WebSocket
+   state, then verify the exact student appears in the teacher dashboard.
+5. Before release, run `npm run check`, `npm test`,
+   `npm run test:extension:chrome`, and `npm run build` from the repository root.
 
 ### Badge States
 - 🟢 Green dot (●) - Connected and sending heartbeats

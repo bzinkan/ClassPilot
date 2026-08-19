@@ -6,6 +6,9 @@ let peerConnection = null;
 let localStream = null;
 let teacherId = null;
 let iceQueue = []; // Queue ICE candidates until peer is ready
+let activeNegotiationId = null;
+let liveViewSetupTimer = null;
+let liveViewHardExpiryTimer = null;
 
 const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -33,8 +36,44 @@ if (document.readyState === 'complete' || document.readyState === 'interactive')
 // ============================================================================
 let proxyWs = null;
 let wsKeepAliveTimer = null;
+let proxyConnectionGeneration = 0;
+let proxyAuthenticated = false;
+let proxyUrl = null;
 
-function handleWsConnect(url, authPayload) {
+function relayWsEvent(event, data) {
+  chrome.runtime.sendMessage({
+    type: 'WS_EVENT',
+    event,
+    data,
+    connectionGeneration: proxyConnectionGeneration,
+  });
+}
+
+function wsStatus() {
+  return {
+    success: true,
+    connectionGeneration: proxyConnectionGeneration,
+    readyState: proxyWs?.readyState ?? WebSocket.CLOSED,
+    transportOpen: proxyWs?.readyState === WebSocket.OPEN,
+    authenticated: proxyAuthenticated,
+    url: proxyUrl,
+  };
+}
+
+function handleWsConnect(url, authPayload, requestedGeneration) {
+  const connectionGeneration = Number(requestedGeneration || 0);
+  if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration < 1) {
+    throw new Error('WS_CONNECT requires a positive connection generation');
+  }
+  if (
+    proxyWs &&
+    proxyConnectionGeneration === connectionGeneration &&
+    proxyUrl === url &&
+    (proxyWs.readyState === WebSocket.CONNECTING || proxyWs.readyState === WebSocket.OPEN)
+  ) {
+    return wsStatus();
+  }
+
   // Close any existing connection and keepalive
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
   if (proxyWs) {
@@ -42,12 +81,17 @@ function handleWsConnect(url, authPayload) {
     proxyWs = null;
   }
 
-  console.log('[Offscreen-WS] Connecting to', url);
+  proxyConnectionGeneration = connectionGeneration;
+  proxyAuthenticated = false;
+  proxyUrl = url;
+  console.log('[Offscreen-WS] Connecting generation', connectionGeneration, 'to', url);
   proxyWs = new WebSocket(url);
+  const connection = proxyWs;
 
   proxyWs.onopen = () => {
+    if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.log('[Offscreen-WS] Connected');
-    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'open' });
+    relayWsEvent('open');
     // Send auth immediately if provided
     if (authPayload && proxyWs.readyState === WebSocket.OPEN) {
       proxyWs.send(JSON.stringify(authPayload));
@@ -66,39 +110,84 @@ function handleWsConnect(url, authPayload) {
   };
 
   proxyWs.onmessage = (event) => {
+    if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
+    try {
+      const payload = JSON.parse(event.data);
+      if (payload?.type === 'auth-success') proxyAuthenticated = true;
+      if (payload?.type === 'auth-error' || payload?.type === 'auth-failed') {
+        proxyAuthenticated = false;
+        stopScreenShare();
+      }
+    } catch { /* payload is relayed unchanged */ }
     // Relay raw message to service worker
-    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'message', data: event.data });
+    relayWsEvent('message', event.data);
   };
 
   proxyWs.onerror = () => {
+    if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.warn('[Offscreen-WS] Connection issue');
-    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'error' });
+    proxyAuthenticated = false;
+    relayWsEvent('error');
   };
 
   proxyWs.onclose = () => {
+    if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.log('[Offscreen-WS] Disconnected');
     if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
     proxyWs = null;
-    chrome.runtime.sendMessage({ type: 'WS_EVENT', event: 'close' });
+    proxyAuthenticated = false;
+    stopScreenShare();
+    relayWsEvent('close');
+  };
+  return wsStatus();
+}
+
+function handleWsSend(data, requestedGeneration) {
+  if (
+    proxyWs &&
+    proxyWs.readyState === WebSocket.OPEN &&
+    Number(requestedGeneration) === proxyConnectionGeneration
+  ) {
+    proxyWs.send(data);
+    return { success: true, connectionGeneration: proxyConnectionGeneration };
+  }
+  return {
+    success: false,
+    code: 'WS_NOT_OPEN',
+    error: 'WebSocket transport is not open for this generation',
+    connectionGeneration: proxyConnectionGeneration,
   };
 }
 
-function handleWsSend(data) {
-  if (proxyWs && proxyWs.readyState === WebSocket.OPEN) {
-    proxyWs.send(data);
+function handleWsClose(requestedGeneration) {
+  if (requestedGeneration && Number(requestedGeneration) !== proxyConnectionGeneration) {
+    return wsStatus();
   }
-}
-
-function handleWsClose() {
+  // An intentional transport shutdown (tracking OFF, sign-out, entitlement
+  // revocation, or off-hours) must revoke the peer-to-peer capture too. The
+  // socket's onclose handler is detached below, so this cleanup cannot rely on
+  // the normal WebSocket close event.
+  stopScreenShare();
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
   if (proxyWs) {
     try { proxyWs.onclose = null; proxyWs.close(); } catch (e) { /* ignore */ }
     proxyWs = null;
   }
+  proxyAuthenticated = false;
+  proxyUrl = null;
+  return wsStatus();
 }
 
 // Listen for messages from service worker (only handle types meant for offscreen)
-const OFFSCREEN_MESSAGE_TYPES = new Set(['START_SHARE', 'SIGNAL', 'STOP_SHARE', 'WS_CONNECT', 'WS_SEND', 'WS_CLOSE']);
+const OFFSCREEN_MESSAGE_TYPES = new Set([
+  'START_SHARE',
+  'SIGNAL',
+  'STOP_SHARE',
+  'WS_CONNECT',
+  'WS_SEND',
+  'WS_CLOSE',
+  'WS_STATUS',
+]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Ignore messages not intended for the offscreen document
@@ -111,7 +200,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     try {
       if (message.type === 'START_SHARE') {
-        const result = await startScreenCapture(message.deviceId, message.mode, message.streamId);
+        const result = await startScreenCapture(
+          message.deviceId,
+          message.mode,
+          message.streamId,
+          message.negotiationId,
+          message.setupExpiresAt,
+          message.expiresAt,
+        );
         sendResponse(result);
         return;
       }
@@ -129,20 +225,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       if (message.type === 'WS_CONNECT') {
-        handleWsConnect(message.url, message.authPayload);
-        sendResponse({ success: true });
+        sendResponse(handleWsConnect(
+          message.url,
+          message.authPayload,
+          message.connectionGeneration
+        ));
         return;
       }
 
       if (message.type === 'WS_SEND') {
-        handleWsSend(message.data);
-        sendResponse({ success: true });
+        sendResponse(handleWsSend(message.data, message.connectionGeneration));
         return;
       }
 
       if (message.type === 'WS_CLOSE') {
-        handleWsClose();
-        sendResponse({ success: true });
+        sendResponse(handleWsClose(message.connectionGeneration));
+        return;
+      }
+
+      if (message.type === 'WS_STATUS') {
+        sendResponse(wsStatus());
         return;
       }
     } catch (error) {
@@ -158,18 +260,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Start screen capture
 // streamId: provided by service worker via chrome.tabCapture.getMediaStreamId() (MV3 approach)
 // Falls back to getDisplayMedia() if no streamId available
-async function startScreenCapture(deviceId, mode = 'auto', streamId = null) {
+function clearLiveViewExpiryTimers() {
+  if (liveViewSetupTimer) clearTimeout(liveViewSetupTimer);
+  if (liveViewHardExpiryTimer) clearTimeout(liveViewHardExpiryTimer);
+  liveViewSetupTimer = null;
+  liveViewHardExpiryTimer = null;
+}
+
+function parseFutureExpiry(value, fallbackMs, maximumMs) {
+  const now = Date.now();
+  const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+  const candidate = Number.isFinite(parsed) && parsed > now ? parsed : now + fallbackMs;
+  return Math.min(candidate, now + maximumMs);
+}
+
+function expireLiveView(reason, negotiationId) {
+  if (!negotiationId || negotiationId !== activeNegotiationId) return;
+  stopScreenShare();
+  chrome.runtime.sendMessage({
+    type: 'LIVE_VIEW_EXPIRED',
+    reason,
+    negotiationId,
+  });
+}
+
+function scheduleLiveViewExpiry(setupExpiresAt, expiresAt, negotiationId) {
+  clearLiveViewExpiryTimers();
+  const now = Date.now();
+  const hardExpiry = parseFutureExpiry(expiresAt, 15 * 60 * 1000, 15 * 60 * 1000);
+  const setupExpiry = Math.min(
+    parseFutureExpiry(setupExpiresAt, 90 * 1000, 90 * 1000),
+    hardExpiry,
+  );
+  liveViewSetupTimer = setTimeout(() => {
+    if (!offerProcessed) expireLiveView('setup-expired', negotiationId);
+  }, Math.max(0, setupExpiry - now));
+  liveViewHardExpiryTimer = setTimeout(() => {
+    expireLiveView('maximum-duration', negotiationId);
+  }, Math.max(0, hardExpiry - now));
+}
+
+async function startScreenCapture(
+  deviceId,
+  mode = 'auto',
+  streamId = null,
+  negotiationId = null,
+  setupExpiresAt = null,
+  expiresAt = null,
+) {
   console.log('[Offscreen] Starting screen capture, mode:', mode, 'streamId:', !!streamId);
 
-  // Clean up any previous capture
-  if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
-    localStream = null;
+  // Every capture attempt is a new negotiation. Reset the duplicate-offer
+  // guard, queued ICE, teacher identity, tracks, and peer together so a failed
+  // or stopped attempt can be retried without restarting the extension.
+  stopScreenShare();
+  activeNegotiationId = String(negotiationId || '').trim() || null;
+  if (!activeNegotiationId) {
+    return { success: false, status: 'missing-negotiation', error: 'Missing live-view negotiation' };
   }
-  if (peerConnection) {
-    peerConnection.close();
-    peerConnection = null;
-  }
+  scheduleLiveViewExpiry(setupExpiresAt, expiresAt, activeNegotiationId);
 
   try {
     // Method 1: Use streamId from service worker (MV3 tab capture)
@@ -212,6 +361,7 @@ async function startScreenCapture(deviceId, mode = 'auto', streamId = null) {
             type: 'CAPTURE_ERROR',
             error: 'Student denied screen share request'
           });
+          stopScreenShare();
           return { success: false, status: 'user-denied' };
         }
         console.error('[Offscreen] getDisplayMedia error:', pickerError);
@@ -219,6 +369,7 @@ async function startScreenCapture(deviceId, mode = 'auto', streamId = null) {
           type: 'CAPTURE_ERROR',
           error: pickerError.message
         });
+        stopScreenShare();
         return { success: false, status: 'failed', error: pickerError.message };
       }
     }
@@ -230,35 +381,45 @@ async function startScreenCapture(deviceId, mode = 'auto', streamId = null) {
         : 'No capture method succeeded';
       console.warn('[Offscreen]', msg);
       chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: msg });
+      stopScreenShare();
       return { success: false, status: 'tab-capture-unavailable' };
     }
 
     // Create peer connection
     peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    const activePeerConnection = peerConnection;
+    const activeStream = localStream;
 
     // Handle ICE candidates - send to teacher via service worker
-    peerConnection.onicecandidate = (event) => {
+    activePeerConnection.onicecandidate = (event) => {
       if (event.candidate) {
         console.log('[Offscreen] Got ICE candidate, sending to teacher');
         chrome.runtime.sendMessage({
           type: 'ICE_CANDIDATE',
+          negotiationId: activeNegotiationId,
           candidate: event.candidate.toJSON(),
         });
       }
     };
 
     // Handle connection state changes
-    peerConnection.onconnectionstatechange = () => {
-      console.log('[Offscreen] Connection state:', peerConnection.connectionState);
-      if (peerConnection.connectionState === 'failed' ||
-          peerConnection.connectionState === 'disconnected') {
+    activePeerConnection.onconnectionstatechange = () => {
+      const connectionState = activePeerConnection.connectionState;
+      console.log('[Offscreen] Connection state:', connectionState);
+      if (connectionState === 'failed' || connectionState === 'disconnected') {
+        if (peerConnection === activePeerConnection) stopScreenShare();
         chrome.runtime.sendMessage({ type: 'CONNECTION_FAILED' });
       }
     };
 
     // Add tracks to peer connection
-    localStream.getTracks().forEach(track => {
-      peerConnection.addTrack(track, localStream);
+    activeStream.getTracks().forEach(track => {
+      track.onended = () => {
+        if (localStream !== activeStream) return;
+        stopScreenShare();
+        chrome.runtime.sendMessage({ type: 'CONNECTION_FAILED', reason: 'capture-track-ended' });
+      };
+      activePeerConnection.addTrack(track, activeStream);
     });
 
     console.log('[Offscreen] Tracks added to peer connection, ready to receive offer');
@@ -267,6 +428,7 @@ async function startScreenCapture(deviceId, mode = 'auto', streamId = null) {
   } catch (error) {
     console.error('[Offscreen] Unexpected screen capture error:', error);
     chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: error.message });
+    stopScreenShare();
     return { success: false, status: 'failed', error: error.message };
   }
 }
@@ -279,6 +441,9 @@ async function handleSignal(signal) {
     console.log('[Offscreen] Handling signal:', signal.type);
 
     if (signal.type === 'offer') {
+      if (!signal.negotiationId || signal.negotiationId !== activeNegotiationId) {
+        return { success: false, status: 'stale-negotiation' };
+      }
       if (!peerConnection) {
         console.log('[Offscreen] Received offer before peer connection ready, queueing (expected)...');
         setTimeout(() => handleSignal(signal), 500);
@@ -299,10 +464,13 @@ async function handleSignal(signal) {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       console.log('[Offscreen] Created and set local description (answer)');
+      if (liveViewSetupTimer) clearTimeout(liveViewSetupTimer);
+      liveViewSetupTimer = null;
 
       // Send answer back to teacher via service worker
       chrome.runtime.sendMessage({
         type: 'ANSWER',
+        negotiationId: activeNegotiationId,
         sdp: peerConnection.localDescription.toJSON(),
       });
 
@@ -312,6 +480,9 @@ async function handleSignal(signal) {
       return { success: true };
 
     } else if (signal.type === 'ice') {
+      if (!signal.negotiationId || signal.negotiationId !== activeNegotiationId) {
+        return { success: false, status: 'stale-negotiation' };
+      }
       if (!peerConnection) {
         console.info('[Offscreen] No peer connection yet, queueing ICE candidate');
         iceQueue.push(signal.candidate);
@@ -366,13 +537,19 @@ async function flushIceQueue() {
 // Stop screen sharing and cleanup
 function stopScreenShare() {
   console.log('[Offscreen] Stopping screen share');
+  clearLiveViewExpiryTimers();
   
   if (localStream) {
-    localStream.getTracks().forEach(track => track.stop());
+    localStream.getTracks().forEach(track => {
+      track.onended = null;
+      track.stop();
+    });
     localStream = null;
   }
   
   if (peerConnection) {
+    peerConnection.onicecandidate = null;
+    peerConnection.onconnectionstatechange = null;
     peerConnection.close();
     peerConnection = null;
   }
@@ -380,6 +557,7 @@ function stopScreenShare() {
   iceQueue = [];
   teacherId = null;
   offerProcessed = false;
+  activeNegotiationId = null;
   
   console.log('[Offscreen] Cleanup complete');
 }

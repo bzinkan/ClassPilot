@@ -4,6 +4,8 @@
 let currentConfig = null;
 let currentAuthState = null;
 let statusIntervalId = null;
+let handRaisingEnabled = true;
+let messagingEnabled = true;
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
@@ -39,6 +41,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if (namespace === 'local' && changes.connectivityHealthV1) {
       updateStatus();
+    }
+    if (namespace === 'local' && (changes.handRaisingEnabled || changes.messagingEnabled || changes.handRaised)) {
+      if (changes.handRaisingEnabled) handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;
+      if (changes.messagingEnabled) messagingEnabled = changes.messagingEnabled.newValue !== false;
+      if (changes.handRaised) handRaised = changes.handRaised.newValue === true;
+      updateRaiseHandUI(handRaised, handRaisingEnabled);
+      updateChatUI(messagingEnabled);
     }
     if ((namespace === 'local' || namespace === 'session') &&
         (changes.studentToken || changes.studentEmail || changes.studentName)) {
@@ -373,22 +382,23 @@ async function clearMessages() {
 let handRaised = false;
 
 async function initRaiseHand() {
-  const stored = await chrome.storage.local.get(['handRaised', 'messagingEnabled']);
+  const stored = await chrome.storage.local.get(['handRaised', 'handRaisingEnabled']);
   handRaised = stored.handRaised || false;
+  handRaisingEnabled = stored.handRaisingEnabled !== false;
 
-  updateRaiseHandUI(handRaised, stored.messagingEnabled !== false);
+  updateRaiseHandUI(handRaised, handRaisingEnabled);
 
   // Add event listeners
   document.getElementById('raise-hand-btn')?.addEventListener('click', raiseHand);
   document.getElementById('lower-hand-btn')?.addEventListener('click', lowerHand);
 }
 
-function updateRaiseHandUI(isRaised, messagingEnabled = true) {
+function updateRaiseHandUI(isRaised, enabled = true) {
   const raiseBtn = document.getElementById('raise-hand-btn');
   const raisedStatus = document.getElementById('hand-raised-status');
   const disabledMsg = document.getElementById('messaging-disabled');
 
-  if (!messagingEnabled) {
+  if (!enabled) {
     raiseBtn?.classList.add('hidden');
     raisedStatus?.classList.add('hidden');
     disabledMsg?.classList.remove('hidden');
@@ -407,6 +417,10 @@ function updateRaiseHandUI(isRaised, messagingEnabled = true) {
 }
 
 async function raiseHand() {
+  if (!handRaisingEnabled) {
+    updateRaiseHandUI(handRaised, false);
+    return;
+  }
   const btn = document.getElementById('raise-hand-btn');
   btn.disabled = true;
   btn.textContent = 'Raising...';
@@ -417,7 +431,7 @@ async function raiseHand() {
       if (response?.success) {
         handRaised = true;
         chrome.storage.local.set({ handRaised: true });
-        updateRaiseHandUI(true);
+        updateRaiseHandUI(true, handRaisingEnabled);
       } else {
         btn.disabled = false;
         btn.textContent = '✋ Raise Hand';
@@ -438,7 +452,7 @@ async function lowerHand() {
       if (response?.success) {
         handRaised = false;
         chrome.storage.local.set({ handRaised: false });
-        updateRaiseHandUI(false);
+        updateRaiseHandUI(false, handRaisingEnabled);
       } else {
         alert(response?.error || 'Failed to lower hand. Please try again.');
       }
@@ -455,6 +469,11 @@ async function sendStudentMessage(messageType = 'message') {
   const message = input?.value?.trim();
   const sendBtn = document.getElementById('send-message-btn');
   const questionBtn = document.getElementById('send-question-btn');
+
+  if (!messagingEnabled) {
+    updateChatUI(false);
+    return;
+  }
 
   if (!message) {
     alert('Please enter a message');
@@ -499,9 +518,25 @@ async function sendStudentMessage(messageType = 'message') {
   }
 }
 
-function initChatUI() {
+async function initChatUI() {
+  const stored = await chrome.storage.local.get(['messagingEnabled']);
+  messagingEnabled = stored.messagingEnabled !== false;
+  updateChatUI(messagingEnabled);
   document.getElementById('send-message-btn')?.addEventListener('click', () => sendStudentMessage('message'));
   document.getElementById('send-question-btn')?.addEventListener('click', () => sendStudentMessage('question'));
+}
+
+function updateChatUI(enabled = true) {
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('send-message-btn');
+  const questionBtn = document.getElementById('send-question-btn');
+  const disabledMsg = document.getElementById('chat-disabled');
+  for (const control of [input, sendBtn, questionBtn]) {
+    if (!control) continue;
+    control.disabled = !enabled;
+    control.classList.toggle('hidden', !enabled);
+  }
+  disabledMsg?.classList.toggle('hidden', enabled);
 }
 
 function showPrivacyInfo() {

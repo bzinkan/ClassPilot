@@ -45,6 +45,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'student-message-state-cleared') {
     seenChatMsgIds.clear();
+    respondedPollIds.clear();
     chatMessages = [];
     chatClosed = false;
     persistFabChatState();
@@ -64,6 +65,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Teacher reply — add to chat thread (ignore if teacher already closed the chat)
   if (message.type === 'chat-reply' && !chatClosed) {
+    const activeFabSessions = currentFabContext?.activeSessionIds || [];
+    if (message.data?.sessionId && activeFabSessions.length > 0
+        && !activeFabSessions.includes(message.data.sessionId)) {
+      return;
+    }
     // Dedup: skip if we've already processed this exact message
     const msgId = message.data?._msgId;
     if (msgId) {
@@ -132,7 +138,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Timer handlers
   if (message.type === 'timer') {
     if (message.data.action === 'start') {
-      startTimerOverlay(message.data.seconds, message.data.message);
+      startTimerOverlay(message.data.seconds, message.data.message, message.data.endsAt);
     } else if (message.data.action === 'stop') {
       stopTimerOverlay();
     }
@@ -145,6 +151,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.data.action === 'close') {
       hidePollOverlay();
     }
+  }
+
+  if (message.type === 'poll-response-succeeded') {
+    completePollResponse(message.data?.pollId, message.data?.selectedOption);
   }
 
   // Chat message notification
@@ -182,13 +192,29 @@ function requestAuthGateState() {
 }
 
 function requestClassroomOverlayState() {
-  chrome.runtime.sendMessage({ type: 'get-classroom-state' }, (response) => {
+  chrome.runtime.sendMessage({ type: 'get-classroom-overlay-state' }, (response) => {
     if (chrome.runtime.lastError || !response?.success) return;
     const attention = response.classroomState?.restrictions?.attentionMode;
     if (attention?.active) {
       showAttentionOverlay(attention.message || 'Please look up!');
     } else {
       hideAttentionOverlay();
+    }
+    const timer = response.overlays?.timer;
+    if (timer?.endsAt > Date.now()) {
+      startTimerOverlay(null, timer.message, timer.endsAt);
+    } else {
+      stopTimerOverlay();
+    }
+    const poll = response.overlays?.poll;
+    if (poll && !poll.response && poll.expiresAt > Date.now()) {
+      showPollOverlay(poll.pollId, poll.question, poll.options);
+    } else if (!poll) {
+      hidePollOverlay();
+    }
+    if (response.fabContext) currentFabContext = response.fabContext;
+    if (response.fabState) {
+      applyFabState({ ...response.fabState, context: response.fabContext });
     }
   });
 }
@@ -1197,11 +1223,16 @@ function addAttentionStyles() {
 // TIMER OVERLAY
 // ============================================
 
-function startTimerOverlay(seconds, message) {
+function startTimerOverlay(seconds, message, absoluteEndsAt = null) {
   // Clear any existing timer
   stopTimerOverlay();
 
-  timerEndTime = Date.now() + (seconds * 1000);
+  const parsedEndsAt = typeof absoluteEndsAt === 'number'
+    ? absoluteEndsAt
+    : Date.parse(absoluteEndsAt || '');
+  timerEndTime = Number.isFinite(parsedEndsAt) && parsedEndsAt > 0
+    ? parsedEndsAt
+    : Date.now() + (Math.max(0, Number(seconds || 0)) * 1000);
 
   // Remove any existing timer overlay
   const existing = document.getElementById('classpilot-timer-overlay');
@@ -1404,8 +1435,8 @@ function showPollOverlay(pollId, question, options) {
 }
 
 function submitPollResponse(pollId, selectedIndex, button) {
-  // Mark as responded so duplicates are ignored
-  respondedPollIds.add(pollId);
+  if (button.dataset.submitting === 'true') return;
+  button.dataset.submitting = 'true';
 
   // Visual feedback
   const allButtons = document.querySelectorAll('.classpilot-poll-option');
@@ -1415,15 +1446,40 @@ function submitPollResponse(pollId, selectedIndex, button) {
   });
   button.classList.add('classpilot-poll-selected');
 
-  // Send response to service worker
+  const body = document.querySelector('.classpilot-poll-body');
+  let status = document.getElementById('classpilot-poll-submit-status');
+  if (!status && body) {
+    status = document.createElement('p');
+    status.id = 'classpilot-poll-submit-status';
+    status.setAttribute('role', 'status');
+    body.appendChild(status);
+  }
+  if (status) status.textContent = 'Submitting response…';
+
+  // Wait for an actual successful HTTP result. Network/server failure leaves
+  // the options enabled for an idempotent retry.
   chrome.runtime.sendMessage({
     type: 'poll-response',
     pollId: pollId,
     selectedOption: selectedIndex
-  }).catch(err => {
-    console.log('[ClassPilot] Could not send poll response:', err);
+  }, (response) => {
+    const error = chrome.runtime.lastError?.message || response?.error;
+    if (error || !response?.success) {
+      button.dataset.submitting = 'false';
+      allButtons.forEach(btn => {
+        btn.disabled = false;
+        btn.classList.remove('classpilot-poll-disabled', 'classpilot-poll-selected');
+      });
+      if (status) status.textContent = error || 'Could not submit. Choose an answer to retry.';
+      return;
+    }
+    completePollResponse(pollId, selectedIndex);
   });
+}
 
+function completePollResponse(pollId, selectedIndex) {
+  if (!pollId || (activePollId && activePollId !== pollId)) return;
+  respondedPollIds.add(pollId);
   // Show thank you message
   const body = document.querySelector('.classpilot-poll-body');
   if (body) {
@@ -1434,13 +1490,13 @@ function submitPollResponse(pollId, selectedIndex, button) {
           <p>Response submitted!</p>
         </div>
       `;
-    }, 500);
+    }, 150);
   }
 
   // Auto-close after 2 seconds
   setTimeout(() => {
     hidePollOverlay();
-  }, 2500);
+  }, 2150);
 }
 
 function hidePollOverlay() {
@@ -1773,11 +1829,16 @@ let chatMessages = []; // { sender: 'student'|'teacher', text: string, time: num
 let chatClosed = false; // Set when teacher closes chat — prevents re-opening old conversation
 const FAB_CHAT_MESSAGES_KEY = 'fabChatMessages';
 const FAB_CHAT_CLOSED_KEY = 'fabChatClosed';
+const FAB_STATE_KEY = 'fabStateV1';
+const FAB_CONTEXT_KEY = 'fabContextV1';
+const FAB_CHAT_CONTEXT_KEY = 'fabChatContextV1';
+let currentFabContext = null;
 
 function persistFabChatState() {
   chrome.storage.local.set({
     [FAB_CHAT_MESSAGES_KEY]: chatMessages.slice(-50),
     [FAB_CHAT_CLOSED_KEY]: chatClosed,
+    [FAB_CHAT_CONTEXT_KEY]: currentFabContext,
   });
 }
 
@@ -1791,7 +1852,36 @@ function updateFabChatControls() {
 function applyFabState(state = {}) {
   const reason = state.reason || '';
   const wasMessagingEnabled = messagingEnabled;
-  const sessionEnded = reason === 'session-ended' || reason === 'session-replaced';
+  const priorContext = currentFabContext;
+  const nextContext = state.context || priorContext;
+  const priorSessions = [...new Set(priorContext?.activeSessionIds || [])].sort();
+  const nextSessions = [...new Set(
+    nextContext?.activeSessionIds || state.activeSessionIds ||
+    (state.teachingSessionId ? [state.teachingSessionId] : [])
+  )].sort();
+  const bindingChanged = Boolean(priorContext?.binding && nextContext?.binding
+    && priorContext.binding !== nextContext.binding);
+  const sessionSetChanged = Boolean(priorContext)
+    && JSON.stringify(priorSessions) !== JSON.stringify(nextSessions);
+  const sessionEnded = reason === 'session-ended'
+    || (Boolean(nextContext) && nextSessions.length === 0);
+
+  if (
+    priorContext?.binding === nextContext?.binding &&
+    !sessionSetChanged &&
+    Number(state.revision || 0) > 0 &&
+    Number(priorContext?.revision || 0) > Number(state.revision || 0)
+  ) {
+    return;
+  }
+  if (nextContext) {
+    currentFabContext = {
+      ...nextContext,
+      activeSessionIds: nextSessions,
+      revision: Number(state.revision ?? nextContext.revision ?? 0),
+      lifecycleRevision: Number(state.lifecycleRevision ?? nextContext.lifecycleRevision ?? 0),
+    };
+  }
 
   if (typeof state.messagingEnabled === 'boolean') {
     messagingEnabled = state.messagingEnabled;
@@ -1803,12 +1893,13 @@ function applyFabState(state = {}) {
     handRaised = state.handRaised;
   }
 
-  if (reason === 'session-started') {
+  if (bindingChanged || sessionSetChanged) {
+    respondedPollIds.clear();
     chatMessages = [];
-    chatClosed = false;
+    chatClosed = sessionEnded;
     persistFabChatState();
     renderChatMessages();
-  } else if (sessionEnded) {
+  } else if (sessionEnded && (chatMessages.length > 0 || !chatClosed)) {
     chatMessages = [];
     chatClosed = true;
     persistFabChatState();
@@ -1888,12 +1979,25 @@ function createFloatingActionButton() {
   document.body.appendChild(fabContainer);
 
   // Get initial state
-  chrome.storage.local.get(['handRaised', 'messagingEnabled', 'handRaisingEnabled', FAB_CHAT_MESSAGES_KEY, FAB_CHAT_CLOSED_KEY], (result) => {
+  chrome.storage.local.get([
+    'handRaised',
+    'messagingEnabled',
+    'handRaisingEnabled',
+    FAB_CHAT_MESSAGES_KEY,
+    FAB_CHAT_CLOSED_KEY,
+    FAB_STATE_KEY,
+    FAB_CONTEXT_KEY,
+    FAB_CHAT_CONTEXT_KEY,
+  ], (result) => {
     handRaised = result.handRaised || false;
     messagingEnabled = result.messagingEnabled !== false;
     handRaisingEnabled = result.handRaisingEnabled !== false;
     chatMessages = Array.isArray(result[FAB_CHAT_MESSAGES_KEY]) ? result[FAB_CHAT_MESSAGES_KEY] : [];
     chatClosed = result[FAB_CHAT_CLOSED_KEY] === true;
+    currentFabContext = result[FAB_CHAT_CONTEXT_KEY] || result[FAB_CONTEXT_KEY] || null;
+    if (result[FAB_STATE_KEY]) {
+      applyFabState({ ...result[FAB_STATE_KEY], context: result[FAB_CONTEXT_KEY] });
+    }
     updateFabHandState();
     updateFabMessageState();
     updateFabChatControls();
@@ -2600,6 +2704,19 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     }
     if (changes[FAB_CHAT_CLOSED_KEY]) {
       chatClosed = changes[FAB_CHAT_CLOSED_KEY].newValue === true;
+    }
+    if (changes[FAB_CONTEXT_KEY] || changes[FAB_STATE_KEY]) {
+      chrome.storage.local.get([FAB_STATE_KEY, FAB_CONTEXT_KEY], (stored) => {
+        if (stored[FAB_STATE_KEY]) {
+          applyFabState({ ...stored[FAB_STATE_KEY], context: stored[FAB_CONTEXT_KEY] });
+        } else {
+          currentFabContext = null;
+          chatMessages = [];
+          chatClosed = true;
+          renderChatMessages();
+          hideMessageBox();
+        }
+      });
     }
   }
   if ((namespace === 'local' || namespace === 'session') &&

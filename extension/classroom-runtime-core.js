@@ -21,7 +21,7 @@
   ]);
 
   const DNR_RANGES = Object.freeze({
-    classroom: Object.freeze([1, 2]),
+    classroom: Object.freeze([1, 1000]),
     school: Object.freeze([1000, 2000]),
     teacher: Object.freeze([2000, 3000]),
     temporary: Object.freeze([3000, 4000]),
@@ -383,7 +383,7 @@
     if (flightActive && flightDomains.length === 0) {
       throw new Error('active Flight Path requires at least one valid domain');
     }
-    if (screenActive && !flightActive && !screenDomain) {
+    if (screenActive && !screenDomain) {
       throw new Error('active screen lock requires a valid domain');
     }
     if (blockActive && blockedDomains.length === 0) {
@@ -392,7 +392,7 @@
 
     return {
       screenLock: {
-        active: screenActive && !flightActive && Boolean(screenDomain),
+        active: screenActive && Boolean(screenDomain),
         url: screenUrl,
         domain: screenDomain,
       },
@@ -528,18 +528,35 @@
           condition: { resourceTypes: ['main_frame'] },
         });
       } else {
-        const allowed = classroom.flightPath?.active
-          ? normalizeDomainList(classroom.flightPath.allowedDomains, 'Flight Path domains')
-          : classroom.screenLock?.active
-            ? normalizeDomainList([classroom.screenLock.domain], 'screen lock domains')
+        // A screen lock is an overlay, not a destructive replacement for an
+        // independently configured Flight Path. It wins enforcement while
+        // active; removing only the screen lock reveals the retained path.
+        const screenLockDomains = classroom.screenLock?.active
+          ? normalizeDomainList([classroom.screenLock.domain], 'screen lock domains')
+          : [];
+        const allowed = screenLockDomains.length > 0
+          ? screenLockDomains
+          : classroom.flightPath?.active
+            ? normalizeDomainList(classroom.flightPath.allowedDomains, 'Flight Path domains')
             : [];
         if (allowed.length > 0) {
+          const screenLockPriority = screenLockDomains.length > 0 ? 500 : 1;
           rules.push({
             id: DNR_RANGES.classroom[0],
-            priority: 1,
+            priority: screenLockPriority,
             action: { type: 'block' },
             condition: { resourceTypes: ['main_frame'], excludedRequestDomains: allowed },
           });
+          if (screenLockDomains.length > 0) {
+            // Make the lock target authoritative over teacher block-list and
+            // temporary-allow rules, while the school range remains higher.
+            rules.push({
+              id: DNR_RANGES.classroom[0] + 1,
+              priority: screenLockPriority,
+              action: { type: 'allow' },
+              condition: { resourceTypes: ['main_frame'], requestDomains: screenLockDomains },
+            });
+          }
         }
       }
     }
