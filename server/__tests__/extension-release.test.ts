@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.1");
+    expect(manifest.version).toBe("2.6.2");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -44,6 +44,17 @@ describe("ClassPilot extension release package guards", () => {
     ]) {
       expect(optionsAround(serviceWorker, context)).toContain("respectGlobalBackoff: false");
     }
+  });
+
+  it("launches the PassPilot kiosk from the auth gate and never paints the gate over it", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const contentScript = readRepoFile("extension/content.js");
+    expect(serviceWorker).toContain("function kioskLaunchUrl");
+    expect(serviceWorker).toContain("launch=gate");
+    expect(serviceWorker).toContain("if (isKioskGateUrl(tab.url || '')) {");
+    expect(contentScript).toContain("state.kioskOrigin");
+    expect(contentScript).toContain("classpilot-auth-kiosk-launch");
+    expect(contentScript).toContain("window.location.pathname.startsWith('/passpilot/kiosk/')");
   });
 
   it("keeps background telemetry respecting global backoff", () => {
