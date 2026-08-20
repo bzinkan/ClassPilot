@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.2");
+    expect(manifest.version).toBe("2.6.3");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
