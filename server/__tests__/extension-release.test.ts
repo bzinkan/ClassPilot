@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.4");
+    expect(manifest.version).toBe("2.6.5");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -55,6 +55,19 @@ describe("ClassPilot extension release package guards", () => {
     expect(contentScript).toContain("state.kioskOrigin");
     expect(contentScript).toContain("classpilot-auth-kiosk-launch");
     expect(contentScript).toContain("window.location.pathname.startsWith('/passpilot/kiosk/')");
+  });
+
+  it("suppresses the student FAB on kiosk pages while keeping the monitoring disclosure", () => {
+    const contentScript = readRepoFile("extension/content.js");
+    expect(contentScript).toContain("function reconcileKioskFabSuppression");
+    expect(contentScript).toContain("function isPassPilotKioskPage");
+    expect(contentScript).toContain("const kioskSuppressed = isPassPilotKioskPage();");
+    // The kiosk-suppressed branch must still render the disclosure indicator.
+    const suppressedBranch = contentScript.slice(
+      contentScript.indexOf("if (kioskSuppressed) {"),
+      contentScript.indexOf("fabContainer.innerHTML = `", contentScript.indexOf("if (kioskSuppressed) {") + 30) + 600
+    );
+    expect(suppressedBranch).toContain("classpilot-monitoring-indicator");
   });
 
   it("keeps background telemetry respecting global backoff", () => {
