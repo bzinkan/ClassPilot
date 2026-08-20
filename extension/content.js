@@ -252,6 +252,16 @@ function showAuthGate(state = {}) {
     return;
   }
 
+  // Never paint the gate over the PassPilot kiosk pages — a locked student
+  // Chromebook can be used as a hall-pass kiosk (the kiosk has its own PIN
+  // gate). Everything else stays locked; leaving the kiosk re-gates the tab.
+  if (typeof state.kioskOrigin === 'string' && state.kioskOrigin &&
+      window.location.origin === state.kioskOrigin &&
+      (window.location.pathname === '/passpilot/kiosk' ||
+        window.location.pathname.startsWith('/passpilot/kiosk/'))) {
+    return;
+  }
+
   authGateActive = true;
   document.documentElement.classList.add('classpilot-auth-locked');
   document.body?.classList.add('classpilot-auth-locked');
@@ -485,6 +495,31 @@ function buildAuthGateMarkup(state) {
         opacity: 0.65 !important;
         cursor: not-allowed !important;
       }
+      .classpilot-auth-kiosk-button {
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 8px !important;
+        width: 100% !important;
+        min-height: 44px !important;
+        margin-top: 20px !important;
+        border: 1px solid #d8dee8 !important;
+        border-radius: 12px !important;
+        background: transparent !important;
+        color: #0e2a57 !important;
+        font-weight: 600 !important;
+        font-size: 15px !important;
+        cursor: pointer !important;
+      }
+      .classpilot-auth-kiosk-button:hover {
+        border-color: #0e2a57 !important;
+        background: #fdf2c8 !important;
+      }
+      .classpilot-auth-kiosk-button svg {
+        width: 18px !important;
+        height: 18px !important;
+        stroke: #0e2a57 !important;
+      }
       .classpilot-auth-error {
         display: none;
         padding: 12px 14px !important;
@@ -565,6 +600,7 @@ function buildAuthGateMarkup(state) {
           ${state.setupRequired ? buildSetupRequiredMarkup() : (
             loginMethod === 'name_pin' ? buildPinLoginMarkup() : buildEmailLoginMarkup()
           )}
+          ${!state.setupRequired && state.kioskUrl ? buildKioskLaunchMarkup() : ''}
           <div class="classpilot-auth-footnote"><span>${authIcon('shield')}</span><span>Shared Chromebook sign-in</span></div>
         </div>
       </div>
@@ -591,6 +627,17 @@ function buildSetupRequiredMarkup() {
     <div class="classpilot-auth-roster-note">
       This Chromebook is missing the managed ClassPilot school setup policy, or Shared Chromebook Sign-In is turned off.
     </div>
+  `;
+}
+
+// Staff shortcut: turn this locked Chromebook into a PassPilot hall-pass
+// kiosk. Rendered only when the service worker confirmed the school's kiosk
+// is usable (state.kioskUrl non-null); the kiosk page itself is PIN-gated.
+function buildKioskLaunchMarkup() {
+  return `
+    <button class="classpilot-auth-kiosk-button" id="classpilot-auth-kiosk-launch" type="button">
+      ${authIcon('badge')} Use as PassPilot hall-pass kiosk
+    </button>
   `;
 }
 
@@ -681,6 +728,16 @@ function attachAuthGateHandlers(state) {
       }, event.submitter);
     });
     loadAuthGateGradeOptions();
+  }
+
+  const kioskButton = document.getElementById('classpilot-auth-kiosk-launch');
+  if (kioskButton && typeof state.kioskUrl === 'string' && state.kioskUrl) {
+    // Current-tab navigation; the click originates inside the gate element so
+    // the input blockers permit it, and the URL is built by the service
+    // worker (never from page-controlled data).
+    kioskButton.addEventListener('click', () => {
+      window.location.assign(state.kioskUrl);
+    });
   }
 }
 

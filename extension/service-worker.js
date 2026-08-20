@@ -349,6 +349,8 @@ let sharedSignInLoginConfig = {
   sharedSignInEnabled: false,
   loginMethod: 'name_pin',
   pinLoginEnabled: false,
+  schoolId: null,
+  passpilotKioskAvailable: false,
 };
 let sharedSignInConfigPromise = null;
 
@@ -359,6 +361,8 @@ function resetSharedSignInLoginConfigCache() {
     sharedSignInEnabled: false,
     loginMethod: 'name_pin',
     pinLoginEnabled: false,
+    schoolId: null,
+    passpilotKioskAvailable: false,
   };
 }
 
@@ -689,6 +693,39 @@ async function clearStoredAuthState(localOverrides = {}) {
 
 function isHttpUrl(url) {
   return Boolean(url && /^https?:\/\//i.test(url));
+}
+
+// PassPilot kiosk launch from the auth gate: the kiosk pages live at
+// <serverOrigin>/passpilot/kiosk (badge) and /passpilot/kiosk/simple. They are
+// public, kiosk-PIN-gated pages, so the auth gate never paints over them —
+// otherwise a locked student Chromebook could not be used as a hall-pass kiosk.
+function kioskGateOrigin() {
+  try {
+    return new URL(CONFIG.serverUrl || DEFAULT_SERVER_URL).origin;
+  } catch {
+    return null;
+  }
+}
+
+function isKioskGateUrl(url) {
+  const origin = kioskGateOrigin();
+  if (!origin || typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === origin &&
+      (parsed.pathname === '/passpilot/kiosk' || parsed.pathname.startsWith('/passpilot/kiosk/'));
+  } catch {
+    return false;
+  }
+}
+
+function kioskLaunchUrl() {
+  const origin = kioskGateOrigin();
+  if (!origin || !sharedSignInLoginConfig.schoolId) return null;
+  if (sharedSignInLoginConfig.passpilotKioskAvailable !== true) return null;
+  // launch=gate tells the kiosk page to keep the staff PIN in sessionStorage
+  // so it dies with the tab instead of persisting in the student profile.
+  return `${origin}/passpilot/kiosk/simple?school=${encodeURIComponent(sharedSignInLoginConfig.schoolId)}&launch=gate`;
 }
 
 // Refresh the tab cache - called when tabs change to keep cache accurate
@@ -2757,6 +2794,8 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         sharedSignInEnabled: false,
         loginMethod: 'name_pin',
         pinLoginEnabled: false,
+        schoolId: null,
+        passpilotKioskAvailable: false,
       };
       return sharedSignInLoginConfig;
     }
@@ -2782,6 +2821,11 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         sharedSignInEnabled: response.ok && data.sharedSignInEnabled === true,
         loginMethod: response.ok && data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
         pinLoginEnabled: response.ok && data.loginMethod !== 'email_id',
+        // PassPilot kiosk launch: the auth gate offers a kiosk button when the
+        // server says the school's kiosk is usable. Kept in this cache (not
+        // CONFIG.schoolId, which is auth-scoped and persisted).
+        schoolId: response.ok && typeof data.schoolId === 'string' ? data.schoolId : null,
+        passpilotKioskAvailable: response.ok && data.passpilotKioskAvailable === true,
       };
       return sharedSignInLoginConfig;
     } catch (error) {
@@ -2792,6 +2836,8 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         sharedSignInEnabled: false,
         loginMethod: 'name_pin',
         pinLoginEnabled: false,
+        schoolId: null,
+        passpilotKioskAvailable: false,
       };
       return sharedSignInLoginConfig;
     }
@@ -2814,6 +2860,11 @@ function getAuthGateState() {
     pinLoginEnabled: sharedSignInLoginConfig.loginMethod === 'name_pin',
     hasManagedSchoolSetup: hasSchoolSetup,
     manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+    // kioskUrl is null unless the school's PassPilot kiosk is usable;
+    // kioskOrigin is always present so the content script can skip painting
+    // the gate on kiosk pages even when the button is hidden.
+    kioskUrl: kioskLaunchUrl(),
+    kioskOrigin: kioskGateOrigin(),
   };
 }
 
@@ -2856,6 +2907,12 @@ async function enforceAuthGateForTab(tabOrId) {
   try {
     const tab = typeof tabOrId === 'number' ? await chrome.tabs.get(tabOrId) : tabOrId;
     if (!tab?.id || !isHttpUrl(tab.url || '')) {
+      return;
+    }
+    // Never push (or force-inject) the auth gate onto a PassPilot kiosk page.
+    // Prefix-only match, not availability-gated: a transient login-config
+    // failure must not repaint the gate over a kiosk mid-hall-pass.
+    if (isKioskGateUrl(tab.url || '')) {
       return;
     }
     if (!hasStudentAuth()) {
@@ -8479,6 +8536,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const newServerUrl = message.serverUrl;
     if (newServerUrl) {
       CONFIG.serverUrl = newServerUrl;
+      // The cached login-config (incl. kiosk schoolId/availability) came from
+      // the old server — drop it so kiosk URLs never mix origins and configs.
+      resetSharedSignInLoginConfigCache();
       chrome.storage.local.set({ config: persistedNonAuthConfig(CONFIG) }, () => {
         console.log('Server URL updated to:', newServerUrl);
         // Refresh school settings and tracking state with new server URL
