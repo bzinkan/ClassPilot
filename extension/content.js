@@ -32,12 +32,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'CLASSPILOT_AUTH_REQUIRED') {
+    reconcileKioskFabSuppression(message.state?.kioskOrigin);
     showAuthGate(message.state || {});
     sendResponse?.({ success: true });
     return false;
   }
 
   if (message.type === 'CLASSPILOT_AUTH_COMPLETE') {
+    reconcileKioskFabSuppression(message.state?.kioskOrigin);
     removeAuthGate();
     updateFabIdentityState();
     sendResponse?.({ success: true });
@@ -183,6 +185,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function requestAuthGateState() {
   chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
     if (chrome.runtime.lastError) return;
+    reconcileKioskFabSuppression(response?.state?.kioskOrigin);
     if (response?.state?.authRequired) {
       showAuthGate(response.state);
     } else {
@@ -190,6 +193,39 @@ function requestAuthGateState() {
     }
     updateFabIdentityState(response?.state);
   });
+}
+
+// ============================================================================
+// PassPilot kiosk FAB suppression
+// ============================================================================
+// A shared hall-pass kiosk has no signed-in student to message, raise a hand
+// for, or sign out — the interactive student FAB is suppressed on the kiosk
+// pages while the "Monitored by school" disclosure indicator stays visible.
+// Any full navigation back to a normal page re-evaluates and restores the
+// full FAB. The path is known at mount time; the authoritative kiosk origin
+// arrives with the auth-gate state and reconciles the decision.
+let knownKioskOrigin = null;
+
+function isPassPilotKioskPath() {
+  return window.location.pathname === '/passpilot/kiosk' ||
+    window.location.pathname.startsWith('/passpilot/kiosk/');
+}
+
+function isPassPilotKioskPage() {
+  if (!isPassPilotKioskPath()) return false;
+  return knownKioskOrigin === null || window.location.origin === knownKioskOrigin;
+}
+
+function reconcileKioskFabSuppression(kioskOrigin) {
+  if (typeof kioskOrigin === 'string' && kioskOrigin) {
+    knownKioskOrigin = kioskOrigin;
+  }
+  const container = document.getElementById('classpilot-fab-container');
+  if (!container) return;
+  const suppressed = isPassPilotKioskPage();
+  const hasStudentFab = Boolean(document.getElementById('classpilot-fab-main'));
+  if (suppressed === !hasStudentFab) return;
+  createFloatingActionButton();
 }
 
 function requestClassroomOverlayState() {
@@ -2268,8 +2304,23 @@ function createFloatingActionButton() {
     existing.remove();
   }
 
+  // PassPilot kiosk pages: keep only the monitoring disclosure — no student
+  // controls (message / raise hand / sign out) on a shared hall-pass kiosk.
+  const kioskSuppressed = isPassPilotKioskPage();
+
   const fabContainer = document.createElement('div');
   fabContainer.id = 'classpilot-fab-container';
+  if (kioskSuppressed) {
+    fabContainer.innerHTML = `
+      <div class="classpilot-monitoring-indicator" title="ClassPilot is active. Your school can see active tab titles, URLs, timestamps, and periodic screen thumbnails.">
+        <span class="classpilot-monitoring-dot" aria-hidden="true"></span>
+        <span>Monitored by school</span>
+      </div>
+    `;
+    addFabStyles();
+    document.body.appendChild(fabContainer);
+    return;
+  }
   fabContainer.innerHTML = `
     <div class="classpilot-monitoring-indicator" title="ClassPilot is active. Your school can see active tab titles, URLs, timestamps, and periodic screen thumbnails.">
       <span class="classpilot-monitoring-dot" aria-hidden="true"></span>
