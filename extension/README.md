@@ -47,7 +47,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
    manifest version must match the file name.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.6.2.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.6.3.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
