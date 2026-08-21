@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.8");
+    expect(manifest.version).toBe("2.6.9");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -323,6 +323,23 @@ describe("ClassPilot extension release package guards", () => {
     expect(contentScript).toContain("state.kioskOrigin");
     expect(contentScript).toContain("classpilot-auth-kiosk-launch");
     expect(contentScript).toContain("window.location.pathname.startsWith('/passpilot/kiosk/')");
+  });
+
+  it("passes the managed device identity to the kiosk so its memory survives profile wipes", () => {
+    const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(manifest.permissions).toContain("enterprise.deviceAttributes");
+    expect(serviceWorker).toContain("getDirectoryDeviceId");
+    expect(serviceWorker).toContain("function detectManagedKioskDeviceId");
+    // The device param must ride the kiosk launch URL without splitting the
+    // launch=gate literal asserted above.
+    expect(serviceWorker).toContain("&launch=gate${deviceParam}");
+    // Late resolution must repaint an already-painted gate.
+    const detectBody = serviceWorker.slice(
+      serviceWorker.indexOf("function detectManagedKioskDeviceId"),
+      serviceWorker.indexOf("function detectManagedKioskDeviceId") + 2400
+    );
+    expect(detectBody).toContain("bumpAuthGateStateRevision()");
   });
 
   it("suppresses the student FAB on kiosk pages while keeping the monitoring disclosure", () => {

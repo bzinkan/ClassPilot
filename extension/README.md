@@ -32,6 +32,19 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
+### Durable kiosk device identity (2.6.9)
+
+On managed (enrolled) Chromebooks the extension resolves the device's
+directory id via `chrome.enterprise.deviceAttributes`, hashes it into an
+opaque UUID, and appends it as `device=` on the PassPilot kiosk launch URL.
+The kiosk page adopts it as the device's identity, so PassPilot's
+teacher-resume memory survives the per-profile storage wipes that occur on
+shared devices when the lid closes or a session ends. The raw directory id
+never leaves the extension; unmanaged installs are unaffected (the
+enterprise API is undefined there). Requires the `enterprise.deviceAttributes`
+permission (no user-facing prompt; the API only functions on policy-installed
+extensions).
+
 ### PassPilot kiosk purity + sign-out finality (2.6.8)
 
 On `/passpilot/kiosk` pages the student FAB suppression is now a one-way
@@ -86,7 +99,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    manifest version must match the file name.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.6.8.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.6.9.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
