@@ -98,6 +98,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'show-message') {
+    // Kiosk purity (2.6.8): classroom broadcasts must never render over a
+    // hall-pass kiosk — there is no signed-in student there to address.
+    if (isPassPilotKioskPage()) return false;
     // Broadcast messages (not replies) still show as modal
     if (!message.data.isTeacherReply) {
       showMessageModal(message.data);
@@ -167,8 +170,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     removeLicenseBanner();
   }
 
-  // Attention Mode handlers
+  // Attention Mode handlers (kiosk-filtered: overlays never cover a kiosk)
   if (message.type === 'attention-mode') {
+    if (isPassPilotKioskPage()) return false;
     if (message.data.active) {
       showAttentionOverlay(message.data.message || 'Please look up!');
     } else {
@@ -176,8 +180,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  // Timer handlers
+  // Timer handlers (kiosk-filtered)
   if (message.type === 'timer') {
+    if (isPassPilotKioskPage()) return false;
     if (message.data.action === 'start') {
       startTimerOverlay(message.data.seconds, message.data.message, message.data.endsAt);
     } else if (message.data.action === 'stop') {
@@ -185,8 +190,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   }
 
-  // Poll handlers
+  // Poll handlers (kiosk-filtered)
   if (message.type === 'poll') {
+    if (isPassPilotKioskPage()) return false;
     if (message.data.action === 'start') {
       showPollOverlay(message.data.pollId, message.data.question, message.data.options);
     } else if (message.data.action === 'close') {
@@ -386,8 +392,15 @@ function isPassPilotKioskPath() {
 }
 
 function isPassPilotKioskPage() {
-  if (!isPassPilotKioskPath()) return false;
-  return knownKioskOrigin === null || window.location.origin === knownKioskOrigin;
+  // Path match alone suppresses (2.6.8 ratchet). The old origin comparison
+  // was an un-suppress escape: once the auth-gate state delivered a kiosk
+  // origin that mismatched window.location.origin (vanity managed serverUrl,
+  // www↔apex canonical redirects), reconcile REBUILT the full student FAB on
+  // a live hall-pass kiosk. Teacher-facing kiosk purity wins over the
+  // theoretical false positive of a third-party site that happens to serve a
+  // /passpilot/kiosk/ path — worst case there is a missing FAB, not student
+  // UI on a kiosk.
+  return isPassPilotKioskPath();
 }
 
 function reconcileKioskFabSuppression(kioskOrigin) {
@@ -567,8 +580,18 @@ function showAuthGate(state = {}) {
   // Never paint the gate over the PassPilot kiosk pages — a locked student
   // Chromebook can be used as a hall-pass kiosk (the kiosk has its own PIN
   // gate). Everything else stays locked; leaving the kiosk re-gates the tab.
-  if (typeof state.kioskOrigin === 'string' && state.kioskOrigin &&
-      window.location.origin === state.kioskOrigin &&
+  // The skip stays ORIGIN-VERIFIED (a lookalike origin serving a kiosk path
+  // must remain gated — path-only skipping would be an auth-gate bypass), but
+  // falls back to the sticky knownKioskOrigin (2.6.8): the managed-policy
+  // fence calls showAuthGate with loading states that carry NO kioskOrigin,
+  // which previously painted "Connecting to ClassPilot" over live kiosks on
+  // every policy change.
+  const kioskOriginForGateSkip =
+    (typeof state.kioskOrigin === 'string' && state.kioskOrigin)
+      ? state.kioskOrigin
+      : knownKioskOrigin;
+  if (kioskOriginForGateSkip &&
+      window.location.origin === kioskOriginForGateSkip &&
       (window.location.pathname === '/passpilot/kiosk' ||
         window.location.pathname.startsWith('/passpilot/kiosk/'))) {
     removeAuthGate();
