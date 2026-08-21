@@ -402,6 +402,13 @@ let sharedSignInLoginConfig = {
   passpilotKioskAvailable: false,
 };
 let sharedSignInConfigPromise = null;
+// Managed-device kiosk identity (2.6.9): the enrolled Chromebook's directory
+// id, hashed into UUID shape and appended to the kiosk launch URL so PassPilot
+// kiosk device memory survives the per-profile storage wipes on shared
+// devices. null until resolved; stays null on unmanaged/consumer installs
+// (the enterprise API object is undefined there).
+let managedKioskDeviceId = null;
+let managedKioskDeviceIdProbe = null;
 
 function bumpAuthGateStateRevision() {
   // The reserved block is intentionally far larger than a worker can consume
@@ -915,7 +922,68 @@ function kioskLaunchUrl() {
   if (sharedSignInLoginConfig.passpilotKioskAvailable !== true) return null;
   // launch=gate tells the kiosk page to keep the staff PIN in sessionStorage
   // so it dies with the tab instead of persisting in the student profile.
-  return `${origin}/passpilot/kiosk/simple?school=${encodeURIComponent(sharedSignInLoginConfig.schoolId)}&launch=gate`;
+  // device= (managed installs only) is the durable kiosk identity the page
+  // adopts so its teacher memory survives profile wipes; appended after
+  // launch=gate so that literal stays contiguous for the release contract.
+  const deviceParam = managedKioskDeviceId
+    ? `&device=${encodeURIComponent(managedKioskDeviceId)}`
+    : '';
+  return `${origin}/passpilot/kiosk/simple?school=${encodeURIComponent(sharedSignInLoginConfig.schoolId)}&launch=gate${deviceParam}`;
+}
+
+// Resolve the enrolled device's directory id (managed ChromeOS +
+// policy-installed only — chrome.enterprise is undefined everywhere else)
+// and hash it into UUID shape: the raw id never leaves the worker, and the
+// hashed form matches the kiosk API's existing device-id validation.
+// Single-flight and cached for the worker's lifetime; resolution bumps the
+// auth-gate state revision so an already-painted gate re-renders its kiosk
+// button with the device param.
+function detectManagedKioskDeviceId() {
+  if (managedKioskDeviceIdProbe) return managedKioskDeviceIdProbe;
+  managedKioskDeviceIdProbe = (async () => {
+    try {
+      if (!chrome.enterprise?.deviceAttributes?.getDirectoryDeviceId) return null;
+      // Timeout-raced: on some unmanaged runtimes the API surface exists but
+      // the callback never fires, and a pending extension API call would pin
+      // the MV3 worker alive. The probe must always settle.
+      const rawId = await Promise.race([
+        new Promise((resolve) => {
+          try {
+            chrome.enterprise.deviceAttributes.getDirectoryDeviceId((value) => {
+              if (chrome.runtime.lastError) {
+                resolve(null);
+                return;
+              }
+              resolve(typeof value === 'string' ? value.trim() : null);
+            });
+          } catch {
+            resolve(null);
+          }
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
+      ]);
+      if (!rawId) return null;
+      if (!globalThis.crypto?.subtle?.digest) return null;
+      const digest = await globalThis.crypto.subtle.digest(
+        'SHA-256',
+        new TextEncoder().encode(`classpilot-kiosk-device:${rawId}`),
+      );
+      const hex = Array.from(new Uint8Array(digest).slice(0, 16))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+      const hashed = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+      if (hashed !== managedKioskDeviceId) {
+        managedKioskDeviceId = hashed;
+        bumpAuthGateStateRevision();
+        notifyAuthGateStateToTabs().catch(() => {});
+      }
+      return managedKioskDeviceId;
+    } catch (err) {
+      console.log('[Kiosk] Managed device id unavailable:', err?.message || err);
+      return null;
+    }
+  })();
+  return managedKioskDeviceIdProbe;
 }
 
 // Refresh the tab cache - called when tabs change to keep cache accurate
@@ -5610,6 +5678,10 @@ const authStateRestorePromise = new Promise((resolve) => {
       (config) => ({ config, error: null }),
       (error) => ({ config: {}, error }),
     );
+  // Resolve the managed kiosk device identity in parallel too — it never
+  // blocks the cold-auth path; kioskLaunchUrl() reads the cached value
+  // synchronously and the resolution bumps the gate revision itself.
+  detectManagedKioskDeviceId().catch(() => {});
   // Reserve the revision range in parallel with both auth stores and managed
   // policy. This keeps the required durable write off the sequential cold-auth
   // path as much as Chrome's storage implementation permits.
