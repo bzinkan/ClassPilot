@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.6");
+    expect(manifest.version).toBe("2.6.7");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -196,7 +196,7 @@ describe("ClassPilot extension release package guards", () => {
 
   it("invalidates old auth before persisting a directly revalidated authority", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
-    const start = serviceWorker.indexOf("async function revalidateManagedAuthGatePolicy");
+    const start = serviceWorker.indexOf("async function runManagedAuthGatePolicyRevalidation");
     const end = serviceWorker.indexOf("function restoreSharedSignInPresentationCache", start);
     const revalidation = serviceWorker.slice(start, end);
     const clearIndex = revalidation.indexOf("await clearStudentAuth('managed_policy_direct_revalidation'");
@@ -212,6 +212,44 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toMatch(
       /async function clearStudentAuthNow\([^)]*invalidationPersisted\)[\s\S]*await invalidationPersisted/,
     );
+  });
+
+  it("coalesces concurrent managed-policy proofs while echoing each caller fence", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toContain("let managedAuthGateDirectRevalidationInFlight = null");
+    expect(serviceWorker).toContain("async function runManagedAuthGatePolicyRevalidation()");
+    expect(serviceWorker).toMatch(
+      /if \(!managedAuthGateDirectRevalidationInFlight\)[\s\S]*runManagedAuthGatePolicyRevalidation\(\)[\s\S]*managedAuthGateDirectRevalidationInFlight = trackedRun/,
+    );
+    expect(serviceWorker).toContain("const result = await managedAuthGateDirectRevalidationInFlight");
+    expect(serviceWorker).toMatch(
+      /return \{[\s\S]*\.\.\.result,[\s\S]*managedPolicyFence,[\s\S]*\};/,
+    );
+  });
+
+  it("commit-fences both Chrome-profile registration adoption paths", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const ensureStart = serviceWorker.indexOf("async function ensureRegisteredNow()");
+    const ensureEnd = serviceWorker.indexOf("// Run auto-registration on install and startup", ensureStart);
+    const ensureRegistration = serviceWorker.slice(ensureStart, ensureEnd);
+    const directStart = serviceWorker.indexOf("async function registerDeviceWithStudentNow(");
+    const directEnd = serviceWorker.indexOf("// Send heartbeat with current tab info", directStart);
+    const directRegistration = serviceWorker.slice(directStart, directEnd);
+
+    for (const registration of [ensureRegistration, directRegistration]) {
+      const beginIndex = registration.indexOf("await beginStudentAuthCommit(");
+      const persistIndex = registration.indexOf("await durableLocalKv.set({", beginIndex);
+      const applyIndex = registration.indexOf("await applyClassroomStateFromAuthResponse(", persistIndex);
+      const requireIndex = registration.indexOf("{ requireApplied: true }", applyIndex);
+      const completeIndex = registration.indexOf("await completeStudentAuthCommit(", requireIndex);
+      expect(beginIndex).toBeGreaterThan(-1);
+      expect(persistIndex).toBeGreaterThan(beginIndex);
+      expect(applyIndex).toBeGreaterThan(persistIndex);
+      expect(requireIndex).toBeGreaterThan(applyIndex);
+      expect(completeIndex).toBeGreaterThan(requireIndex);
+    }
+    expect(ensureRegistration).toContain("student_registration_commit_failed");
+    expect(directRegistration).toContain("student_auto_registration_commit_failed");
   });
 
   it("clears auth before persisting a managed storage-change authority", () => {
@@ -377,7 +415,9 @@ describe("ClassPilot extension release package guards", () => {
       /applyClassroomStateFromAuthResponse\(data, 'student_login', \{ requireApplied: true \}\)/,
     );
     expect(
-      serviceWorker.match(/applyClassroomStateFromAuthResponse\(data, 'student_registration'\)/g)
+      serviceWorker.match(
+        /applyClassroomStateFromAuthResponse\(\s*data,\s*'student_registration',\s*\{ requireApplied: true \},?\s*\)/g,
+      ),
     ).toHaveLength(2);
   });
 

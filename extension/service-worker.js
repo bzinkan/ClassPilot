@@ -388,6 +388,7 @@ let sharedSignInConfigRetryAttempt = 0;
 let managedAuthGatePolicyGeneration = 0;
 let managedAuthGateSetupUnavailable = false;
 let managedAuthGatePolicyRestorePromise = Promise.resolve({});
+let managedAuthGateDirectRevalidationInFlight = null;
 let sharedSignInLoginConfig = {
   phase: 'loading',
   fetchedAt: 0,
@@ -3388,18 +3389,10 @@ function hasStoredStudentAuthMaterial(stored = {}) {
   );
 }
 
-async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
-  if (!Number.isSafeInteger(managedPolicyFence) || managedPolicyFence <= 0) {
-    const error = new Error('Managed policy fence must be a positive safe integer');
-    error.code = 'AUTH_GATE_INVALID_POLICY_FENCE';
-    throw error;
-  }
-
-  await authStateRestorePromise;
-
-  // A direct client fence always owns a new policy generation. Any older
-  // storage-change reread or login adoption is superseded before this fresh
-  // managed snapshot is requested.
+async function runManagedAuthGatePolicyRevalidation() {
+  // One shared direct-revalidation cycle owns a new policy generation. Any
+  // older storage-change reread or login adoption is superseded before this
+  // fresh managed snapshot is requested.
   const policyGeneration = ++managedAuthGatePolicyGeneration;
   let resolvePolicyRestore;
   let rejectPolicyRestore;
@@ -3533,7 +3526,6 @@ async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
     );
     return {
       state,
-      managedPolicyFence,
       managedPolicyGeneration: policyGeneration,
     };
   })().catch(async (error) => {
@@ -3577,6 +3569,35 @@ async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
 
   run.then(resolvePolicyRestore, rejectPolicyRestore);
   return run;
+}
+
+async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
+  if (!Number.isSafeInteger(managedPolicyFence) || managedPolicyFence <= 0) {
+    const error = new Error('Managed policy fence must be a positive safe integer');
+    error.code = 'AUTH_GATE_INVALID_POLICY_FENCE';
+    throw error;
+  }
+
+  await authStateRestorePromise;
+
+  if (!managedAuthGateDirectRevalidationInFlight) {
+    const run = runManagedAuthGatePolicyRevalidation();
+    const trackedRun = run.finally(() => {
+      if (managedAuthGateDirectRevalidationInFlight === trackedRun) {
+        managedAuthGateDirectRevalidationInFlight = null;
+      }
+    });
+    managedAuthGateDirectRevalidationInFlight = trackedRun;
+    trackedRun.catch(() => {});
+  }
+
+  const result = await managedAuthGateDirectRevalidationInFlight;
+  return {
+    ...result,
+    // The expensive authoritative cycle is shared, but each direct caller
+    // receives only its own correlation fence. Broadcasts remain marker-free.
+    managedPolicyFence,
+  };
 }
 
 function restoreSharedSignInPresentationCache(rawCache) {
@@ -5394,6 +5415,10 @@ async function ensureRegisteredNow() {
         }
         await enqueueStudentAuthMutation(async () => {
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          await beginStudentAuthCommit(
+            registrationGeneration,
+            'student registration commit',
+          );
           await durableLocalKv.set({
             studentToken: data.studentToken,
             activeStudentId: studentId,
@@ -5418,11 +5443,40 @@ async function ensureRegisteredNow() {
           CONFIG.autoRegistrationPaused = false;
           studentAuthInvalidating = false;
           await reconcileMessageInboxIdentity('student-registration');
-          await applyClassroomStateFromAuthResponse(data, 'student_registration');
+          await applyClassroomStateFromAuthResponse(
+            data,
+            'student_registration',
+            { requireApplied: true },
+          );
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          await completeStudentAuthCommit(
+            registrationGeneration,
+            'student registration commit',
+          );
         });
         registrationRetryCount = 0; // Reset on success
       } catch (error) {
+        if (studentAuthCommitPendingGeneration === registrationGeneration) {
+          try {
+            // The durable pending marker keeps get-auth-state locked while the
+            // critical classroom snapshot is being applied. Any failure must
+            // remove the partially committed Chrome-profile credentials before
+            // this registration can be retried.
+            await clearStudentAuth('student_registration_commit_failed', {
+              notifyBackend: false,
+              localOnly: true,
+              pauseAutoRegistration: false,
+            });
+            registrationGeneration = studentAuthMutationGeneration;
+          } catch (cleanupError) {
+            failAuthCommitRecoveryBarrier(cleanupError);
+            console.warn(
+              '[Auth] Failed Chrome-profile registration commit cleanup:',
+              cleanupError?.message || cleanupError,
+            );
+            return stored;
+          }
+        }
         if (error?.code === 'AUTH_MUTATION_SUPERSEDED') {
           console.info('[Auth] Ignoring superseded student registration response');
           return stored;
@@ -6265,6 +6319,10 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     }
     await enqueueStudentAuthMutation(async () => {
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      await beginStudentAuthCommit(
+        registrationGeneration,
+        'student auto-registration commit',
+      );
       const persistedConfig = persistedNonAuthConfig({
         ...CONFIG,
         deviceId,
@@ -6298,8 +6356,16 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
       studentAuthInvalidating = false;
       resetSharedSignInLoginConfigCache({ clearPersisted: true });
       await reconcileMessageInboxIdentity('student-registration');
-      await applyClassroomStateFromAuthResponse(data, 'student_registration');
+      await applyClassroomStateFromAuthResponse(
+        data,
+        'student_registration',
+        { requireApplied: true },
+      );
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      await completeStudentAuthCommit(
+        registrationGeneration,
+        'student auto-registration commit',
+      );
     });
     
     // Start adaptive tracking after registration
@@ -6307,6 +6373,21 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     
     return data;
   } catch (error) {
+    if (studentAuthCommitPendingGeneration === registrationGeneration) {
+      try {
+        await clearStudentAuth('student_auto_registration_commit_failed', {
+          notifyBackend: false,
+          localOnly: true,
+          pauseAutoRegistration: false,
+        });
+      } catch (cleanupError) {
+        failAuthCommitRecoveryBarrier(cleanupError);
+        console.warn(
+          '[Auth] Failed student auto-registration commit cleanup:',
+          cleanupError?.message || cleanupError,
+        );
+      }
+    }
     console.warn('Student registration error:', error);
     throw error;
   }

@@ -459,17 +459,49 @@ async function evaluateInAuthGateWorld(world, expression) {
   return result.result?.value;
 }
 
-async function waitForManagedFenceRequests(world, minimum, timeout = 5_000) {
+async function waitForManagedFenceRequests(world, minimum, options = {}) {
+  const timeout = options.timeout ?? 5_000;
+  const revalidate = options.revalidate ?? null;
   const deadline = Date.now() + timeout;
+  let snapshot = [];
+  let firstDiagnostic = null;
+  let lastDiagnostic = null;
   while (Date.now() < deadline) {
-    const queued = await evaluateInAuthGateWorld(
+    lastDiagnostic = await evaluateInAuthGateWorld(
       world,
-      'globalThis.__classpilotManagedFenceTestHarness?.queued.length || 0',
+      `(() => {
+        const bootstrap = globalThis.__classpilotAuthGateBootstrap;
+        return {
+          queued: globalThis.__classpilotManagedFenceTestHarness?.queued.map((entry) => ({
+            revalidate: entry.revalidate,
+            fence: entry.message.managedPolicyFence ?? null,
+            source: entry.source || null
+          })) || [],
+          bootstrap: {
+            active: bootstrap?.active ?? null,
+            enabled: bootstrap?.enabled ?? null,
+            fence: bootstrap?.managedPolicyFence ?? null,
+            pending: bootstrap?.managedPolicyFencePending ?? null,
+            gateRootConnected: bootstrap?.gateRoot?.isConnected === true
+          }
+        };
+      })()`,
     );
-    if (queued >= minimum) return queued;
+    if (!firstDiagnostic) firstDiagnostic = lastDiagnostic;
+    snapshot = lastDiagnostic.queued;
+    const matching = revalidate === null
+      ? snapshot
+      : snapshot.filter((entry) => entry.revalidate === revalidate);
+    if (matching.length >= minimum) return matching;
     await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
   }
-  throw new Error(`Managed-policy fence did not queue ${minimum} direct request(s)`);
+  throw new Error(
+    `Managed-policy fence did not queue ${minimum} matching request(s): ${JSON.stringify({
+      revalidate,
+      firstDiagnostic,
+      lastDiagnostic,
+    })}`,
+  );
 }
 
 async function installManagedFenceMessageHarness(world) {
@@ -496,32 +528,51 @@ async function installManagedFenceMessageHarness(world) {
             state: {
               phase: 'authenticated',
               authRequired: false,
-              revision: kind === 'stale-revision' ? Math.max(0, revision - 1) : revision + 1,
+              revision: kind === 'stale-revision' ? -1 : revision + 1,
             },
           };
           entry.callback(response);
         }
-        return selected.length;
+        return {
+          count: selected.length,
+          sources: selected.map((entry) => entry.source || null),
+          fences: selected.map((entry) => entry.message.managedPolicyFence ?? null),
+        };
       },
-      async replyFenceFromWorker() {
+      beginWorkerReplies() {
         const selected = this.take(true);
         if (selected.length === 0) throw new Error('No managed-policy fence request is queued');
-        const proof = await new Promise((resolve, reject) => {
-          this.originalSendMessage.call(chrome.runtime, selected[0].message, (response) => {
+        if (this.workerReplyPromise) throw new Error('Managed-policy worker replies are already pending');
+        this.workerReplyPromise = Promise.all(selected.map((entry) => new Promise((resolve, reject) => {
+          this.originalSendMessage.call(chrome.runtime, entry.message, (response) => {
             const error = chrome.runtime.lastError;
             if (error) reject(new Error(error.message));
-            else resolve(response);
+            else resolve({ entry, response });
           });
+        }))).then((results) => {
+          for (const { entry, response } of results) entry.callback(response);
+          return results.map(({ entry, response }) => ({
+            requestedFence: entry.message.managedPolicyFence ?? null,
+            success: response?.success === true,
+            managedPolicyFence: response?.managedPolicyFence ?? null,
+            managedPolicyGeneration: response?.managedPolicyGeneration ?? null,
+            phase: response?.state?.phase ?? null,
+            authRequired: response?.state?.authRequired ?? null,
+            revision: response?.state?.revision ?? null,
+          }));
         });
-        for (const entry of selected) entry.callback(proof);
         return {
-          success: proof?.success === true,
-          managedPolicyFence: proof?.managedPolicyFence ?? null,
-          managedPolicyGeneration: proof?.managedPolicyGeneration ?? null,
-          phase: proof?.state?.phase ?? null,
-          authRequired: proof?.state?.authRequired ?? null,
-          revision: proof?.state?.revision ?? null,
+          requestCount: selected.length,
+          requestedFences: selected.map((entry) => entry.message.managedPolicyFence ?? null),
         };
+      },
+      async finishWorkerReplies() {
+        if (!this.workerReplyPromise) throw new Error('No managed-policy worker replies are pending');
+        try {
+          return await this.workerReplyPromise;
+        } finally {
+          this.workerReplyPromise = null;
+        }
       },
       replyNormal(state) {
         const selected = this.take(false);
@@ -536,10 +587,16 @@ async function installManagedFenceMessageHarness(world) {
     chrome.runtime.sendMessage = function(message, ...args) {
       const callback = args.find((value) => typeof value === 'function');
       if (message?.type === 'get-auth-state' && callback) {
+        const stack = new Error().stack || '';
         harness.queued.push({
           message: { ...message },
           callback,
           revalidate: message.revalidateManagedPolicy === true,
+          source: stack.includes('requestAuthGateManagedPolicyRevalidation')
+            ? 'content'
+            : stack.includes('requestManagedPolicyRevalidation')
+              ? 'bootstrap'
+              : 'normal',
         });
         return undefined;
       }
@@ -566,6 +623,223 @@ async function beginManagedPolicyFenceRace(world) {
   assert.equal(result.contentFencePending, true, 'content script did not enter its managed-policy fence');
   await waitForManagedFenceRequests(world, 3);
   return result;
+}
+
+async function beginChromeProfileRegistrationFence(worker, options) {
+  return worker.evaluate(async ({ path, serverUrl, label }) => {
+    if (globalThis.__classpilotProfileRegistrationHarness) {
+      throw new Error('Chrome-profile registration harness is already installed');
+    }
+    await clearStudentAuth(`test_${label}_prepare`, {
+      notifyBackend: false,
+      localOnly: true,
+      notifyAuthGateTabs: false,
+      pauseAutoRegistration: true,
+      disconnectWebSocket: true,
+    });
+    const deviceId = `${label}-device`;
+    const studentEmail = `${label}@example.edu`;
+    const config = persistedNonAuthConfig({
+      ...CONFIG,
+      serverUrl,
+      schoolId: 'cold-start-school',
+      schoolSlug: 'cold-start-school',
+      enrollmentKey: 'fixture-enrollment-key',
+      autoRegistrationPaused: false,
+    });
+    await durableLocalKv.set({
+      config,
+      deviceId,
+      studentEmail,
+      studentName: `${label} Student`,
+      registered: false,
+      lastRegisteredEmail: null,
+      identitySource: null,
+      autoRegistrationPaused: false,
+    });
+    if (hasSessionStorage()) {
+      await durableSessionKv.remove([
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+        'identitySource',
+      ]);
+    }
+    Object.assign(CONFIG, config, {
+      deviceId,
+      studentEmail,
+      studentName: `${label} Student`,
+      studentToken: null,
+      activeStudentId: null,
+      activeStudentSessionId: null,
+      identitySource: null,
+      manualLoginLastSeenAt: null,
+      autoRegistrationPaused: false,
+    });
+    studentAuthInvalidating = false;
+
+    const originals = {
+      fetchWithBackoff,
+      fetchClientConfig,
+      readManagedConfig,
+      detectChromeProfileEmail,
+      applyClassroomStateFromAuthResponse,
+      reconcileMessageInboxIdentity,
+      checkLicenseStatus,
+      notifyAuthGateStateToTabs,
+    };
+    let rejectApply;
+    const applyBarrier = new Promise((_resolveApply, reject) => {
+      rejectApply = reject;
+    });
+    const harness = {
+      path,
+      label,
+      entered: false,
+      settled: false,
+      outcome: null,
+      applyReason: null,
+      applyOptions: null,
+      registerRequestCount: 0,
+      rejectApply,
+      restore() {
+        fetchWithBackoff = originals.fetchWithBackoff;
+        fetchClientConfig = originals.fetchClientConfig;
+        readManagedConfig = originals.readManagedConfig;
+        detectChromeProfileEmail = originals.detectChromeProfileEmail;
+        applyClassroomStateFromAuthResponse = originals.applyClassroomStateFromAuthResponse;
+        reconcileMessageInboxIdentity = originals.reconcileMessageInboxIdentity;
+        checkLicenseStatus = originals.checkLicenseStatus;
+        notifyAuthGateStateToTabs = originals.notifyAuthGateStateToTabs;
+      },
+    };
+    globalThis.__classpilotProfileRegistrationHarness = harness;
+
+    const responseData = {
+      studentToken: `${label}-token`,
+      studentSessionId: `${label}-session`,
+      schoolId: 'cold-start-school',
+      student: {
+        id: `${label}-student`,
+        schoolId: 'cold-start-school',
+      },
+      classroomState: {
+        revision: 1,
+        active: true,
+        blockedCategories: [],
+      },
+    };
+    fetchClientConfig = async () => ({});
+    readManagedConfig = async () => ({
+      fastAuthGateEnabled: true,
+      serverUrl,
+      schoolId: 'cold-start-school',
+      schoolSlug: 'cold-start-school',
+      enrollmentKey: 'fixture-enrollment-key',
+    });
+    detectChromeProfileEmail = async () => studentEmail;
+    fetchWithBackoff = async (url) => {
+      if (!String(url).endsWith('/api/extension/register')) {
+        throw new Error(`Unexpected registration harness request: ${url}`);
+      }
+      harness.registerRequestCount += 1;
+      return new Response(JSON.stringify(responseData), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    reconcileMessageInboxIdentity = async () => {};
+    checkLicenseStatus = async () => {};
+    notifyAuthGateStateToTabs = async () => {};
+    applyClassroomStateFromAuthResponse = async (_data, reason, applyOptions) => {
+      harness.entered = true;
+      harness.applyReason = reason;
+      harness.applyOptions = applyOptions || null;
+      await applyBarrier;
+    };
+
+    if (path === 'ensure') registrationRetryCount = MAX_REGISTRATION_RETRIES;
+    const registration = path === 'ensure'
+      ? ensureRegisteredNow()
+      : registerDeviceWithStudentNow(
+        deviceId,
+        `${label} Chromebook`,
+        'auto',
+        studentEmail,
+        `${label} Student`,
+      );
+    Promise.resolve(registration).then(
+      () => { harness.outcome = 'fulfilled'; },
+      (error) => {
+        harness.outcome = 'rejected';
+        harness.error = error?.message || String(error);
+      },
+    ).finally(() => {
+      harness.restore();
+      harness.settled = true;
+    });
+    return { started: true, path, label };
+  }, options);
+}
+
+async function chromeProfileRegistrationSnapshot(worker) {
+  return worker.evaluate(async () => {
+    const harness = globalThis.__classpilotProfileRegistrationHarness;
+    const persisted = await getStoredAuthState([
+      'studentToken',
+      'activeStudentId',
+      'activeStudentSessionId',
+      'studentAuthCommitPendingV1',
+    ]);
+    const state = getAuthGateState();
+    return {
+      entered: harness?.entered === true,
+      settled: harness?.settled === true,
+      outcome: harness?.outcome || null,
+      error: harness?.error || null,
+      applyReason: harness?.applyReason || null,
+      applyOptions: harness?.applyOptions || null,
+      registerRequestCount: harness?.registerRequestCount ?? 0,
+      persistedCommitPending: persisted.studentAuthCommitPendingV1 === true,
+      inMemoryCommitPending: studentAuthCommitPending === true,
+      exactBinding: Boolean(
+        persisted.studentToken
+        && persisted.activeStudentId
+        && persisted.activeStudentSessionId
+      ),
+      publicAuthenticated: hasStudentAuth(),
+      phase: state.phase,
+      authRequired: state.authRequired,
+      persisted,
+    };
+  });
+}
+
+async function waitForChromeProfileRegistration(worker, predicate, timeout = 7_000) {
+  const deadline = Date.now() + timeout;
+  let snapshot = null;
+  while (Date.now() < deadline) {
+    snapshot = await chromeProfileRegistrationSnapshot(worker);
+    if (predicate(snapshot)) return snapshot;
+    await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+  }
+  throw new Error(`Chrome-profile registration fence timed out: ${JSON.stringify(snapshot)}`);
+}
+
+async function rejectChromeProfileRegistrationApply(worker, message) {
+  return worker.evaluate((errorMessage) => {
+    const harness = globalThis.__classpilotProfileRegistrationHarness;
+    if (!harness?.rejectApply) return false;
+    harness.rejectApply(new Error(errorMessage));
+    return true;
+  }, message);
+}
+
+async function clearChromeProfileRegistrationHarness(worker) {
+  await worker.evaluate(() => {
+    globalThis.__classpilotProfileRegistrationHarness?.restore?.();
+    delete globalThis.__classpilotProfileRegistrationHarness;
+  });
 }
 
 async function managedFenceSnapshot(page, frameReferenceName) {
@@ -2930,6 +3204,187 @@ async function main() {
     assert.equal(Boolean(managedChangeRecovery.persisted.activeStudentSessionId), false);
     await assertUnderlyingPageLocked(corruptPage);
 
+    // Both Chrome-profile registration entrypoints persist credentials before
+    // applying server-provided classroom restrictions. Their durable commit
+    // marker must keep the public auth state and the page locked throughout
+    // that critical apply, and a required-apply failure must remove every
+    // partially adopted credential.
+    for (const registrationPath of [
+      { path: 'ensure', label: 'profile-ensure', expectedOutcome: 'fulfilled' },
+      { path: 'direct', label: 'profile-direct', expectedOutcome: 'rejected' },
+    ]) {
+      const started = await beginChromeProfileRegistrationFence(worker, {
+        ...registrationPath,
+        serverUrl: fixture.origin,
+      });
+      assert.equal(started.started, true);
+      const fencedRegistration = await waitForChromeProfileRegistration(
+        worker,
+        (snapshot) => snapshot.entered
+          && snapshot.persistedCommitPending
+          && snapshot.exactBinding,
+      );
+      assert.equal(fencedRegistration.registerRequestCount, 1);
+      assert.equal(fencedRegistration.applyReason, 'student_registration');
+      assert.equal(fencedRegistration.applyOptions?.requireApplied, true);
+      assert.equal(fencedRegistration.inMemoryCommitPending, true);
+      assert.equal(fencedRegistration.publicAuthenticated, false);
+      assert.equal(fencedRegistration.authRequired, true);
+      assert.notEqual(fencedRegistration.phase, 'authenticated');
+      assert.equal(
+        await corruptPage.locator(GATE_SELECTOR).count(),
+        1,
+        `${registrationPath.label}: gate closed during classroom enforcement`,
+      );
+      await assertUnderlyingPageLocked(corruptPage);
+
+      assert.equal(
+        await rejectChromeProfileRegistrationApply(
+          worker,
+          `${registrationPath.label} required classroom apply failed`,
+        ),
+        true,
+      );
+      const failedRegistration = await waitForChromeProfileRegistration(
+        worker,
+        (snapshot) => snapshot.settled && !snapshot.persistedCommitPending,
+      );
+      assert.equal(failedRegistration.outcome, registrationPath.expectedOutcome);
+      assert.equal(Boolean(failedRegistration.persisted.studentToken), false);
+      assert.equal(Boolean(failedRegistration.persisted.activeStudentId), false);
+      assert.equal(Boolean(failedRegistration.persisted.activeStudentSessionId), false);
+      assert.equal(failedRegistration.inMemoryCommitPending, false);
+      assert.equal(failedRegistration.publicAuthenticated, false);
+      assert.equal(failedRegistration.authRequired, true);
+      assert.notEqual(failedRegistration.phase, 'authenticated');
+      assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 1);
+      await assertUnderlyingPageLocked(corruptPage);
+      await clearChromeProfileRegistrationHarness(worker);
+    }
+
+    // Terminate the real MV3 worker while the direct registration path has
+    // both credentials and its pending marker on disk. A cold successor must
+    // recover the interrupted commit before publishing any auth state.
+    await beginChromeProfileRegistrationFence(worker, {
+      path: 'direct',
+      label: 'profile-crash',
+      serverUrl: fixture.origin,
+    });
+    const profileCrashBoundary = await waitForChromeProfileRegistration(
+      worker,
+      (snapshot) => snapshot.entered
+        && snapshot.persistedCommitPending
+        && snapshot.exactBinding,
+    );
+    assert.equal(profileCrashBoundary.applyOptions?.requireApplied, true);
+    assert.equal(profileCrashBoundary.publicAuthenticated, false);
+    assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 1);
+    await assertUnderlyingPageLocked(corruptPage);
+
+    await corruptPage.goto('chrome://version');
+    const profileCrashStop = await stopExtensionWorker(context, corruptPage, extensionId);
+    assert.equal(profileCrashStop.stopped, true, 'could not terminate the fenced profile registration worker');
+    await corruptPage.goto(`${fixture.origin}/profile-registration-interrupted-commit`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await corruptPage.waitForSelector(GATE_SELECTOR, { timeout: LOADING_LIMIT_MS });
+    worker = await waitForLiveWorker(context);
+    const profileCrashRecovery = await worker.evaluate(async () => {
+      await authStateRestorePromise;
+      await authCommitRecoveryPromise;
+      const persisted = await getStoredAuthState([
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+        'studentAuthCommitPendingV1',
+      ]);
+      return {
+        persisted,
+        publicAuthenticated: hasStudentAuth(),
+        state: await getPublishableAuthGateState(),
+      };
+    });
+    assert.equal(Boolean(profileCrashRecovery.persisted.studentToken), false);
+    assert.equal(Boolean(profileCrashRecovery.persisted.activeStudentId), false);
+    assert.equal(Boolean(profileCrashRecovery.persisted.activeStudentSessionId), false);
+    assert.equal(Boolean(profileCrashRecovery.persisted.studentAuthCommitPendingV1), false);
+    assert.equal(profileCrashRecovery.publicAuthenticated, false);
+    assert.equal(profileCrashRecovery.state.authRequired, true);
+    assert.notEqual(profileCrashRecovery.state.phase, 'authenticated');
+    assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 1);
+    await assertUnderlyingPageLocked(corruptPage);
+
+    // A shared managed-policy failure must reject both concurrent callers,
+    // clear the tracked cycle, and allow a later retry to start a fresh
+    // generation instead of inheriting the rejected promise.
+    const sharedFailureRecovery = await worker.evaluate(async (serverUrl) => {
+      const originalReadManagedConfig = readManagedConfig;
+      let readCount = 0;
+      try {
+        readManagedConfig = async () => {
+          readCount += 1;
+          await new Promise((resolveRead) => setTimeout(resolveRead, 40));
+          throw new Error('synthetic shared managed read failure');
+        };
+        const generationBefore = managedAuthGatePolicyGeneration;
+        const failed = await Promise.allSettled([
+          revalidateManagedAuthGatePolicy(81_001),
+          revalidateManagedAuthGatePolicy(81_002),
+        ]);
+        const afterFailure = {
+          readCount,
+          generation: managedAuthGatePolicyGeneration,
+          inFlight: managedAuthGateDirectRevalidationInFlight !== null,
+          rejected: failed.map((result) => result.status === 'rejected'),
+          publicAuthenticated: hasStudentAuth(),
+        };
+        readManagedConfig = async () => {
+          readCount += 1;
+          return {
+            fastAuthGateEnabled: true,
+            serverUrl,
+            schoolId: 'cold-start-school',
+            schoolSlug: 'cold-start-school',
+            enrollmentKey: 'fixture-enrollment-key',
+          };
+        };
+        const recovered = await revalidateManagedAuthGatePolicy(81_003);
+        return {
+          generationBefore,
+          afterFailure,
+          finalReadCount: readCount,
+          recovered: {
+            fence: recovered.managedPolicyFence,
+            generation: recovered.managedPolicyGeneration,
+            revision: recovered.state?.revision ?? null,
+          },
+          inFlightAfterRecovery: managedAuthGateDirectRevalidationInFlight !== null,
+        };
+      } finally {
+        readManagedConfig = originalReadManagedConfig;
+      }
+    }, fixture.origin);
+    assert.deepEqual(sharedFailureRecovery.afterFailure.rejected, [true, true]);
+    assert.equal(sharedFailureRecovery.afterFailure.readCount, 1);
+    assert.equal(sharedFailureRecovery.afterFailure.inFlight, false);
+    assert.equal(sharedFailureRecovery.afterFailure.publicAuthenticated, false);
+    assert.equal(
+      sharedFailureRecovery.afterFailure.generation,
+      sharedFailureRecovery.generationBefore + 1,
+    );
+    assert.equal(sharedFailureRecovery.recovered.fence, 81_003);
+    assert.equal(
+      sharedFailureRecovery.recovered.generation,
+      sharedFailureRecovery.afterFailure.generation + 1,
+    );
+    assert.equal(
+      sharedFailureRecovery.finalReadCount,
+      2,
+      `fresh managed retry did not reread policy: ${JSON.stringify(sharedFailureRecovery)}`,
+    );
+    assert.ok(Number.isSafeInteger(sharedFailureRecovery.recovered.revision));
+    assert.equal(sharedFailureRecovery.inFlightAfterRecovery, false);
+
     // Seed one final valid binding so the page begins unlocked. The alias case
     // proves an exact direct proof can release, while the canonical case changes
     // authority and proves an exact proof can apply a locked state. Broadcasts
@@ -3029,12 +3484,24 @@ async function main() {
         }
 
         for (const invalidKind of ['wrong-fence', 'unsafe-generation', 'stale-revision']) {
-          const rejectedCount = await evaluateInAuthGateWorld(
+          const rejectedRequests = await evaluateInAuthGateWorld(
             managedFenceWorld,
             `globalThis.__classpilotManagedFenceTestHarness.replyInvalid(${JSON.stringify(invalidKind)}, ${Number(prechangeState.revision)})`,
           );
-          assert.ok(rejectedCount >= 2, `${scenario.label}: ${invalidKind} did not exercise both UI controllers`);
-          await waitForManagedFenceRequests(managedFenceWorld, 3);
+          assert.equal(
+            rejectedRequests.count,
+            2,
+            `${scenario.label}: ${invalidKind} did not exercise both UI controllers`,
+          );
+          assert.deepEqual(
+            [...rejectedRequests.sources].sort(),
+            ['bootstrap', 'content'],
+            `${scenario.label}: ${invalidKind} did not acknowledge bootstrap and content`,
+          );
+          await waitForManagedFenceRequests(managedFenceWorld, 2, {
+            revalidate: true,
+            timeout: 7_000,
+          });
           assertManagedFenceLocked(
             await managedFenceSnapshot(corruptPage, scenario.referenceName),
             `${scenario.label} ${invalidKind} acknowledgement`,
@@ -3045,20 +3512,114 @@ async function main() {
           if (!globalThis.__classpilotManagedFenceOriginalRead) {
             globalThis.__classpilotManagedFenceOriginalRead = readManagedConfig;
           }
-          readManagedConfig = async () => ({ ...managedPolicy });
+          if (!globalThis.__classpilotManagedFenceOriginalRun) {
+            globalThis.__classpilotManagedFenceOriginalRun = runManagedAuthGatePolicyRevalidation;
+          }
+          let releaseRead;
+          const readBarrier = new Promise((resolveRead) => {
+            releaseRead = resolveRead;
+          });
+          globalThis.__classpilotManagedFenceCoalesceHarness = {
+            entered: false,
+            runCount: 0,
+            directReadCount: 0,
+            backgroundReadCount: 0,
+            inDirectRun: false,
+            releaseRead,
+          };
+          runManagedAuthGatePolicyRevalidation = (...args) => {
+            const harness = globalThis.__classpilotManagedFenceCoalesceHarness;
+            harness.runCount += 1;
+            harness.inDirectRun = true;
+            try {
+              return globalThis.__classpilotManagedFenceOriginalRun(...args);
+            } finally {
+              harness.inDirectRun = false;
+            }
+          };
+          readManagedConfig = async () => {
+            const harness = globalThis.__classpilotManagedFenceCoalesceHarness;
+            if (harness.inDirectRun) {
+              harness.entered = true;
+              harness.directReadCount += 1;
+              await readBarrier;
+            } else {
+              harness.backgroundReadCount += 1;
+            }
+            return { ...managedPolicy };
+          };
         }, scenario.policy);
         let directProof;
         try {
-          directProof = await evaluateInAuthGateWorld(
+          const forwarded = await evaluateInAuthGateWorld(
             managedFenceWorld,
-            'globalThis.__classpilotManagedFenceTestHarness.replyFenceFromWorker()',
+            'globalThis.__classpilotManagedFenceTestHarness.beginWorkerReplies()',
           );
+          assert.equal(forwarded.requestCount, 2, `${scenario.label}: expected one retry from each UI controller`);
+          const coalesceDeadline = Date.now() + 7_000;
+          let coalesceState = null;
+          while (Date.now() < coalesceDeadline) {
+            coalesceState = await worker.evaluate(() => ({
+              entered: globalThis.__classpilotManagedFenceCoalesceHarness?.entered === true,
+              runCount: globalThis.__classpilotManagedFenceCoalesceHarness?.runCount ?? 0,
+              directReadCount: globalThis.__classpilotManagedFenceCoalesceHarness?.directReadCount ?? 0,
+              inFlight: managedAuthGateDirectRevalidationInFlight !== null,
+            }));
+            if (coalesceState.entered) break;
+            await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+          }
+          assert.equal(coalesceState?.entered, true, `${scenario.label}: worker revalidation did not begin`);
+          assert.equal(coalesceState?.runCount, 1, `${scenario.label}: concurrent retries started duplicate transactions`);
+          assert.equal(coalesceState?.directReadCount, 1, `${scenario.label}: concurrent retries performed duplicate managed reads`);
+          assert.equal(coalesceState?.inFlight, true, `${scenario.label}: shared revalidation was not tracked`);
+          await worker.evaluate(() => {
+            globalThis.__classpilotManagedFenceCoalesceHarness.releaseRead();
+          });
+          const directProofs = await evaluateInAuthGateWorld(
+            managedFenceWorld,
+            'globalThis.__classpilotManagedFenceTestHarness.finishWorkerReplies()',
+          );
+          assert.equal(directProofs.length, 2, `${scenario.label}: both UI controllers did not receive a proof`);
+          for (const proof of directProofs) {
+            assert.equal(proof.success, true, `${scenario.label}: worker did not return a direct fence proof`);
+            assert.equal(
+              proof.managedPolicyFence,
+              proof.requestedFence,
+              `${scenario.label}: worker echoed another controller's fence`,
+            );
+          }
+          assert.equal(
+            new Set(directProofs.map((proof) => proof.managedPolicyGeneration)).size,
+            1,
+            `${scenario.label}: concurrent retries did not share one managed generation`,
+          );
+          assert.equal(
+            new Set(directProofs.map((proof) => proof.revision)).size,
+            1,
+            `${scenario.label}: concurrent retries did not share one authoritative state`,
+          );
+          directProof = directProofs[0];
+          const completedCoalesce = await worker.evaluate(() => ({
+            runCount: globalThis.__classpilotManagedFenceCoalesceHarness?.runCount ?? 0,
+            directReadCount: globalThis.__classpilotManagedFenceCoalesceHarness?.directReadCount ?? 0,
+            inFlight: managedAuthGateDirectRevalidationInFlight !== null,
+          }));
+          assert.deepEqual(completedCoalesce, {
+            runCount: 1,
+            directReadCount: 1,
+            inFlight: false,
+          });
         } finally {
           await worker.evaluate(() => {
             if (globalThis.__classpilotManagedFenceOriginalRead) {
               readManagedConfig = globalThis.__classpilotManagedFenceOriginalRead;
               delete globalThis.__classpilotManagedFenceOriginalRead;
             }
+            if (globalThis.__classpilotManagedFenceOriginalRun) {
+              runManagedAuthGatePolicyRevalidation = globalThis.__classpilotManagedFenceOriginalRun;
+              delete globalThis.__classpilotManagedFenceOriginalRun;
+            }
+            delete globalThis.__classpilotManagedFenceCoalesceHarness;
           });
         }
         assert.equal(directProof.success, true, `${scenario.label}: worker did not return a direct fence proof`);

@@ -32,7 +32,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
-### Fast shared-Chromebook sign-in gate (2.6.6)
+### Fast shared-Chromebook sign-in gate (2.6.7)
 
 On the first eligible HTTP(S) page, ClassPilot installs its interaction lock at
 `document_start` and restores local authentication before starting classroom,
@@ -69,7 +69,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    manifest version must match the file name.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.6.6.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.6.7.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store

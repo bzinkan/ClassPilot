@@ -151,6 +151,20 @@ async function preparePinForm(frame) {
   );
 }
 
+async function setAuthViewport(page, frame, viewport, expectedSideVisible = null) {
+  await page.setViewportSize(viewport);
+  await frame.waitForFunction(({ width, height, sideVisible }) => {
+    const side = document.querySelector('.classpilot-auth-side');
+    return window.innerWidth === width
+      && window.innerHeight === height
+      && (sideVisible === null || (getComputedStyle(side).display !== 'none') === sideVisible);
+  }, {
+    width: viewport.width,
+    height: viewport.height,
+    sideVisible: expectedSideVisible,
+  });
+}
+
 async function layoutSnapshot(frame) {
   return frame.evaluate(() => {
     const rect = (selector) => {
@@ -292,7 +306,7 @@ async function main() {
       { width: 800, height: 600 },
       { width: 600, height: 640 },
     ]) {
-      await page.setViewportSize(viewport);
+      await setAuthViewport(page, authFrame, viewport);
       const label = `loading-${viewport.width}x${viewport.height}`;
       assertInsideViewport(await layoutSnapshot(authFrame), label, { requireSubmit: false, requireFootnote: false });
       await capture(page, label);
@@ -312,7 +326,7 @@ async function main() {
       { width: 800, height: 600 },
       { width: 600, height: 640 },
     ]) {
-      await page.setViewportSize(viewport);
+      await setAuthViewport(page, authFrame, viewport);
       const label = `unavailable-${viewport.width}x${viewport.height}`;
       const snapshot = await layoutSnapshot(authFrame);
       assertInsideViewport(snapshot, label);
@@ -330,7 +344,12 @@ async function main() {
       { width: 800, height: 600, sideVisible: false },
       { width: 600, height: 640, sideVisible: false },
     ]) {
-      await page.setViewportSize({ width: viewport.width, height: viewport.height });
+      await setAuthViewport(
+        page,
+        authFrame,
+        { width: viewport.width, height: viewport.height },
+        viewport.sideVisible,
+      );
       const snapshot = await layoutSnapshot(authFrame);
       const label = `${viewport.width}x${viewport.height}`;
       assertInsideViewport(snapshot, label);
@@ -343,7 +362,7 @@ async function main() {
       await capture(page, `pin-${label}`);
     }
 
-    await page.setViewportSize({ width: 1024, height: 600 });
+    await setAuthViewport(page, authFrame, { width: 1024, height: 600 }, true);
     await authFrame.evaluate(() => {
       const error = document.getElementById('classpilot-auth-error');
       error.textContent = 'The roster could not refresh. Check the Chromebook connection, then choose the grade again.';
@@ -366,7 +385,7 @@ async function main() {
     assertRectInside(errorSnapshot.error, errorSnapshot.panel, 'pin error message');
     assertRectInside(errorSnapshot.status, errorSnapshot.panel, 'roster status message');
 
-    await page.setViewportSize({ width: 1366, height: 600 });
+    await setAuthViewport(page, authFrame, { width: 1366, height: 600 }, true);
     await authFrame.locator('#classpilot-auth-pin-submit').focus();
     await authFrame.locator('#classpilot-auth-pin-submit').press('Tab');
     assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
@@ -374,7 +393,7 @@ async function main() {
     await page.waitForTimeout(50);
     assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
 
-    await page.setViewportSize({ width: 800, height: 320 });
+    await setAuthViewport(page, authFrame, { width: 800, height: 320 }, false);
     const shortBeforeScroll = await layoutSnapshot(authFrame);
     assertInsideViewport(shortBeforeScroll, '800x320-scroll-fallback', {
       requireSubmit: false,
@@ -392,7 +411,7 @@ async function main() {
     assert.ok(shortAfterScroll.mainScrollTop > 0, 'short viewport main panel did not scroll');
     assertInsideViewport(shortAfterScroll, '800x320-after-scroll', { requireContent: false });
 
-    await page.setViewportSize({ width: 1024, height: 600 });
+    await setAuthViewport(page, authFrame, { width: 1024, height: 600 }, true);
     authFrame = await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'email_id' });
     await authFrame.waitForSelector('#classpilot-auth-email-submit');
     const emailSnapshot = await layoutSnapshot(authFrame);
