@@ -32,7 +32,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
-### PassPilot kiosk purity (2.6.8)
+### PassPilot kiosk purity + sign-out finality (2.6.8)
 
 On `/passpilot/kiosk` pages the student FAB suppression is now a one-way
 ratchet (a mismatched learned kiosk origin can no longer rebuild the full
@@ -41,6 +41,13 @@ the managed-policy revalidation states, which carry no kiosk origin — and
 classroom broadcasts (attention mode, timers, polls, teacher messages) are
 filtered out on kiosk pages. The "Monitored by school" disclosure indicator
 stays visible.
+
+Signing out is now final: a student who signs out (or is signed out
+server-side) is never silently re-registered from the Chrome profile on a
+later service-worker wake. The auto-registration pause is raised by every
+deliberate or server-forced sign-out and is monotonic across repeated
+clears. A different Google account signing into ChromeOS still registers
+normally, and worker-restart continuity for an active session is unchanged.
 
 ### Fast shared-Chromebook sign-in gate (2.6.7)
 
