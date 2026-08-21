@@ -134,7 +134,13 @@ let wsAuthenticatedGeneration = 0;
 let wsConnectInFlight = null;
 let wsMessageProcessingGeneration = 0;
 let wsMessageProcessingTail = Promise.resolve();
+let wsAuthenticatedResponseGuard = null;
 let studentAuthInvalidating = false;
+let studentAuthCommitPending = false;
+let studentAuthCommitPendingGeneration = 0;
+let authCommitRecoveryPromise = Promise.resolve();
+let resolveAuthCommitRecovery = null;
+let rejectAuthCommitRecovery = null;
 let studentAuthMutationGeneration = 0;
 let studentAuthMutationTail = Promise.resolve();
 let chromeProfileRegistrationInFlight = null;
@@ -264,9 +270,27 @@ const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const LICENSE_CONTROL_CLEANUP_ALARM = 'license-control-cleanup';
 const LICENSE_CONTROL_CLEANUP_RETRY_MS = 15 * 1000;
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
+// Permit only sub-second scheduling/serialization skew. A larger future value
+// usually means the Chromebook clock moved backwards and must not extend a
+// shared-device login indefinitely.
+const MANUAL_LOGIN_FUTURE_SKEW_MS = 1000;
 const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
 const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
+const SHARED_SIGN_IN_CONFIG_CACHE_KEY = 'sharedSignInConfigCacheV1';
+const MANAGED_AUTH_GATE_BINDING_KEY = 'managedAuthGateBindingV1';
+const SHARED_SIGN_IN_CONFIG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SHARED_SIGN_IN_CONFIG_RETRY_ALARM = 'shared-sign-in-config-retry';
+const SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000]);
+const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
+const AUTH_GATE_TIMING_STORAGE_KEY = 'authGateTimingV1';
+const AUTH_GATE_REVISION_STORAGE_KEY = 'authGateRevisionV1';
+// Each worker durably reserves its own numeric range before auth-state replies
+// are released. A later worker therefore starts above every revision its
+// predecessor could have emitted, even if the device clock moved backwards.
+const AUTH_GATE_REVISION_BLOCK_SIZE = 1000000;
+const AUTH_GATE_REVISION_RESERVE_THRESHOLD = 10000;
+const CLASSPILOT_PRODUCTION_EXTENSION_ID = 'iggbfegfcjkfieoemeolfmfnapepalca';
 const HEALTH_CHECK_ALARM_NAME = 'health-check';
 const CONNECTIVITY_HEALTH_STORAGE_KEY = 'connectivityHealthV1';
 const CONNECTIVITY_HEALTH_ALARM_NAME = 'connectivity-health-boundary';
@@ -295,6 +319,7 @@ const MANAGED_CONFIG_KEYS = [
   'classpilotSchoolSlug',
   'enrollmentKey',
   'classpilotEnrollmentKey',
+  'fastAuthGateEnabled',
 ];
 
 let trackingState = TRACKING_STATES.OFF;
@@ -343,8 +368,32 @@ let screenshotCaptureInFlight = false;
 let currentFabState = null;
 let isScheduleHardOff = false;
 let sharedAuthLockedSinceAt = 0;
+let fastAuthGateEnabled = true;
+let authGateStateRevision = Date.now();
+let authGateStateRevisionCeiling = 0;
+let authGateStatePendingRevisionBumps = 0;
+let authGateRevisionExtensionPromise = null;
+let authGateRevisionReady = false;
+let resolveAuthGateRevisionReady;
+let rejectAuthGateRevisionReady;
+const authGateRevisionReadyPromise = new Promise((resolve, reject) => {
+  resolveAuthGateRevisionReady = resolve;
+  rejectAuthGateRevisionReady = reject;
+});
+authGateRevisionReadyPromise.catch(() => {});
+let lastAuthGateAuthRequired = null;
+let authGateStateColdWorker = false;
+let ordinaryAuthStateColdCohortOpen = true;
+let sharedSignInConfigGeneration = 0;
+let sharedSignInConfigRetryAttempt = 0;
+let managedAuthGatePolicyGeneration = 0;
+let managedAuthGateSetupUnavailable = false;
+let managedAuthGatePolicyRestorePromise = Promise.resolve({});
+let managedAuthGateDirectRevalidationInFlight = null;
 let sharedSignInLoginConfig = {
+  phase: 'loading',
   fetchedAt: 0,
+  retryAt: null,
   setupRequired: false,
   sharedSignInEnabled: false,
   loginMethod: 'name_pin',
@@ -354,9 +403,96 @@ let sharedSignInLoginConfig = {
 };
 let sharedSignInConfigPromise = null;
 
-function resetSharedSignInLoginConfigCache() {
+function bumpAuthGateStateRevision() {
+  // The reserved block is intentionally far larger than a worker can consume
+  // in its lifetime. Do not consult Date.now() here: a forward clock jump could
+  // escape the durable range and make the next worker's revision go backwards.
+  if (!authGateRevisionReady) {
+    authGateStateRevision += 1;
+    return authGateStateRevision;
+  }
+  if (authGateStateRevision >= authGateStateRevisionCeiling) {
+    authGateStatePendingRevisionBumps += 1;
+    extendAuthGateRevisionReservation().catch(() => {});
+    return authGateStateRevision;
+  }
+  authGateStateRevision += 1;
+  if (
+    authGateStateRevisionCeiling - authGateStateRevision
+    <= AUTH_GATE_REVISION_RESERVE_THRESHOLD
+  ) {
+    extendAuthGateRevisionReservation().catch(() => {});
+  }
+  return authGateStateRevision;
+}
+
+function extendAuthGateRevisionReservation() {
+  if (authGateRevisionExtensionPromise) return authGateRevisionExtensionPromise;
+  const run = (async () => {
+    do {
+      const nextCeiling = authGateStateRevisionCeiling + AUTH_GATE_REVISION_BLOCK_SIZE;
+      if (!Number.isSafeInteger(nextCeiling)) {
+        throw new Error('Auth gate revision space exhausted');
+      }
+      await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling });
+      authGateStateRevisionCeiling = nextCeiling;
+      const bumpsToApply = Math.min(
+        authGateStatePendingRevisionBumps,
+        authGateStateRevisionCeiling - authGateStateRevision,
+      );
+      authGateStateRevision += bumpsToApply;
+      authGateStatePendingRevisionBumps -= bumpsToApply;
+    } while (authGateStatePendingRevisionBumps > 0);
+    return authGateStateRevision;
+  })();
+  authGateRevisionExtensionPromise = run.finally(() => {
+    if (authGateRevisionExtensionPromise === trackedRun) {
+      authGateRevisionExtensionPromise = null;
+    }
+  });
+  const trackedRun = authGateRevisionExtensionPromise;
+  trackedRun.catch(() => {});
+  return trackedRun;
+}
+
+async function awaitAuthGateRevisionPublicationReady() {
+  await authGateRevisionReadyPromise;
+  while (authGateStatePendingRevisionBumps > 0) {
+    await extendAuthGateRevisionReservation();
+  }
+}
+
+async function reserveAuthGateRevisionBlock(storedRevisionCeiling) {
+  const parsedCeiling = Number(storedRevisionCeiling);
+  const priorCeiling = Number.isSafeInteger(parsedCeiling) && parsedCeiling >= 0
+    ? parsedCeiling
+    : 0;
+  const nextRevision = Math.max(authGateStateRevision, Date.now(), priorCeiling + 1);
+  if (!Number.isSafeInteger(nextRevision + AUTH_GATE_REVISION_BLOCK_SIZE)) {
+    throw new Error('Auth gate revision space exhausted');
+  }
+  const nextCeiling = nextRevision + AUTH_GATE_REVISION_BLOCK_SIZE;
+  // Persist the end of the range, not merely the first emitted value. A crash
+  // at any point in this worker's lifetime still forces its successor above
+  // every revision this worker was allowed to publish.
+  await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling });
+  authGateStateRevision = Math.max(authGateStateRevision, nextRevision);
+  authGateStateRevisionCeiling = nextCeiling;
+  authGateRevisionReady = true;
+  resolveAuthGateRevisionReady(authGateStateRevision);
+  return authGateStateRevision;
+}
+
+function resetSharedSignInLoginConfigCache(options = {}) {
+  sharedSignInConfigGeneration += 1;
+  sharedSignInConfigRetryAttempt = 0;
+  sharedSignInConfigPromise = null;
+  authGateStateColdWorker = false;
+  chrome.alarms?.clear?.(SHARED_SIGN_IN_CONFIG_RETRY_ALARM);
   sharedSignInLoginConfig = {
+    phase: 'loading',
     fetchedAt: 0,
+    retryAt: null,
     setupRequired: false,
     sharedSignInEnabled: false,
     loginMethod: 'name_pin',
@@ -364,6 +500,10 @@ function resetSharedSignInLoginConfigCache() {
     schoolId: null,
     passpilotKioskAvailable: false,
   };
+  bumpAuthGateStateRevision();
+  if (options.clearPersisted !== false) {
+    kv.remove(SHARED_SIGN_IN_CONFIG_CACHE_KEY).catch(() => {});
+  }
 }
 
 function sleepMs(ms) {
@@ -477,6 +617,26 @@ const kv = {
   set: (obj) => new Promise(resolve => chrome.storage.local.set(obj, resolve)),
   remove: (keys) => new Promise(resolve => chrome.storage.local.remove(keys, resolve)),
 };
+
+function strictStorageArea(area, label) {
+  const call = (method, value, fallback) => new Promise((resolve, reject) => {
+    area[method](value, (result) => {
+      const runtimeError = chrome.runtime?.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || `${label} ${method} failed`));
+        return;
+      }
+      resolve(result === undefined ? fallback : result);
+    });
+  });
+  return {
+    get: (keys) => call('get', keys, {}),
+    set: (obj) => call('set', obj),
+    remove: (keys) => call('remove', keys),
+  };
+}
+
+const durableLocalKv = strictStorageArea(chrome.storage.local, 'local storage');
 
 function connectivityStatus(nowValue = Date.now(), options = {}) {
   if (!licenseActive) {
@@ -612,6 +772,7 @@ async function recordScreenshotSuccess(nowValue = Date.now()) {
 }
 
 const STUDENT_AUTH_INVALIDATING_KEY = 'studentAuthInvalidatingV1';
+const STUDENT_AUTH_COMMIT_PENDING_KEY = 'studentAuthCommitPendingV1';
 const PERSISTED_CONFIG_KEYS = Object.freeze([
   'serverUrl',
   'deviceId',
@@ -649,50 +810,78 @@ const sessionKv = {
   set: (obj) => new Promise(resolve => chrome.storage.session.set(obj, resolve)),
   remove: (keys) => new Promise(resolve => chrome.storage.session.remove(keys, resolve)),
 };
+const durableSessionKv = hasSessionStorage()
+  ? strictStorageArea(chrome.storage.session, 'session storage')
+  : null;
 
 async function getStoredAuthState(keys) {
-  const local = await kv.get(keys);
-  if (!hasSessionStorage()) return local;
-  const session = await sessionKv.get(keys);
+  if (!hasSessionStorage()) return durableLocalKv.get(keys);
+  const [local, session] = await Promise.all([
+    durableLocalKv.get(keys),
+    durableSessionKv.get(keys),
+  ]);
   const merged = { ...local, ...session };
-  if (Array.isArray(keys) && keys.includes(STUDENT_AUTH_INVALIDATING_KEY)) {
-    if (Object.prototype.hasOwnProperty.call(local, STUDENT_AUTH_INVALIDATING_KEY)) {
-      merged[STUDENT_AUTH_INVALIDATING_KEY] = local[STUDENT_AUTH_INVALIDATING_KEY];
+  const localAuthorityKeys = [
+    STUDENT_AUTH_INVALIDATING_KEY,
+    STUDENT_AUTH_COMMIT_PENDING_KEY,
+    AUTH_GATE_REVISION_STORAGE_KEY,
+  ];
+  const staleSessionAuthorityKeys = [];
+  for (const key of localAuthorityKeys) {
+    if (!Array.isArray(keys) || !keys.includes(key)) continue;
+    if (Object.prototype.hasOwnProperty.call(local, key)) {
+      merged[key] = local[key];
     } else {
-      delete merged[STUDENT_AUTH_INVALIDATING_KEY];
+      delete merged[key];
     }
-    if (Object.prototype.hasOwnProperty.call(session, STUDENT_AUTH_INVALIDATING_KEY)) {
-      await sessionKv.remove(STUDENT_AUTH_INVALIDATING_KEY);
+    if (Object.prototype.hasOwnProperty.call(session, key)) {
+      staleSessionAuthorityKeys.push(key);
     }
+  }
+  if (staleSessionAuthorityKeys.length > 0) {
+    durableSessionKv.remove(staleSessionAuthorityKeys).catch(() => {});
   }
   return merged;
 }
 
 async function setManualAuthState(obj) {
   if (hasSessionStorage()) {
-    await sessionKv.set(obj);
-    await kv.remove(Object.keys(obj));
+    await durableSessionKv.set(obj);
+    await durableLocalKv.remove(Object.keys(obj));
   } else {
-    await kv.set(obj);
+    await durableLocalKv.set(obj);
   }
 }
 
 async function clearStoredAuthState(localOverrides = {}) {
   const cleared = Object.fromEntries(AUTH_STATE_KEYS.map((key) => [key, null]));
-  const stored = await kv.get(['config']);
-  await kv.set({
+  const stored = await durableLocalKv.get(['config']);
+  await durableLocalKv.set({
     ...cleared,
     config: persistedNonAuthConfig(stored.config || CONFIG),
     ...localOverrides,
   });
-  await kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
   if (hasSessionStorage()) {
-    await sessionKv.remove([...AUTH_STATE_KEYS, STUDENT_AUTH_INVALIDATING_KEY]);
+    await durableSessionKv.remove([
+      ...AUTH_STATE_KEYS,
+      STUDENT_AUTH_INVALIDATING_KEY,
+      STUDENT_AUTH_COMMIT_PENDING_KEY,
+    ]);
   }
+  // Remove crash-recovery markers last. If the worker dies during either auth
+  // store cleanup, the surviving local marker keeps the next worker locked.
+  await durableLocalKv.remove([STUDENT_AUTH_INVALIDATING_KEY, STUDENT_AUTH_COMMIT_PENDING_KEY]);
 }
 
 function isHttpUrl(url) {
-  return Boolean(url && /^https?:\/\//i.test(url));
+  if (typeof url !== 'string' || !url.trim()) return false;
+  try {
+    const parsed = new URL(url);
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+      && Boolean(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 // PassPilot kiosk launch from the auth gate: the kiosk pages live at
@@ -721,6 +910,7 @@ function isKioskGateUrl(url) {
 
 function kioskLaunchUrl() {
   const origin = kioskGateOrigin();
+  if (fastAuthGateEnabled && sharedSignInLoginConfig.phase !== 'ready') return null;
   if (!origin || !sharedSignInLoginConfig.schoolId) return null;
   if (sharedSignInLoginConfig.passpilotKioskAvailable !== true) return null;
   // launch=gate tells the kiosk page to keep the staff PIN in sessionStorage
@@ -756,14 +946,22 @@ function normalizeManagedString(value) {
   return normalized || null;
 }
 
-async function readManagedConfig() {
+async function readManagedConfig(options = {}) {
   if (!chrome.storage?.managed) {
     return {};
   }
   try {
-    return await new Promise(resolve => chrome.storage.managed.get(MANAGED_CONFIG_KEYS, resolve));
+    return await new Promise((resolve, reject) => chrome.storage.managed.get(MANAGED_CONFIG_KEYS, (config) => {
+      const runtimeError = chrome.runtime?.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message || 'Managed configuration is unavailable'));
+        return;
+      }
+      resolve(config || {});
+    }));
   } catch (error) {
     console.warn('[Service Worker] Managed config read failed:', error);
+    if (options.failClosed === true) throw error;
     return {};
   }
 }
@@ -783,6 +981,183 @@ function applyManagedSchoolConfig(managedConfig = {}) {
   CONFIG.enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey) ||
     normalizeManagedString(managedConfig.classpilotEnrollmentKey) ||
     CONFIG.enrollmentKey;
+  if (Object.prototype.hasOwnProperty.call(managedConfig, 'fastAuthGateEnabled')) {
+    fastAuthGateEnabled = extractManagedValue(managedConfig.fastAuthGateEnabled) !== false;
+  }
+}
+
+function applyManagedAuthGatePolicySnapshot(managedConfig = {}) {
+  const priorFastAuthGateEnabled = fastAuthGateEnabled;
+  const priorBindingKey = authGateConfigBindingKey();
+  applyManagedSchoolConfig(managedConfig);
+  if (
+    priorFastAuthGateEnabled !== fastAuthGateEnabled
+    || priorBindingKey !== authGateConfigBindingKey()
+  ) {
+    resetSharedSignInLoginConfigCache({ clearPersisted: true });
+  }
+  return managedConfig;
+}
+
+function normalizedServerOrigin(value) {
+  if (!isHttpUrl(value)) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
+}
+
+function managedAuthGatePolicyDescriptor(managedConfig = {}) {
+  const serverUrl = normalizeManagedString(managedConfig.serverUrl)
+    || normalizeManagedString(managedConfig.classpilotServerUrl);
+  const serverOrigin = normalizedServerOrigin(serverUrl);
+  const schoolId = normalizeManagedString(managedConfig.schoolId)
+    || normalizeManagedString(managedConfig.classpilotSchoolId);
+  const schoolSlug = normalizeManagedString(managedConfig.schoolSlug)
+    || normalizeManagedString(managedConfig.classpilotSchoolSlug);
+  const enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey)
+    || normalizeManagedString(managedConfig.classpilotEnrollmentKey);
+  return {
+    schemaVersion: 1,
+    serverOrigin,
+    serverManaged: Boolean(serverUrl),
+    serverValid: !serverUrl || Boolean(serverOrigin),
+    schoolId,
+    schoolIdManaged: Boolean(schoolId),
+    schoolSlug,
+    schoolSlugManaged: Boolean(schoolSlug),
+    enrollmentKeyManaged: Boolean(enrollmentKey),
+    hasManagedSetup: Boolean(
+      (schoolId || schoolSlug)
+      && enrollmentKey
+      && (!serverUrl || serverOrigin)
+    ),
+    enrollmentKey,
+  };
+}
+
+function isExplicitUnmanagedDevelopmentServer(serverUrl) {
+  try {
+    const hostname = new URL(serverUrl).hostname.toLowerCase();
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
+
+function isExplicitUnmanagedDevelopmentRuntime() {
+  const runtimeId = String(chrome.runtime?.id || '').trim();
+  return Boolean(runtimeId && runtimeId !== CLASSPILOT_PRODUCTION_EXTENSION_ID);
+}
+
+function persistedManagedAuthGateDescriptor(descriptor) {
+  return {
+    schemaVersion: 1,
+    serverOrigin: descriptor.serverOrigin,
+    serverManaged: descriptor.serverManaged,
+    serverValid: descriptor.serverValid,
+    schoolId: descriptor.schoolId,
+    schoolIdManaged: descriptor.schoolIdManaged,
+    schoolSlug: descriptor.schoolSlug,
+    schoolSlugManaged: descriptor.schoolSlugManaged,
+    enrollmentKeyManaged: descriptor.enrollmentKeyManaged,
+  };
+}
+
+function applyAuthoritativeManagedAuthGateSnapshot(
+  managedConfig,
+  priorManagedBinding,
+  allowUnmanagedFallback,
+  options = {},
+) {
+  const descriptor = managedAuthGatePolicyDescriptor(managedConfig);
+  const policyIsAuthoritative = !allowUnmanagedFallback || Boolean(priorManagedBinding)
+    || descriptor.hasManagedSetup || descriptor.serverManaged;
+  const priorFastAuthGateEnabled = fastAuthGateEnabled;
+  const priorBindingKey = authGateConfigBindingKey();
+  applyManagedSchoolConfig(managedConfig);
+  if (policyIsAuthoritative) {
+    CONFIG.schoolId = descriptor.schoolId;
+    CONFIG.schoolSlug = descriptor.schoolSlug;
+    CONFIG.enrollmentKey = descriptor.enrollmentKey;
+    if (!descriptor.serverManaged || !descriptor.serverValid) {
+      // In an authoritative production snapshot, an omitted server means the
+      // ClassPilot production origin. This must not inherit a custom endpoint
+      // persisted by a pre-2.6.6 build that has no managed binding record yet.
+      CONFIG.serverUrl = DEFAULT_SERVER_URL;
+    }
+  }
+  if (
+    priorFastAuthGateEnabled !== fastAuthGateEnabled
+    || priorBindingKey !== authGateConfigBindingKey()
+  ) {
+    // The cached login-config also carries kiosk availability/school data.
+    // Drop it before any tab can combine the old origin with the new policy.
+    resetSharedSignInLoginConfigCache({ clearPersisted: true });
+  }
+  managedAuthGateSetupUnavailable = policyIsAuthoritative && !descriptor.hasManagedSetup;
+  if (policyIsAuthoritative && !descriptor.hasManagedSetup) {
+    updateSharedSignInLoginConfig({
+      phase: 'setup_required',
+      fetchedAt: 0,
+      retryAt: null,
+      setupRequired: true,
+      sharedSignInEnabled: false,
+      pinLoginEnabled: false,
+      schoolId: null,
+      passpilotKioskAvailable: false,
+      bindingKey: authGateConfigBindingKey(),
+    });
+  }
+  const persistedDescriptor = persistedManagedAuthGateDescriptor(descriptor);
+  if (policyIsAuthoritative && options.persist !== false) {
+    kv.set({ [MANAGED_AUTH_GATE_BINDING_KEY]: persistedDescriptor }).catch(() => {});
+  }
+  return { descriptor, persistedDescriptor, policyIsAuthoritative };
+}
+
+function managedPolicyConflictsWithStoredAuth(
+  stored = {},
+  managedConfig = {},
+  fallbackServerUrl,
+  options = {},
+) {
+  if (
+    stored[STUDENT_AUTH_INVALIDATING_KEY] === true
+    || stored[STUDENT_AUTH_COMMIT_PENDING_KEY] === true
+    || ![
+      stored.deviceId || stored.config?.deviceId,
+      stored.studentToken,
+      stored.activeStudentId,
+      stored.activeStudentSessionId,
+    ].every((value) => typeof value === 'string' && value.trim().length > 0)
+  ) {
+    return false;
+  }
+
+  const storedConfig = stored.config || {};
+  const descriptor = managedAuthGatePolicyDescriptor(managedConfig);
+  const priorManagedBinding = stored[MANAGED_AUTH_GATE_BINDING_KEY];
+  const policyIsAuthoritative = options.managedReadFailed === true
+    || !options.allowUnmanagedFallback
+    || Boolean(priorManagedBinding)
+    || descriptor.hasManagedSetup
+    || descriptor.serverManaged;
+  const storedServerOrigin = normalizedServerOrigin(storedConfig.serverUrl || fallbackServerUrl);
+  const authoritativeServerOrigin = descriptor.serverManaged
+    ? descriptor.serverOrigin
+    : normalizedServerOrigin(DEFAULT_SERVER_URL);
+
+  return Boolean(
+    options.managedReadFailed === true
+    || (policyIsAuthoritative && !descriptor.hasManagedSetup)
+    || (policyIsAuthoritative && authoritativeServerOrigin !== storedServerOrigin)
+    || (descriptor.schoolIdManaged && descriptor.schoolId !== normalizeManagedString(storedConfig.schoolId))
+    || (descriptor.schoolSlugManaged && descriptor.schoolSlug !== normalizeManagedString(storedConfig.schoolSlug))
+    || (descriptor.enrollmentKeyManaged
+      && descriptor.enrollmentKey !== normalizeManagedString(storedConfig.enrollmentKey))
+  );
 }
 
 function scheduleLicenseCheck() {
@@ -848,7 +1223,25 @@ async function disableForInactiveLicense(planStatus) {
   notifyLicenseState({ type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus });
 }
 
-async function checkLicenseStatus(reason = 'manual') {
+async function checkLicenseStatus(reason = 'manual', options = {}) {
+  const assertCurrent = () => {
+    if (options.authMutationGeneration === undefined) return;
+    assertAuthMutationBindingCurrent(
+      options.authMutationGeneration,
+      options.authBinding,
+      `license check:${reason}`,
+    );
+  };
+  const applyForCurrentAuth = (mutation) => {
+    if (options.authMutationGeneration === undefined) return mutation();
+    return enqueueStudentAuthMutation(async () => {
+      assertCurrent();
+      const result = await mutation();
+      assertCurrent();
+      return result;
+    });
+  };
+  assertCurrent();
   if (!CONFIG.serverUrl) {
     return;
   }
@@ -865,11 +1258,14 @@ async function checkLicenseStatus(reason = 'manual') {
       context: 'license status',
       maxAttempts: 2,
     });
+    assertCurrent();
 
     if (response.status === 402 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
+      assertCurrent();
       if (response.status === 402 || isClassPilotNotEntitledResponse(data)) {
-        await disableForInactiveLicense(data.planStatus);
+        await applyForCurrentAuth(() => disableForInactiveLicense(data.planStatus));
+        assertCurrent();
       }
       return;
     }
@@ -879,31 +1275,46 @@ async function checkLicenseStatus(reason = 'manual') {
     }
 
     const data = await response.json();
+    assertCurrent();
     if (!data.schoolActive) {
-      await disableForInactiveLicense(data.planStatus);
+      await applyForCurrentAuth(() => disableForInactiveLicense(data.planStatus));
+      assertCurrent();
       return;
     }
 
-    const wasInactive = !licenseActive;
-    licenseActive = true;
-    await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
-    await kv.set({ licenseActive: true, planStatus: data.planStatus });
+    const wasInactive = await applyForCurrentAuth(async () => {
+      const inactiveBeforeUpdate = !licenseActive;
+      licenseActive = true;
+      await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
+      await kv.set({ licenseActive: true, planStatus: data.planStatus });
+      return inactiveBeforeUpdate;
+    });
+    assertCurrent();
     if (wasInactive) {
       notifyLicenseState({ type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: data.planStatus });
-      initializeAdaptiveTracking(`license-active:${reason}`);
+      if (options.deferTrackingInitialization !== true) {
+        initializeAdaptiveTracking(`license-active:${reason}`);
+      }
     }
   } catch (error) {
+    if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     console.warn('[License] Status check failed:', error);
   }
 }
 
 async function resolveServerUrl() {
+  if (isExplicitUnmanagedDevelopmentServer(CONFIG.serverUrl || INJECTED_SERVER_URL)) {
+    return CONFIG.serverUrl || INJECTED_SERVER_URL;
+  }
   const managedConfig = await readManagedConfig();
   applyManagedSchoolConfig(managedConfig);
 
-  const managedUrl = extractManagedValue(managedConfig?.serverUrl);
-  if (isHttpUrl(managedUrl)) {
-    return managedUrl;
+  const managedUrl = normalizeManagedString(managedConfig?.serverUrl)
+    || normalizeManagedString(managedConfig?.classpilotServerUrl);
+  if (managedUrl) {
+    // Presence is authoritative. A malformed managed URL must never fall
+    // through to a stale locally persisted endpoint from an older policy.
+    return isHttpUrl(managedUrl) ? managedUrl : DEFAULT_SERVER_URL;
   }
 
   let syncConfig = {};
@@ -915,7 +1326,15 @@ async function resolveServerUrl() {
     }
   }
 
-  const localConfig = await chrome.storage.local.get(['config']);
+  const localConfig = await chrome.storage.local.get([
+    'config',
+    MANAGED_AUTH_GATE_BINDING_KEY,
+  ]);
+  if (localConfig?.[MANAGED_AUTH_GATE_BINDING_KEY]?.serverManaged) {
+    // The prior managed endpoint was removed. Absence is authoritative and
+    // cannot fall back to the endpoint persisted by that former policy.
+    return DEFAULT_SERVER_URL;
+  }
   const storedUrl = localConfig?.config?.serverUrl || syncConfig?.config?.serverUrl;
   if (isHttpUrl(storedUrl)) {
     return storedUrl;
@@ -989,7 +1408,26 @@ async function loadCachedSchoolSettings() {
   }
 }
 
-async function refreshSchoolSettings({ force = false } = {}) {
+async function refreshSchoolSettings(options = {}) {
+  const force = options.force === true;
+  const assertCurrent = () => {
+    if (options.authMutationGeneration === undefined) return;
+    assertAuthMutationBindingCurrent(
+      options.authMutationGeneration,
+      options.authBinding,
+      'school settings refresh',
+    );
+  };
+  const applyForCurrentAuth = (mutation) => {
+    if (options.authMutationGeneration === undefined) return mutation();
+    return enqueueStudentAuthMutation(async () => {
+      assertCurrent();
+      const result = await mutation();
+      assertCurrent();
+      return result;
+    });
+  };
+  assertCurrent();
   const now = Date.now();
   if (!force && schoolSettingsFetchedAt && now - schoolSettingsFetchedAt < SETTINGS_FETCH_INTERVAL_MS) {
     return schoolSettings;
@@ -1007,6 +1445,7 @@ async function refreshSchoolSettings({ force = false } = {}) {
       }
       return schoolSettings;
     }
+    const authenticatedResponseGuard = captureAuthenticatedResponseGuard();
     const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/settings`, {
       cache: 'no-store',
       headers: {
@@ -1016,21 +1455,31 @@ async function refreshSchoolSettings({ force = false } = {}) {
       context: 'extension settings',
       maxAttempts: 2,
     });
+    assertCurrent();
     if (!response.ok) {
       throw new Error(`Settings fetch failed (${response.status})`);
     }
     const settings = await response.json();
-    await adoptAuthenticatedStudentBinding(settings, 'extension settings');
-    schoolSettings = settings;
-    schoolSettingsFetchedAt = now;
-    await applyFabSettings(settings.fab || settings);
-    await kv.set({
-      [SCHOOL_SETTINGS_CACHE_KEY]: settings,
-      [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
+    assertCurrent();
+    await adoptAuthenticatedStudentBinding(
+      settings,
+      'extension settings',
+      authenticatedResponseGuard,
+    );
+    assertCurrent();
+    await applyForCurrentAuth(async () => {
+      schoolSettings = settings;
+      schoolSettingsFetchedAt = now;
+      await applyFabSettings(settings.fab || settings);
+      await kv.set({
+        [SCHOOL_SETTINGS_CACHE_KEY]: settings,
+        [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
+      });
     });
     console.log('[School Hours] Settings updated:', settings);
     return settings;
   } catch (error) {
+    if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     console.warn('[School Hours] Failed to fetch settings:', error);
     if (!schoolSettings) {
       schoolSettings = { enableTrackingHours: false };
@@ -1149,17 +1598,43 @@ function assertAuthMutationCurrent(generation, reason, options = {}) {
   }
 }
 
-function adoptAuthenticatedStudentBinding(raw = {}, reason = 'authenticated-response') {
-  const mutationGeneration = studentAuthMutationGeneration;
+function captureAuthenticatedResponseGuard() {
+  return {
+    mutationGeneration: studentAuthMutationGeneration,
+    authGateBindingKey: authGateConfigBindingKey(),
+  };
+}
+
+function assertAuthenticatedResponseGuardCurrent(guard, reason) {
+  if (
+    !guard
+    || guard.mutationGeneration !== studentAuthMutationGeneration
+    || guard.authGateBindingKey !== authGateConfigBindingKey()
+  ) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+function adoptAuthenticatedStudentBinding(
+  raw = {},
+  reason = 'authenticated-response',
+  responseGuard = captureAuthenticatedResponseGuard(),
+) {
+  assertAuthenticatedResponseGuardCurrent(responseGuard, reason);
   return enqueueStudentAuthMutation(() => adoptAuthenticatedStudentBindingNow(
     raw,
     reason,
-    mutationGeneration,
+    responseGuard,
   ));
 }
 
-async function adoptAuthenticatedStudentBindingNow(raw, reason, mutationGeneration) {
+async function adoptAuthenticatedStudentBindingNow(raw, reason, responseGuard) {
+  const mutationGeneration = responseGuard.mutationGeneration;
   assertAuthMutationCurrent(mutationGeneration, reason);
+  assertAuthenticatedResponseGuardCurrent(responseGuard, reason);
+  const wasAuthenticated = hasStudentAuth();
+  const priorStudentId = CONFIG.activeStudentId;
+  const priorStudentSessionId = CONFIG.activeStudentSessionId;
   const binding = exactStudentBinding(raw);
   const authenticatedSchoolId = String(
     raw.schoolId || raw.settings?.schoolId || raw.school?.id || ''
@@ -1186,24 +1661,32 @@ async function adoptAuthenticatedStudentBindingNow(raw, reason, mutationGenerati
   if (isManualIdentitySource()) {
     // Dispatch the local marker removal before awaiting session storage. A
     // later clear writes `true` afterward and therefore remains fail-closed.
-    const markerCleared = kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
+    const markerCleared = durableLocalKv.remove(STUDENT_AUTH_INVALIDATING_KEY);
     const configPersisted = persistedConfig
-      ? kv.set({ config: persistedConfig })
+      ? durableLocalKv.set({ config: persistedConfig })
       : Promise.resolve();
     await setManualAuthState(update);
     await Promise.all([markerCleared, configPersisted]);
   } else {
-    await kv.set({
+    await durableLocalKv.set({
       ...update,
       ...(persistedConfig ? { config: persistedConfig } : {}),
       [STUDENT_AUTH_INVALIDATING_KEY]: null,
     });
   }
   assertAuthMutationCurrent(mutationGeneration, reason);
+  assertAuthenticatedResponseGuardCurrent(responseGuard, reason);
   CONFIG.activeStudentId = binding.studentId;
   CONFIG.activeStudentSessionId = binding.studentSessionId;
   if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
   studentAuthInvalidating = false;
+  if (
+    !wasAuthenticated
+    || priorStudentId !== binding.studentId
+    || priorStudentSessionId !== binding.studentSessionId
+  ) {
+    resetSharedSignInLoginConfigCache({ clearPersisted: true });
+  }
   return binding;
 }
 
@@ -1994,9 +2477,24 @@ async function updateTrackingState(reason = 'state-check') {
   syncObservedHeartbeat('tracking-state');
 }
 
-async function initializeAdaptiveTracking(reason) {
+async function initializeAdaptiveTracking(reason, options = {}) {
+  const assertCurrent = () => {
+    if (options.authMutationGeneration === undefined) return;
+    assertAuthMutationBindingCurrent(
+      options.authMutationGeneration,
+      options.authBinding,
+      `tracking initialization:${reason}`,
+    );
+  };
+  assertCurrent();
   await loadCachedSchoolSettings();
-  await refreshSchoolSettings({ force: false });
+  assertCurrent();
+  await refreshSchoolSettings({
+    force: false,
+    authMutationGeneration: options.authMutationGeneration,
+    authBinding: options.authBinding,
+  });
+  assertCurrent();
 
   if (!idleListenerReady && chrome.idle) {
     chrome.idle.setDetectionInterval(IDLE_DETECTION_SECONDS);
@@ -2015,7 +2513,15 @@ async function initializeAdaptiveTracking(reason) {
   }
   scheduleHealthCheckAlarm();
 
-  updateTrackingState(reason);
+  assertCurrent();
+  if (options.authMutationGeneration === undefined) {
+    updateTrackingState(reason).catch((error) => {
+      console.warn('[Tracking] State initialization failed:', error?.message || error);
+    });
+  } else {
+    await updateTrackingState(reason);
+    assertCurrent();
+  }
 }
 
 const MONITORING_EVENT_OUTBOX_KEY = 'monitoringEventOutboxV1';
@@ -2745,12 +3251,27 @@ function isManualIdentitySource(source = CONFIG.identitySource) {
   return source === 'manual_email_id' || source === 'manual_pin';
 }
 
+function isManualLoginTimestampFresh(value, now = Date.now()) {
+  const lastSeen = Number(value);
+  const age = Number(now) - lastSeen;
+  return Number.isFinite(lastSeen)
+    && lastSeen > 0
+    && Number.isFinite(age)
+    && age >= -MANUAL_LOGIN_FUTURE_SKEW_MS
+    && age <= MANUAL_LOGIN_STALE_MS;
+}
+
 function hasStudentAuth() {
   return Boolean(
     !studentAuthInvalidating
-    && CONFIG.deviceId
-    && CONFIG.studentToken
-    && (CONFIG.activeStudentId || CONFIG.studentEmail)
+    && !studentAuthCommitPending
+    && (!isManualIdentitySource() || isManualLoginTimestampFresh(CONFIG.manualLoginLastSeenAt))
+    && [
+      CONFIG.deviceId,
+      CONFIG.studentToken,
+      CONFIG.activeStudentId,
+      CONFIG.activeStudentSessionId,
+    ].every((value) => typeof value === 'string' && value.trim().length > 0)
   );
 }
 
@@ -2765,12 +3286,692 @@ function disableToolbarAction() {
 }
 
 function hasManagedSchoolSetup() {
-  return Boolean((CONFIG.schoolId || CONFIG.schoolSlug) && CONFIG.enrollmentKey);
+  return Boolean(
+    !managedAuthGateSetupUnavailable
+    && (CONFIG.schoolId || CONFIG.schoolSlug)
+    && CONFIG.enrollmentKey
+    && isHttpUrl(CONFIG.serverUrl)
+  );
 }
 
-async function refreshSharedSignInLoginConfig(options = {}) {
+function canUseStudentLoginAuthority() {
+  if (!isHttpUrl(CONFIG.serverUrl)) return false;
+  if (!managedAuthGateSetupUnavailable) return true;
+  return isExplicitUnmanagedDevelopmentRuntime()
+    || isExplicitUnmanagedDevelopmentServer(CONFIG.serverUrl);
+}
+
+function authGateConfigBinding() {
+  let serverOrigin = null;
+  try {
+    serverOrigin = new URL(CONFIG.serverUrl || DEFAULT_SERVER_URL).origin;
+  } catch {
+    serverOrigin = null;
+  }
+  return {
+    serverOrigin,
+    schoolId: String(CONFIG.schoolId || '').trim() || null,
+    schoolSlug: String(CONFIG.schoolSlug || '').trim() || null,
+  };
+}
+
+function authGateConfigBindingKey(binding = authGateConfigBinding()) {
+  return JSON.stringify([
+    binding.serverOrigin || '',
+    binding.schoolId || '',
+    binding.schoolSlug || '',
+  ]);
+}
+
+function captureAuthGatePolicyGuard() {
+  return {
+    managedPolicyGeneration: managedAuthGatePolicyGeneration,
+    configGeneration: sharedSignInConfigGeneration,
+    bindingKey: authGateConfigBindingKey(),
+  };
+}
+
+function assertAuthGatePolicyGuardCurrent(guard, reason) {
+  if (
+    !guard
+    || guard.managedPolicyGeneration !== managedAuthGatePolicyGeneration
+    || guard.configGeneration !== sharedSignInConfigGeneration
+    || guard.bindingKey !== authGateConfigBindingKey()
+  ) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+async function awaitManagedAuthGatePolicyStable() {
+  while (true) {
+    const generation = managedAuthGatePolicyGeneration;
+    const pending = managedAuthGatePolicyRestorePromise;
+    try {
+      await pending;
+    } catch (error) {
+      if (
+        generation !== managedAuthGatePolicyGeneration
+        || pending !== managedAuthGatePolicyRestorePromise
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    if (
+      generation === managedAuthGatePolicyGeneration
+      && pending === managedAuthGatePolicyRestorePromise
+    ) {
+      return;
+    }
+  }
+}
+
+function assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, reason) {
+  if (
+    policyGeneration !== managedAuthGatePolicyGeneration
+    || managedAuthGatePolicyRestorePromise !== policyBarrier
+  ) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+function hasStoredStudentAuthMaterial(stored = {}) {
+  return Boolean(
+    stored[STUDENT_AUTH_INVALIDATING_KEY] === true
+    || stored[STUDENT_AUTH_COMMIT_PENDING_KEY] === true
+    || [
+      stored.studentToken,
+      stored.activeStudentId,
+      stored.activeStudentSessionId,
+      CONFIG.studentToken,
+      CONFIG.activeStudentId,
+      CONFIG.activeStudentSessionId,
+    ].some((value) => typeof value === 'string' && value.trim().length > 0)
+  );
+}
+
+async function runManagedAuthGatePolicyRevalidation() {
+  // One shared direct-revalidation cycle owns a new policy generation. Any
+  // older storage-change reread or login adoption is superseded before this
+  // fresh managed snapshot is requested.
+  const policyGeneration = ++managedAuthGatePolicyGeneration;
+  let resolvePolicyRestore;
+  let rejectPolicyRestore;
+  const policyBarrier = new Promise((resolve, reject) => {
+    resolvePolicyRestore = resolve;
+    rejectPolicyRestore = reject;
+  });
+  managedAuthGatePolicyRestorePromise = policyBarrier;
+  policyBarrier.catch(() => {});
+
+  const run = (async () => {
+    const priorBindingKey = authGateConfigBindingKey();
+    const priorEnrollmentKey = normalizeManagedString(CONFIG.enrollmentKey);
+    const [managedConfig, stored] = await Promise.all([
+      readManagedConfig({ failClosed: true }),
+      getStoredAuthState([
+        'config',
+        'deviceId',
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+        'identitySource',
+        'manualLoginLastSeenAt',
+        STUDENT_AUTH_INVALIDATING_KEY,
+        STUDENT_AUTH_COMMIT_PENDING_KEY,
+        MANAGED_AUTH_GATE_BINDING_KEY,
+      ]),
+    ]);
+    assertManagedPolicyRevalidationCurrent(
+      policyGeneration,
+      policyBarrier,
+      'managed policy direct reread',
+    );
+
+    const storedAuthConflicts = managedPolicyConflictsWithStoredAuth(
+      stored,
+      managedConfig,
+      CONFIG.serverUrl || DEFAULT_SERVER_URL,
+      { allowUnmanagedFallback: false },
+    );
+    const descriptor = managedAuthGatePolicyDescriptor(managedConfig);
+    const nextBindingKey = authGateConfigBindingKey({
+      serverOrigin: descriptor.serverManaged && descriptor.serverValid
+        ? descriptor.serverOrigin
+        : normalizedServerOrigin(DEFAULT_SERVER_URL),
+      schoolId: descriptor.schoolId,
+      schoolSlug: descriptor.schoolSlug,
+    });
+    const authorityChanged = priorBindingKey !== nextBindingKey
+      || priorEnrollmentKey !== descriptor.enrollmentKey;
+    const manualTimestampInvalid = isManualIdentitySource(
+      stored.identitySource || CONFIG.identitySource,
+    ) && !isManualLoginTimestampFresh(
+      stored.manualLoginLastSeenAt ?? CONFIG.manualLoginLastSeenAt,
+    );
+    const mustClearAuth = storedAuthConflicts
+      || authorityChanged
+      || !descriptor.hasManagedSetup
+      || manualTimestampInvalid
+      || studentAuthInvalidating
+      || studentAuthCommitPending;
+
+    if (mustClearAuth && (hasStoredStudentAuthMaterial(stored)
+      || studentAuthInvalidating || studentAuthCommitPending)) {
+      // Drain an older auth mutation before reserving this cleanup marker. An
+      // older queued clear removes its own marker last and must never erase the
+      // marker protecting this newer policy transition.
+      await studentAuthMutationTail;
+      assertManagedPolicyRevalidationCurrent(
+        policyGeneration,
+        policyBarrier,
+        'managed policy direct auth cleanup reservation',
+      );
+
+      // clearStudentAuth synchronously raises the in-memory fence and starts
+      // the strict durable invalidation write before its queued cleanup. Await
+      // the whole local clear before applyAuthoritative... is allowed to write
+      // the new binding/config, closing the crash window between those steps.
+      await clearStudentAuth('managed_policy_direct_revalidation', {
+        notifyBackend: false,
+        localOnly: true,
+        notifyAuthGateTabs: false,
+        pauseAutoRegistration: true,
+        disconnectWebSocket: true,
+      });
+      assertManagedPolicyRevalidationCurrent(
+        policyGeneration,
+        policyBarrier,
+        'managed policy direct auth cleanup',
+      );
+    }
+
+    const appliedPolicy = applyAuthoritativeManagedAuthGateSnapshot(
+      managedConfig,
+      stored[MANAGED_AUTH_GATE_BINDING_KEY],
+      false,
+      { persist: false },
+    );
+    assertManagedPolicyRevalidationCurrent(
+      policyGeneration,
+      policyBarrier,
+      'managed policy direct apply',
+    );
+
+    if (authorityChanged) {
+      resetSharedSignInLoginConfigCache({ clearPersisted: true });
+    }
+
+    // The acknowledgement is not valid until the exact effective authority
+    // and binding descriptor are durably recorded. This is a local-only read
+    // and write; managed revalidation never contacts the SchoolPilot API.
+    await durableLocalKv.set({
+      config: persistedNonAuthConfig(CONFIG),
+      [MANAGED_AUTH_GATE_BINDING_KEY]: appliedPolicy.persistedDescriptor,
+    });
+    assertManagedPolicyRevalidationCurrent(
+      policyGeneration,
+      policyBarrier,
+      'managed policy direct persistence',
+    );
+
+    // Always advance the state revision for the direct proof. Clients may
+    // receive a delayed pre-change push with the prior (or equal locally held)
+    // revision, but only this correlated response can acknowledge the fence.
+    bumpAuthGateStateRevision();
+    const state = await getPublishableAuthGateState();
+    assertManagedPolicyRevalidationCurrent(
+      policyGeneration,
+      policyBarrier,
+      'managed policy direct publication',
+    );
+    return {
+      state,
+      managedPolicyGeneration: policyGeneration,
+    };
+  })().catch(async (error) => {
+    if (
+      policyGeneration === managedAuthGatePolicyGeneration
+      && managedAuthGatePolicyRestorePromise === policyBarrier
+    ) {
+      // A failed local read/write cannot prove the policy snapshot. Keep every
+      // client fenced and fail closed without attaching an acknowledgement.
+      managedAuthGateSetupUnavailable = true;
+      CONFIG.serverUrl = DEFAULT_SERVER_URL;
+      CONFIG.schoolId = null;
+      CONFIG.schoolSlug = null;
+      CONFIG.enrollmentKey = null;
+      resetSharedSignInLoginConfigCache({ clearPersisted: true });
+      updateSharedSignInLoginConfig({
+        phase: 'setup_required',
+        fetchedAt: 0,
+        retryAt: null,
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        pinLoginEnabled: false,
+        schoolId: null,
+        passpilotKioskAvailable: false,
+        bindingKey: authGateConfigBindingKey(),
+      });
+      if (hasStoredStudentAuthMaterial() || studentAuthInvalidating || studentAuthCommitPending) {
+        await clearStudentAuth('managed_policy_direct_revalidation_failed', {
+          notifyBackend: false,
+          localOnly: true,
+          notifyAuthGateTabs: false,
+          pauseAutoRegistration: true,
+          disconnectWebSocket: true,
+        }).catch(() => {});
+      }
+      bumpAuthGateStateRevision();
+      await awaitAuthGateRevisionPublicationReady().catch(() => {});
+    }
+    throw error;
+  });
+
+  run.then(resolvePolicyRestore, rejectPolicyRestore);
+  return run;
+}
+
+async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
+  if (!Number.isSafeInteger(managedPolicyFence) || managedPolicyFence <= 0) {
+    const error = new Error('Managed policy fence must be a positive safe integer');
+    error.code = 'AUTH_GATE_INVALID_POLICY_FENCE';
+    throw error;
+  }
+
+  await authStateRestorePromise;
+
+  if (!managedAuthGateDirectRevalidationInFlight) {
+    const run = runManagedAuthGatePolicyRevalidation();
+    const trackedRun = run.finally(() => {
+      if (managedAuthGateDirectRevalidationInFlight === trackedRun) {
+        managedAuthGateDirectRevalidationInFlight = null;
+      }
+    });
+    managedAuthGateDirectRevalidationInFlight = trackedRun;
+    trackedRun.catch(() => {});
+  }
+
+  const result = await managedAuthGateDirectRevalidationInFlight;
+  return {
+    ...result,
+    // The expensive authoritative cycle is shared, but each direct caller
+    // receives only its own correlation fence. Broadcasts remain marker-free.
+    managedPolicyFence,
+  };
+}
+
+function restoreSharedSignInPresentationCache(rawCache) {
+  if (!fastAuthGateEnabled || !rawCache || typeof rawCache !== 'object') return false;
+  const ageMs = Date.now() - Number(rawCache.cachedAt || 0);
+  const currentBinding = authGateConfigBinding();
+  const cacheBinding = rawCache.binding || {};
+  if (
+    rawCache.schemaVersion !== 1
+    || !Number.isFinite(ageMs)
+    || ageMs < 0
+    || ageMs > SHARED_SIGN_IN_CONFIG_CACHE_MAX_AGE_MS
+    || authGateConfigBindingKey(cacheBinding) !== authGateConfigBindingKey(currentBinding)
+  ) {
+    kv.remove(SHARED_SIGN_IN_CONFIG_CACHE_KEY).catch(() => {});
+    return false;
+  }
+
+  // Local cache is presentation-only. A worker restart always begins in the
+  // loading phase and requires a live response before sign-in can be enabled.
+  sharedSignInLoginConfig = {
+    ...sharedSignInLoginConfig,
+    phase: 'loading',
+    fetchedAt: Number(rawCache.configFetchedAt || 0),
+    retryAt: null,
+    setupRequired: false,
+    sharedSignInEnabled: rawCache.sharedSignInEnabled === true,
+    loginMethod: rawCache.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+    pinLoginEnabled: rawCache.loginMethod !== 'email_id',
+    schoolId: typeof rawCache.schoolId === 'string' ? rawCache.schoolId : null,
+    passpilotKioskAvailable: rawCache.passpilotKioskAvailable === true,
+    bindingKey: authGateConfigBindingKey(currentBinding),
+  };
+  bumpAuthGateStateRevision();
+  return true;
+}
+
+async function persistSharedSignInPresentationCache(config) {
+  const binding = authGateConfigBinding();
+  await kv.set({
+    [SHARED_SIGN_IN_CONFIG_CACHE_KEY]: {
+      schemaVersion: 1,
+      cachedAt: Date.now(),
+      configFetchedAt: Number(config.fetchedAt || Date.now()),
+      binding,
+      sharedSignInEnabled: config.sharedSignInEnabled === true,
+      loginMethod: config.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+      schoolId: typeof config.schoolId === 'string' ? config.schoolId : null,
+      passpilotKioskAvailable: config.passpilotKioskAvailable === true,
+    },
+  });
+}
+
+function updateSharedSignInLoginConfig(nextState) {
+  sharedSignInLoginConfig = { ...sharedSignInLoginConfig, ...nextState };
+  bumpAuthGateStateRevision();
+  return sharedSignInLoginConfig;
+}
+
+function sanitizedAuthGateTimingLabel(value, fallback) {
+  const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 40);
+  return normalized || fallback;
+}
+
+function recordAuthGateTiming({ outcome, startedAt, coldWorker = false }) {
+  const completedAt = Date.now();
+  kv.get([AUTH_GATE_TIMING_STORAGE_KEY]).then((stored) => {
+    const prior = stored[AUTH_GATE_TIMING_STORAGE_KEY] || {};
+    const loadingPaintMs = Number(prior.loadingPaintMs);
+    const priorTimestamp = Number(prior.timestamp);
+    const navigationStartedAt = Number.isFinite(loadingPaintMs) && Number.isFinite(priorTimestamp)
+      ? priorTimestamp - loadingPaintMs
+      : Number(startedAt || completedAt);
+    const record = {
+      loadingPaintMs: Number.isFinite(loadingPaintMs)
+        ? Math.max(0, Math.round(loadingPaintMs))
+        : null,
+      configReadyMs: Math.max(0, completedAt - navigationStartedAt),
+      outcome: sanitizedAuthGateTimingLabel(outcome, 'unknown'),
+      coldWorker: prior.coldWorker === true || coldWorker === true,
+      timestamp: completedAt,
+    };
+    console.info('[AuthGatePerf]', record);
+    return kv.set({ [AUTH_GATE_TIMING_STORAGE_KEY]: record });
+  }).catch(() => {});
+}
+
+async function fetchAuthGateRequest(url, init = {}) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), AUTH_GATE_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    let data = {};
+    let jsonValid = true;
+    try {
+      data = await response.json();
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        data = {};
+        jsonValid = false;
+      }
+    } catch (error) {
+      if (controller.signal.aborted) throw error;
+      jsonValid = false;
+    }
+    return { response, data, jsonValid };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error('ClassPilot request timed out');
+      timeoutError.code = 'AUTH_GATE_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function assertAuthMutationBindingCurrent(generation, binding, reason) {
+  assertAuthMutationCurrent(generation, reason);
+  if (
+    CONFIG.activeStudentId !== binding.studentId
+    || CONFIG.activeStudentSessionId !== binding.studentSessionId
+    || CONFIG.deviceId !== binding.deviceId
+    || CONFIG.studentToken !== binding.studentToken
+  ) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+function isUnavailableAuthGateResponse(response) {
+  return response?.status === 408 || response?.status === 429 || response?.status >= 500;
+}
+
+function isValidSharedSignInConfigPayload(data) {
+  return Boolean(
+    data
+    && typeof data === 'object'
+    && !Array.isArray(data)
+    && typeof data.sharedSignInEnabled === 'boolean'
+  );
+}
+
+function isValidLoginRosterPayload(data) {
+  return Boolean(
+    data
+    && typeof data === 'object'
+    && !Array.isArray(data)
+    && Array.isArray(data.students)
+    && Array.isArray(data.grades)
+  );
+}
+
+function clearSharedSignInConfigRetry() {
+  sharedSignInConfigRetryAttempt = 0;
+  chrome.alarms.clear(SHARED_SIGN_IN_CONFIG_RETRY_ALARM);
+}
+
+function scheduleSharedSignInConfigRetry() {
+  const delayIndex = Math.min(
+    sharedSignInConfigRetryAttempt,
+    SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS.length - 1,
+  );
+  const delayMs = SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[delayIndex];
+  sharedSignInConfigRetryAttempt += 1;
+  const retryAt = Date.now() + delayMs;
+  chrome.alarms.create(SHARED_SIGN_IN_CONFIG_RETRY_ALARM, { when: retryAt });
+  return retryAt;
+}
+
+async function refreshSharedSignInLoginConfigFast(options = {}) {
   const force = options.force === true;
-  applyManagedSchoolConfig(await readManagedConfig());
+  if (options.managedConfigAlreadyApplied !== true) {
+    applyManagedAuthGatePolicySnapshot(await readManagedConfig());
+  }
+  if (!fastAuthGateEnabled) {
+    return refreshSharedSignInLoginConfigLegacy({
+      ...options,
+      managedConfigAlreadyApplied: true,
+    });
+  }
+  if (hasStudentAuth()) {
+    clearSharedSignInConfigRetry();
+    return sharedSignInLoginConfig;
+  }
+
+  const now = Date.now();
+  const bindingKey = authGateConfigBindingKey();
+  const coldWorker = options.coldWorker === true;
+  const canUseCurrentConfig = !force
+    && sharedSignInLoginConfig.bindingKey === bindingKey
+    && (sharedSignInLoginConfig.phase === 'ready' || sharedSignInLoginConfig.phase === 'setup_required')
+    && sharedSignInLoginConfig.fetchedAt
+    && now - sharedSignInLoginConfig.fetchedAt < SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS;
+  if (canUseCurrentConfig) {
+    authGateStateColdWorker = coldWorker;
+    return sharedSignInLoginConfig;
+  }
+  if (
+    !force
+    && sharedSignInLoginConfig.phase === 'unavailable'
+    && Number(sharedSignInLoginConfig.retryAt || 0) > now
+  ) {
+    authGateStateColdWorker = coldWorker;
+    return sharedSignInLoginConfig;
+  }
+  if (sharedSignInConfigPromise) return sharedSignInConfigPromise;
+
+  const requestGeneration = sharedSignInConfigGeneration;
+  const requestAuthMutationGeneration = studentAuthMutationGeneration;
+  const startedAt = Date.now();
+  authGateStateColdWorker = coldWorker;
+  if (!hasManagedSchoolSetup()) {
+    clearSharedSignInConfigRetry();
+    const state = updateSharedSignInLoginConfig({
+      phase: 'setup_required',
+      fetchedAt: 0,
+      retryAt: null,
+      setupRequired: true,
+      sharedSignInEnabled: false,
+      pinLoginEnabled: false,
+      schoolId: null,
+      passpilotKioskAvailable: false,
+      bindingKey,
+    });
+    recordAuthGateTiming({ outcome: 'setup_required_local', startedAt, coldWorker });
+    await notifyAuthGateStateToTabs({ triggerRefresh: false });
+    return state;
+  }
+
+  updateSharedSignInLoginConfig({
+    phase: 'loading',
+    retryAt: null,
+    setupRequired: false,
+    bindingKey,
+  });
+
+  const params = new URLSearchParams();
+  if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
+  if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
+
+  const run = (async () => {
+    try {
+      const { response, data, jsonValid } = await fetchAuthGateRequest(
+        `${CONFIG.serverUrl}/api/extension/login-config?${params.toString()}`,
+        {
+          cache: 'no-store',
+          headers: { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey },
+        },
+      );
+      if (
+        requestGeneration !== sharedSignInConfigGeneration
+        || requestAuthMutationGeneration !== studentAuthMutationGeneration
+        || hasStudentAuth()
+        || bindingKey !== authGateConfigBindingKey()
+      ) {
+        return sharedSignInLoginConfig;
+      }
+
+      if (response.ok && (!jsonValid || !isValidSharedSignInConfigPayload(data))) {
+        const retryAt = scheduleSharedSignInConfigRetry();
+        updateSharedSignInLoginConfig({
+          phase: 'unavailable',
+          retryAt,
+          setupRequired: false,
+          sharedSignInEnabled: false,
+          pinLoginEnabled: false,
+          bindingKey,
+        });
+        recordAuthGateTiming({ outcome: 'unavailable_invalid_config', startedAt, coldWorker });
+      } else if (response.ok) {
+        clearSharedSignInConfigRetry();
+        const sharedSignInEnabled = data.sharedSignInEnabled;
+        const state = updateSharedSignInLoginConfig({
+          phase: sharedSignInEnabled ? 'ready' : 'setup_required',
+          fetchedAt: Date.now(),
+          retryAt: null,
+          setupRequired: !sharedSignInEnabled,
+          sharedSignInEnabled,
+          loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
+          pinLoginEnabled: sharedSignInEnabled && data.loginMethod !== 'email_id',
+          schoolId: typeof data.schoolId === 'string' ? data.schoolId : null,
+          passpilotKioskAvailable: data.passpilotKioskAvailable === true,
+          bindingKey,
+        });
+        await persistSharedSignInPresentationCache(state).catch(() => {});
+        if (
+          requestGeneration !== sharedSignInConfigGeneration
+          || requestAuthMutationGeneration !== studentAuthMutationGeneration
+          || hasStudentAuth()
+          || bindingKey !== authGateConfigBindingKey()
+        ) {
+          await kv.remove(SHARED_SIGN_IN_CONFIG_CACHE_KEY).catch(() => {});
+          return sharedSignInLoginConfig;
+        }
+        recordAuthGateTiming({
+          outcome: sharedSignInEnabled ? 'ready' : 'setup_required_disabled',
+          startedAt,
+          coldWorker,
+        });
+      } else if (isUnavailableAuthGateResponse(response)) {
+        const retryAt = scheduleSharedSignInConfigRetry();
+        updateSharedSignInLoginConfig({
+          phase: 'unavailable',
+          retryAt,
+          setupRequired: false,
+          sharedSignInEnabled: false,
+          pinLoginEnabled: false,
+          bindingKey,
+        });
+        recordAuthGateTiming({ outcome: 'unavailable_http', startedAt, coldWorker });
+      } else {
+        clearSharedSignInConfigRetry();
+        updateSharedSignInLoginConfig({
+          phase: 'setup_required',
+          fetchedAt: Date.now(),
+          retryAt: null,
+          setupRequired: true,
+          sharedSignInEnabled: false,
+          pinLoginEnabled: false,
+          schoolId: null,
+          passpilotKioskAvailable: false,
+          bindingKey,
+        });
+        recordAuthGateTiming({ outcome: 'setup_required_server', startedAt, coldWorker });
+      }
+    } catch (error) {
+      if (
+        requestGeneration !== sharedSignInConfigGeneration
+        || requestAuthMutationGeneration !== studentAuthMutationGeneration
+        || hasStudentAuth()
+        || bindingKey !== authGateConfigBindingKey()
+      ) {
+        return sharedSignInLoginConfig;
+      }
+      console.warn('[Auth Gate] Shared sign-in config unavailable:', error?.message || error);
+      const retryAt = scheduleSharedSignInConfigRetry();
+      updateSharedSignInLoginConfig({
+        phase: 'unavailable',
+        retryAt,
+        setupRequired: false,
+        sharedSignInEnabled: false,
+        pinLoginEnabled: false,
+        bindingKey,
+      });
+      recordAuthGateTiming({
+        outcome: error?.code === 'AUTH_GATE_TIMEOUT' ? 'unavailable_timeout' : 'unavailable_network',
+        startedAt,
+        coldWorker,
+      });
+    }
+
+    await notifyAuthGateStateToTabs({ triggerRefresh: false });
+    return sharedSignInLoginConfig;
+  })();
+
+  const trackedRun = run.finally(() => {
+    if (sharedSignInConfigPromise === trackedRun) sharedSignInConfigPromise = null;
+  });
+  sharedSignInConfigPromise = trackedRun;
+  return trackedRun;
+}
+
+async function refreshSharedSignInLoginConfigLegacy(options = {}) {
+  const force = options.force === true;
+  if (options.managedConfigAlreadyApplied !== true) {
+    applyManagedAuthGatePolicySnapshot(await readManagedConfig());
+  }
+  if (fastAuthGateEnabled) {
+    return refreshSharedSignInLoginConfigFast({
+      ...options,
+      managedConfigAlreadyApplied: true,
+    });
+  }
 
   const now = Date.now();
   const hasSchoolSetup = hasManagedSchoolSetup();
@@ -2786,8 +3987,19 @@ async function refreshSharedSignInLoginConfig(options = {}) {
     return sharedSignInConfigPromise;
   }
 
-  sharedSignInConfigPromise = (async () => {
+  const requestGeneration = sharedSignInConfigGeneration;
+  const requestAuthMutationGeneration = studentAuthMutationGeneration;
+  const requestBindingKey = authGateConfigBindingKey();
+  const requestIsStale = () => (
+    requestGeneration !== sharedSignInConfigGeneration
+    || requestAuthMutationGeneration !== studentAuthMutationGeneration
+    || requestBindingKey !== authGateConfigBindingKey()
+    || fastAuthGateEnabled
+    || hasStudentAuth()
+  );
+  const run = (async () => {
     if (!hasManagedSchoolSetup()) {
+      if (requestIsStale()) return sharedSignInLoginConfig;
       sharedSignInLoginConfig = {
         fetchedAt: Date.now(),
         setupRequired: true,
@@ -2815,6 +4027,7 @@ async function refreshSharedSignInLoginConfig(options = {}) {
         maxAttempts: 2,
       });
       const data = await response.json().catch(() => ({}));
+      if (requestIsStale()) return sharedSignInLoginConfig;
       sharedSignInLoginConfig = {
         fetchedAt: Date.now(),
         setupRequired: !response.ok,
@@ -2829,6 +4042,7 @@ async function refreshSharedSignInLoginConfig(options = {}) {
       };
       return sharedSignInLoginConfig;
     } catch (error) {
+      if (requestIsStale()) return sharedSignInLoginConfig;
       console.warn('[Auth Gate] Shared sign-in config check failed:', error?.message || error);
       sharedSignInLoginConfig = {
         fetchedAt: Date.now(),
@@ -2841,25 +4055,52 @@ async function refreshSharedSignInLoginConfig(options = {}) {
       };
       return sharedSignInLoginConfig;
     }
-  })().finally(() => {
-    sharedSignInConfigPromise = null;
   });
+  const trackedRun = run().finally(() => {
+    if (sharedSignInConfigPromise === trackedRun) sharedSignInConfigPromise = null;
+  });
+  sharedSignInConfigPromise = trackedRun;
+  return trackedRun;
+}
 
-  return sharedSignInConfigPromise;
+function refreshSharedSignInLoginConfig(options = {}) {
+  return fastAuthGateEnabled
+    ? refreshSharedSignInLoginConfigFast(options)
+    : refreshSharedSignInLoginConfigLegacy(options);
 }
 
 function getAuthGateState() {
   const hasSchoolSetup = hasManagedSchoolSetup();
+  const authRequired = !hasStudentAuth();
+  if (lastAuthGateAuthRequired !== authRequired) {
+    lastAuthGateAuthRequired = authRequired;
+    bumpAuthGateStateRevision();
+  }
+  const phase = authRequired
+    ? (fastAuthGateEnabled
+      ? sharedSignInLoginConfig.phase
+      : (!hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true
+        ? 'setup_required'
+        : sharedSignInLoginConfig.fetchedAt ? 'ready' : 'loading'))
+    : 'authenticated';
   return {
-    authRequired: !hasStudentAuth(),
+    authRequired,
     setupRequired: !hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true,
-    studentName: CONFIG.studentName || null,
-    studentEmail: CONFIG.studentEmail || null,
+    studentName: authRequired ? null : (CONFIG.studentName || null),
+    studentEmail: authRequired ? null : (CONFIG.studentEmail || null),
     sharedSignInEnabled: sharedSignInLoginConfig.sharedSignInEnabled === true,
     loginMethod: sharedSignInLoginConfig.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
-    pinLoginEnabled: sharedSignInLoginConfig.loginMethod === 'name_pin',
+    pinLoginEnabled: fastAuthGateEnabled
+      ? sharedSignInLoginConfig.pinLoginEnabled === true
+      : sharedSignInLoginConfig.loginMethod === 'name_pin',
     hasManagedSchoolSetup: hasSchoolSetup,
     manualExpiresInSeconds: Math.floor(MANUAL_LOGIN_STALE_MS / 1000),
+    fastAuthGateEnabled,
+    coldWorker: fastAuthGateEnabled && authGateStateColdWorker,
+    phase,
+    revision: authGateStateRevision,
+    configFetchedAt: sharedSignInLoginConfig.fetchedAt || null,
+    retryAt: sharedSignInLoginConfig.retryAt || null,
     // kioskUrl is null unless the school's PassPilot kiosk is usable;
     // kioskOrigin is always present so the content script can skip painting
     // the gate on kiosk pages even when the button is hidden.
@@ -2868,27 +4109,98 @@ function getAuthGateState() {
   };
 }
 
+async function getPublishableAuthGateState() {
+  await awaitAuthGateRevisionPublicationReady();
+  while (true) {
+    const state = getAuthGateState();
+    await awaitAuthGateRevisionPublicationReady();
+    if (
+      authGateStatePendingRevisionBumps === 0
+      && state.revision === authGateStateRevision
+    ) {
+      return state;
+    }
+  }
+}
+
 async function ensureDeviceId() {
   if (CONFIG.deviceId) return CONFIG.deviceId;
-  const stored = await kv.get(['deviceId']);
+  const stored = await durableLocalKv.get(['deviceId']);
   const deviceId = stored.deviceId || ('device-' + crypto.randomUUID().slice(0, 11));
   CONFIG.deviceId = deviceId;
-  await kv.set({ deviceId });
+  await durableLocalKv.set({ deviceId });
   return deviceId;
 }
 
-async function notifyAuthGateStateToTabs() {
+async function notifyAuthGateStateToTabs(options = {}) {
   try {
     const tabs = await chrome.tabs.query({});
-    await Promise.all(tabs.map((tab) => enforceAuthGateForTab(tab)));
+    await Promise.all(tabs.map((tab) => enforceAuthGateForTab(tab, options)));
   } catch (error) {
     console.warn('[Auth Gate] Failed to notify tabs:', error?.message || error);
   }
 }
 
-if (chrome.storage?.onChanged) {
-  chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'managed') return;
+function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') {
+    if (areaName !== 'managed') return null;
+    if (!Object.keys(changes).some((key) => MANAGED_CONFIG_KEYS.includes(key))) return null;
+
+    const serverUrlChanged = ['serverUrl', 'classpilotServerUrl'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key)
+    ));
+    const schoolIdChanged = ['schoolId', 'classpilotSchoolId'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key)
+    ));
+    const schoolSlugChanged = ['schoolSlug', 'classpilotSchoolSlug'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key)
+    ));
+    const enrollmentKeyChanged = ['enrollmentKey', 'classpilotEnrollmentKey'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key)
+    ));
+    const schoolIdRemoved = ['schoolId', 'classpilotSchoolId'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key) && changes[key].newValue == null
+    ));
+    const schoolSlugRemoved = ['schoolSlug', 'classpilotSchoolSlug'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key) && changes[key].newValue == null
+    ));
+    const enrollmentKeyRemoved = ['enrollmentKey', 'classpilotEnrollmentKey'].some((key) => (
+      Object.prototype.hasOwnProperty.call(changes, key) && changes[key].newValue == null
+    ));
+    const authAuthorityChanged = serverUrlChanged || schoolIdChanged
+      || schoolSlugChanged || enrollmentKeyChanged;
+    const policyGeneration = ++managedAuthGatePolicyGeneration;
+    let resolvePolicyRestore;
+    let rejectPolicyRestore;
+    const policyBarrier = new Promise((resolve, reject) => {
+      resolvePolicyRestore = resolve;
+      rejectPolicyRestore = reject;
+    });
+    managedAuthGatePolicyRestorePromise = policyBarrier;
+    policyBarrier.catch(() => {});
+
+    let authorityAuthClearPromise = Promise.resolve();
+    if (authAuthorityChanged) {
+      managedAuthGateSetupUnavailable = true;
+      // Raise the in-memory fence and begin the strict durable invalidation
+      // write synchronously. The policy transition below awaits the complete
+      // local clear before it may apply or persist the new authority.
+      authorityAuthClearPromise = clearStudentAuth('managed_auth_authority_changed', {
+        notifyBackend: false,
+        localOnly: true,
+        notifyAuthGateTabs: false,
+        pauseAutoRegistration: true,
+        disconnectWebSocket: true,
+      });
+      authorityAuthClearPromise.catch(() => {});
+    }
+
+    // A changed server value is untrusted until the complete managed snapshot
+    // proves it is a valid URL. Never retain the previous managed endpoint
+    // through a removal or a malformed replacement.
+    if (serverUrlChanged) CONFIG.serverUrl = DEFAULT_SERVER_URL;
+    if (schoolIdRemoved) CONFIG.schoolId = null;
+    if (schoolSlugRemoved) CONFIG.schoolSlug = null;
+    if (enrollmentKeyRemoved) CONFIG.enrollmentKey = null;
 
     const managedConfig = {};
     for (const [key, change] of Object.entries(changes)) {
@@ -2897,13 +4209,146 @@ if (chrome.storage?.onChanged) {
       }
     }
 
-    applyManagedSchoolConfig(managedConfig);
-    resetSharedSignInLoginConfigCache();
-    notifyAuthGateStateToTabs().catch(() => {});
+    if (authAuthorityChanged) {
+      // Preserve an immediate kill-switch transition, but keep every new
+      // authority field out of CONFIG until durable auth cleanup completes.
+      if (Object.prototype.hasOwnProperty.call(managedConfig, 'fastAuthGateEnabled')) {
+        fastAuthGateEnabled = extractManagedValue(managedConfig.fastAuthGateEnabled) !== false;
+      }
+    } else {
+      applyManagedSchoolConfig(managedConfig);
+    }
+    resetSharedSignInLoginConfigCache({ clearPersisted: true });
+
+    // Publish the transitional state immediately. In particular, a true→false
+    // kill-switch change releases fast bootstrap without waiting for a managed
+    // storage reread or the legacy network request.
+    notifyAuthGateStateToTabs({
+      triggerRefresh: false,
+      skipManagedPolicyWait: true,
+    }).catch(() => {});
+
+    let transitionLegacyRefresh = null;
+    if (!fastAuthGateEnabled && !hasStudentAuth() && !authAuthorityChanged) {
+      transitionLegacyRefresh = refreshSharedSignInLoginConfigLegacy({
+        force: true,
+        managedConfigAlreadyApplied: true,
+      });
+    }
+
+    // Reapply any surviving alias from the complete policy snapshot. Until
+    // that local read completes the state remains loading/setup-required. The
+    // pending promise is installed synchronously, so a login cannot adopt a
+    // response under the partial or uncertain authority above.
+    const storedPolicyAtChange = durableLocalKv.get([MANAGED_AUTH_GATE_BINDING_KEY, 'config']);
+    const policyRestore = Promise.all([
+      readManagedConfig({ failClosed: true }),
+      storedPolicyAtChange,
+      authorityAuthClearPromise,
+    ]).then(async ([currentManagedConfig, persisted]) => {
+      if (policyGeneration !== managedAuthGatePolicyGeneration) {
+        throw authMutationSuperseded('managed policy reread');
+      }
+      const appliedPolicy = applyAuthoritativeManagedAuthGateSnapshot(
+        currentManagedConfig,
+        persisted[MANAGED_AUTH_GATE_BINDING_KEY],
+        false,
+        { persist: false },
+      );
+      if (policyGeneration !== managedAuthGatePolicyGeneration) {
+        throw authMutationSuperseded('managed policy reread');
+      }
+
+      const policyPersistence = {
+        [MANAGED_AUTH_GATE_BINDING_KEY]: appliedPolicy.persistedDescriptor,
+      };
+      if (authAuthorityChanged) {
+        // The snapshot was read in parallel with cleanup and may predate auth
+        // removal. Persist only the non-auth allowlist so no legacy token or
+        // session field can be resurrected with the new authority.
+        const config = persistedNonAuthConfig({
+          ...(persisted.config || {}),
+          serverUrl: CONFIG.serverUrl,
+          schoolId: CONFIG.schoolId,
+          schoolSlug: CONFIG.schoolSlug,
+          enrollmentKey: CONFIG.enrollmentKey,
+        });
+        policyPersistence.config = config;
+      }
+      await durableLocalKv.set(policyPersistence);
+      if (policyGeneration !== managedAuthGatePolicyGeneration) {
+        throw authMutationSuperseded('managed policy persistence');
+      }
+
+      if (fastAuthGateEnabled && !hasStudentAuth()) {
+        refreshSharedSignInLoginConfig({ reason: 'managed_policy_change' }).catch(() => {});
+        await notifyAuthGateStateToTabs({
+          triggerRefresh: false,
+          skipManagedPolicyWait: true,
+        });
+        return currentManagedConfig;
+      }
+      if (!fastAuthGateEnabled && !hasStudentAuth()) {
+        const legacyRefresh = transitionLegacyRefresh || refreshSharedSignInLoginConfigLegacy({
+          force: true,
+          managedConfigAlreadyApplied: true,
+        });
+        await legacyRefresh;
+        await notifyAuthGateStateToTabs({
+          triggerRefresh: false,
+          skipManagedPolicyWait: true,
+        });
+        return currentManagedConfig;
+      }
+      await notifyAuthGateStateToTabs({
+        triggerRefresh: false,
+        skipManagedPolicyWait: true,
+      });
+      return currentManagedConfig;
+    }).catch((error) => {
+      if (policyGeneration === managedAuthGatePolicyGeneration) {
+        managedAuthGateSetupUnavailable = true;
+        CONFIG.serverUrl = DEFAULT_SERVER_URL;
+        CONFIG.schoolId = null;
+        CONFIG.schoolSlug = null;
+        CONFIG.enrollmentKey = null;
+        resetSharedSignInLoginConfigCache({ clearPersisted: true });
+        updateSharedSignInLoginConfig({
+          phase: 'setup_required',
+          fetchedAt: 0,
+          retryAt: null,
+          setupRequired: true,
+          sharedSignInEnabled: false,
+          pinLoginEnabled: false,
+          schoolId: null,
+          passpilotKioskAvailable: false,
+          bindingKey: authGateConfigBindingKey(),
+        });
+        if (!studentAuthInvalidating && (CONFIG.studentToken || studentAuthCommitPending)) {
+          clearStudentAuth('managed_policy_reread_failed', {
+            notifyBackend: false,
+            localOnly: true,
+            pauseAutoRegistration: true,
+          }).catch(() => {});
+        }
+        notifyAuthGateStateToTabs({ triggerRefresh: false }).catch(() => {});
+      }
+      throw error;
+    });
+    policyRestore.then(resolvePolicyRestore, rejectPolicyRestore);
+    return {
+      policyGeneration,
+      policyRestorePromise: policyBarrier,
+    };
+}
+
+if (chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    handleManagedAuthGateStorageChange(changes, areaName);
   });
 }
 
-async function enforceAuthGateForTab(tabOrId) {
+async function enforceAuthGateForTab(tabOrId, options = {}) {
   try {
     const tab = typeof tabOrId === 'number' ? await chrome.tabs.get(tabOrId) : tabOrId;
     if (!tab?.id || !isHttpUrl(tab.url || '')) {
@@ -2915,13 +4360,27 @@ async function enforceAuthGateForTab(tabOrId) {
     if (isKioskGateUrl(tab.url || '')) {
       return;
     }
+    // Auth restoration also durably reserves this worker's revision range.
+    // Never publish an authenticated or invalidated state before that floor is
+    // safe across a subsequent MV3 restart.
+    await authStateRestorePromise;
+    if (!hasStudentAuth() && options.skipManagedPolicyWait !== true) {
+      await awaitManagedAuthGatePolicyStable().catch(() => {});
+    }
     if (!hasStudentAuth()) {
-      await refreshSharedSignInLoginConfig();
+      if (fastAuthGateEnabled) {
+        if (options.triggerRefresh !== false) {
+          refreshSharedSignInLoginConfig({ reason: options.reason || 'tab_enforcement' }).catch(() => {});
+        }
+      } else if (options.triggerRefresh !== false) {
+        await refreshSharedSignInLoginConfig();
+      }
     }
 
-    const message = hasStudentAuth()
-      ? { type: 'CLASSPILOT_AUTH_COMPLETE', state: getAuthGateState() }
-      : { type: 'CLASSPILOT_AUTH_REQUIRED', state: getAuthGateState() };
+    const publishableState = await getPublishableAuthGateState();
+    const message = publishableState.authRequired
+      ? { type: 'CLASSPILOT_AUTH_REQUIRED', state: publishableState }
+      : { type: 'CLASSPILOT_AUTH_COMPLETE', state: publishableState };
 
     try {
       await chrome.tabs.sendMessage(tab.id, message);
@@ -2949,31 +4408,95 @@ function enqueueStudentAuthMutation(mutation) {
   return run;
 }
 
-function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration) {
+function startAuthCommitRecoveryBarrier() {
+  if (resolveAuthCommitRecovery || rejectAuthCommitRecovery) return authCommitRecoveryPromise;
+  authCommitRecoveryPromise = new Promise((resolve, reject) => {
+    resolveAuthCommitRecovery = resolve;
+    rejectAuthCommitRecovery = reject;
+  });
+  authCommitRecoveryPromise.catch(() => {});
+  return authCommitRecoveryPromise;
+}
+
+function completeAuthCommitRecoveryBarrier() {
+  const resolve = resolveAuthCommitRecovery;
+  resolveAuthCommitRecovery = null;
+  rejectAuthCommitRecovery = null;
+  if (resolve) resolve();
+}
+
+function failAuthCommitRecoveryBarrier(error) {
+  const reject = rejectAuthCommitRecovery;
+  resolveAuthCommitRecovery = null;
+  rejectAuthCommitRecovery = null;
+  if (reject) reject(error);
+}
+
+async function beginStudentAuthCommit(mutationGeneration, reason) {
+  assertAuthMutationCurrent(mutationGeneration, reason, { allowInvalidating: true });
+  // Raise the in-memory fence before persisting it. Credentials are written
+  // only after the durable marker lands, so a worker crash in the following
+  // enforcement window cannot expose a partially committed login on restart.
+  studentAuthCommitPending = true;
+  studentAuthCommitPendingGeneration = mutationGeneration;
+  startAuthCommitRecoveryBarrier();
+  await durableLocalKv.set({ [STUDENT_AUTH_COMMIT_PENDING_KEY]: true });
+  assertAuthMutationCurrent(mutationGeneration, reason, { allowInvalidating: true });
+  if (studentAuthCommitPendingGeneration !== mutationGeneration) {
+    throw authMutationSuperseded(reason);
+  }
+}
+
+async function completeStudentAuthCommit(mutationGeneration, reason) {
+  assertAuthMutationCurrent(mutationGeneration, reason);
+  if (studentAuthCommitPendingGeneration !== mutationGeneration) {
+    throw authMutationSuperseded(reason);
+  }
+  await durableLocalKv.remove(STUDENT_AUTH_COMMIT_PENDING_KEY);
+  assertAuthMutationCurrent(mutationGeneration, reason);
+  if (studentAuthCommitPendingGeneration !== mutationGeneration) {
+    throw authMutationSuperseded(reason);
+  }
+  studentAuthCommitPending = false;
+  studentAuthCommitPendingGeneration = 0;
+  completeAuthCommitRecoveryBarrier();
+}
+
+function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration, options = {}) {
   const interruptedAuthClear = stored?.[STUDENT_AUTH_INVALIDATING_KEY] === true;
+  const interruptedAuthCommit = stored?.[STUDENT_AUTH_COMMIT_PENDING_KEY] === true;
+  const manualAuthTimestampInvalid = isManualIdentitySource(stored?.identitySource)
+    && !isManualLoginTimestampFresh(stored?.manualLoginLastSeenAt);
+  const authRestoreBlocked = interruptedAuthClear
+    || interruptedAuthCommit
+    || manualAuthTimestampInvalid;
   return enqueueStudentAuthMutation(async () => {
     const assertCurrent = () => assertAuthMutationCurrent(
       restoreGeneration,
       'worker wake auth restore',
-      { allowInvalidating: interruptedAuthClear },
+      { allowInvalidating: authRestoreBlocked },
     );
     assertCurrent();
 
-    if (interruptedAuthClear) {
+    if (authRestoreBlocked) {
       studentAuthInvalidating = true;
+      studentAuthCommitPending = interruptedAuthCommit;
+      if (interruptedAuthCommit) startAuthCommitRecoveryBarrier();
       CONFIG.autoRegistrationPaused = true;
     }
 
     if (stored?.config) {
       const { serverUrl, ...safeConfig } = persistedNonAuthConfig(stored.config);
-      await kv.set({ config: { serverUrl, ...safeConfig } });
-      assertCurrent();
+      if (options.persistConfig !== false) {
+        await kv.set({ config: { serverUrl, ...safeConfig } });
+        assertCurrent();
+      }
       CONFIG = { ...CONFIG, ...safeConfig };
     }
 
     CONFIG.serverUrl = resolvedServerUrl;
     if (stored?.deviceId) CONFIG.deviceId = stored.deviceId;
-    if (!interruptedAuthClear) {
+    if (!authRestoreBlocked) {
       if (stored?.activeStudentId) CONFIG.activeStudentId = stored.activeStudentId;
       if (stored?.activeStudentSessionId) CONFIG.activeStudentSessionId = stored.activeStudentSessionId;
       if (stored?.studentEmail) CONFIG.studentEmail = stored.studentEmail;
@@ -2982,17 +4505,18 @@ function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration
       if (stored?.identitySource) CONFIG.identitySource = stored.identitySource;
       if (stored?.manualLoginLastSeenAt) CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt;
     }
-    CONFIG.autoRegistrationPaused = interruptedAuthClear || stored?.autoRegistrationPaused === true;
+    CONFIG.autoRegistrationPaused = authRestoreBlocked
+      || stored?.autoRegistrationPaused === true;
     sharedAuthLockedSinceAt = Number(stored?.sharedAuthLockedSinceAt || sharedAuthLockedSinceAt || 0);
     if (
-      !interruptedAuthClear
+      !authRestoreBlocked
       && CONFIG.studentToken
       && CONFIG.activeStudentId
       && CONFIG.activeStudentSessionId
     ) {
       studentAuthInvalidating = false;
     }
-    return { interruptedAuthClear };
+    return { interruptedAuthClear, interruptedAuthCommit, manualAuthTimestampInvalid };
   });
 }
 
@@ -3002,8 +4526,11 @@ function clearStudentAuth(reason = 'manual-clear', options = {}) {
   // response before this cleanup reaches the queue.
   studentAuthMutationGeneration += 1;
   studentAuthInvalidating = true;
+  if (fastAuthGateEnabled) {
+    resetSharedSignInLoginConfigCache({ clearPersisted: true });
+  }
   if (options.disconnectWebSocket !== false) disconnectWebSocket();
-  const invalidationPersisted = kv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true });
+  const invalidationPersisted = durableLocalKv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true });
   return enqueueStudentAuthMutation(() => clearStudentAuthNow(
     reason,
     options,
@@ -3037,11 +4564,17 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // Best-effort the final bounded batch while the old token is still valid,
   // then discard anything unsent. Retrying it under a later student's token
   // would misattribute the prior student's activity.
-  await flushMonitoringEventOutbox().catch(() => {});
+  if (options.localOnly !== true) {
+    await flushMonitoringEventOutbox().catch(() => {});
+  }
   await discardMonitoringEventOutbox().catch(() => {});
-  await flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
+  if (options.localOnly !== true) {
+    await flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
+  }
   await discardCommandAckOutbox().catch(() => {});
-  await flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+  if (options.localOnly !== true) {
+    await flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+  }
   await discardChatAckOutbox().catch(() => {});
   await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
   currentTabSnapshotRevision = 0;
@@ -3085,6 +4618,9 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     registered: false,
     autoRegistrationPaused: pauseAutoRegistration,
   });
+  studentAuthCommitPending = false;
+  studentAuthCommitPendingGeneration = 0;
+  completeAuthCommitRecoveryBarrier();
   if (!pauseAutoRegistration) {
     // Chrome-profile transitions immediately continue into a fresh,
     // generation-fenced registration. Explicit/shared-device sign-outs keep
@@ -3099,7 +4635,15 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     await disconnectWebSocket();
   }
   await setConnectivityBadge(connectivityStatus());
-  await notifyAuthGateStateToTabs();
+  if (options.notifyAuthGateTabs !== false) {
+    await notifyAuthGateStateToTabs({
+      triggerRefresh: false,
+      // Auth invalidation is itself authoritative and safe to publish while a
+      // managed-policy barrier is pending. Waiting for that barrier here can
+      // deadlock a revalidation that is deliberately awaiting this cleanup.
+      skipManagedPolicyWait: true,
+    });
+  }
 }
 
 async function expireManualAuthIfStale(reason = 'stale-check') {
@@ -3108,13 +4652,27 @@ async function expireManualAuthIfStale(reason = 'stale-check') {
     return false;
   }
 
-  const lastSeen = Number(CONFIG.manualLoginLastSeenAt || 0);
-  if (lastSeen && Date.now() - lastSeen <= MANUAL_LOGIN_STALE_MS) {
+  if (isManualLoginTimestampFresh(CONFIG.manualLoginLastSeenAt)) {
     return false;
   }
 
   console.log(`[Auth] Manual login expired (${reason})`);
   await clearStudentAuth('auto_stale_wake', { notifyBackend: true, pauseAutoRegistration: true });
+  return true;
+}
+
+function expireManualAuthIfStaleFailClosed(reason = 'stale-check') {
+  if (!isManualIdentitySource()) return false;
+  if (isManualLoginTimestampFresh(CONFIG.manualLoginLastSeenAt)) return false;
+
+  console.log(`[Auth] Manual login expired (${reason}); raising local auth fence`);
+  // clearStudentAuth synchronously sets studentAuthInvalidating before doing
+  // any async classroom/backend cleanup, so this call makes hasStudentAuth()
+  // false before the latency-critical auth-state response is composed.
+  clearStudentAuth('auto_stale_wake', {
+    notifyBackend: true,
+    pauseAutoRegistration: true,
+  }).catch(() => {});
   return true;
 }
 
@@ -3187,8 +4745,39 @@ async function handleSharedAuthLockTimeout() {
 }
 
 async function fetchLoginRosterForGate(options = {}) {
+  const useFastAuthGate = fastAuthGateEnabled;
+  const requestAuthMutationGeneration = studentAuthMutationGeneration;
+  const requestConfigGeneration = sharedSignInConfigGeneration;
+  const requestPolicyGeneration = managedAuthGatePolicyGeneration;
+  const requestBindingKey = authGateConfigBindingKey();
+  const requestIsStale = () => (
+    requestAuthMutationGeneration !== studentAuthMutationGeneration
+    || requestConfigGeneration !== sharedSignInConfigGeneration
+    || requestPolicyGeneration !== managedAuthGatePolicyGeneration
+    || requestBindingKey !== authGateConfigBindingKey()
+    || hasStudentAuth()
+  );
+  const staleResult = () => ({
+    success: false,
+    stale: true,
+    phase: hasStudentAuth() ? 'authenticated' : getAuthGateState().phase,
+    error: 'Sign-in state changed while loading the roster',
+  });
+
+  if (hasStudentAuth()) return staleResult();
   if (!hasManagedSchoolSetup()) {
     return { success: false, setupRequired: true, error: 'Shared Chromebook setup required' };
+  }
+  if (useFastAuthGate && sharedSignInLoginConfig.phase !== 'ready') {
+    return {
+      success: false,
+      setupRequired: sharedSignInLoginConfig.phase === 'setup_required',
+      unavailable: sharedSignInLoginConfig.phase === 'unavailable',
+      phase: sharedSignInLoginConfig.phase,
+      error: sharedSignInLoginConfig.phase === 'unavailable'
+        ? 'ClassPilot is temporarily unavailable'
+        : 'ClassPilot sign-in setup is still loading',
+    };
   }
   const requestedGradeLevel = String(options.gradeLevel || '').trim();
 
@@ -3197,21 +4786,60 @@ async function fetchLoginRosterForGate(options = {}) {
   if (CONFIG.schoolId) params.set('schoolId', CONFIG.schoolId);
   if (CONFIG.schoolSlug) params.set('schoolSlug', CONFIG.schoolSlug);
 
-  const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`, {
-    cache: 'no-store',
-    headers: {
-      'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
-    },
-  }, {
-    context: 'login roster',
-    maxAttempts: 2,
-    respectGlobalBackoff: false,
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
+  const requestUrl = `${CONFIG.serverUrl}/api/extension/login-roster?${params.toString()}`;
+  let response;
+  let data;
+  let jsonValid = true;
+  try {
+    if (useFastAuthGate) {
+      ({ response, data, jsonValid } = await fetchAuthGateRequest(requestUrl, {
+        cache: 'no-store',
+        headers: { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey },
+      }));
+    } else {
+      response = await fetchWithBackoff(requestUrl, {
+        cache: 'no-store',
+        headers: { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey },
+      }, {
+        context: 'login roster',
+        maxAttempts: 2,
+        respectGlobalBackoff: false,
+      });
+      data = await response.json().catch(() => ({}));
+    }
+  } catch (error) {
+    if (requestIsStale()) return staleResult();
+    if (!useFastAuthGate) throw error;
     return {
       success: false,
-      setupRequired: response.status === 401 || response.status === 404,
+      setupRequired: false,
+      unavailable: true,
+      phase: 'unavailable',
+      error: error?.code === 'AUTH_GATE_TIMEOUT'
+        ? 'Roster request timed out'
+        : 'Could not reach ClassPilot to load the roster',
+    };
+  }
+  if (requestIsStale()) return staleResult();
+  if (useFastAuthGate && response.ok && (!jsonValid || !isValidLoginRosterPayload(data))) {
+    return {
+      success: false,
+      setupRequired: false,
+      unavailable: true,
+      phase: 'unavailable',
+      error: 'ClassPilot returned an invalid roster response',
+    };
+  }
+  if (!response.ok) {
+    const unavailable = useFastAuthGate && isUnavailableAuthGateResponse(response);
+    return {
+      success: false,
+      setupRequired: useFastAuthGate
+        ? !unavailable && (response.status === 400 || response.status === 401 ||
+          response.status === 403 || response.status === 404 || response.status === 422)
+        : response.status === 401 || response.status === 404,
+      unavailable,
+      phase: unavailable ? 'unavailable' : 'setup_required',
       pinLoginEnabled: data.loginMethod !== 'email_id',
       loginMethod: data.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
       error: data.error || 'Could not load roster',
@@ -3226,7 +4854,7 @@ async function fetchLoginRosterForGate(options = {}) {
   };
 }
 
-async function applyClassroomStateFromAuthResponse(data, reason) {
+async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
   if (!data) return;
   const fabState = data.fabState || data.fab || data.settings?.fab;
   if (!Object.prototype.hasOwnProperty.call(data, 'classroomState')) {
@@ -3269,41 +4897,79 @@ async function applyClassroomStateFromAuthResponse(data, reason) {
       await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
     }
   } catch (error) {
-    // Authentication remains valid even if local enforcement fails. The
-    // failed ACK/heartbeat outcome tells the server the restriction is not
-    // synchronized, and the normal reconciliation loop can retry it.
     console.warn('[Classroom State] Login snapshot failed:', error?.message || error);
     requestClassroomStateSync(`${reason}-failed`, true);
+    if (options.requireApplied === true) throw error;
   }
   if (fabState) {
     await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
   }
 }
 
-function manualStudentLogin(payload) {
+async function manualStudentLogin(payload) {
+  await authStateRestorePromise;
+  // A managed-policy change installs its pending reread promise in the same
+  // synchronous storage event. Never build or send credentials against the
+  // partial snapshot visible during that reread.
+  await awaitManagedAuthGatePolicyStable();
+  await authCommitRecoveryPromise;
+  if (studentAuthCommitPending) {
+    throw new Error('Authentication recovery is still in progress');
+  }
+  if (!canUseStudentLoginAuthority()) {
+    const setupError = new Error('ClassPilot student sign-in is not configured');
+    setupError.code = 'AUTH_GATE_SETUP_REQUIRED';
+    throw setupError;
+  }
+
+  const policyGuard = captureAuthGatePolicyGuard();
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login policy');
   const mutationGeneration = ++studentAuthMutationGeneration;
   manualStudentLoginPendingGeneration = mutationGeneration;
   CONFIG.autoRegistrationPaused = true;
   const priorChromeProfileRegistration = chromeProfileRegistrationInFlight;
-  const login = (async () => {
+  try {
     // Let a request already accepted by the server finish before issuing the
     // manual login, so the manual session is always the last server binding.
     // Its client adoption is generation-rejected while the auth queue is free.
-    if (priorChromeProfileRegistration) {
-      await priorChromeProfileRegistration.catch(() => {});
-    }
+    if (priorChromeProfileRegistration) await priorChromeProfileRegistration.catch(() => {});
     assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
-    return enqueueStudentAuthMutation(() => manualStudentLoginNow(payload, mutationGeneration));
-  })();
-  return login.finally(() => {
+    assertAuthGatePolicyGuardCurrent(policyGuard, 'student login policy');
+    return await enqueueStudentAuthMutation(() => manualStudentLoginNow(
+      payload,
+      mutationGeneration,
+      policyGuard,
+    ));
+  } catch (error) {
+    if (studentAuthCommitPendingGeneration === mutationGeneration) {
+      // Raising clearStudentAuth's fence is synchronous. Comprehensive local
+      // and backend cleanup can finish behind the rejected login response.
+      clearStudentAuth('student_login_commit_failed', {
+        notifyBackend: true,
+        pauseAutoRegistration: true,
+      }).catch((cleanupError) => {
+        failAuthCommitRecoveryBarrier(cleanupError);
+        console.warn('[Auth] Failed login commit cleanup:', cleanupError?.message || cleanupError);
+      });
+    }
+    throw error;
+  } finally {
     if (manualStudentLoginPendingGeneration === mutationGeneration) {
       manualStudentLoginPendingGeneration = 0;
     }
-  });
+  }
 }
 
-async function manualStudentLoginNow(payload, mutationGeneration) {
+async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login request');
+  if (!canUseStudentLoginAuthority()) {
+    throw new Error('ClassPilot student sign-in is not configured');
+  }
   const deviceId = await ensureDeviceId();
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login request');
+  if (!canUseStudentLoginAuthority()) {
+    throw new Error('ClassPilot student sign-in is not configured');
+  }
   const isPinLogin = payload.mode === 'pin';
   const body = {
     deviceId,
@@ -3338,7 +5004,11 @@ async function manualStudentLoginNow(payload, mutationGeneration) {
     maxAttempts: 1,
     respectGlobalBackoff: false,
   });
+  assertAuthMutationCurrent(mutationGeneration, 'student login response', { allowInvalidating: true });
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login response');
   const data = await response.json().catch(() => ({}));
+  assertAuthMutationCurrent(mutationGeneration, 'student login response', { allowInvalidating: true });
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login response');
   if (!response.ok || !data.studentToken) {
     throw buildResponseError(response, data, 'Invalid student credentials');
   }
@@ -3354,7 +5024,7 @@ async function manualStudentLoginNow(payload, mutationGeneration) {
   const now = Date.now();
 
   assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
-  const studentId = student.id || null;
+  const studentId = String(student.id || '').trim() || null;
   const studentSessionId = String(
     data.studentSessionId || data.fab?.studentSessionId || ''
   ).trim() || null;
@@ -3363,10 +5033,12 @@ async function manualStudentLoginNow(payload, mutationGeneration) {
   }
   const identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
 
+  await beginStudentAuthCommit(mutationGeneration, 'student login commit');
+
   // Clear the local crash-recovery marker before dispatching the session
   // storage commit. A reset requested later writes `true` afterward and wins.
-  const markerCleared = kv.remove(STUDENT_AUTH_INVALIDATING_KEY);
-  await kv.set({
+  const markerCleared = durableLocalKv.remove(STUDENT_AUTH_INVALIDATING_KEY);
+  await durableLocalKv.set({
     deviceId,
     classId: 'auto',
     config: persistedNonAuthConfig({
@@ -3390,6 +5062,7 @@ async function manualStudentLoginNow(payload, mutationGeneration) {
   });
   await markerCleared;
   assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
+  assertAuthGatePolicyGuardCurrent(policyGuard, 'student login adoption');
   CONFIG.studentToken = data.studentToken;
   CONFIG.activeStudentId = studentId;
   CONFIG.activeStudentSessionId = studentSessionId;
@@ -3401,15 +5074,65 @@ async function manualStudentLoginNow(payload, mutationGeneration) {
   CONFIG.manualLoginLastSeenAt = now;
   CONFIG.autoRegistrationPaused = false;
   studentAuthInvalidating = false;
+  resetSharedSignInLoginConfigCache({ clearPersisted: true });
+  // Authentication intentionally invalidates the pre-login presentation
+  // generation, and a slug-based setup may learn its canonical schoolId from
+  // this authoritative response. Capture that expected post-adoption binding
+  // while retaining the managed-policy generation that authorized the request.
+  const committedPolicyGuard = captureAuthGatePolicyGuard();
+  if (committedPolicyGuard.managedPolicyGeneration !== policyGuard.managedPolicyGeneration) {
+    throw authMutationSuperseded('student login adoption');
+  }
   await reconcileMessageInboxIdentity('student-login');
 
-  await applyClassroomStateFromAuthResponse(data, 'student_login');
+  // Login-provided classroom restrictions are local enforcement authority and
+  // must be reconciled before any page unlocks. License/settings refreshes are
+  // not part of that critical path.
+  await applyClassroomStateFromAuthResponse(data, 'student_login', { requireApplied: true });
   assertAuthMutationCurrent(mutationGeneration, 'student login');
+  assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
+  await completeStudentAuthCommit(mutationGeneration, 'student login commit');
+  assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
 
-  await checkLicenseStatus('manual-login');
-  assertAuthMutationCurrent(mutationGeneration, 'student login');
-  await initializeAdaptiveTracking('manual-login');
-  await notifyAuthGateStateToTabs();
+  const committedAuthBinding = {
+    deviceId: CONFIG.deviceId,
+    studentToken: CONFIG.studentToken,
+    studentId: CONFIG.activeStudentId,
+    studentSessionId: CONFIG.activeStudentSessionId,
+  };
+  // Start the cross-tab authenticated push immediately, but do not make the
+  // initiating tab wait for every tab message/injection attempt to settle.
+  notifyAuthGateStateToTabs({ triggerRefresh: false }).catch((error) => {
+    console.warn('[Auth Gate] Post-login broadcast failed:', error?.message || error);
+  });
+
+  Promise.resolve().then(async () => {
+    assertAuthMutationBindingCurrent(
+      mutationGeneration,
+      committedAuthBinding,
+      'post-login initialization',
+    );
+    await checkLicenseStatus('manual-login', {
+      authMutationGeneration: mutationGeneration,
+      authBinding: committedAuthBinding,
+      deferTrackingInitialization: true,
+    });
+    assertAuthMutationBindingCurrent(
+      mutationGeneration,
+      committedAuthBinding,
+      'post-login initialization',
+    );
+    await initializeAdaptiveTracking('manual-login', {
+      authMutationGeneration: mutationGeneration,
+      authBinding: committedAuthBinding,
+    });
+  }).catch((error) => {
+    if (error?.code === 'AUTH_MUTATION_SUPERSEDED') {
+      console.info('[Auth] Post-login initialization superseded');
+      return;
+    }
+    console.warn('[Auth] Post-login initialization failed:', error?.message || error);
+  });
 
   return {
     success: true,
@@ -3693,7 +5416,11 @@ async function ensureRegisteredNow() {
         }
         await enqueueStudentAuthMutation(async () => {
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
-          await kv.set({
+          await beginStudentAuthCommit(
+            registrationGeneration,
+            'student registration commit',
+          );
+          await durableLocalKv.set({
             studentToken: data.studentToken,
             activeStudentId: studentId,
             activeStudentSessionId: studentSessionId,
@@ -3717,11 +5444,40 @@ async function ensureRegisteredNow() {
           CONFIG.autoRegistrationPaused = false;
           studentAuthInvalidating = false;
           await reconcileMessageInboxIdentity('student-registration');
-          await applyClassroomStateFromAuthResponse(data, 'student_registration');
+          await applyClassroomStateFromAuthResponse(
+            data,
+            'student_registration',
+            { requireApplied: true },
+          );
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          await completeStudentAuthCommit(
+            registrationGeneration,
+            'student registration commit',
+          );
         });
         registrationRetryCount = 0; // Reset on success
       } catch (error) {
+        if (studentAuthCommitPendingGeneration === registrationGeneration) {
+          try {
+            // The durable pending marker keeps get-auth-state locked while the
+            // critical classroom snapshot is being applied. Any failure must
+            // remove the partially committed Chrome-profile credentials before
+            // this registration can be retried.
+            await clearStudentAuth('student_registration_commit_failed', {
+              notifyBackend: false,
+              localOnly: true,
+              pauseAutoRegistration: false,
+            });
+            registrationGeneration = studentAuthMutationGeneration;
+          } catch (cleanupError) {
+            failAuthCommitRecoveryBarrier(cleanupError);
+            console.warn(
+              '[Auth] Failed Chrome-profile registration commit cleanup:',
+              cleanupError?.message || cleanupError,
+            );
+            return stored;
+          }
+        }
         if (error?.code === 'AUTH_MUTATION_SUPERSEDED') {
           console.info('[Auth] Ignoring superseded student registration response');
           return stored;
@@ -3729,8 +5485,8 @@ async function ensureRegisteredNow() {
         console.warn('[Service Worker] Student registration error:', error);
         await enqueueStudentAuthMutation(async () => {
           assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
-          await kv.set({ registered: false, studentToken: null });
-          if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
+          await durableLocalKv.set({ registered: false, studentToken: null });
+          if (hasSessionStorage()) await durableSessionKv.remove(['studentToken']);
           assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
           CONFIG.studentToken = null;
         }).catch((mutationError) => {
@@ -3775,28 +5531,30 @@ async function ensureRegisteredNow() {
 chrome.runtime.onInstalled.addListener(() => {
   console.log('[Service Worker] Extension installed/updated');
   disableToolbarAction();
-  resolveServerUrl().then((serverUrl) => {
-    CONFIG.serverUrl = serverUrl;
-    scheduleLicenseCheck();
-    ensureRegistered().catch(() => {});
-    scheduleJitteredStartup('install', () => initializeAdaptiveTracking('install').catch(() => {}));
-  }).catch(err => {
-    console.warn('[Service Worker] Install init error (will retry):', err?.message || err);
-  });
+  authStateRestorePromise
+    .then(() => awaitManagedAuthGatePolicyStable())
+    .then(() => {
+      scheduleLicenseCheck();
+      ensureRegistered().catch(() => {});
+      scheduleJitteredStartup('install', () => initializeAdaptiveTracking('install').catch(() => {}));
+    }).catch(err => {
+      console.warn('[Service Worker] Install init error (will retry):', err?.message || err);
+    });
 });
 
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     console.log('[Service Worker] Browser started');
     disableToolbarAction();
-    resolveServerUrl().then((serverUrl) => {
-      CONFIG.serverUrl = serverUrl;
-      scheduleLicenseCheck();
-      ensureRegistered().catch(() => {});
-      scheduleJitteredStartup('startup', () => initializeAdaptiveTracking('startup').catch(() => {}));
-    }).catch(err => {
-      console.warn('[Service Worker] Startup init error (will retry):', err?.message || err);
-    });
+    authStateRestorePromise
+      .then(() => awaitManagedAuthGatePolicyStable())
+      .then(() => {
+        scheduleLicenseCheck();
+        ensureRegistered().catch(() => {});
+        scheduleJitteredStartup('startup', () => initializeAdaptiveTracking('startup').catch(() => {}));
+      }).catch(err => {
+        console.warn('[Service Worker] Startup init error (will retry):', err?.message || err);
+      });
   });
 }
 
@@ -3810,13 +5568,50 @@ const classroomStateRestorePromise = new Promise((resolve) => {
   };
 });
 
+let markAuthStateRestored;
+const authStateRestorePromise = new Promise((resolve) => {
+  let settled = false;
+  markAuthStateRestored = () => {
+    if (settled) return;
+    settled = true;
+    resolve();
+  };
+});
+
 // Run immediately on service worker load/wake-up
 // This is CRITICAL: service worker can wake up after being terminated, not just on install/startup
 (async () => {
   console.log('[Service Worker] Waking up...');
   disableToolbarAction();
-  const workerWakeRestoreGeneration = studentAuthMutationGeneration;
-  const stored = await getStoredAuthState([
+  const wakePolicyGeneration = ++managedAuthGatePolicyGeneration;
+  let resolveWakePolicyRestore;
+  let rejectWakePolicyRestore;
+  const wakePolicyRestore = new Promise((resolve, reject) => {
+    resolveWakePolicyRestore = resolve;
+    rejectWakePolicyRestore = reject;
+  });
+  managedAuthGatePolicyRestorePromise = wakePolicyRestore;
+  wakePolicyRestore.catch(() => {});
+  // Start the local managed-policy read in parallel with auth restoration.
+  const explicitUnmanagedDevelopment = isExplicitUnmanagedDevelopmentRuntime()
+    || isExplicitUnmanagedDevelopmentServer(INJECTED_SERVER_URL);
+  const managedConfigReadAtWake = explicitUnmanagedDevelopment
+    ? Promise.resolve({ config: {}, error: null })
+    : readManagedConfig({ failClosed: true }).then(
+      (config) => ({ config, error: null }),
+      (error) => ({ config: {}, error }),
+    );
+  // Reserve the revision range in parallel with both auth stores and managed
+  // policy. This keeps the required durable write off the sequential cold-auth
+  // path as much as Chrome's storage implementation permits.
+  const authGateRevisionReservationAtWake = durableLocalKv.get([AUTH_GATE_REVISION_STORAGE_KEY])
+    .then((stored) => reserveAuthGateRevisionBlock(stored[AUTH_GATE_REVISION_STORAGE_KEY]))
+    .catch((error) => {
+      rejectAuthGateRevisionReady(error);
+      throw error;
+    });
+  let workerWakeRestoreGeneration = studentAuthMutationGeneration;
+  const authStored = await getStoredAuthState([
     'deviceId',
     'config',
     'activeStudentId',
@@ -3828,6 +5623,138 @@ const classroomStateRestorePromise = new Promise((resolve) => {
     'manualLoginLastSeenAt',
     'autoRegistrationPaused',
     'sharedAuthLockedSinceAt',
+    STUDENT_AUTH_INVALIDATING_KEY,
+    STUDENT_AUTH_COMMIT_PENDING_KEY,
+    SHARED_SIGN_IN_CONFIG_CACHE_KEY,
+    MANAGED_AUTH_GATE_BINDING_KEY,
+  ]);
+  const storedServerUrl = authStored.config?.serverUrl;
+  const fastResolvedServerUrl = isHttpUrl(storedServerUrl)
+    ? storedServerUrl
+    : isHttpUrl(INJECTED_SERVER_URL) ? INJECTED_SERVER_URL : DEFAULT_SERVER_URL;
+  const [restoredAuth] = await Promise.all([
+    restoreWorkerWakeAuthState(
+      authStored,
+      fastResolvedServerUrl,
+      workerWakeRestoreGeneration,
+      { persistConfig: false },
+    ),
+    authGateRevisionReservationAtWake,
+  ]);
+  const {
+    interruptedAuthClear,
+    interruptedAuthCommit,
+    manualAuthTimestampInvalid,
+  } = restoredAuth;
+  const allowUnmanagedFallback = (explicitUnmanagedDevelopment
+    || isExplicitUnmanagedDevelopmentServer(fastResolvedServerUrl))
+    && !authStored[MANAGED_AUTH_GATE_BINDING_KEY];
+  let managedAuthBindingChanged = false;
+  let managedSetupUnavailable = false;
+  const applyWorkerWakeManagedPolicy = ({ config, error }, notifyAfter = false) => {
+    managedAuthBindingChanged = managedPolicyConflictsWithStoredAuth(
+      authStored,
+      config,
+      fastResolvedServerUrl,
+      { allowUnmanagedFallback, managedReadFailed: Boolean(error) },
+    );
+    if (error) {
+      managedSetupUnavailable = true;
+      managedAuthGateSetupUnavailable = true;
+      CONFIG.serverUrl = DEFAULT_SERVER_URL;
+      CONFIG.schoolId = null;
+      CONFIG.schoolSlug = null;
+      CONFIG.enrollmentKey = null;
+      resetSharedSignInLoginConfigCache({ clearPersisted: true });
+      updateSharedSignInLoginConfig({
+        phase: 'setup_required',
+        fetchedAt: 0,
+        retryAt: null,
+        setupRequired: true,
+        sharedSignInEnabled: false,
+        pinLoginEnabled: false,
+        schoolId: null,
+        passpilotKioskAvailable: false,
+        bindingKey: authGateConfigBindingKey(),
+      });
+    } else {
+      const appliedPolicy = applyAuthoritativeManagedAuthGateSnapshot(
+        config,
+        authStored[MANAGED_AUTH_GATE_BINDING_KEY],
+        allowUnmanagedFallback,
+      );
+      managedSetupUnavailable = appliedPolicy.policyIsAuthoritative
+        && !appliedPolicy.descriptor.hasManagedSetup;
+    }
+    if (managedAuthBindingChanged && hasStudentAuth()) {
+      // The locally restored token belongs to the previous managed authority.
+      // Raise the auth fence before releasing the startup promise; cleanup stays
+      // asynchronous so a stale profile can never briefly unlock the page.
+      clearStudentAuth('managed_identity_changed_while_worker_asleep', {
+        notifyBackend: false,
+        localOnly: true,
+        pauseAutoRegistration: true,
+        disconnectWebSocket: false,
+      }).catch(() => {});
+      workerWakeRestoreGeneration = studentAuthMutationGeneration;
+    }
+    if (notifyAfter) notifyAuthGateStateToTabs({ triggerRefresh: false }).catch(() => {});
+    return config;
+  };
+  if (allowUnmanagedFallback) {
+    // Unpacked loopback development is an explicit unmanaged mode. It keeps
+    // the local auth SLA and applies any real managed snapshot when available.
+    if (wakePolicyGeneration === managedAuthGatePolicyGeneration) {
+      applyWorkerWakeManagedPolicy({ config: {}, error: null });
+      resolveWakePolicyRestore({});
+    } else {
+      rejectWakePolicyRestore(authMutationSuperseded('worker wake managed policy'));
+    }
+    managedConfigReadAtWake.then((outcome) => {
+      if (wakePolicyGeneration !== managedAuthGatePolicyGeneration) return;
+      applyWorkerWakeManagedPolicy(outcome, true);
+    });
+  } else {
+    const managedOutcome = await managedConfigReadAtWake;
+    if (wakePolicyGeneration === managedAuthGatePolicyGeneration) {
+      const appliedConfig = applyWorkerWakeManagedPolicy(managedOutcome);
+      if (managedOutcome.error) rejectWakePolicyRestore(managedOutcome.error);
+      else resolveWakePolicyRestore(appliedConfig);
+    } else {
+      rejectWakePolicyRestore(authMutationSuperseded('worker wake managed policy'));
+      await awaitManagedAuthGatePolicyStable().catch(() => {});
+    }
+  }
+  restoreSharedSignInPresentationCache(authStored[SHARED_SIGN_IN_CONFIG_CACHE_KEY]);
+  if (managedSetupUnavailable) {
+    updateSharedSignInLoginConfig({
+      phase: 'setup_required',
+      fetchedAt: 0,
+      retryAt: null,
+      setupRequired: true,
+      sharedSignInEnabled: false,
+      pinLoginEnabled: false,
+      schoolId: null,
+      passpilotKioskAvailable: false,
+      bindingKey: authGateConfigBindingKey(),
+    });
+  }
+  markAuthStateRestored();
+  const assertWorkerWakeCurrent = () => assertAuthMutationCurrent(
+    workerWakeRestoreGeneration,
+    'worker wake restore',
+    {
+      allowInvalidating: interruptedAuthClear
+        || interruptedAuthCommit
+        || manualAuthTimestampInvalid
+        || managedAuthBindingChanged,
+    },
+  );
+
+  // Classroom/DNR/FAB restoration can be substantially heavier than the
+  // local authentication read above. It intentionally continues after the
+  // auth-state promise has been released.
+  const stored = await getStoredAuthState([
     'flightPathState',
     'lockScreenState',
     'licenseActive',
@@ -3850,18 +5777,16 @@ const classroomStateRestorePromise = new Promise((resolve) => {
     CHAT_ACK_BINDING_KEY,
     TAB_SNAPSHOT_STORAGE_KEY,
     STUDENT_AUTH_INVALIDATING_KEY,
+    SHARED_SIGN_IN_CONFIG_CACHE_KEY,
   ]);
-  const resolvedServerUrl = await resolveServerUrl();
-  const { interruptedAuthClear } = await restoreWorkerWakeAuthState(
-    stored,
-    resolvedServerUrl,
-    workerWakeRestoreGeneration,
-  );
-  const assertWorkerWakeCurrent = () => assertAuthMutationCurrent(
-    workerWakeRestoreGeneration,
-    'worker wake restore',
-    { allowInvalidating: interruptedAuthClear },
-  );
+  // The authoritative managed snapshot above has already selected or reset
+  // the endpoint. Re-running the legacy fallback resolver here could resurrect
+  // a stale locally persisted URL after policy removal or malformed input.
+  const resolvedServerUrl = isHttpUrl(CONFIG.serverUrl)
+    ? CONFIG.serverUrl
+    : DEFAULT_SERVER_URL;
+  assertWorkerWakeCurrent();
+  CONFIG.serverUrl = resolvedServerUrl;
   scheduleLicenseCheck();
   const storedMonitoringState = stored[MONITORING_STATE_STORAGE_KEY];
   if (
@@ -4001,12 +5926,20 @@ const classroomStateRestorePromise = new Promise((resolve) => {
   });
   markClassroomStateRestored();
 
-  if (interruptedAuthClear) {
+  if (interruptedAuthClear || interruptedAuthCommit || manualAuthTimestampInvalid) {
     assertWorkerWakeCurrent();
-    await clearStudentAuth('interrupted-auth-clear', {
+    const recoveryReason = interruptedAuthCommit
+      ? 'interrupted-auth-commit'
+      : manualAuthTimestampInvalid
+        ? 'manual-login-timestamp-invalid'
+        : 'interrupted-auth-clear';
+    await clearStudentAuth(
+      recoveryReason,
+      {
       notifyBackend: false,
       pauseAutoRegistration: true,
-    });
+      },
+    );
     await setConnectivityBadge(connectivityStatus());
     return;
   }
@@ -4032,7 +5965,11 @@ const classroomStateRestorePromise = new Promise((resolve) => {
   // Silently handle wake-up errors (network issues, server deploys)
   // The extension will self-heal via alarms and retries
   console.warn('[Service Worker] Wake-up error (will retry):', err?.message || err);
-}).finally(() => markClassroomStateRestored());
+  if (studentAuthCommitPending) failAuthCommitRecoveryBarrier(err);
+}).finally(() => {
+  if (authGateRevisionReady) markAuthStateRestored();
+  markClassroomStateRestored();
+});
 
 // Centralized, safe notifications (never throw, never produce red errors)
 async function safeNotify(opts) {
@@ -4381,13 +6318,17 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     }
     await enqueueStudentAuthMutation(async () => {
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      await beginStudentAuthCommit(
+        registrationGeneration,
+        'student auto-registration commit',
+      );
       const persistedConfig = persistedNonAuthConfig({
         ...CONFIG,
         deviceId,
         classId,
         ...(authenticatedSchoolId ? { schoolId: authenticatedSchoolId } : {}),
       });
-      await chrome.storage.local.set({
+      await durableLocalKv.set({
         config: persistedConfig,
         registered: true,
         activeStudentId: studentId,
@@ -4412,9 +6353,18 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
       CONFIG.manualLoginLastSeenAt = null;
       CONFIG.autoRegistrationPaused = false;
       studentAuthInvalidating = false;
+      resetSharedSignInLoginConfigCache({ clearPersisted: true });
       await reconcileMessageInboxIdentity('student-registration');
-      await applyClassroomStateFromAuthResponse(data, 'student_registration');
+      await applyClassroomStateFromAuthResponse(
+        data,
+        'student_registration',
+        { requireApplied: true },
+      );
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
+      await completeStudentAuthCommit(
+        registrationGeneration,
+        'student auto-registration commit',
+      );
     });
     
     // Start adaptive tracking after registration
@@ -4422,6 +6372,21 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     
     return data;
   } catch (error) {
+    if (studentAuthCommitPendingGeneration === registrationGeneration) {
+      try {
+        await clearStudentAuth('student_auto_registration_commit_failed', {
+          notifyBackend: false,
+          localOnly: true,
+          pauseAutoRegistration: false,
+        });
+      } catch (cleanupError) {
+        failAuthCommitRecoveryBarrier(cleanupError);
+        console.warn(
+          '[Auth] Failed student auto-registration commit cleanup:',
+          cleanupError?.message || cleanupError,
+        );
+      }
+    }
     console.warn('Student registration error:', error);
     throw error;
   }
@@ -4559,6 +6524,7 @@ async function sendHeartbeat(reason = 'manual') {
     
     const headers = buildDeviceAuthHeaders();
     const heartbeatMessageBinding = messageInboxAuthBinding();
+    const heartbeatAuthResponseGuard = captureAuthenticatedResponseGuard();
     attachLegacyStudentToken(heartbeatData, headers);
     if (headers.Authorization) {
       console.log('Sending JWT-authenticated heartbeat');
@@ -4625,8 +6591,8 @@ async function sendHeartbeat(reason = 'manual') {
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
       await clearStudentMessageState('student-token-invalid');
-      await kv.set({ studentToken: null, registered: false });
-      if (hasSessionStorage()) await sessionKv.remove(['studentToken']);
+      await durableLocalKv.set({ studentToken: null, registered: false });
+      if (hasSessionStorage()) await durableSessionKv.remove(['studentToken']);
       CONFIG.studentToken = null;
       // Trigger re-registration with backoff (shares retry counter with registration)
       registrationRetryCount++;
@@ -4653,7 +6619,11 @@ async function sendHeartbeat(reason = 'manual') {
       // Check for pending messages missed during WebSocket disconnection
       try {
         const data = await response.json();
-        await adoptAuthenticatedStudentBinding(data, 'heartbeat response');
+        await adoptAuthenticatedStudentBinding(
+          data,
+          'heartbeat response',
+          heartbeatAuthResponseGuard,
+        );
         await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
         if (Object.prototype.hasOwnProperty.call(data, 'fab')) {
           await applyFabSettings(data.fab || {}, {
@@ -4761,6 +6731,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
       });
     });
+  } else if (alarm.name === SHARED_SIGN_IN_CONFIG_RETRY_ALARM) {
+    authStateRestorePromise.then(() => {
+      if (!fastAuthGateEnabled || hasStudentAuth()) {
+        clearSharedSignInConfigRetry();
+        return;
+      }
+      refreshSharedSignInLoginConfig({ force: true, reason: 'retry_alarm' }).catch(() => {});
+    }).catch(() => {});
   } else if (alarm.name === SHARED_AUTH_LOCK_ALARM_NAME) {
     handleSharedAuthLockTimeout().catch(() => {});
   } else if (alarm.name === CLASSROOM_STATE_EXPIRY_ALARM) {
@@ -7656,6 +9634,10 @@ async function connectWebSocketNow() {
   wsTransportConnected = false;
   wsAuthenticatedGeneration = 0;
   wsConnectionGeneration += 1;
+  wsAuthenticatedResponseGuard = {
+    connectionGeneration: wsConnectionGeneration,
+    responseGuard: captureAuthenticatedResponseGuard(),
+  };
   try {
     const response = await sendToOffscreen({
       type: 'WS_CONNECT',
@@ -7761,7 +9743,10 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       if (message.type === 'auth-success') {
         console.log('WebSocket authenticated successfully');
         try {
-          await adoptAuthenticatedStudentBinding(message, 'websocket auth');
+          const responseGuard = wsAuthenticatedResponseGuard?.connectionGeneration === connectionGeneration
+            ? wsAuthenticatedResponseGuard.responseGuard
+            : null;
+          await adoptAuthenticatedStudentBinding(message, 'websocket auth', responseGuard);
         } catch (error) {
           console.warn('[WebSocket] Exact student binding was rejected:', error?.message || error);
           wsConnected = false;
@@ -8286,23 +10271,124 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-auth-state') {
-    expireManualAuthIfStale('get-auth-state')
-      .then(() => hasStudentAuth() ? null : refreshSharedSignInLoginConfig())
-      .then(() => {
-        const response = { success: true, state: getAuthGateState() };
-        if (message.includeConfig) response.config = CONFIG;
-        sendResponse(response);
+    if (message.revalidateManagedPolicy === true) {
+      revalidateManagedAuthGatePolicy(message.managedPolicyFence)
+        .then(({ state, managedPolicyFence, managedPolicyGeneration }) => {
+          const response = {
+            success: true,
+            state,
+            // These proof fields exist only on this correlated direct reply.
+            // Broadcast CLASSPILOT_* messages never carry either field.
+            managedPolicyFence,
+            managedPolicyGeneration,
+          };
+          if (message.includeConfig) response.config = CONFIG;
+          sendResponse(response);
+        })
+        .catch(async (error) => {
+          try {
+            const response = {
+              success: false,
+              error: error?.message || 'Managed policy revalidation failed',
+              state: await getPublishableAuthGateState(),
+            };
+            if (message.includeConfig) response.config = CONFIG;
+            sendResponse(response);
+          } catch {
+            sendResponse({ success: false, error: 'Authentication state is unavailable' });
+          }
+        });
+      return true;
+    }
+
+    // All ordinary callers that arrive before the first ordinary reply belong
+    // to the same cold-worker cohort. Local restoration can finish between
+    // concurrent messages, so its completion is not a reliable cohort fence.
+    const authStateWasCold = ordinaryAuthStateColdCohortOpen;
+    const sendOrdinaryAuthStateResponse = (response) => {
+      sendResponse(response);
+      ordinaryAuthStateColdCohortOpen = false;
+    };
+    authStateRestorePromise
+      .then(async () => {
+        expireManualAuthIfStaleFailClosed('get-auth-state');
+        authGateStateColdWorker = authStateWasCold;
+        if (hasStudentAuth()) return;
+
+        await awaitManagedAuthGatePolicyStable();
+        if (fastAuthGateEnabled) {
+          refreshSharedSignInLoginConfig({
+            reason: 'get_auth_state',
+            coldWorker: authStateWasCold,
+          }).catch(() => {});
+          return;
+        }
+
+        await expireManualAuthIfStale('get-auth-state');
+        if (!hasStudentAuth()) {
+          await refreshSharedSignInLoginConfig({ managedConfigAlreadyApplied: true });
+        }
       })
-      .catch((error) => {
-        const response = { success: false, error: error.message, state: getAuthGateState() };
+      .then(async () => {
+        const state = await getPublishableAuthGateState();
+        state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
+        const response = { success: true, state };
         if (message.includeConfig) response.config = CONFIG;
-        sendResponse(response);
+        sendOrdinaryAuthStateResponse(response);
+      })
+      .catch(async (error) => {
+        try {
+          const state = await getPublishableAuthGateState();
+          state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
+          const response = {
+            success: false,
+            error: error.message,
+            state,
+          };
+          if (message.includeConfig) response.config = CONFIG;
+          sendOrdinaryAuthStateResponse(response);
+        } catch {
+          sendOrdinaryAuthStateResponse({
+            success: false,
+            error: 'Authentication state is unavailable',
+          });
+        }
+      });
+    return true;
+  }
+
+  if (message.type === 'refresh-auth-state') {
+    authStateRestorePromise
+      .then(async () => {
+        expireManualAuthIfStaleFailClosed('refresh-auth-state');
+        if (!hasStudentAuth()) await awaitManagedAuthGatePolicyStable();
+        if (!fastAuthGateEnabled) await expireManualAuthIfStale('refresh-auth-state');
+        if (!hasStudentAuth()) {
+          await refreshSharedSignInLoginConfig({
+            force: true,
+            reason: 'retry_now',
+            managedConfigAlreadyApplied: true,
+          });
+        }
+        const state = await getPublishableAuthGateState();
+        sendResponse({ success: state.phase !== 'unavailable', state });
+      })
+      .catch(async () => {
+        try {
+          sendResponse({ success: false, state: await getPublishableAuthGateState() });
+        } catch {
+          sendResponse({ success: false, error: 'Authentication state is unavailable' });
+        }
       });
     return true;
   }
 
   if (message.type === 'get-login-roster') {
-    fetchLoginRosterForGate({ gradeLevel: message.gradeLevel })
+    authStateRestorePromise
+      .then(async () => {
+        await awaitManagedAuthGatePolicyStable();
+        return fetchLoginRosterForGate({ gradeLevel: message.gradeLevel });
+      })
       .then((data) => sendResponse(data))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not load roster' }));
     return true;

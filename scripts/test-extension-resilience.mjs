@@ -2186,10 +2186,24 @@ async function main() {
     ]);
 
     const entitlementCleanup = await worker.evaluate(async () => {
+      const heartbeatIdleDeadline = Date.now() + 5_000;
+      while (heartbeatInFlight && Date.now() < heartbeatIdleDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (heartbeatInFlight) {
+        throw new Error('Could not isolate entitlement heartbeat fixture from an existing heartbeat');
+      }
       const now = Date.now();
       const originalConfig = { ...CONFIG };
       const originalFetchWithBackoff = fetchWithBackoff;
       const originalDisableForInactiveLicense = disableForInactiveLicense;
+      const originalHeartbeatInFlight = heartbeatInFlight;
+      const originalHeartbeatPendingReason = heartbeatPendingReason;
+      // Keep the normal ten-second periodic heartbeat from consuming this fixture's
+      // temporary fetch stub. The direct sendHeartbeat call below does not use
+      // the safe-send singleflight flag, so production behavior is unchanged.
+      heartbeatInFlight = true;
+      heartbeatPendingReason = null;
       const statusDisablePlans = [];
       const statusResponses = [
         { code: 'CLASSPILOT_NOT_ENTITLED', planStatus: 'canonical-status' },
@@ -2277,6 +2291,8 @@ async function main() {
       } finally {
         fetchWithBackoff = originalFetchWithBackoff;
         disableForInactiveLicense = originalDisableForInactiveLicense;
+        heartbeatInFlight = originalHeartbeatInFlight;
+        heartbeatPendingReason = originalHeartbeatPendingReason;
         CONFIG = originalConfig;
       }
       const stored = await kv.get([

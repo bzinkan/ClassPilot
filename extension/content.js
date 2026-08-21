@@ -23,6 +23,36 @@ const seenChatMsgIds = new Set(); // dedup chat-reply messages
 let authGateActive = false;
 let authGateBlockerInstalled = false;
 let authGateRosterRequestGeneration = 0;
+let authGateStateRequestGeneration = 0;
+let authGateLatestRevision = -1;
+let authGateRetryTimer = null;
+let authGateRetryFallbackIndex = 0;
+let authGateLiveRosterLoaded = false;
+let authGateCurrentState = null;
+let authGateSecureShadow = null;
+let authGateSecureFrame = null;
+let authGateTrustedRoot = null;
+let authGateTrustedPhase = 'loading';
+let authGateSecureFallback = null;
+let authGateSecureFrameNonce = '';
+let authGateSecureFrameReady = false;
+let authGateSecureFrameTrusted = false;
+let authGateSecureFramePendingPhase = 'loading';
+let authGateSecureFrameRecoveryTimer = null;
+let authGateConnectionObserver = null;
+let authGateWatchdogScheduled = false;
+let authGateWatchdogRecovering = false;
+let authGateWatchdogDeferredTimer = null;
+let authGateWatchdogWindowStartedAt = 0;
+let authGateWatchdogRecoveryCount = 0;
+let authGateWatchdogRecoverySerial = 0;
+let authGateFullscreenExitPending = false;
+let authGateManagedPolicyFenceSerial = 0;
+let authGatePendingManagedPolicyFence = 0;
+let authGateManagedPolicyFenceRetryTimer = null;
+const authGateQuarantinedElements = new Map();
+const authGateDetachedBrowsingContexts = new Map();
+const AUTH_GATE_FRAME_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
 
 // Listen for messages from service worker
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -32,16 +62,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'CLASSPILOT_AUTH_REQUIRED') {
+    if (isAuthGateManagedPolicyFencePending()) {
+      sendResponse?.({ success: true, fenced: true });
+      return false;
+    }
     reconcileKioskFabSuppression(message.state?.kioskOrigin);
-    showAuthGate(message.state || {});
+    applyAuthGateState(message.state || {});
     sendResponse?.({ success: true });
     return false;
   }
 
   if (message.type === 'CLASSPILOT_AUTH_COMPLETE') {
+    if (isAuthGateManagedPolicyFencePending()) {
+      sendResponse?.({ success: true, fenced: true });
+      return false;
+    }
     reconcileKioskFabSuppression(message.state?.kioskOrigin);
-    removeAuthGate();
-    updateFabIdentityState();
+    applyAuthGateState({ ...(message.state || {}), phase: 'authenticated', authRequired: false });
+    updateFabIdentityState(message.state);
     sendResponse?.({ success: true });
     return false;
   }
@@ -183,16 +221,152 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function requestAuthGateState() {
+  if (isAuthGateManagedPolicyFencePending()) {
+    if (authGatePendingManagedPolicyFence === 0) beginAuthGateManagedPolicyFence();
+    return;
+  }
+  const requestGeneration = ++authGateStateRequestGeneration;
   chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
-    if (chrome.runtime.lastError) return;
-    reconcileKioskFabSuppression(response?.state?.kioskOrigin);
-    if (response?.state?.authRequired) {
-      showAuthGate(response.state);
-    } else {
-      removeAuthGate();
+    if (requestGeneration !== authGateStateRequestGeneration ||
+        isAuthGateManagedPolicyFencePending()) return;
+    if (chrome.runtime.lastError || !response?.success || !response.state) {
+      if (globalThis.__classpilotAuthGateBootstrap?.active) {
+        showAuthGate({ phase: 'loading', authRequired: true });
+      }
+      return;
     }
+    reconcileKioskFabSuppression(response?.state?.kioskOrigin);
+    applyAuthGateState(response.state);
     updateFabIdentityState(response?.state);
   });
+}
+
+function isAuthGateManagedPolicyFencePending() {
+  return authGatePendingManagedPolicyFence > 0 ||
+    globalThis.__classpilotAuthGateBootstrap?.managedPolicyFencePending === true;
+}
+
+function nextAuthGateManagedPolicyFence() {
+  authGateManagedPolicyFenceSerial = authGateManagedPolicyFenceSerial >= Number.MAX_SAFE_INTEGER
+    ? 1
+    : authGateManagedPolicyFenceSerial + 1;
+  return authGateManagedPolicyFenceSerial;
+}
+
+function scheduleAuthGateManagedPolicyFenceRetry(fence) {
+  if (authGatePendingManagedPolicyFence !== fence ||
+      authGateManagedPolicyFenceRetryTimer !== null) return;
+  authGateManagedPolicyFenceRetryTimer = setTimeout(() => {
+    authGateManagedPolicyFenceRetryTimer = null;
+    requestAuthGateManagedPolicyRevalidation(fence);
+  }, 250);
+}
+
+function requestAuthGateManagedPolicyRevalidation(fence) {
+  if (authGatePendingManagedPolicyFence !== fence) return;
+  chrome.runtime.sendMessage({
+    type: 'get-auth-state',
+    revalidateManagedPolicy: true,
+    managedPolicyFence: fence,
+  }, (response) => {
+    if (authGatePendingManagedPolicyFence !== fence) return;
+    const responseRevision = authGateRevision(response?.state);
+    const workerGeneration = Number(response?.managedPolicyGeneration);
+    const validFenceAck = !chrome.runtime.lastError && response?.success === true &&
+      response?.managedPolicyFence === fence &&
+      Number.isSafeInteger(workerGeneration) && workerGeneration >= 0 &&
+      responseRevision !== null && responseRevision >= authGateLatestRevision;
+    if (!validFenceAck) {
+      showAuthGate({
+        phase: 'loading',
+        authRequired: true,
+        revision: authGateLatestRevision >= 0 ? authGateLatestRevision : undefined,
+      });
+      markSecureAuthGateFrameUntrusted();
+      scheduleAuthGateManagedPolicyFenceRetry(fence);
+      return;
+    }
+
+    authGatePendingManagedPolicyFence = 0;
+    if (authGateManagedPolicyFenceRetryTimer !== null) {
+      clearTimeout(authGateManagedPolicyFenceRetryTimer);
+      authGateManagedPolicyFenceRetryTimer = null;
+    }
+    reconcileKioskFabSuppression(response.state.kioskOrigin);
+    applyAuthGateState(response.state, { managedPolicyFenceValidated: true });
+    updateFabIdentityState(response.state);
+    if (authGateActive) resetSecureAuthGateFrame();
+  });
+}
+
+function beginAuthGateManagedPolicyFence() {
+  const fence = nextAuthGateManagedPolicyFence();
+  authGatePendingManagedPolicyFence = fence;
+  authGateStateRequestGeneration += 1;
+  if (authGateManagedPolicyFenceRetryTimer !== null) {
+    clearTimeout(authGateManagedPolicyFenceRetryTimer);
+    authGateManagedPolicyFenceRetryTimer = null;
+  }
+  showAuthGate({
+    phase: 'loading',
+    authRequired: true,
+    revision: authGateLatestRevision >= 0 ? authGateLatestRevision : undefined,
+  });
+  clearSecureAuthGateFrameRecovery();
+  markSecureAuthGateFrameUntrusted();
+  requestAuthGateManagedPolicyRevalidation(fence);
+}
+
+const AUTH_GATE_PHASES = new Set([
+  'authenticated',
+  'loading',
+  'ready',
+  'setup_required',
+  'unavailable',
+]);
+
+function authGatePhase(state = {}) {
+  if (AUTH_GATE_PHASES.has(state.phase)) return state.phase;
+  if (state.authRequired === false) return 'authenticated';
+  if (state.setupRequired === true) return 'setup_required';
+  // Compatibility with 2.6.5 workers and test fixtures, whose auth-required
+  // state represented a fully fetched form without an explicit phase.
+  return state.loginMethod === 'email_id' || state.loginMethod === 'name_pin'
+    ? 'ready'
+    : 'loading';
+}
+
+function authGateRevision(state = {}) {
+  const revision = Number(state.revision);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+function isAuthGateStateStale(state = {}) {
+  const revision = authGateRevision(state);
+  return revision !== null && revision < authGateLatestRevision;
+}
+
+function applyAuthGateState(state = {}, options = {}) {
+  if (isAuthGateManagedPolicyFencePending() && options.managedPolicyFenceValidated !== true) return;
+  if (isAuthGateStateStale(state)) return;
+  const revision = authGateRevision(state);
+  if (revision !== null) authGateLatestRevision = Math.max(authGateLatestRevision, revision);
+
+  const phase = authGatePhase(state);
+  if (phase === 'authenticated' || state.authRequired === false) {
+    recordAuthGateOutcome({ ...state, phase: 'authenticated', authRequired: false });
+    removeAuthGate();
+    return;
+  }
+
+  // The emergency policy restores 2.6.5's wait-before-paint behavior. Its
+  // eventual ready/setup state still renders through this same content script.
+  if (state.fastAuthGateEnabled === false && phase === 'loading') {
+    removeAuthGate();
+    return;
+  }
+
+  showAuthGate({ ...state, phase, authRequired: true });
 }
 
 // ============================================================================
@@ -256,20 +430,45 @@ function requestClassroomOverlayState() {
   });
 }
 
+const AUTH_GATE_BLOCKED_INPUT_EVENTS = [
+  'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'dblclick',
+  'contextmenu', 'keydown', 'keyup', 'keypress', 'beforeinput', 'input',
+  'wheel', 'touchstart', 'touchmove', 'touchend', 'dragstart', 'drop', 'submit',
+];
+
+function installAuthGateEventContainment(gate) {
+  if (!gate || gate.dataset.classpilotAuthContainmentInstalled === 'true') return;
+  gate.dataset.classpilotAuthContainmentInstalled = 'true';
+  for (const eventName of AUTH_GATE_BLOCKED_INPUT_EVENTS) {
+    gate.addEventListener(eventName, (event) => event.stopPropagation());
+  }
+}
+
 function installAuthGateBlockers() {
+  const gate = authGateTrustedRoot?.isConnected ? authGateTrustedRoot : null;
+  if (globalThis.__classpilotAuthGateBootstrap?.active) {
+    return;
+  }
   if (authGateBlockerInstalled) return;
   const focusInsideGate = (preferLast = false) => {
-    const gate = document.getElementById('classpilot-auth-gate');
-    if (!gate) return;
-    const focusable = getAuthGateFocusableElements(gate);
-    const panel = gate.querySelector('.classpilot-auth-panel');
+    const currentGate = authGateTrustedRoot?.isConnected ? authGateTrustedRoot : null;
+    if (!currentGate) return;
+    if (authGateSecureFrame?.isConnected) {
+      authGateSecureFrame.focus({ preventScroll: true });
+      return;
+    }
+    const focusable = getAuthGateFocusableElements(currentGate);
+    const panel = currentGate.querySelector('.classpilot-auth-panel');
     const target = preferLast ? focusable[focusable.length - 1] : focusable[0];
     (target || panel)?.focus({ preventScroll: true });
   };
   const blockBehindGate = (event) => {
-    const gate = document.getElementById('classpilot-auth-gate');
-    if (!gate) return;
-    if (gate.contains(event.target)) return;
+    const gate = authGateTrustedRoot?.isConnected ? authGateTrustedRoot : null;
+    const loadingPhase = authGateTrustedPhase === 'loading';
+    if (gate && event.target === gate && !loadingPhase) {
+      event.stopImmediatePropagation();
+      return;
+    }
     event.preventDefault();
     event.stopImmediatePropagation();
     if (event.type === 'keydown' && event.key === 'Tab') {
@@ -277,30 +476,41 @@ function installAuthGateBlockers() {
     }
   };
   const containAuthGateFocus = (event) => {
-    const gate = document.getElementById('classpilot-auth-gate');
-    if (!gate || gate.contains(event.target)) return;
+    const gate = authGateTrustedRoot?.isConnected ? authGateTrustedRoot : null;
+    if (gate && event.target === gate) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
     focusInsideGate(false);
   };
-  document.addEventListener('keydown', blockBehindGate, true);
-  document.addEventListener('wheel', blockBehindGate, { capture: true, passive: false });
-  document.addEventListener('touchmove', blockBehindGate, { capture: true, passive: false });
+  for (const eventName of AUTH_GATE_BLOCKED_INPUT_EVENTS) {
+    const options = eventName === 'wheel' || eventName.startsWith('touch')
+      ? { capture: true, passive: false }
+      : true;
+    window.addEventListener(eventName, blockBehindGate, options);
+    document.addEventListener(eventName, blockBehindGate, options);
+  }
+  window.addEventListener('focusin', containAuthGateFocus, true);
   document.addEventListener('focusin', containAuthGateFocus, true);
   window.__classpilotAuthGateBlocker = blockBehindGate;
   window.__classpilotAuthGateFocusContainment = containAuthGateFocus;
+  window.__classpilotAuthGateBlockedEvents = AUTH_GATE_BLOCKED_INPUT_EVENTS;
   authGateBlockerInstalled = true;
 }
 
 function removeAuthGateBlockers() {
   if (!authGateBlockerInstalled || !window.__classpilotAuthGateBlocker) return;
   const blockBehindGate = window.__classpilotAuthGateBlocker;
-  document.removeEventListener('keydown', blockBehindGate, true);
-  document.removeEventListener('wheel', blockBehindGate, true);
-  document.removeEventListener('touchmove', blockBehindGate, true);
+  for (const eventName of window.__classpilotAuthGateBlockedEvents || []) {
+    window.removeEventListener(eventName, blockBehindGate, true);
+    document.removeEventListener(eventName, blockBehindGate, true);
+  }
   if (window.__classpilotAuthGateFocusContainment) {
+    window.removeEventListener('focusin', window.__classpilotAuthGateFocusContainment, true);
     document.removeEventListener('focusin', window.__classpilotAuthGateFocusContainment, true);
   }
   delete window.__classpilotAuthGateBlocker;
   delete window.__classpilotAuthGateFocusContainment;
+  delete window.__classpilotAuthGateBlockedEvents;
   authGateBlockerInstalled = false;
 }
 
@@ -315,29 +525,34 @@ function installAuthGateFocusManagement(gate) {
   const panel = gate?.querySelector('.classpilot-auth-panel');
   if (!gate || !panel) return;
 
-  gate.addEventListener('keydown', (event) => {
-    if (event.key !== 'Tab') return;
-    const focusable = getAuthGateFocusableElements(gate);
-    if (!focusable.length) {
-      event.preventDefault();
-      panel.focus({ preventScroll: true });
-      return;
-    }
+  if (gate.dataset.classpilotFocusManagerInstalled !== 'true') {
+    gate.dataset.classpilotFocusManagerInstalled = 'true';
+    gate.addEventListener('keydown', (event) => {
+      if (event.key !== 'Tab') return;
+      const currentPanel = gate.querySelector('.classpilot-auth-panel');
+      const focusable = getAuthGateFocusableElements(gate);
+      if (!focusable.length) {
+        event.preventDefault();
+        currentPanel?.focus({ preventScroll: true });
+        return;
+      }
 
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (event.shiftKey && (active === first || !gate.contains(active))) {
-      event.preventDefault();
-      last.focus({ preventScroll: true });
-    } else if (!event.shiftKey && active === last) {
-      event.preventDefault();
-      first.focus({ preventScroll: true });
-    }
-  });
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !gate.contains(active))) {
+        event.preventDefault();
+        last.focus({ preventScroll: true });
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus({ preventScroll: true });
+      }
+    });
+  }
 
   requestAnimationFrame(() => {
     if (!gate.isConnected) return;
+    if (gate.contains(document.activeElement) && document.activeElement !== panel) return;
     const initialControl = gate.querySelector('#classpilot-auth-email:not([disabled])') ||
       gate.querySelector('#classpilot-auth-grade:not([disabled])');
     (initialControl || panel).focus({ preventScroll: true });
@@ -345,9 +560,7 @@ function installAuthGateFocusManagement(gate) {
 }
 
 function showAuthGate(state = {}) {
-  if (window.location.protocol === 'chrome-extension:' ||
-      window.location.protocol === 'chrome:' ||
-      window.location.protocol === 'about:') {
+  if (!/^https?:$/.test(window.location.protocol)) {
     return;
   }
 
@@ -358,33 +571,592 @@ function showAuthGate(state = {}) {
       window.location.origin === state.kioskOrigin &&
       (window.location.pathname === '/passpilot/kiosk' ||
         window.location.pathname.startsWith('/passpilot/kiosk/'))) {
+    removeAuthGate();
     return;
   }
 
+  clearAuthGateRetryTimer();
   authGateActive = true;
+  authGateCurrentState = state;
+  authGateLiveRosterLoaded = false;
   document.documentElement.classList.add('classpilot-auth-locked');
   document.body?.classList.add('classpilot-auth-locked');
   const fab = document.getElementById('classpilot-fab-container');
   if (fab) fab.style.display = 'none';
 
-  const existing = document.getElementById('classpilot-auth-gate');
-  if (existing) existing.remove();
+  const bootstrapGate = globalThis.__classpilotAuthGateBootstrap?.gateRoot;
+  const existing = authGateTrustedRoot?.isConnected
+    ? authGateTrustedRoot
+    : bootstrapGate?.isConnected
+      ? bootstrapGate
+      : null;
   authGateRosterRequestGeneration += 1;
 
-  const gate = document.createElement('div');
-  gate.id = 'classpilot-auth-gate';
-  gate.innerHTML = buildAuthGateMarkup(state);
-  (document.body || document.documentElement).appendChild(gate);
+  const gate = existing || document.createElement('div');
+  if (!existing) {
+    gate.id = 'classpilot-auth-gate';
+    document.documentElement.appendChild(gate);
+  } else if (gate.parentElement !== document.documentElement) {
+    document.documentElement.appendChild(gate);
+  }
+  const requestedPhase = authGatePhase(state);
+  gate.dataset.classpilotAuthOwner = 'content';
+  authGateTrustedRoot = gate;
+  restoreAuthGateQuarantinedElement(gate);
+  authGateTrustedRoot.setAttribute('tabindex', '-1');
+  authGateTrustedPhase = authGateSecureFrameTrusted ? requestedPhase : 'loading';
+  gate.dataset.classpilotAuthPhase = authGateTrustedPhase;
+  globalThis.__classpilotAuthGateBootstrap?.adoptSecureGate?.(gate, {
+    ...state,
+    phase: authGateTrustedPhase,
+  });
+  installAuthGateEventContainment(gate);
   installAuthGateBlockers();
-  attachAuthGateHandlers(state);
-  installAuthGateFocusManagement(gate);
+  ensureSecureAuthGateFrame(gate);
+  installAuthGateConnectionWatchdog();
 }
 
+function quarantineAuthGatePageChildren() {
+  const documentRoot = document.documentElement;
+  const body = document.body;
+  if (!documentRoot) return;
+
+  const quarantineElement = (element) => {
+    if (!(element instanceof Element) || element === authGateTrustedRoot) return;
+    if (!authGateQuarantinedElements.has(element)) {
+      authGateQuarantinedElements.set(element, {
+        hadInertAttribute: element.hasAttribute('inert'),
+        inertAttributeValue: element.getAttribute('inert'),
+        pointerEventsValue: element.style?.getPropertyValue('pointer-events') || '',
+        pointerEventsPriority: element.style?.getPropertyPriority('pointer-events') || '',
+        displayValue: element.style?.getPropertyValue('display') || '',
+        displayPriority: element.style?.getPropertyPriority('display') || '',
+      });
+    }
+    if (!element.hasAttribute('inert')) element.setAttribute('inert', '');
+    // SVG/MathML do not consistently implement HTMLElement.inert. Disable
+    // their full hit-test subtree too, including foreignObject iframes.
+    if (element.style?.getPropertyValue('pointer-events') !== 'none' ||
+        element.style?.getPropertyPriority('pointer-events') !== 'important') {
+      element.style?.setProperty('pointer-events', 'none', 'important');
+    }
+    // Inert and pointer hit-testing do not stop a child browsing context from
+    // stealing keyboard focus programmatically. Keep every page-owned surface
+    // capable of rendering descendants out of layout until authentication;
+    // leave <head> metadata active so styles/configuration continue loading.
+    const isHeadMetadata = element.parentElement === document.head &&
+      ['BASE', 'LINK', 'META', 'NOSCRIPT', 'SCRIPT', 'STYLE', 'TEMPLATE', 'TITLE']
+        .includes(element.tagName);
+    if (element !== document.head && !isHeadMetadata &&
+        (element.style?.getPropertyValue('display') !== 'none' ||
+         element.style?.getPropertyPriority('display') !== 'important')) {
+      element.style?.setProperty('display', 'none', 'important');
+    }
+  };
+
+  for (const element of Array.from(documentRoot.children)) {
+    if (element === authGateTrustedRoot) continue;
+    quarantineElement(element);
+  }
+  for (const element of Array.from(body?.children || [])) {
+    if (element === authGateTrustedRoot) continue;
+    quarantineElement(element);
+  }
+  for (const element of Array.from(document.head?.querySelectorAll('*') || [])) {
+    quarantineElement(element);
+  }
+  detachAuthGatePageBrowsingContexts();
+
+  // A same-max-z sibling inserted later would otherwise paint above the gate.
+  // Re-appending the authentic host is safe and settles after one observer
+  // callback because it is already last on the next reconciliation.
+  if (authGateTrustedRoot?.isConnected &&
+      authGateTrustedRoot.parentElement === documentRoot &&
+      documentRoot.lastElementChild !== authGateTrustedRoot) {
+    documentRoot.appendChild(authGateTrustedRoot);
+  }
+
+  // Top-layer UI paints above every z-index. Remove page-owned dialogs and
+  // popovers from the top layer while sign-in is locked; their containing
+  // body subtree remains inert and can be rendered normally after release.
+  for (const dialog of document.querySelectorAll('dialog[open]')) {
+    if (dialog !== authGateTrustedRoot) {
+      try { dialog.close(); } catch (_error) { /* already closing */ }
+    }
+  }
+  for (const popover of document.querySelectorAll('[popover]')) {
+    try {
+      if (popover.matches(':popover-open')) popover.hidePopover();
+    } catch (_error) {
+      // Older Chromium builds may not expose the popover pseudo-class.
+    }
+  }
+  if (document.fullscreenElement && !authGateFullscreenExitPending) {
+    authGateFullscreenExitPending = true;
+    Promise.resolve(document.exitFullscreen?.())
+      .catch(() => {})
+      .finally(() => {
+        authGateFullscreenExitPending = false;
+      });
+  }
+  if (authGateTrustedRoot?.isConnected &&
+      document.activeElement !== authGateTrustedRoot &&
+      !authGateTrustedRoot.contains(document.activeElement)) {
+    if (authGateSecureFrameTrusted && authGateSecureFrame?.isConnected) {
+      authGateSecureFrame.focus({ preventScroll: true });
+    } else {
+      authGateTrustedRoot.focus({ preventScroll: true });
+    }
+  }
+}
+
+function detachAuthGatePageBrowsingContexts() {
+  for (const contextElement of document.querySelectorAll('iframe, frame, object, embed')) {
+    if (!authGateDetachedBrowsingContexts.has(contextElement)) {
+      authGateDetachedBrowsingContexts.set(contextElement, {
+        parent: contextElement.parentNode,
+        nextSibling: contextElement.nextSibling,
+      });
+    }
+    contextElement.remove();
+  }
+}
+
+function restoreAuthGateDetachedBrowsingContexts() {
+  for (const [contextElement, placement] of authGateDetachedBrowsingContexts) {
+    if (contextElement.isConnected || !placement.parent) continue;
+    const anchor = placement.nextSibling?.parentNode === placement.parent
+      ? placement.nextSibling
+      : null;
+    try {
+      placement.parent.insertBefore(contextElement, anchor);
+    } catch (_error) {
+      // Preserve the retired subtree rather than guessing a new page location.
+    }
+  }
+  authGateDetachedBrowsingContexts.clear();
+}
+
+function restoreAuthGateQuarantinedElement(element) {
+  const original = authGateQuarantinedElements.get(element);
+  if (!original) return;
+  if (original.hadInertAttribute) {
+    element.setAttribute('inert', original.inertAttributeValue ?? '');
+  } else {
+    element.removeAttribute('inert');
+  }
+  if (element.style) {
+    if (original.pointerEventsValue) {
+      element.style.setProperty(
+        'pointer-events',
+        original.pointerEventsValue,
+        original.pointerEventsPriority
+      );
+    } else {
+      element.style.removeProperty('pointer-events');
+    }
+    if (original.displayValue) {
+      element.style.setProperty(
+        'display',
+        original.displayValue,
+        original.displayPriority
+      );
+    } else {
+      element.style.removeProperty('display');
+    }
+  }
+  authGateQuarantinedElements.delete(element);
+}
+
+function isTrustedAuthGateHostMounted() {
+  const gate = authGateTrustedRoot;
+  return Boolean(
+    gate?.isConnected &&
+    gate.parentElement === document.documentElement
+  );
+}
+
+function scheduleAuthGateWatchdogReconcile() {
+  if (!authGateActive || authGateWatchdogScheduled) return;
+  authGateWatchdogScheduled = true;
+  queueMicrotask(() => {
+    authGateWatchdogScheduled = false;
+    reconcileAuthGateConnection();
+  });
+}
+
+function reconcileAuthGateConnection() {
+  if (!authGateActive || authGateWatchdogRecovering) return;
+  quarantineAuthGatePageChildren();
+  if (isTrustedAuthGateHostMounted()) return;
+
+  const now = performance.now();
+  if (now - authGateWatchdogWindowStartedAt > 250) {
+    authGateWatchdogWindowStartedAt = now;
+    authGateWatchdogRecoveryCount = 0;
+  }
+  if (authGateWatchdogRecoveryCount >= 4) {
+    if (authGateWatchdogDeferredTimer === null) {
+      authGateWatchdogDeferredTimer = setTimeout(() => {
+        authGateWatchdogDeferredTimer = null;
+        reconcileAuthGateConnection();
+      }, 50);
+    }
+    return;
+  }
+  authGateWatchdogRecoveryCount += 1;
+  recoverTrustedAuthGateHost();
+}
+
+function recoverTrustedAuthGateHost() {
+  if (!authGateActive || authGateWatchdogRecovering) return;
+  authGateWatchdogRecovering = true;
+  try {
+    clearSecureAuthGateFrameRecovery();
+    authGateTrustedRoot?.remove();
+    authGateTrustedRoot = null;
+    authGateTrustedPhase = 'loading';
+    authGateSecureShadow = null;
+    authGateSecureFrame = null;
+    authGateSecureFallback = null;
+    authGateSecureFrameNonce = '';
+    authGateSecureFrameReady = false;
+    authGateSecureFrameTrusted = false;
+    authGateSecureFramePendingPhase = 'loading';
+
+    const recoveryState = {
+      ...(authGateCurrentState || {}),
+      phase: 'loading',
+      authRequired: true,
+    };
+    showAuthGate(recoveryState);
+    if (authGateTrustedRoot) {
+      authGateWatchdogRecoverySerial += 1;
+      authGateTrustedRoot.dataset.classpilotAuthRecovery = 'restored';
+      authGateTrustedRoot.dataset.classpilotAuthRecoverySerial = String(authGateWatchdogRecoverySerial);
+    }
+    quarantineAuthGatePageChildren();
+  } finally {
+    authGateWatchdogRecovering = false;
+  }
+}
+
+function installAuthGateConnectionWatchdog() {
+  quarantineAuthGatePageChildren();
+  if (authGateConnectionObserver) return;
+  authGateConnectionObserver = new MutationObserver(() => {
+    scheduleAuthGateWatchdogReconcile();
+  });
+  // Observe Document rather than the current <html> node. A hostile page can
+  // replace documentElement wholesale; observing the old subtree would leave
+  // the replacement and any child frame outside the recovery watchdog.
+  authGateConnectionObserver.observe(document, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['inert', 'open', 'style'],
+  });
+  document.addEventListener('fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
+  document.addEventListener('toggle', scheduleAuthGateWatchdogReconcile, true);
+  document.addEventListener('beforetoggle', preventPagePopoverWhileAuthLocked, true);
+}
+
+function preventPagePopoverWhileAuthLocked(event) {
+  if (!authGateActive || event.target === authGateTrustedRoot) return;
+  if (event.newState === 'open' && event.cancelable) event.preventDefault();
+  scheduleAuthGateWatchdogReconcile();
+}
+
+function stopAuthGateConnectionWatchdog() {
+  authGateConnectionObserver?.disconnect();
+  authGateConnectionObserver = null;
+  document.removeEventListener('fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
+  document.removeEventListener('toggle', scheduleAuthGateWatchdogReconcile, true);
+  document.removeEventListener('beforetoggle', preventPagePopoverWhileAuthLocked, true);
+  authGateWatchdogScheduled = false;
+  authGateWatchdogRecovering = false;
+  if (authGateWatchdogDeferredTimer !== null) {
+    clearTimeout(authGateWatchdogDeferredTimer);
+    authGateWatchdogDeferredTimer = null;
+  }
+  authGateWatchdogWindowStartedAt = 0;
+  authGateWatchdogRecoveryCount = 0;
+  authGateFullscreenExitPending = false;
+  restoreAuthGateDetachedBrowsingContexts();
+  for (const element of Array.from(authGateQuarantinedElements.keys())) {
+    restoreAuthGateQuarantinedElement(element);
+  }
+}
+
+function ensureSecureAuthGateFrame(gate) {
+  if (!gate) return;
+  if (authGateSecureShadow?.host !== gate) {
+    authGateSecureShadow = null;
+    authGateSecureFrame = null;
+    authGateSecureFallback = null;
+    authGateSecureFrameNonce = '';
+    authGateSecureFrameReady = false;
+    authGateSecureFrameTrusted = false;
+    authGateSecureFramePendingPhase = 'loading';
+  }
+  if (authGateSecureFrame?.isConnected) return;
+
+  // The bootstrap gate starts in light DOM so it can paint at document_start.
+  // Replace it synchronously with a closed shadow tree before mounting the
+  // extension-origin frame. Host-page JavaScript cannot traverse the shadow
+  // tree or inspect the credential controls inside the cross-origin frame.
+  gate.replaceChildren();
+  try {
+    authGateSecureShadow = gate.attachShadow({ mode: 'closed' });
+  } catch (_error) {
+    // A hostile page can race document_idle and attach its own shadow root to
+    // the bootstrap host. Never render into or authorize that unverifiable
+    // host: replace it with a fresh extension-owned node and keep the closure
+    // phase at loading until the nonce-authenticated frame responds.
+    const replacement = document.createElement('div');
+    replacement.id = 'classpilot-auth-gate';
+    replacement.dataset.classpilotAuthOwner = 'content';
+    replacement.dataset.classpilotAuthPhase = 'loading';
+    replacement.dataset.classpilotAuthFrameStatus = 'verifying';
+    if (gate.isConnected) gate.replaceWith(replacement);
+    else document.documentElement.appendChild(replacement);
+    authGateTrustedRoot = replacement;
+    authGateTrustedPhase = 'loading';
+    authGateSecureShadow = null;
+    authGateSecureFrame = null;
+    globalThis.__classpilotAuthGateBootstrap?.adoptSecureGate?.(replacement, {
+      ...(authGateCurrentState || {}),
+      phase: 'loading',
+      authRequired: true,
+    });
+    installAuthGateEventContainment(replacement);
+    ensureSecureAuthGateFrame(replacement);
+    return;
+  }
+
+  const style = document.createElement('style');
+  style.textContent = `
+    :host {
+      position: fixed !important;
+      inset: 0 !important;
+      z-index: 2147483647 !important;
+      display: block !important;
+      width: 100vw !important;
+      height: 100vh !important;
+      height: 100dvh !important;
+      overflow: hidden !important;
+      background: linear-gradient(180deg, rgba(14, 42, 87, .94), rgba(25, 55, 100, .88)) !important;
+      color-scheme: light !important;
+      contain: strict !important;
+      isolation: isolate !important;
+    }
+    .classpilot-auth-frame-fallback {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      color: #fff;
+      font: 700 20px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      text-align: center;
+    }
+    .classpilot-auth-frame-fallback span {
+      display: block;
+      margin-top: 8px;
+      color: #dbe6f7;
+      font-size: 15px;
+      font-weight: 500;
+    }
+    iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: transparent;
+      opacity: 0;
+      pointer-events: none;
+    }
+    iframe.classpilot-auth-frame-loaded {
+      opacity: 1;
+      pointer-events: auto;
+    }
+  `;
+
+  const fallback = document.createElement('div');
+  fallback.className = 'classpilot-auth-frame-fallback';
+  fallback.setAttribute('role', 'status');
+  fallback.setAttribute('aria-live', 'polite');
+  fallback.innerHTML = 'Connecting to ClassPilot…<span>Browsing will stay locked until ClassPilot is ready.</span>';
+
+  const frame = document.createElement('iframe');
+  frame.title = 'ClassPilot student sign-in';
+  frame.referrerPolicy = 'origin';
+  authGateSecureFrameNonce = createAuthGateFrameNonce();
+  frame.src = secureAuthGateFrameUrl(authGateSecureFrameNonce);
+  frame.addEventListener('load', () => {
+    if (!frame.isConnected) return;
+    beginSecureAuthGateFrameVerification();
+  });
+
+  authGateSecureShadow.append(style, fallback, frame);
+  authGateSecureFrame = frame;
+  authGateSecureFallback = fallback;
+  gate.dataset.classpilotAuthFrameStatus = 'verifying';
+}
+
+function createAuthGateFrameNonce() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function secureAuthGateFrameUrl(nonce) {
+  return `${chrome.runtime.getURL('auth-gate-frame.html')}#${encodeURIComponent(nonce)}`;
+}
+
+function clearSecureAuthGateFrameRecovery() {
+  if (authGateSecureFrameRecoveryTimer !== null) {
+    clearTimeout(authGateSecureFrameRecoveryTimer);
+    authGateSecureFrameRecoveryTimer = null;
+  }
+}
+
+function markSecureAuthGateFrameUntrusted() {
+  authGateSecureFrameReady = false;
+  authGateSecureFrameTrusted = false;
+  authGateSecureFramePendingPhase = 'loading';
+  authGateTrustedPhase = 'loading';
+  authGateSecureFrame?.classList.remove('classpilot-auth-frame-loaded');
+  if (authGateSecureFallback) authGateSecureFallback.hidden = false;
+  if (authGateTrustedRoot) {
+    authGateTrustedRoot.dataset.classpilotAuthFrameStatus = 'verifying';
+    authGateTrustedRoot.dataset.classpilotAuthPhase = 'loading';
+    globalThis.__classpilotAuthGateBootstrap?.adoptSecureGate?.(authGateTrustedRoot, {
+      ...(authGateCurrentState || {}),
+      phase: 'loading',
+      authRequired: true,
+    });
+    globalThis.__classpilotAuthGateBootstrap?.setSecureFrameFocusTarget?.(null);
+  }
+}
+
+function beginSecureAuthGateFrameVerification() {
+  if (!authGateSecureFrame?.contentWindow || !authGateSecureFrameNonce) return;
+  markSecureAuthGateFrameUntrusted();
+  try {
+    authGateSecureFrame.contentWindow.postMessage({
+      type: 'CLASSPILOT_AUTH_FRAME_INIT',
+      nonce: authGateSecureFrameNonce,
+    }, AUTH_GATE_FRAME_ORIGIN);
+  } catch (_error) {
+    // The recovery timer below restores the genuine extension document.
+  }
+  clearSecureAuthGateFrameRecovery();
+  authGateSecureFrameRecoveryTimer = setTimeout(() => {
+    authGateSecureFrameRecoveryTimer = null;
+    if (!authGateSecureFrameTrusted) resetSecureAuthGateFrame();
+  }, 300);
+}
+
+function resetSecureAuthGateFrame() {
+  if (!authGateSecureFrame?.isConnected) return;
+  markSecureAuthGateFrameUntrusted();
+  authGateSecureFrameNonce = createAuthGateFrameNonce();
+  authGateSecureFrame.src = secureAuthGateFrameUrl(authGateSecureFrameNonce);
+}
+
+function applyTrustedAuthGateFramePhase(phase) {
+  if (!AUTH_GATE_PHASES.has(phase) || !authGateTrustedRoot?.isConnected) return;
+  if (isAuthGateManagedPolicyFencePending()) {
+    markSecureAuthGateFrameUntrusted();
+    return;
+  }
+  authGateSecureFramePendingPhase = phase;
+  if (!authGateSecureFrameReady) return;
+  if (phase === 'authenticated') {
+    // The message is accepted only from the nonce-bound extension document,
+    // whose phase came from a direct worker response. This closes the gate if
+    // a tabs.sendMessage completion broadcast misses the extension subframe.
+    recordAuthGateOutcome({
+      ...(authGateCurrentState || {}),
+      phase: 'authenticated',
+      authRequired: false,
+    });
+    removeAuthGate();
+    return;
+  }
+  authGateSecureFrameTrusted = true;
+  authGateTrustedPhase = phase;
+  authGateTrustedRoot.dataset.classpilotAuthFrameStatus = 'trusted';
+  authGateTrustedRoot.dataset.classpilotAuthPhase = phase;
+  authGateSecureFrame?.classList.add('classpilot-auth-frame-loaded');
+  if (authGateSecureFallback) authGateSecureFallback.hidden = true;
+  clearSecureAuthGateFrameRecovery();
+  globalThis.__classpilotAuthGateBootstrap?.adoptSecureGate?.(authGateTrustedRoot, {
+    ...(authGateCurrentState || {}),
+    phase,
+    authRequired: phase !== 'authenticated',
+  });
+  globalThis.__classpilotAuthGateBootstrap?.setSecureFrameFocusTarget?.(authGateSecureFrame);
+  authGateSecureFrame?.focus({ preventScroll: true });
+}
+
+window.addEventListener('message', (event) => {
+  if (!event.isTrusted || event.source !== authGateSecureFrame?.contentWindow ||
+      event.origin !== AUTH_GATE_FRAME_ORIGIN ||
+      event.data?.nonce !== authGateSecureFrameNonce) {
+    return;
+  }
+  if (event.data.type === 'CLASSPILOT_AUTH_FRAME_PHASE' &&
+      AUTH_GATE_PHASES.has(event.data.phase)) {
+    applyTrustedAuthGateFramePhase(event.data.phase);
+    return;
+  }
+  if (event.data.type === 'CLASSPILOT_AUTH_FRAME_READY') {
+    authGateSecureFrameReady = true;
+    applyTrustedAuthGateFramePhase(authGateSecureFramePendingPhase);
+    return;
+  }
+  if (event.data.type === 'CLASSPILOT_AUTH_FRAME_LEAVING') {
+    markSecureAuthGateFrameUntrusted();
+    clearSecureAuthGateFrameRecovery();
+    authGateSecureFrameRecoveryTimer = setTimeout(resetSecureAuthGateFrame, 100);
+  }
+}, true);
+
 function removeAuthGate() {
+  clearAuthGateRetryTimer();
+  authGatePendingManagedPolicyFence = 0;
+  if (authGateManagedPolicyFenceRetryTimer !== null) {
+    clearTimeout(authGateManagedPolicyFenceRetryTimer);
+    authGateManagedPolicyFenceRetryTimer = null;
+  }
   authGateActive = false;
+  stopAuthGateConnectionWatchdog();
+  authGateCurrentState = null;
+  authGateLiveRosterLoaded = false;
+  authGateSecureShadow = null;
+  authGateSecureFrame = null;
+  authGateSecureFallback = null;
+  authGateSecureFrameNonce = '';
+  authGateSecureFrameReady = false;
+  authGateSecureFrameTrusted = false;
+  authGateSecureFramePendingPhase = 'loading';
+  clearSecureAuthGateFrameRecovery();
+  authGateStateRequestGeneration += 1;
   authGateRosterRequestGeneration += 1;
-  const gate = document.getElementById('classpilot-auth-gate');
+  const gate = authGateTrustedRoot;
+  if (typeof globalThis.__classpilotAuthGateBootstrap?.release === 'function') {
+    // Unwind the content-owned quarantine first, then authorize bootstrap to
+    // restore its document_start snapshot. Its independent policy fence may
+    // have resolved earlier, but it deliberately stays locked after adoption
+    // so neither layer can preserve the other's temporary inert/display state.
+    globalThis.__classpilotAuthGateBootstrap.release({ fromContent: true });
+  }
   if (gate) gate.remove();
+  authGateTrustedRoot = null;
+  authGateTrustedPhase = 'loading';
   document.documentElement.classList.remove('classpilot-auth-locked');
   document.body?.classList.remove('classpilot-auth-locked');
   const fab = document.getElementById('classpilot-fab-container');
@@ -393,15 +1165,33 @@ function removeAuthGate() {
 }
 
 function buildAuthGateMarkup(state) {
+  const phase = authGatePhase(state);
   const loginMethod = state.loginMethod === 'email_id' ? 'email_id' : 'name_pin';
-  const title = state.setupRequired
-    ? 'Ask your teacher to set up this Chromebook'
-    : 'Sign in to this Chromebook';
-  const subtitle = state.setupRequired
-    ? 'This Chromebook needs the school setup key and Shared Chromebook Sign-In enabled before browsing can start.'
-    : loginMethod === 'name_pin'
-      ? 'Choose your grade and name, then enter your 4-digit PIN.'
-      : 'Enter your school email and student ID to continue.';
+  const title = phase === 'loading'
+    ? 'Connecting to ClassPilot…'
+    : phase === 'unavailable'
+      ? 'ClassPilot can’t connect right now'
+      : phase === 'setup_required'
+        ? 'Ask your teacher to set up this Chromebook'
+        : 'Sign in to this Chromebook';
+  const subtitle = phase === 'loading'
+    ? 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'
+    : phase === 'unavailable'
+      ? 'Browsing stays locked until ClassPilot reconnects. Check the connection, then try again.'
+      : phase === 'setup_required'
+        ? 'This Chromebook needs the school setup key and Shared Chromebook Sign-In enabled before browsing can start.'
+        : loginMethod === 'name_pin'
+          ? 'Choose your grade and name, then enter your 4-digit PIN.'
+          : 'Enter your school email and student ID to continue.';
+  const phaseMarkup = phase === 'loading'
+    ? buildAuthGateLoadingMarkup(loginMethod)
+    : phase === 'unavailable'
+      ? buildAuthGateUnavailableMarkup(state)
+      : phase === 'setup_required'
+        ? buildSetupRequiredMarkup()
+        : loginMethod === 'name_pin'
+          ? buildPinLoginMarkup()
+          : buildEmailLoginMarkup();
 
   return `
     <style>
@@ -615,7 +1405,8 @@ function buildAuthGateMarkup(state) {
         cursor: not-allowed !important;
       }
       .classpilot-auth-button:focus-visible,
-      .classpilot-auth-kiosk-button:focus-visible {
+      .classpilot-auth-kiosk-button:focus-visible,
+      .classpilot-auth-retry:focus-visible {
         outline: 3px solid #0e2a57 !important;
         outline-offset: 3px !important;
         box-shadow: 0 0 0 6px rgba(245, 184, 31, 0.34) !important;
@@ -666,6 +1457,90 @@ function buildAuthGateMarkup(state) {
       }
       .classpilot-auth-roster-note:empty {
         display: none !important;
+      }
+      .classpilot-auth-state-card {
+        min-height: 104px !important;
+        border: 1px solid #d8dee8 !important;
+        border-radius: 14px !important;
+        background: #f8fafc !important;
+        color: #334155 !important;
+        padding: 18px !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 14px !important;
+        font-size: 14px !important;
+        line-height: 1.5 !important;
+      }
+      .classpilot-auth-state-card strong {
+        display: block !important;
+        margin-bottom: 3px !important;
+        color: #0f172a !important;
+        font-size: 15px !important;
+      }
+      .classpilot-auth-state-card > span:first-child:not(.classpilot-auth-spinner) {
+        flex: 0 0 auto !important;
+        width: 36px !important;
+        height: 36px !important;
+        border-radius: 999px !important;
+        background: #fdf2c8 !important;
+        color: #0e2a57 !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+      }
+      .classpilot-auth-state-card > span:first-child:not(.classpilot-auth-spinner) svg {
+        width: 20px !important;
+        height: 20px !important;
+        stroke: currentColor !important;
+      }
+      .classpilot-auth-spinner {
+        flex: 0 0 auto !important;
+        width: 34px !important;
+        height: 34px !important;
+        border: 4px solid #e2e8f0 !important;
+        border-top-color: #f5b81f !important;
+        border-radius: 999px !important;
+        animation: classpilot-auth-spin 0.9s linear infinite !important;
+      }
+      @keyframes classpilot-auth-spin {
+        to { transform: rotate(360deg); }
+      }
+      .classpilot-auth-loading-form {
+        margin-top: 16px !important;
+        opacity: 0.62 !important;
+      }
+      .classpilot-auth-loading-form input:disabled,
+      .classpilot-auth-loading-form select:disabled,
+      .classpilot-auth-loading-form button:disabled {
+        cursor: wait !important;
+      }
+      .classpilot-auth-retry {
+        width: 100% !important;
+        min-height: 52px !important;
+        margin-top: 16px !important;
+        border: 0 !important;
+        border-radius: 12px !important;
+        background: #f5b81f !important;
+        color: #0e2a57 !important;
+        cursor: pointer !important;
+        font-size: 18px !important;
+        font-weight: 800 !important;
+      }
+      .classpilot-auth-retry:disabled {
+        cursor: wait !important;
+        opacity: 0.7 !important;
+      }
+      .classpilot-auth-retry-status {
+        min-height: 20px !important;
+        margin-top: 10px !important;
+        color: #6b7a90 !important;
+        font-size: 13px !important;
+        text-align: center !important;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .classpilot-auth-spinner {
+          animation-duration: 1.8s !important;
+        }
       }
       .classpilot-auth-footnote {
         margin: 22px 0 0 !important;
@@ -849,9 +1724,12 @@ function buildAuthGateMarkup(state) {
         #classpilot-auth-email-form {
           grid-template-columns: minmax(0, 1fr) !important;
         }
+        .classpilot-auth-loading-form {
+          display: none !important;
+        }
       }
     </style>
-    <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" tabindex="-1">
+    <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${phase === 'loading' ? 'aria-busy="true"' : ''} tabindex="-1">
       <div class="classpilot-auth-side" aria-hidden="true">
         <div>
           <div class="classpilot-auth-promise">
@@ -871,10 +1749,8 @@ function buildAuthGateMarkup(state) {
           <p id="classpilot-auth-subtitle">${escapeHtml(subtitle)}</p>
           <div class="classpilot-auth-divider"></div>
           <div class="classpilot-auth-error" id="classpilot-auth-error" role="alert" aria-live="assertive"></div>
-          ${state.setupRequired ? buildSetupRequiredMarkup() : (
-            loginMethod === 'name_pin' ? buildPinLoginMarkup() : buildEmailLoginMarkup()
-          )}
-          ${!state.setupRequired && state.kioskUrl ? buildKioskLaunchMarkup() : ''}
+          ${phaseMarkup}
+          ${phase === 'ready' && state.kioskUrl ? buildKioskLaunchMarkup() : ''}
           <div class="classpilot-auth-footnote"><span>${authIcon('shield')}</span><span>Shared Chromebook sign-in</span></div>
         </div>
       </div>
@@ -896,6 +1772,34 @@ function authIcon(name) {
   return `<svg ${iconAttrs}>${icons[name] || icons.shield}</svg>`;
 }
 
+function buildAuthGateLoadingMarkup(loginMethod) {
+  const disabledForm = loginMethod === 'email_id'
+    ? buildEmailLoginMarkup({ disabled: true })
+    : buildPinLoginMarkup({ disabled: true });
+  return `
+    <div class="classpilot-auth-state-card" role="status" aria-live="polite">
+      <span class="classpilot-auth-spinner" aria-hidden="true"></span>
+      <span><strong>Verifying live school settings</strong>Sign-in controls will unlock only after ClassPilot reconnects to your school.</span>
+    </div>
+    <div class="classpilot-auth-loading-form" aria-hidden="true">${disabledForm}</div>
+  `;
+}
+
+function buildAuthGateUnavailableMarkup(state = {}) {
+  const retryAt = Number(state.retryAt);
+  const retryMessage = Number.isFinite(retryAt) && retryAt > Date.now()
+    ? 'ClassPilot will retry automatically. You can also retry now.'
+    : 'Use Retry now after checking the Chromebook’s connection.';
+  return `
+    <div class="classpilot-auth-state-card" role="status" aria-live="polite">
+      <span>${authIcon('shield')}</span>
+      <span><strong>Your browsing is still protected</strong>ClassPilot could not reach the live sign-in service. No cached information can be used to sign in.</span>
+    </div>
+    <button class="classpilot-auth-retry" id="classpilot-auth-retry" type="button">Retry now</button>
+    <div class="classpilot-auth-retry-status" id="classpilot-auth-retry-status" aria-live="polite">${escapeHtml(retryMessage)}</div>
+  `;
+}
+
 function buildSetupRequiredMarkup() {
   return `
     <div class="classpilot-auth-roster-note">
@@ -915,48 +1819,51 @@ function buildKioskLaunchMarkup() {
   `;
 }
 
-function buildEmailLoginMarkup() {
+function buildEmailLoginMarkup(options = {}) {
+  const disabled = options.disabled === true;
+  const disabledAttribute = disabled ? ' disabled' : '';
   return `
-    <form class="classpilot-auth-form" id="classpilot-auth-email-form">
+    <form class="classpilot-auth-form" id="classpilot-auth-email-form"${disabled ? ' aria-disabled="true"' : ''}>
       <div class="classpilot-auth-field">
         <label for="classpilot-auth-email"><span class="classpilot-auth-field-icon">${authIcon('mail')}</span><span>School email</span></label>
-        <input id="classpilot-auth-email" name="studentEmail" type="email" autocomplete="username" spellcheck="false" placeholder="student@school.edu" required />
+        <input id="classpilot-auth-email" name="studentEmail" type="email" autocomplete="username" spellcheck="false" placeholder="student@school.edu" required${disabledAttribute} />
       </div>
       <div class="classpilot-auth-field">
         <label for="classpilot-auth-student-id"><span class="classpilot-auth-field-icon">${authIcon('badge')}</span><span>Student ID Number</span></label>
-        <input id="classpilot-auth-student-id" name="studentIdNumber" type="text" autocomplete="off" spellcheck="false" placeholder="Student ID" required />
+        <input id="classpilot-auth-student-id" name="studentIdNumber" type="text" autocomplete="off" spellcheck="false" placeholder="Student ID" required${disabledAttribute} />
       </div>
-      <button class="classpilot-auth-button" id="classpilot-auth-email-submit" type="submit">Sign In</button>
+      <button class="classpilot-auth-button" id="classpilot-auth-email-submit" type="submit"${disabledAttribute}>Sign In</button>
     </form>
   `;
 }
 
-function buildPinLoginMarkup() {
+function buildPinLoginMarkup(options = {}) {
+  const disabled = options.disabled === true;
   return `
-    <form class="classpilot-auth-form" id="classpilot-auth-pin-form">
-      ${buildGradeChoiceMarkup()}
-      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite"></div>
+    <form class="classpilot-auth-form" id="classpilot-auth-pin-form"${disabled ? ' aria-disabled="true"' : ''}>
+      ${buildGradeChoiceMarkup({ disabled })}
+      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite">${disabled ? 'Waiting for live roster access…' : ''}</div>
       <div class="classpilot-auth-field classpilot-auth-field--student">
         <label for="classpilot-auth-student"><span class="classpilot-auth-field-icon">${authIcon('user')}</span><span>Student</span></label>
         <select id="classpilot-auth-student" name="studentId" disabled required>
-          <option value="">Select a grade first...</option>
+          <option value="">${disabled ? 'Waiting for ClassPilot…' : 'Select a grade first...'}</option>
         </select>
       </div>
       <div class="classpilot-auth-field classpilot-auth-field--pin">
         <label for="classpilot-auth-pin"><span class="classpilot-auth-field-icon">${authIcon('lock')}</span><span>4-digit PIN</span></label>
-        <input id="classpilot-auth-pin" name="pin" inputmode="numeric" maxlength="4" autocomplete="off" spellcheck="false" placeholder="Enter your 4-digit PIN" required />
+        <input id="classpilot-auth-pin" name="pin" inputmode="numeric" maxlength="4" autocomplete="off" spellcheck="false" placeholder="Enter your 4-digit PIN" required${disabled ? ' disabled' : ''} />
       </div>
       <button class="classpilot-auth-button" id="classpilot-auth-pin-submit" type="submit" disabled>Sign In</button>
     </form>
   `;
 }
 
-function buildGradeChoiceMarkup() {
+function buildGradeChoiceMarkup(options = {}) {
   return `
     <div class="classpilot-auth-field classpilot-auth-field--grade">
       <label for="classpilot-auth-grade"><span class="classpilot-auth-field-icon">${authIcon('graduation')}</span><span>Grade</span></label>
       <select id="classpilot-auth-grade" name="gradeLevel" disabled required>
-        <option value="">Loading grades...</option>
+        <option value="">${options.disabled ? 'Waiting for ClassPilot…' : 'Loading grades...'}</option>
       </select>
     </div>
   `;
@@ -969,15 +1876,125 @@ function setAuthGateError(message) {
   errorEl.style.display = message ? 'block' : 'none';
 }
 
+function clearAuthGateRetryTimer() {
+  if (authGateRetryTimer !== null) {
+    clearTimeout(authGateRetryTimer);
+    authGateRetryTimer = null;
+  }
+}
+
+function fallbackAuthGateRetryDelay() {
+  const delays = [2_000, 5_000, 15_000, 30_000];
+  const delay = delays[Math.min(authGateRetryFallbackIndex, delays.length - 1)];
+  authGateRetryFallbackIndex += 1;
+  return delay;
+}
+
+function scheduleAuthGateRetry(state = {}) {
+  clearAuthGateRetryTimer();
+  if (!authGateActive || authGatePhase(state) !== 'unavailable') return;
+
+  const retryAt = Number(state.retryAt);
+  const delay = Number.isFinite(retryAt) && retryAt > Date.now()
+    ? Math.max(0, retryAt - Date.now())
+    : fallbackAuthGateRetryDelay();
+  authGateRetryTimer = setTimeout(() => {
+    authGateRetryTimer = null;
+    requestAuthGateRefresh(false);
+  }, delay);
+}
+
+function requestAuthGateRefresh(userInitiated) {
+  clearAuthGateRetryTimer();
+  const retryButton = document.getElementById('classpilot-auth-retry');
+  const retryStatus = document.getElementById('classpilot-auth-retry-status');
+  if (retryButton) {
+    retryButton.disabled = true;
+    retryButton.textContent = 'Connecting…';
+    retryButton.setAttribute('aria-busy', 'true');
+  }
+  if (retryStatus) retryStatus.textContent = 'Checking the live ClassPilot sign-in service…';
+
+  const message = {
+    type: 'refresh-auth-state',
+    reason: userInitiated ? 'user' : 'page_timer',
+  };
+  if (authGateLatestRevision >= 0) message.revision = authGateLatestRevision;
+  const requestGeneration = authGateStateRequestGeneration;
+
+  chrome.runtime.sendMessage(message, (response) => {
+    const runtimeError = chrome.runtime.lastError;
+    if (requestGeneration !== authGateStateRequestGeneration ||
+        isAuthGateManagedPolicyFencePending()) return;
+    if (!runtimeError && response?.state) {
+      applyAuthGateState(response.state);
+      return;
+    }
+
+    const currentRetryButton = document.getElementById('classpilot-auth-retry');
+    const currentRetryStatus = document.getElementById('classpilot-auth-retry-status');
+    if (currentRetryButton) {
+      currentRetryButton.disabled = false;
+      currentRetryButton.textContent = 'Retry now';
+      currentRetryButton.setAttribute('aria-busy', 'false');
+    }
+    if (currentRetryStatus) {
+      currentRetryStatus.textContent = response?.error || 'ClassPilot is still unavailable. Browsing remains locked.';
+    }
+    scheduleAuthGateRetry(authGateCurrentState || { phase: 'unavailable' });
+  });
+}
+
+function recordAuthGateOutcome(state = {}) {
+  const phase = authGatePhase(state);
+  if (phase === 'loading') return;
+  if (typeof globalThis.__classpilotAuthGateBootstrap?.recordOutcome === 'function') {
+    globalThis.__classpilotAuthGateBootstrap.recordOutcome(state);
+    return;
+  }
+  chrome.storage.local.set({
+    authGateTimingV1: {
+      loadingPaintMs: null,
+      configReadyMs: null,
+      outcome: phase,
+      coldWorker: state.coldWorker === true,
+      timestamp: Date.now(),
+    },
+  }, () => {
+    void chrome.runtime.lastError;
+  });
+}
+
 function updatePinAuthSubmitState() {
   const studentSelect = document.getElementById('classpilot-auth-student');
   const pinInput = document.getElementById('classpilot-auth-pin');
   const submit = document.getElementById('classpilot-auth-pin-submit');
   if (!studentSelect || !pinInput || !submit) return;
-  submit.disabled = studentSelect.disabled || !studentSelect.value || !/^\d{4}$/.test(pinInput.value);
+  const selectedStudent = studentSelect.selectedOptions?.[0];
+  const selectedStudentHasPin = Boolean(
+    selectedStudent && selectedStudent.value && selectedStudent.disabled !== true
+  );
+  submit.disabled = !authGateLiveRosterLoaded || studentSelect.disabled ||
+    !selectedStudentHasPin || !/^\d{4}$/.test(pinInput.value);
 }
 
 function attachAuthGateHandlers(state) {
+  const phase = authGatePhase(state);
+  if (phase === 'unavailable') {
+    document.getElementById('classpilot-auth-retry')?.addEventListener('click', () => {
+      requestAuthGateRefresh(true);
+    });
+    scheduleAuthGateRetry(state);
+    recordAuthGateOutcome(state);
+    return;
+  }
+  if (phase !== 'ready') {
+    recordAuthGateOutcome(state);
+    return;
+  }
+
+  authGateRetryFallbackIndex = 0;
+  recordAuthGateOutcome(state);
   const emailForm = document.getElementById('classpilot-auth-email-form');
   const pinForm = document.getElementById('classpilot-auth-pin-form');
 
@@ -1032,6 +2049,7 @@ function loadAuthGateGradeOptions() {
   const status = document.getElementById('classpilot-auth-roster-status');
   const submit = document.getElementById('classpilot-auth-pin-submit');
   if (!gradeSelect || !studentSelect || !status || !submit) return;
+  authGateLiveRosterLoaded = false;
   const requestGeneration = ++authGateRosterRequestGeneration;
 
   status.textContent = 'Loading grades...';
@@ -1047,6 +2065,21 @@ function loadAuthGateGradeOptions() {
     if (requestGeneration !== authGateRosterRequestGeneration || !status.isConnected) return;
     status.setAttribute('aria-busy', 'false');
     if (runtimeError || !response?.success) {
+      const failurePhase = response?.phase === 'setup_required'
+        ? 'setup_required'
+        : response?.phase === 'unavailable' || runtimeError
+          ? 'unavailable'
+          : null;
+      if (failurePhase) {
+        applyAuthGateState({
+          ...(authGateCurrentState || {}),
+          phase: failurePhase,
+          authRequired: true,
+          setupRequired: failurePhase === 'setup_required',
+          retryAt: failurePhase === 'unavailable' ? Date.now() + 2_000 : null,
+        });
+        return;
+      }
       status.textContent = response?.error || 'Could not load roster grades.';
       gradeSelect.innerHTML = '<option value="">Grades unavailable</option>';
       gradeSelect.disabled = true;
@@ -1087,6 +2120,7 @@ function loadAuthGateRoster() {
   const gradeSelect = document.getElementById('classpilot-auth-grade');
   const selectedGrade = gradeSelect?.value || '';
   if (!select || !status || !submit) return;
+  authGateLiveRosterLoaded = false;
   const requestGeneration = ++authGateRosterRequestGeneration;
 
   if (gradeSelect && !selectedGrade) {
@@ -1112,6 +2146,21 @@ function loadAuthGateRoster() {
     }
     status.setAttribute('aria-busy', 'false');
     if (runtimeError || !response?.success) {
+      const failurePhase = response?.phase === 'setup_required'
+        ? 'setup_required'
+        : response?.phase === 'unavailable' || runtimeError
+          ? 'unavailable'
+          : null;
+      if (failurePhase) {
+        applyAuthGateState({
+          ...(authGateCurrentState || {}),
+          phase: failurePhase,
+          authRequired: true,
+          setupRequired: failurePhase === 'setup_required',
+          retryAt: failurePhase === 'unavailable' ? Date.now() + 2_000 : null,
+        });
+        return;
+      }
       status.textContent = response?.error || 'Could not load the classroom roster.';
       select.innerHTML = '<option value="">Roster unavailable</option>';
       select.disabled = true;
@@ -1128,6 +2177,7 @@ function loadAuthGateRoster() {
       return;
     }
 
+    authGateLiveRosterLoaded = true;
     status.textContent = '';
     select.innerHTML = '<option value="">Select your name...</option>' +
       students
@@ -1148,7 +2198,9 @@ function submitAuthGateLogin(payload, submitButton) {
     submit.setAttribute('aria-busy', 'true');
   }
 
+  const requestGeneration = authGateStateRequestGeneration;
   chrome.runtime.sendMessage({ type: 'manual-student-login', payload }, (response) => {
+    if (requestGeneration !== authGateStateRequestGeneration) return;
     if (chrome.runtime.lastError || !response?.success) {
       setAuthGateError(response?.error || 'Invalid student credentials');
       if (submit) {
@@ -1163,6 +2215,10 @@ function submitAuthGateLogin(payload, submitButton) {
       const retryField = document.getElementById(payload.mode === 'pin' ? 'classpilot-auth-pin' : 'classpilot-auth-email');
       retryField?.focus({ preventScroll: true });
       retryField?.select?.();
+      return;
+    }
+    if (isAuthGateManagedPolicyFencePending()) {
+      if (authGatePendingManagedPolicyFence === 0) beginAuthGateManagedPolicyFence();
       return;
     }
     removeAuthGate();
@@ -2608,8 +3664,10 @@ function updateFabIdentityState(state) {
     return;
   }
 
+  const requestGeneration = authGateStateRequestGeneration;
   chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
-    if (chrome.runtime.lastError || !response?.success) {
+    if (requestGeneration !== authGateStateRequestGeneration ||
+        isAuthGateManagedPolicyFencePending() || chrome.runtime.lastError || !response?.success) {
       identity.style.display = 'none';
       return;
     }
@@ -3063,6 +4121,19 @@ function addFabStyles() {
 
 // Listen for storage changes to update FAB state
 chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (namespace === 'managed' && [
+    'fastAuthGateEnabled',
+    'serverUrl',
+    'classpilotServerUrl',
+    'schoolSlug',
+    'classpilotSchoolSlug',
+    'schoolId',
+    'classpilotSchoolId',
+    'enrollmentKey',
+    'classpilotEnrollmentKey',
+  ].some((key) => Object.prototype.hasOwnProperty.call(changes, key))) {
+    beginAuthGateManagedPolicyFence();
+  }
   if (namespace === 'local') {
     if (changes.handRaised) {
       handRaised = changes.handRaised.newValue || false;

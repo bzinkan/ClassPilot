@@ -32,6 +32,28 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
+### Fast shared-Chromebook sign-in gate (2.6.7)
+
+On the first eligible HTTP(S) page, ClassPilot installs its interaction lock at
+`document_start` and restores local authentication before starting classroom,
+monitoring, and network initialization. Students who still need to sign in see
+**Connecting to ClassPilot…** immediately while the live school configuration
+loads. Cached configuration can shape this disabled loading screen, but it can
+never authenticate a student or enable submission while offline.
+
+The extension cannot run on the ChromeOS account sign-in screen, New Tab, or
+other `chrome://` pages, and it never opens a page automatically. Schools that
+want the gate immediately after Chrome opens should configure a normal managed
+HTTPS startup page. `fastAuthGateEnabled` defaults to `true`; setting it to
+`false` in managed extension policy temporarily restores the 2.6.5 startup
+behavior as an emergency rollback while retaining all authentication checks.
+
+The automated Chromium startup suite exercises managed-policy binding removal,
+changed authority, read failures, and the kill switch through the extension's
+worker contract. Playwright cannot populate enterprise `chrome.storage.managed`
+policy, so release validation must also repeat policy-change and kill-switch
+checks on a Google Admin-managed Chromebook before organizational-unit rollout.
+
 ## Chrome Web Store and Google Admin Deployment
 
 ### Create the Versioned Web Store ZIP
@@ -47,7 +69,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
    manifest version must match the file name.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.6.5.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.6.7.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
@@ -80,7 +102,8 @@ policy JSON shown in ClassPilot Settings. It should look like this:
 {
   "serverUrl": { "Value": "https://school-pilot.net" },
   "schoolSlug": { "Value": "your-school-slug" },
-  "enrollmentKey": { "Value": "your-shared-chromebook-setup-key" }
+  "enrollmentKey": { "Value": "your-shared-chromebook-setup-key" },
+  "fastAuthGateEnabled": { "Value": true }
 }
 ```
 
