@@ -383,6 +383,7 @@ const authGateRevisionReadyPromise = new Promise((resolve, reject) => {
 authGateRevisionReadyPromise.catch(() => {});
 let lastAuthGateAuthRequired = null;
 let authGateStateColdWorker = false;
+let ordinaryAuthStateColdCohortOpen = true;
 let sharedSignInConfigGeneration = 0;
 let sharedSignInConfigRetryAttempt = 0;
 let managedAuthGatePolicyGeneration = 0;
@@ -5568,13 +5569,11 @@ const classroomStateRestorePromise = new Promise((resolve) => {
 });
 
 let markAuthStateRestored;
-let authStateRestoreCompleted = false;
 const authStateRestorePromise = new Promise((resolve) => {
   let settled = false;
   markAuthStateRestored = () => {
     if (settled) return;
     settled = true;
-    authStateRestoreCompleted = true;
     resolve();
   };
 });
@@ -10302,7 +10301,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    const authStateWasCold = !authStateRestoreCompleted;
+    // All ordinary callers that arrive before the first ordinary reply belong
+    // to the same cold-worker cohort. Local restoration can finish between
+    // concurrent messages, so its completion is not a reliable cohort fence.
+    const authStateWasCold = ordinaryAuthStateColdCohortOpen;
+    const sendOrdinaryAuthStateResponse = (response) => {
+      sendResponse(response);
+      ordinaryAuthStateColdCohortOpen = false;
+    };
     authStateRestorePromise
       .then(async () => {
         expireManualAuthIfStaleFailClosed('get-auth-state');
@@ -10324,21 +10330,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
       })
       .then(async () => {
-        const response = { success: true, state: await getPublishableAuthGateState() };
+        const state = await getPublishableAuthGateState();
+        state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
+        const response = { success: true, state };
         if (message.includeConfig) response.config = CONFIG;
-        sendResponse(response);
+        sendOrdinaryAuthStateResponse(response);
       })
       .catch(async (error) => {
         try {
+          const state = await getPublishableAuthGateState();
+          state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
           const response = {
             success: false,
             error: error.message,
-            state: await getPublishableAuthGateState(),
+            state,
           };
           if (message.includeConfig) response.config = CONFIG;
-          sendResponse(response);
+          sendOrdinaryAuthStateResponse(response);
         } catch {
-          sendResponse({ success: false, error: 'Authentication state is unavailable' });
+          sendOrdinaryAuthStateResponse({
+            success: false,
+            error: 'Authentication state is unavailable',
+          });
         }
       });
     return true;

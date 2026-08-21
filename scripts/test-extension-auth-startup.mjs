@@ -1082,6 +1082,23 @@ async function main() {
     fixture = await startFixtureServer();
     cpSync(sourceExtensionPath, extensionPath, { recursive: true });
     writeFileSync(join(extensionPath, 'config.js'), `globalThis.CLASSPILOT_SERVER_URL = ${JSON.stringify(fixture.origin)};\n`);
+    writeFileSync(
+      join(extensionPath, 'cold-auth-cohort.html'),
+      '<!doctype html><meta charset="utf-8"><title>Cold auth cohort</title><script src="cold-auth-cohort.js"></script>',
+    );
+    writeFileSync(join(extensionPath, 'cold-auth-cohort.js'), `
+      const requestAuthState = () => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
+          const error = chrome.runtime.lastError;
+          resolve(error ? { success: false, error: error.message } : response);
+        });
+      });
+      Promise.all([requestAuthState(), requestAuthState(), requestAuthState()])
+        .then(async (first) => {
+          const later = await requestAuthState();
+          globalThis.__classpilotColdAuthCohort = { first, later };
+        });
+    `);
 
     // Prime only the school policy in a persistent profile, then close Chrome.
     // The measured navigation therefore wakes a fresh extension worker.
@@ -2533,6 +2550,34 @@ async function main() {
     await context.close();
     context = await launchContext(executablePath, profilePath, extensionPath);
     const authenticatedPage = context.pages()[0] || await context.newPage();
+    await authenticatedPage.goto('chrome://version');
+    const cohortStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
+    assert.equal(cohortStop.stopped, true, 'could not stop the MV3 worker before cold cohort requests');
+    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await authenticatedPage.waitForFunction(() => Boolean(globalThis.__classpilotColdAuthCohort), null, {
+      timeout: 7_000,
+    });
+    const coldAuthCohort = await authenticatedPage.evaluate(() => globalThis.__classpilotColdAuthCohort);
+    assert.equal(coldAuthCohort.first.length, 3);
+    for (const [index, response] of coldAuthCohort.first.entries()) {
+      assert.equal(response?.success, true, `cold auth cohort request ${index + 1} failed`);
+      assert.equal(response?.state?.phase, 'authenticated');
+      assert.equal(
+        response?.state?.coldWorker,
+        true,
+        `cold auth cohort request ${index + 1} lost the worker-wake marker`,
+      );
+    }
+    assert.equal(coldAuthCohort.later?.success, true);
+    assert.equal(coldAuthCohort.later?.state?.phase, 'authenticated');
+    assert.equal(
+      coldAuthCohort.later?.state?.coldWorker,
+      false,
+      'ordinary auth requests stayed cold after the first-response cohort completed',
+    );
+
     await authenticatedPage.goto('chrome://version');
     const authenticatedStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
     assert.equal(authenticatedStop.stopped, true, 'could not stop the MV3 worker before authenticated navigation');
