@@ -4599,6 +4599,15 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     }
   }
 
+  // 2.6.8: the pause fence is MONOTONIC across clears — a later clear (e.g.
+  // a second sign-out tap after identity was already nulled) must never lower
+  // a pause an earlier clear raised, or the next worker wake auto-registers
+  // the student straight back in. Only a deliberate credentialed login (or a
+  // chrome-profile email CHANGE, which clears the stored pause explicitly)
+  // re-enables auto-registration.
+  const nextAutoRegistrationPaused =
+    pauseAutoRegistration || CONFIG.autoRegistrationPaused === true;
+
   CONFIG.studentToken = null;
   CONFIG.studentEmail = null;
   CONFIG.studentName = null;
@@ -4606,7 +4615,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   CONFIG.activeStudentSessionId = null;
   CONFIG.identitySource = null;
   CONFIG.manualLoginLastSeenAt = null;
-  CONFIG.autoRegistrationPaused = pauseAutoRegistration;
+  CONFIG.autoRegistrationPaused = nextAutoRegistrationPaused;
   CONFIG.sharedAuthLockedSinceAt = null;
 
   // A heartbeat begun under the old token may still finish while sign-out is
@@ -4616,12 +4625,12 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
 
   await clearStoredAuthState({
     registered: false,
-    autoRegistrationPaused: pauseAutoRegistration,
+    autoRegistrationPaused: nextAutoRegistrationPaused,
   });
   studentAuthCommitPending = false;
   studentAuthCommitPendingGeneration = 0;
   completeAuthCommitRecoveryBarrier();
-  if (!pauseAutoRegistration) {
+  if (!nextAutoRegistrationPaused) {
     // Chrome-profile transitions immediately continue into a fresh,
     // generation-fenced registration. Explicit/shared-device sign-outs keep
     // the fence raised until the next deliberate student login.
@@ -6585,7 +6594,11 @@ async function sendHeartbeat(reason = 'manual') {
         return;
       }
       if (isManualIdentitySource()) {
-        await clearStudentAuth('manual-token-invalid', { notifyBackend: false });
+        // 2.6.8: a server-invalidated manual session (teacher signed the
+        // student out server-side, session replaced) must not leave
+        // auto-registration enabled — that re-signed the student in on the
+        // next worker wake.
+        await clearStudentAuth('manual-token-invalid', { notifyBackend: false, pauseAutoRegistration: true });
         return;
       }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
@@ -10402,7 +10415,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'student-sign-out') {
-    clearStudentAuth('explicit_sign_out', { notifyBackend: true, pauseAutoRegistration: isManualIdentitySource() })
+    // 2.6.8: a deliberate sign-out ALWAYS parks the device at the gate. The
+    // pause was previously conditional on isManualIdentitySource(), so a
+    // chrome_profile student (or a sign-out racing an already-cleared
+    // identity) left auto-registration enabled and the next worker wake —
+    // the 5-minute 'wake-up' alarm — silently signed the student back in.
+    clearStudentAuth('explicit_sign_out', { notifyBackend: true, pauseAutoRegistration: true })
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
