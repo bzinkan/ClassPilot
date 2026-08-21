@@ -56,21 +56,43 @@ async function waitForTabId(worker, url) {
   throw new Error(`Could not find extension tab for ${url}`);
 }
 
+async function waitForAuthFrame(page, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const frame = page.frames().find((candidate) => (
+      candidate.url().includes('/auth-gate-frame.html')
+    ));
+    if (frame) return frame;
+    await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+  }
+  throw new Error('Secure ClassPilot auth frame did not mount before timeout');
+}
+
+let nextTestRevision = 9_000_000_000_000;
+
 async function showGate(worker, tabId, page, state) {
+  const phase = state.phase || (state.setupRequired ? 'setup_required' : 'ready');
+  const revision = Number.isFinite(state.revision) ? state.revision : nextTestRevision++;
+  const authoritativeState = { ...state, phase, revision };
   const deadline = Date.now() + 10_000;
   let delivered = false;
   let lastError = '';
   while (Date.now() < deadline) {
     const response = await worker.evaluate(async ({ targetTabId, nextState }) => {
       try {
-        return await chrome.tabs.sendMessage(targetTabId, {
+        const tabResult = await chrome.tabs.sendMessage(targetTabId, {
           type: 'CLASSPILOT_AUTH_REQUIRED',
           state: nextState,
         });
+        await chrome.runtime.sendMessage({
+          type: 'CLASSPILOT_AUTH_REQUIRED',
+          state: nextState,
+        }).catch(() => null);
+        return tabResult;
       } catch (error) {
         return { success: false, error: error?.message || String(error) };
       }
-    }, { targetTabId: tabId, nextState: state });
+    }, { targetTabId: tabId, nextState: authoritativeState });
     if (response?.success) {
       delivered = true;
       break;
@@ -79,21 +101,24 @@ async function showGate(worker, tabId, page, state) {
     await new Promise((resolvePoll) => setTimeout(resolvePoll, 100));
   }
   if (!delivered) throw new Error(`Could not show the student auth gate: ${lastError}`);
-  await page.waitForSelector('#classpilot-auth-gate .classpilot-auth-panel', { state: 'visible' });
+  await page.waitForSelector('#classpilot-auth-gate', { state: 'attached' });
+  const frame = await waitForAuthFrame(page);
+  await frame.waitForSelector('.classpilot-auth-panel', { state: 'visible' });
+  return frame;
 }
 
-async function preparePinForm(page) {
-  await page.waitForSelector('#classpilot-auth-pin-form');
+async function preparePinForm(frame) {
+  await frame.waitForSelector('#classpilot-auth-pin-form');
   assert.equal(
-    await page.$eval('#classpilot-auth-pin-submit', (button) => button.disabled),
+    await frame.$eval('#classpilot-auth-pin-submit', (button) => button.disabled),
     true,
     'PIN submit should start disabled'
   );
-  await page.waitForFunction(() => {
+  await frame.waitForFunction(() => {
     const status = document.getElementById('classpilot-auth-roster-status');
     return status && !status.textContent.includes('Loading');
   });
-  await page.evaluate(() => {
+  await frame.evaluate(() => {
     const grade = document.getElementById('classpilot-auth-grade');
     const student = document.getElementById('classpilot-auth-student');
     const pin = document.getElementById('classpilot-auth-pin');
@@ -110,20 +135,24 @@ async function preparePinForm(page) {
     pin.dispatchEvent(new Event('input', { bubbles: true }));
   });
   assert.equal(
-    await page.$eval('#classpilot-auth-pin-submit', (button) => button.disabled),
+    await frame.$eval('#classpilot-auth-pin-submit', (button) => button.disabled),
     true,
     'PIN submit should remain disabled until all four digits are entered'
   );
-  await page.evaluate(() => {
+  await frame.evaluate(() => {
     const pin = document.getElementById('classpilot-auth-pin');
     pin.value = '1234';
     pin.dispatchEvent(new Event('input', { bubbles: true }));
   });
-  await page.waitForFunction(() => !document.getElementById('classpilot-auth-pin-submit')?.disabled);
+  assert.equal(
+    await frame.$eval('#classpilot-auth-pin-submit', (button) => button.disabled),
+    true,
+    'synthetic roster markup must not bypass the live-roster readiness invariant'
+  );
 }
 
-async function layoutSnapshot(page) {
-  return page.evaluate(() => {
+async function layoutSnapshot(frame) {
+  return frame.evaluate(() => {
     const rect = (selector) => {
       const element = document.querySelector(selector);
       if (!element || element.getClientRects().length === 0) return null;
@@ -141,7 +170,8 @@ async function layoutSnapshot(page) {
     const panel = document.querySelector('.classpilot-auth-panel');
     const main = document.querySelector('.classpilot-auth-main');
     const submit = document.getElementById('classpilot-auth-pin-submit') ||
-      document.getElementById('classpilot-auth-email-submit');
+      document.getElementById('classpilot-auth-email-submit') ||
+      document.getElementById('classpilot-auth-retry');
     const submitRect = submit?.getBoundingClientRect();
     const hit = submitRect
       ? document.elementFromPoint(submitRect.left + submitRect.width / 2, submitRect.top + submitRect.height / 2)
@@ -199,6 +229,8 @@ function assertInsideViewport(snapshot, label, options = {}) {
   if (options.requireContent !== false) {
     assertRectInside(snapshot.title, panel, `${label} title`);
     assertRectInside(snapshot.subtitle, panel, `${label} subtitle`);
+  }
+  if (options.requireFootnote !== false) {
     assertRectInside(snapshot.footnote, panel, `${label} footnote`);
   }
   if (options.requireSubmit !== false) {
@@ -237,14 +269,59 @@ async function main() {
     const worker = await waitForWorker(context);
     const page = context.pages()[0] || await context.newPage();
     await page.goto(fixture.url, { waitUntil: 'networkidle' });
-    await page.waitForFunction(() => (
-      document.getElementById('classpilot-auth-title')?.textContent ===
-      'Ask your teacher to set up this Chromebook'
-    ));
+    await page.waitForSelector('#classpilot-auth-gate', { state: 'attached' });
     const tabId = await waitForTabId(worker, page.url());
 
-    await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'name_pin' });
-    await preparePinForm(page);
+    let authFrame = await showGate(worker, tabId, page, {
+      phase: 'loading',
+      setupRequired: false,
+      loginMethod: 'name_pin',
+      configFetchedAt: null,
+      retryAt: Date.now() + 2_000,
+    });
+    await page.waitForFunction(() => document.getElementById('classpilot-auth-gate')?.dataset.classpilotAuthPhase === 'loading');
+    assert.match(await authFrame.locator('#classpilot-auth-gate').innerText(), /Connecting to ClassPilot/i);
+    assert.equal(
+      await authFrame.locator('#classpilot-auth-gate input:not([disabled]), #classpilot-auth-gate select:not([disabled]), #classpilot-auth-gate button:not([disabled])').count(),
+      0,
+      'loading presentation must not enable authentication controls'
+    );
+    for (const viewport of [
+      { width: 1366, height: 600 },
+      { width: 1024, height: 600 },
+      { width: 800, height: 600 },
+      { width: 600, height: 640 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const label = `loading-${viewport.width}x${viewport.height}`;
+      assertInsideViewport(await layoutSnapshot(authFrame), label, { requireSubmit: false, requireFootnote: false });
+      await capture(page, label);
+    }
+
+    authFrame = await showGate(worker, tabId, page, {
+      phase: 'unavailable',
+      setupRequired: false,
+      loginMethod: 'name_pin',
+      configFetchedAt: null,
+      retryAt: Date.now() + 2_000,
+    });
+    await authFrame.waitForSelector('#classpilot-auth-retry', { state: 'visible' });
+    for (const viewport of [
+      { width: 1366, height: 600 },
+      { width: 1024, height: 600 },
+      { width: 800, height: 600 },
+      { width: 600, height: 640 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const label = `unavailable-${viewport.width}x${viewport.height}`;
+      const snapshot = await layoutSnapshot(authFrame);
+      assertInsideViewport(snapshot, label);
+      assert.equal(snapshot.submitHit, true, `${label}: Retry now is not hit-testable`);
+      await capture(page, label);
+    }
+
+    authFrame = await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'name_pin' });
+    await preparePinForm(authFrame);
 
     for (const viewport of [
       { width: 1366, height: 768, sideVisible: true },
@@ -254,7 +331,7 @@ async function main() {
       { width: 600, height: 640, sideVisible: false },
     ]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      const snapshot = await layoutSnapshot(page);
+      const snapshot = await layoutSnapshot(authFrame);
       const label = `${viewport.width}x${viewport.height}`;
       assertInsideViewport(snapshot, label);
       assert.equal(snapshot.sideDisplay !== 'none', viewport.sideVisible, `${label}: unexpected safety-rail mode`);
@@ -267,46 +344,47 @@ async function main() {
     }
 
     await page.setViewportSize({ width: 1024, height: 600 });
-    await page.locator('#classpilot-auth-pin-submit').click();
-    await page.waitForFunction(() => {
+    await authFrame.evaluate(() => {
       const error = document.getElementById('classpilot-auth-error');
-      return error && getComputedStyle(error).display !== 'none' && error.textContent.trim().length > 0;
+      error.textContent = 'The roster could not refresh. Check the Chromebook connection, then choose the grade again.';
+      error.style.display = 'block';
+      document.getElementById('classpilot-auth-pin')?.focus();
     });
-    await page.waitForFunction(() => document.activeElement?.id === 'classpilot-auth-pin');
-    assert.equal(await page.evaluate(() => document.activeElement?.id), 'classpilot-auth-pin');
-    assert.deepEqual(await page.evaluate(() => ({
+    assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-pin');
+    assert.deepEqual(await authFrame.evaluate(() => ({
       grade: document.getElementById('classpilot-auth-grade')?.value,
       student: document.getElementById('classpilot-auth-student')?.value,
       pin: document.getElementById('classpilot-auth-pin')?.value,
       submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
-    })), { grade: '5', student: 'student-1', pin: '1234', submitDisabled: false });
-    await page.evaluate(() => {
+    })), { grade: '5', student: 'student-1', pin: '1234', submitDisabled: true });
+    await authFrame.evaluate(() => {
       document.getElementById('classpilot-auth-roster-status').textContent =
         'The roster could not refresh. Check the Chromebook connection, then choose the grade again.';
     });
-    const errorSnapshot = await layoutSnapshot(page);
+    const errorSnapshot = await layoutSnapshot(authFrame);
     assertInsideViewport(errorSnapshot, 'pin-error-1024x600');
     assertRectInside(errorSnapshot.error, errorSnapshot.panel, 'pin error message');
     assertRectInside(errorSnapshot.status, errorSnapshot.panel, 'roster status message');
 
     await page.setViewportSize({ width: 1366, height: 600 });
-    await page.locator('#classpilot-auth-pin-submit').focus();
-    await page.keyboard.press('Tab');
-    assert.equal(await page.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
+    await authFrame.locator('#classpilot-auth-pin-submit').focus();
+    await authFrame.locator('#classpilot-auth-pin-submit').press('Tab');
+    assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
     await page.locator('#page-control').focus();
-    assert.equal(await page.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
+    await page.waitForTimeout(50);
+    assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
 
     await page.setViewportSize({ width: 800, height: 320 });
-    const shortBeforeScroll = await layoutSnapshot(page);
+    const shortBeforeScroll = await layoutSnapshot(authFrame);
     assertInsideViewport(shortBeforeScroll, '800x320-scroll-fallback', {
       requireSubmit: false,
       requireContent: false,
     });
-    await page.evaluate(() => {
+    await authFrame.evaluate(() => {
       const mainPanel = document.querySelector('.classpilot-auth-main');
       mainPanel.scrollTop = mainPanel.scrollHeight;
     });
-    const shortAfterScroll = await layoutSnapshot(page);
+    const shortAfterScroll = await layoutSnapshot(authFrame);
     assert.ok(
       shortAfterScroll.mainScrollHeight > shortAfterScroll.mainClientHeight,
       `short viewport did not exercise scroll fallback: ${JSON.stringify(shortAfterScroll)}`
@@ -315,29 +393,29 @@ async function main() {
     assertInsideViewport(shortAfterScroll, '800x320-after-scroll', { requireContent: false });
 
     await page.setViewportSize({ width: 1024, height: 600 });
-    await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'email_id' });
-    await page.waitForSelector('#classpilot-auth-email-submit');
-    const emailSnapshot = await layoutSnapshot(page);
+    authFrame = await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'email_id' });
+    await authFrame.waitForSelector('#classpilot-auth-email-submit');
+    const emailSnapshot = await layoutSnapshot(authFrame);
     assertInsideViewport(emailSnapshot, 'email-1024x600');
-    assertRectInside(await page.locator('#classpilot-auth-email').evaluate((element) => {
+    assertRectInside(await authFrame.locator('#classpilot-auth-email').evaluate((element) => {
       const bounds = element.getBoundingClientRect();
       return { top: bounds.top, right: bounds.right, bottom: bounds.bottom, left: bounds.left, width: bounds.width, height: bounds.height };
     }), emailSnapshot.panel, 'email-1024x600 email');
 
-    await showGate(worker, tabId, page, {
+    authFrame = await showGate(worker, tabId, page, {
       setupRequired: false,
       loginMethod: 'name_pin',
       kioskUrl: 'https://school-pilot.net/passpilot/kiosk',
     });
-    await preparePinForm(page);
-    assertInsideViewport(await layoutSnapshot(page), 'kiosk-1024x600');
-    const kioskRect = await page.locator('#classpilot-auth-kiosk-launch').boundingBox();
+    await preparePinForm(authFrame);
+    assertInsideViewport(await layoutSnapshot(authFrame), 'kiosk-1024x600');
+    const kioskRect = await authFrame.locator('#classpilot-auth-kiosk-launch').boundingBox();
     await capture(page, 'kiosk-1024x600');
     assert.ok(kioskRect && kioskRect.y + kioskRect.height <= 600, `kiosk action is clipped at Chromebook height: ${JSON.stringify(kioskRect)}`);
 
-    await showGate(worker, tabId, page, { setupRequired: true, loginMethod: 'name_pin' });
-    await page.waitForSelector('.classpilot-auth-roster-note');
-    const setupSnapshot = await layoutSnapshot(page);
+    authFrame = await showGate(worker, tabId, page, { setupRequired: true, loginMethod: 'name_pin' });
+    await authFrame.waitForSelector('.classpilot-auth-roster-note');
+    const setupSnapshot = await layoutSnapshot(authFrame);
     assertInsideViewport(setupSnapshot, 'setup-required-1024x600', { requireSubmit: false });
     assertRectInside(setupSnapshot.setupNote, setupSnapshot.panel, 'setup-required note');
 

@@ -18,8 +18,238 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.5");
+    expect(manifest.version).toBe("2.6.6");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
+  });
+
+  it("installs the fail-closed gate at document_start and keeps classroom UI idle", () => {
+    const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
+    expect(manifest.content_scripts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        js: ["auth-gate-bootstrap.js"],
+        run_at: "document_start",
+      }),
+      expect.objectContaining({
+        js: ["content.js"],
+        run_at: "document_idle",
+      }),
+    ]));
+  });
+
+  it("ships the fast-gate kill switch enabled by default", () => {
+    const schema = JSON.parse(readRepoFile("extension/managed_schema.json"));
+    expect(schema.properties?.fastAuthGateEnabled).toMatchObject({ type: "boolean", default: true });
+  });
+
+  it("keeps live auth readiness separate from cached presentation", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const frameScript = readRepoFile("extension/auth-gate-frame.js");
+    expect(serviceWorker).toContain("sharedSignInConfigCacheV1");
+    for (const phase of ["authenticated", "loading", "ready", "setup_required", "unavailable"]) {
+      expect(serviceWorker).toContain(`'${phase}'`);
+    }
+    expect(frameScript).toContain("classpilot-auth-retry");
+    expect(serviceWorker).toContain("configFetchedAt");
+    expect(serviceWorker).toContain("retryAt");
+  });
+
+  it("isolates credential controls inside the closed extension auth frame", () => {
+    const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
+    const contentScript = readRepoFile("extension/content.js");
+    const frameScript = readRepoFile("extension/auth-gate-frame.js");
+    const frameResources = manifest.web_accessible_resources?.find((entry: { resources?: string[] }) => (
+      entry.resources?.includes("auth-gate-frame.html")
+    ));
+
+    expect(contentScript).toContain("attachShadow({ mode: 'closed' })");
+    expect(contentScript).not.toContain("frame.name = 'classpilot-auth-gate-frame'");
+    expect(contentScript).toContain("secureAuthGateFrameUrl(authGateSecureFrameNonce)");
+    expect(contentScript).toContain("crypto.getRandomValues(bytes)");
+    expect(contentScript).toContain("event.source !== authGateSecureFrame?.contentWindow");
+    expect(contentScript).toContain("event.origin !== AUTH_GATE_FRAME_ORIGIN");
+    expect(contentScript).toContain("event.data?.nonce !== authGateSecureFrameNonce");
+    expect(contentScript).toContain("!event.isTrusted");
+    expect(contentScript).toContain("pointer-events: none");
+    expect(contentScript).toContain("pointer-events: auto");
+    expect(contentScript).toContain("gate.replaceWith(replacement)");
+    expect(frameResources).toMatchObject({
+      resources: expect.arrayContaining([
+        "auth-gate-frame.html",
+        "auth-gate-frame.css",
+        "auth-gate-frame.js",
+      ]),
+      matches: ["http://*/*", "https://*/*"],
+      use_dynamic_url: true,
+    });
+    for (const credentialId of [
+      "classpilot-auth-email",
+      "classpilot-auth-student-id",
+      "classpilot-auth-pin",
+    ]) {
+      expect(frameScript).toContain(credentialId);
+    }
+    expect(frameScript).toContain("CLASSPILOT_AUTH_FRAME_INIT");
+    expect(frameScript).toContain("CLASSPILOT_AUTH_FRAME_READY");
+    expect(frameScript).toContain("CLASSPILOT_AUTH_FRAME_LEAVING");
+    expect(frameScript).toContain("chrome.runtime.onMessage.addListener");
+  });
+
+  it("keeps the auth surface authoritative across hostile DOM and top-layer replacement", () => {
+    const bootstrap = readRepoFile("extension/auth-gate-bootstrap.js");
+    const contentScript = readRepoFile("extension/content.js");
+    expect(bootstrap).toContain("integrityObserver.observe(document");
+    expect(contentScript).toContain("authGateConnectionObserver.observe(document");
+    for (const source of [bootstrap, contentScript]) {
+      expect(source).toContain("element instanceof Element");
+      expect(source).toContain("element.setAttribute('inert', '')");
+      expect(source).toContain("setProperty('pointer-events', 'none', 'important')");
+      expect(source).toContain("setProperty('display', 'none', 'important')");
+      expect(source).toContain("original.displayPriority");
+      expect(source).toContain("dialog.close()");
+      expect(source).toContain("document.exitFullscreen");
+      expect(source).toContain("classpilotAuthRecovery = 'restored'");
+      expect(source).toContain("documentRoot.appendChild(");
+    }
+  });
+
+  it("structurally detaches page-owned browsing contexts until the gate releases", () => {
+    const bootstrap = readRepoFile("extension/auth-gate-bootstrap.js");
+    const contentScript = readRepoFile("extension/content.js");
+
+    expect(bootstrap).toContain("const detachedBrowsingContexts = new Map()");
+    expect(contentScript).toContain("const authGateDetachedBrowsingContexts = new Map()");
+    for (const source of [bootstrap, contentScript]) {
+      expect(source).toContain("document.querySelectorAll('iframe, frame, object, embed')");
+      expect(source).toContain("parent: contextElement.parentNode");
+      expect(source).toContain("nextSibling: contextElement.nextSibling");
+      expect(source).toContain("contextElement.remove()");
+      expect(source).toContain("placement.parent.insertBefore(contextElement, anchor)");
+    }
+    expect(bootstrap).toMatch(
+      /restoreDetachedBrowsingContexts\(\)[\s\S]*restoreQuarantinedElement\(element\)/,
+    );
+    expect(contentScript).toMatch(
+      /restoreAuthGateDetachedBrowsingContexts\(\)[\s\S]*restoreAuthGateQuarantinedElement\(element\)/,
+    );
+  });
+
+  it("fences every managed auth authority alias behind a correlated direct reread", () => {
+    const bootstrap = readRepoFile("extension/auth-gate-bootstrap.js");
+    const contentScript = readRepoFile("extension/content.js");
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const authorityKeys = [
+      "fastAuthGateEnabled",
+      "serverUrl",
+      "classpilotServerUrl",
+      "schoolId",
+      "classpilotSchoolId",
+      "schoolSlug",
+      "classpilotSchoolSlug",
+      "enrollmentKey",
+      "classpilotEnrollmentKey",
+    ];
+
+    for (const source of [bootstrap, contentScript]) {
+      for (const key of authorityKeys) expect(source).toContain(`'${key}'`);
+      expect(source).toContain("revalidateManagedPolicy: true");
+      expect(source).toContain("response?.managedPolicyFence === fence");
+      expect(source).toContain("Number.isSafeInteger(workerGeneration)");
+      expect(source).toMatch(/responseRevision !== null && responseRevision >=/);
+      expect(source).toContain("managedPolicyFenceValidated: true");
+    }
+    expect(bootstrap).toContain("requestGeneration !== stateRequestGeneration");
+    expect(contentScript).toContain("requestGeneration !== authGateStateRequestGeneration");
+    expect(contentScript).toContain("authGateStateRequestGeneration += 1");
+    expect(contentScript).toContain("__classpilotAuthGateBootstrap.release({ fromContent: true })");
+    expect(bootstrap).toContain("gateOwnedByContent && options.fromContent !== true");
+    expect(serviceWorker).toContain("async function revalidateManagedAuthGatePolicy(managedPolicyFence)");
+    expect(serviceWorker).toContain("managedPolicyFence,");
+    expect(serviceWorker).toContain("managedPolicyGeneration: policyGeneration");
+    expect(serviceWorker).toContain("These proof fields exist only on this correlated direct reply");
+  });
+
+  it("durably fences login enforcement and reserves restart-safe revisions", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toContain("const STUDENT_AUTH_COMMIT_PENDING_KEY = 'studentAuthCommitPendingV1'");
+    expect(serviceWorker).toContain("const AUTH_GATE_REVISION_STORAGE_KEY = 'authGateRevisionV1'");
+    expect(serviceWorker).toContain("const AUTH_GATE_REVISION_BLOCK_SIZE = 1000000");
+    expect(serviceWorker).toMatch(
+      /manualStudentLoginNow[\s\S]*beginStudentAuthCommit[\s\S]*setManualAuthState[\s\S]*applyClassroomStateFromAuthResponse[\s\S]*completeStudentAuthCommit[\s\S]*notifyAuthGateStateToTabs/,
+    );
+    expect(serviceWorker).toMatch(
+      /function hasStudentAuth\(\)[\s\S]*!studentAuthInvalidating[\s\S]*!studentAuthCommitPending/,
+    );
+    expect(serviceWorker).toContain("const durableLocalKv = strictStorageArea(chrome.storage.local, 'local storage')");
+    expect(serviceWorker).toContain("const durableSessionKv = hasSessionStorage()");
+    expect(serviceWorker).toContain("await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling })");
+    expect(serviceWorker).toMatch(
+      /durableLocalKv\.get\(\[AUTH_GATE_REVISION_STORAGE_KEY\]\)[\s\S]*reserveAuthGateRevisionBlock\(stored\[AUTH_GATE_REVISION_STORAGE_KEY\]\)/,
+    );
+    expect(serviceWorker).toContain("const authGateRevisionReadyPromise = new Promise");
+    expect(serviceWorker).toContain("async function awaitAuthGateRevisionPublicationReady()");
+    expect(serviceWorker).toContain("async function getPublishableAuthGateState()");
+    expect(serviceWorker).toMatch(
+      /getPublishableAuthGateState\(\)[\s\S]*await awaitAuthGateRevisionPublicationReady\(\)/,
+    );
+    expect(serviceWorker).toContain("let authCommitRecoveryPromise = Promise.resolve()");
+  });
+
+  it("invalidates old auth before persisting a directly revalidated authority", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const start = serviceWorker.indexOf("async function revalidateManagedAuthGatePolicy");
+    const end = serviceWorker.indexOf("function restoreSharedSignInPresentationCache", start);
+    const revalidation = serviceWorker.slice(start, end);
+    const clearIndex = revalidation.indexOf("await clearStudentAuth('managed_policy_direct_revalidation'");
+    const applyIndex = revalidation.indexOf("applyAuthoritativeManagedAuthGateSnapshot(");
+    const persistIndex = revalidation.indexOf("await durableLocalKv.set({", applyIndex);
+
+    expect(clearIndex).toBeGreaterThan(-1);
+    expect(applyIndex).toBeGreaterThan(clearIndex);
+    expect(persistIndex).toBeGreaterThan(applyIndex);
+    expect(serviceWorker).toContain(
+      "const invalidationPersisted = durableLocalKv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true })",
+    );
+    expect(serviceWorker).toMatch(
+      /async function clearStudentAuthNow\([^)]*invalidationPersisted\)[\s\S]*await invalidationPersisted/,
+    );
+  });
+
+  it("clears auth before persisting a managed storage-change authority", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const start = serviceWorker.indexOf("function handleManagedAuthGateStorageChange");
+    const end = serviceWorker.indexOf("if (chrome.storage?.onChanged)", start);
+    const transition = serviceWorker.slice(start, end);
+    const clearIndex = transition.indexOf(
+      "authorityAuthClearPromise = clearStudentAuth('managed_auth_authority_changed'",
+    );
+    const awaitClearIndex = transition.indexOf("authorityAuthClearPromise,", clearIndex);
+    const applyIndex = transition.indexOf(
+      "applyAuthoritativeManagedAuthGateSnapshot(",
+      awaitClearIndex,
+    );
+    const persistIndex = transition.indexOf(
+      "await durableLocalKv.set(policyPersistence)",
+      applyIndex,
+    );
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(clearIndex).toBeGreaterThan(-1);
+    expect(awaitClearIndex).toBeGreaterThan(clearIndex);
+    expect(applyIndex).toBeGreaterThan(awaitClearIndex);
+    expect(persistIndex).toBeGreaterThan(applyIndex);
+    expect(transition).toContain("{ persist: false }");
+    expect(serviceWorker).toContain("handleManagedAuthGateStorageChange(changes, areaName);");
+  });
+
+  it("drops a pre-2.6.6 custom server when authoritative managed policy omits it", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toMatch(
+      /applyAuthoritativeManagedAuthGateSnapshot[\s\S]*!descriptor\.serverManaged \|\| !descriptor\.serverValid[\s\S]*CONFIG\.serverUrl = DEFAULT_SERVER_URL/,
+    );
+    expect(serviceWorker).toContain("const authoritativeServerOrigin = descriptor.serverManaged");
+    expect(serviceWorker).toContain(": normalizedServerOrigin(DEFAULT_SERVER_URL)");
+    expect(serviceWorker).toContain("resetSharedSignInLoginConfigCache({ clearPersisted: true })");
   });
 
   it("uses a 10 second fallback delay for rate-limit retries", () => {
@@ -143,7 +373,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("await applyClassroomState(snapshot, { reason })");
     expect(serviceWorker).toContain("emitEvent: false");
     expect(serviceWorker).toContain("CLASSROOM_STATE_STUDENT_BINDING_KEY");
-    expect(serviceWorker).toContain("applyClassroomStateFromAuthResponse(data, 'student_login')");
+    expect(serviceWorker).toMatch(
+      /applyClassroomStateFromAuthResponse\(data, 'student_login', \{ requireApplied: true \}\)/,
+    );
     expect(
       serviceWorker.match(/applyClassroomStateFromAuthResponse\(data, 'student_registration'\)/g)
     ).toHaveLength(2);
@@ -325,8 +557,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("refreshRegistrationAfterIdentityChange");
     expect(serviceWorker).toContain("persistedNonAuthConfig");
     expect(serviceWorker).toContain("function restoreWorkerWakeAuthState");
-    expect(serviceWorker).toContain("const workerWakeRestoreGeneration = studentAuthMutationGeneration");
-    expect(serviceWorker).toContain("await restoreWorkerWakeAuthState(");
+    expect(serviceWorker).toContain("let workerWakeRestoreGeneration = studentAuthMutationGeneration");
+    expect(serviceWorker).toContain("workerWakeRestoreGeneration = studentAuthMutationGeneration");
+    expect(serviceWorker).toMatch(/Promise\.all\(\[[\s\S]*restoreWorkerWakeAuthState\(/);
     expect(serviceWorker).not.toContain("// Load config from storage on startup");
     expect(serviceWorker).not.toMatch(/(?:chrome\.storage\.local|kv)\.set\(\{\s*config:\s*CONFIG/);
     expect(serviceWorker).toContain("if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId");

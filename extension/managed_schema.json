@@ -20,6 +20,12 @@
       "title": "Shared Chromebook setup key",
       "description": "Enrollment/setup key generated in the ClassPilot admin panel.",
       "type": "string"
+    },
+    "fastAuthGateEnabled": {
+      "title": "Fast student sign-in gate",
+      "description": "Show the student sign-in gate immediately while current sign-in configuration loads.",
+      "type": "boolean",
+      "default": true
     }
   }
 }
