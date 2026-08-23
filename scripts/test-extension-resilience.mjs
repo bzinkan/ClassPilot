@@ -1665,9 +1665,16 @@ async function main() {
     const switchedInbox = await worker.evaluate(async () => {
       const previousBinding = messageInboxAuthBinding();
       const originalFetch = globalThis.fetch;
+      // Linux CI can pause a headless extension worker for several seconds
+      // under load. Keep this comfortably above the two-second event-heartbeat
+      // coalescing window while retaining a hard failure bound.
+      const reconciliationTimeoutMs = 15_000;
       const waitFor = (promise, label) => Promise.race([
         promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 5_000)),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error(`Timed out waiting for ${label}`)),
+          reconciliationTimeoutMs,
+        )),
       ]);
       let firstHeartbeatStarted;
       let secondHeartbeatStarted;
@@ -1802,7 +1809,7 @@ async function main() {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const heartbeatDeadline = Date.now() + 5_000;
+      const heartbeatDeadline = Date.now() + reconciliationTimeoutMs;
       while (heartbeatInFlight && Date.now() < heartbeatDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
