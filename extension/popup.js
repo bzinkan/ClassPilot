@@ -6,19 +6,11 @@ let currentAuthState = null;
 let statusIntervalId = null;
 let handRaisingEnabled = true;
 let messagingEnabled = true;
+let popupStudentActionEpoch = 0;
 
 // Initialize popup
 document.addEventListener('DOMContentLoaded', async () => {
-  // Get config from background
-  chrome.runtime.sendMessage({ type: 'get-config' }, async (response) => {
-    const config = response.config;
-    currentConfig = config;
-
-    // ALWAYS show main view with auto-detected info (no manual registration)
-    showMainView(config);
-    refreshAuthState();
-    updateLicenseBanner();
-  });
+  refreshPopupConfig();
 
   // Load and display messages
   loadMessages();
@@ -51,10 +43,31 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     if ((namespace === 'local' || namespace === 'session') &&
         (changes.studentToken || changes.studentEmail || changes.studentName)) {
+      popupStudentActionEpoch += 1;
       refreshAuthState();
     }
   });
 });
+
+function refreshPopupConfig() {
+  const requestEpoch = popupStudentActionEpoch;
+  chrome.runtime.sendMessage({ type: 'get-config' }, (response) => {
+    if (
+      requestEpoch !== popupStudentActionEpoch
+      || chrome.runtime.lastError
+      || !response?.config
+    ) {
+      return;
+    }
+
+    currentConfig = response.config;
+
+    // ALWAYS show main view with auto-detected info (no manual registration)
+    showMainView(currentConfig);
+    refreshAuthState();
+    updateLicenseBanner();
+  });
+}
 
 function showMainView(config) {
   const setupView = document.getElementById('setup-view');
@@ -89,8 +102,15 @@ function showMainView(config) {
 }
 
 function refreshAuthState() {
+  const requestEpoch = popupStudentActionEpoch;
   chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
-    if (chrome.runtime.lastError || !response?.success) return;
+    if (
+      requestEpoch !== popupStudentActionEpoch
+      || chrome.runtime.lastError
+      || !response?.success
+    ) {
+      return;
+    }
     currentAuthState = response.state;
     if (response.config) {
       currentConfig = response.config;
@@ -120,14 +140,35 @@ function updateAuthUI() {
   }
 }
 
-function signOutStudent() {
+async function signOutStudent() {
   const signOutBtn = document.getElementById('sign-out-btn');
   if (signOutBtn) {
     signOutBtn.disabled = true;
     signOutBtn.textContent = 'Signing out...';
   }
 
-  chrome.runtime.sendMessage({ type: 'student-sign-out' }, (response) => {
+  const requestEpoch = popupStudentActionEpoch;
+  const contextResponse = await requestServiceWorker({ type: 'get-student-message-context' });
+  const studentMessageContext = contextResponse?.success === true
+    ? contextResponse.studentMessageContext
+    : null;
+  if (
+    requestEpoch !== popupStudentActionEpoch
+    || !studentMessageContext?.authContextId
+  ) {
+    if (signOutBtn) {
+      signOutBtn.disabled = false;
+      signOutBtn.textContent = 'Log out';
+    }
+    alert('The signed-in student changed. Please try again.');
+    return;
+  }
+
+  chrome.runtime.sendMessage({
+    type: 'student-sign-out',
+    studentMessageContext: { ...studentMessageContext },
+  }, (response) => {
+    if (requestEpoch !== popupStudentActionEpoch) return;
     if (signOutBtn) {
       signOutBtn.disabled = false;
       signOutBtn.textContent = 'Log out';
@@ -295,8 +336,56 @@ function requestServiceWorker(payload) {
   });
 }
 
+async function capturePopupStudentActionContext() {
+  const epoch = popupStudentActionEpoch;
+  const response = await requestServiceWorker({ type: 'get-student-message-context' });
+  if (
+    epoch !== popupStudentActionEpoch
+    || response?.success !== true
+    || !response.studentMessageContext?.authContextId
+    || !response.fabBinding
+    || !response.activeTeachingSessionId
+  ) return null;
+  return Object.freeze({
+    epoch,
+    studentMessageContext: { ...response.studentMessageContext },
+    fabBinding: response.fabBinding,
+    sessionId: response.activeTeachingSessionId,
+  });
+}
+
+function popupStudentActionPayload(context) {
+  return {
+    studentMessageContext: { ...context.studentMessageContext },
+    fabBinding: context.fabBinding,
+    sessionId: context.sessionId,
+  };
+}
+
+async function popupStudentActionContextIsCurrent(context) {
+  if (!context || context.epoch !== popupStudentActionEpoch) return false;
+  const response = await requestServiceWorker({
+    type: 'validate-student-message-context',
+    studentMessageContext: context.studentMessageContext,
+  });
+  return Boolean(
+    context.epoch === popupStudentActionEpoch
+    && response?.success === true
+    && response.current === true
+    && response.fabBinding === context.fabBinding
+    && Array.isArray(response.activeTeachingSessionIds)
+    && response.activeTeachingSessionIds.includes(context.sessionId)
+  );
+}
+
 async function loadMessages() {
-  const response = await requestServiceWorker({ type: 'get-message-inbox' });
+  const actionContext = await capturePopupStudentActionContext();
+  if (!actionContext) return;
+  const response = await requestServiceWorker({
+    type: 'get-message-inbox',
+    ...popupStudentActionPayload(actionContext),
+  });
+  if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
   const messages = response?.success && Array.isArray(response.messages) ? response.messages : [];
   
   const container = document.getElementById('messages-container');
@@ -349,11 +438,17 @@ async function loadMessages() {
   document.getElementById('clear-messages-btn')?.addEventListener('click', clearMessages);
   
   // Mark all messages as read
-  markMessagesAsRead();
+  markMessagesAsRead(actionContext);
 }
 
-async function markMessagesAsRead() {
-  await requestServiceWorker({ type: 'mark-message-inbox-read' });
+async function markMessagesAsRead(existingContext = null) {
+  const actionContext = existingContext || await capturePopupStudentActionContext();
+  if (!actionContext) return;
+  await requestServiceWorker({
+    type: 'mark-message-inbox-read',
+    ...popupStudentActionPayload(actionContext),
+  });
+  if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
   
   // Connectivity owns the badge; reading messages must not erase its warning.
   chrome.runtime.sendMessage({ type: 'refresh-connectivity-badge' }, () => {});
@@ -361,7 +456,13 @@ async function markMessagesAsRead() {
 
 async function clearMessages() {
   if (confirm('Are you sure you want to clear all messages?')) {
-    await requestServiceWorker({ type: 'clear-message-inbox-display' });
+    const actionContext = await capturePopupStudentActionContext();
+    if (!actionContext) return;
+    await requestServiceWorker({
+      type: 'clear-message-inbox-display',
+      ...popupStudentActionPayload(actionContext),
+    });
+    if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
     loadMessages();
   }
 }
@@ -414,18 +515,21 @@ async function raiseHand() {
   btn.textContent = 'Raising...';
 
   try {
-    // Send to background script
-    chrome.runtime.sendMessage({ type: 'raise-hand' }, (response) => {
-      if (response?.success) {
-        handRaised = true;
-        chrome.storage.local.set({ handRaised: true });
-        updateRaiseHandUI(true, handRaisingEnabled);
-      } else {
-        btn.disabled = false;
-        btn.textContent = '✋ Raise Hand';
-        alert(response?.error || 'Failed to raise hand. Please try again.');
-      }
+    const actionContext = await capturePopupStudentActionContext();
+    if (!actionContext) throw new Error('No active class session');
+    const response = await requestServiceWorker({
+      type: 'raise-hand',
+      ...popupStudentActionPayload(actionContext),
     });
+    if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
+    if (response?.success) {
+      handRaised = true;
+      updateRaiseHandUI(true, handRaisingEnabled);
+    } else {
+      btn.disabled = false;
+      btn.textContent = '✋ Raise Hand';
+      alert(response?.error || 'Failed to raise hand. Please try again.');
+    }
   } catch (error) {
     console.error('Error raising hand');
     btn.disabled = false;
@@ -436,15 +540,19 @@ async function raiseHand() {
 
 async function lowerHand() {
   try {
-    chrome.runtime.sendMessage({ type: 'lower-hand' }, (response) => {
-      if (response?.success) {
-        handRaised = false;
-        chrome.storage.local.set({ handRaised: false });
-        updateRaiseHandUI(false, handRaisingEnabled);
-      } else {
-        alert(response?.error || 'Failed to lower hand. Please try again.');
-      }
+    const actionContext = await capturePopupStudentActionContext();
+    if (!actionContext) throw new Error('No active class session');
+    const response = await requestServiceWorker({
+      type: 'lower-hand',
+      ...popupStudentActionPayload(actionContext),
     });
+    if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
+    if (response?.success) {
+      handRaised = false;
+      updateRaiseHandUI(false, handRaisingEnabled);
+    } else {
+      alert(response?.error || 'Failed to lower hand. Please try again.');
+    }
   } catch (error) {
     console.error('Error lowering hand');
     alert('Failed to lower hand. Please try again.');
@@ -480,30 +588,34 @@ async function sendStudentMessage(messageType = 'message') {
     || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   try {
-    chrome.runtime.sendMessage({
+    const actionContext = await capturePopupStudentActionContext();
+    if (!actionContext) throw new Error('No active class session');
+    const response = await requestServiceWorker({
       type: 'send-student-message',
       clientMessageId,
       message,
-      messageType
-    }, (response) => {
-      // Re-enable buttons
-      if (sendBtn) sendBtn.disabled = false;
-      if (questionBtn) questionBtn.disabled = false;
-
-      if (response?.success) {
-        input.value = '';
-        const sentStatus = document.getElementById('message-sent-status');
-        if (sentStatus) {
-          sentStatus.textContent = response.queued ? 'Message queued — retrying' : 'Message delivered';
-        }
-        sentStatus?.classList.remove('hidden');
-        setTimeout(() => {
-          sentStatus?.classList.add('hidden');
-        }, 3000);
-      } else {
-        alert(response?.error || 'Failed to send message. Please try again.');
-      }
+      messageType,
+      ...popupStudentActionPayload(actionContext),
     });
+    if (!(await popupStudentActionContextIsCurrent(actionContext))) return;
+    // Re-enable buttons
+    if (sendBtn) sendBtn.disabled = false;
+    if (questionBtn) questionBtn.disabled = false;
+
+    if (response?.success) {
+      input.value = '';
+      const sentStatus = document.getElementById('message-sent-status');
+      if (sentStatus) {
+        sentStatus.textContent = response.queued ? 'Message queued — retrying' : 'Message delivered';
+      }
+      sentStatus?.classList.remove('hidden');
+      const statusEpoch = actionContext.epoch;
+      setTimeout(() => {
+        if (statusEpoch === popupStudentActionEpoch) sentStatus?.classList.add('hidden');
+      }, 3000);
+    } else {
+      alert(response?.error || 'Failed to send message. Please try again.');
+    }
   } catch (error) {
     console.error('Error sending message');
     if (sendBtn) sendBtn.disabled = false;

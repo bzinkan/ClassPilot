@@ -7,6 +7,7 @@ let localStream = null;
 let teacherId = null;
 let iceQueue = []; // Queue ICE candidates until peer is ready
 let activeNegotiationId = null;
+let activeLiveViewStartGeneration = 0;
 let activeLiveViewAuthContextId = null;
 let activeLiveViewAuthGeneration = 0;
 let activeLiveViewConnectionGeneration = 0;
@@ -14,6 +15,7 @@ let activeLiveViewServerOrigin = null;
 let activeLiveViewStudentSessionId = null;
 let activeLiveViewRestartGeneration = 0;
 let activeLiveViewContext = null;
+let latestLiveViewIdentity = null;
 let liveViewDisconnectTimer = null;
 let liveViewRestartAttempts = [];
 let liveViewAttemptStartedAt = 0;
@@ -53,6 +55,24 @@ let proxyUrl = null;
 let proxyAuthContextId = null;
 let proxyServerOrigin = null;
 
+function safeDiagnosticLabel(value) {
+  const label = typeof value === 'string' ? value.trim() : '';
+  return new Set(['auto', 'ice', 'offer', 'screen', 'tab']).has(label) ? label : 'unknown';
+}
+
+function safeCaptureError(error) {
+  if (error?.name === 'NotAllowedError' || error?.name === 'AbortError') {
+    return {
+      code: 'SCREEN_CAPTURE_DENIED',
+      message: 'Student denied screen share request',
+    };
+  }
+  return {
+    code: 'SCREEN_CAPTURE_FAILED',
+    message: 'Screen capture failed',
+  };
+}
+
 function normalizedOrigin(value) {
   try {
     const parsed = new URL(String(value || ''));
@@ -67,6 +87,7 @@ function normalizedOrigin(value) {
 function liveViewIdentityPayload() {
   return {
     negotiationId: activeNegotiationId,
+    startGeneration: activeLiveViewStartGeneration,
     authContextId: activeLiveViewAuthContextId,
     authGeneration: activeLiveViewAuthGeneration,
     connectionGeneration: activeLiveViewConnectionGeneration,
@@ -78,12 +99,15 @@ function liveViewIdentityPayload() {
 
 function normalizeLiveViewIdentity(message = {}) {
   const negotiationId = String(message.negotiationId || '').trim();
+  const startGeneration = Number(message.startGeneration ?? message.authGeneration);
   const authContextId = String(message.authContextId || '').trim();
   const authGeneration = Number(message.authGeneration);
   const connectionGeneration = Number(message.connectionGeneration);
   const serverOrigin = normalizedOrigin(message.serverOrigin);
   const studentSessionId = String(message.studentSessionId || '').trim();
   if (!negotiationId
+    || !Number.isSafeInteger(startGeneration)
+    || startGeneration < 1
     || !authContextId
     || !Number.isSafeInteger(authGeneration)
     || authGeneration < 0
@@ -93,6 +117,7 @@ function normalizeLiveViewIdentity(message = {}) {
     || !studentSessionId) return null;
   return {
     negotiationId,
+    startGeneration,
     authContextId,
     authGeneration,
     connectionGeneration,
@@ -105,6 +130,7 @@ function liveViewIdentityMatches(message = {}) {
   const identity = normalizeLiveViewIdentity(message);
   return Boolean(identity
     && identity.negotiationId === activeNegotiationId
+    && identity.startGeneration === activeLiveViewStartGeneration
     && identity.authContextId === activeLiveViewAuthContextId
     && identity.authGeneration === activeLiveViewAuthGeneration
     && identity.connectionGeneration === activeLiveViewConnectionGeneration
@@ -115,6 +141,7 @@ function liveViewIdentityMatches(message = {}) {
 function createLiveViewContext(identity) {
   return Object.freeze({
     negotiationId: identity.negotiationId,
+    startGeneration: identity.startGeneration,
     authContextId: identity.authContextId,
     authGeneration: identity.authGeneration,
     connectionGeneration: identity.connectionGeneration,
@@ -130,6 +157,7 @@ function liveViewContextIsCurrent(context, {
 } = {}) {
   if (!context || activeLiveViewContext !== context) return false;
   if (context.negotiationId !== activeNegotiationId
+    || context.startGeneration !== activeLiveViewStartGeneration
     || context.authContextId !== activeLiveViewAuthContextId
     || context.authGeneration !== activeLiveViewAuthGeneration
     || context.connectionGeneration !== activeLiveViewConnectionGeneration
@@ -145,6 +173,7 @@ function liveViewContextIsCurrent(context, {
 function liveViewContextPayload(context, restartGeneration = activeLiveViewRestartGeneration) {
   return {
     negotiationId: context.negotiationId,
+    startGeneration: context.startGeneration,
     authContextId: context.authContextId,
     authGeneration: context.authGeneration,
     connectionGeneration: context.connectionGeneration,
@@ -279,6 +308,9 @@ function wsStatus() {
     url: proxyUrl,
     authContextId: proxyAuthContextId,
     serverOrigin: proxyServerOrigin,
+    liveViewIdentity: activeLiveViewContext
+      ? liveViewContextPayload(activeLiveViewContext)
+      : null,
   };
 }
 
@@ -303,6 +335,11 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
   ) {
     return wsStatus();
   }
+
+  // A socket identity change is an authority transition. Revoke any capture
+  // owned by the retired socket before detaching its close handler; otherwise
+  // an MV3 worker restart could strand the old student's MediaStream.
+  if (activeLiveViewContext) stopScreenShare();
 
   // Close any existing connection and keepalive
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
@@ -462,7 +499,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       if (message.type === 'STOP_SHARE') {
-        if (activeNegotiationId && !liveViewIdentityMatches(message)) {
+        const identity = normalizeLiveViewIdentity(message);
+        if (!identity || (activeNegotiationId && !liveViewIdentityMatches(identity))) {
+          sendResponse({ success: false, status: 'stale-negotiation' });
+          return;
+        }
+        if (!tombstoneLiveViewIdentity(identity)) {
           sendResponse({ success: false, status: 'stale-negotiation' });
           return;
         }
@@ -507,7 +549,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     } catch (error) {
       console.error('[Offscreen] Unexpected error handling message');
-      sendResponse({ success: false, error: error.message });
+      sendResponse({ success: false, error: 'OFFSCREEN_REQUEST_FAILED' });
     }
   })();
 
@@ -529,9 +571,58 @@ function clearLiveViewExpiryTimers() {
 
 function parseFutureExpiry(value, fallbackMs, maximumMs) {
   const now = Date.now();
+  const absent = value === undefined || value === null || String(value).trim() === '';
+  if (absent) return now + fallbackMs;
   const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
-  const candidate = Number.isFinite(parsed) && parsed > now ? parsed : now + fallbackMs;
-  return Math.min(candidate, now + maximumMs);
+  if (!Number.isFinite(parsed) || parsed <= now || parsed > now + maximumMs) return 0;
+  return parsed;
+}
+
+function sameLiveViewIdentity(left, right) {
+  return Boolean(left && right
+    && left.negotiationId === right.negotiationId
+    && left.startGeneration === right.startGeneration
+    && left.authContextId === right.authContextId
+    && left.authGeneration === right.authGeneration
+    && left.connectionGeneration === right.connectionGeneration
+    && left.serverOrigin === right.serverOrigin
+    && left.studentSessionId === right.studentSessionId);
+}
+
+function liveViewIdentityMatchesProxy(identity) {
+  return Boolean(
+    identity
+    && proxyWs
+    && proxyWs.readyState === WebSocket.OPEN
+    && proxyAuthenticated === true
+    && identity.authContextId === proxyAuthContextId
+    && identity.connectionGeneration === proxyConnectionGeneration
+    && identity.serverOrigin === proxyServerOrigin
+  );
+}
+
+function sameLiveViewProxyAuthority(left, right) {
+  return Boolean(left && right
+    && left.authContextId === right.authContextId
+    && left.connectionGeneration === right.connectionGeneration
+    && left.serverOrigin === right.serverOrigin);
+}
+
+function liveViewIdentityIsNewer(candidate, prior) {
+  if (!liveViewIdentityMatchesProxy(candidate)) return false;
+  if (!prior || !sameLiveViewProxyAuthority(candidate, prior)) return true;
+  return candidate.startGeneration > prior.startGeneration;
+}
+
+function tombstoneLiveViewIdentity(identity) {
+  if (!liveViewIdentityMatchesProxy(identity)) return false;
+  if (
+    latestLiveViewIdentity
+    && sameLiveViewProxyAuthority(identity, latestLiveViewIdentity)
+    && identity.startGeneration < latestLiveViewIdentity.startGeneration
+  ) return false;
+  latestLiveViewIdentity = Object.freeze({ ...identity });
+  return true;
 }
 
 function expireLiveView(reason, negotiationId) {
@@ -545,24 +636,45 @@ function expireLiveView(reason, negotiationId) {
   });
 }
 
-function scheduleLiveViewExpiry(setupExpiresAt, expiresAt, iceConfigurationExpiresAt, negotiationId) {
-  clearLiveViewExpiryTimers();
+function resolveLiveViewExpirySchedule(setupExpiresAt, expiresAt, iceConfigurationExpiresAt) {
   const now = Date.now();
   const sessionHardExpiry = parseFutureExpiry(expiresAt, 15 * 60 * 1000, 15 * 60 * 1000);
-  const iceHardExpiry = iceConfigurationExpiresAt
+  const iceHardExpiry = iceConfigurationExpiresAt !== undefined
+    && iceConfigurationExpiresAt !== null
+    && String(iceConfigurationExpiresAt).trim() !== ''
     ? parseFutureExpiry(iceConfigurationExpiresAt, 10 * 60 * 1000, 11 * 60 * 1000)
     : sessionHardExpiry;
+  if (!sessionHardExpiry || !iceHardExpiry) return null;
   const hardExpiry = Math.min(sessionHardExpiry, iceHardExpiry);
-  const setupExpiry = Math.min(
-    parseFutureExpiry(setupExpiresAt, 90 * 1000, 90 * 1000),
-    hardExpiry,
+  const parsedSetupExpiry = parseFutureExpiry(setupExpiresAt, 90 * 1000, 90 * 1000);
+  if (!parsedSetupExpiry) return null;
+  const setupExpiry = Math.min(parsedSetupExpiry, hardExpiry);
+  if (setupExpiry <= now || hardExpiry <= now) return null;
+  return { setupExpiry, hardExpiry };
+}
+
+function scheduleLiveViewExpiry(
+  setupExpiresAt,
+  expiresAt,
+  iceConfigurationExpiresAt,
+  negotiationId,
+  resolvedSchedule = null,
+) {
+  const schedule = resolvedSchedule || resolveLiveViewExpirySchedule(
+    setupExpiresAt,
+    expiresAt,
+    iceConfigurationExpiresAt,
   );
+  if (!schedule) return false;
+  clearLiveViewExpiryTimers();
+  const now = Date.now();
   liveViewSetupTimer = setTimeout(() => {
     if (!offerProcessed) expireLiveView('setup-expired', negotiationId);
-  }, Math.max(0, setupExpiry - now));
+  }, Math.max(0, schedule.setupExpiry - now));
   liveViewHardExpiryTimer = setTimeout(() => {
     expireLiveView('maximum-duration', negotiationId);
-  }, Math.max(0, hardExpiry - now));
+  }, Math.max(0, schedule.hardExpiry - now));
+  return true;
 }
 
 function failLiveViewConnection(reason) {
@@ -633,11 +745,14 @@ async function startScreenCapture(
   providedIceServers = null,
   iceConfigurationExpiresAt = null,
 ) {
-  console.log('[Offscreen] Starting screen capture, mode:', mode, 'streamId:', !!streamId);
+  console.log('[Offscreen] Starting screen capture, mode:', safeDiagnosticLabel(mode), 'streamId:', !!streamId);
 
   const identity = normalizeLiveViewIdentity(identityMessage || {});
   if (!identity) {
     return { success: false, status: 'missing-negotiation', error: 'Missing Live View authority' };
+  }
+  if (!liveViewIdentityMatchesProxy(identity)) {
+    return { success: false, status: 'stale-negotiation', error: 'Retired Live View transport' };
   }
   const iceServers = providedIceServers === null
     ? ICE_SERVERS
@@ -647,12 +762,28 @@ async function startScreenCapture(
   if (!iceServers) {
     return { success: false, status: 'invalid-ice-configuration', error: 'Invalid ICE configuration' };
   }
+  const expirySchedule = resolveLiveViewExpirySchedule(
+    setupExpiresAt,
+    expiresAt,
+    iceConfigurationExpiresAt,
+  );
+  if (!expirySchedule) {
+    return { success: false, status: 'expired-request', error: 'Live View request expired' };
+  }
+  if (activeLiveViewContext && liveViewIdentityMatches(identity)) {
+    return { success: true, status: 'already-active' };
+  }
+  if (!liveViewIdentityIsNewer(identity, latestLiveViewIdentity)) {
+    return { success: false, status: 'stale-negotiation', error: 'Stale Live View request' };
+  }
+  latestLiveViewIdentity = Object.freeze({ ...identity });
 
   // Every capture attempt is a new negotiation. Reset the duplicate-offer
   // guard, queued ICE, teacher identity, tracks, and peer together so a failed
   // or stopped attempt can be retried without restarting the extension.
   stopScreenShare();
   activeNegotiationId = identity.negotiationId;
+  activeLiveViewStartGeneration = identity.startGeneration;
   activeLiveViewAuthContextId = identity.authContextId;
   activeLiveViewAuthGeneration = identity.authGeneration;
   activeLiveViewConnectionGeneration = identity.connectionGeneration;
@@ -664,16 +795,24 @@ async function startScreenCapture(
   liveViewRestartAttempts = [];
   liveViewAttemptStartedAt = Date.now();
   liveViewTelemetryAttempts = new Set();
-  scheduleLiveViewExpiry(
+  if (!scheduleLiveViewExpiry(
     setupExpiresAt,
     expiresAt,
     iceConfigurationExpiresAt,
     activeNegotiationId,
-  );
+    expirySchedule,
+  )) {
+    stopScreenShare();
+    return { success: false, status: 'expired-request', error: 'Live View request expired' };
+  }
 
   let capturedStream = null;
   let createdPeer = null;
   try {
+    if (Date.now() >= expirySchedule.setupExpiry || Date.now() >= expirySchedule.hardExpiry) {
+      stopScreenShare();
+      return { success: false, status: 'expired-request', error: 'Live View request expired' };
+    }
     // Method 1: Use streamId from service worker (MV3 tab capture)
     if (streamId) {
       try {
@@ -732,12 +871,14 @@ async function startScreenCapture(
           stopScreenShare();
           return { success: false, status: 'user-denied' };
         }
+        const safeError = safeCaptureError(pickerError);
         console.error('[Offscreen] getDisplayMedia failed');
         sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', {
-          error: pickerError.message
+          error: safeError.message,
+          errorCode: safeError.code,
         });
         stopScreenShare();
-        return { success: false, status: 'failed', error: pickerError.message };
+        return { success: false, status: 'failed', error: safeError.code };
       }
     }
 
@@ -813,10 +954,14 @@ async function startScreenCapture(
     }
     disposeDetachedStream(capturedStream);
     disposeDetachedPeer(createdPeer);
+    const safeError = safeCaptureError(error);
     console.error('[Offscreen] Unexpected screen capture error');
-    sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', { error: error.message });
+    sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', {
+      error: safeError.message,
+      errorCode: safeError.code,
+    });
     stopScreenShare();
-    return { success: false, status: 'failed', error: error.message };
+    return { success: false, status: 'failed', error: safeError.code };
   }
 }
 
@@ -826,7 +971,7 @@ let offerProcessed = false; // Guard against duplicate offer processing from set
 async function handleSignal(signal, expectedContext = activeLiveViewContext) {
   const signalContext = expectedContext;
   try {
-    console.log('[Offscreen] Handling signal:', signal.type);
+    console.log('[Offscreen] Handling signal:', safeDiagnosticLabel(signal.type));
     const restartGeneration = Number(signal.restartGeneration || 0);
     if (!Number.isSafeInteger(restartGeneration)
       || !liveViewContextIsCurrent(signalContext, { restartGeneration })) {
@@ -1003,6 +1148,7 @@ function stopScreenShare() {
   teacherId = null;
   offerProcessed = false;
   activeNegotiationId = null;
+  activeLiveViewStartGeneration = 0;
   activeLiveViewAuthContextId = null;
   activeLiveViewAuthGeneration = 0;
   activeLiveViewConnectionGeneration = 0;
