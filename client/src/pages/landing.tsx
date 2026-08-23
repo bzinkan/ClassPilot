@@ -280,7 +280,7 @@ export default function LandingPage() {
             letterSpacing: '0.5px',
             border: '1px solid rgba(251, 191, 36, 0.2)',
           }}>
-            FERPA COMPLIANT · PRIVACY-FIRST
+            BUILT TO SUPPORT FERPA RESPONSIBILITIES · PRIVACY-FIRST
           </div>
 
           <h1 className="fade-2 serif hero-title" style={{

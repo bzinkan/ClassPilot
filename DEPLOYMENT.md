@@ -1,14 +1,27 @@
-# Deployment Guide - ClassPilot
+# Historical Prototype Deployment Guide - ClassPilot
 
-Complete guide for deploying the Teacher Dashboard and Chrome Extension to production.
+> **Production stop:** the Replit dashboard/server instructions in this document
+> describe the retired ClassPilot prototype. They must not be used for a
+> SchoolPilot production deployment. The production API and web app are deployed
+> only from the sibling SchoolPilot repository by following its `CLAUDE.md` and
+> `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
+> ClassPilot Chrome extension. There are no production default credentials.
+>
+> For 2.7.1, upload only `dist/ClassPilot-v2.7.1.zip` produced from the clean,
+> tagged, reviewed commit by `./extension/package-extension.sh`. The matching
+> `dist/ClassPilot-v2.7.1.zip.sha256` record, commit SHA, CI evidence, and exact
+> uploaded archive must be retained. Never create or upload a ZIP manually.
 
-## Prerequisites
+The material below is retained solely to explain the retired prototype and is
+not an operator runbook.
+
+## Historical prototype prerequisites (not production)
 
 - Replit account (for hosting the web app)
 - Google Workspace for Education account with Admin access
 - Managed Chromebooks enrolled in your Google domain
 
-## Part 1: Deploy Teacher Dashboard on Replit
+## Part 1: Retired Replit prototype (do not deploy)
 
 ### 1.1 Environment Variables
 
@@ -50,18 +63,21 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
 3. Wait for deployment to complete
 4. Note your production URL (e.g., `https://your-app.replit.app`)
 
-### 1.3 Configure Production Settings
+### 1.3 Historical prototype settings
 
-1. Access your deployed app
-2. Log in with default credentials:
-   - Username: `teacher`
-   - Password: `teacher123`
-3. Go to **Settings** page
-4. Update the following:
+The retired prototype once used bootstrap credentials. Those credentials have
+been removed from this document and must never be assumed to exist in any
+environment. Production identity and role administration belongs to
+SchoolPilot.
+
+For an isolated historical development instance only, authenticate through its
+configured development identity and then update:
+
+1. Go to **Settings**.
+2. Update the following:
    - **School Name**: Your school's name
    - **WebSocket Shared Key**: Match the `WS_SHARED_KEY` secret
-   - **Data Retention**: Adjust hours as needed (default: 24)
-   - **Change the default password** (important!)
+   - **Activity-History Retention**: Set 1–365 whole days (default: 30 days / 720 hours)
 
 ### 1.4 Create Additional Teacher Accounts
 
@@ -96,21 +112,25 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Create Extension ZIP Package
+### 2.3 Build the canonical 2.7.1 release artifact
 
-Navigate to the extension directory and create a ZIP file:
+Start from a clean, tagged, reviewed 2.7.1 commit at this repository's root.
+Run the complete source gates first, then build and verify the canonical archive:
 
-**On Mac/Linux:**
 ```bash
-cd extension
-zip -r ../classpilot.zip . -x "*.DS_Store" -x "README.md"
+npm run check
+npm test
+npm run test:extension:chrome
+npm run build
+./extension/package-extension.sh
+npm run test:extension:package
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.1.zip --verify-only
 ```
 
-**On Windows:**
-1. Navigate to the `extension` folder
-2. Select all files (manifest.json, service-worker.js, popup.html, popup.js, content.js, icons folder)
-3. Right-click → Send to → Compressed (zipped) folder
-4. Name it `classpilot.zip`
+Confirm the generated SHA-256 record matches the exact archive being uploaded.
+Retain the tag, commit SHA, archive, hash, and CI evidence. Do not use an
+unversioned compatibility copy as the release record, and do not create an
+archive with Explorer, PowerShell, or `zip` directly.
 
 ## Part 3: Deploy Extension via Google Admin Console
 
@@ -124,7 +144,7 @@ zip -r ../classpilot.zip . -x "*.DS_Store" -x "README.md"
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload your `classpilot.zip` file
+7. Upload the retained `dist/ClassPilot-v2.7.1.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -193,15 +213,21 @@ This prevents students from needing to configure the server manually (future enh
 
 ### 4.3 Test Screen Sharing
 
-1. On the student Chromebook, click the extension icon
-2. Click "Share My Screen"
-3. Select a window/tab to share
-4. Verify:
-   - Red "Sharing Active" indicator appears
-   - Extension badge shows red circle (◉)
-   - Teacher dashboard shows "Sharing" badge on student tile
-5. Click "Stop Sharing" to end
-6. Verify indicators update accordingly
+1. From an authorized teacher dashboard, request Live View for the exact test
+   student and active teaching session.
+2. On a policy-installed managed Chromebook, verify the authorized stream starts
+   without a student picker. On an unmanaged test device, complete Chrome's
+   required tab/screen picker.
+3. Verify the student-facing sharing indicator and the teacher dashboard's Live
+   View state both appear.
+4. Stop Live View from the teacher dashboard and verify the media tracks stop on
+   the Chromebook. Repeat after changing the signed-in student/session and
+   confirm the old negotiation cannot resume.
+5. Validate both the direct ICE path and the configured TURN/TURNS fallback. A
+   Live View stream is not recorded by the extension or SchoolPilot servers.
+   If the dashboard's explicit local screenshot/recording controls are used,
+   verify the school applies its notice, access, retention, and deletion policy
+   to the downloaded file.
 
 ## Part 5: Student Communication
 
@@ -219,23 +245,39 @@ Before deploying, inform students and parents about the monitoring:
 > - Active browser tab titles and URLs during class time
 > - Timestamps of web activity
 > - Website icons (favicons)
+> - Bounded open-tab state needed for authorized classroom controls
+> - Observation-bound active-tab thumbnails while an authorized teacher or
+>   administrator is viewing the relevant class/student scope
+> - One exact-tab safety image when an authorized safety action requests it
+> - Classroom communications that a student or teacher chooses to send
+> - Website content visibly rendered in an authorized thumbnail, safety image,
+>   or temporary Live View, which can include an open message, email, or file
 >
 > **What is NOT monitored:**
 > - Keystrokes or typed content
-> - Microphone or camera (unless screen sharing is explicitly enabled by the student)
-> - Private messages or passwords
+> - Microphone or camera audio/video
+> - Passwords or messages read directly through page or account APIs
 > - Activity in incognito/private windows
 >
-> **Screen Sharing (Optional):**
-> - Students may be asked to share their screen with the teacher
-> - This requires the student to click "Share My Screen" button
-> - A visible red indicator shows when sharing is active
-> - Students can stop sharing at any time
+> **Live View:**
+> - An authorized teacher may request a temporary Live View for the exact
+>   student and teaching session
+> - Managed, policy-installed Chromebooks can start the authorized stream
+>   without a student picker; unmanaged devices use Chrome's picker
+> - The extension displays a sharing indicator while the stream is active
+> - Live View media is not recorded by the extension or SchoolPilot servers;
+>   an authorized teacher can explicitly save a local recording or still image,
+>   which the school controls
+> - The temporary stream can display visible website content on the shared tab
+>   or screen
 >
 > **Privacy & Data Retention:**
 > - All monitoring is visible to students through the extension
-> - Activity data is automatically deleted after 24 hours
-> - The system is FERPA and COPPA compliant
+> - The school setting governs heartbeat history and related report detail;
+>   ambient thumbnails, safety evidence, communications, account/audit records,
+>   and teacher-downloaded files follow separate policies
+> - The school remains responsible for applicable notices, consent decisions,
+>   and local privacy requirements
 >
 > This system helps teachers ensure students stay on task during class while maintaining transparency about what is monitored.
 >
@@ -252,12 +294,16 @@ Provide students with a quick reference:
 4. They can see exactly what's being shared (tab title and URL)
 5. A "What's being collected?" link provides full privacy information
 
-**If asked to share their screen:**
-1. Teacher will request screen sharing
-2. Student clicks "Share My Screen" button
-3. Student chooses which window/tab to share
-4. Red indicator shows "Sharing Active"
-5. Student clicks "Stop Sharing" to end
+**When an authorized teacher starts Live View:**
+1. The extension verifies the exact school, student, student session, and Live
+   View negotiation before starting media.
+2. Managed Chromebooks start the authorized stream without a picker; unmanaged
+   devices use Chrome's required picker.
+3. A visible indicator shows while sharing is active.
+4. The stream stops when the teacher ends it or when its authority/session
+   changes. The extension and SchoolPilot servers do not record it; an
+   authorized teacher can explicitly save a local recording or still image,
+   which the school controls.
 
 ## Part 6: Monitoring & Maintenance
 
@@ -279,25 +325,23 @@ For compliance or reporting:
 
 ### 6.3 Roster Management
 
-To organize students by class:
-1. Create a CSV file with format:
-   ```
-   studentName,deviceId,classId
-   John Doe,device-001,class-101
-   Jane Smith,device-002,class-101
-   ```
-2. Go to Settings → Class Roster Upload
-3. Upload the CSV file
-4. Use `/class/{classId}` URL to filter dashboard by class
+Use SchoolPilot's Rosters surface to create or import school student records and
+class memberships. The roster is not a student-to-device assignment surface:
+do not add a `deviceId` column to student create/edit or CSV workflows.
+Chromebook enrollment, extension health, and managed-device status remain in the
+separate Chromebook/device surface.
 
 ### 6.4 Update Extension
 
 To update the extension after changes:
-1. Update extension files locally
-2. Increment version in `manifest.json`
-3. Create new ZIP package
-4. Upload to Google Admin Console
-5. Extension will auto-update on Chromebooks (may take 24 hours)
+1. Land the reviewed changes and obtain green paired SchoolPilot/ClassPilot CI.
+2. Tag the clean ClassPilot release commit and confirm the live Store version.
+3. Run the complete gates and `./extension/package-extension.sh` from the
+   repository root.
+4. Verify and retain `dist/ClassPilot-v2.7.1.zip`, its SHA-256, source/ZIP byte
+   comparison, and unpacked integration evidence.
+5. Upload that exact archive to the Chrome Web Store while production OUs remain
+   pinned; validate the managed test OU before controlled unpinning.
 
 ## Part 7: Troubleshooting
 
@@ -332,16 +376,20 @@ To update the extension after changes:
 ### Screen Sharing Not Working
 
 **Check:**
-1. Student clicked "Share My Screen" button
-2. Student granted permissions in Chrome dialog
-3. WebSocket connection is active
-4. WebRTC signaling is working (check console logs)
+1. The teacher is authorized for the exact student and active teaching session.
+2. The ClassPilot WebSocket is authenticated and the current client accepted
+   `liveViewIceServersV1`.
+3. The server returned unexpired ICE credentials and signaling uses the current
+   negotiation ID.
+4. On unmanaged devices only, the user completed Chrome's required capture
+   picker. Managed policy-installed Chromebooks do not depend on that picker.
 
 **Fix:**
-- Ensure student uses physical button click (user gesture required)
-- Check Chrome permissions for screen capture
-- Verify WebSocket is connected
-- Test with simple tab sharing first
+- End the failed negotiation and start a fresh exact-session Live View request.
+- Verify both TURN nodes, TURN/TCP, and TURNS/443 with the live validation
+  procedure before enabling the capability globally.
+- Confirm an identity/session change stops the old media tracks and rejects its
+  stale signaling frames.
 
 ### Data Not Being Cleaned Up
 
@@ -376,7 +424,7 @@ To update the extension after changes:
 - Monitor for unauthorized access attempts (check server logs)
 - Keep extension updated with security patches
 - Review and update blocked domains list
-- Audit consent logs for screen sharing events
+- Review authorized Live View lifecycle and privacy-safe operational telemetry
 - Ensure compliance with school privacy policies
 
 ## Part 9: Future Enhancements

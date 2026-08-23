@@ -1,5 +1,11 @@
 # AWS Fargate Deployment Guide for ClassPilot
 
+> **Archived prototype — do not use for production.** SchoolPilot is the only
+> production API and teacher web app. Its guarded AWS deployment procedure lives
+> in the SchoolPilot repository's `CLAUDE.md`, with the coordinated 2.7.1 steps
+> in `docs/CLASSPILOT_2_7_1_RELEASE.md`. Do not create or update production
+> infrastructure from this document.
+
 ## Architecture Overview
 
 ```

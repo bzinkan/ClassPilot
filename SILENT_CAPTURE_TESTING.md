@@ -1,5 +1,10 @@
 # Silent Tab Capture - Testing Guide
 
+> **Historical test notes.** Hostnames and prototype flows below are not
+> production configuration. Validate ClassPilot 2.7.1 Live View only through the
+> exact-session direct and TURN/TURNS gates in the SchoolPilot repository's
+> `docs/CLASSPILOT_2_7_1_RELEASE.md` and current managed test OU.
+
 ## What Was Implemented
 
 The Chrome Extension now uses a **silent-first capture strategy**:

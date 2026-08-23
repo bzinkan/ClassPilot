@@ -32,23 +32,25 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
-### Private kiosk continuity tickets (2.7.0)
+### Private kiosk continuity tickets (2.7.1)
 
-On managed (enrolled) Chromebooks, an explicit kiosk launch may read the
-device's Chrome directory id through `chrome.enterprise.deviceAttributes`.
-The extension sends that value only to the enrollment-key-authenticated
-SchoolPilot launch-ticket endpoint. SchoolPilot immediately projects it to a
-school-scoped opaque mapping and returns a random, one-use ticket that expires
-after 60 seconds. The ticket is placed in the URL fragment as
-`#launchTicket=...`; the raw directory id and a stable device identifier never
-appear in the URL, extension storage, or logs. If ticket creation fails, the
-kiosk still opens without continuity. Unmanaged installs are unaffected (the
-enterprise API is undefined there).
+On managed (enrolled) Chromebooks, an explicit kiosk launch first makes a
+non-sensitive, enrollment-key-authenticated capability preflight. Only when
+SchoolPilot accepts `scopedAuthorityChecksV1` and `kioskLaunchTicketV2` may the
+extension read the device's Chrome directory id through
+`chrome.enterprise.deviceAttributes` and send it to that exact SchoolPilot
+origin. SchoolPilot immediately converts it to a school-scoped opaque mapping
+without storing or logging the raw value, then returns a random, one-use ticket
+that expires after 10 minutes. The ticket is placed in the URL fragment as
+`#launchTicket=...`. The raw directory id never appears in a URL, extension
+storage, or logs, and the kiosk continuity mapping remains server-side. If
+ticket creation fails, the kiosk still opens without continuity. Unmanaged
+installs are unaffected (the enterprise API is undefined there).
 
 This requires the `enterprise.deviceAttributes` permission. It produces no
 user-facing prompt and only functions for policy-installed extensions.
 
-### Exact-bound monitoring and delivery (2.7.0)
+### Exact-bound monitoring and delivery (2.7.1)
 
 Every authenticated heartbeat, screenshot, command acknowledgement, chat
 retry, and Live View negotiation is fenced to an immutable school, student,
@@ -120,7 +122,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.0.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.1.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
@@ -228,7 +230,9 @@ Monitored time, domain time, and off-task duration are derived from the
 - Teachers may request live viewing during active class sessions
 - Managed ChromeOS devices can allow silent tab capture through school Chrome policy
 - On unmanaged devices, Chrome may show a picker instead
-- Live streams are not recorded by the extension
+- Live streams are not recorded by the extension or SchoolPilot servers; the
+  authorized teacher dashboard can explicitly save a local recording or still
+  image that is controlled by the school
 - Short-lived, server-authorized ICE configuration may include SchoolPilot TURN
   relays so a session can connect when direct UDP is unavailable
 
@@ -276,9 +280,11 @@ only bounded attempt, success, and error diagnostic timestamps/codes survive a
 worker restart.
 
 Student-to-teacher chat uses a bounded local retry outbox (maximum 40 messages,
-128 KiB, and 30 minutes). Authentication, binding, command, and outbox storage
-failures stop the affected operation; privacy-safe diagnostics remain best
-effort.
+128 KiB, and 30 minutes). An expiry alarm physically removes aged message
+bodies from local storage, including terminal failed entries. The command-ACK
+outbox is likewise physically compacted at its 24-hour safety bound.
+Authentication, binding, command, and outbox storage failures stop the affected
+operation; privacy-safe diagnostics remain best effort.
 
 See `COMPLIANCE.md` for Chrome Web Store and school privacy review notes.
 

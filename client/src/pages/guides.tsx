@@ -704,8 +704,8 @@ function generatePDFContent(): string {
     <ul>
       <li>ClassPilot only monitors during configured school hours</li>
       <li>Students see a green indicator when monitoring is active</li>
-      <li>No data is collected outside school hours</li>
-      <li>Activity data is automatically deleted after 24 hours</li>
+      <li>Heartbeat monitoring and screenshot capture pause outside configured monitoring hours</li>
+      <li>Retention follows the school's configured policy and agreement</li>
     </ul>
   </div>
 

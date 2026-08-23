@@ -212,7 +212,7 @@ async function main() {
     1280, 800,
     'chrome-store-screenshot-3-1280x800.png',
     'Privacy-First Design',
-    'Transparent monitoring with student disclosure\nConfigurable data retention\nFERPA/COPPA compliant architecture'
+    'Transparent monitoring with student disclosure\nConfigurable data retention\nBuilt to support school FERPA/COPPA responsibilities'
   );
 
   // Create promo tiles

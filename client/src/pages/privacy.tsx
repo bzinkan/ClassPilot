@@ -28,7 +28,7 @@ export default function PrivacyPage() {
       {/* Content */}
       <div className="container mx-auto px-4 py-12 max-w-4xl">
         <h1 className="text-4xl font-bold text-slate-900 mb-8">Privacy Policy</h1>
-        <p className="text-slate-600 mb-8">Last updated: January 4, 2025</p>
+        <p className="text-slate-600 mb-8">Last updated: August 23, 2026</p>
 
         <div className="prose prose-slate max-w-none space-y-8">
           <section>
@@ -61,14 +61,24 @@ export default function PrivacyPage() {
             <ul className="list-disc pl-6 text-slate-700 space-y-2 mb-4">
               <li>Google Classroom roster information (class names, student enrollments)</li>
               <li>Screen capture thumbnails during active monitoring sessions</li>
+              <li>Exact safety/evidence screenshots when an authorized safety action requests one</li>
               <li>Current tab URLs and titles during monitoring</li>
               <li>Device connection status</li>
+              <li>Student-teacher ClassPilot communications and session-report activity</li>
+              <li>Temporary authorized Live View media; the extension and SchoolPilot servers do not record it, but an authorized teacher can explicitly save a local recording or still image</li>
             </ul>
 
             <h3 className="text-xl font-medium text-slate-800 mb-3">2.3 Technical Data</h3>
             <p className="text-slate-700 leading-relaxed">
               We automatically collect certain technical information including browser type, device information,
               IP address, and usage logs to maintain and improve our service.
+            </p>
+            <p className="text-slate-700 leading-relaxed mt-4">
+              During an explicit authorized managed-kiosk launch, the extension first performs a non-sensitive
+              capability preflight. Only after SchoolPilot accepts the protected V2 flow may the extension read
+              and send the raw Chrome directory device identifier to that exact SchoolPilot origin. The server
+              immediately converts it to a school-scoped opaque identifier and never stores or logs the raw value
+              or places it in a URL. PIN or signed-token kiosk authorization remains required.
             </p>
           </section>
 
@@ -82,6 +92,7 @@ export default function PrivacyPage() {
               <li>Sync classroom rosters from Google Classroom</li>
               <li>Display student screens to authorized teachers during class sessions</li>
               <li>Generate usage reports for teachers and administrators</li>
+              <li>Classify monitored URL/domain signals and generate automated safety alerts for authorized human review</li>
               <li>Maintain and improve our service</li>
               <li>Communicate important updates about the service</li>
               <li>Ensure compliance with school policies and legal requirements</li>
@@ -94,12 +105,15 @@ export default function PrivacyPage() {
               We retain data only as long as necessary to provide our services:
             </p>
             <ul className="list-disc pl-6 text-slate-700 space-y-2">
-              <li><strong>Screen captures:</strong> Deleted within 24 hours of capture or when the monitoring session ends</li>
-              <li><strong>Session logs:</strong> Retained for up to 90 days for reporting purposes</li>
-              <li><strong>Account data:</strong> Retained until account deletion or school contract termination</li>
+              <li><strong>Ambient thumbnails:</strong> Held in a short-lived operational cache, normally 60–120 seconds</li>
+              <li><strong>Safety/evidence image content:</strong> Uses a separate deployment policy, currently 30 days by default; bounded review metadata may remain</li>
+              <li><strong>Heartbeat history and session-report detail:</strong> Uses the school's selected whole-number period from 1 through 365 days, default 30, and is purged or redacted by an hourly scheduled job</li>
+              <li><strong>Account, audit, communication, and teacher-downloaded files:</strong> Follow separate documented or contractual policies and are not governed by the heartbeat-retention setting</li>
             </ul>
             <p className="text-slate-700 leading-relaxed mt-4">
-              Schools may request complete data deletion at any time by contacting us at privacy@classpilot.net.
+              Schools may submit a verified deletion request at any time by contacting us at privacy@classpilot.net.
+              Current roster and school controls deactivate access and are not proof of permanent destruction;
+              SchoolPilot confirms the approved deletion scope and completion under the applicable agreement and law.
             </p>
           </section>
 
@@ -112,7 +126,7 @@ export default function PrivacyPage() {
             <ul className="list-disc pl-6 text-slate-700 space-y-2">
               <li>We use education records only for legitimate educational purposes</li>
               <li>We are under direct control of the school regarding data use</li>
-              <li>We do not disclose student information to third parties except as required by law</li>
+              <li>We do not sell or rent student information; contracted service providers process purpose-limited data needed to operate enabled features under applicable agreements</li>
               <li>We maintain appropriate security measures to protect student data</li>
             </ul>
           </section>
@@ -120,10 +134,11 @@ export default function PrivacyPage() {
           <section>
             <h2 className="text-2xl font-semibold text-slate-900 mb-4">6. COPPA Compliance</h2>
             <p className="text-slate-700 leading-relaxed">
-              ClassPilot complies with the Children's Online Privacy Protection Act (COPPA). We do not
-              knowingly collect personal information directly from children under 13. All student accounts
-              are created and managed by schools, which obtain necessary parental consent as required by
-              COPPA's school consent exception.
+              ClassPilot may collect the documented browsing activity, screenshots, and intentional classroom
+              inputs of students under 13 only under the direction and authorization of the contracting school
+              for an educational purpose. There is no independent child signup or collection outside school
+              direction. The school remains responsible for the notices and any additional consent its policies
+              or applicable law require, including use of COPPA's school-consent exception where available.
             </p>
           </section>
 
@@ -148,10 +163,17 @@ export default function PrivacyPage() {
             </p>
             <ul className="list-disc pl-6 text-slate-700 space-y-2">
               <li>With authorized school personnel within your institution</li>
-              <li>With service providers who assist in operating our platform (under strict confidentiality agreements)</li>
+              <li>With contracted service providers that operate enabled features, including AWS infrastructure and TURN, Twilio SendGrid email, Google identity/roster services, Sentry error monitoring, and Stripe billing</li>
+              <li>With Anthropic's API for fallback classification of a monitored full URL and page title; those values can themselves contain identifying or user-entered content even though no separate student identity field is added</li>
               <li>When required by law or to protect rights and safety</li>
               <li>With your explicit consent</li>
             </ul>
+            <p className="text-slate-700 leading-relaxed mt-4">
+              The current provider purposes and data exposure are published in SchoolPilot's{' '}
+              <a href="https://school-pilot.net/subprocessors" className="text-amber-600 hover:text-amber-700 underline">
+                Subprocessors notice
+              </a>.
+            </p>
           </section>
 
           <section>

@@ -113,10 +113,21 @@
 <div style="text-align: center; margin-bottom: 40px;">
     <h1 style="border: none; font-size: 42px; margin: 0;">ClassPilot</h1>
     <p style="font-size: 24px; color: #6b7280;">IT Staff Tutorial & Technical Breakdown</p>
-    <p style="color: #9ca3af;">Version 2.7.0</p>
+    <p style="color: #9ca3af;">Version 2.7.1</p>
     <p style="margin-top: 30px; padding: 15px; background-color: #dbeafe; border-radius: 6px; color: #1e40af;">
         <strong>💡 To save as Word:</strong> Press <kbd>Ctrl+P</kbd> (or Cmd+P on Mac), then choose "Save as PDF" or use your browser's "Save Page As" feature, then open in Microsoft Word
     </p>
+</div>
+
+<div style="margin: 24px 0; padding: 18px; border: 2px solid #b91c1c; border-radius: 8px; background: #fef2f2; color: #7f1d1d;">
+    <strong>Production boundary:</strong> SchoolPilot is the only production API
+    and teacher web application. Deploy it only from the SchoolPilot repository
+    using its <code>CLAUDE.md</code> and
+    <code>docs/CLASSPILOT_2_7_1_RELEASE.md</code> runbooks. Replit and the
+    standalone server in this repository are historical prototypes. This
+    repository's production deliverable is only the verified
+    <code>dist/ClassPilot-v2.7.1.zip</code> built from a clean tagged commit;
+    never package the extension manually.
 </div>
 
 <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
@@ -137,12 +148,12 @@
 <h2 id="executive-summary">1. Executive Summary</h2>
 
 <h3>What is ClassPilot?</h3>
-<p>ClassPilot is a privacy-aware classroom monitoring system designed for educational institutions using managed Chromebooks. It enables teachers to monitor student activity in real-time while maintaining transparency and compliance with FERPA/COPPA regulations.</p>
+<p>ClassPilot is a privacy-aware classroom monitoring system designed for educational institutions using managed Chromebooks. It enables teachers to monitor student activity in real time while providing controls that support schools' FERPA/COPPA responsibilities; each school remains responsible for its own policies, notices, and required consent decisions.</p>
 
 <h3>Core Components</h3>
 <ul>
     <li><strong>Teacher Dashboard</strong> (Web Application) - Real-time monitoring interface for educators</li>
-    <li><strong>Chrome Extension</strong> (v2.7.0) - Lightweight monitoring agent on student Chromebooks</li>
+    <li><strong>Chrome Extension</strong> (v2.7.1) - Lightweight monitoring agent on student Chromebooks</li>
 </ul>
 
 <h3>Key Value Propositions</h3>
@@ -170,7 +181,7 @@
 │  ┌────────────┐  │         │  ┌────────────┐  │
 │  │  Chrome    │  │         │  │  Dashboard │  │
 │  │ Extension  │◄─┼─────────┼─►│  Web App   │  │
-│  │  (v2.7.0)  │  │         │  │            │  │
+│  │  (v2.7.1)  │  │         │  │            │  │
 │  └────────────┘  │         │  └────────────┘  │
 └────────┬─────────┘         └────────┬─────────┘
          │                            │
@@ -188,7 +199,7 @@
                       │
             ┌─────────▼─────────┐
             │   PostgreSQL DB    │
-            │   (Neon-backed)    │
+            │   (AWS RDS)        │
             │                    │
             │   • Students       │
             │   • Devices        │
@@ -213,7 +224,7 @@
 <ul>
     <li>Node.js + Express</li>
     <li>WebSocket server (ws library)</li>
-    <li>PostgreSQL database (Neon-backed)</li>
+    <li>PostgreSQL database (AWS RDS, reached by the SchoolPilot services)</li>
     <li>Drizzle ORM</li>
     <li>Session-based authentication</li>
     <li>Rate limiting & CSRF protection</li>
@@ -314,17 +325,18 @@
 <h3>3.5 Privacy & Data Retention</h3>
 <p><strong>Configurable Data Retention:</strong></p>
 <ul>
-    <li>Set retention period (7, 30, 60, 90 days, or indefinite)</li>
+    <li>Set activity-history retention to a whole number from 1 through 365 days (default 30)</li>
     <li>Automatic cleanup of old activity logs</li>
     <li>CSV export before deletion</li>
 </ul>
 
 <p><strong>Privacy Features:</strong></p>
 <ul>
-    <li>All-tabs data stored in-memory only (not persisted)</li>
-    <li>Student disclosure banner in extension</li>
-    <li>Explicit consent for screen sharing</li>
-    <li>Minimal data collection (only browsing activity)</li>
+    <li>Tab state is bounded and identity-bound; the extension may persist a limited local snapshot so exact tab references survive worker restarts</li>
+    <li>Student-facing indicators show when school-managed monitoring is active</li>
+    <li>Ambient screenshot thumbnails require a short-lived authorized observation lease; exact safety captures require a separate exact-bound request</li>
+    <li>Live View is an authorized, temporary encrypted stream and is not recorded by the extension or SchoolPilot servers; the teacher dashboard can explicitly save a local recording or still image, which the school must govern</li>
+    <li>The school setting governs heartbeat history and related session-report detail; ambient thumbnails, safety evidence, communications, account/audit records, and teacher-downloaded files follow their separate documented or contractual policies</li>
 </ul>
 
 <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
@@ -335,16 +347,17 @@
 
 <h4>Data Minimization:</h4>
 <ul>
-    <li>Only collects essential browsing data (URL, title, timestamp)</li>
-    <li>No keystroke logging, screenshot capture (except explicit screen sharing)</li>
-    <li>No personal information beyond school email</li>
+    <li>Processes school-issued student/session identifiers, a device identifier, active-tab URL/title/timestamps, heartbeat state, and classroom communications needed for the service</li>
+    <li>May process observation-bound thumbnail screenshots and one exact-bound safety screenshot; Live View media is temporary and is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local copy from the dashboard</li>
+    <li>An authorized managed-kiosk launch may send the Chrome directory device ID to SchoolPilot after capability preflight; it is immediately converted to a school-scoped opaque ID and is not stored or logged raw</li>
+    <li>Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles</li>
 </ul>
 
 <h4>Transparency:</h4>
 <ul>
     <li>Chrome Extension displays disclosure banner</li>
     <li>Students know monitoring is active</li>
-    <li>Screen sharing requires explicit action (not automatic)</li>
+    <li>Live View requires an authorized teacher request; managed Chrome policy determines whether Chrome shows a screen picker</li>
 </ul>
 
 <h4>Data Security:</h4>
@@ -377,31 +390,38 @@
 
 <h3>Prerequisites</h3>
 <ol>
-    <li><strong>Google Workspace Admin Access</strong> (for force-installing extension)</li>
-    <li><strong>Server/Hosting</strong> (for Teacher Dashboard)</li>
-    <li><strong>PostgreSQL Database</strong> (provided by Replit or your own)</li>
-    <li><strong>Domain Name</strong> (optional but recommended)</li>
+    <li><strong>Google Workspace Admin Access</strong> (for pinning and force-installing the extension)</li>
+    <li><strong>Access to the SchoolPilot production repository and AWS deployment role</strong></li>
+    <li><strong>A clean, reviewed, tagged ClassPilot 2.7.1 commit with green CI</strong></li>
+    <li><strong>The managed test OU and production OU rollout record</strong></li>
 </ol>
 
-<h3>Step 1: Deploy Teacher Dashboard</h3>
-<p><strong>Using Replit (Recommended for Quick Setup):</strong></p>
-<ol>
-    <li>This project is already configured on Replit</li>
-    <li>Click "Publish" button in Replit</li>
-    <li>Configure custom domain (optional)</li>
-    <li>Set up environment variables</li>
-</ol>
+<h3>Step 1: Deploy SchoolPilot compatibility code</h3>
+<p>Use only the guarded procedure in the SchoolPilot repository's
+<code>CLAUDE.md</code> and <code>docs/CLASSPILOT_2_7_1_RELEASE.md</code>. Deploy
+the reviewed backend first and frontend second, then smoke the live 2.7.0
+compatibility path. Do not deploy this repository's prototype server, publish
+from Replit, run a local production database push, or create a bootstrap
+administrator through a public registration endpoint.</p>
 
 <h3>Step 2: Publish Chrome Extension to Chrome Web Store</h3>
 <p><strong>Package the Extension:</strong></p>
-<pre><code>./extension/package-extension.sh
-npm run test:extension:package</code></pre>
+<pre><code>npm run check
+npm test
+npm run test:extension:chrome
+npm run build
+./extension/package-extension.sh
+npm run test:extension:package
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.1.zip --verify-only</code></pre>
+<p>Run these commands from the clean tagged repository root. Verify and retain
+<code>dist/ClassPilot-v2.7.1.zip.sha256</code>, and upload that exact versioned
+archive—not a manually assembled or unversioned ZIP.</p>
 
 <p><strong>Upload to Chrome Web Store:</strong></p>
 <ol>
     <li>Go to: https://chrome.google.com/webstore/devconsole</li>
     <li>Pay $5 one-time developer fee (if first extension)</li>
-    <li>Upload <code>dist/ClassPilot-v2.7.0.zip</code> from the clean, tagged release commit</li>
+    <li>Upload <code>dist/ClassPilot-v2.7.1.zip</code> from the clean, tagged release commit</li>
     <li>Fill in store listing details</li>
     <li>Select visibility: <strong>Private</strong> (unlisted) or <strong>Public</strong></li>
     <li>Submit for Chrome Web Store review</li>
@@ -434,7 +454,7 @@ npm run test:extension:package</code></pre>
             <li>Grade Levels (e.g., 6th, 7th, 8th)</li>
             <li>Tracking Hours (e.g., 8:00 AM - 3:00 PM)</li>
             <li>Weekend Tracking (on/off)</li>
-            <li>Data Retention (7, 30, 60, 90 days, indefinite)</li>
+            <li>Activity-History Retention (1–365 whole days; default 30)</li>
             <li>IP Allowlist (optional)</li>
         </ul>
     </li>
@@ -563,7 +583,7 @@ npm run test:extension:package</code></pre>
     <li><span class="checkmark">✅</span> Privacy-first design with transparency</li>
     <li><span class="checkmark">✅</span> Real-time monitoring with remote control</li>
     <li><span class="checkmark">✅</span> Easy deployment via Google Workspace Admin</li>
-    <li><span class="checkmark">✅</span> FERPA/COPPA compliant architecture</li>
+    <li><span class="checkmark">✅</span> Architecture designed to support school FERPA/COPPA responsibilities</li>
 </ul>
 
 <h3>Next Steps:</h3>
@@ -580,7 +600,7 @@ npm run test:extension:package</code></pre>
 <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
 
 <div style="text-align: center; padding: 40px; background-color: #f9fafb; border-radius: 8px; margin-top: 40px;">
-    <h3 style="color: #2563eb; margin-top: 0;">ClassPilot v2.7.0</h3>
+    <h3 style="color: #2563eb; margin-top: 0;">ClassPilot v2.7.1</h3>
     <p style="color: #6b7280; font-size: 18px;">Privacy-Aware Classroom Monitoring</p>
 </div>
 

@@ -166,19 +166,19 @@ export default function HelpCenter() {
       items: [
         {
           question: 'Is ClassPilot FERPA compliant?',
-          answer: 'Yes. ClassPilot is fully FERPA compliant. We only collect data necessary for classroom management, store it securely, and never share or sell student data to third parties.',
+          answer: 'ClassPilot is designed to support schools\' FERPA and COPPA responsibilities through school-controlled access, documented educational uses, security controls, retention settings, and contractual safeguards. Each school remains responsible for its own policies, notices, and required consents.',
         },
         {
           question: 'What data does ClassPilot collect?',
-          answer: 'ClassPilot collects: active tab title and URL, list of open tabs, and timestamps. We do NOT collect: keystrokes, passwords, form data, camera/microphone, or any content from the pages students visit.',
+          answer: 'ClassPilot processes school-issued identifiers, heartbeat activity, active-tab titles and URLs, bounded open-tab snapshots, authorized screenshot content, classroom communications, and temporary Live View media. It does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles.',
         },
         {
           question: 'Is monitoring active outside school hours?',
-          answer: 'No. ClassPilot respects student privacy by only monitoring during configured school hours. The default is 7 AM - 5 PM, but this can be changed upon request. Outside these hours, no data is collected.',
+          answer: 'Heartbeat monitoring and screenshot capture run only during the school\'s configured monitoring hours. Outside that window the extension pauses those activities; previously retained school records remain subject to the school\'s configured retention policy.',
         },
         {
           question: 'How long is student data retained?',
-          answer: 'Browsing activity (heartbeats) is automatically deleted after 24 hours. This keeps your dashboard responsive while respecting student privacy. Session summaries may be retained longer for reporting.',
+          answer: 'Retention is controlled by the school\'s configured policy and agreement. The current heartbeat-history default is 30 days unless the school selects another supported period; immutable session summaries and safety review records may follow separate documented periods.',
         },
         {
           question: 'Is data encrypted?',
@@ -208,7 +208,7 @@ export default function HelpCenter() {
         },
         {
           question: 'I can\'t see student screenshots',
-          answer: 'Screenshot thumbnails must be enabled in your session settings. Also ensure students have granted the necessary permissions to the extension.',
+          answer: 'Ambient thumbnails appear only while an authorized teacher or administrator is actively observing the relevant class or student scope during monitoring hours. Check the session, observation state, extension connection, and school configuration; managed deployments do not depend on a student screen-picker action.',
         },
         {
           question: 'Google Classroom sync isn\'t working',

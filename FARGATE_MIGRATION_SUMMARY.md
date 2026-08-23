@@ -1,5 +1,10 @@
 # AWS Fargate Migration Summary
 
+> **Historical only.** This describes the retired standalone ClassPilot server
+> migration and is not current production architecture or an operator runbook.
+> SchoolPilot owns the production API/web deployment; follow its `CLAUDE.md` and
+> `docs/CLASSPILOT_2_7_1_RELEASE.md` instead.
+
 ## What We've Set Up
 
 Your ClassPilot application is now **fully configured for AWS Fargate deployment**. All the infrastructure-as-code and automation is ready to go.
