@@ -8,7 +8,9 @@ import { chromium } from 'playwright';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
-const sourceExtensionPath = resolve(repoRoot, 'extension');
+const sourceExtensionPath = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH)
+  : resolve(repoRoot, 'extension');
 const GATE_SELECTOR = '#classpilot-auth-gate';
 const LOADING_LIMIT_MS = 2_000;
 function chromeExecutable() {
@@ -326,7 +328,27 @@ async function waitForLiveWorker(context) {
   throw new Error('A live ClassPilot service worker did not wake after navigation');
 }
 
+async function hasLiveExtensionWorkerTarget(cdp, extensionId) {
+  const expectedPrefix = `chrome-extension://${extensionId}/`;
+  try {
+    const { targetInfos = [] } = await cdp.send('Target.getTargets');
+    return targetInfos.some((target) => (
+      target.type === 'service_worker' && target.url.startsWith(expectedPrefix)
+    ));
+  } catch {
+    // If target discovery itself fails, retain the fail-closed CDP version
+    // requirement below instead of treating an unknown state as stopped.
+    return true;
+  }
+}
+
 async function stopExtensionWorker(context, page, extensionId) {
+  // A freshly launched unpacked release can register its MV3 worker slightly
+  // later than the source checkout because Chrome is also unpacking extension
+  // resources. Prove that a live target exists before subscribing to CDP
+  // version events; otherwise an empty initial snapshot looks like a failed
+  // stop even though the worker simply had not registered yet.
+  await waitForLiveWorker(context);
   const cdp = await context.newCDPSession(page);
   try {
     const versions = new Map();
@@ -337,13 +359,13 @@ async function stopExtensionWorker(context, page, extensionId) {
     const relevant = () => [...versions.values()].filter((version) => (
       String(version.scriptURL || '').startsWith(`chrome-extension://${extensionId}/`)
     ));
-    const discoveryDeadline = Date.now() + 2_000;
+    const discoveryDeadline = Date.now() + 5_000;
     while (relevant().length === 0 && Date.now() < discoveryDeadline) {
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
     }
     const discoveredCount = relevant().length;
     let consecutiveStoppedChecks = 0;
-    const stopDeadline = Date.now() + 3_000;
+    const stopDeadline = Date.now() + 5_000;
     while (Date.now() < stopDeadline) {
       for (const version of relevant()) {
         if (version.runningStatus !== 'stopped') {
@@ -352,7 +374,16 @@ async function stopExtensionWorker(context, page, extensionId) {
       }
       await cdp.send('ServiceWorker.stopAllWorkers');
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
-      const stopped = relevant().length > 0 && relevant().every((version) => version.runningStatus === 'stopped');
+      // Chrome can retire the worker target between waitForLiveWorker() and
+      // ServiceWorker.enable(), or before emitting the final version update.
+      // A missing/non-evaluable extension Worker is direct evidence that the
+      // cold-start precondition is already satisfied; do not require a stale
+      // CDP version record to transition after its target has disappeared.
+      const relevantVersions = relevant();
+      const stoppedByProtocol = relevantVersions.length > 0
+        && relevantVersions.every((version) => version.runningStatus === 'stopped');
+      const stoppedByTarget = !(await hasLiveExtensionWorkerTarget(cdp, extensionId));
+      const stopped = stoppedByProtocol || stoppedByTarget;
       consecutiveStoppedChecks = stopped ? consecutiveStoppedChecks + 1 : 0;
       if (consecutiveStoppedChecks >= 2) {
         return { closedCount: discoveredCount, stopped: true };
@@ -361,6 +392,10 @@ async function stopExtensionWorker(context, page, extensionId) {
     return {
       closedCount: discoveredCount,
       stopped: false,
+      versions: relevant().map((version) => ({
+        status: version.status,
+        runningStatus: version.runningStatus,
+      })),
     };
   } finally {
     await cdp.send('ServiceWorker.disable').catch(() => {});
@@ -2602,7 +2637,8 @@ async function main() {
       });
       if (
         authenticatedTiming?.outcome === 'authenticated' &&
-        Number(authenticatedTiming.timestamp) >= authenticatedNavigationStartedAt
+        Number(authenticatedTiming.timestamp) >= authenticatedNavigationStartedAt &&
+        authenticatedTiming.coldWorker === true
       ) break;
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
     }

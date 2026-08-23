@@ -233,7 +233,7 @@ async function loadStudents(deviceId) {
     }
     
   } catch (error) {
-    console.error('Error loading students:', error);
+    console.error('Error loading students');
     const selectElement = document.getElementById('student-select');
     selectElement.innerHTML = '<option value="">Error loading students</option>';
     selectElement.disabled = true;
@@ -243,35 +243,23 @@ async function loadStudents(deviceId) {
 async function setActiveStudent(studentId) {
   if (!currentConfig || !currentConfig.deviceId) {
     console.error('No device ID available');
-    return;
+    return false;
   }
   
   try {
-    const serverUrl = currentConfig.serverUrl;
-    const response = await fetch(`${serverUrl}/api/device/${currentConfig.deviceId}/active-student`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ studentId }),
-    });
-    
-    if (!response.ok) {
-      throw new Error('Failed to set active student');
-    }
-    
-    // Save to chrome.storage.local
-    await chrome.storage.local.set({ activeStudentId: studentId });
-    
-    // Notify background to send immediate heartbeat with new studentId
-    chrome.runtime.sendMessage({ 
+    const response = await requestServiceWorker({
       type: 'student-changed',
-      studentId 
+      studentId,
     });
-    
-    console.log('Active student set:', studentId);
-    
+    if (!response?.success) {
+      throw new Error(response?.error || 'Student changes require a new sign-in');
+    }
+    return true;
   } catch (error) {
-    console.error('Error setting active student:', error);
-    alert('Failed to set active student. Please try again.');
+    console.error('Error setting active student');
+    alert('To change students, sign out and sign in as the selected student.');
+    await loadStudents();
+    return false;
   }
 }
 
@@ -439,7 +427,7 @@ async function raiseHand() {
       }
     });
   } catch (error) {
-    console.error('Error raising hand:', error);
+    console.error('Error raising hand');
     btn.disabled = false;
     btn.textContent = '✋ Raise Hand';
     alert('Failed to raise hand. Please try again.');
@@ -458,7 +446,7 @@ async function lowerHand() {
       }
     });
   } catch (error) {
-    console.error('Error lowering hand:', error);
+    console.error('Error lowering hand');
     alert('Failed to lower hand. Please try again.');
   }
 }
@@ -488,10 +476,13 @@ async function sendStudentMessage(messageType = 'message') {
   // Disable buttons while sending
   if (sendBtn) sendBtn.disabled = true;
   if (questionBtn) questionBtn.disabled = true;
+  const clientMessageId = globalThis.crypto?.randomUUID?.()
+    || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   try {
     chrome.runtime.sendMessage({
       type: 'send-student-message',
+      clientMessageId,
       message,
       messageType
     }, (response) => {
@@ -502,6 +493,9 @@ async function sendStudentMessage(messageType = 'message') {
       if (response?.success) {
         input.value = '';
         const sentStatus = document.getElementById('message-sent-status');
+        if (sentStatus) {
+          sentStatus.textContent = response.queued ? 'Message queued — retrying' : 'Message delivered';
+        }
         sentStatus?.classList.remove('hidden');
         setTimeout(() => {
           sentStatus?.classList.add('hidden');
@@ -511,7 +505,7 @@ async function sendStudentMessage(messageType = 'message') {
       }
     });
   } catch (error) {
-    console.error('Error sending message:', error);
+    console.error('Error sending message');
     if (sendBtn) sendBtn.disabled = false;
     if (questionBtn) questionBtn.disabled = false;
     alert('Failed to send message. Please try again.');
@@ -546,23 +540,27 @@ function showPrivacyInfo() {
 ✓ Active Tab URL - The web address you're visiting
 ✓ Timestamps - When you visited each page
 ✓ Favicon - The small icon from the website
-✓ Periodic screen thumbnails - Images of the active visible tab while ClassPilot tracking is active
+✓ Observation-bound screen thumbnails - Images of the active visible tab while an authorized teacher or administrator is observing
+✓ Safety evidence - A single exact-tab image may be requested immediately before a safety tab closure
+✓ Messages you choose to send through ClassPilot chat
 
 ✗ NOT Collected:
 - Keystrokes or what you type
 - Microphone or camera access
-- Private messages or passwords
+- Passwords or messages typed outside ClassPilot chat
 - Anything from incognito/private windows
 
 Automatic Monitoring:
 - Tab titles and URLs are automatically collected and sent to your teacher
 - This happens every 10 seconds while you browse
-- Screen thumbnails are captured about every 30 seconds while tracking is active
+- Screen thumbnails are captured about every 30 seconds only while the exact student session is actively observed (or during an explicitly selected legacy rollout mode)
+- Activity time comes from heartbeats; screenshots do not determine monitored or off-task time
 - This is required by your school policy for classroom management
 
 Live Screen Viewing:
 - Teachers may request live screen viewing during active class sessions
 - Managed devices can allow silent tab capture under school Chrome policy
+- Encrypted Live View media may use SchoolPilot relay servers when a direct connection is unavailable
 - ClassPilot keeps visible monitoring indicators active while monitoring is on
 
 Data Retention:

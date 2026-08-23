@@ -16,10 +16,12 @@ const SENTRY_ENV = globalThis.SENTRY_ENV || 'development';
 const SENTRY_DEV_MODE = globalThis.SENTRY_DEV_MODE === true;
 let devExceptionSent = false;
 
-const SENTRY_SENSITIVE_KEY_REGEX = /(email|student|name)/i;
+const SENTRY_SENSITIVE_KEY_REGEX = /(authorization|cookie|credential|device|email|id$|name|payload|pin|prompt|response|school|student|token)/i;
 const SENTRY_URL_KEY_REGEX = /url/i;
 const SENTRY_EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const SENTRY_URL_REGEX = /https?:\/\/\S+/i;
+const SENTRY_BEARER_REGEX = /(?:bearer\s+)?eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/i;
+const SENTRY_OPAQUE_ID_REGEX = /\b(?:[a-f0-9]{8}-[a-f0-9-]{20,}|[A-Za-z0-9_-]{32,})\b/i;
 
 function sanitizeSentryUrl(value) {
   if (typeof value !== 'string') return undefined;
@@ -36,7 +38,9 @@ function sanitizeSentryUrl(value) {
 }
 
 function scrubSentryString(value, key) {
-  if (SENTRY_EMAIL_REGEX.test(value)) {
+  if (SENTRY_EMAIL_REGEX.test(value)
+    || SENTRY_BEARER_REGEX.test(value)
+    || SENTRY_OPAQUE_ID_REGEX.test(value)) {
     return '[redacted]';
   }
   if (SENTRY_URL_REGEX.test(value)) {
@@ -75,27 +79,48 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
     tracesSampleRate: 0,
     sendDefaultPii: false,
     beforeSend(event) {
-      if (event.request?.url) {
-        event.request.url = sanitizeSentryUrl(event.request.url);
-      }
       if (event.request) {
-        delete event.request.headers;
-        delete event.request.cookies;
-        delete event.request.query_string;
+        event.request = {
+          method: typeof event.request.method === 'string'
+            ? event.request.method.slice(0, 12)
+            : undefined,
+          url: event.request.url ? sanitizeSentryUrl(event.request.url) : undefined,
+        };
+      }
+      if (event.message) {
+        event.message = scrubSentryString(event.message, 'message');
+      }
+      if (event.exception?.values) {
+        event.exception.values = event.exception.values.map((exception) => ({
+          type: String(exception.type || 'Error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80) || 'Error',
+          value: scrubSentryString(String(exception.value || 'Extension error'), 'message'),
+          stacktrace: exception.stacktrace?.frames ? {
+            frames: exception.stacktrace.frames.map((frame) => ({
+              filename: scrubSentryString(String(frame.filename || ''), 'stack'),
+              function: frame.function
+                ? String(frame.function).replace(/[^A-Za-z0-9_$.-]/g, '').slice(0, 120)
+                : undefined,
+              lineno: Number.isSafeInteger(frame.lineno) ? frame.lineno : undefined,
+              colno: Number.isSafeInteger(frame.colno) ? frame.colno : undefined,
+            })),
+          } : undefined,
+        }));
       }
       if (event.breadcrumbs) {
         event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
-          ...crumb,
+          category: String(crumb.category || '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80),
+          level: crumb.level,
+          timestamp: crumb.timestamp,
           message: crumb.message ? scrubSentryString(crumb.message, 'message') : crumb.message,
-          data: crumb.data ? scrubSentryData(crumb.data) : crumb.data,
         }));
       }
-      if (event.extra) {
-        event.extra = scrubSentryData(event.extra);
-      }
-      if (event.tags) {
-        event.tags = scrubSentryData(event.tags);
-      }
+      // Extension events do not need user, request data, arbitrary context,
+      // tags, or extras. Removing these surfaces is safer than attempting to
+      // enumerate every future payload field.
+      delete event.user;
+      delete event.contexts;
+      delete event.extra;
+      delete event.tags;
       return event;
     },
   });
@@ -124,6 +149,7 @@ let CONFIG = {
   identitySource: null,
   manualLoginLastSeenAt: null,
   autoRegistrationPaused: false,
+  authContextId: null,
 };
 
 let ws = null; // Legacy reference, kept for compatibility checks
@@ -135,6 +161,7 @@ let wsConnectInFlight = null;
 let wsMessageProcessingGeneration = 0;
 let wsMessageProcessingTail = Promise.resolve();
 let wsAuthenticatedResponseGuard = null;
+let wsTransportIdentity = null;
 let studentAuthInvalidating = false;
 let studentAuthCommitPending = false;
 let studentAuthCommitPendingGeneration = 0;
@@ -142,15 +169,26 @@ let authCommitRecoveryPromise = Promise.resolve();
 let resolveAuthCommitRecovery = null;
 let rejectAuthCommitRecovery = null;
 let studentAuthMutationGeneration = 0;
+let activeAuthContextGeneration = -1;
+let authContextAbortController = new AbortController();
+let negotiatedProtocolState = null;
 let studentAuthMutationTail = Promise.resolve();
 let chromeProfileRegistrationInFlight = null;
 let manualStudentLoginPendingGeneration = 0;
 
-const CLIENT_PROTOCOL_VERSION = 2;
+const CLIENT_PROTOCOL_VERSION = 3;
 const EXTENSION_CAPABILITIES = Object.freeze([
   'classroomStateV1',
   'fabStateRevisionV1',
   'exactTabCloseV1',
+  'authBoundTelemetryV1',
+  'exactBindingAckV2',
+  'exactTabCloseV2',
+  'studentChatIdempotencyV1',
+  'screenshotObservationLeaseV1',
+  'safetyEvidenceCaptureV1',
+  'liveViewIceServersV1',
+  'kioskLaunchTicketV1',
   'screenOnlyUnlockV1',
   'durableChatAckV1',
   'commandAckReceiptV1',
@@ -167,18 +205,35 @@ function extensionProtocolDescriptor() {
 }
 
 // Send a message via the WebSocket proxy in the offscreen document
-async function wsSend(data) {
+async function wsSend(data, expectedAuthContext = null) {
   if (!wsConnected || wsAuthenticatedGeneration !== wsConnectionGeneration) return false;
+  let authContext = expectedAuthContext;
+  try {
+    authContext = authContext || captureAuthenticatedContext('WebSocket send');
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket send');
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return false;
+    throw error;
+  }
+  if (
+    wsTransportIdentity?.connectionGeneration !== wsConnectionGeneration
+    || wsTransportIdentity?.authContextId !== authContext.authContextId
+    || wsTransportIdentity?.serverOrigin !== authContext.serverOrigin
+  ) return false;
   const str = typeof data === 'string' ? data : JSON.stringify(data);
   try {
     const response = await sendToOffscreen({
       type: 'WS_SEND',
       data: str,
       connectionGeneration: wsConnectionGeneration,
+      authContextId: authContext.authContextId,
+      serverOrigin: authContext.serverOrigin,
     });
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket send');
     return response?.success === true;
   } catch (error) {
-    console.warn('[WebSocket] Send deferred:', error?.message || error);
+    if (isAuthContextCancellation(error)) return false;
+    console.warn('[WebSocket] Send deferred:', safeDiagnosticError(error));
     return false;
   }
 }
@@ -209,6 +264,13 @@ function currentChromiumVersion() {
 async function sendCommandAck(commandId, ackState, options = {}) {
   const normalizedCommandId = normalizeCommandId(commandId);
   if (!normalizedCommandId) return false;
+  const authContext = options.authContext || captureAuthenticatedContext('command acknowledgement');
+  assertAuthenticatedContextCurrent(authContext, 'command acknowledgement');
+  const binding = options.binding || {
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  };
+  assertBindingMatchesAuthContext(binding, authContext, 'command acknowledgement');
 
   const defaultOutcome = {
     received: 'pending',
@@ -223,11 +285,17 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     commandId: normalizedCommandId,
     ackState,
     commandType: options.commandType,
-    studentId: CONFIG.activeStudentId || undefined,
-    deviceId: CONFIG.deviceId || undefined,
+    bindingVersion: 2,
+    authContextId: authContext.authContextId,
+    schoolId: authContext.schoolId || undefined,
+    studentId: binding.studentId,
+    studentSessionId: binding.studentSessionId,
+    deviceId: authContext.deviceId,
+    studentControlRevision: binding.controlRevision ?? currentStudentControlRevision() ?? undefined,
     result: options.result,
     state: options.state,
     error: options.error,
+    errorCode: options.errorCode,
     deliveryPolicy: options.deliveryPolicy,
     expiresAt: options.expiresAt,
     appliedRevision: options.appliedRevision ?? currentClassroomState?.revision ?? 0,
@@ -236,8 +304,9 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     timestamp: new Date().toISOString(),
   };
 
-  await enqueueCommandAck(ack);
-  await wsSend(ack);
+  await enqueueCommandAck(ack, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'command acknowledgement');
+  await wsSend(ack, authContext);
   scheduleCommandAckFlush();
   return true;
 }
@@ -257,15 +326,16 @@ const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
 const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
-// Heartbeat frequency: 30s for both active and idle states
-// We keep the same frequency because Chrome's "idle" detection (no keyboard/mouse)
-// doesn't mean the student is away - they could be watching a video or reading.
-// The server will display the student's actual activity regardless of idle state.
-const HEARTBEAT_INTERVAL_MS = 10000;  // 10 seconds - using setInterval to bypass Chrome alarms minimum
-const HEARTBEAT_ACTIVE_MINUTES = 0.5;  // 30 seconds - fallback for Chrome alarms
-const HEARTBEAT_IDLE_MINUTES = 0.5;    // 30 seconds - fallback for Chrome alarms
-const OBSERVED_HEARTBEAT_SECONDS = 10;  // Faster updates when teacher is watching
+// The in-memory interval is the only steady-state heartbeat cadence. Chrome's
+// recurring alarm exists solely to recover after MV3 suspends the worker and
+// therefore must not create two additional heartbeats per minute while the
+// interval is healthy.
+const HEARTBEAT_INTERVAL_MS = 10000;
+const HEARTBEAT_RECOVERY_STALE_MS = HEARTBEAT_INTERVAL_MS * 2;
+const HEARTBEAT_ACTIVE_MINUTES = 0.5;
+const HEARTBEAT_IDLE_MINUTES = 0.5;
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
+const EVENT_HEARTBEAT_COALESCE_MS = 2000;
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const LICENSE_CONTROL_CLEANUP_ALARM = 'license-control-cleanup';
 const LICENSE_CONTROL_CLEANUP_RETRY_MS = 15 * 1000;
@@ -335,6 +405,15 @@ let persistedMonitoringState = {
 
 let connectivityHealth = RuntimeCore.emptyConnectivityHealth();
 let screenshotHealth = RuntimeCore.emptyScreenshotHealth();
+let lastConnectivityHealthPersistAt = 0;
+let lastConnectivityPersistedState = 'checking';
+let screenshotPolicyState = Object.freeze({
+  mode: 'pending',
+  observed: false,
+  expiresAt: 0,
+  scope: null,
+  valid: false,
+});
 
 // Screenshot health tracking (sent with heartbeat for dashboard diagnostics)
 let lastScreenshotAttemptAt = 0;
@@ -353,17 +432,16 @@ let tabSnapshotMutation = Promise.resolve();
 let currentTabSnapshotRevision = 0;
 let settingsAlarmScheduled = false;
 let heartbeatIntervalId = null;
-let observedHeartbeatTimer = null;
 let observedByTeacher = false;
-let lastObservedSignature = null;
-let lastObservedSentAt = 0;
+let eventHeartbeatTimer = null;
+let eventHeartbeatReason = null;
 let licenseActive = true;
 let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
 let apiBackoffUntilMs = 0;
 let heartbeatInFlight = false;
-let heartbeatPendingReason = null;
+let lastHeartbeatDispatchAt = 0;
 let screenshotCaptureInFlight = false;
 let currentFabState = null;
 let isScheduleHardOff = false;
@@ -402,13 +480,7 @@ let sharedSignInLoginConfig = {
   passpilotKioskAvailable: false,
 };
 let sharedSignInConfigPromise = null;
-// Managed-device kiosk identity (2.6.9): the enrolled Chromebook's directory
-// id, hashed into UUID shape and appended to the kiosk launch URL so PassPilot
-// kiosk device memory survives the per-profile storage wipes on shared
-// devices. null until resolved; stays null on unmanaged/consumer installs
-// (the enterprise API object is undefined there).
-let managedKioskDeviceId = null;
-let managedKioskDeviceIdProbe = null;
+let managedKioskDirectoryProbeInFlight = null;
 
 function bumpAuthGateStateRevision() {
   // The reserved block is intentionally far larger than a worker can consume
@@ -575,6 +647,9 @@ async function fetchWithBackoff(url, init = {}, options = {}) {
     if (respectGlobalBackoff) {
       await waitForApiBackoff(context);
     }
+    if (init.signal?.aborted) {
+      throw authContextSuperseded(context);
+    }
 
     try {
       const response = await fetch(url, init);
@@ -586,10 +661,13 @@ async function fetchWithBackoff(url, init = {}, options = {}) {
       }
       await sleepMs(calculateRetryDelayMs(response, attempt));
     } catch (error) {
+      if (init.signal?.aborted || error?.name === 'AbortError') {
+        throw authContextSuperseded(context);
+      }
       if (attempt >= maxAttempts) {
         throw error;
       }
-      console.warn(`[Network] ${context} failed; retrying (${attempt}/${maxAttempts})`, error?.message || error);
+      console.warn(`[Network] ${context} failed; retrying (${attempt}/${maxAttempts})`, safeDiagnosticError(error));
       await sleepMs(calculateRetryDelayMs(null, attempt));
     }
   }
@@ -597,8 +675,12 @@ async function fetchWithBackoff(url, init = {}, options = {}) {
   throw new Error(`${context} failed`);
 }
 
-function scheduleHealthCheckAlarm() {
-  chrome.alarms.create(HEALTH_CHECK_ALARM_NAME, { periodInMinutes: 1 });
+function scheduleHealthCheckAlarm(periodInMinutes = hasStudentAuth() ? 1 : 5) {
+  const normalizedPeriod = Math.max(1, Number(periodInMinutes) || 5);
+  chrome.alarms.get(HEALTH_CHECK_ALARM_NAME, (existing) => {
+    if (existing && Number(existing.periodInMinutes) === normalizedPeriod) return;
+    chrome.alarms.create(HEALTH_CHECK_ALARM_NAME, { periodInMinutes: normalizedPeriod });
+  });
 }
 
 function scheduleJitteredStartup(reason, callback) {
@@ -617,6 +699,8 @@ let creatingOffscreen = null;
 let offscreenReady = false;
 let activeLiveViewNegotiationId = null;
 let activeLiveViewTeachingSessionId = null;
+let activeLiveViewContext = null;
+let liveViewTelemetryAttempts = new Set();
 
 // Storage helpers
 const kv = {
@@ -696,25 +780,59 @@ async function setConnectivityBadge(status = connectivityStatus()) {
 }
 
 async function scheduleConnectivityHealthBoundary(nowValue = Date.now()) {
-  await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
-  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !licenseActive) return;
+  const existing = await chrome.alarms.get(CONNECTIVITY_HEALTH_ALARM_NAME);
+  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !licenseActive) {
+    if (existing) await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
+    return;
+  }
   const { boundaryAt } = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
-  if (!boundaryAt) return;
+  if (!boundaryAt) {
+    if (existing) await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
+    return;
+  }
   if (boundaryAt <= nowValue) {
     await setConnectivityBadge(connectivityStatus(nowValue));
     return;
   }
+  if (existing && Math.abs(Number(existing.scheduledTime || 0) - boundaryAt) < 1000) return;
   chrome.alarms.create(CONNECTIVITY_HEALTH_ALARM_NAME, { when: boundaryAt });
 }
 
-async function recordHeartbeatSuccess(nowValue = Date.now()) {
+function safeDiagnosticError(error) {
+  const code = typeof error?.code === 'string' ? error.code.trim() : '';
+  if (/^[A-Z][A-Z0-9_:-]{0,79}$/.test(code)) return code;
+  const name = typeof error?.name === 'string' ? error.name.trim() : '';
+  if (/^[A-Za-z]{1,40}Error$/.test(name) || name === 'AbortError') return name;
+  return 'Error';
+}
+
+async function persistConnectivityHealthIfNeeded(priorState, nowValue, authContext = null) {
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'connectivity health persistence');
+  const nextState = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue).state;
+  if (priorState !== nextState
+    || lastConnectivityPersistedState !== nextState
+    || nowValue - lastConnectivityHealthPersistAt >= 60 * 1000) {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'connectivity health persistence');
+    await kv.set({ [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth });
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'connectivity health persistence');
+    lastConnectivityPersistedState = nextState;
+    lastConnectivityHealthPersistAt = nowValue;
+  }
+  return nextState;
+}
+
+async function recordHeartbeatSuccess(nowValue = Date.now(), authContext = null) {
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health success');
   const prior = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
   const recovered = connectivityHealth.consecutiveFailures > 0 || prior.state === 'unreachable';
   apiBackoffUntilMs = 0;
   connectivityHealth = RuntimeCore.connectivityHealthAfterSuccess(connectivityHealth, nowValue);
-  await kv.set({ [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth });
+  await persistConnectivityHealthIfNeeded(prior.state, nowValue, authContext);
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health success');
   await setConnectivityBadge(connectivityStatus(nowValue));
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health success');
   await scheduleConnectivityHealthBoundary(nowValue);
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health success');
 
   if (recovered) {
     flushMonitoringEventOutbox().catch(() => {});
@@ -727,15 +845,20 @@ async function recordHeartbeatSuccess(nowValue = Date.now()) {
   return recovered;
 }
 
-async function recordHeartbeatFailure(errorCategory, nowValue = Date.now()) {
+async function recordHeartbeatFailure(errorCategory, nowValue = Date.now(), authContext = null) {
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health failure');
+  const priorState = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue).state;
   connectivityHealth = RuntimeCore.connectivityHealthAfterFailure(
     connectivityHealth,
     errorCategory,
     nowValue
   );
-  await kv.set({ [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth });
+  await persistConnectivityHealthIfNeeded(priorState, nowValue, authContext);
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health failure');
   await setConnectivityBadge(connectivityStatus(nowValue));
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health failure');
   await scheduleConnectivityHealthBoundary(nowValue);
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health failure');
   return connectivityHealth;
 }
 
@@ -746,31 +869,35 @@ function syncScreenshotHealthGlobals() {
   lastScreenshotError = screenshotHealth.lastErrorCode || '';
 }
 
-async function persistScreenshotHealth(nextHealth) {
-  screenshotHealth = RuntimeCore.normalizeScreenshotHealth(nextHealth);
+async function persistScreenshotHealth(nextHealth, authContext = null) {
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'screenshot health persistence');
+  const normalized = RuntimeCore.normalizeScreenshotHealth(nextHealth);
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'screenshot health persistence');
+  await kv.set({ [SCREENSHOT_HEALTH_STORAGE_KEY]: normalized });
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'screenshot health persistence');
+  screenshotHealth = normalized;
   syncScreenshotHealthGlobals();
-  await kv.set({ [SCREENSHOT_HEALTH_STORAGE_KEY]: screenshotHealth });
   return screenshotHealth;
 }
 
-async function recordScreenshotAttempt(nowValue = Date.now()) {
+async function recordScreenshotAttempt(nowValue = Date.now(), authContext = null) {
   return persistScreenshotHealth({
     ...screenshotHealth,
     schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
     lastAttemptAt: nowValue,
-  });
+  }, authContext);
 }
 
-async function recordScreenshotError(errorCode, nowValue = Date.now()) {
+async function recordScreenshotError(errorCode, nowValue = Date.now(), authContext = null) {
   return persistScreenshotHealth({
     ...screenshotHealth,
     schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
     lastErrorAt: nowValue,
     lastErrorCode: errorCode,
-  });
+  }, authContext);
 }
 
-async function recordScreenshotSuccess(nowValue = Date.now()) {
+async function recordScreenshotSuccess(nowValue = Date.now(), authContext = null) {
   return persistScreenshotHealth({
     ...screenshotHealth,
     schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
@@ -789,6 +916,7 @@ const PERSISTED_CONFIG_KEYS = Object.freeze([
   'enrollmentKey',
 ]);
 const AUTH_STATE_KEYS = [
+  'authContextId',
   'studentToken',
   'activeStudentId',
   'activeStudentSessionId',
@@ -922,77 +1050,138 @@ function kioskLaunchUrl() {
   if (sharedSignInLoginConfig.passpilotKioskAvailable !== true) return null;
   // launch=gate tells the kiosk page to keep the staff PIN in sessionStorage
   // so it dies with the tab instead of persisting in the student profile.
-  // device= (managed installs only) is the durable kiosk identity the page
-  // adopts so its teacher memory survives profile wipes; appended after
-  // launch=gate so that literal stays contiguous for the release contract.
-  const deviceParam = managedKioskDeviceId
-    ? `&device=${encodeURIComponent(managedKioskDeviceId)}`
-    : '';
-  return `${origin}/passpilot/kiosk/simple?school=${encodeURIComponent(sharedSignInLoginConfig.schoolId)}&launch=gate${deviceParam}`;
+  return `${origin}/passpilot/kiosk/simple?school=${encodeURIComponent(sharedSignInLoginConfig.schoolId)}&launch=gate`;
 }
 
-// Resolve the enrolled device's directory id (managed ChromeOS +
-// policy-installed only — chrome.enterprise is undefined everywhere else)
-// and hash it into UUID shape: the raw id never leaves the worker, and the
-// hashed form matches the kiosk API's existing device-id validation.
-// Single-flight and cached for the worker's lifetime; resolution bumps the
-// auth-gate state revision so an already-painted gate re-renders its kiosk
-// button with the device param.
-function detectManagedKioskDeviceId() {
-  if (managedKioskDeviceIdProbe) return managedKioskDeviceIdProbe;
-  managedKioskDeviceIdProbe = (async () => {
-    try {
-      if (!chrome.enterprise?.deviceAttributes?.getDirectoryDeviceId) return null;
-      // Timeout-raced: on some unmanaged runtimes the API surface exists but
-      // the callback never fires, and a pending extension API call would pin
-      // the MV3 worker alive. The probe must always settle.
-      const rawId = await Promise.race([
-        new Promise((resolve) => {
-          try {
-            chrome.enterprise.deviceAttributes.getDirectoryDeviceId((value) => {
-              if (chrome.runtime.lastError) {
-                resolve(null);
-                return;
-              }
-              resolve(typeof value === 'string' ? value.trim() : null);
-            });
-          } catch {
-            resolve(null);
-          }
-        }),
-        new Promise((resolve) => setTimeout(() => resolve(null), 3000)),
-      ]);
-      if (!rawId) return null;
-      if (!globalThis.crypto?.subtle?.digest) return null;
-      const digest = await globalThis.crypto.subtle.digest(
-        'SHA-256',
-        new TextEncoder().encode(`classpilot-kiosk-device:${rawId}`),
-      );
-      const hex = Array.from(new Uint8Array(digest).slice(0, 16))
-        .map((byte) => byte.toString(16).padStart(2, '0'))
-        .join('');
-      const hashed = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-      if (hashed !== managedKioskDeviceId) {
-        managedKioskDeviceId = hashed;
-        bumpAuthGateStateRevision();
-        notifyAuthGateStateToTabs().catch(() => {});
+function readManagedDirectoryDeviceIdOnce(timeoutMs = 1500) {
+  return Promise.race([
+    new Promise((resolve) => {
+      if (!chrome.enterprise?.deviceAttributes?.getDirectoryDeviceId) {
+        resolve(null);
+        return;
       }
-      return managedKioskDeviceId;
-    } catch (err) {
-      console.log('[Kiosk] Managed device id unavailable:', err?.message || err);
-      return null;
+      try {
+        chrome.enterprise.deviceAttributes.getDirectoryDeviceId((value) => {
+          if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+          }
+          resolve(typeof value === 'string' ? value.trim() || null : null);
+        });
+      } catch {
+        resolve(null);
+      }
+    }),
+    new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+}
+
+async function readManagedDirectoryDeviceIdWithRetry() {
+  if (managedKioskDirectoryProbeInFlight) return managedKioskDirectoryProbeInFlight;
+  managedKioskDirectoryProbeInFlight = (async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const directoryDeviceId = await readManagedDirectoryDeviceIdOnce();
+      if (directoryDeviceId) return directoryDeviceId;
+      if (attempt < 2) {
+        const baseDelay = attempt === 0 ? 150 : 400;
+        const jitter = Math.floor(Math.random() * 150);
+        await new Promise((resolve) => setTimeout(resolve, baseDelay + jitter));
+      }
     }
+    return null;
   })();
-  return managedKioskDeviceIdProbe;
+  try {
+    return await managedKioskDirectoryProbeInFlight;
+  } finally {
+    // Transient enterprise API failures must be retried on the next explicit
+    // click. Never cache either the raw directory id or a failure.
+    managedKioskDirectoryProbeInFlight = null;
+  }
+}
+
+function captureKioskLaunchGuard() {
+  const fallbackUrl = kioskLaunchUrl();
+  return Object.freeze({
+    fallbackUrl,
+    origin: kioskGateOrigin(),
+    schoolId: String(sharedSignInLoginConfig.schoolId || '').trim() || null,
+    enrollmentKey: String(CONFIG.enrollmentKey || '').trim() || null,
+    managedPolicyGeneration: managedAuthGatePolicyGeneration,
+    configGeneration: sharedSignInConfigGeneration,
+  });
+}
+
+function kioskLaunchGuardIsCurrent(guard) {
+  return Boolean(
+    guard
+    && guard.fallbackUrl === kioskLaunchUrl()
+    && guard.origin === kioskGateOrigin()
+    && guard.schoolId === (String(sharedSignInLoginConfig.schoolId || '').trim() || null)
+    && guard.enrollmentKey === (String(CONFIG.enrollmentKey || '').trim() || null)
+    && guard.managedPolicyGeneration === managedAuthGatePolicyGeneration
+    && guard.configGeneration === sharedSignInConfigGeneration
+  );
+}
+
+async function requestKioskLaunchUrl(options = {}) {
+  const guard = captureKioskLaunchGuard();
+  if (!guard.fallbackUrl || !guard.enrollmentKey) return guard.fallbackUrl;
+  const directoryDeviceId = options.directoryDeviceId
+    || await readManagedDirectoryDeviceIdWithRetry();
+  if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
+  if (!directoryDeviceId) return guard.fallbackUrl;
+  if (!guard.origin) return guard.fallbackUrl;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 5000);
+  try {
+    const fetcher = options.fetchImpl || globalThis.fetch;
+    const response = await fetcher(`${guard.origin}/api/classpilot/kiosk/launch-ticket`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-ClassPilot-Enrollment-Key': guard.enrollmentKey,
+        'X-School-Id': guard.schoolId,
+      },
+      body: JSON.stringify({
+        directoryDeviceId,
+        clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+        capabilities: ['kioskLaunchTicketV1'],
+      }),
+      signal: controller.signal,
+    });
+    if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
+    if (!response.ok) return guard.fallbackUrl;
+    const data = await response.json().catch(() => ({}));
+    if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
+    const ticket = String(data.ticket || '').trim();
+    const expiresAt = parseBoundedExpiry(data.expiresAt);
+    const accepted = Array.isArray(data.acceptedCapabilities)
+      && data.acceptedCapabilities.includes('kioskLaunchTicketV1');
+    if (!accepted || !ticket || ticket.length > 2048
+      || expiresAt <= Date.now() || expiresAt > Date.now() + 65000) return guard.fallbackUrl;
+    const launchUrl = new URL(guard.fallbackUrl);
+    launchUrl.hash = `launchTicket=${encodeURIComponent(ticket)}`;
+    return launchUrl.href;
+  } catch {
+    return kioskLaunchGuardIsCurrent(guard) ? guard.fallbackUrl : kioskLaunchUrl();
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // Refresh the tab cache - called when tabs change to keep cache accurate
-async function refreshTabCache() {
+async function refreshTabCache(expectedAuthContext = null) {
   try {
     const allTabs = await chrome.tabs.query({});
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'tab cache refresh');
+    }
     const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
     if (httpTabs.length > 0) {
-      const snapshot = await buildOpaqueTabSnapshot(httpTabs);
+      const snapshot = await buildOpaqueTabSnapshot(httpTabs, expectedAuthContext);
+      if (expectedAuthContext) {
+        assertAuthenticatedContextCurrent(expectedAuthContext, 'tab cache refresh');
+      }
       lastKnownTabs = snapshot.tabs;
     }
   } catch (error) {
@@ -1028,7 +1217,7 @@ async function readManagedConfig(options = {}) {
       resolve(config || {});
     }));
   } catch (error) {
-    console.warn('[Service Worker] Managed config read failed:', error);
+    console.warn('[Service Worker] Managed config read failed:', safeDiagnosticError(error));
     if (options.failClosed === true) throw error;
     return {};
   }
@@ -1250,12 +1439,17 @@ function isClassPilotNotEntitledResponse(data = {}) {
     || identifiers.includes('school_not_entitled');
 }
 
-async function disableForInactiveLicense(planStatus) {
+async function disableForInactiveLicense(planStatus, expectedAuthContext = null) {
+  const assertCurrent = (reason) => {
+    if (expectedAuthContext) assertAuthenticatedContextCurrent(expectedAuthContext, reason);
+  };
+  assertCurrent('license revocation');
   // Persist and attempt delivery while the authenticated device context is
   // still available. A retryable failure remains in the bounded outbox and
   // can be delivered after the license/session recovers.
   if (licenseActive) {
     await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
+    assertCurrent('license revocation tracking transition');
   }
   // Product entitlement revocation must remove teacher-authored controls even
   // after a worker restart. Preserve the independently managed school policy
@@ -1265,29 +1459,33 @@ async function disableForInactiveLicense(planStatus) {
       reason: 'entitlement-inactive',
       emitEvent: false,
     });
+    assertCurrent('license revocation control cleanup');
     await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
+    assertCurrent('license revocation control cleanup');
   } catch (error) {
-    console.warn('[License] Classroom control cleanup deferred:', error?.message || error);
+    if (isAuthContextCancellation(error)) throw error;
+    console.warn('[License] Classroom control cleanup deferred:', safeDiagnosticError(error));
     chrome.alarms.create(LICENSE_CONTROL_CLEANUP_ALARM, {
       when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
     });
   }
   await clearFabAndOverlayState('entitlement-inactive', { closeChat: true }).catch(() => {});
+  assertCurrent('license revocation FAB cleanup');
   licenseActive = false;
-  if (observedHeartbeatTimer) {
-    clearInterval(observedHeartbeatTimer);
-    observedHeartbeatTimer = null;
-  }
   scheduleHeartbeat(null);
   await disconnectWebSocket();
+  assertCurrent('license revocation WebSocket cleanup');
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
   chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   chrome.alarms.clear('settings-refresh');
   settingsAlarmScheduled = false;
   await setConnectivityBadge(connectivityStatus());
+  assertCurrent('license revocation connectivity state');
 
+  assertCurrent('license revocation persistence');
   await kv.set({ licenseActive: false, planStatus, licenseDisabledAt: Date.now() });
+  assertCurrent('license revocation persistence');
   notifyLicenseState({ type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus });
 }
 
@@ -1366,7 +1564,7 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
     }
   } catch (error) {
     if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
-    console.warn('[License] Status check failed:', error);
+    console.warn('[License] Status check failed:', safeDiagnosticError(error));
   }
 }
 
@@ -1390,7 +1588,7 @@ async function resolveServerUrl() {
     try {
       syncConfig = await new Promise(resolve => chrome.storage.sync.get(['config'], resolve));
     } catch (error) {
-      console.warn('[Service Worker] Sync config read failed:', error);
+      console.warn('[Service Worker] Sync config read failed:', safeDiagnosticError(error));
     }
   }
 
@@ -1437,7 +1635,7 @@ async function fetchClientConfig(serverUrl) {
       }
     }
   } catch (error) {
-    console.warn('[Service Worker] Failed to fetch client config:', error);
+    console.warn('[Service Worker] Failed to fetch client config:', safeDiagnosticError(error));
   }
 
   return { baseUrl: serverUrl };
@@ -1461,7 +1659,7 @@ function isWithinTrackingHours(
       now: Date.now(),
     });
   } catch (error) {
-    console.warn('[School Hours] Error checking tracking hours:', error);
+    console.warn('[School Hours] Error checking tracking hours:', safeDiagnosticError(error));
     return true;
   }
 }
@@ -1544,11 +1742,11 @@ async function refreshSchoolSettings(options = {}) {
         [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
       });
     });
-    console.log('[School Hours] Settings updated:', settings);
+    console.log('[School Hours] Settings updated');
     return settings;
   } catch (error) {
     if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
-    console.warn('[School Hours] Failed to fetch settings:', error);
+    console.warn('[School Hours] Failed to fetch settings:', safeDiagnosticError(error));
     if (!schoolSettings) {
       schoolSettings = { enableTrackingHours: false };
     }
@@ -1598,12 +1796,17 @@ function fabIdentityBinding() {
 function exactStudentBinding(raw = {}) {
   const candidates = [
     raw,
+    raw?.binding,
+    raw?.exactBinding,
     raw?.data,
+    raw?.authority,
     raw?.command,
     raw?.command?.data,
+    raw?.command?.authority,
     raw?.fab,
     raw?.fabState,
     raw?.state,
+    raw?.classroomState,
     raw?.settings?.fab,
   ].filter((candidate) => candidate && typeof candidate === 'object');
   const firstValue = (key) => {
@@ -1613,20 +1816,75 @@ function exactStudentBinding(raw = {}) {
     }
     return null;
   };
+  const firstInteger = (keys) => {
+    for (const key of keys) {
+      for (const candidate of candidates) {
+        if (!Object.prototype.hasOwnProperty.call(candidate, key)) continue;
+        const value = Number(candidate[key]);
+        if (Number.isSafeInteger(value) && value >= 0) return value;
+      }
+    }
+    return null;
+  };
   return {
+    bindingVersion: firstInteger(['bindingVersion']),
+    schoolId: firstValue('schoolId'),
+    deviceId: firstValue('deviceId'),
     studentId: firstValue('studentId'),
     studentSessionId: firstValue('studentSessionId'),
+    controlRevision: firstInteger([
+      'studentControlRevision',
+      'controlRevision',
+      'ownershipRevision',
+      'studentSessionRevision',
+      'sessionRevision',
+    ]),
   };
 }
 
-function assertCurrentStudentBinding(raw = {}, label = 'message') {
+function currentStudentControlRevision() {
+  if (currentFabState?.ownershipRevisionKnown === true) {
+    const revision = Number(currentFabState.ownershipRevision);
+    if (Number.isSafeInteger(revision) && revision >= 0) return revision;
+  }
+  const revision = Number(
+    currentClassroomState?.studentControlRevision
+    ?? currentClassroomState?.ownershipRevision
+    ?? currentClassroomState?.revision,
+  );
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+function fullAuthorityBindingNegotiated(context = null) {
+  return hasNegotiatedCapability('exactBindingAckV2', context)
+    || hasNegotiatedCapability('exactTabCloseV2', context)
+    || hasNegotiatedCapability('authBoundTelemetryV1', context);
+}
+
+function assertCurrentStudentBinding(raw = {}, label = 'message', options = {}) {
   const binding = exactStudentBinding(raw);
+  const context = options.authContext || null;
+  const requireFullAuthority = options.requireFullAuthority === true
+    || (options.requireFullAuthority !== false && fullAuthorityBindingNegotiated(context));
+  const expectedSchoolId = context?.schoolId ?? (String(CONFIG.schoolId || '').trim() || null);
+  const expectedDeviceId = context?.deviceId ?? CONFIG.deviceId;
+  const expectedControlRevision = currentStudentControlRevision();
   if (
     studentAuthInvalidating
     || !CONFIG.activeStudentId
     || !CONFIG.activeStudentSessionId
     || binding.studentId !== CONFIG.activeStudentId
     || binding.studentSessionId !== CONFIG.activeStudentSessionId
+    || (requireFullAuthority && (
+      binding.bindingVersion !== 2
+      || !expectedSchoolId
+      || binding.schoolId !== expectedSchoolId
+      || !expectedDeviceId
+      || binding.deviceId !== expectedDeviceId
+      || binding.controlRevision === null
+      || expectedControlRevision === null
+      || binding.controlRevision !== expectedControlRevision
+    ))
   ) {
     const error = new Error(`${label} belongs to a retired student session`);
     error.code = 'STUDENT_BINDING_MISMATCH';
@@ -1640,7 +1898,7 @@ function acceptsCurrentStudentBinding(raw = {}, label = 'message') {
     assertCurrentStudentBinding(raw, label);
     return true;
   } catch (error) {
-    console.warn(`[Binding] Ignoring ${label}:`, error?.message || error);
+    console.warn(`[Binding] Ignoring ${label}:`, safeDiagnosticError(error));
     return false;
   }
 }
@@ -1705,7 +1963,7 @@ async function adoptAuthenticatedStudentBindingNow(raw, reason, responseGuard) {
   const priorStudentSessionId = CONFIG.activeStudentSessionId;
   const binding = exactStudentBinding(raw);
   const authenticatedSchoolId = String(
-    raw.schoolId || raw.settings?.schoolId || raw.school?.id || ''
+    raw.schoolId || raw.exactBinding?.schoolId || raw.settings?.schoolId || raw.school?.id || ''
   ).trim() || null;
   if (!binding.studentId || !binding.studentSessionId) {
     throw new Error(`${reason} omitted the exact student binding`);
@@ -2169,9 +2427,12 @@ function markPollResponsePersisted(pollId, selectedOption) {
   });
 }
 
-async function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
+async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expectedAuthContext) {
   const messageId = message.chatMessageId || message.messageId;
-  if (!messageId) return false;
+  if (!messageId || !expectedAuthContext) return false;
+  assertAuthenticatedContextCurrent(expectedAuthContext, 'chat delivery acknowledgement');
+  const binding = assertCurrentStudentBinding(message, 'chat delivery acknowledgement');
+  assertBindingMatchesAuthContext(binding, expectedAuthContext, 'chat delivery acknowledgement');
   const ack = {
     type: 'chat-message-ack',
     ackId: `chat:${messageId}:${deliveryStatus}`,
@@ -2183,8 +2444,9 @@ async function sendChatDeliveryAck(message, deliveryStatus, errorMessage) {
     errorMessage: errorMessage || null,
     timestamp: new Date().toISOString(),
   };
-  await enqueueChatAck(ack);
-  await wsSend(ack);
+  await enqueueChatAck(ack, expectedAuthContext);
+  assertAuthenticatedContextCurrent(expectedAuthContext, 'chat delivery acknowledgement');
+  await wsSend(ack, expectedAuthContext);
   scheduleChatAckFlush();
   return true;
 }
@@ -2228,20 +2490,26 @@ function disconnectWebSocket() {
   wsConnected = false;
   wsTransportConnected = false;
   wsAuthenticatedGeneration = 0;
+  const closingIdentity = wsTransportIdentity;
   // Tell offscreen document to close the WebSocket
   const closePromise = sendToOffscreen({
     type: 'WS_CLOSE',
-    connectionGeneration: wsConnectionGeneration,
+    connectionGeneration: closingIdentity?.connectionGeneration || wsConnectionGeneration,
+    authContextId: closingIdentity?.authContextId,
+    serverOrigin: closingIdentity?.serverOrigin,
   }).then((response) => {
     activeLiveViewNegotiationId = null;
     activeLiveViewTeachingSessionId = null;
+    activeLiveViewContext = null;
     return response;
-  }).catch(() => {});
+  }).catch(() => {}).finally(() => {
+    if (wsTransportIdentity === closingIdentity) wsTransportIdentity = null;
+  });
   if (ws) {
     try {
       ws.close();
     } catch (error) {
-      console.warn('WebSocket close failed:', error);
+      console.warn('WebSocket close failed:', safeDiagnosticError(error));
     }
   }
   ws = null;
@@ -2249,25 +2517,34 @@ function disconnectWebSocket() {
 }
 
 function scheduleHeartbeat(periodInMinutes) {
-  // Clear any existing heartbeat mechanisms
-  chrome.alarms.clear('heartbeat');
-  if (heartbeatIntervalId) {
-    clearInterval(heartbeatIntervalId);
+  if (!periodInMinutes) {
+    chrome.alarms.get('heartbeat', (existing) => {
+      if (existing) chrome.alarms.clear('heartbeat');
+    });
+    if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
     heartbeatIntervalId = null;
+    if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
+    eventHeartbeatTimer = null;
+    eventHeartbeatReason = null;
+    lastHeartbeatDispatchAt = 0;
+    return;
   }
 
-  if (periodInMinutes) {
-    // Use setInterval for 10-second heartbeats (Chrome alarms minimum is 30 seconds)
+  const normalizedPeriod = Math.max(0.5, Number(periodInMinutes) || 0.5);
+  const intervalWasMissing = !heartbeatIntervalId;
+  if (intervalWasMissing) {
     heartbeatIntervalId = setInterval(() => {
       safeSendHeartbeat('interval');
     }, HEARTBEAT_INTERVAL_MS);
-    // Chrome alarms survive MV3 worker suspension. They cannot provide the
-    // 10-second foreground cadence, so they are the independent 30-second
-    // recovery path rather than a replacement for the interval.
-    chrome.alarms.create('heartbeat', {
-      periodInMinutes: Math.max(0.5, Number(periodInMinutes) || 0.5),
-    });
-    // Send immediately when starting
+  }
+  // Chrome alarms survive MV3 suspension. Preserve an unchanged recovery
+  // alarm rather than shifting its schedule on every reconciliation.
+  chrome.alarms.get('heartbeat', (existing) => {
+    if (!existing || Number(existing.periodInMinutes) !== normalizedPeriod) {
+      chrome.alarms.create('heartbeat', { periodInMinutes: normalizedPeriod });
+    }
+  });
+  if (intervalWasMissing) {
     safeSendHeartbeat('schedule');
     console.log('[Heartbeat] Scheduled every 10 seconds');
   }
@@ -2285,6 +2562,9 @@ function clearNetworkAlarms() {
     clearInterval(heartbeatIntervalId);
     heartbeatIntervalId = null;
   }
+  if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
+  eventHeartbeatTimer = null;
+  eventHeartbeatReason = null;
   settingsAlarmScheduled = false;
 }
 
@@ -2318,30 +2598,49 @@ async function resumeNetworkAfterOffHours(reason) {
 
 async function safeSendHeartbeat(reason) {
   if (heartbeatInFlight) {
-    heartbeatPendingReason = reason;
-    console.log(`[Heartbeat] Coalescing ${reason}; previous heartbeat still in flight`);
-    return;
+    console.log(`[Heartbeat] Skipping ${reason}; previous heartbeat still in flight`);
+    return false;
   }
   if (Date.now() < apiBackoffUntilMs) {
     console.log(`[Heartbeat] Skipping ${reason}; API backoff active`);
-    return;
+    return false;
   }
   heartbeatInFlight = true;
+  lastHeartbeatDispatchAt = Date.now();
   try {
     await sendHeartbeat(reason);
+    return true;
   } catch (error) {
     if (globalThis.Sentry?.captureException) {
       globalThis.Sentry.captureException(error);
     }
-    console.warn(`[Heartbeat] Failed (${reason}):`, error?.message || error);
+    console.warn(`[Heartbeat] Failed (${reason}):`, safeDiagnosticError(error));
   } finally {
     heartbeatInFlight = false;
-    if (heartbeatPendingReason) {
-      const pendingReason = heartbeatPendingReason;
-      heartbeatPendingReason = null;
-      setTimeout(() => safeSendHeartbeat(`coalesced:${pendingReason}`), 0);
-    }
   }
+}
+
+function handleHeartbeatRecoveryAlarm(nowValue = Date.now()) {
+  if (heartbeatInFlight) return Promise.resolve(false);
+  if (
+    lastHeartbeatDispatchAt > 0
+    && nowValue - lastHeartbeatDispatchAt < HEARTBEAT_RECOVERY_STALE_MS
+  ) {
+    console.log('[Heartbeat] Recovery alarm skipped; 10-second cadence is healthy');
+    return Promise.resolve(false);
+  }
+  return safeSendHeartbeat('alarm-recovery');
+}
+
+function scheduleEventHeartbeat(reason) {
+  eventHeartbeatReason = reason;
+  if (eventHeartbeatTimer) return;
+  eventHeartbeatTimer = setTimeout(() => {
+    const trailingReason = eventHeartbeatReason || 'event';
+    eventHeartbeatReason = null;
+    eventHeartbeatTimer = null;
+    safeSendHeartbeat(`event:${trailingReason}`);
+  }, EVENT_HEARTBEAT_COALESCE_MS);
 }
 
 function generateOpaqueTabRef() {
@@ -2350,21 +2649,34 @@ function generateOpaqueTabRef() {
   return `tab_${String(random).replace(/[^a-zA-Z0-9]/g, '')}`;
 }
 
-function tabSnapshotAuthBinding() {
-  return monitoringEventAuthBinding();
+function tabSnapshotAuthBinding(authContext = null) {
+  return authContext
+    ? monitoringEventAuthBindingForContext(authContext)
+    : monitoringEventAuthBinding();
 }
 
-function buildOpaqueTabSnapshot(rawTabs) {
+function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
   const tabs = (Array.isArray(rawTabs) ? rawTabs : [])
     .filter((tab) => Number.isInteger(tab?.id) && isHttpUrl(tab?.url))
     .slice(0, 20);
-  const binding = tabSnapshotAuthBinding();
+  let authContext = expectedAuthContext;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('tab snapshot');
+    } catch {
+      return Promise.resolve({ schemaVersion: 1, revision: 0, tabs: [], localEntries: [] });
+    }
+  }
+  assertAuthenticatedContextCurrent(authContext, 'tab snapshot');
+  const binding = tabSnapshotAuthBinding(authContext);
   if (!binding) {
     return Promise.resolve({ schemaVersion: 1, revision: 0, tabs: [], localEntries: [] });
   }
 
-  tabSnapshotMutation = tabSnapshotMutation.then(async () => {
+  tabSnapshotMutation = tabSnapshotMutation.catch(() => undefined).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'tab snapshot');
     const stored = await kv.get(TAB_SNAPSHOT_STORAGE_KEY);
+    assertAuthenticatedContextCurrent(authContext, 'tab snapshot');
     const prior = stored[TAB_SNAPSHOT_STORAGE_KEY];
     const bindingMatches = prior?.binding === binding;
     const priorById = new Map((bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
@@ -2379,6 +2691,15 @@ function buildOpaqueTabSnapshot(rawTabs) {
       .map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }));
     const changed = JSON.stringify(previousProjection) !== JSON.stringify(localEntries);
     const priorRevision = bindingMatches ? Number(prior.revision || 0) : 0;
+    if (bindingMatches && !changed && Number.isSafeInteger(priorRevision) && priorRevision >= 1) {
+      currentTabSnapshotRevision = priorRevision;
+      return {
+        schemaVersion: 1,
+        revision: priorRevision,
+        tabs: localEntries.map(({ tabRef, url, title }) => ({ tabRef, url, title })),
+        localEntries,
+      };
+    }
     const revision = Math.max(1, priorRevision + (changed ? 1 : 0));
     const next = {
       schemaVersion: 1,
@@ -2387,7 +2708,9 @@ function buildOpaqueTabSnapshot(rawTabs) {
       entries: localEntries,
       updatedAt: Date.now(),
     };
+    assertAuthenticatedContextCurrent(authContext, 'tab snapshot persistence');
     await kv.set({ [TAB_SNAPSHOT_STORAGE_KEY]: next });
+    assertAuthenticatedContextCurrent(authContext, 'tab snapshot persistence');
     currentTabSnapshotRevision = revision;
     return {
       schemaVersion: 1,
@@ -2395,24 +2718,33 @@ function buildOpaqueTabSnapshot(rawTabs) {
       tabs: localEntries.map(({ tabRef, url, title }) => ({ tabRef, url, title })),
       localEntries,
     };
-  }, async () => ({ schemaVersion: 1, revision: 0, tabs: [], localEntries: [] }));
+  });
   return tabSnapshotMutation;
 }
 
-async function resolveExactTabRefs(rawTabRefs, expectedRevision) {
+async function resolveExactTabRefs(rawTabRefs, expectedRevision, expectedAuthContext = null) {
   const tabRefs = [...new Set((Array.isArray(rawTabRefs) ? rawTabRefs : [])
     .map((value) => String(value || '').trim())
     .filter(Boolean))];
   if (tabRefs.length === 0) throw new Error('Missing exact tab references');
-  const currentTabs = await chrome.tabs.query({});
-  const snapshot = await buildOpaqueTabSnapshot(currentTabs);
   const parsedExpected = Number(expectedRevision);
-  if (Number.isSafeInteger(parsedExpected) && parsedExpected > 0 && parsedExpected !== snapshot.revision) {
+  if (!Number.isSafeInteger(parsedExpected) || parsedExpected < 1) {
+    const error = new Error('Exact tab close requires a positive snapshot revision');
+    error.code = 'TAB_SNAPSHOT_REVISION_REQUIRED';
+    throw error;
+  }
+  const authContext = expectedAuthContext || captureAuthenticatedContext('exact tab resolution');
+  assertAuthenticatedContextCurrent(authContext, 'exact tab resolution');
+  const currentTabs = await chrome.tabs.query({});
+  assertAuthenticatedContextCurrent(authContext, 'exact tab resolution');
+  const snapshot = await buildOpaqueTabSnapshot(currentTabs, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'exact tab resolution');
+  if (parsedExpected !== snapshot.revision) {
     const error = new Error('Tab snapshot is stale; refresh before closing tabs');
     error.code = 'STALE_TAB_SNAPSHOT';
     throw error;
   }
-  const byRef = new Map(snapshot.localEntries.map((entry) => [entry.tabRef, entry.tabId]));
+  const byRef = new Map(snapshot.localEntries.map((entry) => [entry.tabRef, entry]));
   const missing = tabRefs.filter((tabRef) => !byRef.has(tabRef));
   if (missing.length > 0) {
     const error = new Error('One or more exact tab references are no longer open');
@@ -2421,35 +2753,124 @@ async function resolveExactTabRefs(rawTabRefs, expectedRevision) {
   }
   return {
     revision: snapshot.revision,
-    targets: tabRefs.map((tabRef) => ({ tabRef, tabId: byRef.get(tabRef) })),
+    targets: tabRefs.map((tabRef) => {
+      const entry = byRef.get(tabRef);
+      return {
+        tabRef,
+        tabId: entry.tabId,
+        expectedUrl: entry.url,
+        expectedTitle: entry.title,
+      };
+    }),
   };
 }
 
-function syncObservedHeartbeat(reason) {
-  if (trackingState === TRACKING_STATES.ACTIVE && observedByTeacher) {
-    if (!observedHeartbeatTimer) {
-      observedHeartbeatTimer = setInterval(() => {
-        safeSendHeartbeat('observed-interval');
-      }, OBSERVED_HEARTBEAT_SECONDS * 1000);
-      console.log(`[Heartbeat] Observed mode enabled (${reason})`);
-      safeSendHeartbeat('observed-start');
-    }
-    return;
-  }
-
-  if (observedHeartbeatTimer) {
-    clearInterval(observedHeartbeatTimer);
-    observedHeartbeatTimer = null;
-    console.log(`[Heartbeat] Observed mode disabled (${reason})`);
+function normalizedLegacyTabUrl(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    parsed.hash = '';
+    return parsed.href;
+  } catch {
+    return null;
   }
 }
 
-function setObservedState(isObserved, reason) {
+async function resolveUniqueLegacyTabUrls(rawUrls, expectedAuthContext = null) {
+  const urls = [...new Set((Array.isArray(rawUrls) ? rawUrls : [])
+    .map(normalizedLegacyTabUrl)
+    .filter(Boolean))];
+  if (urls.length === 0) {
+    const error = new Error('Missing exact legacy tab URLs');
+    error.code = 'TAB_TARGET_REQUIRED';
+    throw error;
+  }
+  const authContext = expectedAuthContext || captureAuthenticatedContext('legacy tab resolution');
+  assertAuthenticatedContextCurrent(authContext, 'legacy tab resolution');
+  const tabs = (await chrome.tabs.query({})).filter((tab) => Number.isInteger(tab?.id));
+  assertAuthenticatedContextCurrent(authContext, 'legacy tab resolution');
+  const tabsByUrl = new Map();
+  for (const tab of tabs) {
+    const normalized = normalizedLegacyTabUrl(tab.url);
+    if (!normalized) continue;
+    const matches = tabsByUrl.get(normalized) || [];
+    matches.push(tab);
+    tabsByUrl.set(normalized, matches);
+  }
+  const targets = [];
+  for (const url of urls) {
+    const matches = tabsByUrl.get(url) || [];
+    if (matches.length !== 1) {
+      const error = new Error('Legacy URL target is missing or ambiguous; refresh for an exact tab reference');
+      error.code = matches.length === 0 ? 'TAB_URL_NOT_FOUND' : 'AMBIGUOUS_TAB_URL';
+      throw error;
+    }
+    targets.push(matches[0]);
+  }
+  const snapshot = await buildOpaqueTabSnapshot(tabs, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'legacy tab resolution');
+  const entryById = new Map(snapshot.localEntries.map((entry) => [entry.tabId, entry]));
+  return {
+    revision: snapshot.revision,
+    targets: targets.map((tab) => ({
+      tabId: tab.id,
+      tabRef: entryById.get(tab.id)?.tabRef || null,
+      expectedUrl: String(tab.url || '').slice(0, 512),
+      expectedTitle: String(tab.title || 'Untitled').slice(0, 512),
+    })),
+  };
+}
+
+async function revalidateExactTabTargets(exact, authContext, resolver = resolveExactTabRefs) {
+  assertAuthenticatedContextCurrent(authContext, 'exact tab revalidation');
+  const tabRefs = (exact?.targets || []).map((target) => target?.tabRef).filter(Boolean);
+  const current = await resolver(tabRefs, exact?.revision, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'exact tab revalidation');
+  const expectedIds = new Map((exact?.targets || []).map((target) => [target.tabRef, target.tabId]));
+  if (current.targets.some((target) => expectedIds.get(target.tabRef) !== target.tabId)) {
+    const error = new Error('Exact tab target changed after authorization');
+    error.code = 'STALE_TAB_SNAPSHOT';
+    throw error;
+  }
+  return current;
+}
+
+async function closeExactTabTargets(exact, authContext, options = {}) {
+  const resolver = options.resolveExactTargets || resolveExactTabRefs;
+  const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
+  const verified = await revalidateExactTabTargets(exact, authContext, resolver);
+  for (const target of verified.targets) {
+    assertAuthenticatedContextCurrent(authContext, 'exact tab close');
+    try {
+      const tab = await getTab(target.tabId);
+      assertAuthenticatedContextCurrent(authContext, 'exact tab close');
+      if (
+        !tab
+        || tab.id !== target.tabId
+        || String(tab.url || '').slice(0, 512) !== target.expectedUrl
+        || String(tab.title || 'Untitled').slice(0, 512) !== target.expectedTitle
+      ) {
+        const error = new Error('Exact tab changed immediately before close');
+        error.code = 'STALE_TAB_SNAPSHOT';
+        throw error;
+      }
+      await chrome.tabs.remove(target.tabId);
+      assertAuthenticatedContextCurrent(authContext, 'exact tab close');
+    } catch (error) {
+      if (error?.code === 'STALE_TAB_SNAPSHOT' || isAuthContextCancellation(error)) throw error;
+      const closeError = new Error(`Exact tab ${target.tabRef || 'target'} could not be closed`);
+      closeError.code = 'TAB_CLOSE_FAILED';
+      throw closeError;
+    }
+  }
+  assertAuthenticatedContextCurrent(authContext, 'exact tab close');
+}
+
+function setObservedState(isObserved, _reason) {
   if (observedByTeacher === isObserved) {
     return;
   }
   observedByTeacher = isObserved;
-  syncObservedHeartbeat(reason);
 }
 
 async function transitionTrackingState(nextState, reason) {
@@ -2484,7 +2905,6 @@ async function updateTrackingState(reason = 'state-check') {
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);  // Disable screenshots when license inactive
       await disconnectWebSocket();
-      syncObservedHeartbeat('license-inactive');
     }
     return;
   }
@@ -2494,12 +2914,12 @@ async function updateTrackingState(reason = 'state-check') {
   }
 
   if (!hasStudentAuth()) {
+    scheduleHealthCheckAlarm(5);
     if (trackingState !== TRACKING_STATES.OFF) {
       await transitionTrackingState(TRACKING_STATES.OFF, 'auth_required');
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);
       await disconnectWebSocket();
-      syncObservedHeartbeat('auth-required');
     }
     await notifyAuthGateStateToTabs();
     return;
@@ -2511,7 +2931,6 @@ async function updateTrackingState(reason = 'state-check') {
       await transitionTrackingState(nextState, reason);
     }
     await pauseNetworkForOffHours(reason);
-    syncObservedHeartbeat('tracking-state');
     return;
   }
 
@@ -2541,8 +2960,6 @@ async function updateTrackingState(reason = 'state-check') {
     scheduleScreenshotCapture(false);  // Disable screenshots when tracking is off
     await disconnectWebSocket();
   }
-
-  syncObservedHeartbeat('tracking-state');
 }
 
 async function initializeAdaptiveTracking(reason, options = {}) {
@@ -2584,7 +3001,7 @@ async function initializeAdaptiveTracking(reason, options = {}) {
   assertCurrent();
   if (options.authMutationGeneration === undefined) {
     updateTrackingState(reason).catch((error) => {
-      console.warn('[Tracking] State initialization failed:', error?.message || error);
+      console.warn('[Tracking] State initialization failed:', safeDiagnosticError(error));
     });
   } else {
     await updateTrackingState(reason);
@@ -2617,6 +3034,15 @@ const CHAT_ACK_BINDING_KEY = 'chatAckOutboxAuthBindingV1';
 const CHAT_ACK_FLUSH_ALARM = 'chat-ack-flush';
 let chatAckMutation = Promise.resolve();
 let chatAckFlushInFlight = false;
+const STUDENT_CHAT_OUTBOX_KEY = 'studentChatOutboxV1';
+const STUDENT_CHAT_OUTBOX_BINDING_KEY = 'studentChatOutboxAuthBindingV1';
+const STUDENT_CHAT_FLUSH_ALARM = 'student-chat-flush';
+const STUDENT_CHAT_MAX_ENTRIES = 40;
+const STUDENT_CHAT_MAX_BYTES = 128 * 1024;
+const STUDENT_CHAT_MAX_AGE_MS = 30 * 60 * 1000;
+const STUDENT_CHAT_RETRY_DELAYS_MS = Object.freeze([5000, 15000, 30000, 60000, 120000]);
+let studentChatMutation = Promise.resolve();
+let studentChatFlushInFlight = false;
 
 function boundedAckObject(value, maxBytes = 16 * 1024) {
   if (value === undefined) return undefined;
@@ -2642,11 +3068,20 @@ function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
     commandId,
     ackState,
     commandType: String(rawAck?.commandType || '').slice(0, 80) || undefined,
-    studentId: CONFIG.activeStudentId || undefined,
-    deviceId: CONFIG.deviceId || undefined,
+    bindingVersion: Number(rawAck?.bindingVersion || 0) || undefined,
+    authContextId: String(rawAck?.authContextId || '').slice(0, 128) || undefined,
+    schoolId: String(rawAck?.schoolId || '').slice(0, 256) || undefined,
+    studentId: String(rawAck?.studentId || '').slice(0, 256) || undefined,
+    studentSessionId: String(rawAck?.studentSessionId || '').slice(0, 256) || undefined,
+    deviceId: String(rawAck?.deviceId || '').slice(0, 256) || undefined,
+    studentControlRevision: Number.isSafeInteger(Number(rawAck?.studentControlRevision))
+      && Number(rawAck.studentControlRevision) >= 0
+      ? Number(rawAck.studentControlRevision)
+      : undefined,
     result: boundedAckObject(rawAck?.result),
     state: boundedAckObject(rawAck?.state),
     error: rawAck?.error ? String(rawAck.error).slice(0, 500) : undefined,
+    errorCode: rawAck?.errorCode ? String(rawAck.errorCode).slice(0, 120) : undefined,
     deliveryPolicy: rawAck?.deliveryPolicy,
     expiresAt: rawAck?.expiresAt,
     appliedRevision: Number(rawAck?.appliedRevision || 0),
@@ -2668,6 +3103,58 @@ function boundCommandAckOutbox(entries, nowValue = Date.now()) {
   return bounded;
 }
 
+function acceptedAckReceiptIds(receipts, entries, authContext, kind = 'command') {
+  const storedByAckId = new Map((Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry?.ackId)
+    .map((entry) => [String(entry.ackId), entry]));
+  const requireExact = hasNegotiatedCapability('exactBindingAckV2', authContext);
+  const accepted = [];
+  for (const receipt of Array.isArray(receipts) ? receipts : []) {
+    if (receipt?.accepted !== true) continue;
+    const ackId = String(receipt.ackId || '').trim();
+    const stored = storedByAckId.get(ackId);
+    if (!stored) continue;
+    const storedTargetId = String(kind === 'chat' ? stored.messageId || '' : stored.commandId || '');
+    const receiptTargetId = String(kind === 'chat'
+      ? receipt.messageId || receipt.chatMessageId || ''
+      : receipt.commandId || '');
+    if ((requireExact && receiptTargetId !== storedTargetId)
+      || (!requireExact && receiptTargetId && receiptTargetId !== storedTargetId)) continue;
+    if (requireExact) {
+      const binding = exactStudentBinding(receipt);
+      const storedControlRevision = Number(stored.studentControlRevision);
+      if (
+        binding.bindingVersion !== 2
+        || binding.schoolId !== stored.schoolId
+        || binding.schoolId !== authContext.schoolId
+        || binding.deviceId !== stored.deviceId
+        || binding.deviceId !== authContext.deviceId
+        || binding.studentId !== stored.studentId
+        || binding.studentId !== authContext.studentId
+        || binding.studentSessionId !== stored.studentSessionId
+        || binding.studentSessionId !== authContext.studentSessionId
+        || !Number.isSafeInteger(storedControlRevision)
+        || binding.controlRevision !== storedControlRevision
+      ) continue;
+    }
+    accepted.push(ackId);
+  }
+  return [...new Set(accepted)];
+}
+
+async function removeAcceptedCommandAckReceipts(receipts, authContext) {
+  await commandAckMutation;
+  assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+  const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+  assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+  if (stored[COMMAND_ACK_BINDING_KEY] !== monitoringEventAuthBindingForContext(authContext)) return 0;
+  const entries = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY]);
+  const receiptIds = acceptedAckReceiptIds(receipts, entries, authContext, 'command');
+  if (receiptIds.length === 0) return 0;
+  const remaining = await removeCommandAcks(receiptIds, authContext);
+  return Math.max(0, entries.length - remaining);
+}
+
 function scheduleCommandAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
   chrome.alarms.get(COMMAND_ACK_FLUSH_ALARM, (existing) => {
     const when = Date.now() + Math.max(1000, Number(delayMs || 0));
@@ -2677,13 +3164,16 @@ function scheduleCommandAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
   });
 }
 
-function enqueueCommandAck(rawAck) {
-  const binding = monitoringEventAuthBinding();
+function enqueueCommandAck(rawAck, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
+  const binding = monitoringEventAuthBindingForContext(authContext);
   const normalized = normalizeCommandAckForStorage(rawAck);
   if (!binding || !normalized) return Promise.resolve(false);
 
-  commandAckMutation = commandAckMutation.then(async () => {
-    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+  commandAckMutation = commandAckMutation.catch(() => undefined).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
+    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
     let entries = stored[COMMAND_ACK_BINDING_KEY] === binding
       ? boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY])
       : [];
@@ -2696,25 +3186,37 @@ function enqueueCommandAck(rawAck) {
       entries = entries.filter((ack) => ack.ackId !== normalized.ackId);
     }
     entries = boundCommandAckOutbox([...entries, normalized]);
-    await kv.set({
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
+    await durableLocalKv.set({
       [COMMAND_ACK_OUTBOX_KEY]: entries,
       [COMMAND_ACK_BINDING_KEY]: binding,
     });
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
     return true;
-  }, async () => false);
+  });
   return commandAckMutation;
 }
 
-function removeCommandAcks(ackIds) {
+function removeCommandAcks(ackIds, expectedAuthContext = null) {
   const acknowledged = new Set((Array.isArray(ackIds) ? ackIds : []).filter(Boolean));
-  commandAckMutation = commandAckMutation.then(async () => {
-    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY]);
+  commandAckMutation = commandAckMutation.catch(() => undefined).then(async () => {
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'command acknowledgement removal');
+    }
+    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'command acknowledgement removal');
+      if (
+        stored[COMMAND_ACK_BINDING_KEY]
+        !== monitoringEventAuthBindingForContext(expectedAuthContext)
+      ) return boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY]).length;
+    }
     const remaining = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY])
       .filter((ack) => !acknowledged.has(ack.ackId));
-    await kv.set({ [COMMAND_ACK_OUTBOX_KEY]: remaining });
+    await durableLocalKv.set({ [COMMAND_ACK_OUTBOX_KEY]: remaining });
     if (remaining.length === 0) {
       commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
-      await kv.remove(COMMAND_ACK_BINDING_KEY);
+      await durableLocalKv.remove(COMMAND_ACK_BINDING_KEY);
       await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
     }
     return remaining.length;
@@ -2723,9 +3225,9 @@ function removeCommandAcks(ackIds) {
 }
 
 async function discardCommandAckOutbox() {
-  commandAckMutation = commandAckMutation.then(async () => {
-    await kv.set({ [COMMAND_ACK_OUTBOX_KEY]: [] });
-    await kv.remove(COMMAND_ACK_BINDING_KEY);
+  commandAckMutation = commandAckMutation.catch(() => undefined).then(async () => {
+    await durableLocalKv.set({ [COMMAND_ACK_OUTBOX_KEY]: [] });
+    await durableLocalKv.remove(COMMAND_ACK_BINDING_KEY);
     await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
   });
   return commandAckMutation;
@@ -2733,11 +3235,20 @@ async function discardCommandAckOutbox() {
 
 async function flushCommandAckOutbox(options = {}) {
   if (commandAckFlushInFlight || !hasStudentAuth()) return;
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('command acknowledgement flush');
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return;
+    throw error;
+  }
   commandAckFlushInFlight = true;
   try {
     await commandAckMutation;
-    const binding = monitoringEventAuthBinding();
-    const stored = await kv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
     if (!binding || stored[COMMAND_ACK_BINDING_KEY] !== binding) {
       await discardCommandAckOutbox();
       return;
@@ -2751,7 +3262,7 @@ async function flushCommandAckOutbox(options = {}) {
     let wsAttempted = false;
     if (wsConnected) {
       for (const ack of batch) {
-        wsAttempted = (await wsSend(ack)) || wsAttempted;
+        wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
       }
     }
     const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
@@ -2763,38 +3274,41 @@ async function flushCommandAckOutbox(options = {}) {
     const payload = {
       acks: batch.map(({ queuedAt, lastWsAttemptAt, ...ack }) => ack),
     };
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/command-acks`, {
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/command-acks`, {
       method: 'POST',
-      headers: buildDeviceAuthHeaders(),
+      headers: buildDeviceAuthHeaders(authContext),
       body: JSON.stringify(payload),
+      signal: authContext.signal,
     }, {
       context: 'command acknowledgement',
       maxAttempts: 1,
       retryStatuses: new Set([429, 503]),
     });
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
     if (!response.ok) {
       commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
       scheduleCommandAckFlush(commandAckRetryDelayMs);
       return;
     }
     const data = await response.json().catch(() => ({}));
-    const receiptIds = (Array.isArray(data.receipts) ? data.receipts : [])
-      .map((receipt) => receipt?.ackId)
-      .filter(Boolean);
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+    const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'command');
     if (receiptIds.length === 0) {
       commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
       scheduleCommandAckFlush(commandAckRetryDelayMs);
       return;
     }
-    if (binding !== monitoringEventAuthBinding()) {
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+    if (binding !== monitoringEventAuthBindingForContext(authContext)) {
       await discardCommandAckOutbox();
       return;
     }
-    const remaining = await removeCommandAcks(receiptIds);
+    const remaining = await removeCommandAcks(receiptIds, authContext);
     commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
     if (remaining > 0) scheduleCommandAckFlush();
   } catch (error) {
-    console.warn('[Command ACK] Flush deferred:', error?.message || error);
+    console.warn('[Command ACK] Flush deferred:', safeDiagnosticError(error));
     commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
     scheduleCommandAckFlush(commandAckRetryDelayMs);
   } finally {
@@ -2811,8 +3325,9 @@ function scheduleChatAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
   });
 }
 
-function enqueueChatAck(rawAck) {
-  const binding = monitoringEventAuthBinding();
+function enqueueChatAck(rawAck, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
+  const binding = monitoringEventAuthBindingForContext(authContext);
   if (!binding || !rawAck?.ackId || !rawAck?.messageId) return Promise.resolve(false);
   const ack = {
     type: 'chat-message-ack',
@@ -2823,11 +3338,19 @@ function enqueueChatAck(rawAck) {
     deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
     status: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
     errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
+    bindingVersion: 2,
+    schoolId: authContext.schoolId || undefined,
+    deviceId: authContext.deviceId,
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+    studentControlRevision: currentStudentControlRevision() ?? undefined,
     timestamp: rawAck.timestamp || new Date().toISOString(),
     queuedAt: Date.now(),
   };
-  chatAckMutation = chatAckMutation.then(async () => {
-    const stored = await kv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+  chatAckMutation = chatAckMutation.catch(() => undefined).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
+    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
     let entries = stored[CHAT_ACK_BINDING_KEY] === binding && Array.isArray(stored[CHAT_ACK_OUTBOX_KEY])
       ? stored[CHAT_ACK_OUTBOX_KEY]
       : [];
@@ -2840,21 +3363,46 @@ function enqueueChatAck(rawAck) {
       .filter((item) => Number(item.queuedAt || 0) >= Date.now() - COMMAND_ACK_MAX_AGE_MS)
       .slice(-COMMAND_ACK_MAX_ENTRIES);
     while (entries.length > 0 && RuntimeCore.utf8ByteLength(entries) > COMMAND_ACK_MAX_BYTES) entries.shift();
-    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: entries, [CHAT_ACK_BINDING_KEY]: binding });
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
+    await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: entries, [CHAT_ACK_BINDING_KEY]: binding });
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
     return true;
   });
   return chatAckMutation;
 }
 
-function removeChatAcks(ackIds) {
+async function removeAcceptedChatAckReceipts(receipts, authContext) {
+  await chatAckMutation;
+  assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+  const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+  assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+  if (stored[CHAT_ACK_BINDING_KEY] !== monitoringEventAuthBindingForContext(authContext)) return 0;
+  const entries = Array.isArray(stored[CHAT_ACK_OUTBOX_KEY]) ? stored[CHAT_ACK_OUTBOX_KEY] : [];
+  const receiptIds = acceptedAckReceiptIds(receipts, entries, authContext, 'chat');
+  if (receiptIds.length === 0) return 0;
+  const remaining = await removeChatAcks(receiptIds, authContext);
+  return Math.max(0, entries.length - remaining);
+}
+
+function removeChatAcks(ackIds, expectedAuthContext = null) {
   const acknowledged = new Set(ackIds || []);
-  chatAckMutation = chatAckMutation.then(async () => {
-    const stored = await kv.get(CHAT_ACK_OUTBOX_KEY);
+  chatAckMutation = chatAckMutation.catch(() => undefined).then(async () => {
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'chat acknowledgement removal');
+    }
+    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'chat acknowledgement removal');
+      if (
+        stored[CHAT_ACK_BINDING_KEY]
+        !== monitoringEventAuthBindingForContext(expectedAuthContext)
+      ) return (stored[CHAT_ACK_OUTBOX_KEY] || []).length;
+    }
     const remaining = (stored[CHAT_ACK_OUTBOX_KEY] || [])
       .filter((ack) => !acknowledged.has(ack.ackId));
-    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: remaining });
+    await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: remaining });
     if (remaining.length === 0) {
-      await kv.remove(CHAT_ACK_BINDING_KEY);
+      await durableLocalKv.remove(CHAT_ACK_BINDING_KEY);
       await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
     }
     return remaining.length;
@@ -2863,9 +3411,9 @@ function removeChatAcks(ackIds) {
 }
 
 async function discardChatAckOutbox() {
-  chatAckMutation = chatAckMutation.then(async () => {
-    await kv.set({ [CHAT_ACK_OUTBOX_KEY]: [] });
-    await kv.remove(CHAT_ACK_BINDING_KEY);
+  chatAckMutation = chatAckMutation.catch(() => undefined).then(async () => {
+    await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: [] });
+    await durableLocalKv.remove(CHAT_ACK_BINDING_KEY);
     await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
   });
   return chatAckMutation;
@@ -2873,11 +3421,20 @@ async function discardChatAckOutbox() {
 
 async function flushChatAckOutbox(options = {}) {
   if (chatAckFlushInFlight || !hasStudentAuth()) return;
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('chat acknowledgement flush');
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return;
+    throw error;
+  }
   chatAckFlushInFlight = true;
   try {
     await chatAckMutation;
-    const binding = monitoringEventAuthBinding();
-    const stored = await kv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
     if (!binding || stored[CHAT_ACK_BINDING_KEY] !== binding) {
       await discardChatAckOutbox();
       return;
@@ -2889,33 +3446,35 @@ async function flushChatAckOutbox(options = {}) {
     }
     let wsAttempted = false;
     if (wsConnected) {
-      for (const ack of batch) wsAttempted = (await wsSend(ack)) || wsAttempted;
+      for (const ack of batch) wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
     }
     const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
     if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
       scheduleChatAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
       return;
     }
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/chat-acks`, {
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/chat-acks`, {
       method: 'POST',
-      headers: buildDeviceAuthHeaders(),
+      headers: buildDeviceAuthHeaders(authContext),
       body: JSON.stringify({
         acks: batch.map(({ queuedAt, type, chatMessageId, deliveryStatus, timestamp, sessionId, ...ack }) => ack),
       }),
+      signal: authContext.signal,
     }, {
       context: 'chat acknowledgement',
       maxAttempts: 1,
       retryStatuses: new Set([429, 503]),
     });
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
     if (!response.ok) {
       scheduleChatAckFlush(30 * 1000);
       return;
     }
     const data = await response.json().catch(() => ({}));
-    const receiptIds = (Array.isArray(data.receipts) ? data.receipts : [])
-      .map((receipt) => receipt?.ackId)
-      .filter(Boolean);
-    if (binding !== monitoringEventAuthBinding()) {
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+    const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'chat');
+    if (binding !== monitoringEventAuthBindingForContext(authContext)) {
       await discardChatAckOutbox();
       return;
     }
@@ -2923,13 +3482,419 @@ async function flushChatAckOutbox(options = {}) {
       scheduleChatAckFlush(30 * 1000);
       return;
     }
-    const remaining = await removeChatAcks(receiptIds);
+    const remaining = await removeChatAcks(receiptIds, authContext);
     if (remaining > 0) scheduleChatAckFlush();
   } catch (error) {
-    console.warn('[Chat ACK] Flush deferred:', error?.message || error);
+    console.warn('[Chat ACK] Flush deferred:', safeDiagnosticError(error));
     scheduleChatAckFlush(30 * 1000);
   } finally {
     chatAckFlushInFlight = false;
+  }
+}
+
+function generateStudentChatClientMessageId() {
+  return globalThis.crypto?.randomUUID?.()
+    || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function normalizeStudentChatEntry(raw = {}) {
+  const clientMessageId = String(raw.clientMessageId || '').trim().slice(0, 128);
+  const message = String(raw.message || '').trim().slice(0, 500);
+  const sessionId = String(raw.sessionId || '').trim().slice(0, 256);
+  const binding = String(raw.binding || '').trim();
+  if (!clientMessageId || !message || !sessionId || !binding) return null;
+  const status = ['sending', 'retrying', 'failed'].includes(raw.status)
+    ? raw.status
+    : 'sending';
+  return {
+    schemaVersion: 1,
+    clientMessageId,
+    message,
+    messageType: raw.messageType === 'question' ? 'question' : 'message',
+    sessionId,
+    binding,
+    queuedAt: Number(raw.queuedAt || Date.now()),
+    updatedAt: Number(raw.updatedAt || Date.now()),
+    lastAttemptAt: Number(raw.lastAttemptAt || 0),
+    attempts: Math.max(0, Number(raw.attempts || 0)),
+    status,
+    errorCode: raw.errorCode ? String(raw.errorCode).slice(0, 80) : null,
+  };
+}
+
+function boundedStudentChatOutbox(rawEntries, nowValue = Date.now()) {
+  const entries = (Array.isArray(rawEntries) ? rawEntries : [])
+    .map(normalizeStudentChatEntry)
+    .filter(Boolean)
+    .filter((entry) => entry.queuedAt >= nowValue - STUDENT_CHAT_MAX_AGE_MS)
+    .slice(-STUDENT_CHAT_MAX_ENTRIES);
+  while (entries.length > 0 && RuntimeCore.utf8ByteLength(entries) > STUDENT_CHAT_MAX_BYTES) {
+    entries.shift();
+  }
+  return entries;
+}
+
+async function notifyStudentChatStatus(entry, status, details = {}, authContext = null) {
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'student message status');
+  const update = {
+    clientMessageId: entry.clientMessageId,
+    messageId: details.messageId || null,
+    status,
+    duplicate: details.duplicate === true,
+    errorCode: details.errorCode || null,
+    updatedAt: Date.now(),
+  };
+  // Status updates contain no message body or identity. Content scripts can
+  // update the exact optimistic bubble without exposing another student's
+  // durable outbox after an authentication transition.
+  await broadcastToAllTabs('student-message-status', update).catch(() => {});
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'student message status');
+  return update;
+}
+
+function scheduleStudentChatFlush(delayMs = STUDENT_CHAT_RETRY_DELAYS_MS[0]) {
+  const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+  chrome.alarms.get(STUDENT_CHAT_FLUSH_ALARM, (existing) => {
+    if (!existing || existing.scheduledTime > when) {
+      chrome.alarms.create(STUDENT_CHAT_FLUSH_ALARM, { when });
+    }
+  });
+}
+
+function mutateStudentChatOutbox(operation) {
+  studentChatMutation = studentChatMutation.then(operation, operation);
+  return studentChatMutation;
+}
+
+function persistStudentChatEntry(rawEntry, authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding) throw authContextSuperseded('student message persistence');
+  const entry = normalizeStudentChatEntry({ ...rawEntry, binding });
+  if (!entry) throw new Error('Student message is incomplete');
+  return mutateStudentChatOutbox(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'student message persistence');
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message persistence');
+    const entries = stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] === binding
+      ? boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY])
+      : [];
+    const withoutSameId = entries.filter((item) => item.clientMessageId !== entry.clientMessageId);
+    const next = boundedStudentChatOutbox([...withoutSameId, entry]);
+    if (!next.some((item) => item.clientMessageId === entry.clientMessageId)) {
+      const error = new Error('Student message outbox is full');
+      error.code = 'STUDENT_CHAT_OUTBOX_FULL';
+      throw error;
+    }
+    assertAuthenticatedContextCurrent(authContext, 'student message persistence');
+    await durableLocalKv.set({
+      [STUDENT_CHAT_OUTBOX_KEY]: next,
+      [STUDENT_CHAT_OUTBOX_BINDING_KEY]: binding,
+    });
+    assertAuthenticatedContextCurrent(authContext, 'student message persistence');
+    return entry;
+  });
+}
+
+function updateStudentChatEntry(clientMessageId, updates, authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  return mutateStudentChatOutbox(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'student message update');
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message update');
+    if (stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== binding) {
+      throw authContextSuperseded('student message update');
+    }
+    let updated = null;
+    const next = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY]).map((entry) => {
+      if (entry.clientMessageId !== clientMessageId) return entry;
+      updated = normalizeStudentChatEntry({ ...entry, ...updates, binding, updatedAt: Date.now() });
+      return updated;
+    });
+    if (!updated) throw new Error('Student message outbox entry is unavailable');
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: next });
+    assertAuthenticatedContextCurrent(authContext, 'student message update');
+    return updated;
+  });
+}
+
+function removeDeliveredStudentChatEntry(clientMessageId, authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  return mutateStudentChatOutbox(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'student message receipt');
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message receipt');
+    if (stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== binding) {
+      throw authContextSuperseded('student message receipt');
+    }
+    const remaining = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY])
+      .filter((entry) => entry.clientMessageId !== clientMessageId);
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: remaining });
+    if (remaining.length === 0) {
+      await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
+      await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+    }
+    assertAuthenticatedContextCurrent(authContext, 'student message receipt');
+    return remaining.length;
+  });
+}
+
+async function discardStudentChatOutbox() {
+  return mutateStudentChatOutbox(async () => {
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: [] });
+    await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
+    await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+  });
+}
+
+function studentChatRetryDelay(attempts) {
+  return STUDENT_CHAT_RETRY_DELAYS_MS[Math.min(
+    Math.max(0, Number(attempts || 1) - 1),
+    STUDENT_CHAT_RETRY_DELAYS_MS.length - 1,
+  )];
+}
+
+async function deliverStudentChatEntry(rawEntry, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'student message delivery');
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  const entry = normalizeStudentChatEntry(rawEntry);
+  if (!entry || entry.binding !== binding) throw authContextSuperseded('student message delivery');
+  const attemptStatus = entry.attempts > 0 ? 'Retrying' : 'Sending';
+  await notifyStudentChatStatus(entry, attemptStatus, {}, authContext);
+  const attempted = await updateStudentChatEntry(entry.clientMessageId, {
+    attempts: entry.attempts + 1,
+    lastAttemptAt: Date.now(),
+    status: entry.attempts > 0 ? 'retrying' : 'sending',
+    errorCode: null,
+  }, authContext);
+  try {
+    assertAuthenticatedContextCurrent(authContext, 'student message transmission');
+    const response = await fetchWithBackoff(
+      `${authContext.serverOrigin}/api/student/send-message`,
+      {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(authContext),
+        body: JSON.stringify({
+          clientMessageId: attempted.clientMessageId,
+          message: attempted.message,
+          messageType: attempted.messageType,
+          sessionId: attempted.sessionId,
+        }),
+        signal: authContext.signal,
+      },
+      {
+        context: 'student message',
+        maxAttempts: 1,
+        respectGlobalBackoff: false,
+      },
+    );
+    assertAuthenticatedContextCurrent(authContext, 'student message response');
+    const data = await response.json().catch(() => ({}));
+    assertAuthenticatedContextCurrent(authContext, 'student message response body');
+    if (response.ok
+      && data?.delivered === true
+      && String(data.clientMessageId || '') === attempted.clientMessageId
+      && String(data.messageId || '').trim()) {
+      await removeDeliveredStudentChatEntry(attempted.clientMessageId, authContext);
+      await notifyStudentChatStatus(attempted, 'Delivered', {
+        messageId: String(data.messageId),
+        duplicate: data.duplicate === true,
+      }, authContext);
+      return {
+        success: true,
+        queued: false,
+        clientMessageId: attempted.clientMessageId,
+        messageId: String(data.messageId),
+        duplicate: data.duplicate === true,
+        status: 'Delivered',
+      };
+    }
+
+    const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    const errorCode = retryable ? 'STUDENT_CHAT_RETRY_SCHEDULED' : 'STUDENT_CHAT_REJECTED';
+    const status = retryable ? 'retrying' : 'failed';
+    const updated = await updateStudentChatEntry(attempted.clientMessageId, {
+      status,
+      errorCode,
+    }, authContext);
+    await notifyStudentChatStatus(
+      updated,
+      retryable ? 'Retrying' : 'Failed',
+      { errorCode },
+      authContext,
+    );
+    if (retryable) scheduleStudentChatFlush(studentChatRetryDelay(updated.attempts));
+    return {
+      success: retryable,
+      queued: retryable,
+      clientMessageId: attempted.clientMessageId,
+      status: retryable ? 'Retrying' : 'Failed',
+      errorCode,
+    };
+  } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
+    const updated = await updateStudentChatEntry(attempted.clientMessageId, {
+      status: 'retrying',
+      errorCode: 'STUDENT_CHAT_RETRY_SCHEDULED',
+    }, authContext);
+    await notifyStudentChatStatus(updated, 'Retrying', {
+      errorCode: 'STUDENT_CHAT_RETRY_SCHEDULED',
+    }, authContext);
+    scheduleStudentChatFlush(studentChatRetryDelay(updated.attempts));
+    return {
+      success: true,
+      queued: true,
+      clientMessageId: attempted.clientMessageId,
+      status: 'Retrying',
+      errorCode: 'STUDENT_CHAT_RETRY_SCHEDULED',
+    };
+  }
+}
+
+async function sendLegacyStudentChatMessage(raw, authContext, sessionId) {
+  const clientMessageId = String(raw.clientMessageId || '').trim()
+    || generateStudentChatClientMessageId();
+  const statusEntry = { clientMessageId };
+  await notifyStudentChatStatus(statusEntry, 'Sending', {}, authContext);
+  try {
+    assertAuthenticatedContextCurrent(authContext, 'legacy student message transmission');
+    const response = await fetchWithBackoff(
+      `${authContext.serverOrigin}/api/student/send-message`,
+      {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(authContext),
+        body: JSON.stringify({
+          message: String(raw.message || '').trim(),
+          messageType: raw.messageType === 'question' ? 'question' : 'message',
+          sessionId,
+        }),
+        signal: authContext.signal,
+      },
+      {
+        context: 'legacy student message',
+        maxAttempts: 1,
+        respectGlobalBackoff: false,
+      },
+    );
+    assertAuthenticatedContextCurrent(authContext, 'legacy student message response');
+    const data = await response.json().catch(() => ({}));
+    assertAuthenticatedContextCurrent(authContext, 'legacy student message response body');
+    if (!response.ok) {
+      await notifyStudentChatStatus(statusEntry, 'Failed', {
+        errorCode: 'STUDENT_CHAT_REJECTED',
+      }, authContext);
+      return {
+        success: false,
+        queued: false,
+        clientMessageId,
+        status: 'Failed',
+        errorCode: 'STUDENT_CHAT_REJECTED',
+      };
+    }
+    const messageId = String(data.messageId || '').trim() || null;
+    await notifyStudentChatStatus(statusEntry, 'Delivered', { messageId }, authContext);
+    return {
+      success: true,
+      queued: false,
+      clientMessageId,
+      messageId,
+      status: 'Delivered',
+      legacy: true,
+    };
+  } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
+    await notifyStudentChatStatus(statusEntry, 'Failed', {
+      errorCode: 'STUDENT_CHAT_UNAVAILABLE',
+    }, authContext);
+    return {
+      success: false,
+      queued: false,
+      clientMessageId,
+      status: 'Failed',
+      errorCode: 'STUDENT_CHAT_UNAVAILABLE',
+    };
+  }
+}
+
+async function queueAndSendStudentChatMessage(raw = {}) {
+  const authContext = captureAuthenticatedContext('student message');
+  const message = String(raw.message || '').trim();
+  if (!message || message.length > 500) {
+    const error = new Error(message ? 'Message is too long' : 'Message is required');
+    error.code = 'STUDENT_CHAT_INVALID';
+    throw error;
+  }
+  const activeSessionIds = activeTeachingSessionIds();
+  const requestedSessionId = String(raw.sessionId || activeSessionIds[0] || '').trim();
+  if (!requestedSessionId || !activeSessionIds.includes(requestedSessionId)) {
+    const error = new Error('No exact active class session for messaging');
+    error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
+    throw error;
+  }
+  if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
+    return sendLegacyStudentChatMessage(raw, authContext, requestedSessionId);
+  }
+  const entry = await persistStudentChatEntry({
+    clientMessageId: String(raw.clientMessageId || '').trim()
+      || generateStudentChatClientMessageId(),
+    message,
+    messageType: raw.messageType,
+    sessionId: requestedSessionId,
+    queuedAt: Date.now(),
+    status: 'sending',
+  }, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'student message queued');
+  return deliverStudentChatEntry(entry, authContext);
+}
+
+async function flushStudentChatOutbox() {
+  if (studentChatFlushInFlight || !hasStudentAuth()) return;
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('student message retry');
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return;
+    throw error;
+  }
+  studentChatFlushInFlight = true;
+  try {
+    if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
+      await discardStudentChatOutbox();
+      return;
+    }
+    await studentChatMutation;
+    assertAuthenticatedContextCurrent(authContext, 'student message retry');
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message retry');
+    if (stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== binding) {
+      await discardStudentChatOutbox();
+      return;
+    }
+    const entries = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY]);
+    for (const entry of entries) {
+      assertAuthenticatedContextCurrent(authContext, 'student message retry');
+      if (entry.status === 'failed') continue;
+      const result = await deliverStudentChatEntry(entry, authContext);
+      if (result?.queued) break;
+    }
+  } catch (error) {
+    if (!isAuthContextCancellation(error)) {
+      scheduleStudentChatFlush(STUDENT_CHAT_RETRY_DELAYS_MS[0]);
+    }
+  } finally {
+    studentChatFlushInFlight = false;
   }
 }
 
@@ -2938,31 +3903,32 @@ function generateMonitoringEventId() {
   return `evt-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function monitoringEventAuthBinding() {
+function monitoringEventAuthBindingForContext(context) {
   if (
-    !CONFIG.studentToken
-    || !CONFIG.deviceId
-    || !CONFIG.activeStudentId
-    || !CONFIG.activeStudentSessionId
+    !context?.authContextId
+    || !context.deviceId
+    || !context.studentId
+    || !context.studentSessionId
   ) return null;
-  // This is a local correlation guard, not an authentication primitive. Hash
-  // the already-authenticated token so the outbox never persists another copy
-  // of the credential, especially for session-only manual sign-ins.
-  let first = 0x811c9dc5;
-  let second = 0x9e3779b9;
-  for (let index = 0; index < CONFIG.studentToken.length; index += 1) {
-    const code = CONFIG.studentToken.charCodeAt(index);
-    first = Math.imul(first ^ code, 0x01000193) >>> 0;
-    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
-  }
+  // This is a local correlation guard, not an authentication primitive. The
+  // random context id partitions every durable outbox without persisting a
+  // second copy or derived fingerprint of the bearer credential.
   return [
-    'v2',
-    CONFIG.activeStudentId,
-    CONFIG.activeStudentSessionId,
-    CONFIG.deviceId,
-    first.toString(16).padStart(8, '0'),
-    second.toString(16).padStart(8, '0'),
+    'v3',
+    context.authContextId,
+    context.schoolId || 'school',
+    context.studentId,
+    context.studentSessionId,
+    context.deviceId,
   ].join(':');
+}
+
+function monitoringEventAuthBinding() {
+  try {
+    return monitoringEventAuthBindingForContext(captureAuthenticatedContext('monitoring binding'));
+  } catch {
+    return null;
+  }
 }
 
 function messageInboxAuthBinding() {
@@ -3148,7 +4114,13 @@ function scheduleMonitoringEventFlush(delayMs = MONITORING_EVENT_FLUSH_MS) {
 
 function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
   if (!hasStudentAuth() && !options.allowWithoutAuth) return Promise.resolve(false);
-  const authBinding = monitoringEventAuthBinding();
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('monitoring event');
+  } catch {
+    return Promise.resolve(false);
+  }
+  const authBinding = monitoringEventAuthBindingForContext(authContext);
   if (!authBinding) return Promise.resolve(false);
   const scope = getMonitoringEventScope();
   const event = RuntimeCore.createMonitoringEvent({
@@ -3161,11 +4133,13 @@ function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
   if (!event) return Promise.resolve(false);
 
   monitoringEventMutation = monitoringEventMutation.then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event persistence');
     const stored = await kv.get([
       MONITORING_EVENT_OUTBOX_KEY,
       MONITORING_EVENT_DROPPED_KEY,
       MONITORING_EVENT_AUTH_BINDING_KEY,
     ]);
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event persistence');
     const storedEntries = Array.isArray(stored[MONITORING_EVENT_OUTBOX_KEY])
       ? stored[MONITORING_EVENT_OUTBOX_KEY]
       : [];
@@ -3174,6 +4148,7 @@ function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
       ? storedEntries.length
       : 0;
     const bounded = RuntimeCore.boundEventOutbox(bindingMatches ? storedEntries : [], event);
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event persistence');
     await kv.set({
       [MONITORING_EVENT_OUTBOX_KEY]: bounded.entries,
       [MONITORING_EVENT_DROPPED_KEY]: Number(stored[MONITORING_EVENT_DROPPED_KEY] || 0)
@@ -3181,31 +4156,47 @@ function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
         + bounded.dropped,
       [MONITORING_EVENT_AUTH_BINDING_KEY]: authBinding,
     });
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event persistence');
     scheduleMonitoringEventFlush();
     return true;
   }).catch((error) => {
-    console.warn('[Monitoring Events] Failed to queue event:', error?.message || error);
+    console.warn('[Monitoring Events] Failed to queue event:', safeDiagnosticError(error));
     return false;
   });
   return monitoringEventMutation;
 }
 
-async function removeMonitoringEventBatch(sourceEventIds) {
+async function removeMonitoringEventBatch(sourceEventIds, expectedAuthContext = null) {
   const acknowledged = new Set(sourceEventIds);
   monitoringEventMutation = monitoringEventMutation.then(async () => {
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event receipt');
+    }
     const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY]);
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event receipt');
+    }
     const remaining = (stored[MONITORING_EVENT_OUTBOX_KEY] || [])
       .filter((event) => !acknowledged.has(event?.sourceEventId));
     await kv.set({ [MONITORING_EVENT_OUTBOX_KEY]: remaining });
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event receipt');
+    }
     if (remaining.length === 0) await kv.remove(MONITORING_EVENT_AUTH_BINDING_KEY);
     return remaining.length;
   });
   return monitoringEventMutation;
 }
 
-async function discardMonitoringEventOutbox() {
+async function discardMonitoringEventOutbox(expectedAuthContext = null) {
   monitoringEventMutation = monitoringEventMutation.then(async () => {
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event discard');
+    }
     const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_DROPPED_KEY]);
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event discard');
+    }
     const discarded = Array.isArray(stored[MONITORING_EVENT_OUTBOX_KEY])
       ? stored[MONITORING_EVENT_OUTBOX_KEY].length
       : 0;
@@ -3213,7 +4204,13 @@ async function discardMonitoringEventOutbox() {
       [MONITORING_EVENT_OUTBOX_KEY]: [],
       [MONITORING_EVENT_DROPPED_KEY]: Number(stored[MONITORING_EVENT_DROPPED_KEY] || 0) + discarded,
     });
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event discard');
+    }
     await kv.remove(MONITORING_EVENT_AUTH_BINDING_KEY);
+    if (expectedAuthContext) {
+      assertAuthenticatedContextCurrent(expectedAuthContext, 'monitoring event discard');
+    }
     return discarded;
   });
   return monitoringEventMutation;
@@ -3221,34 +4218,45 @@ async function discardMonitoringEventOutbox() {
 
 async function flushMonitoringEventOutbox() {
   if (monitoringEventFlushInFlight || !hasStudentAuth()) return;
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('monitoring event flush');
+  } catch {
+    return;
+  }
   monitoringEventFlushInFlight = true;
   try {
     await monitoringEventMutation;
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
     const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_AUTH_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
     const batch = (stored[MONITORING_EVENT_OUTBOX_KEY] || []).slice(0, 50);
     if (batch.length === 0) {
       chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
       return;
     }
-    const currentBinding = monitoringEventAuthBinding();
+    const currentBinding = monitoringEventAuthBindingForContext(authContext);
     if (!currentBinding || stored[MONITORING_EVENT_AUTH_BINDING_KEY] !== currentBinding) {
-      await discardMonitoringEventOutbox();
+      await discardMonitoringEventOutbox(authContext);
       chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
       return;
     }
 
     const payload = { events: batch };
-    const headers = buildDeviceAuthHeaders();
-    attachLegacyStudentToken(payload, headers);
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/classpilot/device/events`, {
+    const headers = buildDeviceAuthHeaders(authContext);
+    attachLegacyStudentToken(payload, headers, authContext);
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event transmission');
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/events`, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
+      signal: authContext.signal,
     }, {
       context: 'device event',
       maxAttempts: 1,
       retryStatuses: new Set([429, 503]),
     });
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event response');
 
     if (response.status === 429 || response.status === 503) {
       scheduleMonitoringEventFlush();
@@ -3256,7 +4264,8 @@ async function flushMonitoringEventOutbox() {
     }
     if (response.status === 402) {
       const data = await response.json().catch(() => ({}));
-      await disableForInactiveLicense(data.planStatus);
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event license response');
+      await disableForInactiveLicense(data.planStatus, authContext);
     }
 
     // A successful batch acknowledges each source event independently. Keep
@@ -3267,16 +4276,17 @@ async function flushMonitoringEventOutbox() {
     let acknowledgedIds = batch.map((event) => event.sourceEventId);
     if (response.ok) {
       const data = await response.json().catch(() => null);
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event receipt');
       acknowledgedIds = RuntimeCore.acknowledgedMonitoringEventIds(batch, data);
       if (acknowledgedIds.length === 0) {
         scheduleMonitoringEventFlush();
         return;
       }
     }
-    const remaining = await removeMonitoringEventBatch(acknowledgedIds);
+    const remaining = await removeMonitoringEventBatch(acknowledgedIds, authContext);
     if (remaining > 0) scheduleMonitoringEventFlush();
   } catch (error) {
-    console.warn('[Monitoring Events] Flush deferred:', error?.message || error);
+    console.warn('[Monitoring Events] Flush deferred:', safeDiagnosticError(error));
     scheduleMonitoringEventFlush();
   } finally {
     monitoringEventFlushInFlight = false;
@@ -3301,17 +4311,280 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
   }, NAVIGATION_DEBOUNCE_MS));
 }
 
-function buildDeviceAuthHeaders() {
+function generateAuthContextId() {
+  const random = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `auth_${String(random).replace(/[^a-zA-Z0-9_-]/g, '')}`;
+}
+
+function abortActiveAuthContext() {
+  try {
+    authContextAbortController.abort();
+  } catch {
+    // AbortController cleanup is best effort; the generation fence is authoritative.
+  }
+  activeAuthContextGeneration = -1;
+  negotiatedProtocolState = null;
+  activeLiveViewContext = null;
+  activeLiveViewNegotiationId = null;
+  activeLiveViewTeachingSessionId = null;
+  liveViewTelemetryAttempts = new Set();
+  screenshotPolicyState = Object.freeze({
+    mode: 'pending',
+    observed: false,
+    expiresAt: 0,
+    scope: null,
+    valid: false,
+  });
+  chrome.alarms?.clear?.('screenshot-observation-lease-expiry');
+}
+
+function advanceStudentAuthMutationGeneration() {
+  abortActiveAuthContext();
+  studentAuthMutationGeneration += 1;
+  return studentAuthMutationGeneration;
+}
+
+function activateAuthenticatedContext(authContextId) {
+  const normalizedId = String(authContextId || '').trim();
+  if (!normalizedId) {
+    const error = new Error('Authenticated context is missing its immutable identifier');
+    error.code = 'AUTH_CONTEXT_INCOMPLETE';
+    throw error;
+  }
+  if (
+    CONFIG.authContextId === normalizedId
+    && activeAuthContextGeneration === studentAuthMutationGeneration
+    && !authContextAbortController.signal.aborted
+  ) return normalizedId;
+  abortActiveAuthContext();
+  authContextAbortController = new AbortController();
+  activeAuthContextGeneration = studentAuthMutationGeneration;
+  CONFIG.authContextId = normalizedId;
+  return normalizedId;
+}
+
+function authContextSuperseded(reason) {
+  const error = new Error(`${reason} belongs to a retired authentication context`);
+  error.code = 'AUTH_CONTEXT_SUPERSEDED';
+  return error;
+}
+
+function captureAuthenticatedContext(reason = 'authenticated operation') {
+  if (!hasStudentAuth()) throw authContextSuperseded(reason);
+  const serverOrigin = normalizedServerOrigin(CONFIG.serverUrl);
+  const authContextId = String(CONFIG.authContextId || '').trim();
+  if (
+    !authContextId
+    || activeAuthContextGeneration !== studentAuthMutationGeneration
+    || !serverOrigin
+  ) {
+    const error = new Error(`${reason} has no complete immutable authentication context`);
+    error.code = 'AUTH_CONTEXT_INCOMPLETE';
+    throw error;
+  }
+  return Object.freeze({
+    authContextId,
+    mutationGeneration: studentAuthMutationGeneration,
+    serverOrigin,
+    schoolId: String(CONFIG.schoolId || '').trim() || null,
+    deviceId: CONFIG.deviceId,
+    studentId: CONFIG.activeStudentId,
+    studentSessionId: CONFIG.activeStudentSessionId,
+    studentToken: CONFIG.studentToken,
+    studentEmail: CONFIG.studentEmail || '',
+    signal: authContextAbortController.signal,
+  });
+}
+
+function assertAuthenticatedContextCurrent(context, reason = 'authenticated operation') {
+  if (
+    !context
+    || context.signal?.aborted
+    || context.mutationGeneration !== studentAuthMutationGeneration
+    || activeAuthContextGeneration !== studentAuthMutationGeneration
+    || context.authContextId !== CONFIG.authContextId
+    || context.serverOrigin !== normalizedServerOrigin(CONFIG.serverUrl)
+    || context.schoolId !== (String(CONFIG.schoolId || '').trim() || null)
+    || context.deviceId !== CONFIG.deviceId
+    || context.studentId !== CONFIG.activeStudentId
+    || context.studentSessionId !== CONFIG.activeStudentSessionId
+    || context.studentToken !== CONFIG.studentToken
+    || !hasStudentAuth()
+  ) {
+    throw authContextSuperseded(reason);
+  }
+  return context;
+}
+
+function isAuthContextCancellation(error) {
+  return error?.code === 'AUTH_CONTEXT_SUPERSEDED'
+    || error?.code === 'AUTH_CONTEXT_INCOMPLETE'
+    || error?.name === 'AbortError';
+}
+
+function assertBindingMatchesAuthContext(
+  binding,
+  context,
+  reason = 'authenticated binding',
+  options = {},
+) {
+  const requireFullAuthority = options.requireFullAuthority === true
+    || (options.requireFullAuthority !== false && fullAuthorityBindingNegotiated(context));
+  const expectedControlRevision = currentStudentControlRevision();
+  if (
+    !binding
+    || binding.studentId !== context?.studentId
+    || binding.studentSessionId !== context?.studentSessionId
+    || (requireFullAuthority && (
+      binding.bindingVersion !== 2
+      || binding.schoolId !== context?.schoolId
+      || binding.deviceId !== context?.deviceId
+      || binding.controlRevision === null
+      || expectedControlRevision === null
+      || binding.controlRevision !== expectedControlRevision
+    ))
+  ) {
+    const error = new Error(`${reason} does not match the immutable authentication context`);
+    error.code = 'STUDENT_BINDING_MISMATCH';
+    throw error;
+  }
+  return binding;
+}
+
+function authContextProtocolScope(context) {
+  return JSON.stringify([
+    context?.serverOrigin || '',
+    context?.schoolId || '',
+    context?.deviceId || '',
+    context?.studentId || '',
+    context?.studentSessionId || '',
+    context?.authContextId || '',
+  ]);
+}
+
+function adoptNegotiatedProtocolState(raw = {}, context) {
+  assertAuthenticatedContextCurrent(context, 'protocol negotiation');
+  const serverProtocolVersion = Number(raw.serverProtocolVersion);
+  const advertised = new Set(
+    Array.isArray(raw.acceptedCapabilities)
+      ? raw.acceptedCapabilities.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+  );
+  // The accepted list, not the protocol number, is the behavior switch. Keep
+  // only capabilities this exact build advertised so a server cannot turn on
+  // an unknown or misspelled feature accidentally.
+  const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => advertised.has(name));
+  negotiatedProtocolState = Object.freeze({
+    scope: authContextProtocolScope(context),
+    serverProtocolVersion: Number.isSafeInteger(serverProtocolVersion) && serverProtocolVersion > 0
+      ? serverProtocolVersion
+      : null,
+    acceptedCapabilities: Object.freeze(acceptedCapabilities),
+    negotiatedAt: Date.now(),
+  });
+  return negotiatedProtocolState;
+}
+
+function hasNegotiatedCapability(name, context = null) {
+  let authContext = context;
+  try {
+    authContext = authContext || captureAuthenticatedContext('capability check');
+    assertAuthenticatedContextCurrent(authContext, 'capability check');
+  } catch {
+    return false;
+  }
+  return negotiatedProtocolState?.scope === authContextProtocolScope(authContext)
+    && negotiatedProtocolState.acceptedCapabilities.includes(name);
+}
+
+function screenshotPolicyScope(context) {
+  return authContextProtocolScope(context);
+}
+
+function ambientScreenshotAllowed(context, nowValue = Date.now()) {
+  try {
+    assertAuthenticatedContextCurrent(context, 'screenshot observation lease');
+  } catch {
+    return false;
+  }
+  if (screenshotPolicyState.scope !== screenshotPolicyScope(context)) return false;
+  if (screenshotPolicyState.mode === 'legacy') return screenshotPolicyState.valid === true;
+  return screenshotPolicyState.mode === 'lease'
+    && screenshotPolicyState.valid === true
+    && screenshotPolicyState.observed === true
+    && Number(screenshotPolicyState.expiresAt || 0) > nowValue;
+}
+
+function assertAmbientScreenshotAllowed(context, reason = 'ambient screenshot') {
+  assertAuthenticatedContextCurrent(context, reason);
+  if (!ambientScreenshotAllowed(context)) {
+    const error = new Error('Screenshot capture is paused while this student is not observed');
+    error.code = 'SCREENSHOT_PAUSED_UNOBSERVED';
+    throw error;
+  }
+}
+
+function adoptScreenshotPolicy(rawPolicy, context) {
+  assertAuthenticatedContextCurrent(context, 'screenshot policy');
+  const scope = screenshotPolicyScope(context);
+  const priorAllowed = ambientScreenshotAllowed(context);
+  let next;
+  if (!hasNegotiatedCapability('screenshotObservationLeaseV1', context)) {
+    // A server that did not accept the capability remains on the v2 ambient
+    // behavior. Capability intersection, never a version comparison, chooses
+    // this compatibility path.
+    next = Object.freeze({ mode: 'legacy', observed: true, expiresAt: 0, scope, valid: true });
+  } else if (rawPolicy?.mode === 'legacy') {
+    // Explicit server-side rollback for a capable fleet.
+    next = Object.freeze({ mode: 'legacy', observed: true, expiresAt: 0, scope, valid: true });
+  } else {
+    const expiresInSeconds = Number(rawPolicy?.expiresInSeconds);
+    const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
+    const validShape = rawPolicy?.mode === 'lease'
+      && typeof rawPolicy?.observed === 'boolean'
+      && Number.isFinite(expiresInSeconds)
+      && expiresInSeconds >= 0
+      && Number.isFinite(serverTime);
+    const observed = validShape && rawPolicy.observed === true && expiresInSeconds > 0;
+    next = Object.freeze({
+      mode: 'lease',
+      observed,
+      expiresAt: observed
+        ? Date.now() + Math.min(120, expiresInSeconds) * 1000
+        : 0,
+      scope,
+      valid: validShape,
+    });
+  }
+  screenshotPolicyState = next;
+  const nextAllowed = ambientScreenshotAllowed(context);
+  chrome.alarms.clear(SCREENSHOT_LEASE_EXPIRY_ALARM);
+  if (next.mode === 'lease' && nextAllowed) {
+    chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: next.expiresAt });
+  }
+  scheduleScreenshotCapture(nextAllowed);
+  if (!priorAllowed && nextAllowed) {
+    captureAndSendScreenshot({ reason: 'lease-start' }).catch(() => {});
+  }
+  return next;
+}
+
+function buildDeviceAuthHeaders(context = null) {
   const headers = { 'Content-Type': 'application/json' };
-  if (CONFIG.studentToken) {
-    headers.Authorization = `Bearer ${CONFIG.studentToken}`;
+  if (context) assertAuthenticatedContextCurrent(context, 'device authentication headers');
+  const studentToken = context?.studentToken || CONFIG.studentToken;
+  if (studentToken) {
+    headers.Authorization = `Bearer ${studentToken}`;
   }
   return headers;
 }
 
-function attachLegacyStudentToken(payload, headers) {
-  if (CONFIG.studentToken && !headers.Authorization) {
-    payload.studentToken = CONFIG.studentToken;
+function attachLegacyStudentToken(payload, headers, context = null) {
+  if (context) assertAuthenticatedContextCurrent(context, 'legacy student authentication');
+  const studentToken = context?.studentToken || CONFIG.studentToken;
+  if (studentToken && !headers.Authorization) {
+    payload.studentToken = studentToken;
   }
 }
 
@@ -4001,7 +5274,7 @@ async function refreshSharedSignInLoginConfigFast(options = {}) {
       ) {
         return sharedSignInLoginConfig;
       }
-      console.warn('[Auth Gate] Shared sign-in config unavailable:', error?.message || error);
+      console.warn('[Auth Gate] Shared sign-in config unavailable:', safeDiagnosticError(error));
       const retryAt = scheduleSharedSignInConfigRetry();
       updateSharedSignInLoginConfig({
         phase: 'unavailable',
@@ -4111,7 +5384,7 @@ async function refreshSharedSignInLoginConfigLegacy(options = {}) {
       return sharedSignInLoginConfig;
     } catch (error) {
       if (requestIsStale()) return sharedSignInLoginConfig;
-      console.warn('[Auth Gate] Shared sign-in config check failed:', error?.message || error);
+      console.warn('[Auth Gate] Shared sign-in config check failed:', safeDiagnosticError(error));
       sharedSignInLoginConfig = {
         fetchedAt: Date.now(),
         setupRequired: true,
@@ -4205,7 +5478,7 @@ async function notifyAuthGateStateToTabs(options = {}) {
     const tabs = await chrome.tabs.query({});
     await Promise.all(tabs.map((tab) => enforceAuthGateForTab(tab, options)));
   } catch (error) {
-    console.warn('[Auth Gate] Failed to notify tabs:', error?.message || error);
+    console.warn('[Auth Gate] Failed to notify tabs:', safeDiagnosticError(error));
   }
 }
 
@@ -4430,8 +5703,12 @@ async function enforceAuthGateForTab(tabOrId, options = {}) {
     }
     // Auth restoration also durably reserves this worker's revision range.
     // Never publish an authenticated or invalidated state before that floor is
-    // safe across a subsequent MV3 restart.
-    await authStateRestorePromise;
+    // safe across a subsequent MV3 restart. The authoritative clear path is
+    // the sole exception because it owns the fail-closed fence and must finish
+    // before the startup recovery barrier can resolve.
+    if (options.skipAuthRestoreWait !== true) {
+      await authStateRestorePromise;
+    }
     if (!hasStudentAuth() && options.skipManagedPolicyWait !== true) {
       await awaitManagedAuthGatePolicyStable().catch(() => {});
     }
@@ -4565,6 +5842,7 @@ function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration
     CONFIG.serverUrl = resolvedServerUrl;
     if (stored?.deviceId) CONFIG.deviceId = stored.deviceId;
     if (!authRestoreBlocked) {
+      if (stored?.authContextId) CONFIG.authContextId = String(stored.authContextId).trim() || null;
       if (stored?.activeStudentId) CONFIG.activeStudentId = stored.activeStudentId;
       if (stored?.activeStudentSessionId) CONFIG.activeStudentSessionId = stored.activeStudentSessionId;
       if (stored?.studentEmail) CONFIG.studentEmail = stored.studentEmail;
@@ -4582,17 +5860,30 @@ function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration
       && CONFIG.activeStudentId
       && CONFIG.activeStudentSessionId
     ) {
+      if (!CONFIG.authContextId) {
+        CONFIG.authContextId = generateAuthContextId();
+        if (isManualIdentitySource(stored?.identitySource)) {
+          await setManualAuthState({ authContextId: CONFIG.authContextId });
+        } else {
+          await durableLocalKv.set({ authContextId: CONFIG.authContextId });
+        }
+        assertCurrent();
+      }
       studentAuthInvalidating = false;
+      activateAuthenticatedContext(CONFIG.authContextId);
     }
     return { interruptedAuthClear, interruptedAuthCommit, manualAuthTimestampInvalid };
   });
 }
 
 function clearStudentAuth(reason = 'manual-clear', options = {}) {
+  if (options.expectedAuthContext) {
+    assertAuthenticatedContextCurrent(options.expectedAuthContext, `authentication clear:${reason}`);
+  }
   // Reserve the mutation and revoke the current authority synchronously. A
   // login already waiting on the network must not briefly reinstall its old
   // response before this cleanup reaches the queue.
-  studentAuthMutationGeneration += 1;
+  advanceStudentAuthMutationGeneration();
   studentAuthInvalidating = true;
   if (fastAuthGateEnabled) {
     resetSharedSignInLoginConfigCache({ clearPersisted: true });
@@ -4621,13 +5912,13 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // A confirmed student sign-out/profile change ends the student-bound
   // classroom context. Clear only teacher-session ranges; school policy stays.
   await clearTeacherSessionStateForSignOut().catch((error) => {
-    console.warn('[Auth] Classroom state clear failed:', error?.message || error);
+    console.warn('[Auth] Classroom state clear failed:', safeDiagnosticError(error));
   });
   await clearFabAndOverlayState(reason, { closeChat: true }).catch((error) => {
-    console.warn('[Auth] FAB/overlay state clear failed:', error?.message || error);
+    console.warn('[Auth] FAB/overlay state clear failed:', safeDiagnosticError(error));
   });
   await clearStudentMessageState(reason).catch((error) => {
-    console.warn('[Auth] Student message state clear failed:', error?.message || error);
+    console.warn('[Auth] Student message state clear failed:', safeDiagnosticError(error));
   });
   // Best-effort the final bounded batch while the old token is still valid,
   // then discard anything unsent. Retrying it under a later student's token
@@ -4644,6 +5935,10 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     await flushChatAckOutbox({ forceHttp: true }).catch(() => {});
   }
   await discardChatAckOutbox().catch(() => {});
+  // Outbound student messages are exact-bound and may never cross a student,
+  // school, session, device, or server transition. Do not attempt an old
+  // message under a later credential.
+  await discardStudentChatOutbox().catch(() => {});
   await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
   currentTabSnapshotRevision = 0;
   lastKnownTabs = [];
@@ -4663,7 +5958,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
         respectGlobalBackoff: false,
       });
     } catch (error) {
-      console.warn('[Auth] Session-end call failed:', error?.message || error);
+      console.warn('[Auth] Session-end call failed:', safeDiagnosticError(error));
     }
   }
 
@@ -4677,6 +5972,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     pauseAutoRegistration || CONFIG.autoRegistrationPaused === true;
 
   CONFIG.studentToken = null;
+  CONFIG.authContextId = null;
   CONFIG.studentEmail = null;
   CONFIG.studentName = null;
   CONFIG.activeStudentId = null;
@@ -4706,6 +6002,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   }
 
   scheduleHeartbeat(null);
+  scheduleHealthCheckAlarm(5);
   scheduleScreenshotCapture(false);
   chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
   if (disconnect) {
@@ -4715,6 +6012,11 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   if (options.notifyAuthGateTabs !== false) {
     await notifyAuthGateStateToTabs({
       triggerRefresh: false,
+      // This clear is itself the authoritative fail-closed transition. Startup
+      // crash recovery intentionally keeps authStateRestorePromise pending
+      // until this durable clear completes, so tab notification must not wait
+      // on the promise that it is responsible for allowing to resolve.
+      skipAuthRestoreWait: true,
       // Auth invalidation is itself authoritative and safe to publish while a
       // managed-policy barrier is pending. Waiting for that barrier here can
       // deadlock a revalidation that is deliberately awaiting this cleanup.
@@ -4974,7 +6276,7 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
       await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
     }
   } catch (error) {
-    console.warn('[Classroom State] Login snapshot failed:', error?.message || error);
+    console.warn('[Classroom State] Login snapshot failed:', safeDiagnosticError(error));
     requestClassroomStateSync(`${reason}-failed`, true);
     if (options.requireApplied === true) throw error;
   }
@@ -5001,7 +6303,7 @@ async function manualStudentLogin(payload) {
 
   const policyGuard = captureAuthGatePolicyGuard();
   assertAuthGatePolicyGuardCurrent(policyGuard, 'student login policy');
-  const mutationGeneration = ++studentAuthMutationGeneration;
+  const mutationGeneration = advanceStudentAuthMutationGeneration();
   manualStudentLoginPendingGeneration = mutationGeneration;
   CONFIG.autoRegistrationPaused = true;
   const priorChromeProfileRegistration = chromeProfileRegistrationInFlight;
@@ -5026,7 +6328,7 @@ async function manualStudentLogin(payload) {
         pauseAutoRegistration: true,
       }).catch((cleanupError) => {
         failAuthCommitRecoveryBarrier(cleanupError);
-        console.warn('[Auth] Failed login commit cleanup:', cleanupError?.message || cleanupError);
+        console.warn('[Auth] Failed login commit cleanup:', safeDiagnosticError(cleanupError));
       });
     }
     throw error;
@@ -5109,6 +6411,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     throw new Error('Student login omitted the exact student binding');
   }
   const identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
+  const authContextId = generateAuthContextId();
 
   await beginStudentAuthCommit(mutationGeneration, 'student login commit');
 
@@ -5126,6 +6429,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     }),
   });
   await setManualAuthState({
+    authContextId,
     studentToken: data.studentToken,
     activeStudentId: studentId,
     activeStudentSessionId: studentSessionId,
@@ -5151,6 +6455,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   CONFIG.manualLoginLastSeenAt = now;
   CONFIG.autoRegistrationPaused = false;
   studentAuthInvalidating = false;
+  activateAuthenticatedContext(authContextId);
   resetSharedSignInLoginConfigCache({ clearPersisted: true });
   // Authentication intentionally invalidates the pre-login presentation
   // generation, and a slug-based setup may learn its canonical schoolId from
@@ -5180,7 +6485,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   // Start the cross-tab authenticated push immediately, but do not make the
   // initiating tab wait for every tab message/injection attempt to settle.
   notifyAuthGateStateToTabs({ triggerRefresh: false }).catch((error) => {
-    console.warn('[Auth Gate] Post-login broadcast failed:', error?.message || error);
+    console.warn('[Auth Gate] Post-login broadcast failed:', safeDiagnosticError(error));
   });
 
   Promise.resolve().then(async () => {
@@ -5208,7 +6513,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
       console.info('[Auth] Post-login initialization superseded');
       return;
     }
-    console.warn('[Auth] Post-login initialization failed:', error?.message || error);
+    console.warn('[Auth] Post-login initialization failed:', safeDiagnosticError(error));
   });
 
   return {
@@ -5233,7 +6538,7 @@ function normalizeEmail(raw) {
     const baseLocal = local.split('+')[0];
     return `${baseLocal}@${domain}`;
   } catch (err) {
-    console.warn('[Service Worker] Email normalization failed:', err);
+    console.warn('[Service Worker] Email normalization failed:', safeDiagnosticError(err));
     return null;
   }
 }
@@ -5249,7 +6554,7 @@ async function detectChromeProfileEmail() {
           return normalizeEmail(profile.email);
         }
       } catch (err) {
-        console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, err);
+        console.log(`[Service Worker] Could not get profile info (attempt ${attempt + 1}):`, safeDiagnosticError(err));
       }
       if (attempt < 2) {
         await new Promise(r => setTimeout(r, 2000));
@@ -5328,6 +6633,7 @@ async function ensureRegisteredNow() {
     
     // Get or create IDs (including studentToken for consistent state)
     let stored = await getStoredAuthState([
+      'authContextId',
       'studentEmail',
       'studentName',
       'deviceId',
@@ -5364,7 +6670,7 @@ async function ensureRegisteredNow() {
       const profileEmail = await detectChromeProfileEmail();
       assertAuthMutationCurrent(registrationGeneration, 'student registration profile lookup');
       if (profileEmail && stored.studentEmail && stored.studentEmail !== profileEmail) {
-        console.log(`[Service Worker] Chrome profile changed from ${stored.studentEmail} to ${profileEmail}; re-registering`);
+        console.log('[Service Worker] Chrome profile identity changed; re-registering');
         await clearStudentAuth('chrome-profile-email-changed', { notifyBackend: true });
         registrationGeneration = studentAuthMutationGeneration;
         assertAuthMutationCurrent(registrationGeneration, 'student registration profile change');
@@ -5375,6 +6681,7 @@ async function ensureRegisteredNow() {
           registered: false,
           lastRegisteredEmail: null,
           studentToken: null,
+          authContextId: null,
           activeStudentId: null,
           activeStudentSessionId: null,
           identitySource: null,
@@ -5420,6 +6727,7 @@ async function ensureRegisteredNow() {
     CONFIG.classId = 'auto'; // Backend determines this from email domain
     CONFIG.activeStudentId = stored.activeStudentId || CONFIG.activeStudentId;
     CONFIG.activeStudentSessionId = stored.activeStudentSessionId || CONFIG.activeStudentSessionId;
+    CONFIG.authContextId = stored.authContextId || CONFIG.authContextId;
     CONFIG.identitySource = stored.identitySource || CONFIG.identitySource;
     CONFIG.manualLoginLastSeenAt = stored.manualLoginLastSeenAt || CONFIG.manualLoginLastSeenAt;
     CONFIG.autoRegistrationPaused = stored.autoRegistrationPaused === true;
@@ -5491,6 +6799,7 @@ async function ensureRegisteredNow() {
         if (!data.studentToken || !studentId || !studentSessionId) {
           throw new Error('Student registration omitted the exact authenticated binding');
         }
+        const authContextId = generateAuthContextId();
         await enqueueStudentAuthMutation(async () => {
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
           await beginStudentAuthCommit(
@@ -5498,6 +6807,7 @@ async function ensureRegisteredNow() {
             'student registration commit',
           );
           await durableLocalKv.set({
+            authContextId,
             studentToken: data.studentToken,
             activeStudentId: studentId,
             activeStudentSessionId: studentSessionId,
@@ -5520,6 +6830,7 @@ async function ensureRegisteredNow() {
           CONFIG.manualLoginLastSeenAt = null;
           CONFIG.autoRegistrationPaused = false;
           studentAuthInvalidating = false;
+          activateAuthenticatedContext(authContextId);
           await reconcileMessageInboxIdentity('student-registration');
           await applyClassroomStateFromAuthResponse(
             data,
@@ -5559,13 +6870,15 @@ async function ensureRegisteredNow() {
           console.info('[Auth] Ignoring superseded student registration response');
           return stored;
         }
-        console.warn('[Service Worker] Student registration error:', error);
+        console.warn('[Service Worker] Student registration error:', safeDiagnosticError(error));
         await enqueueStudentAuthMutation(async () => {
           assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
-          await durableLocalKv.set({ registered: false, studentToken: null });
-          if (hasSessionStorage()) await durableSessionKv.remove(['studentToken']);
+          await durableLocalKv.set({ registered: false, studentToken: null, authContextId: null });
+          if (hasSessionStorage()) await durableSessionKv.remove(['studentToken', 'authContextId']);
           assertAuthMutationCurrent(registrationGeneration, 'student registration failure');
           CONFIG.studentToken = null;
+          CONFIG.authContextId = null;
+          abortActiveAuthContext();
         }).catch((mutationError) => {
           if (mutationError?.code !== 'AUTH_MUTATION_SUPERSEDED') throw mutationError;
         });
@@ -5598,7 +6911,7 @@ async function ensureRegisteredNow() {
     
     return stored;
   } catch (error) {
-    console.warn('[Service Worker] Registration failed:', error);
+    console.warn('[Service Worker] Registration failed:', safeDiagnosticError(error));
     // Don't throw - extension can still work with defaults
     return {};
   }
@@ -5615,7 +6928,7 @@ chrome.runtime.onInstalled.addListener(() => {
       ensureRegistered().catch(() => {});
       scheduleJitteredStartup('install', () => initializeAdaptiveTracking('install').catch(() => {}));
     }).catch(err => {
-      console.warn('[Service Worker] Install init error (will retry):', err?.message || err);
+      console.warn('[Service Worker] Install init error (will retry):', safeDiagnosticError(err));
     });
 });
 
@@ -5630,7 +6943,7 @@ if (chrome.runtime.onStartup) {
         ensureRegistered().catch(() => {});
         scheduleJitteredStartup('startup', () => initializeAdaptiveTracking('startup').catch(() => {}));
       }).catch(err => {
-        console.warn('[Service Worker] Startup init error (will retry):', err?.message || err);
+        console.warn('[Service Worker] Startup init error (will retry):', safeDiagnosticError(err));
       });
   });
 }
@@ -5678,10 +6991,6 @@ const authStateRestorePromise = new Promise((resolve) => {
       (config) => ({ config, error: null }),
       (error) => ({ config: {}, error }),
     );
-  // Resolve the managed kiosk device identity in parallel too — it never
-  // blocks the cold-auth path; kioskLaunchUrl() reads the cached value
-  // synchronously and the resolution bumps the gate revision itself.
-  detectManagedKioskDeviceId().catch(() => {});
   // Reserve the revision range in parallel with both auth stores and managed
   // policy. This keeps the required durable write off the sequential cold-auth
   // path as much as Chrome's storage implementation permits.
@@ -5693,6 +7002,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     });
   let workerWakeRestoreGeneration = studentAuthMutationGeneration;
   const authStored = await getStoredAuthState([
+    'authContextId',
     'deviceId',
     'config',
     'activeStudentId',
@@ -5820,7 +7130,14 @@ const authStateRestorePromise = new Promise((resolve) => {
       bindingKey: authGateConfigBindingKey(),
     });
   }
-  markAuthStateRestored();
+  // Ordinary cold start can release the page gate as soon as the local
+  // credential snapshot is resolved. Crash-recovery paths must keep the
+  // barrier pending until their durable invalidation markers are removed;
+  // otherwise callers can observe a fail-closed UI while recovery is still
+  // only half committed on disk.
+  if (!interruptedAuthClear && !interruptedAuthCommit && !manualAuthTimestampInvalid) {
+    markAuthStateRestored();
+  }
   const assertWorkerWakeCurrent = () => assertAuthMutationCurrent(
     workerWakeRestoreGeneration,
     'worker wake restore',
@@ -5856,6 +7173,8 @@ const authStateRestorePromise = new Promise((resolve) => {
     COMMAND_ACK_BINDING_KEY,
     CHAT_ACK_OUTBOX_KEY,
     CHAT_ACK_BINDING_KEY,
+    STUDENT_CHAT_OUTBOX_KEY,
+    STUDENT_CHAT_OUTBOX_BINDING_KEY,
     TAB_SNAPSHOT_STORAGE_KEY,
     STUDENT_AUTH_INVALIDATING_KEY,
     SHARED_SIGN_IN_CONFIG_CACHE_KEY,
@@ -5886,6 +7205,14 @@ const authStateRestorePromise = new Promise((resolve) => {
   connectivityHealth = RuntimeCore.normalizeConnectivityHealth(
     stored[CONNECTIVITY_HEALTH_STORAGE_KEY]
   );
+  lastConnectivityHealthPersistAt = Math.max(
+    Number(connectivityHealth.lastSuccessAt || 0),
+    Number(connectivityHealth.lastFailureAt || 0),
+  );
+  lastConnectivityPersistedState = RuntimeCore.connectivityHealthState(
+    connectivityHealth,
+    Date.now(),
+  ).state;
   screenshotHealth = RuntimeCore.normalizeScreenshotHealth(
     stored[SCREENSHOT_HEALTH_STORAGE_KEY]
   );
@@ -5904,6 +7231,16 @@ const authStateRestorePromise = new Promise((resolve) => {
   }
   if (Array.isArray(stored[CHAT_ACK_OUTBOX_KEY]) && stored[CHAT_ACK_OUTBOX_KEY].length > 0) {
     scheduleChatAckFlush();
+  }
+  if (
+    stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] === monitoringEventAuthBinding()
+    && boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY])
+      .some((entry) => entry.status !== 'failed')
+  ) {
+    scheduleStudentChatFlush(1000);
+  } else if (Array.isArray(stored[STUDENT_CHAT_OUTBOX_KEY])
+      && stored[STUDENT_CHAT_OUTBOX_KEY].length > 0) {
+    await discardStudentChatOutbox();
   }
   if (stored[TAB_SNAPSHOT_STORAGE_KEY]?.binding === tabSnapshotAuthBinding()) {
     currentTabSnapshotRevision = Number(stored[TAB_SNAPSHOT_STORAGE_KEY].revision || 0);
@@ -5949,7 +7286,7 @@ const authStateRestorePromise = new Promise((resolve) => {
         await checkClassroomStateExpiry();
         await kv.remove(CLASSROOM_STATE_STORAGE_KEY);
       }
-      console.warn('[Service Worker] Stored classroom state is invalid; existing rules retained:', error?.message || error);
+      console.warn('[Service Worker] Stored classroom state is invalid; existing rules retained:', safeDiagnosticError(error));
     }
   } else if (stored.flightPathState || stored.lockScreenState || stored.teacherBlockListState) {
     // One-time migration for controls persisted by older extension versions.
@@ -5983,22 +7320,21 @@ const authStateRestorePromise = new Promise((resolve) => {
       await applyClassroomState(legacyState, { force: true, reason: 'legacy_migration' });
       console.log('[Service Worker] Migrated legacy classroom restrictions');
     } catch (error) {
-      console.warn('[Service Worker] Legacy classroom state could not be restored:', error?.message || error);
+      console.warn('[Service Worker] Legacy classroom state could not be restored:', safeDiagnosticError(error));
     }
   } else {
     // No teacher state is known. Reconcile only the school range; never clear
     // teacher ranges merely because the worker was restarted.
     if (globalBlockedDomainsStateTrusted) {
       await updateGlobalBlacklistRules(globalBlockedDomains).catch((error) => {
-        console.warn('[Service Worker] School block list restore failed:', error?.message || error);
+        console.warn('[Service Worker] School block list restore failed:', safeDiagnosticError(error));
       });
     }
   }
   assertWorkerWakeCurrent();
 
   console.log('[Service Worker] State restored:', {
-    deviceId: CONFIG.deviceId,
-    studentEmail: CONFIG.studentEmail,
+    authenticated: hasStudentAuth(),
     flightPathActive: allowedDomains.length > 0,
     screenLocked: screenLocked,
     globalBlockedDomains: globalBlockedDomains.length,
@@ -6045,7 +7381,7 @@ const authStateRestorePromise = new Promise((resolve) => {
 })().catch(err => {
   // Silently handle wake-up errors (network issues, server deploys)
   // The extension will self-heal via alarms and retries
-  console.warn('[Service Worker] Wake-up error (will retry):', err?.message || err);
+  console.warn('[Service Worker] Wake-up error (will retry):', safeDiagnosticError(err));
   if (studentAuthCommitPending) failAuthCommitRecoveryBarrier(err);
 }).finally(() => {
   if (authGateRevisionReady) markAuthStateRestored();
@@ -6078,7 +7414,7 @@ async function safeNotify(opts) {
     });
   } catch (e) {
     // Never use console.warn for expected conditions; keep the Errors panel clean
-    console.warn('notify skipped:', e?.message || e);
+    console.warn('notify skipped:', safeDiagnosticError(e));
   }
 }
 
@@ -6202,7 +7538,7 @@ async function getLoggedInUserInfo() {
       id: null,
     };
   } catch (error) {
-    console.warn('Error getting logged-in user info:', error);
+    console.warn('Error getting logged-in user info:', safeDiagnosticError(error));
     return { email: null, id: null };
   }
 }
@@ -6222,7 +7558,7 @@ async function autoDetectAndRegister() {
   assertChromeProfileRegistrationAllowed('student auto-detection');
   
   if (userInfo.email) {
-    console.log('Auto-detected student email:', userInfo.email);
+    console.log('[Service Worker] Chrome profile identity detected');
     
     // Extract name from email (e.g., john.smith@school.edu -> john.smith)
     const emailName = userInfo.email.split('@')[0];
@@ -6250,9 +7586,9 @@ async function autoDetectAndRegister() {
         
         // Register with auto-detected info
         await registerDeviceWithStudent(deviceId, null, 'default-class', normalizedEmail, displayName);
-        console.log('Auto-registered student:', normalizedEmail);
+        console.log('[Service Worker] Chrome profile student registered');
       } catch (error) {
-        console.warn('Auto-registration failed:', error);
+        console.warn('Auto-registration failed:', safeDiagnosticError(error));
       }
     }
   } else {
@@ -6268,7 +7604,7 @@ if (chrome.identity?.onSignInChanged) {
         await notifyAuthGateStateToTabs();
       }
     } catch (error) {
-      console.warn('[Auth] Failed to refresh registration after Chrome sign-in change:', error?.message || error);
+      console.warn('[Auth] Failed to refresh registration after Chrome sign-in change:', safeDiagnosticError(error));
     }
   });
 }
@@ -6315,7 +7651,7 @@ async function registerDevice(deviceId, deviceName, classId) {
     }
     
     const data = await response.json();
-    console.log('Device registered:', data);
+    console.log('[Service Worker] Device registration completed');
     
     // Save config (using deviceName as studentName for now)
     CONFIG.deviceId = deviceId;
@@ -6329,7 +7665,7 @@ async function registerDevice(deviceId, deviceName, classId) {
     
     return data;
   } catch (error) {
-    console.warn('Registration error:', error);
+    console.warn('Registration error:', safeDiagnosticError(error));
     throw error;
   }
 }
@@ -6386,7 +7722,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     }
     
     const data = await response.json();
-    console.log('Student auto-registered:', data);
+    console.log('[Service Worker] Student auto-registration completed');
     const studentId = String(data.student?.id || '').trim() || null;
     const studentSessionId = String(
       data.studentSessionId || data.fab?.studentSessionId || ''
@@ -6397,6 +7733,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
     if (!data.studentToken || !studentId || !studentSessionId) {
       throw new Error('Student registration omitted the exact authenticated binding');
     }
+    const authContextId = generateAuthContextId();
     await enqueueStudentAuthMutation(async () => {
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
       await beginStudentAuthCommit(
@@ -6410,6 +7747,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         ...(authenticatedSchoolId ? { schoolId: authenticatedSchoolId } : {}),
       });
       await durableLocalKv.set({
+        authContextId,
         config: persistedConfig,
         registered: true,
         activeStudentId: studentId,
@@ -6434,6 +7772,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
       CONFIG.manualLoginLastSeenAt = null;
       CONFIG.autoRegistrationPaused = false;
       studentAuthInvalidating = false;
+      activateAuthenticatedContext(authContextId);
       resetSharedSignInLoginConfigCache({ clearPersisted: true });
       await reconcileMessageInboxIdentity('student-registration');
       await applyClassroomStateFromAuthResponse(
@@ -6468,7 +7807,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         );
       }
     }
-    console.warn('Student registration error:', error);
+    console.warn('Student registration error:', safeDiagnosticError(error));
     throw error;
   }
 }
@@ -6495,6 +7834,17 @@ async function sendHeartbeat(reason = 'manual') {
     console.log('Skipping heartbeat - no deviceId');
     return;
   }
+  let heartbeatAuthContext;
+  try {
+    heartbeatAuthContext = captureAuthenticatedContext(`heartbeat:${reason}`);
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return;
+    if (isAuthContextCancellation(error)) {
+      console.info(`[Heartbeat] Skipping ${reason}; authentication context is not ready`);
+      return;
+    }
+    throw error;
+  }
 
   let heartbeatRequestStarted = false;
   let heartbeatResponseReceived = false;
@@ -6503,6 +7853,7 @@ async function sendHeartbeat(reason = 'manual') {
     // Get the active tab from the LAST FOCUSED window (the one the user is actually looking at)
     // Service workers don't have a "current window", so we must query for lastFocusedWindow
     let tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:active-tab`);
 
     // Determine tab data or use fallback for "no active tab" state
     // IMPORTANT: Use empty strings instead of null for Zod schema validation
@@ -6526,32 +7877,22 @@ async function sendHeartbeat(reason = 'manual') {
     }
     // If tabs.length === 0, keep empty strings (no focused window or all windows minimized)
     
-    const isObservedHeartbeat = reason.startsWith('observed');
-    const now = Date.now();
-    const observedSignature = `${activeTabUrl}|${activeTabTitle}|${activeTabId ?? 'none'}`;
-
-    if (
-      isObservedHeartbeat &&
-      observedSignature === lastObservedSignature &&
-      now - lastObservedSentAt < OBSERVED_HEARTBEAT_SECONDS * 1000
-    ) {
-      return;
-    }
-
     // Collect ALL open tabs for teacher dashboard
     // Use caching to prevent flickering when chrome.tabs.query returns inconsistent results
     let allOpenTabs = [];
     let tabSnapshotRevision = currentTabSnapshotRevision;
     try {
       const allTabs = await chrome.tabs.query({});
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:all-tabs`);
       const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
-      const tabSnapshot = await buildOpaqueTabSnapshot(httpTabs);
+      const tabSnapshot = await buildOpaqueTabSnapshot(httpTabs, heartbeatAuthContext);
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:tab-snapshot`);
       allOpenTabs = tabSnapshot.tabs;
       tabSnapshotRevision = tabSnapshot.revision;
       activeTabRef = tabSnapshot.localEntries.find((entry) => entry.tabId === activeTabId)?.tabRef || null;
       lastKnownTabs = allOpenTabs;
     } catch (error) {
-      console.warn('[Heartbeat] Failed to collect tabs:', error);
+      console.warn('[Heartbeat] Failed to collect tabs:', safeDiagnosticError(error));
       // Use cached tabs on error to prevent flickering
       if (lastKnownTabs.length > 0) {
         allOpenTabs = lastKnownTabs;
@@ -6562,8 +7903,8 @@ async function sendHeartbeat(reason = 'manual') {
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
     const heartbeatData = {
-      studentEmail: CONFIG.studentEmail || '', // JWT is the authority for manual shared-device login
-      deviceId: CONFIG.deviceId,            // Internal device tracking
+      studentEmail: heartbeatAuthContext.studentEmail, // JWT is the authority for manual shared-device login
+      deviceId: heartbeatAuthContext.deviceId,         // Internal device tracking
       activeTabTitle: activeTabTitle,       // '' = no monitored tab
       activeTabUrl: activeTabUrl,           // '' = no monitored tab
       favicon: favicon,
@@ -6600,34 +7941,35 @@ async function sendHeartbeat(reason = 'manual') {
         attempts: screenshotAttemptCount,
         successes: screenshotSuccessCount,
         alarmActive: screenshotScheduled,
+        captureState: ambientScreenshotAllowed(heartbeatAuthContext)
+          ? 'active'
+          : 'paused_unobserved',
       },
     };
     
-    const headers = buildDeviceAuthHeaders();
+    const headers = buildDeviceAuthHeaders(heartbeatAuthContext);
     const heartbeatMessageBinding = messageInboxAuthBinding();
     const heartbeatAuthResponseGuard = captureAuthenticatedResponseGuard();
-    attachLegacyStudentToken(heartbeatData, headers);
+    attachLegacyStudentToken(heartbeatData, headers, heartbeatAuthContext);
     if (headers.Authorization) {
       console.log('Sending JWT-authenticated heartbeat');
     } else {
       console.log('⚠️  Sending legacy heartbeat (no JWT)');
     }
 
-    if (isObservedHeartbeat) {
-      lastObservedSignature = observedSignature;
-      lastObservedSentAt = now;
-    }
-    
+    assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:send`);
     heartbeatRequestStarted = true;
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/heartbeat`, {
+    const response = await fetchWithBackoff(`${heartbeatAuthContext.serverOrigin}/api/device/heartbeat`, {
       method: 'POST',
       headers,
       body: JSON.stringify(heartbeatData),
+      signal: heartbeatAuthContext.signal,
     }, {
       context: 'device heartbeat',
       maxAttempts: 2,
     });
     heartbeatResponseReceived = true;
+    assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response`);
 
     const currentHeartbeatBinding = messageInboxAuthBinding();
     if (heartbeatMessageBinding && heartbeatMessageBinding !== currentHeartbeatBinding) {
@@ -6641,28 +7983,35 @@ async function sendHeartbeat(reason = 'manual') {
         requestClassroomStateSync('heartbeat-identity-changed', true);
         // safeSendHeartbeat is still marked in flight until this call returns.
         // Queue the new identity's authoritative heartbeat for the next task.
-        setTimeout(() => safeSendHeartbeat('identity-changed-reconcile'), 0);
+        scheduleEventHeartbeat('identity-changed-reconcile');
       }
       return;
     }
 
     if (response.status === 402) {
       const data = await response.json().catch(() => ({}));
-      await disableForInactiveLicense(data.planStatus);
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:license-body`);
+      await disableForInactiveLicense(data.planStatus, heartbeatAuthContext);
       return;
     } else if (response.status === 409) {
       const data = await response.json().catch(() => ({}));
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:conflict-body`);
       if (data?.error === 'student_session_replaced') {
         console.warn('[Auth] Student session was replaced on another Chromebook');
-        await clearStudentAuth('session-replaced', { notifyBackend: false, pauseAutoRegistration: true });
+        await clearStudentAuth('session-replaced', {
+          notifyBackend: false,
+          pauseAutoRegistration: true,
+          expectedAuthContext: heartbeatAuthContext,
+        });
         return;
       }
-      console.warn('Heartbeat conflict:', data?.error || response.status);
+      console.warn('Heartbeat conflict:', response.status);
       return;
     } else if (response.status === 401 || response.status === 403) {
       const data = await response.json().catch(() => ({}));
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:authorization-body`);
       if (isClassPilotNotEntitledResponse(data)) {
-        await disableForInactiveLicense(data.planStatus);
+        await disableForInactiveLicense(data.planStatus, heartbeatAuthContext);
         return;
       }
       if (isManualIdentitySource()) {
@@ -6670,14 +8019,22 @@ async function sendHeartbeat(reason = 'manual') {
         // student out server-side, session replaced) must not leave
         // auto-registration enabled — that re-signed the student in on the
         // next worker wake.
-        await clearStudentAuth('manual-token-invalid', { notifyBackend: false, pauseAutoRegistration: true });
+        await clearStudentAuth('manual-token-invalid', {
+          notifyBackend: false,
+          pauseAutoRegistration: true,
+          expectedAuthContext: heartbeatAuthContext,
+        });
         return;
       }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
       await clearStudentMessageState('student-token-invalid');
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
       await durableLocalKv.set({ studentToken: null, registered: false });
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
       if (hasSessionStorage()) await durableSessionKv.remove(['studentToken']);
+      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
       CONFIG.studentToken = null;
       // Trigger re-registration with backoff (shares retry counter with registration)
       registrationRetryCount++;
@@ -6687,57 +8044,70 @@ async function sendHeartbeat(reason = 'manual') {
       }
       return; // Skip rest of error handling
     } else if (response.status === 408 || response.status >= 500) {
-      await recordHeartbeatFailure('server_unavailable');
+      await recordHeartbeatFailure('server_unavailable', Date.now(), heartbeatAuthContext);
       console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
-      await recordHeartbeatSuccess();
+      await recordHeartbeatSuccess(Date.now(), heartbeatAuthContext);
       if (isManualIdentitySource()) {
+        assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:manual-last-seen`);
         CONFIG.manualLoginLastSeenAt = Date.now();
         await setManualAuthState({ manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt });
-      }
-      // Ensure screenshot alarm is running after every successful heartbeat
-      // This recovers from cases where the alarm was lost (SW restart, Chrome killed it)
-      if (!screenshotScheduled && (trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE)) {
-        console.log('[Screenshot] Recovering lost screenshot alarm after heartbeat');
-        scheduleScreenshotCapture(true);
+        assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:manual-last-seen`);
       }
       // Check for pending messages missed during WebSocket disconnection
       try {
         const data = await response.json();
+        assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response-body`);
+        adoptNegotiatedProtocolState(data, heartbeatAuthContext);
+        adoptScreenshotPolicy(data.screenshotPolicy, heartbeatAuthContext);
         await adoptAuthenticatedStudentBinding(
           data,
           'heartbeat response',
           heartbeatAuthResponseGuard,
         );
+        assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:binding-adoption`);
         await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
+        assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:classroom-state`);
         if (Object.prototype.hasOwnProperty.call(data, 'fab')) {
           await applyFabSettings(data.fab || {}, {
             reason: 'heartbeat-reconcile',
             broadcast: true,
           });
+          assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:fab-state`);
         }
         if (Array.isArray(data.pendingMessages) && data.pendingMessages.length > 0) {
           const inboxResult = await handleHeartbeatPendingMessages(
             data.pendingMessages,
             heartbeatMessageBinding
           );
+          assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:pending-messages`);
           if (inboxResult.addedMessageIds.length > 0) {
             console.log('[Heartbeat] Stored new pending messages:', inboxResult.addedMessageIds.length);
           }
         }
-      } catch { /* response may not be JSON in some edge cases */ }
+      } catch (error) {
+        if (isAuthContextCancellation(error)) throw error;
+        // Compatibility: a legacy success response may have no JSON body.
+      }
     } else {
       // Client error (400s) - log but don't retry
       console.warn('Heartbeat client error:', response.status);
     }
     
   } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      console.info(`[Heartbeat] Discarded ${reason} work for a retired authentication context`);
+      if (hasStudentAuth()) {
+        scheduleEventHeartbeat('identity-changed-reconcile');
+      }
+      return;
+    }
     if (heartbeatRequestStarted && !heartbeatResponseReceived) {
-      await recordHeartbeatFailure('network_error').catch(() => {});
+      await recordHeartbeatFailure('network_error', Date.now(), heartbeatAuthContext).catch(() => {});
     }
     // This means only that the school server could not be reached. It is not
     // evidence that Wi-Fi was intentionally disabled or that a student acted.
-    console.warn('Heartbeat network issue:', error?.message || error);
+    console.warn('Heartbeat network issue:', safeDiagnosticError(error));
   }
 }
 
@@ -6748,6 +8118,14 @@ async function healthCheck() {
     console.log('[Health Check] No deviceId - extension not yet configured');
     return;
   }
+  if (!hasStudentAuth()) {
+    // Configured signed-out devices perform only local gate maintenance on a
+    // five-minute cadence. School settings require a student token.
+    scheduleHealthCheckAlarm(5);
+    await updateTrackingState('health-check-signed-out');
+    return;
+  }
+  scheduleHealthCheckAlarm(1);
   await refreshSchoolSettings({ force: false });
   await updateTrackingState('health-check');
   await setConnectivityBadge(connectivityStatus());
@@ -6781,7 +8159,7 @@ async function healthCheck() {
 // Alarm listener for heartbeat and WebSocket reconnection
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
-    safeSendHeartbeat('alarm');
+    handleHeartbeatRecoveryAlarm();
     // Re-schedule screenshot alarm if lost after service worker restart
     if ((trackingState === TRACKING_STATES.ACTIVE || trackingState === TRACKING_STATES.IDLE) && !screenshotScheduled) {
       scheduleScreenshotCapture(true);
@@ -6828,7 +8206,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     handleSharedAuthLockTimeout().catch(() => {});
   } else if (alarm.name === CLASSROOM_STATE_EXPIRY_ALARM) {
     classroomStateRestorePromise.then(() => checkClassroomStateExpiry()).catch((error) => {
-      console.warn('[Classroom State] Expiry check failed:', error?.message || error);
+      console.warn('[Classroom State] Expiry check failed:', safeDiagnosticError(error));
     });
   } else if (alarm.name === CLASSROOM_STATE_RECONCILE_ALARM) {
     classroomStateRestorePromise.then(() => enqueueClassroomStateOperation(async () => {
@@ -6838,7 +8216,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       }
       await reconcileClassroomStateTabsBestEffort(currentClassroomState);
     })).catch((error) => {
-      console.warn('[Classroom State] Reconciliation retry failed:', error?.message || error);
+      console.warn('[Classroom State] Reconciliation retry failed:', safeDiagnosticError(error));
       scheduleClassroomStateReconciliationRetry();
     });
   } else if (alarm.name === MONITORING_EVENT_FLUSH_ALARM) {
@@ -6847,10 +8225,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
   } else if (alarm.name === CHAT_ACK_FLUSH_ALARM) {
     flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+  } else if (alarm.name === STUDENT_CHAT_FLUSH_ALARM) {
+    flushStudentChatOutbox().catch(() => {});
   } else if (alarm.name === CLASSROOM_OVERLAY_EXPIRY_ALARM) {
     expireClassroomOverlays().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot({ reason: 'alarm' });
+  } else if (alarm.name === SCREENSHOT_LEASE_EXPIRY_ALARM) {
+    screenshotPolicyState = Object.freeze({
+      ...screenshotPolicyState,
+      observed: false,
+      expiresAt: 0,
+    });
+    scheduleScreenshotCapture(false);
   }
 });
 
@@ -6858,21 +8245,30 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // Uses chrome.alarms (30s minimum) instead of setInterval so it survives
 // MV3 service worker termination. setInterval dies when the SW goes inactive.
 const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
+const SCREENSHOT_LEASE_EXPIRY_ALARM = 'screenshot-observation-lease-expiry';
 const SCREENSHOT_PERIOD_MS = 30 * 1000;
 const SCREENSHOT_SCHEDULED_MIN_GAP_MS = 25 * 1000;
 const SCREENSHOT_COMMAND_MIN_GAP_MS = 5 * 1000;
 let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
+  if (enable) {
+    let authContext = null;
+    try {
+      authContext = captureAuthenticatedContext('screenshot scheduling');
+    } catch {
+      authContext = null;
+    }
+    if (!authContext || !ambientScreenshotAllowed(authContext)) {
+      screenshotScheduled = false;
+      chrome.alarms.clear(SCREENSHOT_ALARM_NAME);
+      return;
+    }
+  }
   if (enable && !screenshotScheduled) {
     screenshotScheduled = true;
     // chrome.alarms minimum is 30 seconds; use 0.5 min (30s) for near-real-time
     chrome.alarms.create(SCREENSHOT_ALARM_NAME, { periodInMinutes: 0.5 });
-    // A single cold-start capture is useful, but only if the persisted health
-    // proves the last attempt did not already occur in this cadence window.
-    if (!lastScreenshotAttemptAt || Date.now() - lastScreenshotAttemptAt >= SCREENSHOT_PERIOD_MS) {
-      captureAndSendScreenshot({ reason: 'startup' });
-    }
     console.log('[Screenshot] Scheduled periodic capture via chrome.alarms (every 30s)');
   } else if (!enable && screenshotScheduled) {
     screenshotScheduled = false;
@@ -6894,25 +8290,36 @@ async function captureAndSendScreenshot(options = {}) {
     console.log('[Screenshot] Skipping capture; previous capture still in flight');
     return;
   }
-  screenshotAttemptCount++;
-  await recordScreenshotAttempt();
-  if (Date.now() < apiBackoffUntilMs) {
-    await recordScreenshotError('rate_limited_backoff');
-    console.log('[Screenshot] Skipping capture during API backoff');
-    return;
-  }
-
   if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
-    await recordScreenshotError('tracking_off');
     return;
   }
   if (await expireManualAuthIfStale('screenshot-capture')) {
-    await recordScreenshotError('auth_stale');
     return;
   }
   if (!hasStudentAuth()) {
-    await recordScreenshotError('no_config');
+    scheduleHealthCheckAlarm(5);
     await notifyAuthGateStateToTabs();
+    return;
+  }
+  let screenshotAuthContext;
+  try {
+    screenshotAuthContext = captureAuthenticatedContext(`screenshot:${reason}`);
+  } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      console.info(`[Screenshot] Skipping ${reason}; authentication context is not ready`);
+      return;
+    }
+    throw error;
+  }
+  if (!ambientScreenshotAllowed(screenshotAuthContext)) {
+    // This is an expected privacy state, not an operational failure.
+    return { status: 'paused_unobserved' };
+  }
+  await recordScreenshotAttempt(Date.now(), screenshotAuthContext);
+  screenshotAttemptCount++;
+  if (Date.now() < apiBackoffUntilMs) {
+    await recordScreenshotError('rate_limited_backoff', Date.now(), screenshotAuthContext);
+    console.log('[Screenshot] Skipping capture during API backoff');
     return;
   }
 
@@ -6920,66 +8327,225 @@ async function captureAndSendScreenshot(options = {}) {
   let screenshotPhase = 'capture';
   try {
     // Get the last focused window
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const queryActiveTab = options.queryActiveTab
+      || (() => chrome.tabs.query({ active: true, lastFocusedWindow: true }));
+    const captureVisibleTab = options.captureVisibleTab
+      || ((windowId, captureOptions) => chrome.tabs.captureVisibleTab(windowId, captureOptions));
+    const [tab] = await queryActiveTab();
+    assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:active-tab`);
+    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:active-tab`);
     if (!tab || !tab.windowId) {
-      await recordScreenshotError('no_active_tab');
+      await recordScreenshotError('no_active_tab', Date.now(), screenshotAuthContext);
       console.log('[Screenshot] No active tab in focused window');
       return;
     }
 
     // Skip chrome:// and other non-HTTP pages
     if (!tab.url || !tab.url.startsWith('http')) {
-      await recordScreenshotError('non_http_page');
-      console.log('[Screenshot] Skipping non-HTTP page:', tab.url?.slice(0, 30));
+      await recordScreenshotError('non_http_page', Date.now(), screenshotAuthContext);
+      console.log('[Screenshot] Skipping non-HTTP page');
       return;
     }
 
     // Capture the visible tab as JPEG with quality for compression
-    const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+    const dataUrl = await captureVisibleTab(tab.windowId, {
       format: 'jpeg',
       quality: 50  // Lower quality for smaller file size (~30-50KB)
     });
+    assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
+    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
 
     if (!dataUrl) {
-      await recordScreenshotError('capture_empty');
+      await recordScreenshotError('capture_empty', Date.now(), screenshotAuthContext);
       console.log('[Screenshot] Capture returned empty');
       return;
     }
 
     // Send screenshot to server with tab metadata
     screenshotPhase = 'upload';
-    const headers = buildDeviceAuthHeaders();
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/device/screenshot`, {
+    const headers = buildDeviceAuthHeaders(screenshotAuthContext);
+    assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload`);
+    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:upload`);
+    const screenshotUploadPath = hasNegotiatedCapability(
+      'screenshotObservationLeaseV1',
+      screenshotAuthContext,
+    )
+      ? '/api/classpilot/device/screenshot'
+      : '/api/device/screenshot';
+    const response = await fetchWithBackoff(`${screenshotAuthContext.serverOrigin}${screenshotUploadPath}`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
+        ...extensionProtocolDescriptor(),
+        deviceId: screenshotAuthContext.deviceId,
         screenshot: dataUrl,  // base64 data URL
         timestamp: Date.now(),
         tabTitle: tab.title || '',
         tabUrl: tab.url || '',
         tabFavicon: tab.favIconUrl || '',
       }),
+      signal: screenshotAuthContext.signal,
     }, {
       context: 'screenshot upload',
       maxAttempts: 2,
     });
+    assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
 
     if (!response.ok) {
       await recordScreenshotError(response.status >= 500
         ? 'upload_server_error'
-        : 'upload_client_error');
+        : 'upload_client_error', Date.now(), screenshotAuthContext);
       console.warn('[Screenshot] Upload failed:', response.status);
     } else {
-      await recordScreenshotSuccess();
+      await recordScreenshotSuccess(Date.now(), screenshotAuthContext);
       screenshotSuccessCount++;
       console.log('[Screenshot] Uploaded successfully');
     }
   } catch (error) {
-    await recordScreenshotError(screenshotPhase === 'upload' ? 'upload_failed' : 'capture_failed');
-    console.warn('[Screenshot] Capture error:', error.message);
+    if (isAuthContextCancellation(error)) {
+      console.info(`[Screenshot] Discarded ${reason} capture for a retired authentication context`);
+      return;
+    }
+    if (error?.code === 'SCREENSHOT_PAUSED_UNOBSERVED') {
+      console.info('[Screenshot] Capture paused because no current observation lease is active');
+      return { status: 'paused_unobserved' };
+    }
+    await recordScreenshotError(
+      screenshotPhase === 'upload' ? 'upload_failed' : 'capture_failed',
+      Date.now(),
+      screenshotAuthContext,
+    );
+    console.warn('[Screenshot] Capture error:', safeDiagnosticError(error));
   } finally {
     screenshotCaptureInFlight = false;
+  }
+}
+
+function parseBoundedExpiry(value) {
+  const parsed = typeof value === 'number' ? value : Date.parse(String(value || ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function captureSafetyEvidence(rawRequest, exactTargets, authContext, options = {}) {
+  const request = rawRequest && typeof rawRequest === 'object' ? rawRequest : null;
+  const requestId = String(request?.requestId || '').trim().slice(0, 256);
+  const tabRef = String(request?.tabRef || '').trim().slice(0, 256);
+  const snapshotRevision = Number(request?.snapshotRevision);
+  const expiresAt = parseBoundedExpiry(request?.expiresAt);
+  const exactTarget = exactTargets?.targets?.find((target) => target.tabRef === tabRef);
+  if (!hasNegotiatedCapability('safetyEvidenceCaptureV1', authContext)
+    || !requestId
+    || !tabRef
+    || !Number.isSafeInteger(snapshotRevision)
+    || snapshotRevision < 1
+    || snapshotRevision !== exactTargets?.revision
+    || !exactTarget
+    || expiresAt <= Date.now()
+    || expiresAt > Date.now() + 35 * 1000) {
+    return { status: 'unavailable', reason: 'invalid_or_unnegotiated_request' };
+  }
+  if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+    return { status: 'unavailable', reason: 'monitoring_inactive' };
+  }
+
+  const timeoutController = new AbortController();
+  const onAuthorityAbort = () => timeoutController.abort();
+  authContext.signal.addEventListener('abort', onAuthorityAbort, { once: true });
+  const timeoutId = setTimeout(() => timeoutController.abort(), 3000);
+  const timeout = new Promise((_, reject) => {
+    timeoutController.signal.addEventListener('abort', () => {
+      const error = new Error('Safety evidence capture timed out');
+      error.code = authContext.signal.aborted
+        ? 'AUTH_CONTEXT_SUPERSEDED'
+        : 'SAFETY_EVIDENCE_TIMEOUT';
+      reject(error);
+    }, { once: true });
+  });
+
+  try {
+    return await Promise.race([(async () => {
+      assertAuthenticatedContextCurrent(authContext, 'safety evidence capture');
+      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+        return { status: 'unavailable', reason: 'monitoring_inactive' };
+      }
+      const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
+      const captureVisibleTab = options.captureVisibleTab
+        || ((windowId, captureOptions) => chrome.tabs.captureVisibleTab(windowId, captureOptions));
+      const resolveExactTargets = options.resolveExactTargets || resolveExactTabRefs;
+      let verified = await revalidateExactTabTargets(exactTargets, authContext, resolveExactTargets);
+      let verifiedTarget = verified.targets.find((target) => target.tabRef === tabRef);
+      if (!verifiedTarget || verifiedTarget.tabId !== exactTarget.tabId) {
+        return { status: 'unavailable', reason: 'stale_tab_snapshot' };
+      }
+      const tab = await getTab(verifiedTarget.tabId);
+      assertAuthenticatedContextCurrent(authContext, 'safety evidence tab');
+      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+        return { status: 'unavailable', reason: 'monitoring_inactive' };
+      }
+      if (!tab?.active || !Number.isInteger(tab.windowId) || !isHttpUrl(tab.url)) {
+        return { status: 'unavailable', reason: 'target_not_visible' };
+      }
+      const dataUrl = await captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 50 });
+      assertAuthenticatedContextCurrent(authContext, 'safety evidence pixels');
+      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+        return { status: 'unavailable', reason: 'monitoring_inactive' };
+      }
+      verified = await revalidateExactTabTargets(exactTargets, authContext, resolveExactTargets);
+      verifiedTarget = verified.targets.find((target) => target.tabRef === tabRef);
+      if (!verifiedTarget || verifiedTarget.tabId !== exactTarget.tabId) {
+        return { status: 'unavailable', reason: 'stale_tab_snapshot' };
+      }
+      if (!dataUrl || expiresAt <= Date.now()) {
+        return { status: 'unavailable', reason: 'capture_empty_or_expired' };
+      }
+      const capturedAt = new Date().toISOString();
+      assertAuthenticatedContextCurrent(authContext, 'safety evidence upload');
+      const response = await fetchWithBackoff(
+        `${authContext.serverOrigin}/api/classpilot/device/screenshot`,
+        {
+          method: 'POST',
+          headers: buildDeviceAuthHeaders(authContext),
+          body: JSON.stringify({
+            ...extensionProtocolDescriptor(),
+            captureKind: 'safety_evidence',
+            evidenceRequestId: requestId,
+            tabRef,
+            tabSnapshotRevision: snapshotRevision,
+            capturedAt,
+            screenshot: dataUrl,
+            tabTitle: String(tab.title || '').slice(0, 512),
+            tabUrl: String(tab.url || '').slice(0, 2048),
+            tabFavicon: String(tab.favIconUrl || '').slice(0, 2048),
+          }),
+          signal: timeoutController.signal,
+        },
+        {
+          context: 'safety evidence upload',
+          maxAttempts: 1,
+          respectGlobalBackoff: false,
+        },
+      );
+      assertAuthenticatedContextCurrent(authContext, 'safety evidence upload');
+      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+        return { status: 'unavailable', reason: 'monitoring_inactive' };
+      }
+      return response.ok
+        ? { status: 'available', requestId }
+        : { status: 'unavailable', reason: 'upload_rejected' };
+    })(), timeout]);
+  } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
+    return {
+      status: 'unavailable',
+      reason: error?.code === 'SAFETY_EVIDENCE_TIMEOUT'
+        ? 'timeout'
+        : error?.code === 'STALE_TAB_SNAPSHOT' || error?.code === 'TAB_REF_NOT_FOUND'
+          ? 'stale_tab_snapshot'
+          : 'capture_failed',
+    };
+  } finally {
+    clearTimeout(timeoutId);
+    authContext.signal.removeEventListener('abort', onAuthorityAbort);
   }
 }
 
@@ -7217,7 +8783,7 @@ async function setRuntimeFromClassroomState(state) {
       message: restrictions.attentionMode.message || 'Please look up!',
     });
   } catch (error) {
-    console.warn('[Classroom State] Attention overlay reconciliation failed:', error?.message || error);
+    console.warn('[Classroom State] Attention overlay reconciliation failed:', safeDiagnosticError(error));
   }
   // DNR is the durable enforcement boundary. Browser tabs are inherently
   // racy, so failure to query/update one must never roll back or clear the
@@ -7238,7 +8804,7 @@ async function reconcileClassroomStateTabsBestEffort(state) {
     await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
     return true;
   } catch (error) {
-    console.warn('[Classroom State] Existing-tab reconciliation deferred:', error?.message || error);
+    console.warn('[Classroom State] Existing-tab reconciliation deferred:', safeDiagnosticError(error));
     scheduleClassroomStateReconciliationRetry();
     return false;
   }
@@ -7255,7 +8821,7 @@ async function reconcileExistingTabsForClassroomState(state) {
     } catch (error) {
       // A tab may disappear between query and update. A replacement below
       // prevents that race from leaving the student without the lock target.
-      console.warn('[Classroom State] Retained tab disappeared during reconciliation:', error?.message || error);
+      console.warn('[Classroom State] Retained tab disappeared during reconciliation:', safeDiagnosticError(error));
     }
   }
   for (const tabId of plan.removeTabIds) {
@@ -7263,7 +8829,7 @@ async function reconcileExistingTabsForClassroomState(state) {
       await chrome.tabs.remove(tabId);
     } catch (error) {
       // Closed-by-user races are already compliant with the desired state.
-      console.info('[Classroom State] Tab already closed during reconciliation:', tabId);
+      console.info('[Classroom State] Exact retained tab already closed during reconciliation');
     }
   }
   const fallbackUrl = plan.createUrl || (!updateSucceeded ? plan.updates[0]?.url : null);
@@ -7349,7 +8915,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
       'flightPathState',
       'teacherBlockListState',
     ]).catch((error) => {
-      console.warn('[Classroom State] Legacy state cleanup failed:', error?.message || error);
+      console.warn('[Classroom State] Legacy state cleanup failed:', safeDiagnosticError(error));
     });
     scheduleClassroomStateExpiry(normalized);
     sendClassroomStateAck(normalized, 'applied');
@@ -7392,7 +8958,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
         // the server's authoritative scope resolver.
         occurredAt: Date.now(),
       }).catch((error) => {
-        console.warn('[Classroom State] Scope monitoring event was deferred:', error?.message || error);
+        console.warn('[Classroom State] Scope monitoring event was deferred:', safeDiagnosticError(error));
       });
     }
     return { outcome: 'applied', appliedRevision: normalized.revision };
@@ -7404,13 +8970,13 @@ async function applyClassroomStateNow(rawState, options = {}) {
       currentClassroomState = normalized;
       scheduleClassroomStateExpiry(normalized);
       sendClassroomStateAck(normalized, 'applied');
-      console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', error?.message || error);
+      console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', safeDiagnosticError(error));
       return { outcome: 'applied', appliedRevision: normalized.revision };
     }
     restoreClassroomRuntimeBackup(runtimeBackup);
     currentClassroomState = previousState;
     await composeAllManagedDynamicRules().catch((rollbackError) => {
-      console.warn('[Classroom State] Snapshot rule rollback failed:', rollbackError?.message || rollbackError);
+      console.warn('[Classroom State] Snapshot rule rollback failed:', safeDiagnosticError(rollbackError));
     });
     broadcastToAllTabs('attention-mode', {
       active: attentionModeActive,
@@ -7746,7 +9312,7 @@ function extractDomain(url) {
     // Remove 'www.' prefix for consistent matching
     return urlObj.hostname.replace(/^www\./, '');
   } catch (error) {
-    console.warn('Invalid URL:', url, error);
+    console.warn('[URL] Invalid URL value');
     return null;
   }
 }
@@ -7864,17 +9430,37 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
 async function handleRemoteControl(command, envelope = {}) {
   const commandId = getCommandIdFromMessage(envelope, command);
   const commandType = command?.type || 'unknown';
+  let authContext;
+  let commandBinding;
+  try {
+    authContext = captureAuthenticatedContext('remote-control command');
+    commandBinding = assertCurrentStudentBinding(envelope, 'remote-control command');
+    assertBindingMatchesAuthContext(commandBinding, authContext, 'remote-control command');
+    assertAuthenticatedContextCurrent(authContext, 'remote-control command');
+  } catch (error) {
+    // A command that cannot prove its exact student/session binding is not
+    // acknowledged. Sending even a rejection under the current student's
+    // token would let a stale envelope mutate the wrong command ledger.
+    console.warn('[Command] Ignoring unbound command:', safeDiagnosticError(error));
+    return { rejected: true, error: commandErrorMessage(error) };
+  }
+
   const delivery = RuntimeCore.commandDeliveryState(command, envelope, Date.now());
 
   // One-shot actions never become a reconnect queue. If the device did not
   // receive the envelope before its deadline, report expiry without executing.
+  // Exact binding is deliberately proven above before any ACK is created.
   if (delivery.expired) {
     if (commandId) {
+      const state = await getClassroomCommandStateSnapshot();
+      assertAuthenticatedContextCurrent(authContext, 'expired command acknowledgement');
       await sendCommandAck(commandId, 'expired', {
+        authContext,
+        binding: commandBinding,
         commandType,
         deliveryPolicy: delivery.deliveryPolicy,
         expiresAt: delivery.expiresAt,
-        state: await getClassroomCommandStateSnapshot(),
+        state,
         outcome: 'expired',
       });
     }
@@ -7883,25 +9469,34 @@ async function handleRemoteControl(command, envelope = {}) {
 
   let authority = null;
   try {
-    assertCurrentStudentBinding(envelope, 'remote-control command');
     authority = assertCurrentCommandAuthority(command, envelope);
   } catch (error) {
     if (commandId) {
-      await sendCommandAck(commandId, 'failed', {
-        commandType,
-        error: commandErrorMessage(error),
-        errorCode: error?.code || 'COMMAND_AUTHORITY_MISMATCH',
-        state: await getClassroomCommandStateSnapshot(),
-        outcome: 'failed',
-        deliveryPolicy: delivery.deliveryPolicy,
-        expiresAt: delivery.expiresAt,
-      });
+      try {
+        const state = await getClassroomCommandStateSnapshot();
+        assertAuthenticatedContextCurrent(authContext, 'rejected command acknowledgement');
+        await sendCommandAck(commandId, 'failed', {
+          authContext,
+          binding: commandBinding,
+          commandType,
+          error: commandErrorMessage(error),
+          errorCode: error?.code || 'COMMAND_AUTHORITY_MISMATCH',
+          state,
+          outcome: 'failed',
+          deliveryPolicy: delivery.deliveryPolicy,
+          expiresAt: delivery.expiresAt,
+        });
+      } catch (ackError) {
+        if (!isAuthContextCancellation(ackError)) throw ackError;
+      }
     }
     return { rejected: true, error: commandErrorMessage(error) };
   }
 
   if (commandId) {
     await sendCommandAck(commandId, 'received', {
+      authContext,
+      binding: commandBinding,
       commandType,
       deliveryPolicy: delivery.deliveryPolicy,
       expiresAt: delivery.expiresAt,
@@ -7911,7 +9506,12 @@ async function handleRemoteControl(command, envelope = {}) {
   try {
     // Re-check after the asynchronous receipt write. A class replacement may
     // have arrived while the durable ACK was being persisted.
-    assertCurrentStudentBinding(envelope, 'remote-control command');
+    assertAuthenticatedContextCurrent(authContext, 'remote-control command');
+    assertBindingMatchesAuthContext(
+      assertCurrentStudentBinding(envelope, 'remote-control command'),
+      authContext,
+      'remote-control command',
+    );
     assertCurrentCommandAuthority(command, envelope);
     if (authority?.teachingSessionId) {
       command.data = {
@@ -7945,7 +9545,13 @@ async function handleRemoteControl(command, envelope = {}) {
         const runtimeBackup = classroomRuntimeBackup();
         const stateBackup = currentClassroomState;
         try {
-          const legacyResult = await executeRemoteControlCommand(command || {}, { commandId, envelope, delivery });
+          const legacyResult = await executeRemoteControlCommand(command || {}, {
+            commandId,
+            envelope,
+            delivery,
+            authContext,
+            binding: commandBinding,
+          });
           await persistLegacyClassroomState(command, envelope);
           application = {
             outcome: 'applied',
@@ -7961,7 +9567,7 @@ async function handleRemoteControl(command, envelope = {}) {
           restoreClassroomRuntimeBackup(runtimeBackup);
           currentClassroomState = stateBackup;
           await composeAllManagedDynamicRules().catch((rollbackError) => {
-            console.warn('[Classroom State] Legacy command rule rollback failed:', rollbackError?.message || rollbackError);
+            console.warn('[Classroom State] Legacy command rule rollback failed:', safeDiagnosticError(rollbackError));
           });
           broadcastToAllTabs('attention-mode', {
             active: attentionModeActive,
@@ -7973,13 +9579,23 @@ async function handleRemoteControl(command, envelope = {}) {
         }
       });
     } else {
-      result = await executeRemoteControlCommand(command || {}, { commandId, envelope, delivery });
+      result = await executeRemoteControlCommand(command || {}, {
+        commandId,
+        envelope,
+        delivery,
+        authContext,
+        binding: commandBinding,
+      });
     }
     if (commandId) {
+      const state = await getClassroomCommandStateSnapshot();
+      assertAuthenticatedContextCurrent(authContext, 'completed command acknowledgement');
       await sendCommandAck(commandId, 'completed', {
+        authContext,
+        binding: commandBinding,
         commandType,
         result,
-        state: await getClassroomCommandStateSnapshot(),
+        state,
         appliedRevision: application?.appliedRevision,
         outcome: application?.outcome || 'applied',
         deliveryPolicy: delivery.deliveryPolicy,
@@ -7987,24 +9603,60 @@ async function handleRemoteControl(command, envelope = {}) {
       });
     }
   } catch (error) {
-    console.warn('Error handling remote control command:', error);
+    console.warn('Error handling remote control command:', safeDiagnosticError(error));
+    if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') {
+      return { rejected: true, error: commandErrorMessage(error) };
+    }
     if (commandId) {
-      await sendCommandAck(commandId, 'failed', {
-        commandType,
-        error: commandErrorMessage(error),
-        state: await getClassroomCommandStateSnapshot(),
-        appliedRevision: currentClassroomState?.revision ?? 0,
-        outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
-        deliveryPolicy: delivery.deliveryPolicy,
-        expiresAt: delivery.expiresAt,
-      });
+      const state = await getClassroomCommandStateSnapshot();
+      try {
+        assertAuthenticatedContextCurrent(authContext, 'failed command acknowledgement');
+        await sendCommandAck(commandId, 'failed', {
+          authContext,
+          binding: commandBinding,
+          commandType,
+          error: commandErrorMessage(error),
+          errorCode: error?.code,
+          state,
+          appliedRevision: currentClassroomState?.revision ?? 0,
+          outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
+          deliveryPolicy: delivery.deliveryPolicy,
+          expiresAt: delivery.expiresAt,
+        });
+      } catch (ackError) {
+        if (!isAuthContextCancellation(ackError)) throw ackError;
+      }
     }
     return { rejected: true, error: commandErrorMessage(error) };
   }
 }
 
 async function executeRemoteControlCommand(command, executionContext = {}) {
-  console.log('Remote control command received:', command);
+  console.log('[Command] Exact-bound remote control received:', command?.type || 'unknown');
+  const commandAuthContext = executionContext.authContext
+    || captureAuthenticatedContext(`remote-control:${command?.type || 'unknown'}`);
+  const commandControlRevision = executionContext.binding?.controlRevision
+    ?? currentStudentControlRevision();
+  const assertCommandExecutionCurrent = (reason = 'remote-control command execution') => {
+    assertAuthenticatedContextCurrent(commandAuthContext, reason);
+    if (executionContext.binding) {
+      assertBindingMatchesAuthContext(
+        executionContext.binding,
+        commandAuthContext,
+        reason,
+        { requireFullAuthority: false },
+      );
+    }
+    if (
+      fullAuthorityBindingNegotiated(commandAuthContext)
+      && currentStudentControlRevision() !== commandControlRevision
+    ) {
+      const error = new Error(`${reason} belongs to a retired control revision`);
+      error.code = 'STUDENT_BINDING_MISMATCH';
+      throw error;
+    }
+  };
+  assertCommandExecutionCurrent();
   const result = {
     commandType: command.type || 'unknown',
     completedAt: new Date().toISOString(),
@@ -8017,13 +9669,27 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           throw new Error('Missing URL for open-tab command');
         }
         {
-          const tab = await chrome.tabs.create({ url: command.data.url, active: true });
-          const tabSnapshot = await buildOpaqueTabSnapshot(await chrome.tabs.query({}));
+          assertCommandExecutionCurrent('open-tab command');
+          const createTab = executionContext.createTab
+            || ((createProperties) => chrome.tabs.create(createProperties));
+          const queryTabs = executionContext.queryTabs || (() => chrome.tabs.query({}));
+          const removeTab = executionContext.removeTab || ((tabId) => chrome.tabs.remove(tabId));
+          const tab = await createTab({ url: command.data.url, active: true });
+          try {
+            assertCommandExecutionCurrent('open-tab command');
+          } catch (error) {
+            if (Number.isInteger(tab?.id)) await removeTab(tab.id).catch(() => {});
+            throw error;
+          }
+          const tabs = await queryTabs();
+          assertCommandExecutionCurrent('open-tab command');
+          const tabSnapshot = await buildOpaqueTabSnapshot(tabs, commandAuthContext);
+          assertCommandExecutionCurrent('open-tab command');
           const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
           result.openedUrl = command.data.url;
           result.tabRef = openedEntry?.tabRef || null;
           result.tabSnapshotRevision = tabSnapshot.revision;
-          console.log('Opened tab:', command.data.url);
+          console.log('[Command] Opened exact requested tab');
           // Capture screenshot after tab loads so dashboard updates fast
           setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 2000);
         }
@@ -8031,101 +9697,106 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
       case 'close-tabs':
       case 'close-tab':
-        if (Array.isArray(command.data.tabRefs) || command.data.tabRef) {
-          const exact = await resolveExactTabRefs(
-            command.data.tabRefs || [command.data.tabRef],
-            command.data.snapshotRevision ?? command.data.tabSnapshotRevision
-          );
-          let closedCount = 0;
-          for (const target of exact.targets) {
-            try {
-              await chrome.tabs.remove(target.tabId);
-              closedCount += 1;
-            } catch (error) {
-              const closeError = new Error(`Exact tab ${target.tabRef} could not be closed`);
-              closeError.code = 'TAB_CLOSE_FAILED';
-              throw closeError;
-            }
+        {
+          const authContext = commandAuthContext;
+          assertAuthenticatedContextCurrent(authContext, 'tab close command');
+          if (executionContext.binding) {
+            assertBindingMatchesAuthContext(
+              executionContext.binding,
+              authContext,
+              'tab close command',
+            );
           }
-          result.closedTabRefs = exact.targets.map((target) => target.tabRef);
-          result.closedCount = closedCount;
-          result.tabSnapshotRevision = exact.revision;
-          await refreshTabCache();
-        } else if (command.data.closeAll) {
-          // Close all tabs except chrome:// system tabs and optionally allowed domains
-          const tabs = await chrome.tabs.query({});
-          const allowedDomains = command.data.allowedDomains || [];
-          
-          let closedCount = 0;
-          for (const tab of tabs) {
-            try {
-              // Skip chrome:// system pages
-              if (tab.url?.startsWith('chrome://')) {
-                continue;
-              }
-              
-              // If there are allowed domains, check if tab is on an allowed domain
-              if (allowedDomains.length > 0) {
-                const tabDomain = extractDomain(tab.url);
-                if (tabDomain && allowedDomains.some(allowed => tabDomain.includes(allowed) || allowed.includes(tabDomain))) {
-                  continue; // Don't close tabs on allowed domains
-                }
-              }
-              
-              // Close the tab
-              await chrome.tabs.remove(tab.id);
-              closedCount++;
-            } catch (error) {
-              console.warn('Could not close tab:', tab.id, error);
+          let exact;
+          if (Array.isArray(command.data.tabRefs) || command.data.tabRef) {
+            if (!hasNegotiatedCapability('exactTabCloseV2', authContext)
+              && !hasNegotiatedCapability('exactTabCloseV1', authContext)) {
+              const capabilityError = new Error('Exact tab references were not negotiated');
+              capabilityError.code = 'TAB_CLOSE_CAPABILITY_REQUIRED';
+              throw capabilityError;
             }
-          }
-          result.closeAll = true;
-          result.closedCount = closedCount;
-          result.allowedDomains = allowedDomains;
-          console.log(`Closed ${closedCount} tabs (allowed domains: ${allowedDomains.length > 0 ? allowedDomains.join(', ') : 'none'})`);
-        } else if (command.data.specificUrls && Array.isArray(command.data.specificUrls)) {
-          // Close tabs matching specific URLs
-          const tabs = await chrome.tabs.query({});
-          let closedCount = 0;
-          for (const tab of tabs) {
-            // Skip chrome:// system pages
-            if (tab.url?.startsWith('chrome://')) {
-              continue;
+            exact = await resolveExactTabRefs(
+              command.data.tabRefs || [command.data.tabRef],
+              command.data.snapshotRevision ?? command.data.tabSnapshotRevision,
+              authContext,
+            );
+            assertCommandExecutionCurrent('exact tab resolution');
+            const safetyEvidenceRequest = command.data.safetyEvidenceRequest
+              || command.safetyEvidenceRequest;
+            if (safetyEvidenceRequest) {
+              // Evidence is attempted before the exact close, for at most
+              // three seconds. An ordinary capture/upload failure does not
+              // prevent the safety action from closing its exact target.
+              result.safetyEvidence = await captureSafetyEvidence(
+                safetyEvidenceRequest,
+                exact,
+                authContext,
+              );
+              assertCommandExecutionCurrent('safety evidence command');
             }
-            
-            // Check if this tab's URL matches any of the specificUrls
-            if (command.data.specificUrls.includes(tab.url)) {
+            await closeExactTabTargets(exact, authContext);
+            assertCommandExecutionCurrent('exact tab close command');
+            result.closedTabRefs = exact.targets.map((target) => target.tabRef);
+            result.closedCount = exact.targets.length;
+            result.tabSnapshotRevision = exact.revision;
+          } else if (
+            Array.isArray(command.data.specificUrls)
+            || typeof command.data.url === 'string'
+          ) {
+            // Protocol-v2 compatibility is exact and fail-closed: a normalized
+            // URL is accepted only when it identifies one currently open tab.
+            exact = await resolveUniqueLegacyTabUrls(
+              command.data.specificUrls || [command.data.url],
+              authContext,
+            );
+            assertCommandExecutionCurrent('legacy exact tab resolution');
+            if (command.data.safetyEvidenceRequest || command.safetyEvidenceRequest) {
+              result.safetyEvidence = {
+                status: 'unavailable',
+                reason: 'exact_tab_reference_required',
+              };
+            }
+            await closeExactTabTargets(exact, authContext);
+            assertCommandExecutionCurrent('legacy exact tab close');
+            result.closedTabRefs = exact.targets.map((target) => target.tabRef).filter(Boolean);
+            result.closedCount = exact.targets.length;
+            result.tabSnapshotRevision = exact.revision;
+            result.legacyExactUrl = true;
+          } else if (command.type === 'close-tabs' && command.data.closeAll === true) {
+            // Missing target data never implies a broadcast. Closing all tabs
+            // requires the explicit close-tabs action and closeAll=true.
+            const tabs = await chrome.tabs.query({});
+            assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
+            const allowedDomainSet = new Set((Array.isArray(command.data.allowedDomains)
+              ? command.data.allowedDomains
+              : [])
+              .map((value) => extractDomain(`https://${String(value || '').replace(/^https?:\/\//, '')}`))
+              .filter(Boolean));
+            let closedCount = 0;
+            for (const tab of tabs) {
+              if (!Number.isInteger(tab?.id) || tab.url?.startsWith('chrome://')) continue;
+              const tabDomain = extractDomain(tab.url);
+              if (tabDomain && allowedDomainSet.has(tabDomain)) continue;
+              assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
               try {
                 await chrome.tabs.remove(tab.id);
-                closedCount++;
-                console.log('Closed specific tab:', tab.url);
+                assertCommandExecutionCurrent('close-all-tabs command');
+                closedCount += 1;
               } catch (error) {
-                console.warn('Could not close tab:', tab.id, error);
+                console.warn('Could not close an explicitly targeted all-tabs entry:', safeDiagnosticError(error));
               }
             }
+            assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
+            result.closeAll = true;
+            result.closedCount = closedCount;
+            result.allowedDomains = [...allowedDomainSet];
+          } else {
+            const targetError = new Error('Missing exact close-tab target');
+            targetError.code = 'TAB_TARGET_REQUIRED';
+            throw targetError;
           }
-          result.specificUrls = command.data.specificUrls;
-          result.closedCount = closedCount;
-          console.log(`Closed ${closedCount} specific tabs`);
-        } else if (command.data.pattern) {
-          // Close tabs matching pattern
-          const tabs = await chrome.tabs.query({});
-          let closedCount = 0;
-          for (const tab of tabs) {
-            if (tab.url && tab.url.includes(command.data.pattern)) {
-              try {
-                await chrome.tabs.remove(tab.id);
-                closedCount++;
-                console.log('Closed tab matching pattern:', tab.url);
-              } catch (error) {
-                console.warn('Could not close tab:', tab.id, error);
-              }
-            }
-          }
-          result.pattern = command.data.pattern;
-          result.closedCount = closedCount;
-        } else {
-          throw new Error('Missing close-tab target');
+          await refreshTabCache(authContext);
+          assertCommandExecutionCurrent('tab cache refresh');
         }
         // Capture screenshot immediately after closing tabs so dashboard updates fast
         setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 1500);
@@ -8136,10 +9807,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         let urlToLock = command.data.url;
         if (urlToLock === "CURRENT_URL") {
           const allTabs = await chrome.tabs.query({});
+          assertCommandExecutionCurrent('lock-screen active tab');
           const activeTab = allTabs.find(t => t.active) || allTabs[0];
           if (activeTab && activeTab.url) {
             urlToLock = activeTab.url;
-            console.log('[Lock Screen] Using current tab URL:', urlToLock);
+            console.log('[Lock Screen] Using current active tab');
           } else {
             throw new Error('No active tab found to lock to current URL');
           }
@@ -8164,6 +9836,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             timestamp: Date.now()
           }
         });
+        assertCommandExecutionCurrent('lock-screen persistence');
         // Keep any independently applied Flight Path durable underneath the
         // screen-lock overlay. Screen Lock wins enforcement while active;
         // screen-only Unlock recomposes the retained path.
@@ -8171,9 +9844,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Apply network-level blocking rules for single domain
         await updateBlockingRules([lockedDomain]);
+        assertCommandExecutionCurrent('lock-screen rules');
         
         // Close all other tabs - keep only the current tab
         const allTabs = await chrome.tabs.query({});
+        assertCommandExecutionCurrent('lock-screen tab reconciliation');
         const activeTab = allTabs.find(t => t.active) || allTabs[0];
         
         if (activeTab) {
@@ -8182,8 +9857,9 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')) {
               try {
                 await chrome.tabs.remove(tab.id);
+                assertCommandExecutionCurrent('lock-screen tab reconciliation');
               } catch (error) {
-                console.warn('Could not close tab:', tab.id, error);
+                console.warn('Could not close an excess tab:', safeDiagnosticError(error));
               }
             }
           }
@@ -8199,7 +9875,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.screenLocked = true;
         result.lockedUrl = lockedUrl;
         result.lockedDomain = lockedDomain;
-        console.log('Screen locked to domain:', lockedDomain, '(from URL:', lockedUrl + ')');
+        console.log('[Lock Screen] Screen lock applied');
         break;
         
       case 'unlock-screen':
@@ -8220,6 +9896,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await chrome.storage.local.remove(screenOnly
           ? ['lockScreenState']
           : ['lockScreenState', 'flightPathState']);
+        assertCommandExecutionCurrent('unlock-screen persistence');
         console.log('[Unlock Screen] State cleared from storage');
         
         // Recompose the retained Flight Path immediately. Clearing all
@@ -8227,11 +9904,14 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // the still-active path until a later reconciliation.
         if (preserveFlightPath) {
           await updateBlockingRules(allowedDomains);
+          assertCommandExecutionCurrent('unlock-screen rules');
           await reconcileClassroomStateTabsBestEffort({
             restrictions: classroomRestrictionsFromRuntime(),
           });
+          assertCommandExecutionCurrent('unlock-screen reconciliation');
         } else {
           await clearBlockingRules();
+          assertCommandExecutionCurrent('unlock-screen rules');
         }
         
         safeNotify({
@@ -8276,15 +9956,19 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             timestamp: Date.now()
           }
         });
+        assertCommandExecutionCurrent('flight-path persistence');
         await chrome.storage.local.remove('lockScreenState');
+        assertCommandExecutionCurrent('flight-path persistence');
         console.log('[Flight Path] State persisted to storage');
         
         // Apply network-level blocking rules
         await updateBlockingRules(allowedDomains);
+        assertCommandExecutionCurrent('flight-path rules');
         
         // Close all tabs except one and navigate to the first allowed domain
         if (allowedDomains.length > 0) {
           const allTabs = await chrome.tabs.query({});
+          assertCommandExecutionCurrent('flight-path tabs');
           const activeTab = allTabs.find(t => t.active) || allTabs[0];
           
           // Navigate the first tab to the first allowed domain (prepend https:// if needed)
@@ -8294,16 +9978,19 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           if (activeTab) {
             // Update the active tab to the first domain
             await chrome.tabs.update(activeTab.id, { url: firstUrl });
+            assertCommandExecutionCurrent('flight-path navigation');
             
             // Close all other tabs
             for (const tab of allTabs) {
               if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')) {
                 await chrome.tabs.remove(tab.id);
+                assertCommandExecutionCurrent('flight-path tab close');
               }
             }
           } else {
             // No tabs exist, create one
             await chrome.tabs.create({ url: firstUrl, active: true });
+            assertCommandExecutionCurrent('flight-path tab create');
           }
           
           safeNotify({
@@ -8317,7 +10004,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.flightPathActive = true;
         result.allowedDomains = allowedDomains;
         result.activeFlightPathName = activeFlightPathName;
-        console.log('Flight Path applied with allowed domains:', allowedDomains, 'Name:', activeFlightPathName);
+        console.log('[Flight Path] Applied authorized domain policy');
         break;
         
       case 'remove-flight-path':
@@ -8326,10 +10013,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Clear persisted Flight Path state
         await chrome.storage.local.remove('flightPathState');
+        assertCommandExecutionCurrent('flight-path removal persistence');
         console.log('[Flight Path] State cleared from storage');
         
         // Clear network-level blocking rules
         await clearBlockingRules();
+        assertCommandExecutionCurrent('flight-path removal rules');
         
         safeNotify({
           title: 'Flight Path Removed',
@@ -8356,6 +10045,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         temporaryAllowedDomains = temporaryAllowedDomains.filter(d => d.domain !== tempDomain);
         temporaryAllowedDomains.push({ domain: tempDomain, expiresAt: tempExpiresAt });
         await updateTemporaryAllowRules(temporaryAllowedDomains);
+        assertCommandExecutionCurrent('temporary unblock rules');
 
         safeNotify({
           title: 'Temporary Access Granted',
@@ -8366,7 +10056,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.domain = tempDomain;
         result.expiresAt = tempExpiresAt;
         result.durationMinutes = tempDuration;
-        console.log('[Temp Unblock] Temporarily allowed domain:', tempDomain, 'until', new Date(tempExpiresAt));
+        console.log('[Temp Unblock] Applied bounded exception');
         break;
 
       case 'apply-block-list':
@@ -8381,6 +10071,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         // The revisioned full snapshot is persisted after this legacy command.
         await updateTeacherBlockListRules(teacherBlockedDomains);
+        assertCommandExecutionCurrent('teacher block-list rules');
 
         if (teacherBlockedDomains.length > 0) {
           safeNotify({
@@ -8392,7 +10083,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         result.activeBlockListName = activeBlockListName;
         result.blockedDomains = teacherBlockedDomains;
-        console.log('[Block List] Teacher block list applied (session-based):', activeBlockListName, teacherBlockedDomains);
+        console.log('[Block List] Applied teacher-session policy');
         break;
 
       case 'remove-block-list':
@@ -8401,6 +10092,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         // Clear teacher block list rules (keeps global blacklist)
         await clearTeacherBlockListRules();
+        assertCommandExecutionCurrent('teacher block-list removal');
         
         safeNotify({
           title: 'Block List Removed',
@@ -8432,12 +10124,14 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // Close excess tabs if over limit
         if (currentMaxTabs) {
           const tabs = await chrome.tabs.query({});
+          assertCommandExecutionCurrent('tab-limit query');
           if (tabs.length > currentMaxTabs) {
             // Close oldest tabs first (keep most recent)
             const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
             for (const tab of tabsToClose) {
               if (!tab.url.startsWith('chrome://')) {
                 await chrome.tabs.remove(tab.id);
+                assertCommandExecutionCurrent('tab-limit close');
               }
             }
           }
@@ -8455,6 +10149,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // Update attention mode state (blocks navigation and new tabs when active)
         attentionModeActive = attentionActive;
         await composeDynamicRules(['classroom']);
+        assertCommandExecutionCurrent('attention-mode rules');
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
@@ -8469,7 +10164,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         result.active = attentionActive;
         result.message = attentionMessage;
-        console.log('Attention mode:', attentionActive ? 'ON' : 'OFF', attentionMessage);
+        console.log('Attention mode:', attentionActive ? 'ON' : 'OFF');
         break;
 
       case 'timer':
@@ -8477,6 +10172,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const timerSeconds = command.data.seconds;
         const timerMessage = command.data.message || '';
         const timerState = await persistTimerOverlay(command, executionContext);
+        assertCommandExecutionCurrent('timer persistence');
         const timerEndsAt = timerState?.timer?.endsAt || null;
 
         broadcastToAllTabs('timer', {
@@ -8512,7 +10208,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // The persisted poll is the restart-safe dedup boundary. The short
         // in-memory set only avoids duplicate same-turn broadcasts.
         if (pollAction === 'start' && seenPollIds.has(pollId)) {
-          console.log('Poll dedup: already shown', pollId);
+          console.log('Poll dedup: already shown');
           result.action = pollAction;
           result.pollId = pollId;
           result.deduplicated = true;
@@ -8528,6 +10224,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
 
         const pollState = await persistPollOverlay(command, executionContext);
+        assertCommandExecutionCurrent('poll persistence');
 
         broadcastToAllTabs('poll', {
           action: pollAction,
@@ -8549,7 +10246,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.action = pollAction;
         result.pollId = pollId;
         result.question = pollQuestion;
-        console.log('Poll:', pollAction, pollId);
+        console.log('Poll:', pollAction);
         break;
 
       case 'chat-notification':
@@ -8562,12 +10259,13 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         result.messageDelivered = true;
         result.fromName = chatFromName;
-        console.log('Chat notification sent:', chatFromName, chatMessage);
+        console.log('Chat notification sent');
         break;
 
       case 'hand-dismissed':
         // Notify student their hand was acknowledged
         await updateLocalFabHandRaised(false, 'hand-dismissed');
+        assertCommandExecutionCurrent('hand dismissal');
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-dismissed', command.data || {});
@@ -8588,6 +10286,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             : {}),
           reason: 'messaging-toggle',
         });
+        assertCommandExecutionCurrent('messaging toggle');
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('messaging-toggle', { ...(command.data || {}), enabled: messagingEnabled });
@@ -8608,6 +10307,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             : {}),
           reason: 'hand-raising-toggle',
         });
+        assertCommandExecutionCurrent('hand-raising toggle');
 
         // Fire-and-forget - don't await to avoid any delay
         broadcastToAllTabs('hand-raising-toggle', { ...(command.data || {}), enabled: handRaisingEnabled });
@@ -8621,9 +10321,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // Apply session lifecycle state pushed by SchoolPilot when classes start/end.
         const fabStateData = command.data || {};
         const appliedFabState = await applyFabSettings(fabStateData);
+        assertCommandExecutionCurrent('FAB state command');
 
         result.fabState = appliedFabState;
-        console.log('FAB state updated:', fabStateData.reason || 'state-refresh');
+        console.log('FAB state updated');
         break;
 
       case 'student-sign-out':
@@ -8639,14 +10340,17 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             sessionId: command.data.sessionId || '',
             reason: signOutReason,
           });
+          assertCommandExecutionCurrent('student sign-out FAB cleanup');
           await chrome.storage.local.set({
             fabChatMessages: [],
             fabChatClosed: false,
           });
+          assertCommandExecutionCurrent('student sign-out chat cleanup');
           await clearStudentAuth(signOutReason, {
             notifyBackend: false,
             pauseAutoRegistration: true,
             disconnectWebSocket: false,
+            expectedAuthContext: commandAuthContext,
           });
           setTimeout(() => {
             disconnectWebSocket();
@@ -8663,9 +10367,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         throw new Error(`Unsupported remote control command: ${command.type || 'unknown'}`);
     }
 
+  assertCommandExecutionCurrent('remote-control result');
+  const state = await getClassroomCommandStateSnapshot();
+  assertCommandExecutionCurrent('remote-control result');
   return {
     ...result,
-    state: await getClassroomCommandStateSnapshot(),
+    state,
   };
 }
 
@@ -8743,7 +10450,7 @@ function messageMatchesActiveFabSession(message = {}) {
 }
 
 async function handleChatMessage(message) {
-  console.log('Chat message received:', message);
+  console.log('[Chat] Exact-bound teacher message received');
 
   if (!acceptsCurrentStudentBinding(message, 'teacher chat message')) return;
 
@@ -8759,7 +10466,7 @@ async function handleChatMessage(message) {
     expectedBinding,
   });
   if (!inboxResult.addedMessageIds.includes(inboxMessage.id)) {
-    console.log('Dedup: skipping duplicate chat message', inboxMessage.id);
+    console.log('Dedup: skipping duplicate chat message');
     return;
   }
 
@@ -8783,6 +10490,8 @@ async function handleChatMessage(message) {
 async function handleDurableTeacherMessage(message, options = {}) {
   const expectedBinding = options.expectedBinding || messageInboxAuthBinding();
   const commandId = getCommandIdFromMessage(message);
+  let authContext = null;
+  let commandBinding = null;
   const hasChatDelivery = !commandId || Boolean(message.chatDeliveryId || message.deliveryId);
   const delivery = RuntimeCore.commandDeliveryState(
     { type: 'teacher-message', ...message.command },
@@ -8790,7 +10499,9 @@ async function handleDurableTeacherMessage(message, options = {}) {
     Date.now()
   );
   try {
-    assertCurrentStudentBinding(message, 'durable teacher message');
+    authContext = captureAuthenticatedContext('durable teacher message');
+    commandBinding = assertCurrentStudentBinding(message, 'durable teacher message');
+    assertBindingMatchesAuthContext(commandBinding, authContext, 'durable teacher message');
     if (!expectedBinding || expectedBinding !== messageInboxAuthBinding()) {
       throw new Error('Teacher message belongs to a retired student session');
     }
@@ -8808,11 +10519,14 @@ async function handleDurableTeacherMessage(message, options = {}) {
     }
     if (commandId) {
       await sendCommandAck(commandId, 'received', {
+        authContext,
+        binding: commandBinding,
         commandType: 'teacher-message',
         deliveryPolicy: delivery.deliveryPolicy,
         expiresAt: delivery.expiresAt,
       });
     }
+    assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
     assertCurrentStudentBinding(message, 'durable teacher message');
     const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
     const inboxResult = await persistTeacherMessages([inboxMessage], {
@@ -8822,7 +10536,7 @@ async function handleDurableTeacherMessage(message, options = {}) {
     const deduplicated = !inboxResult.addedMessageIds.includes(inboxMessage.id);
 
     if (deduplicated) {
-      console.log('Dedup: skipping duplicate teacher-message', inboxMessage.id);
+      console.log('Dedup: skipping duplicate teacher-message');
     } else {
       safeNotify({
         title: 'Reply from Teacher',
@@ -8843,12 +10557,14 @@ async function handleDurableTeacherMessage(message, options = {}) {
     }
 
     if (hasChatDelivery) {
-      await sendChatDeliveryAck(message, 'delivered').catch((error) => {
-        console.warn('[Chat ACK] Could not persist delivered acknowledgement:', error?.message || error);
+      await sendChatDeliveryAck(message, 'delivered', null, authContext).catch((error) => {
+        console.warn('[Chat ACK] Could not persist delivered acknowledgement:', safeDiagnosticError(error));
       });
     }
     if (commandId) {
       await sendCommandAck(commandId, 'completed', {
+        authContext,
+        binding: commandBinding,
         commandType: 'teacher-message',
         result: deduplicated
           ? { deduplicated: true }
@@ -8863,11 +10579,24 @@ async function handleDurableTeacherMessage(message, options = {}) {
     }
     return { messageId: inboxMessage.id, deduplicated };
   } catch (error) {
-    if (hasChatDelivery) {
-      await sendChatDeliveryAck(message, 'failed', commandErrorMessage(error)).catch(() => {});
+    if (hasChatDelivery && authContext && commandBinding && !isAuthContextCancellation(error)) {
+      await sendChatDeliveryAck(
+        message,
+        'failed',
+        commandErrorMessage(error),
+        authContext,
+      ).catch(() => {});
     }
-    if (commandId) {
+    if (
+      commandId
+      && authContext
+      && commandBinding
+      && !isAuthContextCancellation(error)
+      && error?.code !== 'STUDENT_BINDING_MISMATCH'
+    ) {
       await sendCommandAck(commandId, 'failed', {
+        authContext,
+        binding: commandBinding,
         commandType: 'teacher-message',
         error: commandErrorMessage(error),
         state: await getClassroomCommandStateSnapshot(),
@@ -8905,7 +10634,7 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
       }, { expectedBinding });
       if (!result.deduplicated) addedMessageIds.push(result.messageId);
     } catch (error) {
-      console.warn('[Heartbeat] Durable teacher message was not applied:', error?.message || error);
+      console.warn('[Heartbeat] Durable teacher message was not applied:', safeDiagnosticError(error));
     }
   }
 
@@ -8918,7 +10647,7 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
 
 // Check-in Request Handler (Phase 3)
 async function handleCheckInRequest(request) {
-  console.log('Check-in request received:', request);
+  console.log('Check-in request received');
   
   // Show notification with check-in question
   safeNotify({
@@ -8952,7 +10681,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
   // Block ALL navigation when attention mode is active
   if (attentionModeActive) {
-    console.log('[Attention Mode] Blocked navigation to:', details.url);
+    console.log('[Attention Mode] Blocked navigation');
     enqueueMonitoringEvent('navigation_blocked', {
       url: details.url,
       title: '',
@@ -8985,7 +10714,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     });
     
     if (isBlacklisted) {
-      console.log('[Blacklist] Blocked navigation to:', details.url);
+      console.log('[Blacklist] Blocked navigation');
       enqueueMonitoringEvent('navigation_blocked', {
         url: details.url,
         title: '',
@@ -9013,7 +10742,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // teacher block-list state. School policy above remains authoritative.
   if (screenLocked) {
     if (lockedDomain && isOnSameDomain(details.url, lockedDomain)) return;
-    console.log('[Screen Lock] Blocked navigation to:', details.url);
+    console.log('[Screen Lock] Blocked navigation');
     enqueueMonitoringEvent('navigation_blocked', {
       url: details.url,
       title: '',
@@ -9044,7 +10773,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   });
 
   if (isTempAllowed) {
-    console.log('[Temp Unblock] Allowing temporarily unblocked domain:', targetDomain);
+    console.log('[Temp Unblock] Allowing bounded exception');
     return; // Allow navigation
   }
 
@@ -9056,7 +10785,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     });
     
     if (isTeacherBlocked) {
-      console.log('[Teacher Block List] Blocked navigation to:', details.url);
+      console.log('[Teacher Block List] Blocked navigation');
       enqueueMonitoringEvent('navigation_blocked', {
         url: details.url,
         title: '',
@@ -9087,7 +10816,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     
     if (!isAllowed) {
       // Redirect back to locked URL or prevent navigation
-      console.log('Blocked navigation to:', details.url);
+      console.log('[Flight Path] Blocked navigation');
       enqueueMonitoringEvent('navigation_blocked', {
         url: details.url,
         title: '',
@@ -9114,7 +10843,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
   }
   } catch (error) {
-    console.warn('[Service Worker] Navigation handler error:', error?.message || error);
+    console.warn('[Service Worker] Navigation handler error:', safeDiagnosticError(error));
   }
 });
 
@@ -9134,9 +10863,9 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
     // Send immediate heartbeat - this fires the moment navigation commits
     // (before page is loaded, so teacher sees URL change instantly)
-    safeSendHeartbeat('navigation-committed');
+    scheduleEventHeartbeat('navigation-committed');
   } catch (error) {
-    console.warn('[Service Worker] Navigation committed handler error:', error?.message || error);
+    console.warn('[Service Worker] Navigation committed handler error:', safeDiagnosticError(error));
   }
 });
 
@@ -9209,7 +10938,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     // Refresh tab cache when a new tab is created
     refreshTabCache();
   } catch (error) {
-    console.warn('[Service Worker] Tab created handler error:', error?.message || error);
+    console.warn('[Service Worker] Tab created handler error:', safeDiagnosticError(error));
   }
 });
 
@@ -9240,7 +10969,7 @@ async function ensureOffscreenDocument() {
       // Chrome reports an existing-document error if another worker wake won
       // the race. Verify the context before treating it as a real failure.
       if (!await hasOffscreenDocument()) {
-        console.warn('[Service Worker] Offscreen document creation failed:', error?.message || error);
+        console.warn('[Service Worker] Offscreen document creation failed:', safeDiagnosticError(error));
         throw error;
       }
     } finally {
@@ -9303,19 +11032,189 @@ async function sendToOffscreen(message) {
   return response;
 }
 
+function normalizedIceServers(rawServers) {
+  if (!Array.isArray(rawServers) || rawServers.length === 0 || rawServers.length > 8) return null;
+  const allowedScheme = /^(?:stun|stuns|turn|turns):/i;
+  const normalized = [];
+  for (const raw of rawServers) {
+    const rawUrls = Array.isArray(raw?.urls) ? raw.urls : [raw?.urls];
+    const urls = rawUrls
+      .map((value) => String(value || '').trim())
+      .filter((value) => value && value.length <= 1024 && allowedScheme.test(value));
+    if (urls.length === 0 || urls.length !== rawUrls.length || urls.length > 8) return null;
+    const entry = { urls: Array.isArray(raw?.urls) ? urls : urls[0] };
+    if (raw?.username !== undefined) entry.username = String(raw.username).slice(0, 512);
+    if (raw?.credential !== undefined) entry.credential = String(raw.credential).slice(0, 1024);
+    normalized.push(entry);
+  }
+  return normalized;
+}
+
+async function fetchLiveViewIceConfiguration(negotiationId, authContext) {
+  if (!hasNegotiatedCapability('liveViewIceServersV1', authContext)) {
+    return { iceServers: null, expiresAt: null, legacy: true };
+  }
+  assertAuthenticatedContextCurrent(authContext, 'Live View ICE authorization');
+  const response = await fetchWithBackoff(
+    `${authContext.serverOrigin}/api/classpilot/device/live-view/ice-servers`,
+    {
+      method: 'POST',
+      headers: buildDeviceAuthHeaders(authContext),
+      body: JSON.stringify({ negotiationId }),
+      signal: authContext.signal,
+    },
+    {
+      context: 'Live View ICE configuration',
+      maxAttempts: 1,
+      respectGlobalBackoff: false,
+    },
+  );
+  assertAuthenticatedContextCurrent(authContext, 'Live View ICE authorization');
+  if (!response.ok) throw new Error('Live View relay configuration is unavailable');
+  const data = await response.json().catch(() => ({}));
+  assertAuthenticatedContextCurrent(authContext, 'Live View ICE authorization');
+  const expiresAt = parseBoundedExpiry(data.expiresAt);
+  const iceServers = normalizedIceServers(data.iceServers);
+  if (String(data.negotiationId || '') !== negotiationId
+    || !iceServers
+    || expiresAt <= Date.now()
+    || expiresAt > Date.now() + 11 * 60 * 1000) {
+    throw new Error('Live View relay configuration is invalid or stale');
+  }
+  return { iceServers, expiresAt, legacy: false };
+}
+
+function liveViewContextFor(authContext, negotiationId, teachingSessionId) {
+  return Object.freeze({
+    negotiationId,
+    teachingSessionId,
+    authContextId: authContext.authContextId,
+    authGeneration: authContext.mutationGeneration,
+    connectionGeneration: wsConnectionGeneration,
+    serverOrigin: authContext.serverOrigin,
+    studentSessionId: authContext.studentSessionId,
+  });
+}
+
+function liveViewContextMatches(value, authContext = null) {
+  if (!activeLiveViewContext || !value) return false;
+  let currentContext = authContext;
+  try {
+    currentContext = currentContext || captureAuthenticatedContext('Live View context');
+    assertAuthenticatedContextCurrent(currentContext, 'Live View context');
+  } catch {
+    return false;
+  }
+  return String(value.negotiationId || '') === activeLiveViewContext.negotiationId
+    && String(value.authContextId || '') === activeLiveViewContext.authContextId
+    && Number(value.authGeneration) === activeLiveViewContext.authGeneration
+    && Number(value.connectionGeneration) === activeLiveViewContext.connectionGeneration
+    && normalizedServerOrigin(value.serverOrigin) === activeLiveViewContext.serverOrigin
+    && currentContext.authContextId === activeLiveViewContext.authContextId
+    && currentContext.studentSessionId === activeLiveViewContext.studentSessionId;
+}
+
+function liveViewOffscreenIdentity(context = activeLiveViewContext) {
+  return context ? {
+    negotiationId: context.negotiationId,
+    authContextId: context.authContextId,
+    authGeneration: context.authGeneration,
+    connectionGeneration: context.connectionGeneration,
+    serverOrigin: context.serverOrigin,
+    studentSessionId: context.studentSessionId,
+  } : {};
+}
+
+async function sendLiveViewAttemptTelemetry(message) {
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('Live View telemetry');
+    if (!hasNegotiatedCapability('liveViewIceServersV1', authContext)) return false;
+    if (!liveViewContextMatches(message, authContext)) return false;
+    const negotiationId = String(message.negotiationId || '').trim();
+    const attempt = Number(message.attempt);
+    const outcome = String(message.outcome || '');
+    const connectionTimeMs = Number(message.connectionTimeMs);
+    const selectedCandidateType = String(message.selectedCandidateType || 'unknown');
+    const relayTransport = String(message.relayTransport || 'unknown');
+    if (
+      negotiationId !== activeLiveViewContext?.negotiationId
+      || !Number.isSafeInteger(attempt)
+      || attempt < 0
+      || attempt > 2
+      || !['connected', 'failed'].includes(outcome)
+      || !Number.isSafeInteger(connectionTimeMs)
+      || connectionTimeMs < 0
+      || connectionTimeMs > 90000
+      || !['host', 'server_reflexive', 'relay', 'unknown'].includes(selectedCandidateType)
+      || (selectedCandidateType === 'relay'
+        && !['udp', 'tcp', 'tls', 'unknown'].includes(relayTransport))
+      || (selectedCandidateType !== 'relay' && message.relayTransport !== undefined)
+    ) return false;
+    const attemptKey = `${negotiationId}:${attempt}`;
+    if (liveViewTelemetryAttempts.has(attemptKey)) return false;
+    liveViewTelemetryAttempts.add(attemptKey);
+    if (liveViewTelemetryAttempts.size > 8) {
+      liveViewTelemetryAttempts = new Set([...liveViewTelemetryAttempts].slice(-4));
+    }
+    const payload = {
+      negotiationId,
+      attempt,
+      outcome,
+      connectionTimeMs,
+      selectedCandidateType,
+      ...(selectedCandidateType === 'relay' ? { relayTransport } : {}),
+    };
+    assertAuthenticatedContextCurrent(authContext, 'Live View telemetry');
+    const response = await fetchWithBackoff(
+      `${authContext.serverOrigin}/api/classpilot/device/live-view/telemetry`,
+      {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(authContext),
+        body: JSON.stringify(payload),
+        signal: authContext.signal,
+      },
+      {
+        context: 'Live View telemetry',
+        maxAttempts: 1,
+        respectGlobalBackoff: false,
+      },
+    );
+    assertAuthenticatedContextCurrent(authContext, 'Live View telemetry');
+    return response.ok;
+  } catch {
+    // Diagnostics are deliberately best effort. Signaling and cleanup never
+    // depend on telemetry delivery, and no payload/error details are logged.
+    return false;
+  }
+}
+
 // WebRTC: Handle screen share request from teacher (orchestrate via offscreen)
 async function handleScreenShareRequest(
   mode = 'auto',
   negotiationId = null,
+  teachingSessionId = null,
   setupExpiresAt = null,
   expiresAt = null,
 ) {
+  let authContext;
+  let requestContext = null;
   try {
-    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
+    authContext = captureAuthenticatedContext('Live View start');
+    requestContext = activeLiveViewContext;
+    if (!negotiationId
+      || negotiationId !== activeLiveViewNegotiationId
+      || teachingSessionId !== activeLiveViewTeachingSessionId
+      || !liveViewContextMatches(requestContext, authContext)) return;
     console.log('[WebRTC] Teacher requested screen share, mode:', mode);
+
+    const iceConfiguration = await fetchLiveViewIceConfiguration(negotiationId, authContext);
+    assertAuthenticatedContextCurrent(authContext, 'Live View ICE configuration');
+    if (!liveViewContextMatches(requestContext, authContext)) return;
 
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
+    assertAuthenticatedContextCurrent(authContext, 'Live View offscreen setup');
 
     // MV3: Get a stream ID from the service worker via tabCapture.getMediaStreamId
     // This is the correct MV3 approach - tabCapture.capture() doesn't work in offscreen docs
@@ -9324,42 +11223,52 @@ async function handleScreenShareRequest(
     if (mode === 'auto' || mode === 'tab') {
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        assertAuthenticatedContextCurrent(authContext, 'Live View active tab');
         if (activeTab?.id) {
           // Try without consumerTabId first (for offscreen document consumption)
           try {
             streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
-            console.log('[WebRTC] Got tab capture stream ID (method 1) for tab:', activeTab.id);
+            assertAuthenticatedContextCurrent(authContext, 'Live View stream id');
+            console.log('[WebRTC] Got tab capture stream ID (method 1)');
           } catch (e1) {
-            console.info('[WebRTC] Method 1 failed:', e1.message, '- trying without targetTabId');
+            console.info('[WebRTC] Method 1 failed; trying without targetTabId');
             // Some Chrome versions need no targetTabId for offscreen docs
             try {
               streamId = await chrome.tabCapture.getMediaStreamId({});
+              assertAuthenticatedContextCurrent(authContext, 'Live View stream id');
               console.log('[WebRTC] Got tab capture stream ID (method 2, no target)');
             } catch (e2) {
-              console.info('[WebRTC] Method 2 also failed:', e2.message);
+              console.info('[WebRTC] Method 2 also failed:', safeDiagnosticError(e2));
             }
           }
         } else {
           console.info('[WebRTC] No active tab found for tab capture');
         }
       } catch (tabErr) {
-        console.info('[WebRTC] tabCapture.getMediaStreamId failed:', tabErr.message);
+        console.info('[WebRTC] tabCapture.getMediaStreamId failed:', safeDiagnosticError(tabErr));
       }
     }
 
     // Tell offscreen to start capture with the streamId (if available)
     const result = await sendToOffscreen({
       type: 'START_SHARE',
-      deviceId: CONFIG.deviceId,
       mode: mode,
       streamId: streamId,
       negotiationId,
+      teachingSessionId,
       setupExpiresAt,
       expiresAt,
+      iceServers: iceConfiguration.iceServers,
+      iceConfigurationExpiresAt: iceConfiguration.expiresAt,
+      ...liveViewOffscreenIdentity(requestContext),
     });
+    assertAuthenticatedContextCurrent(authContext, 'Live View start response');
 
     if (!result?.success) {
-      await stopScreenShare({ reason: result?.status || 'capture-start-failed' });
+      await stopScreenShare({
+        reason: result?.status || 'capture-start-failed',
+        expectedContext: requestContext,
+      });
       // Check if this is an expected failure (user denied, etc.)
       if (result?.status === 'user-denied') {
         console.info('[WebRTC] User denied screen share (expected behavior)');
@@ -9369,76 +11278,99 @@ async function handleScreenShareRequest(
         return;
       } else {
         // Unexpected error
-        console.warn('[WebRTC] Unexpected screen share error:', result?.error);
+        console.warn('[WebRTC] Unexpected screen share error');
         safeNotify({
           title: 'Screen Sharing Error',
-          message: 'Unable to share screen: ' + (result?.error || 'Unknown error'),
+          message: 'Unable to start the requested screen share.',
         });
         return;
       }
     }
 
-    if (negotiationId !== activeLiveViewNegotiationId) {
-      await sendToOffscreen({ type: 'STOP_SHARE' }).catch(() => {});
+    if (!liveViewContextMatches(requestContext, authContext)) {
+      await sendToOffscreen({
+        type: 'STOP_SHARE',
+        ...liveViewOffscreenIdentity(requestContext),
+      }).catch(() => {});
       return;
     }
     setObservedState(true, 'teacher-request');
     console.log('[WebRTC] Screen capture initiated in offscreen document');
 
   } catch (error) {
-    await stopScreenShare({ reason: 'capture-start-error' });
+    await stopScreenShare({
+      reason: 'capture-start-error',
+      notifyServer: !isAuthContextCancellation(error),
+      expectedContext: requestContext,
+    });
     // Only unexpected errors reach here
-    console.warn('[WebRTC] Unexpected screen share request error:', error);
+    console.warn('[WebRTC] Unexpected screen share request error:', safeDiagnosticError(error));
     safeNotify({
       title: 'Screen Sharing Error',
-      message: 'Unable to share screen: ' + error.message,
+      message: 'Unable to start the requested screen share.',
     });
   }
 }
 
 // WebRTC: Handle stop screen share request from teacher
 async function handleStopScreenShare(negotiationId = null) {
+  const expectedContext = activeLiveViewContext;
   try {
-    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
+    const authContext = captureAuthenticatedContext('Live View stop');
+    if (!negotiationId
+      || negotiationId !== activeLiveViewNegotiationId
+      || !liveViewContextMatches(expectedContext, authContext)) return;
     console.log('[WebRTC] Teacher requested to stop screen share');
     setObservedState(false, 'teacher-stop');
     
     // Tell offscreen to stop sharing and clean up
     const result = await sendToOffscreen({
-      type: 'STOP_SHARE'
+      type: 'STOP_SHARE',
+      ...liveViewOffscreenIdentity(expectedContext),
     });
-    
+    if (activeLiveViewContext !== expectedContext
+      || !liveViewContextMatches(expectedContext, authContext)) return;
+
     if (result?.success) {
       console.log('[WebRTC] Screen share stopped successfully');
     } else {
-      console.info('[WebRTC] Stop share completed with status:', result?.status);
+      console.info('[WebRTC] Stop share completed');
     }
-    if (activeLiveViewNegotiationId === negotiationId) {
+    if (activeLiveViewContext === expectedContext) {
       activeLiveViewNegotiationId = null;
       activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
     }
     
   } catch (error) {
-    console.warn('[WebRTC] Error stopping screen share:', error);
+    console.warn('[WebRTC] Error stopping screen share:', safeDiagnosticError(error));
   } finally {
-    if (activeLiveViewNegotiationId === negotiationId) {
+    if (activeLiveViewContext === expectedContext) {
       activeLiveViewNegotiationId = null;
       activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
     }
   }
 }
 
 // WebRTC: Handle offer from teacher (forward to offscreen)
-async function handleOffer(sdp, from, negotiationId) {
+async function handleOffer(sdp, from, negotiationId, restartGeneration = 0) {
+  const expectedContext = activeLiveViewContext;
   try {
-    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
+    const authContext = captureAuthenticatedContext('Live View offer');
+    if (!negotiationId
+      || negotiationId !== activeLiveViewNegotiationId
+      || !liveViewContextMatches(expectedContext, authContext)) return;
     console.log('[WebRTC] Forwarding offer to offscreen document');
     
     const response = await sendToOffscreen({
       type: 'SIGNAL',
-      payload: { type: 'offer', sdp: sdp, from: from, negotiationId }
+      payload: { type: 'offer', sdp: sdp, from: from, negotiationId, restartGeneration },
+      ...liveViewOffscreenIdentity(expectedContext),
     });
-    
+    if (activeLiveViewContext !== expectedContext
+      || !liveViewContextMatches(expectedContext, authContext)) return;
+
     if (!response?.success) {
       // Expected: peer connection not ready yet (normal when student hasn't started sharing)
       if (response?.status === 'no-peer-yet') {
@@ -9451,26 +11383,33 @@ async function handleOffer(sdp, from, negotiationId) {
         return;
       }
       // Unexpected error only
-      console.warn('[WebRTC] Unexpected offer handling error:', response?.error);
+      console.warn('[WebRTC] Unexpected offer handling error');
       return;
     }
     
     console.log('[WebRTC] Offer handled in offscreen document');
   } catch (error) {
     // Only unexpected errors reach here
-    console.warn('[WebRTC] Unexpected error handling offer:', error);
+    console.warn('[WebRTC] Unexpected error handling offer:', safeDiagnosticError(error));
   }
 }
 
 // WebRTC: Handle ICE candidate from teacher (forward to offscreen)
-async function handleIceCandidate(candidate, negotiationId) {
+async function handleIceCandidate(candidate, negotiationId, restartGeneration = 0) {
+  const expectedContext = activeLiveViewContext;
   try {
-    if (!negotiationId || negotiationId !== activeLiveViewNegotiationId) return;
+    const authContext = captureAuthenticatedContext('Live View ICE candidate');
+    if (!negotiationId
+      || negotiationId !== activeLiveViewNegotiationId
+      || !liveViewContextMatches(expectedContext, authContext)) return;
     const response = await sendToOffscreen({
       type: 'SIGNAL',
-      payload: { type: 'ice', candidate: candidate, negotiationId }
+      payload: { type: 'ice', candidate: candidate, negotiationId, restartGeneration },
+      ...liveViewOffscreenIdentity(expectedContext),
     });
-    
+    if (activeLiveViewContext !== expectedContext
+      || !liveViewContextMatches(expectedContext, authContext)) return;
+
     // Expected: ICE candidates can arrive before peer is ready or be queued
     if (response?.status === 'queued' || response?.status === 'late-candidate') {
       console.info('[WebRTC] ICE candidate queued/late (expected)');
@@ -9485,8 +11424,11 @@ async function handleIceCandidate(candidate, negotiationId) {
 
 // WebRTC: Stop screen sharing (cleanup in offscreen)
 async function stopScreenShare(options = {}) {
-  const negotiationId = activeLiveViewNegotiationId;
-  if (negotiationId && options.notifyServer !== false) {
+  const expectedContext = options.expectedContext || activeLiveViewContext;
+  const negotiationId = expectedContext?.negotiationId || activeLiveViewNegotiationId || null;
+  if (negotiationId
+    && activeLiveViewContext === expectedContext
+    && options.notifyServer !== false) {
     wsSend({
       type: 'stop-share',
       to: 'teacher',
@@ -9497,35 +11439,44 @@ async function stopScreenShare(options = {}) {
   try {
     console.log('[WebRTC] Stopping screen share');
     await sendToOffscreen({
-      type: 'STOP_SHARE'
+      type: 'STOP_SHARE',
+      ...liveViewOffscreenIdentity(expectedContext),
     });
     // The offscreen document also owns the durable student WebSocket. Keep it
     // alive while monitoring is ACTIVE/IDLE; OFF/sign-out performs the close.
-    if (trackingState === TRACKING_STATES.OFF) {
+    if (trackingState === TRACKING_STATES.OFF && activeLiveViewContext === expectedContext) {
       await closeOffscreenDocument();
     }
   } catch (error) {
-    console.warn('[WebRTC] Error stopping screen share:', error);
+    console.warn('[WebRTC] Error stopping screen share:', safeDiagnosticError(error));
   } finally {
-    if (!negotiationId || activeLiveViewNegotiationId === negotiationId) {
+    if (!expectedContext || activeLiveViewContext === expectedContext) {
       activeLiveViewNegotiationId = null;
       activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
     }
   }
 }
 
 async function handleOffscreenMessage(message) {
   if (message.type === 'WS_EVENT') {
-    await handleWsEvent(message.event, message.data, message.connectionGeneration);
+    await handleWsEvent(
+      message.event,
+      message.data,
+      message.connectionGeneration,
+      message.authContextId,
+      message.serverOrigin,
+    );
     return { success: true };
   }
 
   if (message.type === 'ICE_CANDIDATE') {
-    if (message.negotiationId && message.negotiationId === activeLiveViewNegotiationId) {
+    if (liveViewContextMatches(message)) {
       await wsSend({
         type: 'ice',
         to: 'teacher',
         negotiationId: message.negotiationId,
+        restartGeneration: Number(message.restartGeneration || 0),
         candidate: message.candidate,
       });
     }
@@ -9533,18 +11484,38 @@ async function handleOffscreenMessage(message) {
   }
 
   if (message.type === 'ANSWER') {
-    if (message.negotiationId && message.negotiationId === activeLiveViewNegotiationId) {
+    if (liveViewContextMatches(message)) {
       await wsSend({
         type: 'answer',
         to: 'teacher',
         negotiationId: message.negotiationId,
+        restartGeneration: Number(message.restartGeneration || 0),
         sdp: message.sdp,
       });
     }
     return { success: true };
   }
 
+  if (message.type === 'ICE_RESTART_REQUIRED') {
+    if (liveViewContextMatches(message)) {
+      await wsSend({
+        type: 'ice-restart',
+        to: 'teacher',
+        negotiationId: message.negotiationId,
+        restartGeneration: Number(message.restartGeneration || 0),
+      });
+    }
+    return { success: true };
+  }
+
+  if (message.type === 'LIVE_VIEW_ATTEMPT_TERMINAL') {
+    if (!liveViewContextMatches(message)) return { success: true, ignored: true };
+    await sendLiveViewAttemptTelemetry(message);
+    return { success: true };
+  }
+
   if (message.type === 'CONNECTION_FAILED') {
+    if (!liveViewContextMatches(message)) return { success: true, ignored: true };
     console.log('[WebRTC] Connection failed, cleaning up');
     await stopScreenShare();
     setObservedState(false, 'connection-failed');
@@ -9552,6 +11523,7 @@ async function handleOffscreenMessage(message) {
   }
 
   if (message.type === 'CAPTURE_ERROR') {
+    if (!liveViewContextMatches(message)) return { success: true, ignored: true };
     safeNotify({
       title: 'Screen Sharing Error',
       message: message.error || 'Failed to capture screen',
@@ -9563,6 +11535,7 @@ async function handleOffscreenMessage(message) {
 
   if (message.type === 'LIVE_VIEW_EXPIRED') {
     const negotiationId = String(message.negotiationId || '').trim();
+    if (!liveViewContextMatches(message)) return { success: true, ignored: true };
     if (negotiationId) {
       await wsSend({
         type: 'stop-share',
@@ -9574,6 +11547,7 @@ async function handleOffscreenMessage(message) {
     if (negotiationId && negotiationId === activeLiveViewNegotiationId) {
       activeLiveViewNegotiationId = null;
       activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
     }
     setObservedState(false, message.reason || 'live-view-expired');
     return { success: true };
@@ -9637,14 +11611,56 @@ async function queryOffscreenWebSocketStatus() {
   }
 }
 
-async function recoverOffscreenWebSocketStatus() {
+function wsIdentityMatchesContext(value, authContext) {
+  return Boolean(
+    value
+    && Number(value.connectionGeneration) === Number(wsConnectionGeneration)
+    && String(value.authContextId || '') === authContext.authContextId
+    && normalizedServerOrigin(value.serverOrigin) === authContext.serverOrigin
+  );
+}
+
+async function closeReportedOffscreenWebSocket(status) {
+  if (!status) return;
+  await sendToOffscreen({
+    type: 'WS_CLOSE',
+    connectionGeneration: status.connectionGeneration,
+    authContextId: status.authContextId || undefined,
+    serverOrigin: status.serverOrigin || undefined,
+  }).catch(() => {});
+}
+
+async function recoverOffscreenWebSocketStatus(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'WebSocket recovery');
   const status = await queryOffscreenWebSocketStatus();
+  assertAuthenticatedContextCurrent(authContext, 'WebSocket recovery');
   if (!status) return false;
   const generation = Number(status.connectionGeneration || 0);
-  if (generation < wsConnectionGeneration) return false;
+  const identityMatches = String(status.authContextId || '') === authContext.authContextId
+    && normalizedServerOrigin(status.serverOrigin) === authContext.serverOrigin;
+  if (!Number.isSafeInteger(generation) || generation < 1 || !identityMatches) {
+    if (Number.isSafeInteger(generation)) {
+      wsConnectionGeneration = Math.max(wsConnectionGeneration, generation);
+    }
+    await closeReportedOffscreenWebSocket(status);
+    wsConnected = false;
+    wsTransportConnected = false;
+    wsAuthenticatedGeneration = 0;
+    wsTransportIdentity = null;
+    return false;
+  }
+  if (generation < wsConnectionGeneration) {
+    await closeReportedOffscreenWebSocket(status);
+    return false;
+  }
   if (Number.isSafeInteger(generation) && generation > wsConnectionGeneration) {
     wsConnectionGeneration = generation;
   }
+  wsTransportIdentity = {
+    connectionGeneration: wsConnectionGeneration,
+    authContextId: authContext.authContextId,
+    serverOrigin: authContext.serverOrigin,
+  };
   wsTransportConnected = status.transportOpen === true;
   if (status.transportOpen === true && status.authenticated === true) {
     wsConnected = true;
@@ -9683,30 +11699,38 @@ async function connectWebSocketNow() {
     await notifyAuthGateStateToTabs();
     return;
   }
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('WebSocket connect');
+  } catch (error) {
+    if (isAuthContextCancellation(error)) return false;
+    throw error;
+  }
 
   // Clear any pending reconnection alarm since we're connecting now
   chrome.alarms.clear('ws-reconnect');
 
   // Ensure offscreen document exists (it hosts the WebSocket)
   await ensureOffscreenDocument();
+  assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
 
-  if (await recoverOffscreenWebSocketStatus()) {
+  if (await recoverOffscreenWebSocketStatus(authContext)) {
     console.log('[WebSocket] Recovered authenticated offscreen transport');
     return true;
   }
 
-  const protocol = CONFIG.serverUrl.startsWith('https') ? 'wss' : 'ws';
-  const wsUrl = `${protocol}://${new URL(CONFIG.serverUrl).host}/ws`;
+  const protocol = authContext.serverOrigin.startsWith('https') ? 'wss' : 'ws';
+  const wsUrl = `${protocol}://${new URL(authContext.serverOrigin).host}/ws`;
 
   // Build auth payload to send immediately on connection
   const authPayload = {
     type: 'auth',
     role: 'student',
-    deviceId: CONFIG.deviceId,
+    deviceId: authContext.deviceId,
     ...extensionProtocolDescriptor(),
   };
-  if (CONFIG.studentToken) {
-    authPayload.studentToken = CONFIG.studentToken;
+  if (authContext.studentToken) {
+    authPayload.studentToken = authContext.studentToken;
     console.log('WebSocket auth: using JWT token');
   } else {
     console.log('Skipping WebSocket - student token required');
@@ -9719,22 +11743,39 @@ async function connectWebSocketNow() {
   wsTransportConnected = false;
   wsAuthenticatedGeneration = 0;
   wsConnectionGeneration += 1;
+  wsTransportIdentity = {
+    connectionGeneration: wsConnectionGeneration,
+    authContextId: authContext.authContextId,
+    serverOrigin: authContext.serverOrigin,
+  };
   wsAuthenticatedResponseGuard = {
     connectionGeneration: wsConnectionGeneration,
     responseGuard: captureAuthenticatedResponseGuard(),
+    authContext,
   };
   try {
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
     const response = await sendToOffscreen({
       type: 'WS_CONNECT',
       url: wsUrl,
       authPayload,
       connectionGeneration: wsConnectionGeneration,
+      authContextId: authContext.authContextId,
+      serverOrigin: authContext.serverOrigin,
     });
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
+    if (!wsIdentityMatchesContext(response, authContext)) {
+      throw authContextSuperseded('WebSocket connection response');
+    }
     console.log('[WebSocket] Connection request sent to offscreen document, generation',
       response.connectionGeneration);
     return true;
   } catch (error) {
-    console.warn('[WebSocket] Failed to send connect request to offscreen:', error?.message || error);
+    if (isAuthContextCancellation(error)) {
+      console.info('[WebSocket] Discarded connection for a retired authentication context');
+      return false;
+    }
+    console.warn('[WebSocket] Failed to send connect request to offscreen:', safeDiagnosticError(error));
     scheduleWsReconnect();
     return false;
   }
@@ -9743,9 +11784,20 @@ async function connectWebSocketNow() {
 // Handle WebSocket events relayed from the offscreen document in transport
 // order. Offscreen emits frames without awaiting runtime.sendMessage, so an
 // explicit per-generation tail is required to keep auth/state/commands causal.
-function handleWsEvent(event, data, connectionGeneration) {
+function handleWsEvent(event, data, connectionGeneration, authContextId, serverOrigin) {
   const generation = Number(connectionGeneration || 0);
-  if (generation !== wsConnectionGeneration) {
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('WebSocket event');
+  } catch {
+    return Promise.resolve({ ignored: true });
+  }
+  if (
+    generation !== wsConnectionGeneration
+    || String(authContextId || '') !== authContext.authContextId
+    || normalizedServerOrigin(serverOrigin) !== authContext.serverOrigin
+    || !wsIdentityMatchesContext({ connectionGeneration, authContextId, serverOrigin }, authContext)
+  ) {
     console.info('[WebSocket] Ignoring stale transport event for generation', generation);
     return Promise.resolve({ ignored: true });
   }
@@ -9754,14 +11806,19 @@ function handleWsEvent(event, data, connectionGeneration) {
     wsMessageProcessingTail = Promise.resolve();
   }
   const processing = wsMessageProcessingTail.then(
-    () => processWsEvent(event, data, generation),
-    () => processWsEvent(event, data, generation),
+    () => processWsEvent(event, data, generation, authContext),
+    () => processWsEvent(event, data, generation, authContext),
   );
   wsMessageProcessingTail = processing.catch(() => undefined);
   return processing;
 }
 
-async function processWsEvent(event, data, generation) {
+async function processWsEvent(event, data, generation, authContext) {
+  try {
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket event');
+  } catch {
+    return { ignored: true };
+  }
   if (generation !== wsConnectionGeneration) return { ignored: true };
   if (event === 'open') {
     console.log('WebSocket transport connected (via offscreen)');
@@ -9775,6 +11832,7 @@ async function processWsEvent(event, data, generation) {
     wsConnected = false;
     wsTransportConnected = false;
     wsAuthenticatedGeneration = 0;
+    wsTransportIdentity = null;
     setObservedState(false, 'ws-closed');
     await cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
     if (activeLiveViewNegotiationId) {
@@ -9782,34 +11840,40 @@ async function processWsEvent(event, data, generation) {
     }
     scheduleWsReconnect();
   } else if (event === 'message') {
-    await handleWsMessage(data, generation);
+    await handleWsMessage(data, generation, authContext);
   }
   return { handled: true };
 }
 
 // Process incoming WebSocket message (same logic as before, just extracted)
-async function handleWsMessage(rawData, connectionGeneration = wsConnectionGeneration) {
+async function handleWsMessage(
+  rawData,
+  connectionGeneration = wsConnectionGeneration,
+  expectedAuthContext = null,
+) {
     if (Number(connectionGeneration) !== wsConnectionGeneration) return;
     try {
+      const authContext = expectedAuthContext || captureAuthenticatedContext('WebSocket message');
+      assertAuthenticatedContextCurrent(authContext, 'WebSocket message');
       const message = JSON.parse(rawData);
-      console.log('WebSocket message:', message);
+      console.log('[WebSocket] Received frame:', String(message?.type || 'unknown').slice(0, 80));
 
       if (message.type === 'command-ack-receipt') {
-        if (message.ackId) {
-          await removeCommandAcks([message.ackId]);
-          if (message.accepted === false) {
-            console.warn('[Command ACK] Server rejected acknowledgement:', message.ackId);
-          }
+        assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+        const removed = await removeAcceptedCommandAckReceipts([message], authContext);
+        assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+        if (removed !== 1) {
+          console.warn('[Command ACK] Ignoring non-positive or non-exact receipt');
         }
         return;
       }
 
       if (message.type === 'chat-message-ack-receipt') {
-        if (message.ackId) {
-          await removeChatAcks([message.ackId]);
-          if (message.accepted === false) {
-            console.warn('[Chat ACK] Server rejected acknowledgement:', message.ackId);
-          }
+        assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+        const removed = await removeAcceptedChatAckReceipts([message], authContext);
+        assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+        if (removed !== 1) {
+          console.warn('[Chat ACK] Ignoring non-positive or non-exact receipt');
         }
         return;
       }
@@ -9828,12 +11892,23 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       if (message.type === 'auth-success') {
         console.log('WebSocket authenticated successfully');
         try {
+          if (
+            wsAuthenticatedResponseGuard?.authContext?.authContextId !== authContext.authContextId
+            || wsAuthenticatedResponseGuard?.authContext?.mutationGeneration !== authContext.mutationGeneration
+          ) {
+            throw authContextSuperseded('WebSocket authentication');
+          }
           const responseGuard = wsAuthenticatedResponseGuard?.connectionGeneration === connectionGeneration
             ? wsAuthenticatedResponseGuard.responseGuard
             : null;
           await adoptAuthenticatedStudentBinding(message, 'websocket auth', responseGuard);
+          assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication');
+          adoptNegotiatedProtocolState(message, authContext);
+          if (Object.prototype.hasOwnProperty.call(message, 'screenshotPolicy')) {
+            adoptScreenshotPolicy(message.screenshotPolicy, authContext);
+          }
         } catch (error) {
-          console.warn('[WebSocket] Exact student binding was rejected:', error?.message || error);
+          console.warn('[WebSocket] Exact student binding was rejected:', safeDiagnosticError(error));
           wsConnected = false;
           wsAuthenticatedGeneration = 0;
           await disconnectWebSocket();
@@ -9845,7 +11920,9 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
         wsReconnectBackoffMs = 10000;
         chrome.alarms.clear('ws-reconnect');
         await flushCommandAckOutbox().catch(() => {});
+        assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication ACK flush');
         await flushChatAckOutbox().catch(() => {});
+        assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication chat ACK flush');
         
         // Always update maxTabsPerStudent setting (including null for unlimited)
         if (message.settings && message.settings.hasOwnProperty('maxTabsPerStudent')) {
@@ -9861,6 +11938,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
           if (currentMaxTabs !== null && currentMaxTabs > 0) {
             try {
               const tabs = await chrome.tabs.query({});
+              assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit query');
               if (tabs.length > currentMaxTabs) {
                 // Close oldest tabs first (keep most recent)
                 const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
@@ -9868,10 +11946,13 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
                   try {
                     // Only close if it's not a protected chrome:// URL and has a valid id
                     if (tab.id && !tab.url?.startsWith('chrome://')) {
+                      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
                       await chrome.tabs.remove(tab.id);
+                      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
                     }
                   } catch (tabError) {
-                    console.warn('Failed to close tab:', tab.id, tabError);
+                    if (isAuthContextCancellation(tabError)) throw tabError;
+                    console.warn('Failed to close an excess tab:', safeDiagnosticError(tabError));
                     // Continue closing other tabs even if one fails
                   }
                 }
@@ -9883,7 +11964,8 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
                 });
               }
             } catch (error) {
-              console.warn('Error enforcing tab limit:', error);
+              if (isAuthContextCancellation(error)) throw error;
+              console.warn('Error enforcing tab limit:', safeDiagnosticError(error));
             }
           }
         }
@@ -9891,15 +11973,18 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
         // Handle global blocked domains (school-wide blacklist)
         if (message.settings && message.settings.globalBlockedDomains) {
           const receivedGlobalBlockedDomains = message.settings.globalBlockedDomains;
-          console.log('[Blacklist] Received from server:', receivedGlobalBlockedDomains);
+          console.log('[Blacklist] Received updated school policy');
 
           // Apply blacklist rules and persist to storage
           try {
             await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
+            assertAuthenticatedContextCurrent(authContext, 'WebSocket blacklist rules');
             await chrome.storage.local.set({ globalBlockedDomains });
+            assertAuthenticatedContextCurrent(authContext, 'WebSocket blacklist persistence');
             console.log('[Blacklist] Persisted to storage');
           } catch (error) {
-            console.warn('[Blacklist] Error applying rules:', error);
+            if (isAuthContextCancellation(error)) throw error;
+            console.warn('[Blacklist] Error applying rules:', safeDiagnosticError(error));
           }
         }
 
@@ -9910,12 +11995,16 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
             : null;
         if (authStateEnvelope) {
           await applyClassroomStateFromAuthResponse(authStateEnvelope, 'websocket_auth').catch((error) => {
-            console.warn('[Classroom State] Auth snapshot failed:', error?.message || error);
+            if (isAuthContextCancellation(error)) throw error;
+            console.warn('[Classroom State] Auth snapshot failed:', safeDiagnosticError(error));
           });
+          assertAuthenticatedContextCurrent(authContext, 'WebSocket classroom state');
         } else if (message.settings?.fab) {
           await applyFabSettings(message.settings.fab).catch((error) => {
-            console.warn('[FAB] Failed to apply initial state:', error);
+            if (isAuthContextCancellation(error)) throw error;
+            console.warn('[FAB] Failed to apply initial state:', safeDiagnosticError(error));
           });
+          assertAuthenticatedContextCurrent(authContext, 'WebSocket FAB state');
         }
         requestClassroomStateSync('websocket-auth', true);
       }
@@ -9924,13 +12013,13 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
         if (!acceptsCurrentStudentBinding(message, 'classroom state')) return;
         if (Object.prototype.hasOwnProperty.call(message, 'classroomState')) {
           await applyClassroomStateFromAuthResponse(message, 'websocket_reconcile').catch((error) => {
-            console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
+            console.warn('[Classroom State] WebSocket snapshot failed:', safeDiagnosticError(error));
           });
         } else {
           const snapshot = message.state || message.snapshot;
           if (!snapshot) return;
           await applyClassroomState(snapshot, { reason: 'websocket_reconcile' }).catch((error) => {
-            console.warn('[Classroom State] WebSocket snapshot failed:', error?.message || error);
+            console.warn('[Classroom State] WebSocket snapshot failed:', safeDiagnosticError(error));
           });
         }
       }
@@ -9939,7 +12028,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
         if (!acceptsCurrentStudentBinding(message, 'FAB state')) return;
         const fabState = message.fabState || message.state || message.data || message;
         await applyFabSettings(fabState).catch((error) => {
-          console.warn('[FAB] WebSocket snapshot failed:', error?.message || error);
+          console.warn('[FAB] WebSocket snapshot failed:', safeDiagnosticError(error));
         });
       }
 
@@ -9955,7 +12044,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
             ...authoritativeFabState,
             reason: authoritativeFabState.reason || 'session-ended',
           }).catch((error) => {
-            console.warn('[FAB] Session-end snapshot failed:', error?.message || error);
+            console.warn('[FAB] Session-end snapshot failed:', safeDiagnosticError(error));
           });
         } else if (!endedSessionId || activeSessionIds.includes(endedSessionId)) {
           const remainingSessionIds = endedSessionId
@@ -9975,7 +12064,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
             handRaised: false,
             reason: 'session-ended',
           }).catch((error) => {
-            console.warn('[FAB] Session-end snapshot failed:', error?.message || error);
+            console.warn('[FAB] Session-end snapshot failed:', safeDiagnosticError(error));
           });
         }
       }
@@ -9983,7 +12072,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       // Handle global blacklist updates from server
       if (message.type === 'update-global-blacklist') {
         const receivedGlobalBlockedDomains = message.blockedDomains || [];
-        console.log('[Blacklist] Update received from server:', receivedGlobalBlockedDomains);
+        console.log('[Blacklist] Update received from server');
         
         // Apply updated blacklist rules and persist to storage
         try {
@@ -10000,7 +12089,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
             });
           }
         } catch (error) {
-          console.warn('[Blacklist] Error applying updated rules:', error);
+          console.warn('[Blacklist] Error applying updated rules:', safeDiagnosticError(error));
         }
       }
       
@@ -10029,9 +12118,12 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
           }
           activeLiveViewNegotiationId = negotiationId;
           activeLiveViewTeachingSessionId = teachingSessionId;
+          activeLiveViewContext = liveViewContextFor(authContext, negotiationId, teachingSessionId);
+          liveViewTelemetryAttempts = new Set();
           await handleScreenShareRequest(
             mode,
             negotiationId,
+            teachingSessionId,
             message.setupExpiresAt,
             message.expiresAt,
           );
@@ -10065,7 +12157,12 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       if (message.type === 'offer') {
         if (!acceptsCurrentStudentBinding(message, 'live-view offer')) return;
         console.log('[WebRTC] Received offer from teacher');
-        await handleOffer(message.sdp, message.from, String(message.negotiationId || '').trim());
+        await handleOffer(
+          message.sdp,
+          message.from,
+          String(message.negotiationId || '').trim(),
+          Number(message.restartGeneration || 0),
+        );
       }
       
       // Handle WebRTC ICE candidate from teacher
@@ -10073,7 +12170,11 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
         if (!acceptsCurrentStudentBinding(message, 'live-view ICE')) return;
         console.log('[WebRTC] Received ICE candidate from teacher');
         if (message.candidate) {
-          await handleIceCandidate(message.candidate, String(message.negotiationId || '').trim());
+          await handleIceCandidate(
+            message.candidate,
+            String(message.negotiationId || '').trim(),
+            Number(message.restartGeneration || 0),
+          );
         }
       }
       
@@ -10096,18 +12197,20 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       
       // Handle remote control commands (Phase 1: GoGuardian-style features)
       if (message.type === 'remote-control') {
-        // General _msgId dedup: skip if this exact message was already processed
+        // Binding validation deliberately precedes deduplication. A stale or
+        // cross-target frame must never poison the current student's dedup set.
+        if (!acceptsCurrentStudentBinding(message, 'remote-control command')) return;
         const msgId = message._msgId;
         if (msgId) {
           if (recentMsgIds.has(msgId)) {
-            console.log('Dedup: skipping duplicate remote-control _msgId', msgId);
+            console.log('Dedup: skipping duplicate remote-control frame');
             return;
           }
           recentMsgIds.add(msgId);
           setTimeout(() => recentMsgIds.delete(msgId), MSG_DEDUP_TTL);
         }
         await handleRemoteControl(message.command, message).catch((error) => {
-          console.warn('Unhandled remote control command error:', error);
+          console.warn('Unhandled remote control command error:', safeDiagnosticError(error));
         });
       }
       
@@ -10121,7 +12224,7 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
       // delivery as well as later heartbeat inbox retries across worker restarts.
       if (message.type === 'teacher-message') {
         await handleDurableTeacherMessage(message).catch((error) => {
-          console.warn('Teacher message delivery failed:', error?.message || error);
+          console.warn('Teacher message delivery failed:', safeDiagnosticError(error));
         });
       }
 
@@ -10156,31 +12259,39 @@ async function handleWsMessage(rawData, connectionGeneration = wsConnectionGener
 
       // Teacher started broadcasting - request to join
       if (message.type === 'teacher-broadcast-start') {
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast start')) return;
         console.log('[Broadcast] Teacher started broadcasting, requesting to join');
         await handleBroadcastStart(message);
       }
 
       // Teacher stopped broadcasting
       if (message.type === 'teacher-broadcast-stop') {
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast stop')) return;
         console.log('[Broadcast] Teacher stopped broadcasting');
         await handleBroadcastStop();
       }
 
       // Received broadcast offer from teacher
       if (message.type === 'broadcast-offer') {
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast offer')) return;
         console.log('[Broadcast] Received offer from teacher');
         await handleBroadcastOffer(message.sdp);
       }
 
       // Received ICE candidate for broadcast
       if (message.type === 'broadcast-ice') {
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast ICE')) return;
         console.log('[Broadcast] Received ICE candidate from teacher');
         if (message.candidate) {
           handleBroadcastIce(message.candidate);
         }
       }
     } catch (error) {
-      console.warn('Error processing WebSocket message:', error);
+      if (isAuthContextCancellation(error)) {
+        console.info('[WebSocket] Discarded a frame for a retired authentication context');
+        return;
+      }
+      console.warn('Error processing WebSocket message:', safeDiagnosticError(error));
     }
 }
 
@@ -10194,9 +12305,9 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
     // Send immediate heartbeat to update teacher dashboard quickly
-    safeSendHeartbeat('tab-activated');
+    scheduleEventHeartbeat('tab-activated');
   } catch (error) {
-    console.warn('Failed to read active tab info:', error);
+    console.warn('Failed to read active tab info:', safeDiagnosticError(error));
   }
 });
 
@@ -10213,10 +12324,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     if (changeInfo.url) {
       queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
       // Send immediate heartbeat to update teacher dashboard quickly
-      safeSendHeartbeat('url-changed');
+      scheduleEventHeartbeat('url-changed');
     }
   } catch (error) {
-    console.warn('[Service Worker] Tab updated handler error:', error?.message || error);
+    console.warn('[Service Worker] Tab updated handler error:', safeDiagnosticError(error));
   }
 });
 
@@ -10227,16 +12338,16 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   if (windowId === chrome.windows.WINDOW_ID_NONE) {
     // User switched to a different application (not Chrome)
     // Send heartbeat with current state - teacher will see last known tab
-    safeSendHeartbeat('window-unfocused');
+    scheduleEventHeartbeat('window-unfocused');
   } else {
     // User focused a Chrome window - get the active tab in that window
     try {
       const tabs = await chrome.tabs.query({ active: true, windowId });
       if (tabs.length > 0 && tabs[0].url?.startsWith('http')) {
-        safeSendHeartbeat('window-focused');
+        scheduleEventHeartbeat('window-focused');
       }
     } catch (error) {
-      console.warn('Failed to query focused window tabs:', error);
+      console.warn('Failed to query focused window tabs:', safeDiagnosticError(error));
     }
   }
 });
@@ -10274,7 +12385,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             chrome.tabs.reload(tabs[0].id);
           }
         } catch (error) {
-          console.warn('Failed to refresh tab:', error);
+          console.warn('Failed to refresh tab:', safeDiagnosticError(error));
         }
         
         sendResponse({ success: true, data });
@@ -10352,6 +12463,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         fabContext: stored[FAB_CONTEXT_STORAGE_KEY] || null,
       }))
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Overlay state unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'request-kiosk-launch') {
+    authStateRestorePromise
+      .then(() => awaitManagedAuthGatePolicyStable())
+      .then(() => requestKioskLaunchUrl())
+      .then((url) => {
+        if (!url || !isKioskGateUrl(url)) {
+          sendResponse({ success: false, error: 'PassPilot kiosk is unavailable' });
+          return;
+        }
+        const parsed = new URL(url);
+        sendResponse({
+          success: true,
+          url,
+          continuity: parsed.hash.startsWith('#launchTicket='),
+        });
+      })
+      .catch(() => sendResponse({ success: false, error: 'PassPilot kiosk is unavailable' }));
     return true;
   }
 
@@ -10501,7 +12632,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle poll response from content script
   if (message.type === 'poll-response') {
     const { pollId, selectedOption } = message;
-    console.log('Poll response received:', pollId, selectedOption);
+    console.log('[Poll] Response received');
 
     (async () => {
       if (!CONFIG.deviceId || !CONFIG.serverUrl || !hasStudentAuth()) {
@@ -10541,12 +12672,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       await markPollResponsePersisted(pollId, option);
       broadcastToAllTabs('poll-response-succeeded', { pollId, selectedOption: option });
-      console.log('Poll response submitted:', data);
+      console.log('[Poll] Response submitted');
       return data;
     })()
       .then((data) => sendResponse({ success: true, data }))
       .catch((error) => {
-        console.warn('Failed to submit poll response:', error?.message || error);
+        console.warn('Failed to submit poll response:', safeDiagnosticError(error));
         sendResponse({ success: false, error: error?.message || 'Could not submit poll response' });
       });
     return true;
@@ -10590,12 +12721,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           fabBindingAtRaise !== fabIdentityBinding() ||
           JSON.stringify(fabSessionsAtRaise) !== JSON.stringify(activeTeachingSessionIds())
         ) throw new Error('Class session changed while raising the hand');
-        console.log('Hand raised:', data);
+        console.log('[FAB] Hand raised');
         await updateLocalFabHandRaised(true, 'student-raised-hand');
         sendResponse({ success: true, data });
       })
       .catch(err => {
-        console.warn('Failed to raise hand:', err);
+        console.warn('Failed to raise hand:', safeDiagnosticError(err));
         sendResponse({ success: false, error: err.message });
       });
 
@@ -10634,12 +12765,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           fabBindingAtLower !== fabIdentityBinding() ||
           JSON.stringify(fabSessionsAtLower) !== JSON.stringify(activeTeachingSessionIds())
         ) throw new Error('Class session changed while lowering the hand');
-        console.log('Hand lowered:', data);
+        console.log('[FAB] Hand lowered');
         await updateLocalFabHandRaised(false, 'student-lowered-hand');
         sendResponse({ success: true, data });
       })
       .catch(err => {
-        console.warn('Failed to lower hand:', err);
+        console.warn('Failed to lower hand:', safeDiagnosticError(err));
         sendResponse({ success: false, error: err.message });
       });
 
@@ -10648,75 +12779,48 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Handle send message from popup (two-way chat)
   if (message.type === 'send-student-message') {
-    console.log('Send message requested:', message.messageType);
-
-    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
-      sendResponse({ success: false, error: 'Not connected to server' });
-      return true;
-    }
-
-    if (!message.message || message.message.trim().length === 0) {
-      sendResponse({ success: false, error: 'Message is required' });
-      return true;
-    }
-
-    const fabBindingAtSend = fabIdentityBinding();
-    const activeSessionIdsAtSend = activeTeachingSessionIds();
-    if (currentFabState && activeSessionIdsAtSend.length === 0) {
-      sendResponse({ success: false, error: 'No active class session for messaging' });
-      return true;
-    }
-
-    const headers = buildDeviceAuthHeaders();
-    headers['Content-Type'] = 'application/json';
-
-    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/send-message`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        message: message.message.trim(),
-        messageType: message.messageType || 'message',
-        sessionId: activeSessionIdsAtSend[0] || undefined,
-      }),
-    }, {
-      context: 'student message',
-      maxAttempts: 2,
-      respectGlobalBackoff: false,
-    })
-      .then(parseJsonResponse)
-      .then(data => {
-        if (
-          fabBindingAtSend !== fabIdentityBinding() ||
-          JSON.stringify(activeSessionIdsAtSend) !== JSON.stringify(activeTeachingSessionIds())
-        ) {
-          sendResponse({ success: false, error: 'Class session changed while sending the message' });
-          return;
-        }
-        if (data.error) {
-          console.warn('Failed to send message:', data.error);
-          sendResponse({ success: false, error: data.error });
-        } else {
-          console.log('Message sent:', data);
-          sendResponse({ success: true, messageId: data.messageId });
-        }
-      })
-      .catch(err => {
-        console.warn('Failed to send message:', err);
-        sendResponse({ success: false, error: err.message });
+    queueAndSendStudentChatMessage({
+      clientMessageId: message.clientMessageId,
+      message: message.message,
+      messageType: message.messageType,
+      sessionId: message.sessionId,
+    }).then(sendResponse).catch((error) => {
+      if (isAuthContextCancellation(error)) {
+        sendResponse({
+          success: false,
+          error: 'Student changed while sending the message',
+          errorCode: 'AUTH_CONTEXT_SUPERSEDED',
+        });
+        return;
+      }
+      sendResponse({
+        success: false,
+        error: error?.message || 'Message could not be queued',
+        errorCode: error?.code || 'STUDENT_CHAT_FAILED',
       });
+    });
 
     return true;
   }
 
   if (message.type === 'update-server-url') {
-    const newServerUrl = message.serverUrl;
+    const newServerUrl = normalizedServerOrigin(message.serverUrl);
+    const currentServerUrl = normalizedServerOrigin(CONFIG.serverUrl);
     if (newServerUrl) {
+      if (currentServerUrl && currentServerUrl !== newServerUrl && hasStudentAuth()) {
+        sendResponse({
+          success: false,
+          error: 'Sign out before changing the ClassPilot server',
+          errorCode: 'AUTH_CONTEXT_SERVER_CHANGE_REQUIRES_SIGN_OUT',
+        });
+        return true;
+      }
       CONFIG.serverUrl = newServerUrl;
       // The cached login-config (incl. kiosk schoolId/availability) came from
       // the old server — drop it so kiosk URLs never mix origins and configs.
       resetSharedSignInLoginConfigCache();
       chrome.storage.local.set({ config: persistedNonAuthConfig(CONFIG) }, () => {
-        console.log('Server URL updated to:', newServerUrl);
+        console.log('[Config] Server origin updated');
         // Refresh school settings and tracking state with new server URL
         refreshSchoolSettings({ force: true }).then(() => {
           updateTrackingState('server-url-update');
@@ -10730,19 +12834,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'student-changed') {
-    // Update active student ID
-    const previousStudentId = CONFIG.activeStudentId;
-    CONFIG.activeStudentId = message.studentId;
-    
-    console.log('Student changed:', previousStudentId, '->', message.studentId);
-    
-    reconcileMessageInboxIdentity('student-changed')
-      .then(() => {
-        // Send immediate heartbeat only after prior-student messages are gone.
-        safeSendHeartbeat('student-changed');
-        sendResponse({ success: true });
-      })
-      .catch((error) => sendResponse({ success: false, error: error?.message || 'Could not change student' }));
+    const requestedStudentId = String(message.studentId || '').trim();
+    if (requestedStudentId && requestedStudentId === CONFIG.activeStudentId) {
+      sendResponse({ success: true, unchanged: true });
+      return true;
+    }
+    // A student ID cannot be replaced independently of its token and session.
+    // The popup's historical selector did exactly that, allowing work captured
+    // for one student to be relabelled as another. Require the atomic sign-in
+    // flow to establish a fresh immutable authentication context instead.
+    sendResponse({
+      success: false,
+      error: 'Sign out and sign in as the selected student',
+      errorCode: 'STUDENT_CHANGE_REQUIRES_SIGN_IN',
+    });
     return true;
   }
   
@@ -10752,7 +12857,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[Service Worker] Camera status updated:', cameraActive);
     
     // Send immediate heartbeat with camera status
-    safeSendHeartbeat('camera-status');
+    scheduleEventHeartbeat('camera-status');
     
     sendResponse({ success: true });
     return true;

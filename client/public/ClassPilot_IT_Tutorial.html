@@ -113,7 +113,7 @@
 <div style="text-align: center; margin-bottom: 40px;">
     <h1 style="border: none; font-size: 42px; margin: 0;">ClassPilot</h1>
     <p style="font-size: 24px; color: #6b7280;">IT Staff Tutorial & Technical Breakdown</p>
-    <p style="color: #9ca3af;">Version 1.0.5</p>
+    <p style="color: #9ca3af;">Version 2.7.0</p>
     <p style="margin-top: 30px; padding: 15px; background-color: #dbeafe; border-radius: 6px; color: #1e40af;">
         <strong>💡 To save as Word:</strong> Press <kbd>Ctrl+P</kbd> (or Cmd+P on Mac), then choose "Save as PDF" or use your browser's "Save Page As" feature, then open in Microsoft Word
     </p>
@@ -142,7 +142,7 @@
 <h3>Core Components</h3>
 <ul>
     <li><strong>Teacher Dashboard</strong> (Web Application) - Real-time monitoring interface for educators</li>
-    <li><strong>Chrome Extension</strong> (v1.0.5) - Lightweight monitoring agent on student Chromebooks</li>
+    <li><strong>Chrome Extension</strong> (v2.7.0) - Lightweight monitoring agent on student Chromebooks</li>
 </ul>
 
 <h3>Key Value Propositions</h3>
@@ -170,7 +170,7 @@
 │  ┌────────────┐  │         │  ┌────────────┐  │
 │  │  Chrome    │  │         │  │  Dashboard │  │
 │  │ Extension  │◄─┼─────────┼─►│  Web App   │  │
-│  │  (v1.0.5)  │  │         │  │            │  │
+│  │  (v2.7.0)  │  │         │  │            │  │
 │  └────────────┘  │         │  └────────────┘  │
 └────────┬─────────┘         └────────┬─────────┘
          │                            │
@@ -394,17 +394,17 @@
 
 <h3>Step 2: Publish Chrome Extension to Chrome Web Store</h3>
 <p><strong>Package the Extension:</strong></p>
-<pre><code>cd extension
-zip -r classpilot-extension-v1.0.5.zip .</code></pre>
+<pre><code>./extension/package-extension.sh
+npm run test:extension:package</code></pre>
 
 <p><strong>Upload to Chrome Web Store:</strong></p>
 <ol>
     <li>Go to: https://chrome.google.com/webstore/devconsole</li>
     <li>Pay $5 one-time developer fee (if first extension)</li>
-    <li>Upload <code>classpilot-extension-v1.0.5.zip</code></li>
+    <li>Upload <code>dist/ClassPilot-v2.7.0.zip</code> from the clean, tagged release commit</li>
     <li>Fill in store listing details</li>
     <li>Select visibility: <strong>Private</strong> (unlisted) or <strong>Public</strong></li>
-    <li>Submit for review (typically 1-3 days)</li>
+    <li>Submit for Chrome Web Store review</li>
 </ol>
 
 <h3>Step 3: Configure Google Workspace Admin Console</h3>
@@ -580,7 +580,7 @@ zip -r classpilot-extension-v1.0.5.zip .</code></pre>
 <hr style="border: none; border-top: 2px solid #e5e7eb; margin: 40px 0;">
 
 <div style="text-align: center; padding: 40px; background-color: #f9fafb; border-radius: 8px; margin-top: 40px;">
-    <h3 style="color: #2563eb; margin-top: 0;">ClassPilot v1.0.5</h3>
+    <h3 style="color: #2563eb; margin-top: 0;">ClassPilot v2.7.0</h3>
     <p style="color: #6b7280; font-size: 18px;">Privacy-Aware Classroom Monitoring</p>
 </div>
 

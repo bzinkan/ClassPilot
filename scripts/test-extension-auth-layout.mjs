@@ -8,7 +8,9 @@ import { chromium } from 'playwright';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
-const extensionPath = resolve(repoRoot, 'extension');
+const extensionPath = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH)
+  : resolve(repoRoot, 'extension');
 const screenshotDir = String(process.env.CLASSPILOT_AUTH_SCREENSHOT_DIR || '').trim();
 
 function chromeExecutable() {
@@ -70,6 +72,24 @@ async function waitForAuthFrame(page, timeout = 10_000) {
 
 let nextTestRevision = 9_000_000_000_000;
 
+async function deliverGateState(worker, tabId, state) {
+  return worker.evaluate(async ({ targetTabId, nextState }) => {
+    try {
+      const tabResult = await chrome.tabs.sendMessage(targetTabId, {
+        type: 'CLASSPILOT_AUTH_REQUIRED',
+        state: nextState,
+      });
+      await chrome.runtime.sendMessage({
+        type: 'CLASSPILOT_AUTH_REQUIRED',
+        state: nextState,
+      }).catch(() => null);
+      return tabResult;
+    } catch (error) {
+      return { success: false, error: error?.message || String(error) };
+    }
+  }, { targetTabId: tabId, nextState: state });
+}
+
 async function showGate(worker, tabId, page, state) {
   const phase = state.phase || (state.setupRequired ? 'setup_required' : 'ready');
   const revision = Number.isFinite(state.revision) ? state.revision : nextTestRevision++;
@@ -78,21 +98,7 @@ async function showGate(worker, tabId, page, state) {
   let delivered = false;
   let lastError = '';
   while (Date.now() < deadline) {
-    const response = await worker.evaluate(async ({ targetTabId, nextState }) => {
-      try {
-        const tabResult = await chrome.tabs.sendMessage(targetTabId, {
-          type: 'CLASSPILOT_AUTH_REQUIRED',
-          state: nextState,
-        });
-        await chrome.runtime.sendMessage({
-          type: 'CLASSPILOT_AUTH_REQUIRED',
-          state: nextState,
-        }).catch(() => null);
-        return tabResult;
-      } catch (error) {
-        return { success: false, error: error?.message || String(error) };
-      }
-    }, { targetTabId: tabId, nextState: authoritativeState });
+    const response = await deliverGateState(worker, tabId, authoritativeState);
     if (response?.success) {
       delivered = true;
       break;
@@ -104,6 +110,23 @@ async function showGate(worker, tabId, page, state) {
   await page.waitForSelector('#classpilot-auth-gate', { state: 'attached' });
   const frame = await waitForAuthFrame(page);
   await frame.waitForSelector('.classpilot-auth-panel', { state: 'visible' });
+
+  // The first delivery can create the secure frame before that frame has
+  // installed its runtime listener. Re-deliver only after initialization so
+  // its direct get-auth-state response cannot replace the requested fixture
+  // phase and leave the host/frame assertions waiting on a state never sent.
+  const synchronized = await deliverGateState(worker, tabId, authoritativeState);
+  if (!synchronized?.success) {
+    throw new Error(`Could not synchronize the student auth frame: ${synchronized?.error || 'unknown delivery error'}`);
+  }
+  await Promise.all([
+    page.waitForFunction((expectedPhase) => (
+      document.getElementById('classpilot-auth-gate')?.dataset.classpilotAuthPhase === expectedPhase
+    ), phase, { timeout: 10_000 }),
+    frame.waitForFunction((expectedPhase) => (
+      document.getElementById('classpilot-auth-gate')?.dataset.classpilotAuthPhase === expectedPhase
+    ), phase, { timeout: 10_000 }),
+  ]);
   return frame;
 }
 

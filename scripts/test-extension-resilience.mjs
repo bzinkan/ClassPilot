@@ -8,7 +8,9 @@ import { chromium } from 'playwright';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
-const extensionPath = resolve(repoRoot, 'extension');
+const extensionPath = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH)
+  : resolve(repoRoot, 'extension');
 const profilePath = mkdtempSync(join(tmpdir(), 'classpilot-extension-resilience-'));
 
 function chromeExecutable() {
@@ -306,6 +308,7 @@ async function main() {
       const originalWsSend = wsSend;
       wsSend = (data) => acknowledgements.push(data);
       let result;
+      let mismatchedExpired;
       try {
         result = await handleRemoteControl({
           type: 'open-tab',
@@ -317,16 +320,30 @@ async function main() {
           deliveryPolicy: 'transient_action',
           expiresAt: new Date(Date.now() - 1).toISOString(),
         });
+        mismatchedExpired = await handleRemoteControl({
+          type: 'open-tab',
+          data: { url: 'https://mismatched-expired.example/never-open' },
+        }, {
+          commandId: 'mismatched-expired-command',
+          studentId: CONFIG.activeStudentId,
+          studentSessionId: `${CONFIG.activeStudentSessionId}-retired`,
+          deliveryPolicy: 'transient_action',
+          expiresAt: new Date(Date.now() - 1).toISOString(),
+        });
       } finally {
         wsSend = originalWsSend;
       }
       const after = (await chrome.tabs.query({})).filter((tab) => tab.url === expiredUrl).length;
-      return { before, after, result, acknowledgements };
+      return { before, after, result, mismatchedExpired, acknowledgements };
     });
     assert.equal(expiredTransient.before, 0);
     assert.equal(expiredTransient.after, 0);
     assert.equal(expiredTransient.result.expired, true);
+    assert.equal(expiredTransient.mismatchedExpired.rejected, true);
     assert.deepEqual(expiredTransient.acknowledgements.map((ack) => ack.ackState), ['expired']);
+    assert.equal(expiredTransient.acknowledgements[0].bindingVersion, 2);
+    assert.ok(expiredTransient.acknowledgements[0].studentSessionId);
+    assert.ok(expiredTransient.acknowledgements[0].authContextId);
 
     const receivedBeforeExpiry = await worker.evaluate(async () => {
       const expiresAt = Date.now() + 100;
@@ -563,7 +580,16 @@ async function main() {
       CONFIG.activeStudentSessionId = 'protocol-student-session';
       CONFIG.studentToken = 'protocol-token';
       CONFIG.schoolId = 'protocol-school';
+      CONFIG.identitySource = 'integration_test';
+      studentAuthInvalidating = false;
+      studentAuthCommitPending = false;
+      advanceStudentAuthMutationGeneration();
+      activateAuthenticatedContext(generateAuthContextId());
       trackingState = TRACKING_STATES.OFF;
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: ['exactTabCloseV1'],
+      }, captureAuthenticatedContext('protocol resilience capability fixture'));
 
       await discardCommandAckOutbox();
       wsConnected = false;
@@ -618,15 +644,24 @@ async function main() {
         return originalFetch(url, init);
       };
       await flushCommandAckOutbox({ forceHttp: true });
+      const chatAckAuthContext = captureAuthenticatedContext('chat ACK resilience fixture');
+      const chatAckBinding = {
+        studentId: chatAckAuthContext.studentId,
+        studentSessionId: chatAckAuthContext.studentSessionId,
+      };
       await sendChatDeliveryAck({
         chatMessageId: 'chat-http-message',
         sessionId: 'fab-session-a',
-      }, 'delivered');
+        ...chatAckBinding,
+      }, 'delivered', null, chatAckAuthContext);
       await flushChatAckOutbox({ forceHttp: true });
       globalThis.fetch = originalFetch;
       const afterHttpFallback = (await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY))
         [COMMAND_ACK_OUTBOX_KEY] || [];
-      await sendChatDeliveryAck({ chatMessageId: 'chat-ws-message' }, 'delivered');
+      await sendChatDeliveryAck({
+        chatMessageId: 'chat-ws-message',
+        ...chatAckBinding,
+      }, 'delivered', null, chatAckAuthContext);
       const queuedChatAcks = (await chrome.storage.local.get(CHAT_ACK_OUTBOX_KEY))
         [CHAT_ACK_OUTBOX_KEY] || [];
       await handleWsMessage(JSON.stringify({
@@ -686,7 +721,41 @@ async function main() {
       } catch (error) {
         staleCode = error.code;
       }
-      await chrome.tabs.remove([second.id, extra.id]).catch(() => {});
+      let missingRevisionCode = null;
+      try {
+        await resolveExactTabRefs([secondEntry.tabRef], null);
+      } catch (error) {
+        missingRevisionCode = error.code;
+      }
+      const duplicateUrl = `http://duplicate-target.localhost:${fixturePort}/same`;
+      const duplicateOne = await chrome.tabs.create({ url: duplicateUrl, active: false });
+      const duplicateTwo = await chrome.tabs.create({ url: duplicateUrl, active: false });
+      await Promise.all([waitForLoaded(duplicateOne.id), waitForLoaded(duplicateTwo.id)]);
+      let ambiguousLegacyCode = null;
+      try {
+        await resolveUniqueLegacyTabUrls([duplicateUrl]);
+      } catch (error) {
+        ambiguousLegacyCode = error.code;
+      }
+      let fuzzyPatternCode = null;
+      try {
+        await executeRemoteControlCommand({
+          type: 'close-tab',
+          data: { pattern: 'duplicate-target' },
+        });
+      } catch (error) {
+        fuzzyPatternCode = error.code;
+      }
+      const duplicatesStillOpen = await Promise.all([
+        chrome.tabs.get(duplicateOne.id).then(() => true).catch(() => false),
+        chrome.tabs.get(duplicateTwo.id).then(() => true).catch(() => false),
+      ]);
+      await chrome.tabs.remove([
+        second.id,
+        extra.id,
+        duplicateOne.id,
+        duplicateTwo.id,
+      ]).catch(() => {});
       restoreClassroomRuntimeBackup(classroomRuntimeBeforeTabTest);
       await composeDynamicRules(['classroom']);
 
@@ -865,6 +934,15 @@ async function main() {
       await chrome.storage.local.remove(TAB_SNAPSHOT_STORAGE_KEY);
       await new Promise((resolve) => setTimeout(resolve, 1_600));
       CONFIG = originalConfig;
+      if (
+        CONFIG.deviceId
+        && CONFIG.activeStudentId
+        && CONFIG.activeStudentSessionId
+        && CONFIG.studentToken
+      ) {
+        advanceStudentAuthMutationGeneration();
+        activateAuthenticatedContext(generateAuthContextId());
+      }
       trackingState = originalTrackingState;
       return {
         descriptor: extensionProtocolDescriptor(),
@@ -878,6 +956,10 @@ async function main() {
         exactResult,
         firstStillOpen,
         staleCode,
+        missingRevisionCode,
+        ambiguousLegacyCode,
+        fuzzyPatternCode,
+        duplicatesStillOpen,
         directFabState,
         directEndedState,
         directEndedOverlays,
@@ -894,7 +976,10 @@ async function main() {
         afterConcurrentFabState,
       };
     }, { fixturePort: fixture.port });
-    assert.equal(protocolResilience.descriptor.clientProtocolVersion, 2);
+    assert.equal(protocolResilience.descriptor.clientProtocolVersion, 3);
+    assert.ok(protocolResilience.descriptor.capabilities.includes('authBoundTelemetryV1'));
+    assert.ok(protocolResilience.descriptor.capabilities.includes('exactBindingAckV2'));
+    assert.ok(protocolResilience.descriptor.capabilities.includes('exactTabCloseV2'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('commandAckReceiptV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('classroomOverlayRestoreV1'));
     assert.deepEqual(protocolResilience.queuedAckIds, ['durable-ack-command:received']);
@@ -908,6 +993,10 @@ async function main() {
     assert.equal(protocolResilience.exactResult.closedTabRefs.length, 1);
     assert.equal(protocolResilience.firstStillOpen, false);
     assert.equal(protocolResilience.staleCode, 'STALE_TAB_SNAPSHOT');
+    assert.equal(protocolResilience.missingRevisionCode, 'TAB_SNAPSHOT_REVISION_REQUIRED');
+    assert.equal(protocolResilience.ambiguousLegacyCode, 'AMBIGUOUS_TAB_URL');
+    assert.equal(protocolResilience.fuzzyPatternCode, 'TAB_TARGET_REQUIRED');
+    assert.deepEqual(protocolResilience.duplicatesStillOpen, [true, true]);
     assert.equal(protocolResilience.directFabState.handRaised, true);
     assert.deepEqual(protocolResilience.directFabState.activeSessionIds, ['fab-session-a']);
     assert.deepEqual(protocolResilience.directEndedState.activeSessionIds, []);
@@ -1339,6 +1428,8 @@ async function main() {
       CONFIG.deviceId = 'integration-device';
       CONFIG.activeStudentId = 'integration-student';
       CONFIG.studentToken = 'old-session-token';
+      advanceStudentAuthMutationGeneration();
+      activateAuthenticatedContext(generateAuthContextId());
       const scope = {
         teachingSessionId: 'integration-event-session',
         supervisionContextId: null,
@@ -1348,6 +1439,8 @@ async function main() {
         title: 'Old student event',
       }, scope);
       CONFIG.studentToken = 'new-session-token';
+      advanceStudentAuthMutationGeneration();
+      activateAuthenticatedContext(generateAuthContextId());
       await enqueueMonitoringEvent('navigation_changed', {
         url: 'https://example.com/new?secret=2',
         title: 'New student event',
@@ -1738,13 +1831,221 @@ async function main() {
       CONFIG.activeStudentSessionId = 'diagnostic-student-session';
       CONFIG.studentToken = 'diagnostic-token';
       studentAuthInvalidating = false;
+      const authContextId = generateAuthContextId();
+      activateAuthenticatedContext(authContextId);
       await chrome.storage.local.set({
+        authContextId,
         deviceId: CONFIG.deviceId,
         activeStudentId: CONFIG.activeStudentId,
         activeStudentSessionId: CONFIG.activeStudentSessionId,
         studentToken: CONFIG.studentToken,
       });
     });
+
+    const authContextRaceFencing = await worker.evaluate(async ({ fixturePort }) => {
+      // Disable the production interval for this deterministic pause-point
+      // fixture; all heartbeats below are invoked explicitly.
+      scheduleHeartbeat(null);
+      const originalFetch = globalThis.fetch;
+      const originalBuildOpaqueTabSnapshot = buildOpaqueTabSnapshot;
+      const priorIdentity = {
+        serverUrl: CONFIG.serverUrl,
+        schoolId: CONFIG.schoolId,
+        deviceId: CONFIG.deviceId,
+        studentId: CONFIG.activeStudentId,
+        studentSessionId: CONFIG.activeStudentSessionId,
+        studentToken: CONFIG.studentToken,
+        studentEmail: CONFIG.studentEmail,
+      };
+      const requests = [];
+      const waitFor = (promise, label) => Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error(`Timed out waiting for ${label}`)),
+          5_000,
+        )),
+      ]);
+      const installIdentity = (suffix, identity = null) => {
+        const next = identity || {
+          ...priorIdentity,
+          studentId: `race-student-${suffix}`,
+          studentSessionId: `race-session-${suffix}`,
+          studentToken: `race-token-${suffix}`,
+          studentEmail: `race-${suffix}@example.edu`,
+        };
+        advanceStudentAuthMutationGeneration();
+        CONFIG.serverUrl = next.serverUrl;
+        CONFIG.schoolId = next.schoolId;
+        CONFIG.deviceId = next.deviceId;
+        CONFIG.activeStudentId = next.studentId;
+        CONFIG.activeStudentSessionId = next.studentSessionId;
+        CONFIG.studentToken = next.studentToken;
+        CONFIG.studentEmail = next.studentEmail;
+        CONFIG.identitySource = 'integration_test';
+        CONFIG.manualLoginLastSeenAt = null;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        const authContextId = generateAuthContextId();
+        activateAuthenticatedContext(authContextId);
+        return authContextId;
+      };
+      try {
+        licenseActive = true;
+        trackingState = TRACKING_STATES.ACTIVE;
+        screenshotScheduled = true;
+        apiBackoffUntilMs = 0;
+        safeSendHeartbeat = async () => {};
+        globalThis.fetch = async (url, init = {}) => {
+          const requestUrl = String(url);
+          if (requestUrl.includes('/api/device/heartbeat')) {
+            requests.push({
+              type: 'heartbeat',
+              authorization: init.headers?.Authorization || null,
+              body: JSON.parse(String(init.body || '{}')),
+            });
+            return new Response(JSON.stringify({
+              studentId: CONFIG.activeStudentId,
+              studentSessionId: CONFIG.activeStudentSessionId,
+              serverProtocolVersion: 3,
+              acceptedCapabilities: [
+                'authBoundTelemetryV1',
+                'serverOnlyCapability',
+              ],
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          if (requestUrl.includes('/api/device/screenshot')) {
+            requests.push({
+              type: 'screenshot',
+              authorization: init.headers?.Authorization || null,
+            });
+            return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return originalFetch(url, init);
+        };
+
+        installIdentity('heartbeat-a');
+        let releaseHeartbeatSnapshot;
+        let markHeartbeatSnapshotStarted;
+        const heartbeatSnapshotStarted = new Promise((resolveStarted) => {
+          markHeartbeatSnapshotStarted = resolveStarted;
+        });
+        const heartbeatSnapshotGate = new Promise((resolveGate) => {
+          releaseHeartbeatSnapshot = resolveGate;
+        });
+        buildOpaqueTabSnapshot = async () => {
+          markHeartbeatSnapshotStarted();
+          await heartbeatSnapshotGate;
+          return {
+            schemaVersion: 1,
+            revision: 1,
+            tabs: [{ tabRef: 'retired-tab', url: 'https://student-a.example/private', title: 'Student A' }],
+            localEntries: [],
+          };
+        };
+        const delayedHeartbeat = sendHeartbeat('auth-context-race-a');
+        await waitFor(heartbeatSnapshotStarted, 'heartbeat tab snapshot');
+        const currentAuthContextId = installIdentity('heartbeat-b', priorIdentity);
+        buildOpaqueTabSnapshot = originalBuildOpaqueTabSnapshot;
+        releaseHeartbeatSnapshot();
+        await delayedHeartbeat;
+        const heartbeatRequestsBeforeCurrentSend = requests.filter((entry) => entry.type === 'heartbeat').length;
+        await sendHeartbeat('auth-context-race-current');
+        const negotiatedAtHeartbeat = negotiatedProtocolState
+          ? {
+            ...negotiatedProtocolState,
+            acceptedCapabilities: [...negotiatedProtocolState.acceptedCapabilities],
+          }
+          : null;
+
+        installIdentity('screenshot-a');
+        lastScreenshotAttemptAt = Date.now();
+        const screenshotAContext = captureAuthenticatedContext('screenshot race fixture');
+        adoptNegotiatedProtocolState({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: [],
+        }, screenshotAContext);
+        adoptScreenshotPolicy(undefined, screenshotAContext);
+        licenseActive = true;
+        trackingState = TRACKING_STATES.ACTIVE;
+        apiBackoffUntilMs = 0;
+        lastScreenshotAttemptAt = 0;
+        screenshotCaptureInFlight = false;
+        let releaseScreenshot;
+        let markScreenshotStarted;
+        const screenshotStarted = new Promise((resolveStarted) => {
+          markScreenshotStarted = resolveStarted;
+        });
+        const screenshotGate = new Promise((resolveGate) => {
+          releaseScreenshot = resolveGate;
+        });
+        const delayedScreenshot = captureAndSendScreenshot({
+          reason: 'auth-context-race',
+          queryActiveTab: async () => [{
+            id: 999_001,
+            windowId: 1,
+            url: `http://auth-context-race.localhost:${fixturePort}/screenshot`,
+            title: 'Student A private tab',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => {
+            markScreenshotStarted();
+            await screenshotGate;
+            return 'data:image/jpeg;base64,c3R1ZGVudC1h';
+          },
+        });
+        await waitFor(screenshotStarted, 'screenshot pixels');
+        const finalAuthContextId = installIdentity('screenshot-b', priorIdentity);
+        releaseScreenshot();
+        await delayedScreenshot;
+
+        await chrome.storage.local.set({
+          authContextId: finalAuthContextId,
+          deviceId: CONFIG.deviceId,
+          activeStudentId: CONFIG.activeStudentId,
+          activeStudentSessionId: CONFIG.activeStudentSessionId,
+          studentToken: CONFIG.studentToken,
+          studentEmail: CONFIG.studentEmail,
+          identitySource: CONFIG.identitySource,
+        });
+        return {
+          heartbeatRequestsBeforeCurrentSend,
+          heartbeatRequests: requests.filter((entry) => entry.type === 'heartbeat'),
+          screenshotRequests: requests.filter((entry) => entry.type === 'screenshot'),
+          currentAuthContextId,
+          finalAuthContextId,
+          currentStudentId: CONFIG.activeStudentId,
+          negotiatedAtHeartbeat,
+          negotiatedAfterFinalTransition: negotiatedProtocolState,
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+        buildOpaqueTabSnapshot = originalBuildOpaqueTabSnapshot;
+        // Keep event-triggered maintenance heartbeats disabled for the rest of
+        // this deterministic command/socket section. The harness invokes every
+        // heartbeat it needs directly, and delayed callbacks from earlier cases
+        // must not mutate the fixture identity between assertions.
+        safeSendHeartbeat = async () => {};
+      }
+    }, { fixturePort: fixture.port });
+    assert.equal(authContextRaceFencing.heartbeatRequestsBeforeCurrentSend, 0);
+    assert.equal(authContextRaceFencing.heartbeatRequests.length, 1);
+    assert.equal(
+      authContextRaceFencing.heartbeatRequests[0].authorization,
+      'Bearer diagnostic-token',
+    );
+    assert.notEqual(
+      authContextRaceFencing.heartbeatRequests[0].body.studentEmail,
+      'race-heartbeat-a@example.edu',
+    );
+    assert.equal(authContextRaceFencing.screenshotRequests.length, 0);
+    assert.deepEqual(
+      authContextRaceFencing.negotiatedAtHeartbeat.acceptedCapabilities,
+      ['authBoundTelemetryV1'],
+    );
+    assert.equal(authContextRaceFencing.negotiatedAtHeartbeat.serverProtocolVersion, 3);
+    assert.equal(authContextRaceFencing.negotiatedAfterFinalTransition, null);
+    assert.notEqual(authContextRaceFencing.currentAuthContextId, authContextRaceFencing.finalAuthContextId);
+    assert.equal(authContextRaceFencing.currentStudentId, 'diagnostic-student');
 
     const screenLockOverlay = await worker.evaluate(async () => {
       const now = Date.now();
@@ -1822,6 +2123,13 @@ async function main() {
 
     const reorderedCommand = await worker.evaluate(async () => {
       const now = Date.now();
+      const authBefore = {
+        mutation: studentAuthMutationGeneration,
+        active: activeAuthContextGeneration,
+        id: CONFIG.authContextId,
+        aborted: authContextAbortController.signal.aborted,
+        hasAuth: hasStudentAuth(),
+      };
       await applyClassroomState({
         schemaVersion: 1,
         revision: 902,
@@ -1859,10 +2167,34 @@ async function main() {
       });
       return {
         result,
+        authBefore,
+        authAfter: {
+          mutation: studentAuthMutationGeneration,
+          active: activeAuthContextGeneration,
+          id: CONFIG.authContextId,
+          aborted: authContextAbortController.signal.aborted,
+          hasAuth: hasStudentAuth(),
+          deviceId: CONFIG.deviceId,
+          studentId: CONFIG.activeStudentId,
+          studentSessionId: CONFIG.activeStudentSessionId,
+          hasToken: Boolean(CONFIG.studentToken),
+          identitySource: CONFIG.identitySource,
+          manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt,
+          invalidating: studentAuthInvalidating,
+          commitPending: studentAuthCommitPending,
+        },
         overlays: await getRestorableClassroomOverlayState(),
         seenPollIds: [...seenPollIds],
       };
     });
+    assert.equal(reorderedCommand.authBefore.id, reorderedCommand.authAfter.id);
+    assert.equal(reorderedCommand.authAfter.active, reorderedCommand.authAfter.mutation);
+    assert.equal(reorderedCommand.authAfter.aborted, false);
+    assert.equal(
+      reorderedCommand.authAfter.hasAuth,
+      true,
+      JSON.stringify(reorderedCommand.authAfter),
+    );
     assert.equal(reorderedCommand.result.rejected, true);
     assert.match(reorderedCommand.result.error, /inactive teaching session/i);
     assert.equal(reorderedCommand.overlays.timer, null);
@@ -1968,6 +2300,7 @@ async function main() {
           studentIdAfter: CONFIG.activeStudentId,
           sessionAfterDelayedReplacement,
           liveViewDuringInvalidation,
+          hasAuthAfter: hasStudentAuth(),
         };
       } finally {
         executeRemoteControlCommand = originalExecute;
@@ -1981,15 +2314,101 @@ async function main() {
     assert.equal(exactBindingIsolation.invalidatingResult.rejected, true);
     assert.equal(exactBindingIsolation.executions, 0);
     assert.equal(exactBindingIsolation.liveViewDuringInvalidation, null);
+    assert.equal(exactBindingIsolation.hasAuthAfter, true);
     assert.equal(exactBindingIsolation.studentIdAfter, 'diagnostic-student');
     assert.equal(
       exactBindingIsolation.sessionAfterDelayedReplacement,
       'diagnostic-student-session-replacement',
     );
 
+    const offscreenRecoveryIdentity = await worker.evaluate(async () => {
+      const originalQueryStatus = queryOffscreenWebSocketStatus;
+      const originalCloseReported = closeReportedOffscreenWebSocket;
+      const originalFlushCommandAcks = flushCommandAckOutbox;
+      const originalFlushChatAcks = flushChatAckOutbox;
+      const originalState = {
+        generation: wsConnectionGeneration,
+        connected: wsConnected,
+        transportConnected: wsTransportConnected,
+        authenticatedGeneration: wsAuthenticatedGeneration,
+        transportIdentity: wsTransportIdentity,
+      };
+      const authContext = captureAuthenticatedContext('offscreen recovery fixture');
+      const closedStatuses = [];
+      try {
+        // Recovery dispatches these as detached maintenance jobs. Stub them so
+        // this identity-only fixture cannot leak work into the next fixture.
+        flushCommandAckOutbox = async () => {};
+        flushChatAckOutbox = async () => {};
+        queryOffscreenWebSocketStatus = async () => ({
+          success: true,
+          connectionGeneration: originalState.generation + 7,
+          transportOpen: true,
+          authenticated: true,
+          authContextId: 'retired-offscreen-auth-context',
+          serverOrigin: authContext.serverOrigin,
+        });
+        closeReportedOffscreenWebSocket = async (status) => {
+          closedStatuses.push(status);
+        };
+        const recoveredMismatch = await recoverOffscreenWebSocketStatus(authContext);
+        const generationAfterMismatch = wsConnectionGeneration;
+
+        queryOffscreenWebSocketStatus = async () => ({
+          success: true,
+          connectionGeneration: generationAfterMismatch + 1,
+          transportOpen: true,
+          authenticated: true,
+          authContextId: authContext.authContextId,
+          serverOrigin: authContext.serverOrigin,
+        });
+        const recoveredCurrent = await recoverOffscreenWebSocketStatus(authContext);
+        return {
+          recoveredMismatch,
+          recoveredCurrent,
+          closedStatuses,
+          adoptedIdentity: wsTransportIdentity,
+          generationAfterMismatch,
+          expectedAuthContextId: authContext.authContextId,
+        };
+      } finally {
+        queryOffscreenWebSocketStatus = originalQueryStatus;
+        closeReportedOffscreenWebSocket = originalCloseReported;
+        flushCommandAckOutbox = originalFlushCommandAcks;
+        flushChatAckOutbox = originalFlushChatAcks;
+        wsConnectionGeneration = originalState.generation;
+        wsConnected = originalState.connected;
+        wsTransportConnected = originalState.transportConnected;
+        wsAuthenticatedGeneration = originalState.authenticatedGeneration;
+        wsTransportIdentity = originalState.transportIdentity;
+      }
+    });
+    assert.equal(offscreenRecoveryIdentity.recoveredMismatch, false);
+    assert.equal(offscreenRecoveryIdentity.closedStatuses.length, 1);
+    assert.equal(
+      offscreenRecoveryIdentity.closedStatuses[0].authContextId,
+      'retired-offscreen-auth-context',
+    );
+    assert.equal(offscreenRecoveryIdentity.recoveredCurrent, true);
+    assert.equal(
+      offscreenRecoveryIdentity.adoptedIdentity.authContextId,
+      offscreenRecoveryIdentity.expectedAuthContextId,
+    );
+    assert.equal(
+      offscreenRecoveryIdentity.adoptedIdentity.connectionGeneration,
+      offscreenRecoveryIdentity.generationAfterMismatch + 1,
+    );
+
     const wsEventLifetime = await worker.evaluate(async () => {
       const originalHandleRemoteControl = handleRemoteControl;
       const generation = wsConnectionGeneration;
+      const authContext = captureAuthenticatedContext('WebSocket lifetime fixture');
+      const priorTransportIdentity = wsTransportIdentity;
+      wsTransportIdentity = {
+        connectionGeneration: generation,
+        authContextId: authContext.authContextId,
+        serverOrigin: authContext.serverOrigin,
+      };
       const order = [];
       let releaseFirst;
       let markFirstStarted;
@@ -2024,6 +2443,8 @@ async function main() {
           event: 'message',
           data: envelope('first'),
           connectionGeneration: generation,
+          authContextId: authContext.authContextId,
+          serverOrigin: authContext.serverOrigin,
         }).then((value) => {
           firstSettled = true;
           return value;
@@ -2034,6 +2455,8 @@ async function main() {
           event: 'message',
           data: envelope('second'),
           connectionGeneration: generation,
+          authContextId: authContext.authContextId,
+          serverOrigin: authContext.serverOrigin,
         });
         await Promise.resolve();
         const beforeRelease = { firstSettled, order: [...order] };
@@ -2042,6 +2465,7 @@ async function main() {
         return { beforeRelease, finalOrder: order };
       } finally {
         handleRemoteControl = originalHandleRemoteControl;
+        wsTransportIdentity = priorTransportIdentity;
       }
     });
     assert.equal(wsEventLifetime.beforeRelease.firstSettled, false);
@@ -2198,12 +2622,10 @@ async function main() {
       const originalFetchWithBackoff = fetchWithBackoff;
       const originalDisableForInactiveLicense = disableForInactiveLicense;
       const originalHeartbeatInFlight = heartbeatInFlight;
-      const originalHeartbeatPendingReason = heartbeatPendingReason;
       // Keep the normal ten-second periodic heartbeat from consuming this fixture's
       // temporary fetch stub. The direct sendHeartbeat call below does not use
       // the safe-send singleflight flag, so production behavior is unchanged.
       heartbeatInFlight = true;
-      heartbeatPendingReason = null;
       const statusDisablePlans = [];
       const statusResponses = [
         { code: 'CLASSPILOT_NOT_ENTITLED', planStatus: 'canonical-status' },
@@ -2292,7 +2714,6 @@ async function main() {
         fetchWithBackoff = originalFetchWithBackoff;
         disableForInactiveLicense = originalDisableForInactiveLicense;
         heartbeatInFlight = originalHeartbeatInFlight;
-        heartbeatPendingReason = originalHeartbeatPendingReason;
         CONFIG = originalConfig;
       }
       const stored = await kv.get([

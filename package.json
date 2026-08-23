@@ -10,7 +10,8 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:extension:chrome": "node scripts/test-extension-resilience.mjs && node scripts/test-extension-auth-layout.mjs && node scripts/test-extension-auth-startup.mjs",
+    "test:extension:chrome": "node scripts/test-extension-resilience.mjs && node scripts/test-extension-2-7-behavior.mjs && node scripts/test-extension-offscreen-identity.mjs && node scripts/test-extension-auth-layout.mjs && node scripts/test-extension-auth-startup.mjs",
+    "test:extension:package": "node scripts/verify-extension-package.mjs",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
