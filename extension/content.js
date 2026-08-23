@@ -97,6 +97,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message.type === 'student-message-status') {
+    const update = message.data || {};
+    const clientMessageId = String(update.clientMessageId || '');
+    const chatMessage = chatMessages.find((item) =>
+      item.sender === 'student' && item.clientMessageId === clientMessageId
+    );
+    if (chatMessage) {
+      chatMessage.status = ['Sending', 'Retrying', 'Delivered', 'Failed'].includes(update.status)
+        ? update.status
+        : chatMessage.status;
+      if (update.messageId) chatMessage.id = update.messageId;
+      persistFabChatState();
+      renderChatMessages();
+    }
+    sendResponse?.({ success: true });
+    return false;
+  }
+
   if (message.type === 'show-message') {
     // Kiosk purity (2.6.8): classroom broadcasts must never render over a
     // hall-pass kiosk — there is no signed-in student there to address.
@@ -118,7 +136,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const msgId = message.data?._msgId;
     if (msgId) {
       if (seenChatMsgIds.has(msgId)) {
-        console.log('[ClassPilot] Dedup: skipping duplicate chat-reply', msgId);
+        console.log('[ClassPilot] Dedup: skipping duplicate chat reply');
         return;
       }
       seenChatMsgIds.add(msgId);
@@ -2061,7 +2079,21 @@ function attachAuthGateHandlers(state) {
     // the input blockers permit it, and the URL is built by the service
     // worker (never from page-controlled data).
     kioskButton.addEventListener('click', () => {
-      window.location.assign(state.kioskUrl);
+      kioskButton.disabled = true;
+      chrome.runtime.sendMessage({ type: 'request-kiosk-launch' }, (response) => {
+        kioskButton.disabled = false;
+        const launchUrl = !chrome.runtime.lastError && response?.success
+          ? response.url
+          : state.kioskUrl;
+        try {
+          const parsed = new URL(launchUrl);
+          if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+            window.location.assign(parsed.href);
+          }
+        } catch {
+          setAuthGateError('PassPilot kiosk is unavailable. Please try again.');
+        }
+      });
     });
   }
 }
@@ -2300,7 +2332,7 @@ function updateCameraStatus(isActive) {
       cameraActive: isActive
     }).catch(err => {
       // Ignore errors if extension context is invalidated
-      console.log('[ClassPilot] Could not notify service worker:', err);
+      console.log('[ClassPilot] Could not notify service worker');
     });
   }
 }
@@ -3711,38 +3743,62 @@ function sendMessage() {
     return;
   }
 
-  // Disable input while sending
+  const clientMessageId = globalThis.crypto?.randomUUID?.()
+    || `chat-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  chatMessages.push({
+    id: clientMessageId,
+    clientMessageId,
+    sender: 'student',
+    text: message,
+    time: Date.now(),
+    status: 'Sending',
+  });
+  persistFabChatState();
+  input.value = '';
+  renderChatMessages();
+
+  // Keep this compose box serialized until the worker has durably queued the
+  // message. A network response is not required for the user to keep working.
   input.disabled = true;
 
   try {
     chrome.runtime.sendMessage({
       type: 'send-student-message',
+      clientMessageId,
       message: message,
       messageType: 'message'
     }, (response) => {
+      const optimistic = chatMessages.find((item) => item.clientMessageId === clientMessageId);
       if (chrome.runtime.lastError) {
         input.disabled = false;
+        if (optimistic) optimistic.status = 'Failed';
+        persistFabChatState();
+        renderChatMessages();
         showFabNotification('Extension updated — please refresh the page.', true);
         return;
       }
       input.disabled = false;
       if (response?.success) {
-        chatMessages.push({
-          id: response.messageId,
-          sender: 'student',
-          text: message,
-          time: Date.now(),
-        });
+        if (optimistic) {
+          optimistic.id = response.messageId || optimistic.id;
+          optimistic.status = response.status || (response.queued ? 'Retrying' : 'Delivered');
+        }
         persistFabChatState();
-        input.value = '';
         renderChatMessages();
         input.focus();
       } else {
+        if (optimistic) optimistic.status = 'Failed';
+        persistFabChatState();
+        renderChatMessages();
         showFabNotification('Could not send message. Please try again.', true);
       }
     });
   } catch (e) {
     input.disabled = false;
+    const optimistic = chatMessages.find((item) => item.clientMessageId === clientMessageId);
+    if (optimistic) optimistic.status = 'Failed';
+    persistFabChatState();
+    renderChatMessages();
     showFabNotification('Extension updated — please refresh the page.', true);
   }
 }
@@ -3760,7 +3816,10 @@ function renderChatMessages() {
     const isStudent = msg.sender === 'student';
     const bubbleClass = isStudent ? 'classpilot-chat-bubble-student' : 'classpilot-chat-bubble-teacher';
     const text = msg.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}</div>`;
+    const deliveryStatus = isStudent && ['Sending', 'Retrying', 'Delivered', 'Failed'].includes(msg.status)
+      ? `<span class="classpilot-chat-delivery-status">${msg.status}</span>`
+      : '';
+    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}${deliveryStatus}</div>`;
   }).join('');
 
   container.scrollTop = container.scrollHeight;
@@ -4051,6 +4110,15 @@ function addFabStyles() {
       background: #3b82f6;
       color: white;
       border-bottom-right-radius: 4px;
+    }
+
+    .classpilot-chat-delivery-status {
+      display: block;
+      margin-top: 3px;
+      font-size: 10px;
+      line-height: 1.2;
+      opacity: 0.82;
+      text-align: right;
     }
 
     .classpilot-chat-bubble-teacher {

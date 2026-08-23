@@ -20,6 +20,7 @@ class FakePeerConnection {
   onconnectionstatechange: null | (() => void) = null;
   closed = false;
   tracks: FakeTrack[] = [];
+  restartCount = 0;
 
   constructor() {
     FakePeerConnection.instances.push(this);
@@ -42,6 +43,10 @@ class FakePeerConnection {
   }
 
   async addIceCandidate() {}
+
+  restartIce() {
+    this.restartCount += 1;
+  }
 
   close() {
     this.closed = true;
@@ -95,6 +100,7 @@ describe("extension offscreen WebRTC lifecycle", () => {
         static OPEN = 1;
         static CLOSED = 3;
       },
+      URL,
       setTimeout,
       clearTimeout,
       setInterval,
@@ -102,14 +108,22 @@ describe("extension offscreen WebRTC lifecycle", () => {
     });
     vm.runInContext(source, context);
 
+    const identityA = {
+      negotiationId: "negotiation-a",
+      authContextId: "auth-a",
+      authGeneration: 1,
+      connectionGeneration: 1,
+      serverOrigin: "https://school-pilot.net",
+      studentSessionId: "student-session-a",
+    };
     const firstStart = await vm.runInContext(
-      "startScreenCapture('device-1', 'tab', 'stream-1', 'negotiation-a')",
+      `startScreenCapture('tab', 'stream-1', ${JSON.stringify(identityA)})`,
       context,
     );
     expect(firstStart).toEqual({ success: true });
     const firstPeer = FakePeerConnection.instances[0]!;
     await vm.runInContext(
-      "handleSignal({ type: 'offer', from: 'teacher-a', negotiationId: 'negotiation-a', sdp: { type: 'offer', sdp: 'a' } })",
+      "handleSignal({ type: 'offer', from: 'teacher-a', negotiationId: 'negotiation-a', restartGeneration: 0, sdp: { type: 'offer', sdp: 'a' } })",
       context,
     );
     expect(firstPeer.remoteDescription).not.toBeNull();
@@ -117,25 +131,39 @@ describe("extension offscreen WebRTC lifecycle", () => {
 
     firstPeer.connectionState = "failed";
     firstPeer.onconnectionstatechange?.();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(firstPeer.restartCount).toBe(1);
+    expect(firstPeer.closed).toBe(false);
+    vm.runInContext("attemptLiveViewIceRestart(peerConnection)", context);
+    expect(firstPeer.restartCount).toBe(2);
+    vm.runInContext("attemptLiveViewIceRestart(peerConnection)", context);
     expect(firstPeer.closed).toBe(true);
     expect(firstPeer.tracks[0]?.stopped).toBe(true);
     expect(vm.runInContext("offerProcessed", context)).toBe(false);
     expect(sentMessages.some((message) => message.type === "CONNECTION_FAILED")).toBe(true);
 
+    const identityB = {
+      ...identityA,
+      negotiationId: "negotiation-b",
+      authContextId: "auth-b",
+      authGeneration: 2,
+      connectionGeneration: 2,
+      studentSessionId: "student-session-b",
+    };
     const secondStart = await vm.runInContext(
-      "startScreenCapture('device-1', 'tab', 'stream-2', 'negotiation-b')",
+      `startScreenCapture('tab', 'stream-2', ${JSON.stringify(identityB)})`,
       context,
     );
     expect(secondStart).toEqual({ success: true });
     const secondPeer = FakePeerConnection.instances[1]!;
     const staleOffer = await vm.runInContext(
-      "handleSignal({ type: 'offer', from: 'teacher-a', negotiationId: 'negotiation-a', sdp: { type: 'offer', sdp: 'stale' } })",
+      "handleSignal({ type: 'offer', from: 'teacher-a', negotiationId: 'negotiation-a', restartGeneration: 0, sdp: { type: 'offer', sdp: 'stale' } })",
       context,
     );
     expect(staleOffer).toEqual({ success: false, status: "stale-negotiation" });
     expect(secondPeer.remoteDescription).toBeNull();
     const secondOffer = await vm.runInContext(
-      "handleSignal({ type: 'offer', from: 'teacher-b', negotiationId: 'negotiation-b', sdp: { type: 'offer', sdp: 'b' } })",
+      "handleSignal({ type: 'offer', from: 'teacher-b', negotiationId: 'negotiation-b', restartGeneration: 0, sdp: { type: 'offer', sdp: 'b' } })",
       context,
     );
     expect(secondOffer).toEqual({ success: true });

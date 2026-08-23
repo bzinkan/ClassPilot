@@ -12,8 +12,9 @@ VERSION="$(node -p "require('./extension/manifest.json').version")"
 OUTPUT="dist/ClassPilot-v${VERSION}.zip"
 COMPAT_OUTPUT="dist/classpilot-extension.zip"
 
-# Remove old packages if they exist
-rm -f dist/ClassPilot-v*.zip "$COMPAT_OUTPUT"
+# Replace only this version and the unversioned compatibility copy. Older
+# versioned artifacts are release evidence and must remain recoverable.
+rm -f "$OUTPUT" "${OUTPUT}.sha256" "$COMPAT_OUTPUT"
 
 EXCLUDES=(
   "*.DS_Store"
@@ -123,9 +124,11 @@ if [ -f "$OUTPUT" ]; then
     echo "❌ Package version mismatch: manifest=$ZIP_VERSION expected=$VERSION"
     exit 1
   fi
+  node scripts/verify-extension-package.mjs "$OUTPUT" --verify-only
   echo "✅ Package created successfully!"
   echo "📍 Location: $OUTPUT"
   echo "📊 Size: $(ls -lh "$OUTPUT" | awk '{print $5}')"
+  echo "🔐 SHA-256 record: ${OUTPUT}.sha256"
   echo ""
   echo "📝 Contents:"
   unzip -l "$OUTPUT" | head -20

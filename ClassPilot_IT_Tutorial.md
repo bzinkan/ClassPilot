@@ -1,7 +1,7 @@
 # ClassPilot - IT Staff Tutorial & Technical Breakdown
 
 **Presentation Date**: [Your Date]  
-**Version**: 1.0.5  
+**Version**: 2.7.0
 **Presented by**: [Your Name]
 
 ---
@@ -25,7 +25,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 **Core Components:**
 - **Teacher Dashboard** (Web Application) - Real-time monitoring interface for educators
-- **Chrome Extension** (v1.0.5) - Lightweight monitoring agent on student Chromebooks
+- **Chrome Extension** (v2.7.0) - Lightweight monitoring agent on student Chromebooks
 
 **Key Value Propositions:**
 - ✅ Transparent monitoring with student disclosure
@@ -52,7 +52,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 │  ┌────────────┐  │         │  ┌────────────┐  │
 │  │  Chrome    │  │         │  │  Dashboard │  │
 │  │ Extension  │◄─┼─────────┼─►│  Web App   │  │
-│  │  (v1.0.5)  │  │         │  │            │  │
+│  │  (v2.7.0)  │  │         │  │            │  │
 │  └────────────┘  │         │  └────────────┘  │
 └────────┬─────────┘         └────────┬─────────┘
          │                            │
@@ -351,22 +351,22 @@ POST /api/register
 **Package the Extension:**
 
 ```bash
-cd extension
-zip -r classpilot-extension-v1.0.5.zip .
+./extension/package-extension.sh
+npm run test:extension:package
 ```
 
 **Upload to Chrome Web Store:**
 
 1. Go to: https://chrome.google.com/webstore/devconsole
 2. Pay $5 one-time developer fee (if first extension)
-3. Upload `classpilot-extension-v1.0.5.zip`
+3. Upload `dist/ClassPilot-v2.7.0.zip` from the clean, tagged release commit
 4. Fill in store listing details:
    - **Name:** ClassPilot
    - **Description:** Privacy-aware classroom monitoring for managed Chromebooks
    - **Screenshots:** (capture from demo)
    - **Icon:** Already included (128x128px)
 5. Select visibility: **Private** (unlisted) or **Public**
-6. Submit for review (typically 1-3 days)
+6. Submit for Chrome Web Store review
 
 **Important:** For school deployment, you can use **unlisted** mode. Schools will install via Extension ID, not public store.
 
@@ -676,4 +676,4 @@ Contact: [Your Contact Information]
 
 ---
 
-*ClassPilot v1.0.5 - Privacy-Aware Classroom Monitoring*
+*ClassPilot v2.7.0 - Privacy-Aware Classroom Monitoring*

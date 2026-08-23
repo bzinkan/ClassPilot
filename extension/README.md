@@ -8,7 +8,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 - **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Periodic Screen Thumbnails**: Captures bounded active-tab screenshots for the teacher dashboard while tracking is active
+- **Observation-Bound Screen Thumbnails**: Captures bounded active-tab screenshots only while an authorized teacher or administrator is actively observing, plus an exact-bound safety capture when requested
 - **Visible Indicators**: Shows in-page and popup indicators when school-managed monitoring is active
 - **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
@@ -32,18 +32,36 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
-### Durable kiosk device identity (2.6.9)
+### Private kiosk continuity tickets (2.7.0)
 
-On managed (enrolled) Chromebooks the extension resolves the device's
-directory id via `chrome.enterprise.deviceAttributes`, hashes it into an
-opaque UUID, and appends it as `device=` on the PassPilot kiosk launch URL.
-The kiosk page adopts it as the device's identity, so PassPilot's
-teacher-resume memory survives the per-profile storage wipes that occur on
-shared devices when the lid closes or a session ends. The raw directory id
-never leaves the extension; unmanaged installs are unaffected (the
-enterprise API is undefined there). Requires the `enterprise.deviceAttributes`
-permission (no user-facing prompt; the API only functions on policy-installed
-extensions).
+On managed (enrolled) Chromebooks, an explicit kiosk launch may read the
+device's Chrome directory id through `chrome.enterprise.deviceAttributes`.
+The extension sends that value only to the enrollment-key-authenticated
+SchoolPilot launch-ticket endpoint. SchoolPilot immediately projects it to a
+school-scoped opaque mapping and returns a random, one-use ticket that expires
+after 60 seconds. The ticket is placed in the URL fragment as
+`#launchTicket=...`; the raw directory id and a stable device identifier never
+appear in the URL, extension storage, or logs. If ticket creation fails, the
+kiosk still opens without continuity. Unmanaged installs are unaffected (the
+enterprise API is undefined there).
+
+This requires the `enterprise.deviceAttributes` permission. It produces no
+user-facing prompt and only functions for policy-installed extensions.
+
+### Exact-bound monitoring and delivery (2.7.0)
+
+Every authenticated heartbeat, screenshot, command acknowledgement, chat
+retry, and Live View negotiation is fenced to an immutable school, student,
+student-session, device, server-origin, and authentication context. Work that
+finishes after an identity transition is discarded. Teacher commands validate
+that binding before expiry checks, deduplication, acknowledgements, or side
+effects, and tab-close safety actions require the exact opaque tab reference
+and snapshot revision.
+
+Student chat messages use a client-generated id and a bounded, exact-binding
+retry outbox. A message is removed only after SchoolPilot echoes both the
+client and server ids. It is never replayed for a different student, session,
+school, device, or server.
 
 ### PassPilot kiosk purity + sign-out finality (2.6.8)
 
@@ -96,10 +114,13 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    ```
 3. Inspect the versioned `dist/ClassPilot-vX.Y.Z.zip`. It must contain
    root-level `manifest.json` and `managed_schema.json`, and the embedded
-   manifest version must match the file name.
+   manifest version must match the file name. Packaging compares every ZIP
+   file byte-for-byte with the source allowlist and writes a `.sha256` record.
+4. Run `npm run test:extension:package` to repeat the Chrome integration suites
+   against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.6.9.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.0.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
@@ -182,7 +203,8 @@ git rm --cached extension/config.js
 - Timestamps of activity
 - Website favicon URL
 - Heartbeat, connection, and device health state
-- Periodic JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab while tracking is active
+- Observation-bound JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab
+- An exact-bound screenshot immediately before a requested safety tab closure, when capture succeeds within the bounded window
 
 ### What's NOT Monitored
 - Keystrokes or typed content
@@ -194,15 +216,21 @@ git rm --cached extension/config.js
 ### Automatic Monitoring
 - **Tab titles and URLs are collected automatically** - No student action required
 - Heartbeat sends data every 10 seconds
-- Screen thumbnails are captured about every 30 seconds while tracking is active
+- In negotiated observation-lease mode, ambient screen thumbnails are captured about every 30 seconds only while an authorized teacher or administrator is actively observing the exact student session
+- A server-selected legacy screenshot mode remains available only as an explicit staged-rollout fallback
 - Teacher sees current tab and URL history in real-time
 - Complies with school district monitoring policies for managed Chromebooks
+
+Monitored time, domain time, and off-task duration are derived from the
+10-second heartbeat stream. Screenshots are not used for those calculations.
 
 ### Live Screen Viewing
 - Teachers may request live viewing during active class sessions
 - Managed ChromeOS devices can allow silent tab capture through school Chrome policy
 - On unmanaged devices, Chrome may show a picker instead
 - Live streams are not recorded by the extension
+- Short-lived, server-authorized ICE configuration may include SchoolPilot TURN
+  relays so a session can connect when direct UDP is unavailable
 
 ### Transparency & Disclosure
 The extension popup clearly displays:
@@ -247,6 +275,11 @@ snapshot. Screenshot image bodies are never queued or written to local storage;
 only bounded attempt, success, and error diagnostic timestamps/codes survive a
 worker restart.
 
+Student-to-teacher chat uses a bounded local retry outbox (maximum 40 messages,
+128 KiB, and 30 minutes). Authentication, binding, command, and outbox storage
+failures stop the affected operation; privacy-safe diagnostics remain best
+effort.
+
 See `COMPLIANCE.md` for Chrome Web Store and school privacy review notes.
 
 ## Development
@@ -278,7 +311,8 @@ extension/
 4. Check the service-worker/offscreen consoles for heartbeat and WebSocket
    state, then verify the exact student appears in the teacher dashboard.
 5. Before release, run `npm run check`, `npm test`,
-   `npm run test:extension:chrome`, and `npm run build` from the repository root.
+   `npm run test:extension:chrome`, `npm run build`, package the versioned ZIP,
+   and run `npm run test:extension:package` from the repository root.
 
 ### Badge States
 - 🟢 Green dot (●) - Connected and sending heartbeats

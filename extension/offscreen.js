@@ -7,6 +7,17 @@ let localStream = null;
 let teacherId = null;
 let iceQueue = []; // Queue ICE candidates until peer is ready
 let activeNegotiationId = null;
+let activeLiveViewAuthContextId = null;
+let activeLiveViewAuthGeneration = 0;
+let activeLiveViewConnectionGeneration = 0;
+let activeLiveViewServerOrigin = null;
+let activeLiveViewStudentSessionId = null;
+let activeLiveViewRestartGeneration = 0;
+let activeLiveViewContext = null;
+let liveViewDisconnectTimer = null;
+let liveViewRestartAttempts = [];
+let liveViewAttemptStartedAt = 0;
+let liveViewTelemetryAttempts = new Set();
 let liveViewSetupTimer = null;
 let liveViewHardExpiryTimer = null;
 
@@ -39,6 +50,213 @@ let wsKeepAliveTimer = null;
 let proxyConnectionGeneration = 0;
 let proxyAuthenticated = false;
 let proxyUrl = null;
+let proxyAuthContextId = null;
+let proxyServerOrigin = null;
+
+function normalizedOrigin(value) {
+  try {
+    const parsed = new URL(String(value || ''));
+    if (parsed.protocol === 'wss:') parsed.protocol = 'https:';
+    if (parsed.protocol === 'ws:') parsed.protocol = 'http:';
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function liveViewIdentityPayload() {
+  return {
+    negotiationId: activeNegotiationId,
+    authContextId: activeLiveViewAuthContextId,
+    authGeneration: activeLiveViewAuthGeneration,
+    connectionGeneration: activeLiveViewConnectionGeneration,
+    serverOrigin: activeLiveViewServerOrigin,
+    studentSessionId: activeLiveViewStudentSessionId,
+    restartGeneration: activeLiveViewRestartGeneration,
+  };
+}
+
+function normalizeLiveViewIdentity(message = {}) {
+  const negotiationId = String(message.negotiationId || '').trim();
+  const authContextId = String(message.authContextId || '').trim();
+  const authGeneration = Number(message.authGeneration);
+  const connectionGeneration = Number(message.connectionGeneration);
+  const serverOrigin = normalizedOrigin(message.serverOrigin);
+  const studentSessionId = String(message.studentSessionId || '').trim();
+  if (!negotiationId
+    || !authContextId
+    || !Number.isSafeInteger(authGeneration)
+    || authGeneration < 0
+    || !Number.isSafeInteger(connectionGeneration)
+    || connectionGeneration < 1
+    || !serverOrigin
+    || !studentSessionId) return null;
+  return {
+    negotiationId,
+    authContextId,
+    authGeneration,
+    connectionGeneration,
+    serverOrigin,
+    studentSessionId,
+  };
+}
+
+function liveViewIdentityMatches(message = {}) {
+  const identity = normalizeLiveViewIdentity(message);
+  return Boolean(identity
+    && identity.negotiationId === activeNegotiationId
+    && identity.authContextId === activeLiveViewAuthContextId
+    && identity.authGeneration === activeLiveViewAuthGeneration
+    && identity.connectionGeneration === activeLiveViewConnectionGeneration
+    && identity.serverOrigin === activeLiveViewServerOrigin
+    && identity.studentSessionId === activeLiveViewStudentSessionId);
+}
+
+function createLiveViewContext(identity) {
+  return Object.freeze({
+    negotiationId: identity.negotiationId,
+    authContextId: identity.authContextId,
+    authGeneration: identity.authGeneration,
+    connectionGeneration: identity.connectionGeneration,
+    serverOrigin: identity.serverOrigin,
+    studentSessionId: identity.studentSessionId,
+  });
+}
+
+function liveViewContextIsCurrent(context, {
+  peer = undefined,
+  stream = undefined,
+  restartGeneration = undefined,
+} = {}) {
+  if (!context || activeLiveViewContext !== context) return false;
+  if (context.negotiationId !== activeNegotiationId
+    || context.authContextId !== activeLiveViewAuthContextId
+    || context.authGeneration !== activeLiveViewAuthGeneration
+    || context.connectionGeneration !== activeLiveViewConnectionGeneration
+    || context.serverOrigin !== activeLiveViewServerOrigin
+    || context.studentSessionId !== activeLiveViewStudentSessionId) return false;
+  if (peer !== undefined && peerConnection !== peer) return false;
+  if (stream !== undefined && localStream !== stream) return false;
+  if (restartGeneration !== undefined
+    && activeLiveViewRestartGeneration !== restartGeneration) return false;
+  return true;
+}
+
+function liveViewContextPayload(context, restartGeneration = activeLiveViewRestartGeneration) {
+  return {
+    negotiationId: context.negotiationId,
+    authContextId: context.authContextId,
+    authGeneration: context.authGeneration,
+    connectionGeneration: context.connectionGeneration,
+    serverOrigin: context.serverOrigin,
+    studentSessionId: context.studentSessionId,
+    restartGeneration,
+  };
+}
+
+function sendLiveViewMessageForContext(
+  context,
+  type,
+  payload = {},
+  restartGeneration = activeLiveViewRestartGeneration,
+) {
+  if (!liveViewContextIsCurrent(context, { restartGeneration })) return false;
+  chrome.runtime.sendMessage({
+    type,
+    ...payload,
+    ...liveViewContextPayload(context, restartGeneration),
+  });
+  return true;
+}
+
+function disposeDetachedStream(stream) {
+  if (!stream || stream === localStream) return;
+  stream.getTracks().forEach((track) => {
+    track.onended = null;
+    track.stop();
+  });
+}
+
+function disposeDetachedPeer(peer) {
+  if (!peer || peer === peerConnection) return;
+  peer.onicecandidate = null;
+  peer.onconnectionstatechange = null;
+  peer.close();
+}
+
+function sendLiveViewMessage(type, payload = {}) {
+  return chrome.runtime.sendMessage({
+    type,
+    ...liveViewIdentityPayload(),
+    ...payload,
+  });
+}
+
+function boundedLiveViewConnectionTime(nowValue = Date.now()) {
+  if (!liveViewAttemptStartedAt) return 0;
+  return Math.max(0, Math.min(90000, Math.round(nowValue - liveViewAttemptStartedAt)));
+}
+
+function candidateTelemetryFromStats(stats) {
+  let selectedPair = null;
+  for (const report of stats?.values?.() || []) {
+    if (report?.type === 'transport' && report.selectedCandidatePairId) {
+      selectedPair = stats.get(report.selectedCandidatePairId) || null;
+      break;
+    }
+    if (report?.type === 'candidate-pair' && (report.selected === true || report.nominated === true)) {
+      selectedPair = report;
+    }
+  }
+  const local = selectedPair?.localCandidateId ? stats.get(selectedPair.localCandidateId) : null;
+  const typeMap = { host: 'host', srflx: 'server_reflexive', relay: 'relay' };
+  const selectedCandidateType = typeMap[String(local?.candidateType || '')] || 'unknown';
+  let relayTransport;
+  if (selectedCandidateType === 'relay') {
+    const relayProtocol = String(local?.relayProtocol || '').toLowerCase();
+    const protocol = String(local?.protocol || '').toLowerCase();
+    const url = String(local?.url || '').toLowerCase();
+    relayTransport = url.startsWith('turns:') || relayProtocol === 'tls'
+      ? 'tls'
+      : relayProtocol === 'udp' || protocol === 'udp'
+        ? 'udp'
+        : relayProtocol === 'tcp' || protocol === 'tcp'
+          ? 'tcp'
+          : 'unknown';
+  }
+  return { selectedCandidateType, ...(relayTransport ? { relayTransport } : {}) };
+}
+
+async function sendLiveViewAttemptTelemetry(outcome, expectedPeer = peerConnection) {
+  const context = activeLiveViewContext;
+  const attempt = Math.max(0, Math.min(2, Number(activeLiveViewRestartGeneration || 0)));
+  const key = String(attempt);
+  if (!context || liveViewTelemetryAttempts.has(key)) return false;
+  let candidate = { selectedCandidateType: 'unknown' };
+  if (outcome === 'connected' && expectedPeer?.getStats) {
+    try {
+      const stats = await expectedPeer.getStats();
+      if (!liveViewContextIsCurrent(context, { peer: expectedPeer, restartGeneration: attempt })) {
+        return false;
+      }
+      candidate = candidateTelemetryFromStats(stats);
+    } catch {
+      if (!liveViewContextIsCurrent(context, { peer: expectedPeer, restartGeneration: attempt })) {
+        return false;
+      }
+    }
+  }
+  if (!liveViewContextIsCurrent(context, { peer: expectedPeer, restartGeneration: attempt })) {
+    return false;
+  }
+  liveViewTelemetryAttempts.add(key);
+  return sendLiveViewMessageForContext(context, 'LIVE_VIEW_ATTEMPT_TERMINAL', {
+    attempt,
+    outcome,
+    connectionTimeMs: boundedLiveViewConnectionTime(),
+    ...candidate,
+  }, attempt);
+}
 
 function relayWsEvent(event, data) {
   chrome.runtime.sendMessage({
@@ -46,6 +264,8 @@ function relayWsEvent(event, data) {
     event,
     data,
     connectionGeneration: proxyConnectionGeneration,
+    authContextId: proxyAuthContextId,
+    serverOrigin: proxyServerOrigin,
   });
 }
 
@@ -57,18 +277,28 @@ function wsStatus() {
     transportOpen: proxyWs?.readyState === WebSocket.OPEN,
     authenticated: proxyAuthenticated,
     url: proxyUrl,
+    authContextId: proxyAuthContextId,
+    serverOrigin: proxyServerOrigin,
   };
 }
 
-function handleWsConnect(url, authPayload, requestedGeneration) {
+function handleWsConnect(url, authPayload, requestedGeneration, authContextId, serverOrigin) {
   const connectionGeneration = Number(requestedGeneration || 0);
+  const normalizedAuthContextId = String(authContextId || '').trim();
+  const normalizedServerOrigin = normalizedOrigin(serverOrigin);
+  const socketOrigin = normalizedOrigin(url);
   if (!Number.isSafeInteger(connectionGeneration) || connectionGeneration < 1) {
     throw new Error('WS_CONNECT requires a positive connection generation');
+  }
+  if (!normalizedAuthContextId || !normalizedServerOrigin || socketOrigin !== normalizedServerOrigin) {
+    throw new Error('WS_CONNECT requires one exact authentication context and server origin');
   }
   if (
     proxyWs &&
     proxyConnectionGeneration === connectionGeneration &&
     proxyUrl === url &&
+    proxyAuthContextId === normalizedAuthContextId &&
+    proxyServerOrigin === normalizedServerOrigin &&
     (proxyWs.readyState === WebSocket.CONNECTING || proxyWs.readyState === WebSocket.OPEN)
   ) {
     return wsStatus();
@@ -84,7 +314,9 @@ function handleWsConnect(url, authPayload, requestedGeneration) {
   proxyConnectionGeneration = connectionGeneration;
   proxyAuthenticated = false;
   proxyUrl = url;
-  console.log('[Offscreen-WS] Connecting generation', connectionGeneration, 'to', url);
+  proxyAuthContextId = normalizedAuthContextId;
+  proxyServerOrigin = normalizedServerOrigin;
+  console.log('[Offscreen-WS] Connecting generation', connectionGeneration, 'to configured origin');
   proxyWs = new WebSocket(url);
   const connection = proxyWs;
 
@@ -142,11 +374,13 @@ function handleWsConnect(url, authPayload, requestedGeneration) {
   return wsStatus();
 }
 
-function handleWsSend(data, requestedGeneration) {
+function handleWsSend(data, requestedGeneration, authContextId, serverOrigin) {
   if (
     proxyWs &&
     proxyWs.readyState === WebSocket.OPEN &&
-    Number(requestedGeneration) === proxyConnectionGeneration
+    Number(requestedGeneration) === proxyConnectionGeneration &&
+    String(authContextId || '').trim() === proxyAuthContextId &&
+    normalizedOrigin(serverOrigin) === proxyServerOrigin
   ) {
     proxyWs.send(data);
     return { success: true, connectionGeneration: proxyConnectionGeneration };
@@ -159,10 +393,12 @@ function handleWsSend(data, requestedGeneration) {
   };
 }
 
-function handleWsClose(requestedGeneration) {
+function handleWsClose(requestedGeneration, authContextId, serverOrigin) {
   if (requestedGeneration && Number(requestedGeneration) !== proxyConnectionGeneration) {
     return wsStatus();
   }
+  if (authContextId && String(authContextId).trim() !== proxyAuthContextId) return wsStatus();
+  if (serverOrigin && normalizedOrigin(serverOrigin) !== proxyServerOrigin) return wsStatus();
   // An intentional transport shutdown (tracking OFF, sign-out, entitlement
   // revocation, or off-hours) must revoke the peer-to-peer capture too. The
   // socket's onclose handler is detached below, so this cleanup cannot rely on
@@ -175,6 +411,8 @@ function handleWsClose(requestedGeneration) {
   }
   proxyAuthenticated = false;
   proxyUrl = null;
+  proxyAuthContextId = null;
+  proxyServerOrigin = null;
   return wsStatus();
 }
 
@@ -201,24 +439,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       if (message.type === 'START_SHARE') {
         const result = await startScreenCapture(
-          message.deviceId,
           message.mode,
           message.streamId,
-          message.negotiationId,
+          message,
           message.setupExpiresAt,
           message.expiresAt,
+          message.iceServers,
+          message.iceConfigurationExpiresAt,
         );
         sendResponse(result);
         return;
       }
 
       if (message.type === 'SIGNAL') {
-        const result = await handleSignal(message.payload);
+        if (!liveViewIdentityMatches(message)) {
+          sendResponse({ success: false, status: 'stale-negotiation' });
+          return;
+        }
+        const result = await handleSignal(message.payload, activeLiveViewContext);
         sendResponse(result);
         return;
       }
 
       if (message.type === 'STOP_SHARE') {
+        if (activeNegotiationId && !liveViewIdentityMatches(message)) {
+          sendResponse({ success: false, status: 'stale-negotiation' });
+          return;
+        }
         stopScreenShare();
         sendResponse({ success: true });
         return;
@@ -228,18 +475,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(handleWsConnect(
           message.url,
           message.authPayload,
-          message.connectionGeneration
+          message.connectionGeneration,
+          message.authContextId,
+          message.serverOrigin
         ));
         return;
       }
 
       if (message.type === 'WS_SEND') {
-        sendResponse(handleWsSend(message.data, message.connectionGeneration));
+        sendResponse(handleWsSend(
+          message.data,
+          message.connectionGeneration,
+          message.authContextId,
+          message.serverOrigin
+        ));
         return;
       }
 
       if (message.type === 'WS_CLOSE') {
-        sendResponse(handleWsClose(message.connectionGeneration));
+        sendResponse(handleWsClose(
+          message.connectionGeneration,
+          message.authContextId,
+          message.serverOrigin
+        ));
         return;
       }
 
@@ -248,7 +506,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
     } catch (error) {
-      console.error('[Offscreen] Unexpected error handling message:', error);
+      console.error('[Offscreen] Unexpected error handling message');
       sendResponse({ success: false, error: error.message });
     }
   })();
@@ -263,8 +521,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function clearLiveViewExpiryTimers() {
   if (liveViewSetupTimer) clearTimeout(liveViewSetupTimer);
   if (liveViewHardExpiryTimer) clearTimeout(liveViewHardExpiryTimer);
+  if (liveViewDisconnectTimer) clearTimeout(liveViewDisconnectTimer);
   liveViewSetupTimer = null;
   liveViewHardExpiryTimer = null;
+  liveViewDisconnectTimer = null;
 }
 
 function parseFutureExpiry(value, fallbackMs, maximumMs) {
@@ -276,18 +536,23 @@ function parseFutureExpiry(value, fallbackMs, maximumMs) {
 
 function expireLiveView(reason, negotiationId) {
   if (!negotiationId || negotiationId !== activeNegotiationId) return;
+  const identity = liveViewIdentityPayload();
   stopScreenShare();
   chrome.runtime.sendMessage({
+    ...identity,
     type: 'LIVE_VIEW_EXPIRED',
     reason,
-    negotiationId,
   });
 }
 
-function scheduleLiveViewExpiry(setupExpiresAt, expiresAt, negotiationId) {
+function scheduleLiveViewExpiry(setupExpiresAt, expiresAt, iceConfigurationExpiresAt, negotiationId) {
   clearLiveViewExpiryTimers();
   const now = Date.now();
-  const hardExpiry = parseFutureExpiry(expiresAt, 15 * 60 * 1000, 15 * 60 * 1000);
+  const sessionHardExpiry = parseFutureExpiry(expiresAt, 15 * 60 * 1000, 15 * 60 * 1000);
+  const iceHardExpiry = iceConfigurationExpiresAt
+    ? parseFutureExpiry(iceConfigurationExpiresAt, 10 * 60 * 1000, 11 * 60 * 1000)
+    : sessionHardExpiry;
+  const hardExpiry = Math.min(sessionHardExpiry, iceHardExpiry);
   const setupExpiry = Math.min(
     parseFutureExpiry(setupExpiresAt, 90 * 1000, 90 * 1000),
     hardExpiry,
@@ -300,32 +565,120 @@ function scheduleLiveViewExpiry(setupExpiresAt, expiresAt, negotiationId) {
   }, Math.max(0, hardExpiry - now));
 }
 
+function failLiveViewConnection(reason) {
+  const identity = liveViewIdentityPayload();
+  sendLiveViewAttemptTelemetry('failed', peerConnection);
+  stopScreenShare();
+  chrome.runtime.sendMessage({
+    ...identity,
+    type: 'CONNECTION_FAILED',
+    reason,
+  });
+}
+
+function attemptLiveViewIceRestart(expectedPeer) {
+  if (peerConnection !== expectedPeer || !activeNegotiationId) return;
+  if (expectedPeer.connectionState === 'connected') {
+    if (liveViewDisconnectTimer) clearTimeout(liveViewDisconnectTimer);
+    liveViewDisconnectTimer = null;
+    return;
+  }
+  const now = Date.now();
+  liveViewRestartAttempts = liveViewRestartAttempts.filter((attemptedAt) => attemptedAt >= now - 30000);
+  if (liveViewRestartAttempts.length >= 2 || typeof expectedPeer.restartIce !== 'function') {
+    failLiveViewConnection('ice-restart-exhausted');
+    return;
+  }
+  sendLiveViewAttemptTelemetry('failed', expectedPeer);
+  liveViewRestartAttempts.push(now);
+  activeLiveViewRestartGeneration += 1;
+  liveViewAttemptStartedAt = now;
+  offerProcessed = false;
+  iceQueue = [];
+  try {
+    expectedPeer.restartIce();
+  } catch {
+    failLiveViewConnection('ice-restart-failed');
+    return;
+  }
+  sendLiveViewMessage('ICE_RESTART_REQUIRED');
+  liveViewDisconnectTimer = setTimeout(() => {
+    liveViewDisconnectTimer = null;
+    attemptLiveViewIceRestart(expectedPeer);
+  }, 5000);
+}
+
+function handleLiveViewConnectionInterruption(expectedPeer, connectionState) {
+  if (peerConnection !== expectedPeer) return;
+  if (connectionState === 'connected') {
+    if (liveViewDisconnectTimer) clearTimeout(liveViewDisconnectTimer);
+    liveViewDisconnectTimer = null;
+    sendLiveViewAttemptTelemetry('connected', expectedPeer);
+    return;
+  }
+  if (connectionState !== 'disconnected' && connectionState !== 'failed') return;
+  if (liveViewDisconnectTimer) return;
+  liveViewDisconnectTimer = setTimeout(() => {
+    liveViewDisconnectTimer = null;
+    attemptLiveViewIceRestart(expectedPeer);
+  }, connectionState === 'disconnected' ? 5000 : 0);
+}
+
 async function startScreenCapture(
-  deviceId,
   mode = 'auto',
   streamId = null,
-  negotiationId = null,
+  identityMessage = null,
   setupExpiresAt = null,
   expiresAt = null,
+  providedIceServers = null,
+  iceConfigurationExpiresAt = null,
 ) {
   console.log('[Offscreen] Starting screen capture, mode:', mode, 'streamId:', !!streamId);
+
+  const identity = normalizeLiveViewIdentity(identityMessage || {});
+  if (!identity) {
+    return { success: false, status: 'missing-negotiation', error: 'Missing Live View authority' };
+  }
+  const iceServers = providedIceServers === null
+    ? ICE_SERVERS
+    : Array.isArray(providedIceServers) && providedIceServers.length > 0
+      ? providedIceServers
+      : null;
+  if (!iceServers) {
+    return { success: false, status: 'invalid-ice-configuration', error: 'Invalid ICE configuration' };
+  }
 
   // Every capture attempt is a new negotiation. Reset the duplicate-offer
   // guard, queued ICE, teacher identity, tracks, and peer together so a failed
   // or stopped attempt can be retried without restarting the extension.
   stopScreenShare();
-  activeNegotiationId = String(negotiationId || '').trim() || null;
-  if (!activeNegotiationId) {
-    return { success: false, status: 'missing-negotiation', error: 'Missing live-view negotiation' };
-  }
-  scheduleLiveViewExpiry(setupExpiresAt, expiresAt, activeNegotiationId);
+  activeNegotiationId = identity.negotiationId;
+  activeLiveViewAuthContextId = identity.authContextId;
+  activeLiveViewAuthGeneration = identity.authGeneration;
+  activeLiveViewConnectionGeneration = identity.connectionGeneration;
+  activeLiveViewServerOrigin = identity.serverOrigin;
+  activeLiveViewStudentSessionId = identity.studentSessionId;
+  activeLiveViewRestartGeneration = 0;
+  const captureContext = createLiveViewContext(identity);
+  activeLiveViewContext = captureContext;
+  liveViewRestartAttempts = [];
+  liveViewAttemptStartedAt = Date.now();
+  liveViewTelemetryAttempts = new Set();
+  scheduleLiveViewExpiry(
+    setupExpiresAt,
+    expiresAt,
+    iceConfigurationExpiresAt,
+    activeNegotiationId,
+  );
 
+  let capturedStream = null;
+  let createdPeer = null;
   try {
     // Method 1: Use streamId from service worker (MV3 tab capture)
     if (streamId) {
       try {
         console.log('[Offscreen] Using streamId from service worker for tab capture...');
-        localStream = await navigator.mediaDevices.getUserMedia({
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             mandatory: {
               chromeMediaSource: 'tab',
@@ -334,18 +687,26 @@ async function startScreenCapture(
           },
           audio: false
         });
+        if (!liveViewContextIsCurrent(captureContext)) {
+          disposeDetachedStream(stream);
+          return { success: false, status: 'stale-negotiation' };
+        }
+        capturedStream = stream;
         console.log('[Offscreen] Tab capture via streamId succeeded');
       } catch (streamIdError) {
-        console.info('[Offscreen] streamId capture failed:', streamIdError.message);
+        if (!liveViewContextIsCurrent(captureContext)) {
+          return { success: false, status: 'stale-negotiation' };
+        }
+        console.info('[Offscreen] streamId capture failed');
         // Fall through to getDisplayMedia fallback
       }
     }
 
     // Method 2: Fall back to getDisplayMedia (shows picker on unmanaged devices)
-    if (!localStream && (mode === 'auto' || mode === 'screen')) {
+    if (!capturedStream && (mode === 'auto' || mode === 'screen')) {
       console.log('[Offscreen] Using getDisplayMedia (screen picker)...');
       try {
-        localStream = await navigator.mediaDevices.getDisplayMedia({
+        const stream = await navigator.mediaDevices.getDisplayMedia({
           video: {
             frameRate: 15,
             width: { ideal: 1280 },
@@ -353,20 +714,26 @@ async function startScreenCapture(
           },
           audio: false
         });
+        if (!liveViewContextIsCurrent(captureContext)) {
+          disposeDetachedStream(stream);
+          return { success: false, status: 'stale-negotiation' };
+        }
+        capturedStream = stream;
         console.log('[Offscreen] getDisplayMedia succeeded');
       } catch (pickerError) {
+        if (!liveViewContextIsCurrent(captureContext)) {
+          return { success: false, status: 'stale-negotiation' };
+        }
         if (pickerError.name === 'NotAllowedError' || pickerError.name === 'AbortError') {
           console.info('[Offscreen] User denied screen share or closed picker (expected)');
-          chrome.runtime.sendMessage({
-            type: 'CAPTURE_ERROR',
+          sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', {
             error: 'Student denied screen share request'
           });
           stopScreenShare();
           return { success: false, status: 'user-denied' };
         }
-        console.error('[Offscreen] getDisplayMedia error:', pickerError);
-        chrome.runtime.sendMessage({
-          type: 'CAPTURE_ERROR',
+        console.error('[Offscreen] getDisplayMedia failed');
+        sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', {
           error: pickerError.message
         });
         stopScreenShare();
@@ -375,28 +742,36 @@ async function startScreenCapture(
     }
 
     // No stream obtained
-    if (!localStream) {
+    if (!capturedStream) {
       const msg = mode === 'tab'
         ? 'Silent tab capture not available on this device'
         : 'No capture method succeeded';
       console.warn('[Offscreen]', msg);
-      chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: msg });
+      sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', { error: msg });
       stopScreenShare();
       return { success: false, status: 'tab-capture-unavailable' };
     }
 
     // Create peer connection
-    peerConnection = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-    const activePeerConnection = peerConnection;
-    const activeStream = localStream;
+    createdPeer = new RTCPeerConnection({ iceServers });
+    if (!liveViewContextIsCurrent(captureContext)) {
+      disposeDetachedStream(capturedStream);
+      disposeDetachedPeer(createdPeer);
+      return { success: false, status: 'stale-negotiation' };
+    }
+    localStream = capturedStream;
+    peerConnection = createdPeer;
+    const activePeerConnection = createdPeer;
+    const activeStream = capturedStream;
 
     // Handle ICE candidates - send to teacher via service worker
     activePeerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
+      if (event.candidate && liveViewContextIsCurrent(captureContext, {
+        peer: activePeerConnection,
+        stream: activeStream,
+      })) {
         console.log('[Offscreen] Got ICE candidate, sending to teacher');
-        chrome.runtime.sendMessage({
-          type: 'ICE_CANDIDATE',
-          negotiationId: activeNegotiationId,
+        sendLiveViewMessageForContext(captureContext, 'ICE_CANDIDATE', {
           candidate: event.candidate.toJSON(),
         });
       }
@@ -406,18 +781,23 @@ async function startScreenCapture(
     activePeerConnection.onconnectionstatechange = () => {
       const connectionState = activePeerConnection.connectionState;
       console.log('[Offscreen] Connection state:', connectionState);
-      if (connectionState === 'failed' || connectionState === 'disconnected') {
-        if (peerConnection === activePeerConnection) stopScreenShare();
-        chrome.runtime.sendMessage({ type: 'CONNECTION_FAILED' });
-      }
+      handleLiveViewConnectionInterruption(activePeerConnection, connectionState);
     };
 
     // Add tracks to peer connection
     activeStream.getTracks().forEach(track => {
       track.onended = () => {
-        if (localStream !== activeStream) return;
+        if (!liveViewContextIsCurrent(captureContext, {
+          peer: activePeerConnection,
+          stream: activeStream,
+        })) return;
+        const identityPayload = liveViewContextPayload(captureContext);
         stopScreenShare();
-        chrome.runtime.sendMessage({ type: 'CONNECTION_FAILED', reason: 'capture-track-ended' });
+        chrome.runtime.sendMessage({
+          ...identityPayload,
+          type: 'CONNECTION_FAILED',
+          reason: 'capture-track-ended',
+        });
       };
       activePeerConnection.addTrack(track, activeStream);
     });
@@ -426,8 +806,15 @@ async function startScreenCapture(
     return { success: true };
 
   } catch (error) {
-    console.error('[Offscreen] Unexpected screen capture error:', error);
-    chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: error.message });
+    if (!liveViewContextIsCurrent(captureContext)) {
+      disposeDetachedStream(capturedStream);
+      disposeDetachedPeer(createdPeer);
+      return { success: false, status: 'stale-negotiation' };
+    }
+    disposeDetachedStream(capturedStream);
+    disposeDetachedPeer(createdPeer);
+    console.error('[Offscreen] Unexpected screen capture error');
+    sendLiveViewMessageForContext(captureContext, 'CAPTURE_ERROR', { error: error.message });
     stopScreenShare();
     return { success: false, status: 'failed', error: error.message };
   }
@@ -436,9 +823,15 @@ async function startScreenCapture(
 // Handle signaling messages (offer, answer, ICE)
 let offerProcessed = false; // Guard against duplicate offer processing from setTimeout retries
 
-async function handleSignal(signal) {
+async function handleSignal(signal, expectedContext = activeLiveViewContext) {
+  const signalContext = expectedContext;
   try {
     console.log('[Offscreen] Handling signal:', signal.type);
+    const restartGeneration = Number(signal.restartGeneration || 0);
+    if (!Number.isSafeInteger(restartGeneration)
+      || !liveViewContextIsCurrent(signalContext, { restartGeneration })) {
+      return { success: false, status: 'stale-negotiation' };
+    }
 
     if (signal.type === 'offer') {
       if (!signal.negotiationId || signal.negotiationId !== activeNegotiationId) {
@@ -446,36 +839,58 @@ async function handleSignal(signal) {
       }
       if (!peerConnection) {
         console.log('[Offscreen] Received offer before peer connection ready, queueing (expected)...');
-        setTimeout(() => handleSignal(signal), 500);
+        setTimeout(() => {
+          if (!liveViewContextIsCurrent(signalContext, { restartGeneration })) return;
+          void handleSignal(signal, signalContext);
+        }, 500);
         return { success: true, status: 'queued' };
       }
 
+      const signalPeer = peerConnection;
+      const signalIceQueue = iceQueue;
+
       // Prevent duplicate processing from multiple setTimeout retries
-      if (offerProcessed || peerConnection.remoteDescription) {
+      if (offerProcessed) {
         console.log('[Offscreen] Offer already processed, skipping duplicate');
         return { success: true, status: 'already-processed' };
       }
       offerProcessed = true;
 
       teacherId = signal.from;
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+      await signalPeer.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+      if (!liveViewContextIsCurrent(signalContext, {
+        peer: signalPeer,
+        restartGeneration,
+      })) return { success: false, status: 'stale-negotiation' };
       console.log('[Offscreen] Set remote description (offer)');
 
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
+      const answer = await signalPeer.createAnswer();
+      if (!liveViewContextIsCurrent(signalContext, {
+        peer: signalPeer,
+        restartGeneration,
+      })) return { success: false, status: 'stale-negotiation' };
+      await signalPeer.setLocalDescription(answer);
+      if (!liveViewContextIsCurrent(signalContext, {
+        peer: signalPeer,
+        restartGeneration,
+      })) return { success: false, status: 'stale-negotiation' };
       console.log('[Offscreen] Created and set local description (answer)');
       if (liveViewSetupTimer) clearTimeout(liveViewSetupTimer);
       liveViewSetupTimer = null;
 
       // Send answer back to teacher via service worker
-      chrome.runtime.sendMessage({
-        type: 'ANSWER',
-        negotiationId: activeNegotiationId,
-        sdp: peerConnection.localDescription.toJSON(),
-      });
+      sendLiveViewMessageForContext(signalContext, 'ANSWER', {
+        sdp: signalPeer.localDescription.toJSON(),
+      }, restartGeneration);
 
       // Flush queued ICE candidates now that remote description is set
-      await flushIceQueue();
+      const queueFlushed = await flushIceQueue(
+        signalContext,
+        signalPeer,
+        signalIceQueue,
+        restartGeneration,
+      );
+      if (!queueFlushed) return { success: false, status: 'stale-negotiation' };
 
       return { success: true };
 
@@ -489,19 +904,29 @@ async function handleSignal(signal) {
         return { success: true, status: 'queued' };
       }
       
-      if (!peerConnection.remoteDescription) {
+      const signalPeer = peerConnection;
+      const signalIceQueue = iceQueue;
+      if (!signalPeer.remoteDescription) {
         console.info('[Offscreen] Remote description not set yet, queueing ICE candidate');
-        iceQueue.push(signal.candidate);
+        signalIceQueue.push(signal.candidate);
         return { success: true, status: 'queued' };
       }
       
       try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        await signalPeer.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        if (!liveViewContextIsCurrent(signalContext, {
+          peer: signalPeer,
+          restartGeneration,
+        })) return { success: false, status: 'stale-negotiation' };
         console.log('[Offscreen] Added ICE candidate');
         return { success: true };
       } catch (iceError) {
+        if (!liveViewContextIsCurrent(signalContext, {
+          peer: signalPeer,
+          restartGeneration,
+        })) return { success: false, status: 'stale-negotiation' };
         // Late ICE candidates are expected and safe to ignore
-        console.info('[Offscreen] ICE candidate add failed (expected for late candidates):', iceError.message);
+        console.info('[Offscreen] ICE candidate add failed (expected for late candidates)');
         return { success: true, status: 'late-candidate' };
       }
     }
@@ -509,29 +934,49 @@ async function handleSignal(signal) {
     return { success: true };
     
   } catch (error) {
+    if (!liveViewContextIsCurrent(signalContext)) {
+      return { success: false, status: 'stale-negotiation' };
+    }
     // Log with name + message for DOMExceptions
-    console.error('[Offscreen] Unexpected signaling error:', error.name || 'Error', error.message || error);
+    console.error('[Offscreen] Unexpected signaling error');
     return { success: false, error: error.message || String(error) };
   }
 }
 
 // Flush queued ICE candidates after remote description is set
-async function flushIceQueue() {
-  if (iceQueue.length === 0) return;
-  
-  console.log(`[Offscreen] Flushing ${iceQueue.length} queued ICE candidates`);
-  
-  while (iceQueue.length > 0) {
-    const candidate = iceQueue.shift();
+async function flushIceQueue(context, expectedPeer, expectedQueue, restartGeneration) {
+  if (!liveViewContextIsCurrent(context, {
+    peer: expectedPeer,
+    restartGeneration,
+  })) return false;
+  if (expectedQueue.length === 0) return true;
+
+  console.log(`[Offscreen] Flushing ${expectedQueue.length} queued ICE candidates`);
+
+  while (expectedQueue.length > 0) {
+    if (!liveViewContextIsCurrent(context, {
+      peer: expectedPeer,
+      restartGeneration,
+    })) return false;
+    const candidate = expectedQueue.shift();
     try {
-      await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      await expectedPeer.addIceCandidate(new RTCIceCandidate(candidate));
+      if (!liveViewContextIsCurrent(context, {
+        peer: expectedPeer,
+        restartGeneration,
+      })) return false;
     } catch (error) {
+      if (!liveViewContextIsCurrent(context, {
+        peer: expectedPeer,
+        restartGeneration,
+      })) return false;
       // Late candidates are safe to ignore
-      console.info('[Offscreen] Queued ICE candidate add failed (safe to ignore):', error.message);
+      console.info('[Offscreen] Queued ICE candidate add failed (safe to ignore)');
     }
   }
   
   console.log('[Offscreen] ICE queue flushed');
+  return true;
 }
 
 // Stop screen sharing and cleanup
@@ -558,6 +1003,16 @@ function stopScreenShare() {
   teacherId = null;
   offerProcessed = false;
   activeNegotiationId = null;
+  activeLiveViewAuthContextId = null;
+  activeLiveViewAuthGeneration = 0;
+  activeLiveViewConnectionGeneration = 0;
+  activeLiveViewServerOrigin = null;
+  activeLiveViewStudentSessionId = null;
+  activeLiveViewRestartGeneration = 0;
+  activeLiveViewContext = null;
+  liveViewRestartAttempts = [];
+  liveViewAttemptStartedAt = 0;
+  liveViewTelemetryAttempts = new Set();
   
   console.log('[Offscreen] Cleanup complete');
 }

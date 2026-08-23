@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.6.9");
+    expect(manifest.version).toBe("2.7.0");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -325,21 +325,17 @@ describe("ClassPilot extension release package guards", () => {
     expect(contentScript).toContain("window.location.pathname.startsWith('/passpilot/kiosk/')");
   });
 
-  it("passes the managed device identity to the kiosk so its memory survives profile wipes", () => {
+  it("uses a one-use managed-device launch ticket without a stable kiosk URL identifier", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(manifest.permissions).toContain("enterprise.deviceAttributes");
     expect(serviceWorker).toContain("getDirectoryDeviceId");
-    expect(serviceWorker).toContain("function detectManagedKioskDeviceId");
-    // The device param must ride the kiosk launch URL without splitting the
-    // launch=gate literal asserted above.
-    expect(serviceWorker).toContain("&launch=gate${deviceParam}");
-    // Late resolution must repaint an already-painted gate.
-    const detectBody = serviceWorker.slice(
-      serviceWorker.indexOf("function detectManagedKioskDeviceId"),
-      serviceWorker.indexOf("function detectManagedKioskDeviceId") + 2400
-    );
-    expect(detectBody).toContain("bumpAuthGateStateRevision()");
+    expect(serviceWorker).toContain("function requestKioskLaunchUrl");
+    expect(serviceWorker).toContain("/api/classpilot/kiosk/launch-ticket");
+    expect(serviceWorker).toContain("launchUrl.hash = `launchTicket=${encodeURIComponent(ticket)}`");
+    expect(serviceWorker).toContain("capabilities: ['kioskLaunchTicketV1']");
+    expect(serviceWorker).not.toContain("&device=");
+    expect(serviceWorker).not.toContain("classpilot-kiosk-device:");
   });
 
   it("suppresses the student FAB on kiosk pages while keeping the monitoring disclosure", () => {
@@ -530,7 +526,10 @@ describe("ClassPilot extension release package guards", () => {
       "heartbeatMessageBinding !== currentHeartbeatBinding",
       sendHeartbeatStart
     );
-    const heartbeatSuccess = serviceWorker.indexOf("await recordHeartbeatSuccess()", sendHeartbeatStart);
+    const heartbeatSuccess = serviceWorker.indexOf(
+      "await recordHeartbeatSuccess(Date.now(), heartbeatAuthContext)",
+      sendHeartbeatStart,
+    );
     const classroomResponseApply = serviceWorker.indexOf(
       "await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile')",
       sendHeartbeatStart
@@ -538,7 +537,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(responseBindingGuard).toBeGreaterThan(sendHeartbeatStart);
     expect(responseBindingGuard).toBeLessThan(heartbeatSuccess);
     expect(responseBindingGuard).toBeLessThan(classroomResponseApply);
-    expect(serviceWorker).toContain("safeSendHeartbeat('identity-changed-reconcile')");
+    expect(serviceWorker).toContain("scheduleEventHeartbeat('identity-changed-reconcile')");
     expect(serviceWorker).toContain("await clearStudentMessageState(reason)");
     expect(serviceWorker).toContain("await reconcileMessageInboxIdentity('worker-wake')");
     expect(runtimeCore).toContain("const MAX_MESSAGE_INBOX_ENTRIES = 50;");
@@ -547,12 +546,20 @@ describe("ClassPilot extension release package guards", () => {
     expect(popup).not.toContain("chrome.storage.local.get(['messages'])");
   });
 
-  it("advertises the additive 2.6 realtime capabilities on auth and heartbeat", () => {
+  it("advertises protocol 3 capabilities on auth and heartbeat", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     for (const capability of [
       "classroomStateV1",
       "fabStateRevisionV1",
       "exactTabCloseV1",
+      "authBoundTelemetryV1",
+      "exactBindingAckV2",
+      "exactTabCloseV2",
+      "studentChatIdempotencyV1",
+      "screenshotObservationLeaseV1",
+      "safetyEvidenceCaptureV1",
+      "liveViewIceServersV1",
+      "kioskLaunchTicketV1",
       "screenOnlyUnlockV1",
       "durableChatAckV1",
       "commandAckReceiptV1",
@@ -562,15 +569,115 @@ describe("ClassPilot extension release package guards", () => {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
     expect(serviceWorker).toContain("clientProtocolVersion: CLIENT_PROTOCOL_VERSION");
+    expect(serviceWorker).toContain("const CLIENT_PROTOCOL_VERSION = 3");
     expect(serviceWorker).toContain("...extensionProtocolDescriptor()");
     expect(serviceWorker).toContain("message.type === 'fab-state-sync'");
+  });
+
+  it("fences authenticated work to one immutable context and treats replacement as cancellation", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toContain("authContextId: null");
+    expect(serviceWorker).toContain("function generateAuthContextId()");
+    expect(serviceWorker).toContain("function captureAuthenticatedContext(");
+    expect(serviceWorker).toContain("function assertAuthenticatedContextCurrent(");
+    expect(serviceWorker).toContain("error.code = 'AUTH_CONTEXT_SUPERSEDED'");
+    expect(serviceWorker).toContain("authContextAbortController.abort()");
+    expect(serviceWorker).toContain("signal: authContextAbortController.signal");
+    expect(serviceWorker).toContain("signal: heartbeatAuthContext.signal");
+    expect(serviceWorker).toContain("signal: screenshotAuthContext.signal");
+    expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`)");
+    expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response-body`)");
+  });
+
+  it("keeps student chat durable, bounded, idempotent, and exact-bound", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const contentScript = readRepoFile("extension/content.js");
+    const popup = readRepoFile("extension/popup.js");
+    expect(serviceWorker).toContain("const STUDENT_CHAT_OUTBOX_KEY = 'studentChatOutboxV1'");
+    expect(serviceWorker).toContain("const STUDENT_CHAT_MAX_ENTRIES = 40");
+    expect(serviceWorker).toContain("const STUDENT_CHAT_MAX_BYTES = 128 * 1024");
+    expect(serviceWorker).toContain("const STUDENT_CHAT_MAX_AGE_MS = 30 * 60 * 1000");
+    expect(serviceWorker).toContain("String(data.clientMessageId || '') === attempted.clientMessageId");
+    expect(serviceWorker).toContain("String(data.messageId || '').trim()");
+    expect(serviceWorker).toContain("await removeDeliveredStudentChatEntry(attempted.clientMessageId, authContext)");
+    expect(serviceWorker).toContain("await discardStudentChatOutbox().catch(() => {})");
+    for (const source of [contentScript, popup]) {
+      expect(source).toContain("globalThis.crypto?.randomUUID?.()");
+      expect(source).toContain("clientMessageId,");
+    }
+    for (const status of ["Sending", "Retrying", "Delivered", "Failed"]) {
+      expect(serviceWorker).toContain(`'${status}'`);
+    }
+  });
+
+  it("fails ambient screenshots private and captures exact safety evidence before close", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toContain("function adoptScreenshotPolicy(rawPolicy, context)");
+    expect(serviceWorker).toContain("hasNegotiatedCapability('screenshotObservationLeaseV1', context)");
+    expect(serviceWorker).toContain("status: 'paused_unobserved'");
+    expect(serviceWorker).toContain("Math.min(120, expiresInSeconds)");
+    expect(serviceWorker).toContain("captureAndSendScreenshot({ reason: 'lease-start' })");
+    expect(serviceWorker).toContain("? '/api/classpilot/device/screenshot'");
+    expect(serviceWorker).toContain(": '/api/device/screenshot'");
+    expect(serviceWorker).toContain("async function captureSafetyEvidence(");
+    expect(serviceWorker).toContain("expiresAt > Date.now() + 35 * 1000");
+    expect(serviceWorker).toContain("captureKind: 'safety_evidence'");
+    expect(serviceWorker).toContain("evidenceRequestId: requestId");
+    expect(serviceWorker).toContain("tabSnapshotRevision: snapshotRevision");
+    expect(serviceWorker).toContain("...extensionProtocolDescriptor()");
+    const closeStart = serviceWorker.indexOf("case 'close-tabs':");
+    const safetyIndex = serviceWorker.indexOf("result.safetyEvidence = await captureSafetyEvidence(", closeStart);
+    const closeIndex = serviceWorker.indexOf("await closeExactTabTargets(exact, authContext)", safetyIndex);
+    expect(safetyIndex).toBeGreaterThan(closeStart);
+    expect(closeIndex).toBeGreaterThan(safetyIndex);
+  });
+
+  it("retrieves short-lived Live View ICE configuration by authenticated POST", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const start = serviceWorker.indexOf("async function fetchLiveViewIceConfiguration");
+    const end = serviceWorker.indexOf("function liveViewContextFor", start);
+    const fetchIce = serviceWorker.slice(start, end);
+    expect(fetchIce).toContain("hasNegotiatedCapability('liveViewIceServersV1', authContext)");
+    expect(fetchIce).toContain("/api/classpilot/device/live-view/ice-servers`");
+    expect(fetchIce).toContain("method: 'POST'");
+    expect(fetchIce).toContain("body: JSON.stringify({ negotiationId })");
+    expect(fetchIce).toContain("signal: authContext.signal");
+    expect(fetchIce).not.toContain("?negotiationId=");
+  });
+
+  it("keeps logs and Sentry surfaces free of raw identities and command payloads", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const offscreen = readRepoFile("extension/offscreen.js");
+    expect(serviceWorker).toContain("function safeDiagnosticError(error)");
+    expect(serviceWorker).toContain("delete event.user");
+    expect(serviceWorker).toContain("delete event.contexts");
+    expect(serviceWorker).toContain("delete event.extra");
+    expect(serviceWorker).toContain("delete event.tags");
+    const consoleStatements = serviceWorker
+      .split("\n")
+      .filter((line) => line.includes("console."))
+      .join("\n");
+    for (const forbidden of [
+      "studentEmail: CONFIG.studentEmail",
+      "deviceId: CONFIG.deviceId",
+      "Flight Path applied with allowed domains:",
+      "Chat notification sent:', chatFromName, chatMessage",
+      "Check-in request received:', request",
+      "Update received from server:', receivedGlobalBlockedDomains",
+      "duplicate remote-control _msgId', msgId",
+    ]) {
+      expect(consoleStatements).not.toContain(forbidden);
+    }
+    expect(offscreen).not.toContain("console.error('[Offscreen] Unexpected signaling error:', error");
   });
 
   it("uses worker-safe heartbeat/screenshot scheduling and generation-bound offscreen RPC", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     const offscreen = readRepoFile("extension/offscreen.js");
     expect(serviceWorker).toContain("chrome.alarms.create('heartbeat'");
-    expect(serviceWorker).toContain("heartbeatPendingReason = reason");
+    expect(serviceWorker).toContain("if (heartbeatInFlight)");
+    expect(serviceWorker).not.toContain("heartbeatPendingReason");
+    expect(serviceWorker).toContain("const EVENT_HEARTBEAT_COALESCE_MS = 2000");
     expect(serviceWorker).toContain("typeof chrome.runtime.getContexts === 'function'");
     expect(serviceWorker).toContain("creatingOffscreen = null;");
     expect(serviceWorker).toContain("type: 'WS_STATUS'");
@@ -596,7 +703,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("type: 'stop-share'");
     expect(serviceWorker).toContain("negotiationId: message.negotiationId");
     expect(offscreen).toContain("signal.negotiationId !== activeNegotiationId");
-    expect(offscreen).toContain("scheduleLiveViewExpiry(setupExpiresAt, expiresAt, activeNegotiationId)");
+    expect(offscreen).toContain("scheduleLiveViewExpiry(");
+    expect(offscreen).toContain("iceConfigurationExpiresAt,");
+    expect(offscreen).toContain("attemptLiveViewIceRestart");
     expect(offscreen).toContain("expireLiveView('setup-expired', negotiationId)");
     expect(offscreen).toContain("expireLiveView('maximum-duration', negotiationId)");
     expect(serviceWorker).toContain("message.type === 'LIVE_VIEW_EXPIRED'");
@@ -621,7 +730,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).not.toMatch(/(?:chrome\.storage\.local|kv)\.set\(\{\s*config:\s*CONFIG/);
     expect(serviceWorker).toContain("if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId");
     expect(serviceWorker).toMatch(/handleOffscreenMessage\(message\)[\s\S]*\.then\(sendResponse\)/);
-    expect(serviceWorker).toMatch(/await handleWsEvent\(message\.event, message\.data, message\.connectionGeneration\)/);
+    expect(serviceWorker).toMatch(/await handleWsEvent\([\s\S]*message\.authContextId,[\s\S]*message\.serverOrigin/);
     expect(serviceWorker).toContain("wsMessageProcessingTail");
   });
 
@@ -629,7 +738,7 @@ describe("ClassPilot extension release package guards", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(serviceWorker).toContain("const COMMAND_ACK_OUTBOX_KEY = 'commandAckOutboxV1';");
     expect(serviceWorker).toContain("ackId: `${normalizedCommandId}:${ackState}`");
-    expect(serviceWorker).toContain("await enqueueCommandAck(ack)");
+    expect(serviceWorker).toContain("await enqueueCommandAck(ack, authContext)");
     expect(serviceWorker).toContain("message.type === 'command-ack-receipt'");
     expect(serviceWorker).toContain("/api/classpilot/device/command-acks");
     expect(serviceWorker).toContain("slice(0, 50)");

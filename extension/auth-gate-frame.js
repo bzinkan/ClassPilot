@@ -456,9 +456,21 @@
     const kioskUrl = safeKioskUrl(state.kioskUrl);
     if (kioskUrl) {
       document.getElementById('classpilot-auth-kiosk-launch')?.addEventListener('click', () => {
-        // This value came from the extension worker and was restricted to
-        // HTTP(S). The user gesture navigates the embedding tab directly.
-        window.open(kioskUrl, '_top');
+        const button = document.getElementById('classpilot-auth-kiosk-launch');
+        if (button) button.disabled = true;
+        chrome.runtime.sendMessage({ type: 'request-kiosk-launch' }, (response) => {
+          if (button) button.disabled = false;
+          const launchUrl = safeKioskUrl(
+            !chrome.runtime.lastError && response?.success ? response.url : kioskUrl,
+          );
+          if (launchUrl) {
+            // Ticket continuity is carried only in the fragment; the kiosk
+            // removes it immediately after POST redemption.
+            window.open(launchUrl, '_top');
+          } else {
+            setError('PassPilot kiosk is unavailable. Please try again.');
+          }
+        });
       });
     }
   }
