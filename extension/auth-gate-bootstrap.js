@@ -25,6 +25,7 @@
   let loadingPaintTimer = null;
   let lastState = null;
   let loadingPaintMs = null;
+  let recordedAuthGateOutcome = null;
   let interactionBlockersInstalled = false;
   let latestRevision = -1;
   let managedKioskOrigin = null;
@@ -461,14 +462,25 @@
         : state.setupRequired === true
           ? 'setup_required'
           : 'ready';
+    const candidate = {
+      loadingPaintMs,
+      configReadyMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      outcome: phase,
+      coldWorker: state.coldWorker === true,
+      timestamp: Date.now(),
+    };
+    // document_start and document_idle can both request the same restored
+    // state. The later warm duplicate must not overwrite the cold worker's
+    // first decision or its SLA timing for the same outcome.
+    if (!(
+      recordedAuthGateOutcome?.outcome === candidate.outcome
+      && recordedAuthGateOutcome.coldWorker === true
+      && candidate.coldWorker === false
+    )) {
+      recordedAuthGateOutcome = candidate;
+    }
     chrome.storage.local.set({
-      authGateTimingV1: {
-        loadingPaintMs,
-        configReadyMs: Math.max(0, Math.round(performance.now() - startedAt)),
-        outcome: phase,
-        coldWorker: state.coldWorker === true,
-        timestamp: Date.now(),
-      },
+      authGateTimingV1: recordedAuthGateOutcome,
     }, () => {
       void chrome.runtime.lastError;
     });

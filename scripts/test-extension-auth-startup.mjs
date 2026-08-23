@@ -2637,7 +2637,8 @@ async function main() {
       });
       if (
         authenticatedTiming?.outcome === 'authenticated' &&
-        Number(authenticatedTiming.timestamp) >= authenticatedNavigationStartedAt
+        Number(authenticatedTiming.timestamp) >= authenticatedNavigationStartedAt &&
+        authenticatedTiming.coldWorker === true
       ) break;
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 20));
     }
