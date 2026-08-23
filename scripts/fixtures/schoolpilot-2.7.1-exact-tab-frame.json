@@ -1,0 +1,51 @@
+{
+  "fixtureSchemaVersion": 1,
+  "contract": "SchoolPilot ClassPilot exact tab close V2",
+  "frame": {
+    "type": "remote-control",
+    "_msgId": "<opaque-message-id>",
+    "commandId": "command-a",
+    "studentId": "student-a",
+    "studentSessionId": "student-session-a",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-a",
+      "deviceId": "device-a",
+      "studentId": "student-a",
+      "studentSessionId": "student-session-a",
+      "controlRevision": 12
+    },
+    "deliveryPolicy": "transient_action",
+    "expiresAt": "2026-08-23T15:00:15.000Z",
+    "command": {
+      "type": "close-tab",
+      "commandId": "command-a",
+      "studentId": "student-a",
+      "studentSessionId": "student-session-a",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-a",
+        "deviceId": "device-a",
+        "studentId": "student-a",
+        "studentSessionId": "student-session-a",
+        "controlRevision": 12
+      },
+      "deliveryPolicy": "transient_action",
+      "expiresAt": "2026-08-23T15:00:15.000Z",
+      "authority": {
+        "teachingSessionId": "teaching-session-a",
+        "supervisionContextId": null
+      },
+      "teachingSessionId": "teaching-session-a",
+      "supervisionContextId": null,
+      "data": {
+        "commandId": "command-a",
+        "closeAll": false,
+        "tabRefs": [
+          "tab-ref-a"
+        ],
+        "snapshotRevision": 44
+      }
+    }
+  }
+}

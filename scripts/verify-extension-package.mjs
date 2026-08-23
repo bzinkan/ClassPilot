@@ -18,6 +18,12 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
+const expectedPreparedReleaseVersion = '2.7.1';
+assert.equal(
+  manifest.version,
+  expectedPreparedReleaseVersion,
+  'Prepared ClassPilot release guard must be bumped together with manifest.json',
+);
 const archivePath = resolve(
   repoRoot,
   process.argv[2] || `dist/ClassPilot-v${manifest.version}.zip`,
@@ -131,8 +137,10 @@ function runPackagedTests() {
   const environment = { ...process.env, CLASSPILOT_EXTENSION_PATH: unpackRoot };
   for (const script of [
     'test-extension-resilience.mjs',
+    'test-extension-authority-races.mjs',
     'test-extension-2-7-behavior.mjs',
     'test-extension-offscreen-identity.mjs',
+    'test-extension-popup-identity.mjs',
     'test-extension-auth-layout.mjs',
     'test-extension-auth-startup.mjs',
   ]) {

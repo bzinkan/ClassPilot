@@ -1,0 +1,45 @@
+{
+  "fixtureSchemaVersion": 1,
+  "contract": "SchoolPilot ClassPilot authoritative control revision pushes",
+  "frames": {
+    "classroom": {
+      "type": "classroom-state-sync",
+      "_msgId": "classroom-message-a",
+      "studentId": "student-a",
+      "studentSessionId": "student-session-a",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-a",
+        "deviceId": "device-a",
+        "studentId": "student-a",
+        "studentSessionId": "student-session-a",
+        "controlRevision": 42
+      },
+      "classroomState": {
+        "schemaVersion": 1,
+        "revision": 42
+      }
+    },
+    "fab": {
+      "type": "fab-state-sync",
+      "_msgId": "fab-message-a",
+      "sessionId": "teaching-session-a",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-a",
+        "deviceId": "device-a",
+        "studentId": "student-a",
+        "studentSessionId": "student-session-a",
+        "controlRevision": 42
+      },
+      "data": {
+        "schemaVersion": 1,
+        "studentId": "student-a",
+        "studentSessionId": "student-session-a",
+        "ownershipRevision": 42,
+        "revision": 41,
+        "lifecycleRevision": 41
+      }
+    }
+  }
+}

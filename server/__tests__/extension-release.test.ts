@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.7.0");
+    expect(manifest.version).toBe("2.7.1");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -240,13 +240,18 @@ describe("ClassPilot extension release package guards", () => {
       const beginIndex = registration.indexOf("await beginStudentAuthCommit(");
       const persistIndex = registration.indexOf("await durableLocalKv.set({", beginIndex);
       const applyIndex = registration.indexOf("await applyClassroomStateFromAuthResponse(", persistIndex);
-      const requireIndex = registration.indexOf("{ requireApplied: true }", applyIndex);
-      const completeIndex = registration.indexOf("await completeStudentAuthCommit(", requireIndex);
+      const requireIndex = registration.indexOf("requireApplied: true", applyIndex);
+      const contextIndex = registration.indexOf(
+        "authContext: committedAuthContext",
+        requireIndex,
+      );
+      const completeIndex = registration.indexOf("await completeStudentAuthCommit(", contextIndex);
       expect(beginIndex).toBeGreaterThan(-1);
       expect(persistIndex).toBeGreaterThan(beginIndex);
       expect(applyIndex).toBeGreaterThan(persistIndex);
       expect(requireIndex).toBeGreaterThan(applyIndex);
-      expect(completeIndex).toBeGreaterThan(requireIndex);
+      expect(contextIndex).toBeGreaterThan(requireIndex);
+      expect(completeIndex).toBeGreaterThan(contextIndex);
     }
     expect(ensureRegistration).toContain("student_registration_commit_failed");
     expect(directRegistration).toContain("student_auto_registration_commit_failed");
@@ -331,9 +336,11 @@ describe("ClassPilot extension release package guards", () => {
     expect(manifest.permissions).toContain("enterprise.deviceAttributes");
     expect(serviceWorker).toContain("getDirectoryDeviceId");
     expect(serviceWorker).toContain("function requestKioskLaunchUrl");
+    expect(serviceWorker).toContain("/api/classpilot/kiosk/launch-ticket/preflight");
     expect(serviceWorker).toContain("/api/classpilot/kiosk/launch-ticket");
     expect(serviceWorker).toContain("launchUrl.hash = `launchTicket=${encodeURIComponent(ticket)}`");
-    expect(serviceWorker).toContain("capabilities: ['kioskLaunchTicketV1']");
+    expect(serviceWorker).toContain("'kioskLaunchTicketV2'");
+    expect(serviceWorker).toContain("const KIOSK_LAUNCH_TICKET_V2_MAX_EXPIRY_MS = 660 * 1000");
     expect(serviceWorker).not.toContain("&device=");
     expect(serviceWorker).not.toContain("classpilot-kiosk-device:");
   });
@@ -392,7 +399,9 @@ describe("ClassPilot extension release package guards", () => {
     const runtimeEnd = serviceWorker.indexOf("async function resolveCurrentUrlMarker", runtimeStart);
     const runtimeBody = serviceWorker.slice(runtimeStart, runtimeEnd);
     expect(runtimeBody).toContain("await composeAllManagedDynamicRules()");
-    expect(runtimeBody).toContain("await reconcileClassroomStateTabsBestEffort(state)");
+    expect(runtimeBody).toMatch(
+      /await reconcileClassroomStateTabsBestEffort\(state,\s*\{\s*authContext,\s*assertCurrent,\s*runtimeOwner,/,
+    );
     expect(runtimeBody).toContain("DNR is the durable enforcement boundary");
     expect(serviceWorker).toContain("CLASSROOM_STATE_RECONCILE_ALARM");
     expect(serviceWorker).toContain("Existing-tab reconciliation deferred");
@@ -421,15 +430,17 @@ describe("ClassPilot extension release package guards", () => {
   it("applies classroom state returned by every supported student login path", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(serviceWorker).toContain("async function applyClassroomStateFromAuthResponse");
-    expect(serviceWorker).toContain("await applyClassroomState(snapshot, { reason })");
+    expect(serviceWorker).toContain(
+      "await applyClassroomState(snapshot, { reason, authContext, authorityEnvelope: data })",
+    );
     expect(serviceWorker).toContain("emitEvent: false");
     expect(serviceWorker).toContain("CLASSROOM_STATE_STUDENT_BINDING_KEY");
     expect(serviceWorker).toMatch(
-      /applyClassroomStateFromAuthResponse\(data, 'student_login', \{ requireApplied: true \}\)/,
+      /applyClassroomStateFromAuthResponse\(data, 'student_login', \{\s*requireApplied: true,\s*authContext: committedAuthContext,\s*authMutationHeld: true,?\s*\}\)/,
     );
     expect(
       serviceWorker.match(
-        /applyClassroomStateFromAuthResponse\(\s*data,\s*'student_registration',\s*\{ requireApplied: true \},?\s*\)/g,
+        /applyClassroomStateFromAuthResponse\(\s*data,\s*'student_registration',\s*\{\s*requireApplied: true,\s*authContext: committedAuthContext,\s*authMutationHeld: true,?\s*\},?\s*\)/g,
       ),
     ).toHaveLength(2);
   });
@@ -459,9 +470,11 @@ describe("ClassPilot extension release package guards", () => {
   it("persists monitoring transitions and flushes OFF before disconnect", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(serviceWorker).toContain("const MONITORING_STATE_STORAGE_KEY = 'monitoringStateV1';");
-    expect(serviceWorker).toContain("await kv.set({ [MONITORING_STATE_STORAGE_KEY]: persistedMonitoringState })");
-    expect(serviceWorker).toContain(
-      "trackingState === nextState && persistedMonitoringState.state === nextState"
+    expect(serviceWorker).toMatch(
+      /await kv\.set\(\{\s*\[MONITORING_STATE_STORAGE_KEY\]: persistedMonitoringState,/,
+    );
+    expect(serviceWorker).toMatch(
+      /trackingState === nextState\s*&& persistedMonitoringState\.state === nextState\s*&& persistedMonitoringStateScope === expectedScope/,
     );
     expect(serviceWorker).toContain("await flushMonitoringEventOutbox()");
     expect(serviceWorker).toContain("reason: 'scope_initialized'");
@@ -469,7 +482,7 @@ describe("ClassPilot extension release package guards", () => {
     const disableEnd = serviceWorker.indexOf("async function checkLicenseStatus", disableStart);
     const disableBody = serviceWorker.slice(disableStart, disableEnd);
     expect(disableBody.indexOf("transitionTrackingState(TRACKING_STATES.OFF"))
-      .toBeLessThan(disableBody.indexOf("disconnectWebSocket()"));
+      .toBeLessThan(disableBody.indexOf("disconnectWebSocket({ authContext })"));
   });
 
   it("uses persisted heartbeat health and a worker-safe 60-second alarm", () => {
@@ -518,7 +531,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("persistHeartbeatPendingMessages(");
     expect(serviceWorker).toContain("heartbeatMessageBinding");
     expect(serviceWorker).toContain("options.expectedBinding !== identity.binding");
-    expect(serviceWorker).toMatch(/handleHeartbeatPendingMessages\(\s*data\.pendingMessages,\s*heartbeatMessageBinding\s*\)/);
+    expect(serviceWorker).toMatch(
+      /handleHeartbeatPendingMessages\(\s*data\.pendingMessages,\s*heartbeatMessageBinding,\s*heartbeatAuthContext,?\s*\)/,
+    );
     expect(serviceWorker).toContain("assertCurrentCommandAuthority({\n        type: 'teacher-message'");
     expect(serviceWorker).toContain("sendCommandAck(commandId, 'completed'");
     const sendHeartbeatStart = serviceWorker.indexOf("async function sendHeartbeat(");
@@ -552,6 +567,7 @@ describe("ClassPilot extension release package guards", () => {
       "classroomStateV1",
       "fabStateRevisionV1",
       "exactTabCloseV1",
+      "scopedAuthorityChecksV1",
       "authBoundTelemetryV1",
       "exactBindingAckV2",
       "exactTabCloseV2",
@@ -560,6 +576,7 @@ describe("ClassPilot extension release package guards", () => {
       "safetyEvidenceCaptureV1",
       "liveViewIceServersV1",
       "kioskLaunchTicketV1",
+      "kioskLaunchTicketV2",
       "screenOnlyUnlockV1",
       "durableChatAckV1",
       "commandAckReceiptV1",
@@ -583,7 +600,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("error.code = 'AUTH_CONTEXT_SUPERSEDED'");
     expect(serviceWorker).toContain("authContextAbortController.abort()");
     expect(serviceWorker).toContain("signal: authContextAbortController.signal");
-    expect(serviceWorker).toContain("signal: heartbeatAuthContext.signal");
+    expect(serviceWorker).toContain("signal: heartbeatRequestController.signal");
+    expect(serviceWorker).toContain("const HEARTBEAT_REQUEST_TIMEOUT_MS = 15 * 1000");
+    expect(serviceWorker).toContain("heartbeatAuthContext.signal.addEventListener('abort', abortHeartbeatForAuth");
     expect(serviceWorker).toContain("signal: screenshotAuthContext.signal");
     expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`)");
     expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response-body`)");
@@ -612,11 +631,14 @@ describe("ClassPilot extension release package guards", () => {
 
   it("fails ambient screenshots private and captures exact safety evidence before close", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
-    expect(serviceWorker).toContain("function adoptScreenshotPolicy(rawPolicy, context)");
+    expect(serviceWorker).toContain("function adoptScreenshotPolicy(rawPolicy, context, options = {})");
     expect(serviceWorker).toContain("hasNegotiatedCapability('screenshotObservationLeaseV1', context)");
     expect(serviceWorker).toContain("status: 'paused_unobserved'");
-    expect(serviceWorker).toContain("Math.min(120, expiresInSeconds)");
-    expect(serviceWorker).toContain("captureAndSendScreenshot({ reason: 'lease-start' })");
+    expect(serviceWorker).toContain("Math.min(120, Math.max(0, expiresInSeconds))");
+    expect(serviceWorker).toContain("function requestImmediateObservedScreenshotCapture()");
+    expect(serviceWorker).toContain("screenshotPolicyGeneration !== expectedGeneration");
+    expect(serviceWorker).toContain("serverTime + boundedLeaseMs - responseReceivedAt");
+    expect(serviceWorker).toContain("function subscribeTabNavigationFence(");
     expect(serviceWorker).toContain("? '/api/classpilot/device/screenshot'");
     expect(serviceWorker).toContain(": '/api/device/screenshot'");
     expect(serviceWorker).toContain("async function captureSafetyEvidence(");
@@ -692,6 +714,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(offscreen).toContain("peerConnection.onconnectionstatechange = null");
     expect(offscreen).toMatch(/proxyWs\.onclose = \(\) => \{[\s\S]*stopScreenShare\(\)/);
     expect(offscreen).toMatch(/payload\?\.type === 'auth-error'[\s\S]*stopScreenShare\(\)/);
+    expect(serviceWorker).toContain("function revokeRetiredOffscreenAuthority(");
+    expect(serviceWorker).toMatch(/function abortActiveAuthContext\(\)[\s\S]*revokeRetiredOffscreenAuthority\(retiredLiveViewContext, retiredTransportIdentity\)/);
+    expect(offscreen).toMatch(/if \(activeLiveViewContext\) stopScreenShare\(\);[\s\S]*Close any existing connection/);
     expect(serviceWorker).toContain("if (message.type === 'CONNECTION_FAILED')");
     expect(serviceWorker).toContain("await stopScreenShare();");
     expect(serviceWorker).toContain("reason: 'student-websocket-closed'");
@@ -704,13 +729,18 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("negotiationId: message.negotiationId");
     expect(offscreen).toContain("signal.negotiationId !== activeNegotiationId");
     expect(offscreen).toContain("scheduleLiveViewExpiry(");
+    expect(offscreen).toContain("function resolveLiveViewExpirySchedule(");
+    expect(offscreen).toContain("latestLiveViewIdentity = Object.freeze({ ...identity })");
+    expect(offscreen).toContain("return { success: false, status: 'stale-negotiation'");
+    expect(serviceWorker).toContain("function reserveLiveViewNegotiation(");
     expect(offscreen).toContain("iceConfigurationExpiresAt,");
     expect(offscreen).toContain("attemptLiveViewIceRestart");
     expect(offscreen).toContain("expireLiveView('setup-expired', negotiationId)");
     expect(offscreen).toContain("expireLiveView('maximum-duration', negotiationId)");
     expect(serviceWorker).toContain("message.type === 'LIVE_VIEW_EXPIRED'");
     expect(serviceWorker).toContain("activeStudentSessionId: null");
-    expect(serviceWorker).toContain("assertCurrentStudentBinding(envelope, 'remote-control command')");
+    expect(serviceWorker).toContain("assertCurrentStudentBinding(envelope, 'remote-control command', {");
+    expect(serviceWorker).toContain("requireFullAuthority: requireExactTabAuthority");
     expect(serviceWorker).toContain("assertCurrentStudentBinding(message, 'durable teacher message')");
     expect(serviceWorker).toMatch(/function clearStudentAuth[\s\S]*studentAuthInvalidating = true;[\s\S]*disconnectWebSocket\(\)/);
     expect(serviceWorker).toMatch(/function adoptAuthenticatedStudentBinding[\s\S]*enqueueStudentAuthMutation/);
@@ -756,7 +786,12 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("function resolveExactTabRefs");
     expect(serviceWorker).toContain("error.code = 'STALE_TAB_SNAPSHOT'");
     expect(serviceWorker).toContain("command.data.screenOnly === true");
-    expect(serviceWorker).toContain("await markPollResponsePersisted(pollId, option)");
+    expect(serviceWorker).toContain(
+      "await markPollResponsePersisted(pollId, option, actionRequest.authContext)",
+    );
+    expect(serviceWorker).toContain(
+      "assertStudentActionRequestCurrent(actionRequest, 'poll response persistence')",
+    );
     expect(contentScript).toContain("type: 'get-classroom-overlay-state'");
     expect(contentScript).toContain("Submitting response…");
     expect(contentScript).toContain("completePollResponse(pollId, selectedIndex)");
@@ -777,7 +812,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("'hand-raising-toggle'");
     expect(serviceWorker).toContain("'hand-dismissed'");
     expect(serviceWorker).toContain("'teacher-message'");
-    expect(serviceWorker).toContain("stateScope\n        ? stateScope !== authority.teachingSessionId");
+    expect(serviceWorker).toContain("const activeSessionIds = activeTeachingSessionIds()");
+    expect(serviceWorker).toContain("!activeSessionIds.includes(authority.teachingSessionId)");
+    expect(serviceWorker).toContain("currentClassroomState?.supervisionContextId");
     expect(serviceWorker).toContain("currentClassroomState.teachingSessionId === sessionId");
     expect(serviceWorker).toContain("const messagingRevision = Number(command.data.revision)");
     expect(serviceWorker).toContain("const handRevision = Number(command.data.revision)");
@@ -824,5 +861,46 @@ describe("ClassPilot extension release package guards", () => {
     expect(compliance).not.toContain("default: 24 hours");
     expect(compliance).toContain("default 30 days");
     expect(extensionCompliance).toContain("https://school-pilot.net/privacy");
+  });
+
+  it("keeps public IT tutorial privacy claims aligned with 2.7.1 behavior", () => {
+    const tutorialMarkdown = readRepoFile("ClassPilot_IT_Tutorial.md");
+    const tutorialHtml = readRepoFile("client/public/ClassPilot_IT_Tutorial.html");
+    const alignedPrivacySurfaces = [
+      tutorialMarkdown,
+      tutorialHtml,
+      readRepoFile("CLASSPILOT_USER_GUIDE.md"),
+      readRepoFile("COPPA_FERPA_Compliance.md"),
+      readRepoFile("client/index.html"),
+      readRepoFile("client/src/pages/guides.tsx"),
+      readRepoFile("client/src/pages/help.tsx"),
+      readRepoFile("client/src/pages/settings.tsx"),
+      readRepoFile("replit.md"),
+    ];
+    for (const copy of alignedPrivacySurfaces) {
+      expect(copy).not.toContain("All-tabs data stored in-memory only");
+      expect(copy).not.toContain("Explicit consent for screen sharing");
+      expect(copy).not.toContain("only browsing activity");
+      expect(copy).not.toContain("No personal information beyond school email");
+      expect(copy).not.toContain("No keystroke logging, screenshot capture");
+      expect(copy).not.toContain("Screen sharing requires explicit action");
+      expect(copy).not.toContain("Data collected: Tab titles, URLs, and timestamps only");
+      expect(copy).not.toContain("Screen sharing requires explicit student consent");
+      expect(copy).not.toContain("Data is stored in-memory only for privacy");
+      expect(copy).not.toContain("Voluntary student consent");
+      expect(copy).not.toContain("No personal input data stored");
+      expect(copy.toLowerCase()).not.toContain("opt-in screen sharing");
+      expect(copy.toLowerCase()).not.toContain("record screen activity");
+      expect(copy.toLowerCase()).not.toContain("transparent monitoring with clear consent");
+      expect(copy).not.toContain("Outside these hours, no data is collected");
+      expect(copy).not.toContain("automatically deleted after 24 hours");
+      expect(copy).not.toContain("granted the necessary permissions to the extension");
+    }
+    for (const copy of [tutorialMarkdown, tutorialHtml]) {
+      expect(copy).toContain("observation-bound thumbnail screenshots");
+      expect(copy).toContain("school-scoped opaque ID");
+      expect(copy).toContain("temporary encrypted stream");
+      expect(copy).toContain("classroom communications");
+    }
   });
 });

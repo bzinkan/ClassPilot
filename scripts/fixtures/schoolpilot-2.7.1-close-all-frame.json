@@ -1,0 +1,31 @@
+{
+  "fixtureSchemaVersion": 1,
+  "contract": "SchoolPilot ClassPilot explicit all-tabs close",
+  "frame": {
+    "type": "remote-control",
+    "_msgId": "<opaque-message-id>",
+    "commandId": "command-close-all",
+    "studentId": "student-a",
+    "studentSessionId": "student-session-a",
+    "deliveryPolicy": "transient_action",
+    "expiresAt": "2026-08-23T15:00:15.000Z",
+    "command": {
+      "type": "close-tabs",
+      "commandId": "command-close-all",
+      "studentId": "student-a",
+      "studentSessionId": "student-session-a",
+      "deliveryPolicy": "transient_action",
+      "expiresAt": "2026-08-23T15:00:15.000Z",
+      "authority": {
+        "teachingSessionId": "teaching-session-a",
+        "supervisionContextId": null
+      },
+      "teachingSessionId": "teaching-session-a",
+      "supervisionContextId": null,
+      "data": {
+        "commandId": "command-close-all",
+        "closeAll": true
+      }
+    }
+  }
+}

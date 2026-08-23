@@ -116,6 +116,14 @@ describe("extension offscreen WebRTC lifecycle", () => {
       serverOrigin: "https://school-pilot.net",
       studentSessionId: "student-session-a",
     };
+    vm.runInContext(
+      `proxyWs = { readyState: WebSocket.OPEN };
+       proxyAuthenticated = true;
+       proxyAuthContextId = ${JSON.stringify(identityA.authContextId)};
+       proxyConnectionGeneration = ${identityA.connectionGeneration};
+       proxyServerOrigin = ${JSON.stringify(identityA.serverOrigin)};`,
+      context,
+    );
     const firstStart = await vm.runInContext(
       `startScreenCapture('tab', 'stream-1', ${JSON.stringify(identityA)})`,
       context,
@@ -150,6 +158,14 @@ describe("extension offscreen WebRTC lifecycle", () => {
       connectionGeneration: 2,
       studentSessionId: "student-session-b",
     };
+    vm.runInContext(
+      `proxyWs = { readyState: WebSocket.OPEN };
+       proxyAuthenticated = true;
+       proxyAuthContextId = ${JSON.stringify(identityB.authContextId)};
+       proxyConnectionGeneration = ${identityB.connectionGeneration};
+       proxyServerOrigin = ${JSON.stringify(identityB.serverOrigin)};`,
+      context,
+    );
     const secondStart = await vm.runInContext(
       `startScreenCapture('tab', 'stream-2', ${JSON.stringify(identityB)})`,
       context,
