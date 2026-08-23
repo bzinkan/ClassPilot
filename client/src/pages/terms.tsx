@@ -28,7 +28,7 @@ export default function TermsPage() {
       {/* Content */}
       <div className="container mx-auto px-4 py-12 max-w-4xl">
         <h1 className="text-4xl font-bold text-slate-900 mb-8">Terms of Service</h1>
-        <p className="text-slate-600 mb-8">Last updated: January 6, 2025</p>
+        <p className="text-slate-600 mb-8">Last updated: August 23, 2026</p>
 
         <div className="prose prose-slate max-w-none space-y-8">
           <section>
@@ -92,6 +92,7 @@ export default function TermsPage() {
               <li>Ensuring the Service is used in compliance with school policies and applicable laws</li>
               <li>Managing user accounts and access permissions appropriately</li>
               <li>Training staff on appropriate use of monitoring capabilities</li>
+              <li>Governing access, notice, retention, and secure deletion for any screenshot or recording an authorized teacher explicitly downloads to a local device</li>
             </ul>
           </section>
 
@@ -99,8 +100,9 @@ export default function TermsPage() {
             <h2 className="text-2xl font-semibold text-slate-900 mb-4">6. Student Privacy</h2>
             <p className="text-slate-700 leading-relaxed">
               ClassPilot is designed with student privacy as a priority. Monitoring occurs only during
-              designated school hours, students receive visual indicators when monitoring is active,
-              and screen captures are automatically deleted after a short retention period. For full
+              designated school hours and students receive visual indicators when monitoring is active.
+              Ambient thumbnails, safety/evidence content, activity history, account records, and any
+              teacher-downloaded local copies have different documented retention rules. For full
               details on how we handle student data, please review our{" "}
               <Link href="/privacy" className="text-amber-600 hover:text-amber-700 underline">
                 Privacy Policy
@@ -137,10 +139,11 @@ export default function TermsPage() {
           <section>
             <h2 className="text-2xl font-semibold text-slate-900 mb-4">9. Third-Party Services</h2>
             <p className="text-slate-700 leading-relaxed">
-              ClassPilot integrates with third-party services including Google Classroom and Google
-              Workspace for Education. Your use of these integrations is subject to the respective
-              third-party terms of service. We are not responsible for the practices or content of
-              third-party services.
+              ClassPilot integrates with Google Classroom and Google Workspace for Education and uses
+              contracted infrastructure, communications, error-monitoring, TURN relay, billing, and
+              AI-classification providers to operate enabled features. The current sub-processor list,
+              purpose, and data exposure are described in the Privacy Policy and compliance documentation.
+              Your use of integrations is also subject to the applicable third-party terms.
             </p>
           </section>
 

@@ -1,5 +1,10 @@
 # AWS Fargate - Quick Start Guide
 
+> **Archived prototype — do not run these commands against production.** Use
+> the SchoolPilot repository's guarded `CLAUDE.md` deployment flow and
+> `docs/CLASSPILOT_2_7_1_RELEASE.md`. The ClassPilot repository publishes only
+> the canonical, verified Chrome Web Store ZIP.
+
 ## TL;DR - Deploy in 3 Commands
 
 ```bash

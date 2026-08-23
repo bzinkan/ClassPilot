@@ -450,7 +450,7 @@ export default function PricingPage() {
                   'Chrome extension',
                   'Usage reports & analytics',
                   'Privacy scheduling',
-                  'FERPA compliant',
+                  'Supports school FERPA responsibilities',
                   'Priority email support',
                 ].map((feature, i) => (
                   <div key={i} className="feature-check">

@@ -60,7 +60,9 @@ session. On managed ChromeOS devices, a school Chrome policy can allow silent
 tab capture; otherwise Chrome may show a screen picker. Server-authorized,
 short-lived ICE configuration may route encrypted WebRTC media through
 SchoolPilot TURN relays when a direct connection is unavailable. The extension
-does not record Live View streams.
+and SchoolPilot servers do not record Live View streams. The authorized teacher
+dashboard can explicitly save a local recording or still image, which the
+school controls.
 
 The extension shows visible indicators in the popup and in-page ClassPilot FAB
 so students can see that school-managed monitoring is active.
@@ -71,27 +73,56 @@ duration.
 
 ## Managed Kiosk Continuity
 
-On an explicit managed-device kiosk launch, the extension may read the Chrome
-directory device id and send it only to SchoolPilot's enrollment-key-
-authenticated launch-ticket endpoint. The server converts it immediately to a
-school-scoped opaque mapping and returns a random one-use ticket with a
-60-second lifetime. Only the ticket enters the URL fragment. The raw directory
-id is not placed in URLs, stored by the extension, or logged. Kiosk PIN or
-signed-token authentication remains required; the ticket supplies continuity
-only.
+On an explicit managed-device kiosk launch, the extension first sends a
+non-sensitive capability preflight to the exact enrollment-key-authenticated
+SchoolPilot origin. If the server does not accept the repaired V2 contract,
+the ordinary PIN kiosk opens and the enterprise device API is never called.
+After a successful preflight, the extension may read the Chrome directory
+device id and send it only to that SchoolPilot origin. The server immediately
+converts it to a school-scoped opaque mapping and never stores or logs the raw
+value. It returns a random one-use ticket with a 10-minute lifetime. Only the
+ticket enters the URL fragment, and the kiosk removes the fragment immediately
+after reading it. The raw directory id is not placed in URLs, stored by the
+extension, or logged. Kiosk PIN or signed-token authentication remains
+required; the ticket supplies continuity only.
+
+## Chrome Web Store Privacy Disclosure Copy
+
+ClassPilot processes school-issued identifiers, active-tab activity, tab
+titles and URLs, website content visible in observation-bound screenshots,
+and student/teacher communications to provide classroom monitoring and
+messaging. Authorized Live View streams are temporary, encrypted in transit,
+and not recorded by the extension or SchoolPilot servers, but they may be
+relayed through SchoolPilot TURN servers. The authorized teacher dashboard can
+explicitly save a local recording or still image; that downloaded copy is
+controlled by the school.
+ClassPilot does not claim that Live View or the extension operates without
+processing personal data.
+
+An explicit authorized managed-kiosk launch may send the raw Chrome directory
+device id to SchoolPilot only after the capability preflight described above.
+SchoolPilot immediately converts it to a school-scoped opaque id; the raw value
+is never stored, logged, or placed in a URL.
 
 ## Retention
 
-The extension does not set retention by itself. SchoolPilot controls retention
-server-side. Raw screenshots and heartbeat-derived activity should remain
-bounded by the SchoolPilot retention jobs and school contract terms.
+The extension does not set server retention. The school setting governs
+heartbeat history and related session-report detail. Ambient previews use a
+short operational TTL; safety/evidence content, communications, account/audit
+records, and teacher-downloaded local files follow separate documented or
+contractual policies.
 
 ## Release Checklist
 
 Before each Chrome Web Store upload:
 
-- Bump `extension/manifest.json`.
-- Build a fresh zip from the `extension/` directory only.
+- Start from the clean, reviewed, tagged release commit and confirm the live
+  Store version immediately before upload.
+- Bump `extension/manifest.json`, run every source gate, then build only through
+  `./extension/package-extension.sh` from the repository root.
+- Upload only the generated versioned artifact (for this release,
+  `dist/ClassPilot-v2.7.1.zip`); never assemble a ZIP manually or treat the
+  unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
   zips, helper scripts, or generated icon sources.

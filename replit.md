@@ -1,7 +1,12 @@
 # ClassPilot - Teacher Dashboard & Chrome Extension
 
+> **Development history, not a production runbook.** SchoolPilot is the sole
+> production API and teacher web app. Deploy from the SchoolPilot repository's
+> guarded `CLAUDE.md` and `docs/CLASSPILOT_2_7_1_RELEASE.md`; this repository's
+> production output is only the verified ClassPilot extension archive.
+
 ## Overview
-ClassPilot is a privacy-aware classroom monitoring system for educational settings. This full-stack web application, consisting of a teacher dashboard and a Chrome Extension, enables transparent monitoring of student activity on managed Chromebooks. It prioritizes privacy with disclosure banners and opt-in screen sharing, provides real-time activity tracking, class roster management, and robust data retention controls. The system aims for FERPA/COPPA compliance by collecting minimal, essential data, supporting shared Chromebook environments, and offering comprehensive remote classroom control features. The project's ambition is to provide educators with effective digital classroom management while upholding student privacy and complying with educational regulations.
+ClassPilot is a privacy-aware classroom monitoring system for educational settings. This full-stack web application, consisting of a teacher dashboard and a Chrome Extension, enables transparent monitoring of student activity on managed Chromebooks. It prioritizes privacy with disclosure banners, observation-bound screenshots, exact safety captures, and authorized temporary Live View streams that are not recorded by the extension or SchoolPilot servers; an authorized teacher can explicitly save a local recording or still image governed by school policy. It provides real-time activity tracking, class roster management, and robust data retention controls. The system is designed to support schools' FERPA/COPPA responsibilities by limiting collection to documented educational purposes, supporting shared Chromebook environments, and offering comprehensive remote classroom control features.
 
 ## User Preferences
 I prefer detailed explanations.
@@ -29,7 +34,7 @@ The system is built with a full-stack architecture:
 -   **Shared Chromebook Support**: Supports multiple students on the same device with automatic detection and student-specific tracking.
 -   **Session-Based Device Tracking**: Device-first identification architecture with a `student_sessions` table tracking "Student X on Device Y RIGHT NOW." Transactional swap logic ensures one active session per student and device. Background jobs manage session expiration.
 -   **Student Monitoring**: Collects tab titles, URLs, timestamps, and favicons every 10 seconds, with real-time alerts for domain blocklist violations. Classifies students as Online, Idle, or Offline.
--   **All-Tabs Tracking**: Chrome Extension sends all open tabs (max 20) in every heartbeat. The dashboard displays all tabs across all student devices with per-device targeting. Teachers can close specific tabs with precise device-level control. Data is stored in-memory only for privacy.
+-   **All-Tabs Tracking**: Chrome Extension sends a bounded open-tab snapshot for authorized classroom controls. Exact tab references are identity-bound, and a limited local snapshot may persist across service-worker restarts; SchoolPilot retention follows the configured school policy.
 -   **Camera Usage Monitoring**: Detects camera activation via the Chrome extension, treating it as off-task behavior.
 -   **Live Screen Viewing**: Real-time screen capture using WebRTC with silent tab capture on managed Chromebooks and advanced video controls.
 -   **Website Duration Tracking**: Calculates and displays time spent on websites.
@@ -47,7 +52,7 @@ The system is built with a full-stack architecture:
 -   **Admin Student Roster Management**: Dedicated `/students` page for admin-only student roster management, including CSV bulk import, dynamic grade filtering, student table view, and edit/delete functionalities.
 
 ### System Design Choices
--   **Privacy-First**: Transparent monitoring, explicit consent for screen sharing, minimal data collection.
+-   **Privacy-First**: Transparent school-managed monitoring, authorized temporary Live View, purpose-limited data processing, and configurable retention.
 -   **Scalability**: Utilizes PostgreSQL (Neon-backed) with Drizzle ORM.
 -   **Deployment**: Designed for production, supporting Google Admin force-install of the Chrome Extension.
 -   **IP Allowlist**: Optional IP-based access control for the teacher dashboard.

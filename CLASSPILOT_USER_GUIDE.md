@@ -29,9 +29,9 @@ ClassPilot is a comprehensive classroom monitoring system designed for education
 - 🎥 **Live Screen Viewing** - Watch student screens via WebRTC with advanced controls
 - 🎯 **Per-Student Targeting** - Apply controls to specific students or entire class
 - 🔒 **Remote Classroom Control** - Lock screens, manage tabs, apply domain restrictions
-- 📸 **Advanced Recording** - Capture screenshots and record screen activity
+- 📸 **Authorized Visual Support** - Show observation-bound thumbnails, exact safety captures, and temporary Live View streams
 - 📱 **Shared Device Support** - Multiple students per Chromebook
-- 🔐 **Privacy-First Design** - Transparent monitoring with clear consent
+- 🔐 **Privacy-First Design** - Transparent monitoring with school-controlled authorization and accurate disclosure
 - 📈 **Website Duration Tracking** - Track time spent on websites
 
 ---
@@ -205,9 +205,11 @@ Click **Expand** to open the **Video Portal** with professional monitoring tools
 - Click **🔴 Record** button to start recording
 - **Duration counter** shows recording time
 - Click **⏹️ Stop** to end recording
-- Saves as WebM video file
+- Saves a WebM video file locally on the authorized teacher's computer
 - **Auto-downloads** to your `~/Downloads` folder
 - Filename: `recording-[student]-[timestamp].webm`
+- The extension and SchoolPilot servers do not retain this recording; the school
+  is responsible for access, notice, retention, and deletion of the downloaded file
 
 ##### Additional Controls
 - **Fullscreen Mode** - Maximize video to entire screen
@@ -420,10 +422,11 @@ Access via **"Roster"** page in navigation.
 **Delete Student:**
 1. Find student in list
 2. Click "Delete"
-3. Choose data retention option:
-   - Delete student and all activity data
-   - Delete student but keep anonymized data
-4. Confirm deletion
+3. Confirm removal from the active roster
+4. This deactivates access and active monitoring; it does not certify permanent
+   deletion of every linked historical record
+5. Submit a verified request to `privacy@classpilot.net` when permanent deletion
+   of linked records is required
 
 ### Grade-Level Filtering
 
@@ -445,49 +448,49 @@ ClassPilot is built with privacy as a core principle:
 - Clear notification that monitoring is occurring
 - No hidden or secret tracking
 
-✅ **Opt-In Screen Sharing**
-- Live screen viewing requires explicit consent
-- Student sees request before sharing (on unmanaged devices)
-- Can deny screen share request
-- Silent capture only on managed devices with admin policies
+✅ **Authorized Live View**
+- Live View starts only from an authorized teacher request for the current student session
+- The stream is temporary, encrypted in transit, and is not recorded by the extension or SchoolPilot servers
+- An authorized teacher can explicitly save a local still image or recording from the dashboard; the school controls that downloaded copy
+- Chrome may show a screen picker on unmanaged devices; managed Chrome policy can permit capture without one
+- The extension displays the applicable monitoring or sharing indicator
 
-✅ **Minimal Data Collection**
-- Only collects educational activity data
-- No keystrokes or passwords captured
-- No personal input data stored
-- No camera/microphone content recorded
+✅ **Purpose-Limited Data Processing**
+- Processes school-issued identifiers, active-tab URLs/titles, heartbeat state, and classroom communications needed for the service
+- May process observation-bound thumbnails and an exact-bound safety screenshot under the configured school policy
+- Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles
+- The school setting controls heartbeat history and related report detail; ambient thumbnails, safety evidence, communications, account/audit records, and local teacher downloads follow separate policies
 
-✅ **FERPA/COPPA Compliance**
-- Designed to meet educational privacy standards
-- Essential data only
-- Clear disclosure and consent
-- Parental/admin controls available
+✅ **School Privacy Controls**
+- Designed to support schools' FERPA, COPPA, and local-policy responsibilities
+- Clear disclosure of the data the service processes
+- School-admin authorization, retention, and access controls
+- Schools remain responsible for required parent/student notices and consent decisions
 
 ### Data Retention
 
-**Configurable Retention Periods:**
+**Configurable Activity-History Retention:**
 
 Access via **Settings → Data Retention**
 
 **Options:**
-- 7 days
-- 30 days
-- 90 days
-- 1 year
-- Indefinite
+- Any whole number from 1 through 365 days
+- Default: 30 days
 
 **Automatic Cleanup:**
-- Data older than retention period is automatically deleted
-- Runs daily at midnight
-- Irreversible deletion
-- Activity logs, browsing history, and screenshots cleaned
+- The scheduled job checks hourly, near 30 minutes past the hour
+- Heartbeat history and related session-report detail older than the selected period are purged or redacted
+- Ambient thumbnails use a separate 60–120-second operational cache
+- Exact safety/evidence image content uses a separate deployment retention policy (default 30 days); bounded review metadata may remain
+- Account, audit, and teacher-downloaded files follow their separate documented or contractual policies
 
 **Export Before Deletion:**
 1. Go to Data Retention settings
 2. Click "Export Data"
 3. Select date range
 4. Download CSV (.csv) file
-5. Contains all activity data in spreadsheet format
+5. Contains the exportable records returned for the selected range; verify the
+   file before relying on it as a complete legal or archival export
 
 ### What Data is Collected
 
@@ -505,13 +508,19 @@ Access via **Settings → Data Retention**
 - Total session duration
 - Device information
 
-**NOT Collected:**
+**Not directly collected through page or account APIs:**
 - Keystrokes or form inputs
 - Passwords or credentials
-- Personal messages or emails
 - Camera or microphone content
-- File contents
-- Downloads
+- Downloaded files
+
+Authorized observation thumbnails, exact-tab safety screenshots, and temporary
+Live View can show the website content visibly rendered on the shared tab or
+screen. That visible content can include a message, email, or file if it is open
+at the time. Live View streams are not recorded by the extension or SchoolPilot
+servers; an authorized teacher can explicitly save a local recording or still
+image, which the school controls. Captured images and ClassPilot communications
+follow their separate documented access and retention controls.
 
 ### IP Allowlist (Optional)
 
@@ -671,8 +680,8 @@ The extension sends activity updates every **10 seconds**:
 7. Streams video in real-time
 
 **Network:**
-- Uses STUN servers for NAT traversal
-- Peer-to-peer WebRTC connection
+- Uses authorized, short-lived STUN/TURN/TURNS configuration for NAT traversal
+- Prefers a direct WebRTC path and relays through SchoolPilot TURN when needed
 - Low latency (~1-2 seconds)
 - Adaptive bitrate
 
@@ -680,14 +689,17 @@ The extension sends activity updates every **10 seconds**:
 
 **For IT Administrators:**
 
-1. **Package Extension:**
-   - Download ClassPilot extension folder
-   - Create `.zip` file or `.crx` package
+1. **Use the reviewed Chrome Web Store release:**
+   - Confirm the live listing version and the retained release SHA-256
+   - For 2.7.1, the publisher uploads only the verified
+     `dist/ClassPilot-v2.7.1.zip` built by the repository release pipeline from
+     a clean tagged commit; school IT must not assemble or sideload a production
+     `.zip` or `.crx`
 
 2. **Google Admin Console:**
    - Navigate to Devices → Chrome → Apps & Extensions
    - Click "Add app or extension"
-   - Upload extension package
+   - Add the official ClassPilot Chrome Web Store listing by extension ID
    - Set install policy to "Force install"
    - Apply to student organizational units
 
@@ -708,6 +720,9 @@ The extension sends activity updates every **10 seconds**:
 4. Select extension folder
 5. Extension activates immediately
 
+Manual unpacked installation is only for an isolated development device. It is
+not a production deployment or a substitute for the managed test-OU gate.
+
 ### Troubleshooting Extension
 
 **Extension Not Appearing:**
@@ -725,7 +740,9 @@ The extension sends activity updates every **10 seconds**:
 **Silent Capture Not Working:**
 - Verify Google Admin policy "Allow tab capture" is enabled
 - Check device is enrolled in Google Admin
-- Extension will automatically fall back to picker
+- End the failed Live View negotiation and start a new exact-session request;
+  do not treat a managed-device capture failure as authorization to reuse stale
+  signaling or another student's stream
 
 **Screen Share Picker Not Appearing:**
 - Browser may have blocked popup
@@ -756,17 +773,19 @@ The extension sends activity updates every **10 seconds**:
 #### Live Screen View Not Working
 
 **Possible Causes:**
-1. Student denied screen share request
-2. WebRTC connection blocked by firewall
-3. Offscreen document not created
-4. Network connectivity issues
+1. The teacher/student/session authority changed
+2. WebRTC connection is blocked by the firewall
+3. TURN/TURNS credentials expired or the offscreen document did not recover
+4. On an unmanaged device, Chrome's capture picker was cancelled
 
 **Solutions:**
-1. Ask student to accept screen share request
-2. Check firewall allows WebRTC traffic (STUN/TURN ports)
-3. Reload extension on student device
-4. Try again - connection may have timed out
-5. Check browser console for WebRTC errors
+1. End the old negotiation and start a fresh request for the exact current
+   student and teaching session
+2. Check direct ICE and the documented TURN/TCP and TURNS/443 fallback paths
+3. Reload the extension on the student device if its offscreen document cannot
+   recover
+4. On unmanaged devices only, complete Chrome's required capture picker
+5. Check privacy-safe WebRTC diagnostics for an expired or stale negotiation
 
 #### Video Quality Poor
 
@@ -796,7 +815,7 @@ The extension sends activity updates every **10 seconds**:
 4. Check for Chrome browser updates
 5. Restart Chromebook
 
-#### Screenshots/Recordings Not Downloading
+#### Local Screenshots/Recordings Not Downloading
 
 **Possible Causes:**
 1. Browser blocked automatic downloads
@@ -947,9 +966,9 @@ The extension sends activity updates every **10 seconds**:
 ### Data Storage
 
 **Per Student/Day:**
-- ~5 MB activity data
-- ~50 MB with screenshots (if using)
-- ~500 MB with recordings (if using)
+- Server usage varies with heartbeat activity and the school's configured retention period
+- Ambient thumbnails are short-lived operational data; exact safety evidence follows its separate policy
+- Teacher-created screenshots and recordings are downloaded locally and are not part of SchoolPilot server-storage estimates
 
 **Database:**
 - PostgreSQL with automatic cleanup

@@ -1,0 +1,35 @@
+{
+  "schoolId": "school-b",
+  "studentId": "student-b",
+  "studentSessionId": "student-session-b",
+  "exactBinding": {
+    "bindingVersion": 2,
+    "schoolId": "school-b",
+    "deviceId": "device-b",
+    "studentId": "student-b",
+    "studentSessionId": "student-session-b",
+    "controlRevision": 42
+  },
+  "classroomState": {
+    "schemaVersion": 1,
+    "revision": 42,
+    "teachingSessionId": "teaching-session-b",
+    "hardExpiresAt": "2099-01-01T00:00:00.000Z",
+    "restrictions": {
+      "screenLock": { "active": false },
+      "flightPath": { "active": false, "allowedDomains": [] },
+      "blockList": { "active": false, "blockedDomains": [] },
+      "attentionMode": { "active": false, "message": "" },
+      "temporaryAllows": []
+    }
+  },
+  "settings": {
+    "schoolId": "school-b",
+    "fab": {
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "ownershipRevision": 41,
+      "ownershipRevisionKnown": true
+    }
+  }
+}

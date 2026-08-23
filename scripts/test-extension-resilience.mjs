@@ -102,8 +102,14 @@ async function main() {
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     const initialNow = Date.now();
     const initial = await worker.evaluate(async ({ now }) => {
-      await updateGlobalBlacklistRules(['school-policy.example']);
-      await chrome.storage.local.set({ globalBlockedDomains: ['school-policy.example'] });
+      CONFIG.serverUrl = 'https://school-pilot.net';
+      CONFIG.schoolId = 'integration-school';
+      await chrome.storage.local.set({
+        config: persistedNonAuthConfig(CONFIG),
+      });
+      await updateGlobalBlacklistRules(['school-policy.example'], {
+        scope: schoolPolicyScope(),
+      });
       const application = await applyClassroomState({
         schemaVersion: 1,
         revision: 42,
@@ -164,13 +170,18 @@ async function main() {
       CONFIG.activeStudentId = 'diagnostic-student';
       CONFIG.activeStudentSessionId = 'diagnostic-student-session';
       CONFIG.studentToken = 'diagnostic-token';
-      await chrome.storage.local.set({
-        deviceId: CONFIG.deviceId,
-        activeStudentId: CONFIG.activeStudentId,
-        activeStudentSessionId: CONFIG.activeStudentSessionId,
-        studentToken: CONFIG.studentToken,
-      });
-      licenseActive = true;
+      CONFIG.authContextId = 'diagnostic-auth-context';
+      activateAuthenticatedContext(CONFIG.authContextId);
+      const diagnosticAuthContext = captureAuthenticatedContext('diagnostic fixture');
+       await chrome.storage.local.set({
+         deviceId: CONFIG.deviceId,
+         activeStudentId: CONFIG.activeStudentId,
+         activeStudentSessionId: CONFIG.activeStudentSessionId,
+         studentToken: CONFIG.studentToken,
+         authContextId: CONFIG.authContextId,
+         classroomStateStudentBindingV1: CONFIG.activeStudentId,
+       });
+      adoptLicenseState(true, 'active', diagnosticAuthContext);
       trackingState = TRACKING_STATES.ACTIVE;
 
       const now = Date.now();
@@ -385,15 +396,17 @@ async function main() {
     const schoolPolicyCloseAuthority = await worker.evaluate(async () => {
       const originalConfig = { ...CONFIG };
       const originalStoredConfig = await chrome.storage.local.get('config');
+      const originalSchoolPolicyDomains = [...globalBlockedDomains];
       const originalExecute = executeRemoteControlCommand;
       const originalEnqueueMonitoringEvent = enqueueMonitoringEvent;
       const executions = [];
-      CONFIG.schoolId = null;
+      CONFIG.schoolId = 'authority-school';
+      const responseGuard = captureAuthenticatedResponseGuard();
       await adoptAuthenticatedStudentBinding({
         schoolId: 'authority-school',
         studentId: CONFIG.activeStudentId,
         studentSessionId: CONFIG.activeStudentSessionId,
-      }, 'school-policy-bootstrap-fixture');
+      }, 'school-policy-bootstrap-fixture', responseGuard);
       enqueueMonitoringEvent = async () => {};
       executeRemoteControlCommand = async (command) => {
         executions.push(command.type);
@@ -458,6 +471,9 @@ async function main() {
         CONFIG = originalConfig;
         await chrome.storage.local.remove('config');
         if (originalStoredConfig.config) await chrome.storage.local.set(originalStoredConfig);
+        await updateGlobalBlacklistRules(originalSchoolPolicyDomains, {
+          scope: schoolPolicyScope(),
+        });
       }
     });
     assert.deepEqual(schoolPolicyCloseAuthority.executions, ['close-tab']);
@@ -759,6 +775,8 @@ async function main() {
       restoreClassroomRuntimeBackup(classroomRuntimeBeforeTabTest);
       await composeDynamicRules(['classroom']);
 
+      const classroomStateBeforeFabTests = currentClassroomState;
+      currentClassroomState = null;
       await applyFabSettings({
         schemaVersion: 1,
         revision: 10,
@@ -895,9 +913,20 @@ async function main() {
       const afterDelayedCommands = (await chrome.storage.local.get(FAB_STATE_STORAGE_KEY))
         [FAB_STATE_STORAGE_KEY];
 
+      const directToggleAuthContext = captureAuthenticatedContext(
+        'same-session delayed legacy toggle fixture',
+      );
+      const directToggleBinding = {
+        studentId: directToggleAuthContext.studentId,
+        studentSessionId: directToggleAuthContext.studentSessionId,
+      };
       await executeRemoteControlCommand({
         type: 'messaging-toggle',
         data: { enabled: false, revision: 0 },
+      }, {
+        authContext: directToggleAuthContext,
+        binding: directToggleBinding,
+        envelope: directToggleBinding,
       });
       const afterSameSessionDelayedLegacyToggle = (
         await chrome.storage.local.get(FAB_STATE_STORAGE_KEY)
@@ -933,6 +962,7 @@ async function main() {
       await clearFabAndOverlayState('integration-protocol-cleanup', { closeChat: true });
       await chrome.storage.local.remove(TAB_SNAPSHOT_STORAGE_KEY);
       await new Promise((resolve) => setTimeout(resolve, 1_600));
+      currentClassroomState = classroomStateBeforeFabTests;
       CONFIG = originalConfig;
       if (
         CONFIG.deviceId
@@ -977,9 +1007,11 @@ async function main() {
       };
     }, { fixturePort: fixture.port });
     assert.equal(protocolResilience.descriptor.clientProtocolVersion, 3);
+    assert.ok(protocolResilience.descriptor.capabilities.includes('scopedAuthorityChecksV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('authBoundTelemetryV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('exactBindingAckV2'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('exactTabCloseV2'));
+    assert.ok(protocolResilience.descriptor.capabilities.includes('kioskLaunchTicketV2'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('commandAckReceiptV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('classroomOverlayRestoreV1'));
     assert.deepEqual(protocolResilience.queuedAckIds, ['durable-ack-command:received']);
@@ -1021,6 +1053,11 @@ async function main() {
 
     const reconciliationNow = Date.now();
     const reconciled = await worker.evaluate(async ({ now }) => {
+      const authContext = captureAuthenticatedContext('resilience classroom reconciliation');
+      const authorityEnvelope = {
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+      };
       const cleared = await applyClassroomState({
         schemaVersion: 1,
         revision: 43,
@@ -1028,7 +1065,7 @@ async function main() {
         receivedAt: now,
         hardExpiresAt: now + 60 * 60 * 1000,
         restrictions: {},
-      });
+      }, { authContext, authorityEnvelope });
       const stale = await applyClassroomState({
         schemaVersion: 1,
         revision: 42,
@@ -1038,7 +1075,7 @@ async function main() {
         restrictions: {
           blockList: { active: true, blockedDomains: ['stale.example'] },
         },
-      });
+      }, { authContext, authorityEnvelope });
       return {
         cleared,
         stale,
@@ -1149,7 +1186,12 @@ async function main() {
       });
       const afterFlightPath = await waitForTabState((tabs) => {
         const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
-        return webUrls.length === 2 && webUrls.every((url) =>
+        // The retained disallowed tab is redirected to the allowed domain's
+        // canonical HTTPS origin. This local fixture only serves HTTP, so
+        // Chromium may replace that redirected tab with chrome-error:// before
+        // the poll observes it. The deterministic invariant is that at least
+        // the pre-existing allowed tab remains and no disallowed web URL does.
+        return webUrls.length >= 1 && webUrls.every((url) =>
           new URL(url).hostname === 'flight.localhost'
         );
       });
@@ -1169,7 +1211,7 @@ async function main() {
     assert.ok(existingTabReconciliation.afterLock.internal.length >= 1);
     assert.deepEqual(existingTabReconciliation.afterLock.web, [reconciliationUrls.lock]);
     assert.ok(existingTabReconciliation.afterFlightPath.internal.length >= 1);
-    assert.equal(existingTabReconciliation.afterFlightPath.web.length, 2);
+    assert.ok(existingTabReconciliation.afterFlightPath.web.length >= 1);
     assert.ok(existingTabReconciliation.afterFlightPath.web.every((url) =>
       new URL(url).hostname === 'flight.localhost'
     ));
@@ -1417,6 +1459,12 @@ async function main() {
     });
 
     const authBoundOutbox = await worker.evaluate(async () => {
+      if (monitoringEventFlushTimer) {
+        clearTimeout(monitoringEventFlushTimer);
+        monitoringEventFlushTimer = null;
+      }
+      await chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
+      await monitoringEventMutation.catch(() => {});
       const before = await chrome.storage.local.get([
         MONITORING_EVENT_OUTBOX_KEY,
         MONITORING_EVENT_DROPPED_KEY,
@@ -1617,9 +1665,16 @@ async function main() {
     const switchedInbox = await worker.evaluate(async () => {
       const previousBinding = messageInboxAuthBinding();
       const originalFetch = globalThis.fetch;
+      // Linux CI can pause a headless extension worker for several seconds
+      // under load. Keep this comfortably above the two-second event-heartbeat
+      // coalescing window while retaining a hard failure bound.
+      const reconciliationTimeoutMs = 15_000;
       const waitFor = (promise, label) => Promise.race([
         promise,
-        new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), 5_000)),
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error(`Timed out waiting for ${label}`)),
+          reconciliationTimeoutMs,
+        )),
       ]);
       let firstHeartbeatStarted;
       let secondHeartbeatStarted;
@@ -1652,7 +1707,11 @@ async function main() {
         return originalFetch(url, init);
       };
 
-      licenseActive = true;
+      adoptLicenseState(
+        true,
+        'active',
+        captureAuthenticatedContext('heartbeat race Student A'),
+      );
       trackingState = TRACKING_STATES.ACTIVE;
       screenshotScheduled = false;
       apiBackoffUntilMs = 0;
@@ -1705,6 +1764,11 @@ async function main() {
         manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt,
         [CONNECTIVITY_HEALTH_STORAGE_KEY]: connectivityHealth,
       });
+      adoptLicenseState(
+        true,
+        'active',
+        captureAuthenticatedContext('heartbeat race Student B'),
+      );
 
       releaseInboxMutation();
       await blockerTask;
@@ -1745,7 +1809,7 @@ async function main() {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const heartbeatDeadline = Date.now() + 5_000;
+      const heartbeatDeadline = Date.now() + reconciliationTimeoutMs;
       while (heartbeatInFlight && Date.now() < heartbeatDeadline) {
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
@@ -1887,10 +1951,15 @@ async function main() {
         studentAuthCommitPending = false;
         const authContextId = generateAuthContextId();
         activateAuthenticatedContext(authContextId);
+        adoptLicenseState(
+          true,
+          'active',
+          captureAuthenticatedContext(`race identity ${suffix}`),
+        );
+        trackingState = TRACKING_STATES.ACTIVE;
         return authContextId;
       };
       try {
-        licenseActive = true;
         trackingState = TRACKING_STATES.ACTIVE;
         screenshotScheduled = true;
         apiBackoffUntilMs = 0;
@@ -1908,6 +1977,7 @@ async function main() {
               studentSessionId: CONFIG.activeStudentSessionId,
               serverProtocolVersion: 3,
               acceptedCapabilities: [
+                'scopedAuthorityChecksV1',
                 'authBoundTelemetryV1',
                 'serverOnlyCapability',
               ],
@@ -1965,7 +2035,6 @@ async function main() {
           acceptedCapabilities: [],
         }, screenshotAContext);
         adoptScreenshotPolicy(undefined, screenshotAContext);
-        licenseActive = true;
         trackingState = TRACKING_STATES.ACTIVE;
         apiBackoffUntilMs = 0;
         lastScreenshotAttemptAt = 0;
@@ -1982,6 +2051,7 @@ async function main() {
           reason: 'auth-context-race',
           queryActiveTab: async () => [{
             id: 999_001,
+            active: true,
             windowId: 1,
             url: `http://auth-context-race.localhost:${fixturePort}/screenshot`,
             title: 'Student A private tab',
@@ -1992,6 +2062,8 @@ async function main() {
             await screenshotGate;
             return 'data:image/jpeg;base64,c3R1ZGVudC1h';
           },
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
         });
         await waitFor(screenshotStarted, 'screenshot pixels');
         const finalAuthContextId = installIdentity('screenshot-b', priorIdentity);
@@ -2040,7 +2112,7 @@ async function main() {
     assert.equal(authContextRaceFencing.screenshotRequests.length, 0);
     assert.deepEqual(
       authContextRaceFencing.negotiatedAtHeartbeat.acceptedCapabilities,
-      ['authBoundTelemetryV1'],
+      ['scopedAuthorityChecksV1', 'authBoundTelemetryV1'],
     );
     assert.equal(authContextRaceFencing.negotiatedAtHeartbeat.serverProtocolVersion, 3);
     assert.equal(authContextRaceFencing.negotiatedAfterFinalTransition, null);
@@ -2571,6 +2643,8 @@ async function main() {
           ...(currentFabState || {}),
           teachingSessionId: 'ended-session-a',
           activeSessionIds: ['ended-session-a'],
+          ownershipRevisionKnown: true,
+          ownershipRevision: 903,
         };
         const result = await handleHeartbeatPendingMessages([{
           id: messageId,
@@ -2591,14 +2665,21 @@ async function main() {
           result,
           message: inbox.find((entry) => entry.id === messageId) || null,
           ackStates,
+          activeSessionIds: activeTeachingSessionIds(),
+          classroomSessionId: currentClassroomState?.teachingSessionId || null,
+          fabSessionId: currentFabState?.teachingSessionId || null,
         };
       } finally {
         sendCommandAck = originalSendCommandAck;
         currentFabState = originalFabState;
       }
     });
+    assert.ok(
+      heartbeatRecoveredTeacherMessage.message,
+      JSON.stringify(heartbeatRecoveredTeacherMessage),
+    );
     assert.equal(
-      heartbeatRecoveredTeacherMessage.message.message,
+      heartbeatRecoveredTeacherMessage.message?.message,
       'Recovered after the WebSocket was unavailable',
     );
     assert.deepEqual(heartbeatRecoveredTeacherMessage.result.addedMessageIds, [
@@ -2672,13 +2753,15 @@ async function main() {
         },
       }, { force: true, reason: 'entitlement-cleanup-fixture' });
       const before = await getClassroomCommandStateSnapshot();
-      licenseActive = true;
+      const entitlementAuthContext = captureAuthenticatedContext('entitlement cleanup fixture');
+      adoptLicenseState(true, 'active', entitlementAuthContext);
       trackingState = TRACKING_STATES.ACTIVE;
       persistedMonitoringState = {
         state: TRACKING_STATES.ACTIVE,
         changedAt: now,
         reason: 'entitlement-cleanup-fixture',
       };
+      persistedMonitoringStateScope = monitoringEventAuthBindingForContext(entitlementAuthContext);
       fetchWithBackoff = async (url) => {
         if (String(url).endsWith('/api/device/heartbeat')) {
           heartbeatRequestCount += 1;
@@ -2952,6 +3035,8 @@ async function main() {
       CONFIG.studentToken = null;
       CONFIG.identitySource = null;
       CONFIG.autoRegistrationPaused = false;
+      CONFIG.schoolId = null;
+      CONFIG.schoolSlug = 'manual-school';
       studentAuthInvalidating = false;
       try {
         const auto = registerDeviceWithStudent(

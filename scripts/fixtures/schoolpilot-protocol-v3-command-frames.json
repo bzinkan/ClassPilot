@@ -1,0 +1,165 @@
+{
+  "validExactClose": {
+    "type": "remote-control",
+    "_msgId": "schoolpilot-v3-exact-close-valid",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-b",
+      "deviceId": "device-b",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "controlRevision": 41
+    },
+    "command": {
+      "commandId": "schoolpilot-v3-exact-close-command",
+      "type": "close-tab",
+      "authority": {
+        "kind": "school_policy",
+        "source": "ai_safety",
+        "schoolId": "school-b"
+      },
+      "data": {
+        "tabRef": "schoolpilot_tab_ref_1",
+        "snapshotRevision": 23
+      }
+    }
+  },
+  "staleRevisionExactClose": {
+    "type": "remote-control",
+    "_msgId": "schoolpilot-v3-exact-close-stale",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-b",
+      "deviceId": "device-b",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "controlRevision": 40
+    },
+    "command": {
+      "commandId": "schoolpilot-v3-exact-close-stale-command",
+      "type": "close-tab",
+      "authority": {
+        "kind": "school_policy",
+        "source": "ai_safety",
+        "schoolId": "school-b"
+      },
+      "data": {
+        "tabRef": "schoolpilot_tab_ref_1",
+        "snapshotRevision": 23
+      }
+    }
+  },
+  "conflictingNestedExactBinding": {
+    "type": "remote-control",
+    "_msgId": "schoolpilot-v3-exact-close-conflicting-binding",
+    "commandId": "schoolpilot-v3-exact-close-conflicting-binding-command",
+    "studentId": "student-b",
+    "studentSessionId": "student-session-b",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-b",
+      "deviceId": "device-b",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "controlRevision": 41
+    },
+    "command": {
+      "commandId": "schoolpilot-v3-exact-close-conflicting-binding-command",
+      "type": "close-tab",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-b",
+        "deviceId": "device-b",
+        "studentId": "different-student",
+        "studentSessionId": "student-session-b",
+        "controlRevision": 41
+      },
+      "authority": {
+        "kind": "school_policy",
+        "source": "ai_safety",
+        "schoolId": "school-b"
+      },
+      "data": {
+        "tabRef": "schoolpilot_tab_ref_1",
+        "snapshotRevision": 23
+      }
+    }
+  },
+  "partialNestedExactBinding": {
+    "type": "remote-control",
+    "_msgId": "schoolpilot-v3-exact-close-partial-binding",
+    "commandId": "schoolpilot-v3-exact-close-partial-binding-command",
+    "studentId": "student-b",
+    "studentSessionId": "student-session-b",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-b",
+      "deviceId": "device-b",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "controlRevision": 41
+    },
+    "command": {
+      "commandId": "schoolpilot-v3-exact-close-partial-binding-command",
+      "type": "close-tab",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-b",
+        "studentId": "student-b",
+        "studentSessionId": "student-session-b",
+        "controlRevision": 41
+      },
+      "authority": {
+        "kind": "school_policy",
+        "source": "ai_safety",
+        "schoolId": "school-b"
+      },
+      "data": {
+        "tabRef": "schoolpilot_tab_ref_1",
+        "snapshotRevision": 23
+      }
+    }
+  },
+  "conflictingNestedRevisionBinding": {
+    "type": "remote-control",
+    "_msgId": "schoolpilot-v3-exact-close-conflicting-revision",
+    "commandId": "schoolpilot-v3-exact-close-conflicting-revision-command",
+    "studentId": "student-b",
+    "studentSessionId": "student-session-b",
+    "exactBinding": {
+      "bindingVersion": 2,
+      "schoolId": "school-b",
+      "deviceId": "device-b",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "controlRevision": 41
+    },
+    "command": {
+      "commandId": "schoolpilot-v3-exact-close-conflicting-revision-command",
+      "type": "close-tab",
+      "studentId": "student-b",
+      "studentSessionId": "student-session-b",
+      "exactBinding": {
+        "bindingVersion": 2,
+        "schoolId": "school-b",
+        "deviceId": "device-b",
+        "studentId": "student-b",
+        "studentSessionId": "student-session-b",
+        "controlRevision": 40
+      },
+      "authority": {
+        "kind": "school_policy",
+        "source": "ai_safety",
+        "schoolId": "school-b"
+      },
+      "data": {
+        "tabRef": "schoolpilot_tab_ref_1",
+        "snapshotRevision": 23
+      }
+    }
+  }
+}

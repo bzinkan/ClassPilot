@@ -1,5 +1,10 @@
 # AWS Fargate Deployment Checklist
 
+> **Archived prototype — not a production checklist.** Production API/web
+> deployment belongs exclusively to the SchoolPilot repository and its guarded
+> `CLAUDE.md` plus `docs/CLASSPILOT_2_7_1_RELEASE.md` procedures. This repository
+> supplies only the verified ClassPilot Chrome extension artifact.
+
 ## Pre-Deployment (One-Time Setup)
 
 ### 1. AWS Account Setup

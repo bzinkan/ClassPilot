@@ -1,8 +1,16 @@
 # ClassPilot - IT Staff Tutorial & Technical Breakdown
 
 **Presentation Date**: [Your Date]  
-**Version**: 2.7.0
+**Version**: 2.7.1
 **Presented by**: [Your Name]
+
+> **Production boundary:** SchoolPilot is the only production API and teacher
+> web application. Deploy it from the SchoolPilot repository using its
+> `CLAUDE.md` and `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. Replit and the
+> standalone server in this repository are historical prototype material, not a
+> production path. This repository's production deliverable is only the
+> verified `dist/ClassPilot-v2.7.1.zip` Chrome Web Store artifact built from a
+> clean tagged commit; never package the extension manually.
 
 ---
 
@@ -21,11 +29,11 @@
 
 **What is ClassPilot?**
 
-ClassPilot is a privacy-aware classroom monitoring system designed for educational institutions using managed Chromebooks. It enables teachers to monitor student activity in real-time while maintaining transparency and compliance with FERPA/COPPA regulations.
+ClassPilot is a privacy-aware classroom monitoring system designed for educational institutions using managed Chromebooks. It enables teachers to monitor student activity in real time while providing controls that support schools' FERPA/COPPA responsibilities; each school remains responsible for its own policies, notices, and required consent decisions.
 
 **Core Components:**
 - **Teacher Dashboard** (Web Application) - Real-time monitoring interface for educators
-- **Chrome Extension** (v2.7.0) - Lightweight monitoring agent on student Chromebooks
+- **Chrome Extension** (v2.7.1) - Lightweight monitoring agent on student Chromebooks
 
 **Key Value Propositions:**
 - ✅ Transparent monitoring with student disclosure
@@ -52,7 +60,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 │  ┌────────────┐  │         │  ┌────────────┐  │
 │  │  Chrome    │  │         │  │  Dashboard │  │
 │  │ Extension  │◄─┼─────────┼─►│  Web App   │  │
-│  │  (v2.7.0)  │  │         │  │            │  │
+│  │  (v2.7.1)  │  │         │  │            │  │
 │  └────────────┘  │         │  └────────────┘  │
 └────────┬─────────┘         └────────┬─────────┘
          │                            │
@@ -70,7 +78,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
                       │
             ┌─────────▼─────────┐
             │   PostgreSQL DB    │
-            │   (Neon-backed)    │
+            │   (AWS RDS)        │
             │                    │
             │   • Students       │
             │   • Devices        │
@@ -92,7 +100,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 **Backend:**
 - Node.js + Express
 - WebSocket server (ws library)
-- PostgreSQL database (Neon-backed)
+- PostgreSQL database (AWS RDS, reached by the SchoolPilot services)
 - Drizzle ORM
 - Session-based authentication
 - Rate limiting & CSRF protection
@@ -212,15 +220,16 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 ### 7. Privacy & Data Retention
 
 **Configurable Data Retention:**
-- Set retention period (7, 30, 60, 90 days, or indefinite)
+- Set activity-history retention to a whole number from 1 through 365 days (default 30)
 - Automatic cleanup of old activity logs
 - CSV export before deletion
 
 **Privacy Features:**
-- All-tabs data stored in-memory only (not persisted)
-- Student disclosure banner in extension
-- Explicit consent for screen sharing
-- Minimal data collection (only browsing activity)
+- Tab state is bounded and identity-bound; the extension may persist a limited local snapshot so exact tab references survive worker restarts
+- Student-facing indicators show when school-managed monitoring is active
+- Ambient screenshot thumbnails require a short-lived authorized observation lease; exact safety captures require a separate exact-bound request
+- Live View is an authorized, temporary encrypted stream and is not recorded by the extension or SchoolPilot servers; the teacher dashboard can explicitly save a local recording or still image, which the school must govern
+- The school setting governs heartbeat history and related session-report detail; ambient thumbnails, safety evidence, communications, account/audit records, and teacher-downloaded files follow their separate documented or contractual policies
 
 ### 8. Multi-Tenancy Support
 
@@ -265,14 +274,15 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 ### FERPA/COPPA Compliance
 
 **Data Minimization:**
-- Only collects essential browsing data (URL, title, timestamp)
-- No keystroke logging, screenshot capture (except explicit screen sharing)
-- No personal information beyond school email
+- Processes school-issued student/session identifiers, a device identifier, active-tab URL/title/timestamps, heartbeat state, and classroom communications needed for the service
+- May process observation-bound thumbnail screenshots and one exact-bound safety screenshot; Live View media is temporary and is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local copy from the dashboard
+- An authorized managed-kiosk launch may send the Chrome directory device ID to SchoolPilot after capability preflight; it is immediately converted to a school-scoped opaque ID and is not stored or logged raw
+- Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles
 
 **Transparency:**
 - Chrome Extension displays disclosure banner
 - Students know monitoring is active
-- Screen sharing requires explicit action (not automatic)
+- Live View requires an authorized teacher request; managed Chrome policy determines whether Chrome shows a screen picker
 
 **Data Security:**
 - Session-based authentication with bcrypt password hashing
@@ -304,62 +314,44 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 ### Prerequisites
 
-1. **Google Workspace Admin Access** (for force-installing extension)
-2. **Server/Hosting** (for Teacher Dashboard)
-3. **PostgreSQL Database** (provided by Replit or your own)
-4. **Domain Name** (optional but recommended)
+1. **Google Workspace Admin Access** (for pinning and force-installing the extension)
+2. **Access to the SchoolPilot production repository and AWS deployment role**
+3. **A clean, reviewed, tagged ClassPilot 2.7.1 commit with green CI**
+4. **The managed test OU and production OU rollout record**
 
-### Step 1: Deploy Teacher Dashboard
+### Step 1: Deploy SchoolPilot compatibility code
 
-**Using Replit (Recommended for Quick Setup):**
-
-1. This project is already configured on Replit
-2. Click "Publish" button in Replit
-3. Configure custom domain (optional)
-4. Set up environment variables:
-   - `DATABASE_URL` - PostgreSQL connection string
-   - `SESSION_SECRET` - Random secure string
-
-**Manual Deployment:**
-
-```bash
-# Install dependencies
-npm install
-
-# Build frontend
-npm run build
-
-# Start production server
-NODE_ENV=production npm start
-```
-
-**Create Admin Account:**
-
-```bash
-# On first deployment, create admin via API:
-POST /api/register
-{
-  "username": "admin",
-  "password": "secure_password",
-  "role": "admin",
-  "schoolName": "Your School Name"
-}
-```
+Use only the guarded production procedure in the SchoolPilot repository's
+`CLAUDE.md` and `docs/CLASSPILOT_2_7_1_RELEASE.md`. Deploy the reviewed backend
+first and frontend second, smoke the live 2.7.0 compatibility path, and retain
+the prior ECS task definitions and deployment evidence. Do not deploy the
+prototype server in this repository, publish from Replit, run a local database
+push against production, or create a bootstrap administrator through a public
+registration endpoint.
 
 ### Step 2: Publish Chrome Extension to Chrome Web Store
 
 **Package the Extension:**
 
 ```bash
+npm run check
+npm test
+npm run test:extension:chrome
+npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.1.zip --verify-only
 ```
+
+Run these commands from the clean tagged ClassPilot repository root. Verify and
+retain `dist/ClassPilot-v2.7.1.zip.sha256`; upload that exact versioned archive,
+not a manually assembled or unversioned ZIP.
 
 **Upload to Chrome Web Store:**
 
 1. Go to: https://chrome.google.com/webstore/devconsole
 2. Pay $5 one-time developer fee (if first extension)
-3. Upload `dist/ClassPilot-v2.7.0.zip` from the clean, tagged release commit
+3. Upload `dist/ClassPilot-v2.7.1.zip` from the clean, tagged release commit
 4. Fill in store listing details:
    - **Name:** ClassPilot
    - **Description:** Privacy-aware classroom monitoring for managed Chromebooks
@@ -404,7 +396,7 @@ You can set the dashboard URL via policy:
    - **Grade Levels** (e.g., 6th, 7th, 8th)
    - **Tracking Hours** (e.g., 8:00 AM - 3:00 PM)
    - **Weekend Tracking** (on/off)
-   - **Data Retention** (7, 30, 60, 90 days, indefinite)
+   - **Activity-History Retention** (1–365 whole days; default 30)
    - **IP Allowlist** (optional - restrict dashboard access)
 
 **Create Teachers:**
@@ -535,13 +527,16 @@ Jane Doe,jane.doe@school.edu,7th
 **Issue: Screen sharing not working**
 
 **Possible Causes:**
-- Not a managed Chromebook (personal devices may block)
-- WebRTC permissions not granted
+- The teacher or teaching-session authority changed
+- The extension does not have current ICE/TURN credentials
+- WebRTC is blocked by the network
 
 **Solution:**
 - Verify Chromebook is managed via Admin Console
 - Check extension permissions in `chrome://extensions`
-- Ensure student clicked "Allow" on screen share prompt
+- Start a fresh Live View request for the exact current student/session
+- Test direct ICE and TURN/TURNS fallback; unmanaged devices must also complete
+  Chrome's capture picker
 
 ---
 
@@ -657,7 +652,7 @@ ClassPilot provides a comprehensive, privacy-aware classroom monitoring solution
 - ✅ Privacy-first design with transparency
 - ✅ Real-time monitoring with remote control
 - ✅ Easy deployment via Google Workspace Admin
-- ✅ FERPA/COPPA compliant architecture
+- ✅ Architecture designed to support school FERPA/COPPA responsibilities
 
 **Next Steps:**
 1. Schedule deployment timeline
@@ -676,4 +671,4 @@ Contact: [Your Contact Information]
 
 ---
 
-*ClassPilot v2.7.0 - Privacy-Aware Classroom Monitoring*
+*ClassPilot v2.7.1 - Privacy-Aware Classroom Monitoring*

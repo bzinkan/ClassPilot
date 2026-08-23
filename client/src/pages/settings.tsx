@@ -364,7 +364,7 @@ export default function Settings() {
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  Student activity data will be automatically deleted after this period
+                  Heartbeat history and related session-report detail are automatically purged or redacted after this period. Screenshots, account records, audit records, and teacher-downloaded files follow separate policies.
                 </p>
               </div>
 
@@ -581,13 +581,13 @@ export default function Settings() {
           </CardHeader>
           <CardContent className="space-y-2 text-sm text-muted-foreground">
             <p>
-              This system is designed to be FERPA and COPPA compliant. All monitoring is visible to students through the Chrome extension.
+              This system is designed to support schools' FERPA, COPPA, and local-policy responsibilities. The Chrome extension provides the applicable student-facing monitoring indicators.
             </p>
             <p>
-              Data collected: Tab titles, URLs, and timestamps only. No keystrokes, microphone, or camera access.
+              SchoolPilot processes school-issued identifiers, active-tab titles and URLs, heartbeat state, authorized screenshots, and classroom communications. It does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito activity, or browsing from unmanaged profiles.
             </p>
             <p>
-              Screen sharing requires explicit student consent via button click and shows a visible indicator.
+              Live View requires an authorized teacher request and may run without a Chrome screen picker when managed-device policy permits it. The extension and SchoolPilot servers do not record the stream; an authorized teacher can explicitly save a local recording or still image, which the school controls.
             </p>
           </CardContent>
         </Card>

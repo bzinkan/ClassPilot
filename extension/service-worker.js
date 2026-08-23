@@ -22,6 +22,38 @@ const SENTRY_EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
 const SENTRY_URL_REGEX = /https?:\/\/\S+/i;
 const SENTRY_BEARER_REGEX = /(?:bearer\s+)?eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/i;
 const SENTRY_OPAQUE_ID_REGEX = /\b(?:[a-f0-9]{8}-[a-f0-9-]{20,}|[A-Za-z0-9_-]{32,})\b/i;
+const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
+  'AMBIGUOUS_TAB_URL',
+  'AUTH_CONTEXT_INCOMPLETE',
+  'AUTH_CONTEXT_SUPERSEDED',
+  'AUTH_GATE_INVALID_POLICY_FENCE',
+  'AUTH_GATE_TIMEOUT',
+  'AUTH_MUTATION_SUPERSEDED',
+  'CLASSROOM_STATE_INVALID',
+  'COMMAND_ACK_AUTHORITY_UNAVAILABLE',
+  'COMMAND_ACK_BINDING_MISMATCH',
+  'COMMAND_ACK_INVALID_TRANSITION',
+  'COMMAND_ACK_MALFORMED',
+  'COMMAND_ACK_TARGET_EXPIRED',
+  'COMMAND_ACK_TARGET_GONE',
+  'COMMAND_AUTHORITY_MISMATCH',
+  'COMMAND_AUTHORITY_MISSING',
+  'COMMAND_FAILED',
+  'SAFETY_EVIDENCE_TIMEOUT',
+  'SCREENSHOT_PAUSED_UNOBSERVED',
+  'STALE_TAB_SNAPSHOT',
+  'STUDENT_BINDING_MISMATCH',
+  'STUDENT_CHAT_INVALID',
+  'STUDENT_CHAT_OUTBOX_FULL',
+  'STUDENT_CHAT_SESSION_REQUIRED',
+  'TAB_CLOSE_CAPABILITY_REQUIRED',
+  'TAB_CLOSE_FAILED',
+  'TAB_REF_NOT_FOUND',
+  'TAB_SNAPSHOT_REVISION_REQUIRED',
+  'TAB_TARGET_REQUIRED',
+  'TAB_URL_NOT_FOUND',
+  'UNSUPPORTED_CLASSROOM_STATE_SCHEMA',
+]);
 
 function sanitizeSentryUrl(value) {
   if (typeof value !== 'string') return undefined;
@@ -53,6 +85,65 @@ function scrubSentryString(value, key) {
     return sanitizeSentryUrl(value);
   }
   return value;
+}
+
+function scrubSentryMessage(value, fallback) {
+  const raw = String(value || '');
+  const scrubbed = scrubSentryString(raw, 'message');
+  if (scrubbed === '[redacted]') return scrubbed;
+  const diagnosticCode = raw.trim();
+  if (DIAGNOSTIC_CODE_ALLOWLIST.has(diagnosticCode)) return diagnosticCode;
+  // Messages and exception values are not a telemetry contract. Keeping only
+  // a generic label prevents a future server/body/command error from smuggling
+  // names, identifiers, URLs or payload text into Sentry.
+  return fallback;
+}
+
+const SENTRY_EXCEPTION_TYPE_ALLOWLIST = new Set([
+  'AbortError',
+  'DOMException',
+  'Error',
+  'NetworkError',
+  'NotAllowedError',
+  'NotFoundError',
+  'OperationError',
+  'QuotaExceededError',
+  'SecurityError',
+  'TimeoutError',
+  'TypeError',
+]);
+const SENTRY_BREADCRUMB_CATEGORY_ALLOWLIST = new Set([
+  'console',
+  'fetch',
+  'http',
+  'navigation',
+  'sentry.event',
+  'sentry.transaction',
+  'ui.click',
+  'xhr',
+]);
+const SENTRY_LEVEL_ALLOWLIST = new Set([
+  'debug',
+  'error',
+  'fatal',
+  'info',
+  'log',
+  'warning',
+]);
+
+function safeSentryExceptionType(value) {
+  const type = String(value || '').trim();
+  return SENTRY_EXCEPTION_TYPE_ALLOWLIST.has(type) ? type : 'Error';
+}
+
+function safeSentryBreadcrumbCategory(value) {
+  const category = String(value || '').trim();
+  return SENTRY_BREADCRUMB_CATEGORY_ALLOWLIST.has(category) ? category : 'extension';
+}
+
+function safeSentryLevel(value) {
+  const level = String(value || '').trim();
+  return SENTRY_LEVEL_ALLOWLIST.has(level) ? level : undefined;
 }
 
 function scrubSentryData(value, key) {
@@ -88,15 +179,15 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
         };
       }
       if (event.message) {
-        event.message = scrubSentryString(event.message, 'message');
+        event.message = scrubSentryMessage(event.message, 'Extension diagnostic');
       }
       if (event.exception?.values) {
         event.exception.values = event.exception.values.map((exception) => ({
-          type: String(exception.type || 'Error').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80) || 'Error',
-          value: scrubSentryString(String(exception.value || 'Extension error'), 'message'),
+          type: safeSentryExceptionType(exception.type),
+          value: scrubSentryMessage(exception.value, 'Extension error'),
           stacktrace: exception.stacktrace?.frames ? {
             frames: exception.stacktrace.frames.map((frame) => ({
-              filename: scrubSentryString(String(frame.filename || ''), 'stack'),
+              filename: frame.filename ? sanitizeSentryUrl(String(frame.filename)) : undefined,
               function: frame.function
                 ? String(frame.function).replace(/[^A-Za-z0-9_$.-]/g, '').slice(0, 120)
                 : undefined,
@@ -108,10 +199,12 @@ if (!globalThis.__classpilotSentryInitialized && globalThis.Sentry?.init && SENT
       }
       if (event.breadcrumbs) {
         event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
-          category: String(crumb.category || '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80),
-          level: crumb.level,
+          category: safeSentryBreadcrumbCategory(crumb.category),
+          level: safeSentryLevel(crumb.level),
           timestamp: crumb.timestamp,
-          message: crumb.message ? scrubSentryString(crumb.message, 'message') : crumb.message,
+          message: crumb.message
+            ? scrubSentryMessage(crumb.message, 'Extension breadcrumb')
+            : crumb.message,
         }));
       }
       // Extension events do not need user, request data, arbitrary context,
@@ -158,6 +251,7 @@ let wsTransportConnected = false;
 let wsConnectionGeneration = 0;
 let wsAuthenticatedGeneration = 0;
 let wsConnectInFlight = null;
+let wsConnectInFlightIdentity = null;
 let wsMessageProcessingGeneration = 0;
 let wsMessageProcessingTail = Promise.resolve();
 let wsAuthenticatedResponseGuard = null;
@@ -171,6 +265,7 @@ let rejectAuthCommitRecovery = null;
 let studentAuthMutationGeneration = 0;
 let activeAuthContextGeneration = -1;
 let authContextAbortController = new AbortController();
+let lastRetiredStudentMessageContext = null;
 let negotiatedProtocolState = null;
 let studentAuthMutationTail = Promise.resolve();
 let chromeProfileRegistrationInFlight = null;
@@ -181,6 +276,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'classroomStateV1',
   'fabStateRevisionV1',
   'exactTabCloseV1',
+  'scopedAuthorityChecksV1',
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
@@ -189,11 +285,17 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'safetyEvidenceCaptureV1',
   'liveViewIceServersV1',
   'kioskLaunchTicketV1',
+  'kioskLaunchTicketV2',
   'screenOnlyUnlockV1',
   'durableChatAckV1',
   'commandAckReceiptV1',
   'classroomOverlayRestoreV1',
   'liveViewNegotiationV1',
+]);
+const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'authBoundTelemetryV1',
+  'exactBindingAckV2',
+  'exactTabCloseV2',
 ]);
 
 function extensionProtocolDescriptor() {
@@ -252,13 +354,62 @@ function getCommandIdFromMessage(message, command) {
   );
 }
 
+const COMMAND_DIAGNOSTIC_MESSAGES = Object.freeze({
+  AUTH_CONTEXT_INCOMPLETE: 'Command was canceled because authentication is incomplete.',
+  AUTH_CONTEXT_SUPERSEDED: 'Command was canceled because the signed-in student changed.',
+  STUDENT_BINDING_MISMATCH: 'Command was canceled because the student session changed.',
+  COMMAND_ACK_AUTHORITY_UNAVAILABLE: 'Command was canceled because class authority is unavailable.',
+  COMMAND_AUTHORITY_MISSING: 'Command is not authorized for the active class.',
+  COMMAND_AUTHORITY_MISMATCH: 'Command is not authorized for the active class.',
+  TAB_SNAPSHOT_REVISION_REQUIRED: 'The selected tab is no longer available.',
+  STALE_TAB_SNAPSHOT: 'The selected tab is no longer available.',
+  TAB_REF_NOT_FOUND: 'The selected tab is no longer available.',
+  TAB_TARGET_REQUIRED: 'The selected tab is no longer available.',
+  TAB_URL_NOT_FOUND: 'The selected tab is no longer available.',
+  AMBIGUOUS_TAB_URL: 'The selected tab is no longer available.',
+  TAB_CLOSE_FAILED: 'The selected tab could not be closed.',
+  TAB_CLOSE_CAPABILITY_REQUIRED: 'A ClassPilot update is required for this action.',
+  UNSUPPORTED_CLASSROOM_STATE_SCHEMA: 'This classroom command is not supported.',
+  CLASSROOM_STATE_INVALID: 'The classroom command could not be applied.',
+  COMMAND_FAILED: 'Command could not be completed.',
+});
+const COMMAND_DIAGNOSTIC_TEXT_ALLOWLIST = new Set([
+  'Command belongs to an inactive supervision context',
+  'Command belongs to an inactive teaching session',
+  'Command has invalid school-policy authority',
+  'Command is missing one immutable classroom authority',
+  'Teacher message belongs to an inactive teaching session',
+  'Teacher message belongs to a retired student session',
+]);
+
+function commandDiagnosticCode(error, fallback = 'COMMAND_FAILED') {
+  const rawCode = typeof error?.code === 'string' ? error.code.trim() : '';
+  if (Object.prototype.hasOwnProperty.call(COMMAND_DIAGNOSTIC_MESSAGES, rawCode)) return rawCode;
+  return Object.prototype.hasOwnProperty.call(COMMAND_DIAGNOSTIC_MESSAGES, fallback)
+    ? fallback
+    : 'COMMAND_FAILED';
+}
+
 function commandErrorMessage(error) {
-  return error?.message || String(error || 'Command failed');
+  const exactMessage = typeof error?.message === 'string' ? error.message.trim() : '';
+  if (COMMAND_DIAGNOSTIC_TEXT_ALLOWLIST.has(exactMessage)) return exactMessage;
+  return COMMAND_DIAGNOSTIC_MESSAGES[commandDiagnosticCode(error)];
 }
 
 function currentChromiumVersion() {
   const match = /(?:Chrome|Chromium)\/([0-9.]+)/.exec(globalThis.navigator?.userAgent || '');
   return match?.[1] || null;
+}
+
+function assertCommandAckAuthorityAvailable(authContext, reason = 'command acknowledgement') {
+  const revision = currentStudentControlRevision();
+  if (!hasNegotiatedCapability('exactBindingAckV2', authContext)) return revision;
+  if (revision === null) {
+    const error = new Error(`${reason} has no authoritative control revision`);
+    error.code = 'COMMAND_ACK_AUTHORITY_UNAVAILABLE';
+    throw error;
+  }
+  return revision;
 }
 
 async function sendCommandAck(commandId, ackState, options = {}) {
@@ -270,7 +421,49 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     studentId: authContext.studentId,
     studentSessionId: authContext.studentSessionId,
   };
-  assertBindingMatchesAuthContext(binding, authContext, 'command acknowledgement');
+  // The command must identify the current student/session. When exact ACK V2
+  // is active, enrich the outbound ACK from the already captured immutable
+  // authentication context instead of demanding that unrelated legacy command
+  // envelopes carry ACK-only school/device/control fields.
+  assertBindingMatchesAuthContext(binding, authContext, 'command acknowledgement', {
+    requireFullAuthority: false,
+  });
+  const exactAckNegotiated = hasNegotiatedCapability('exactBindingAckV2', authContext);
+  const preserveExactTabRevision = (
+    hasNegotiatedCapability('exactTabCloseV2', authContext)
+    && (options.commandType === 'close-tab' || options.commandType === 'close-tabs')
+    && binding.bindingVersion === 2
+  );
+  if (preserveExactTabRevision && (
+    binding.bindingVersion !== 2
+    || binding.schoolId !== authContext.schoolId
+    || binding.deviceId !== authContext.deviceId
+    || !Number.isSafeInteger(binding.controlRevision)
+  )) {
+    const error = new Error('Exact tab acknowledgement does not match its captured authority tuple');
+    error.code = 'STUDENT_BINDING_MISMATCH';
+    throw error;
+  }
+  if (exactAckNegotiated && !preserveExactTabRevision && currentStudentControlRevision() === null) {
+    // Exact ACK V2 scopes acknowledgement creation only. An ordinary command
+    // that already passed its student/session and classroom-authority checks
+    // remains executable while the control-revision watermark is hydrating;
+    // no under-bound ACK is created in that interval.
+    return false;
+  }
+  const ackControlRevision = preserveExactTabRevision
+    ? binding.controlRevision
+    : exactAckNegotiated
+      ? assertCommandAckAuthorityAvailable(authContext)
+      : currentStudentControlRevision();
+  const ackBinding = exactAckNegotiated ? {
+    bindingVersion: 2,
+    schoolId: authContext.schoolId,
+    deviceId: authContext.deviceId,
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+    controlRevision: ackControlRevision,
+  } : binding;
 
   const defaultOutcome = {
     received: 'pending',
@@ -284,14 +477,14 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     ackId: `${normalizedCommandId}:${ackState}`,
     commandId: normalizedCommandId,
     ackState,
-    commandType: options.commandType,
+    commandType: safeDiagnosticLabel(options.commandType),
     bindingVersion: 2,
     authContextId: authContext.authContextId,
     schoolId: authContext.schoolId || undefined,
-    studentId: binding.studentId,
-    studentSessionId: binding.studentSessionId,
+    studentId: ackBinding.studentId,
+    studentSessionId: ackBinding.studentSessionId,
     deviceId: authContext.deviceId,
-    studentControlRevision: binding.controlRevision ?? currentStudentControlRevision() ?? undefined,
+    studentControlRevision: ackBinding.controlRevision ?? ackControlRevision ?? undefined,
     result: options.result,
     state: options.state,
     error: options.error,
@@ -310,7 +503,8 @@ async function sendCommandAck(commandId, ackState, options = {}) {
   scheduleCommandAckFlush();
   return true;
 }
-let cameraActive = false; // Track camera usage across all tabs
+let cameraActive = false; // Aggregate current-authority camera usage across tabs
+const cameraActiveTabs = new Set();
 
 // Adaptive tracking state machine
 // ACTIVE: within school hours and user active
@@ -324,6 +518,8 @@ const TRACKING_STATES = {
 
 const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
+const SCHOOL_SETTINGS_SCOPE_KEY = 'schoolSettingsScopeV1';
+const GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY = 'globalBlockedDomainsScopeV1';
 const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
 // The in-memory interval is the only steady-state heartbeat cadence. Chrome's
@@ -332,6 +528,7 @@ const IDLE_DETECTION_SECONDS = 180;
 // interval is healthy.
 const HEARTBEAT_INTERVAL_MS = 10000;
 const HEARTBEAT_RECOVERY_STALE_MS = HEARTBEAT_INTERVAL_MS * 2;
+const HEARTBEAT_REQUEST_TIMEOUT_MS = 15 * 1000;
 const HEARTBEAT_ACTIVE_MINUTES = 0.5;
 const HEARTBEAT_IDLE_MINUTES = 0.5;
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
@@ -339,6 +536,7 @@ const EVENT_HEARTBEAT_COALESCE_MS = 2000;
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
 const LICENSE_CONTROL_CLEANUP_ALARM = 'license-control-cleanup';
 const LICENSE_CONTROL_CLEANUP_RETRY_MS = 15 * 1000;
+const LICENSE_STATE_SCOPE_KEY = 'licenseStateScopeV1';
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 // Permit only sub-second scheduling/serialization skew. A larger future value
 // usually means the Chromebook clock moved backwards and must not extend a
@@ -346,6 +544,7 @@ const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 const MANUAL_LOGIN_FUTURE_SKEW_MS = 1000;
 const SHARED_AUTH_LOCK_TIMEOUT_MS = MANUAL_LOGIN_STALE_MS;
 const SHARED_AUTH_LOCK_ALARM_NAME = 'shared-auth-lock-timeout';
+const SHARED_AUTH_LOCK_OWNER_KEY = 'sharedAuthLockOwnerV1';
 const SHARED_SIGN_IN_CONFIG_FETCH_INTERVAL_MS = 5 * 60 * 1000;
 const SHARED_SIGN_IN_CONFIG_CACHE_KEY = 'sharedSignInConfigCacheV1';
 const MANAGED_AUTH_GATE_BINDING_KEY = 'managedAuthGateBindingV1';
@@ -353,6 +552,7 @@ const SHARED_SIGN_IN_CONFIG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SHARED_SIGN_IN_CONFIG_RETRY_ALARM = 'shared-sign-in-config-retry';
 const SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000]);
 const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
+const SIGN_OUT_REQUEST_TIMEOUT_MS = 2000;
 const AUTH_GATE_TIMING_STORAGE_KEY = 'authGateTimingV1';
 const AUTH_GATE_REVISION_STORAGE_KEY = 'authGateRevisionV1';
 // Each worker durably reserves its own numeric range before auth-state replies
@@ -368,6 +568,9 @@ const SCREENSHOT_HEALTH_STORAGE_KEY = 'screenshotHealthV1';
 const MESSAGE_INBOX_STORAGE_KEY = 'messages';
 const MESSAGE_INBOX_BINDING_KEY = 'messageInboxAuthBindingV1';
 const MESSAGE_INBOX_DEDUP_KEY = 'messageInboxSeenIdsV1';
+const PENDING_CHECK_IN_KEY = 'pendingCheckIn';
+const PENDING_CHECK_IN_EXPIRY_ALARM = 'pending-check-in-expiry';
+const PENDING_CHECK_IN_MAX_AGE_MS = 5 * 60 * 1000;
 const FAB_STATE_STORAGE_KEY = 'fabStateV1';
 const FAB_CONTEXT_STORAGE_KEY = 'fabContextV1';
 const FAB_CHAT_CONTEXT_STORAGE_KEY = 'fabChatContextV1';
@@ -396,12 +599,16 @@ let trackingState = TRACKING_STATES.OFF;
 let idleState = 'active';
 let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
+let schoolSettingsScope = null;
+let schoolSettingsMutation = Promise.resolve();
 const MONITORING_STATE_STORAGE_KEY = 'monitoringStateV1';
+const MONITORING_STATE_SCOPE_KEY = 'monitoringStateScopeV1';
 let persistedMonitoringState = {
   state: TRACKING_STATES.OFF,
   changedAt: Date.now(),
   reason: 'worker_default',
 };
+let persistedMonitoringStateScope = null;
 
 let connectivityHealth = RuntimeCore.emptyConnectivityHealth();
 let screenshotHealth = RuntimeCore.emptyScreenshotHealth();
@@ -414,6 +621,10 @@ let screenshotPolicyState = Object.freeze({
   scope: null,
   valid: false,
 });
+let screenshotPolicyGeneration = 0;
+let screenshotImmediateCapturePending = false;
+let protocolPolicyRequestGeneration = 0;
+let protocolPolicyAppliedGeneration = 0;
 
 // Screenshot health tracking (sent with heartbeat for dashboard diagnostics)
 let lastScreenshotAttemptAt = 0;
@@ -427,6 +638,7 @@ let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
 let lastKnownTabs = []; // Cache tabs to prevent flickering when query returns partial results
+let lastKnownTabsAuthBinding = null;
 const TAB_SNAPSHOT_STORAGE_KEY = 'tabSnapshotV1';
 let tabSnapshotMutation = Promise.resolve();
 let currentTabSnapshotRevision = 0;
@@ -435,7 +647,12 @@ let heartbeatIntervalId = null;
 let observedByTeacher = false;
 let eventHeartbeatTimer = null;
 let eventHeartbeatReason = null;
-let licenseActive = true;
+// Entitlement is pending/fail-private until the current exact authentication
+// context receives an authoritative school-status response. Never inherit a
+// previous student's or school's boolean across an authority transition.
+let licenseActive = false;
+let licenseStateScope = null;
+let licensePlanStatus = null;
 let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
@@ -444,6 +661,15 @@ let heartbeatInFlight = false;
 let lastHeartbeatDispatchAt = 0;
 let screenshotCaptureInFlight = false;
 let currentFabState = null;
+let studentControlRevisionAuthority = Object.freeze({
+  scope: null,
+  revision: null,
+});
+const activeAuthBoundNotificationIds = new Set();
+let authBoundNotificationCleanupPromise = Promise.resolve(false);
+let authBoundNotificationInventoryReconciled = false;
+let authBoundNotificationCleanupInFlight = null;
+let authBoundNotificationCleanupRetryAt = 0;
 let isScheduleHardOff = false;
 let sharedAuthLockedSinceAt = 0;
 let fastAuthGateEnabled = true;
@@ -468,6 +694,7 @@ let managedAuthGatePolicyGeneration = 0;
 let managedAuthGateSetupUnavailable = false;
 let managedAuthGatePolicyRestorePromise = Promise.resolve({});
 let managedAuthGateDirectRevalidationInFlight = null;
+let authoritativeManagedSchoolPolicyScope = null;
 let sharedSignInLoginConfig = {
   phase: 'loading',
   fetchedAt: 0,
@@ -696,10 +923,14 @@ const MSG_DEDUP_TTL = 30_000; // 30 seconds
 // WebRTC: Offscreen document handles all WebRTC in MV3
 // Service worker only orchestrates via messaging
 let creatingOffscreen = null;
+let offscreenCloseInFlight = null;
 let offscreenReady = false;
 let activeLiveViewNegotiationId = null;
 let activeLiveViewTeachingSessionId = null;
 let activeLiveViewContext = null;
+let liveViewStartGeneration = 0;
+let liveViewSeenNegotiationScope = null;
+let liveViewSeenNegotiationIds = new Set();
 let liveViewTelemetryAttempts = new Set();
 
 // Storage helpers
@@ -730,7 +961,7 @@ function strictStorageArea(area, label) {
 const durableLocalKv = strictStorageArea(chrome.storage.local, 'local storage');
 
 function connectivityStatus(nowValue = Date.now(), options = {}) {
-  if (!licenseActive) {
+  if (!currentLicenseIsActive()) {
     return { state: 'inactive', label: 'Monitoring disabled', health: connectivityHealth };
   }
   if (!hasStudentAuth()) {
@@ -781,7 +1012,7 @@ async function setConnectivityBadge(status = connectivityStatus()) {
 
 async function scheduleConnectivityHealthBoundary(nowValue = Date.now()) {
   const existing = await chrome.alarms.get(CONNECTIVITY_HEALTH_ALARM_NAME);
-  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !licenseActive) {
+  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !currentLicenseIsActive()) {
     if (existing) await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
     return;
   }
@@ -800,10 +1031,82 @@ async function scheduleConnectivityHealthBoundary(nowValue = Date.now()) {
 
 function safeDiagnosticError(error) {
   const code = typeof error?.code === 'string' ? error.code.trim() : '';
-  if (/^[A-Z][A-Z0-9_:-]{0,79}$/.test(code)) return code;
+  if (DIAGNOSTIC_CODE_ALLOWLIST.has(code)) return code;
   const name = typeof error?.name === 'string' ? error.name.trim() : '';
-  if (/^[A-Za-z]{1,40}Error$/.test(name) || name === 'AbortError') return name;
+  if (SENTRY_EXCEPTION_TYPE_ALLOWLIST.has(name)) return name;
   return 'Error';
+}
+
+const DIAGNOSTIC_LABEL_ALLOWLIST = new Set([
+  'ANSWER',
+  'CAPTURE_ERROR',
+  'CONNECTION_FAILED',
+  'ICE_CANDIDATE',
+  'ICE_RESTART_REQUIRED',
+  'LIVE_VIEW_ATTEMPT_TERMINAL',
+  'LIVE_VIEW_EXPIRED',
+  'OFFSCREEN_READY',
+  'WS_EVENT',
+  'apply-block-list',
+  'apply-flight-path',
+  'attention-mode',
+  'auth-error',
+  'auth-failed',
+  'auth-success',
+  'auto',
+  'broadcast-ice',
+  'broadcast-offer',
+  'chat',
+  'chat-closed',
+  'chat-message-ack-receipt',
+  'chat-notification',
+  'close',
+  'close-tab',
+  'close-tabs',
+  'command-ack-receipt',
+  'end',
+  'fab-state',
+  'fab-state-sync',
+  'hand-dismissed',
+  'hand-raising-toggle',
+  'ice',
+  'limit-tabs',
+  'lock-screen',
+  'messaging-toggle',
+  'offer',
+  'open',
+  'open-tab',
+  'pause',
+  'ping',
+  'poll',
+  'remote-control',
+  'remove-block-list',
+  'remove-flight-path',
+  'request-stream',
+  'resume',
+  'screen',
+  'session-ended',
+  'start',
+  'stop',
+  'stop-share',
+  'student-session-ended',
+  'student-session-replaced',
+  'student-sign-out',
+  'tab',
+  'teacher-message',
+  'temp-unblock',
+  'timer',
+  'unlock-screen',
+  'update-global-blacklist',
+]);
+
+function safeDiagnosticLabel(value) {
+  const label = typeof value === 'string' ? value.trim() : '';
+  return DIAGNOSTIC_LABEL_ALLOWLIST.has(label) ? label : 'unknown';
+}
+
+function warnAuthCleanupFailure(label, error) {
+  console.warn(label, safeDiagnosticError(error));
 }
 
 async function persistConnectivityHealthIfNeeded(priorState, nowValue, authContext = null) {
@@ -902,7 +1205,7 @@ async function recordScreenshotSuccess(nowValue = Date.now(), authContext = null
     ...screenshotHealth,
     schemaVersion: RuntimeCore.SCREENSHOT_HEALTH_SCHEMA_VERSION,
     lastSuccessAt: nowValue,
-  });
+  }, authContext);
 }
 
 const STUDENT_AUTH_INVALIDATING_KEY = 'studentAuthInvalidatingV1';
@@ -928,6 +1231,7 @@ const AUTH_STATE_KEYS = [
   'manualLoginLastSeenAt',
   'autoRegistrationPaused',
   'sharedAuthLockedSinceAt',
+  SHARED_AUTH_LOCK_OWNER_KEY,
 ];
 
 function persistedNonAuthConfig(raw = {}) {
@@ -1123,69 +1427,152 @@ function kioskLaunchGuardIsCurrent(guard) {
   );
 }
 
-async function requestKioskLaunchUrl(options = {}) {
-  const guard = captureKioskLaunchGuard();
-  if (!guard.fallbackUrl || !guard.enrollmentKey) return guard.fallbackUrl;
-  const directoryDeviceId = options.directoryDeviceId
-    || await readManagedDirectoryDeviceIdWithRetry();
-  if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
-  if (!directoryDeviceId) return guard.fallbackUrl;
-  if (!guard.origin) return guard.fallbackUrl;
+const KIOSK_LAUNCH_TICKET_V2_CAPABILITIES = Object.freeze([
+  'scopedAuthorityChecksV1',
+  'kioskLaunchTicketV2',
+]);
+const KIOSK_LAUNCH_TICKET_V2_MAX_EXPIRY_MS = 660 * 1000;
+
+async function postKioskLaunchContract(fetcher, guard, path, body) {
+  if (!kioskLaunchGuardIsCurrent(guard)) return { superseded: true };
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 5000);
   try {
-    const fetcher = options.fetchImpl || globalThis.fetch;
-    const response = await fetcher(`${guard.origin}/api/classpilot/kiosk/launch-ticket`, {
+    const response = await fetcher(`${guard.origin}${path}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
         'X-ClassPilot-Enrollment-Key': guard.enrollmentKey,
         'X-School-Id': guard.schoolId,
       },
-      body: JSON.stringify({
-        directoryDeviceId,
-        clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
-        capabilities: ['kioskLaunchTicketV1'],
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
-    if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
-    if (!response.ok) return guard.fallbackUrl;
+    if (!kioskLaunchGuardIsCurrent(guard)) return { superseded: true };
     const data = await response.json().catch(() => ({}));
-    if (!kioskLaunchGuardIsCurrent(guard)) return kioskLaunchUrl();
-    const ticket = String(data.ticket || '').trim();
-    const expiresAt = parseBoundedExpiry(data.expiresAt);
-    const accepted = Array.isArray(data.acceptedCapabilities)
-      && data.acceptedCapabilities.includes('kioskLaunchTicketV1');
-    if (!accepted || !ticket || ticket.length > 2048
-      || expiresAt <= Date.now() || expiresAt > Date.now() + 65000) return guard.fallbackUrl;
-    const launchUrl = new URL(guard.fallbackUrl);
-    launchUrl.hash = `launchTicket=${encodeURIComponent(ticket)}`;
-    return launchUrl.href;
-  } catch {
-    return kioskLaunchGuardIsCurrent(guard) ? guard.fallbackUrl : kioskLaunchUrl();
+    if (!kioskLaunchGuardIsCurrent(guard)) return { superseded: true };
+    return { response, data, superseded: false };
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
+function kioskLaunchTicketV2Accepted(data) {
+  if (data?.serverProtocolVersion !== CLIENT_PROTOCOL_VERSION) return false;
+  const accepted = new Set(Array.isArray(data?.acceptedCapabilities)
+    ? data.acceptedCapabilities.map((value) => String(value || '').trim())
+    : []);
+  return KIOSK_LAUNCH_TICKET_V2_CAPABILITIES.every((name) => accepted.has(name));
+}
+
+async function requestKioskLaunchUrl(options = {}) {
+  const guard = options.guard || captureKioskLaunchGuard();
+  if (!guard.fallbackUrl || !guard.enrollmentKey || !guard.origin) return guard.fallbackUrl;
+  const fetcher = options.fetchImpl || globalThis.fetch;
+  try {
+    // Privacy gate: prove that this exact SchoolPilot origin accepts the V2
+    // contract before Chrome's managed directory identifier is even read.
+    const preflight = await postKioskLaunchContract(
+      fetcher,
+      guard,
+      '/api/classpilot/kiosk/launch-ticket/preflight',
+      {
+        clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+        capabilities: [...KIOSK_LAUNCH_TICKET_V2_CAPABILITIES],
+      },
+    );
+    if (preflight.superseded) return null;
+    if (!preflight.response.ok || !kioskLaunchTicketV2Accepted(preflight.data)) {
+      return guard.fallbackUrl;
+    }
+
+    const directoryDeviceId = options.directoryDeviceId
+      || await readManagedDirectoryDeviceIdWithRetry();
+    if (!kioskLaunchGuardIsCurrent(guard)) return null;
+    if (!directoryDeviceId) return guard.fallbackUrl;
+
+    const issuance = await postKioskLaunchContract(
+      fetcher,
+      guard,
+      '/api/classpilot/kiosk/launch-ticket',
+      {
+        directoryDeviceId,
+        clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+        capabilities: [...KIOSK_LAUNCH_TICKET_V2_CAPABILITIES],
+      },
+    );
+    if (issuance.superseded) return null;
+    if (!issuance.response.ok || !kioskLaunchTicketV2Accepted(issuance.data)) {
+      return guard.fallbackUrl;
+    }
+    const ticket = String(issuance.data.ticket || '').trim();
+    const expiresAt = parseBoundedExpiry(issuance.data.expiresAt);
+    const nowValue = Date.now();
+    if (!ticket || ticket.length > 2048
+      || expiresAt <= nowValue
+      || expiresAt > nowValue + KIOSK_LAUNCH_TICKET_V2_MAX_EXPIRY_MS) return guard.fallbackUrl;
+    const launchUrl = new URL(guard.fallbackUrl);
+    launchUrl.hash = `launchTicket=${encodeURIComponent(ticket)}`;
+    return launchUrl.href;
+  } catch {
+    return kioskLaunchGuardIsCurrent(guard) ? guard.fallbackUrl : null;
+  }
+}
+
+function publishableKioskLaunchGuard(guard) {
+  return Object.freeze({
+    fallbackUrl: guard?.fallbackUrl || null,
+    origin: guard?.origin || null,
+    schoolId: guard?.schoolId || null,
+    managedPolicyGeneration: Number(guard?.managedPolicyGeneration),
+    configGeneration: Number(guard?.configGeneration),
+  });
+}
+
+function kioskLaunchValidationIsCurrent(rawGuard, launchUrl) {
+  const currentGuard = captureKioskLaunchGuard();
+  const normalizedGuard = publishableKioskLaunchGuard(rawGuard);
+  const expectedGuard = publishableKioskLaunchGuard(currentGuard);
+  if (
+    normalizedGuard.fallbackUrl !== expectedGuard.fallbackUrl
+    || normalizedGuard.origin !== expectedGuard.origin
+    || normalizedGuard.schoolId !== expectedGuard.schoolId
+    || normalizedGuard.managedPolicyGeneration !== expectedGuard.managedPolicyGeneration
+    || normalizedGuard.configGeneration !== expectedGuard.configGeneration
+  ) return false;
+  return typeof launchUrl === 'string'
+    && Boolean(launchUrl)
+    && isKioskGateUrl(launchUrl);
+}
+
 // Refresh the tab cache - called when tabs change to keep cache accurate
 async function refreshTabCache(expectedAuthContext = null) {
+  let authContext = expectedAuthContext;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('tab cache refresh');
+    } catch {
+      return false;
+    }
+  }
   try {
     const allTabs = await chrome.tabs.query({});
-    if (expectedAuthContext) {
-      assertAuthenticatedContextCurrent(expectedAuthContext, 'tab cache refresh');
-    }
+    assertAuthenticatedContextCurrent(authContext, 'tab cache refresh');
     const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
     if (httpTabs.length > 0) {
-      const snapshot = await buildOpaqueTabSnapshot(httpTabs, expectedAuthContext);
-      if (expectedAuthContext) {
-        assertAuthenticatedContextCurrent(expectedAuthContext, 'tab cache refresh');
-      }
+      const snapshot = await buildOpaqueTabSnapshot(httpTabs, authContext);
+      assertAuthenticatedContextCurrent(authContext, 'tab cache refresh');
       lastKnownTabs = snapshot.tabs;
+      lastKnownTabsAuthBinding = monitoringEventAuthBindingForContext(authContext);
+    } else {
+      lastKnownTabs = [];
+      lastKnownTabsAuthBinding = monitoringEventAuthBindingForContext(authContext);
     }
+    return true;
   } catch (error) {
     // Ignore errors - cache will be updated on next successful query
+    return false;
   }
 }
 
@@ -1368,6 +1755,10 @@ function applyAuthoritativeManagedAuthGateSnapshot(
     });
   }
   const persistedDescriptor = persistedManagedAuthGateDescriptor(descriptor);
+  authoritativeManagedSchoolPolicyScope = managedDescriptorSchoolPolicyScope(
+    descriptor,
+    policyIsAuthoritative,
+  );
   if (policyIsAuthoritative && options.persist !== false) {
     kv.set({ [MANAGED_AUTH_GATE_BINDING_KEY]: persistedDescriptor }).catch(() => {});
   }
@@ -1422,7 +1813,19 @@ function scheduleLicenseCheck() {
   chrome.alarms.create('license-check', { periodInMinutes });
 }
 
-function notifyLicenseState(message) {
+async function notifyLicenseState(message, authContext) {
+  if (authContext) {
+    await broadcastToAllTabsForAuth(
+      message.type,
+      { planStatus: message.planStatus },
+      authContext,
+      {
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+      },
+    );
+    return;
+  }
   chrome.tabs.query({}, (tabs) => {
     tabs.forEach((tab) => {
       if (!tab.id) return;
@@ -1439,16 +1842,42 @@ function isClassPilotNotEntitledResponse(data = {}) {
     || identifiers.includes('school_not_entitled');
 }
 
-async function disableForInactiveLicense(planStatus, expectedAuthContext = null) {
+async function disableForInactiveLicense(planStatus, expectedAuthContext = null, options = {}) {
+  const authContext = expectedAuthContext || (() => {
+    try {
+      return captureAuthenticatedContext('license revocation');
+    } catch {
+      return null;
+    }
+  })();
+  if (!authContext) throw authContextSuperseded('license revocation');
+  if (options.authMutationHeld !== true) {
+    return enqueueStudentAuthMutation(() => disableForInactiveLicense(
+      planStatus,
+      authContext,
+      { ...options, authMutationHeld: true },
+    ));
+  }
   const assertCurrent = (reason) => {
-    if (expectedAuthContext) assertAuthenticatedContextCurrent(expectedAuthContext, reason);
+    assertAuthenticatedContextCurrent(authContext, reason);
   };
   assertCurrent('license revocation');
+  const licenseScope = adoptLicenseState(false, planStatus, authContext);
+  await kv.set({
+    licenseActive: false,
+    planStatus: licensePlanStatus,
+    licenseDisabledAt: Date.now(),
+    [LICENSE_STATE_SCOPE_KEY]: licenseScope,
+  });
+  assertCurrent('license revocation persistence');
   // Persist and attempt delivery while the authenticated device context is
   // still available. A retryable failure remains in the bounded outbox and
   // can be delivered after the license/session recovers.
-  if (licenseActive) {
-    await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
+  if (trackingState !== TRACKING_STATES.OFF || persistedMonitoringStateScope !== monitoringEventAuthBindingForContext(authContext)) {
+    await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive', {
+      authContext,
+      authMutationHeld: true,
+    });
     assertCurrent('license revocation tracking transition');
   }
   // Product entitlement revocation must remove teacher-authored controls even
@@ -1471,9 +1900,8 @@ async function disableForInactiveLicense(planStatus, expectedAuthContext = null)
   }
   await clearFabAndOverlayState('entitlement-inactive', { closeChat: true }).catch(() => {});
   assertCurrent('license revocation FAB cleanup');
-  licenseActive = false;
   scheduleHeartbeat(null);
-  await disconnectWebSocket();
+  await disconnectWebSocket({ authContext });
   assertCurrent('license revocation WebSocket cleanup');
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
@@ -1484,22 +1912,69 @@ async function disableForInactiveLicense(planStatus, expectedAuthContext = null)
   assertCurrent('license revocation connectivity state');
 
   assertCurrent('license revocation persistence');
-  await kv.set({ licenseActive: false, planStatus, licenseDisabledAt: Date.now() });
-  assertCurrent('license revocation persistence');
-  notifyLicenseState({ type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus });
+  await notifyLicenseState(
+    { type: 'CLASSPILOT_LICENSE_INACTIVE', planStatus: licensePlanStatus },
+    authContext,
+  );
+  assertCurrent('license revocation notification');
+}
+
+function licenseScopeForAuthContext(authContext) {
+  return authContext ? authContextProtocolScope(authContext) : null;
+}
+
+function licenseStateMatchesAuthContext(authContext) {
+  const scope = licenseScopeForAuthContext(authContext);
+  return Boolean(scope && licenseStateScope === scope);
+}
+
+function currentLicenseIsActive() {
+  try {
+    const authContext = captureAuthenticatedContext('license state');
+    return licenseActive && licenseStateMatchesAuthContext(authContext);
+  } catch {
+    return false;
+  }
+}
+
+function resetLicenseStateForAuthorityTransition() {
+  licenseActive = false;
+  licenseStateScope = null;
+  licensePlanStatus = null;
+}
+
+function adoptLicenseState(active, planStatus, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'license state adoption');
+  const scope = licenseScopeForAuthContext(authContext);
+  if (!scope) throw authContextSuperseded('license state adoption');
+  licenseActive = active === true;
+  licenseStateScope = scope;
+  licensePlanStatus = typeof planStatus === 'string' ? planStatus.slice(0, 80) : null;
+  return scope;
 }
 
 async function checkLicenseStatus(reason = 'manual', options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext(`license check:${reason}`);
+    } catch (error) {
+      if (isAuthContextCancellation(error)) return;
+      throw error;
+    }
+  }
   const assertCurrent = () => {
-    if (options.authMutationGeneration === undefined) return;
-    assertAuthMutationBindingCurrent(
-      options.authMutationGeneration,
-      options.authBinding,
-      `license check:${reason}`,
-    );
+    assertAuthenticatedContextCurrent(authContext, `license check:${reason}`);
+    if (options.authMutationGeneration !== undefined) {
+      assertAuthMutationBindingCurrent(
+        options.authMutationGeneration,
+        options.authBinding,
+        `license check:${reason}`,
+      );
+    }
   };
   const applyForCurrentAuth = (mutation) => {
-    if (options.authMutationGeneration === undefined) return mutation();
+    if (options.authMutationHeld === true) return mutation();
     return enqueueStudentAuthMutation(async () => {
       assertCurrent();
       const result = await mutation();
@@ -1513,13 +1988,14 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
   }
 
   try {
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/school/status`, {
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/school/status`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        studentToken: CONFIG.studentToken || null,
-        studentEmail: CONFIG.studentEmail || null,
+        studentToken: authContext.studentToken || null,
+        studentEmail: authContext.studentEmail || null,
       }),
+      signal: authContext.signal,
     }, {
       context: 'license status',
       maxAttempts: 2,
@@ -1530,7 +2006,11 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
       const data = await response.json().catch(() => ({}));
       assertCurrent();
       if (response.status === 402 || isClassPilotNotEntitledResponse(data)) {
-        await applyForCurrentAuth(() => disableForInactiveLicense(data.planStatus));
+        await applyForCurrentAuth(() => disableForInactiveLicense(
+          data.planStatus,
+          authContext,
+          { authMutationHeld: true },
+        ));
         assertCurrent();
       }
       return;
@@ -1543,27 +2023,44 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
     const data = await response.json();
     assertCurrent();
     if (!data.schoolActive) {
-      await applyForCurrentAuth(() => disableForInactiveLicense(data.planStatus));
+      await applyForCurrentAuth(() => disableForInactiveLicense(
+        data.planStatus,
+        authContext,
+        { authMutationHeld: true },
+      ));
       assertCurrent();
       return;
     }
 
     const wasInactive = await applyForCurrentAuth(async () => {
-      const inactiveBeforeUpdate = !licenseActive;
-      licenseActive = true;
+      assertCurrent();
+      const inactiveBeforeUpdate = !currentLicenseIsActive();
+      const licenseScope = licenseScopeForAuthContext(authContext);
+      if (!licenseScope) throw authContextSuperseded(`license check:${reason}`);
       await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
-      await kv.set({ licenseActive: true, planStatus: data.planStatus });
+      assertCurrent();
+      await kv.set({
+        licenseActive: true,
+        planStatus: typeof data.planStatus === 'string' ? data.planStatus.slice(0, 80) : null,
+        [LICENSE_STATE_SCOPE_KEY]: licenseScope,
+      });
+      assertCurrent();
+      adoptLicenseState(true, data.planStatus, authContext);
       return inactiveBeforeUpdate;
     });
     assertCurrent();
     if (wasInactive) {
-      notifyLicenseState({ type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: data.planStatus });
+      await notifyLicenseState(
+        { type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: data.planStatus },
+        authContext,
+      );
+      assertCurrent();
       if (options.deferTrackingInitialization !== true) {
         initializeAdaptiveTracking(`license-active:${reason}`);
       }
     }
   } catch (error) {
-    if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
+    if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     console.warn('[License] Status check failed:', safeDiagnosticError(error));
   }
 }
@@ -1660,42 +2157,125 @@ function isWithinTrackingHours(
     });
   } catch (error) {
     console.warn('[School Hours] Error checking tracking hours:', safeDiagnosticError(error));
-    return true;
+    return false;
   }
 }
 
-async function loadCachedSchoolSettings() {
-  const stored = await kv.get([SCHOOL_SETTINGS_CACHE_KEY, SCHOOL_SETTINGS_FETCHED_AT_KEY]);
-  if (stored[SCHOOL_SETTINGS_CACHE_KEY]) {
-    schoolSettings = stored[SCHOOL_SETTINGS_CACHE_KEY];
-  }
-  if (stored[SCHOOL_SETTINGS_FETCHED_AT_KEY]) {
-    schoolSettingsFetchedAt = stored[SCHOOL_SETTINGS_FETCHED_AT_KEY];
-  }
+function validSchoolSettingsPayload(value) {
+  const structurallyValid = Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof value.enableTrackingHours === 'boolean'
+  );
+  if (!structurallyValid) return false;
+  if (value.enableTrackingHours !== true) return true;
+  return Boolean(
+    typeof value.trackingStartTime === 'string'
+    && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.trackingStartTime)
+    && typeof value.trackingEndTime === 'string'
+    && /^([01]\d|2[0-3]):[0-5]\d$/.test(value.trackingEndTime)
+    && typeof value.schoolTimezone === 'string'
+    && value.schoolTimezone.trim().length > 0
+    && Array.isArray(value.trackingDays)
+    && value.trackingDays.length > 0
+    && value.trackingDays.every((day) => typeof day === 'string' && day.trim().length > 0)
+  );
+}
+
+function enqueueSchoolSettingsMutation(operation) {
+  const run = () => operation();
+  schoolSettingsMutation = schoolSettingsMutation.then(run, run);
+  return schoolSettingsMutation;
+}
+
+function loadCachedSchoolSettings(options = {}) {
+  const authContext = options.authContext || (hasStudentAuth()
+    ? captureAuthenticatedContext('school settings cache read')
+    : null);
+  if (!authContext) return Promise.resolve(null);
+  const expectedScope = schoolPolicyScopeForAuthContext(authContext);
+  const run = () => enqueueSchoolSettingsMutation(async () => {
+    const assertCurrent = () => {
+      assertAuthenticatedContextCurrent(authContext, 'school settings cache read');
+      if (!expectedScope || schoolPolicyScopeForAuthContext(authContext) !== expectedScope) {
+        throw authContextSuperseded('school settings cache read');
+      }
+    };
+    assertCurrent();
+    const stored = await kv.get([
+      SCHOOL_SETTINGS_CACHE_KEY,
+      SCHOOL_SETTINGS_FETCHED_AT_KEY,
+      SCHOOL_SETTINGS_SCOPE_KEY,
+    ]);
+    assertCurrent();
+    const storedSettings = stored[SCHOOL_SETTINGS_CACHE_KEY];
+    const storedFetchedAt = Number(stored[SCHOOL_SETTINGS_FETCHED_AT_KEY] || 0);
+    const storedScope = stored[SCHOOL_SETTINGS_SCOPE_KEY] || null;
+    if (storedScope === expectedScope && validSchoolSettingsPayload(storedSettings)) {
+      schoolSettings = storedSettings;
+      schoolSettingsFetchedAt = storedFetchedAt;
+      schoolSettingsScope = expectedScope;
+      return schoolSettings;
+    }
+    schoolSettings = null;
+    schoolSettingsFetchedAt = 0;
+    schoolSettingsScope = null;
+    const latest = await kv.get([
+      SCHOOL_SETTINGS_FETCHED_AT_KEY,
+      SCHOOL_SETTINGS_SCOPE_KEY,
+    ]);
+    assertCurrent();
+    if (
+      (latest[SCHOOL_SETTINGS_SCOPE_KEY] || null) === storedScope
+      && Number(latest[SCHOOL_SETTINGS_FETCHED_AT_KEY] || 0) === storedFetchedAt
+    ) {
+      await kv.remove([
+        SCHOOL_SETTINGS_CACHE_KEY,
+        SCHOOL_SETTINGS_FETCHED_AT_KEY,
+        SCHOOL_SETTINGS_SCOPE_KEY,
+      ]);
+      assertCurrent();
+    }
+    return null;
+  });
+  return options.authMutationHeld === true ? run() : enqueueStudentAuthMutation(run);
 }
 
 async function refreshSchoolSettings(options = {}) {
   const force = options.force === true;
+  const authContext = options.authContext || (hasStudentAuth()
+    ? captureAuthenticatedContext('school settings refresh')
+    : null);
+  if (!authContext) return null;
+  const expectedScope = schoolPolicyScopeForAuthContext(authContext);
   const assertCurrent = () => {
-    if (options.authMutationGeneration === undefined) return;
-    assertAuthMutationBindingCurrent(
-      options.authMutationGeneration,
-      options.authBinding,
-      'school settings refresh',
-    );
-  };
-  const applyForCurrentAuth = (mutation) => {
-    if (options.authMutationGeneration === undefined) return mutation();
-    return enqueueStudentAuthMutation(async () => {
-      assertCurrent();
-      const result = await mutation();
-      assertCurrent();
-      return result;
-    });
+    assertAuthenticatedContextCurrent(authContext, 'school settings refresh');
+    if (options.authMutationGeneration !== undefined) {
+      assertAuthMutationBindingCurrent(
+        options.authMutationGeneration,
+        options.authBinding,
+        'school settings refresh',
+      );
+    }
+    if (!expectedScope || schoolPolicyScope() !== expectedScope) {
+      throw authContextSuperseded('school settings refresh');
+    }
   };
   assertCurrent();
   const now = Date.now();
-  if (!force && schoolSettingsFetchedAt && now - schoolSettingsFetchedAt < SETTINGS_FETCH_INTERVAL_MS) {
+  if (schoolSettingsScope !== expectedScope) {
+    schoolSettings = null;
+    schoolSettingsFetchedAt = 0;
+    schoolSettingsScope = null;
+  }
+  if (
+    !force
+    && validSchoolSettingsPayload(schoolSettings)
+    && schoolSettingsScope === expectedScope
+    && schoolSettingsFetchedAt
+    && now - schoolSettingsFetchedAt < SETTINGS_FETCH_INTERVAL_MS
+  ) {
     return schoolSettings;
   }
 
@@ -1704,19 +2284,20 @@ async function refreshSchoolSettings(options = {}) {
     // (enableTrackingHours, trackingStartTime, trackingEndTime, trackingDays, schoolTimezone).
     // Requires the "idle" permission in manifest.json to respect ACTIVE/IDLE states.
     // Use /api/extension/settings endpoint which accepts student token authentication
-    if (!CONFIG.studentToken) {
+    if (!authContext?.studentToken) {
       console.log('[School Hours] No student token, skipping settings fetch');
-      if (!schoolSettings) {
-        schoolSettings = { enableTrackingHours: false };
-      }
-      return schoolSettings;
+      schoolSettings = null;
+      schoolSettingsFetchedAt = 0;
+      schoolSettingsScope = null;
+      return null;
     }
     const authenticatedResponseGuard = captureAuthenticatedResponseGuard();
-    const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/settings`, {
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/extension/settings`, {
       cache: 'no-store',
       headers: {
-        'Authorization': `Bearer ${CONFIG.studentToken}`,
+        'Authorization': `Bearer ${authContext.studentToken}`,
       },
+      signal: authContext.signal,
     }, {
       context: 'extension settings',
       maxAttempts: 2,
@@ -1733,22 +2314,35 @@ async function refreshSchoolSettings(options = {}) {
       authenticatedResponseGuard,
     );
     assertCurrent();
-    await applyForCurrentAuth(async () => {
-      schoolSettings = settings;
-      schoolSettingsFetchedAt = now;
-      await applyFabSettings(settings.fab || settings);
+    if (!validSchoolSettingsPayload(settings)) {
+      throw new Error('School settings payload is incomplete');
+    }
+    await enqueueStudentAuthMutation(() => enqueueSchoolSettingsMutation(async () => {
+      assertCurrent();
+      await applyFabSettings(settings.fab || settings, { authContext });
+      assertCurrent();
       await kv.set({
         [SCHOOL_SETTINGS_CACHE_KEY]: settings,
         [SCHOOL_SETTINGS_FETCHED_AT_KEY]: now,
+        [SCHOOL_SETTINGS_SCOPE_KEY]: expectedScope,
       });
-    });
+      assertCurrent();
+      schoolSettings = settings;
+      schoolSettingsFetchedAt = now;
+      schoolSettingsScope = expectedScope;
+    }));
     console.log('[School Hours] Settings updated');
     return settings;
   } catch (error) {
-    if (error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
+    if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     console.warn('[School Hours] Failed to fetch settings:', safeDiagnosticError(error));
-    if (!schoolSettings) {
-      schoolSettings = { enableTrackingHours: false };
+    if (
+      schoolSettingsScope !== expectedScope
+      || !validSchoolSettingsPayload(schoolSettings)
+    ) {
+      schoolSettings = null;
+      schoolSettingsFetchedAt = 0;
+      schoolSettingsScope = null;
     }
     return schoolSettings;
   }
@@ -1794,13 +2388,20 @@ function fabIdentityBinding() {
 }
 
 function exactStudentBinding(raw = {}) {
-  const candidates = [
+  const roots = [
     raw,
-    raw?.binding,
-    raw?.exactBinding,
+    raw?.student && typeof raw.student === 'object'
+      ? { studentId: raw.student.id ?? raw.student.studentId }
+      : null,
     raw?.data,
+    raw?.data?.student && typeof raw.data.student === 'object'
+      ? { studentId: raw.data.student.id ?? raw.data.student.studentId }
+      : null,
     raw?.authority,
     raw?.command,
+    raw?.command?.student && typeof raw.command.student === 'object'
+      ? { studentId: raw.command.student.id ?? raw.command.student.studentId }
+      : null,
     raw?.command?.data,
     raw?.command?.authority,
     raw?.fab,
@@ -1809,63 +2410,506 @@ function exactStudentBinding(raw = {}) {
     raw?.classroomState,
     raw?.settings?.fab,
   ].filter((candidate) => candidate && typeof candidate === 'object');
-  const firstValue = (key) => {
-    for (const candidate of candidates) {
-      const value = String(candidate[key] || '').trim();
-      if (value) return value;
+  const candidates = [];
+  const explicitBindingCandidates = [];
+  const seen = new Set();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const candidate = pending.shift();
+    if (!candidate || typeof candidate !== 'object' || seen.has(candidate)) continue;
+    seen.add(candidate);
+    candidates.push(candidate);
+    for (const key of ['binding', 'exactBinding']) {
+      if (candidate[key] && typeof candidate[key] === 'object') {
+        explicitBindingCandidates.push(candidate[key]);
+        pending.push(candidate[key]);
+      }
     }
-    return null;
+  }
+  const conflict = () => {
+    const error = new Error('Message contains conflicting exact authority aliases');
+    error.code = 'STUDENT_BINDING_MISMATCH';
+    throw error;
   };
-  const firstInteger = (keys) => {
+  for (const bindingCandidate of new Set(explicitBindingCandidates)) {
+    if (Number(bindingCandidate.bindingVersion) !== 2) continue;
+    const completeString = (key) => (
+      Object.prototype.hasOwnProperty.call(bindingCandidate, key)
+      && typeof bindingCandidate[key] === 'string'
+      && Boolean(bindingCandidate[key].trim())
+    );
+    if (
+      !completeString('schoolId')
+      || !completeString('deviceId')
+      || !completeString('studentId')
+      || !completeString('studentSessionId')
+      || !Object.prototype.hasOwnProperty.call(bindingCandidate, 'controlRevision')
+      || !Number.isSafeInteger(Number(bindingCandidate.controlRevision))
+      || Number(bindingCandidate.controlRevision) < 0
+    ) conflict();
+  }
+  const consistentValue = (key) => {
+    let selected = null;
+    for (const candidate of candidates) {
+      if (!Object.prototype.hasOwnProperty.call(candidate, key)) continue;
+      const supplied = candidate[key];
+      if (supplied === null || supplied === undefined || supplied === '') continue;
+      if (typeof supplied !== 'string') conflict();
+      const value = supplied.trim();
+      if (!value) continue;
+      if (selected !== null && selected !== value) conflict();
+      selected = value;
+    }
+    return selected;
+  };
+  const consistentInteger = (keys, sourceCandidates = candidates) => {
+    let selected = null;
     for (const key of keys) {
-      for (const candidate of candidates) {
+      for (const candidate of sourceCandidates) {
         if (!Object.prototype.hasOwnProperty.call(candidate, key)) continue;
-        const value = Number(candidate[key]);
+        const supplied = candidate[key];
+        if (supplied === null || supplied === undefined || supplied === '') continue;
+        const value = Number(supplied);
+        if (!Number.isSafeInteger(value) || value < 0) conflict();
+        if (selected !== null && selected !== value) conflict();
+        selected = value;
+      }
+    }
+    return selected;
+  };
+  const firstInteger = (keys, sourceCandidates = candidates) => {
+    for (const key of keys) {
+      for (const candidate of sourceCandidates) {
+        if (!Object.prototype.hasOwnProperty.call(candidate, key)) continue;
+        const supplied = candidate[key];
+        if (supplied === null || supplied === undefined || supplied === '') continue;
+        const value = Number(supplied);
         if (Number.isSafeInteger(value) && value >= 0) return value;
       }
     }
     return null;
   };
+  const revisionKeys = [
+    'studentControlRevision',
+    'controlRevision',
+    'ownershipRevision',
+    'studentSessionRevision',
+    'sessionRevision',
+  ];
+  const explicitBindings = [...new Set(explicitBindingCandidates)];
+  const explicitV2Bindings = explicitBindings.filter(
+    (candidate) => Number(candidate.bindingVersion) === 2,
+  );
+  let controlRevision = null;
+  if (explicitV2Bindings.length > 0) {
+    // Settings/auth responses can legitimately contain an older FAB snapshot
+    // alongside a newer exact binding. Compare revisions only inside the
+    // explicit V2 authority tuple(s), and for actual command envelopes against
+    // their duplicate command-level aliases. Identity fields remain globally
+    // consistent above because those values may never be spliced.
+    controlRevision = consistentInteger(revisionKeys, explicitV2Bindings);
+    const isCommandEnvelope = raw?.type === 'remote-control'
+      || (raw?.command && typeof raw.command === 'object');
+    if (isCommandEnvelope) {
+      const commandRevisionCandidates = [
+        raw,
+        raw?.binding,
+        raw?.exactBinding,
+        raw?.data,
+        raw?.data?.binding,
+        raw?.data?.exactBinding,
+        raw?.authority,
+        raw?.command,
+        raw?.command?.binding,
+        raw?.command?.exactBinding,
+        raw?.command?.data,
+        raw?.command?.data?.binding,
+        raw?.command?.data?.exactBinding,
+        raw?.command?.authority,
+      ].filter((candidate) => candidate && typeof candidate === 'object');
+      const commandRevision = consistentInteger(revisionKeys, commandRevisionCandidates);
+      if (commandRevision !== null && commandRevision !== controlRevision) conflict();
+    }
+  } else {
+    controlRevision = firstInteger(revisionKeys);
+  }
+  const bindingVersion = explicitBindings.length > 0
+    ? consistentInteger(['bindingVersion'], explicitBindings)
+    : firstInteger(['bindingVersion']);
   return {
-    bindingVersion: firstInteger(['bindingVersion']),
-    schoolId: firstValue('schoolId'),
-    deviceId: firstValue('deviceId'),
-    studentId: firstValue('studentId'),
-    studentSessionId: firstValue('studentSessionId'),
-    controlRevision: firstInteger([
-      'studentControlRevision',
-      'controlRevision',
-      'ownershipRevision',
-      'studentSessionRevision',
-      'sessionRevision',
-    ]),
+    bindingVersion,
+    schoolId: consistentValue('schoolId'),
+    deviceId: consistentValue('deviceId'),
+    studentId: consistentValue('studentId'),
+    studentSessionId: consistentValue('studentSessionId'),
+    controlRevision,
   };
 }
 
-function currentStudentControlRevision() {
-  if (currentFabState?.ownershipRevisionKnown === true) {
-    const revision = Number(currentFabState.ownershipRevision);
-    if (Number.isSafeInteger(revision) && revision >= 0) return revision;
-  }
-  const revision = Number(
-    currentClassroomState?.studentControlRevision
-    ?? currentClassroomState?.ownershipRevision
-    ?? currentClassroomState?.revision,
-  );
-  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+function schoolPolicyScope(serverOrigin = CONFIG.serverUrl, schoolId = CONFIG.schoolId) {
+  const origin = normalizedServerOrigin(serverOrigin);
+  const normalizedSchoolId = String(schoolId || '').trim();
+  return origin && normalizedSchoolId ? `${origin}|${normalizedSchoolId}` : null;
 }
 
-function fullAuthorityBindingNegotiated(context = null) {
-  return hasNegotiatedCapability('exactBindingAckV2', context)
-    || hasNegotiatedCapability('exactTabCloseV2', context)
-    || hasNegotiatedCapability('authBoundTelemetryV1', context);
+function schoolPolicyScopeForAuthContext(authContext) {
+  return schoolPolicyScope(authContext?.serverOrigin, authContext?.schoolId);
+}
+
+function managedDescriptorSchoolPolicyScope(descriptor, policyIsAuthoritative) {
+  if (
+    !policyIsAuthoritative
+    || !descriptor?.hasManagedSetup
+    || descriptor.schoolIdManaged !== true
+    || !descriptor.schoolId
+  ) return null;
+  const serverOrigin = descriptor.serverManaged
+    ? descriptor.serverOrigin
+    : normalizedServerOrigin(DEFAULT_SERVER_URL);
+  return schoolPolicyScope(serverOrigin, descriptor.schoolId);
+}
+
+function classifyStoredSchoolPolicy(
+  stored = {},
+  expectedScope = schoolPolicyScope(),
+  options = {},
+) {
+  if (!Object.prototype.hasOwnProperty.call(stored, 'globalBlockedDomains')) {
+    return { status: 'missing', domains: null, scope: null };
+  }
+  const storedScope = typeof stored[GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY] === 'string'
+    ? stored[GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY]
+    : null;
+  if (!expectedScope) {
+    return { status: 'untrusted', domains: null, scope: storedScope };
+  }
+  if (storedScope && storedScope !== expectedScope) {
+    return { status: 'mismatch', domains: null, scope: storedScope };
+  }
+  try {
+    const domains = RuntimeCore.normalizeDomainList(
+      stored.globalBlockedDomains,
+      'school block list',
+    );
+    if (storedScope === expectedScope) {
+      return { status: 'matched', domains, scope: expectedScope };
+    }
+    if (
+      authoritativeManagedSchoolPolicyScope === expectedScope
+      && options.legacyOwnerScope === expectedScope
+    ) {
+      return { status: 'legacy_migratable', domains, scope: expectedScope };
+    }
+    if (
+      authoritativeManagedSchoolPolicyScope === expectedScope
+      && options.legacyOwnerScope
+      && options.legacyOwnerScope !== expectedScope
+    ) {
+      return { status: 'mismatch', domains: null, scope: options.legacyOwnerScope };
+    }
+    // 2.7.0 stored the block list without a school/origin scope. Until an
+    // authoritative managed tuple proves ownership, leave the surviving DNR
+    // range untouched instead of deleting restrictions or guessing a tenant.
+    return { status: 'legacy_untrusted', domains: null, scope: null };
+  } catch {
+    return { status: 'invalid', domains: null, scope: storedScope };
+  }
+}
+
+function resetStudentControlRevisionAuthority() {
+  studentControlRevisionAuthority = Object.freeze({
+    scope: null,
+    revision: null,
+  });
+}
+
+const AUTH_BOUND_NOTIFICATION_API_TIMEOUT_MS = 1_000;
+const AUTH_BOUND_NOTIFICATION_RETRY_MS = 5_000;
+const AUTH_BOUND_NOTIFICATION_CLEANUP_ALARM = 'auth-bound-notification-cleanup';
+
+function scheduleAuthBoundNotificationCleanupRetry(delayMs = AUTH_BOUND_NOTIFICATION_RETRY_MS) {
+  const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+  chrome.alarms?.get?.(AUTH_BOUND_NOTIFICATION_CLEANUP_ALARM, (existing) => {
+    if (!existing || Number(existing.scheduledTime || 0) > when) {
+      chrome.alarms.create(AUTH_BOUND_NOTIFICATION_CLEANUP_ALARM, { when });
+    }
+  });
+}
+
+function clearAuthBoundNotificationCleanupRetry() {
+  try {
+    const pending = chrome.alarms?.clear?.(AUTH_BOUND_NOTIFICATION_CLEANUP_ALARM);
+    Promise.resolve(pending).catch(() => {});
+  } catch {
+    // A future worker wake always performs another inventory reconciliation.
+  }
+}
+
+function readAllNotificationsBounded() {
+  return new Promise((resolve) => {
+    if (!chrome.notifications?.getAll) {
+      resolve({ ok: false, notifications: {} });
+      return;
+    }
+    let settled = false;
+    const finish = (ok, notifications = {}) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve({
+        ok: ok === true,
+        notifications: notifications && typeof notifications === 'object' ? notifications : {},
+      });
+    };
+    const timeoutId = setTimeout(
+      () => finish(false, {}),
+      AUTH_BOUND_NOTIFICATION_API_TIMEOUT_MS,
+    );
+    try {
+      const pending = chrome.notifications.getAll((notifications) => {
+        const failed = Boolean(chrome.runtime?.lastError);
+        finish(!failed, notifications);
+      });
+      if (pending && typeof pending.then === 'function') {
+        pending.then(
+          (notifications) => finish(true, notifications),
+          () => finish(false, {}),
+        );
+      }
+    } catch {
+      finish(false, {});
+    }
+  });
+}
+
+function clearAuthBoundNotificationOutcome(notificationId) {
+  return new Promise((resolve) => {
+    if (!chrome.notifications?.clear) {
+      resolve({ ok: false, cleared: false });
+      return;
+    }
+    let settled = false;
+    const finish = (ok, cleared = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      resolve({ ok: ok === true, cleared: cleared === true });
+    };
+    const timeoutId = setTimeout(
+      () => finish(false, false),
+      AUTH_BOUND_NOTIFICATION_API_TIMEOUT_MS,
+    );
+    try {
+      const pending = chrome.notifications.clear(notificationId, (cleared) => {
+        const failed = Boolean(chrome.runtime?.lastError);
+        finish(!failed, cleared);
+      });
+      if (pending && typeof pending.then === 'function') {
+        pending.then(
+          (cleared) => finish(true, cleared),
+          () => finish(false, false),
+        );
+      }
+    } catch {
+      finish(false, false);
+    }
+  });
+}
+
+async function clearAuthBoundNotification(notificationId) {
+  const outcome = await clearAuthBoundNotificationOutcome(notificationId);
+  return outcome.ok && outcome.cleared;
+}
+
+function authBoundNotificationPrefixForContext(authContext) {
+  const authContextId = String(authContext?.authContextId || '')
+    .replace(/[^a-zA-Z0-9_-]/g, '');
+  return authContextId ? `classpilot-message-${authContextId}-` : null;
+}
+
+function currentAuthBoundNotificationPrefix() {
+  try {
+    return authBoundNotificationPrefixForContext(
+      captureAuthenticatedContext('notification inventory ownership'),
+    );
+  } catch {
+    return null;
+  }
+}
+
+async function reconcileAuthBoundTeacherMessageNotifications(options = {}) {
+  const readInventory = options.readInventory || readAllNotificationsBounded;
+  const clearNotification = options.clearNotification || clearAuthBoundNotificationOutcome;
+  const ownerGeneration = options.ownerGeneration === undefined
+    ? studentAuthMutationGeneration
+    : options.ownerGeneration;
+  const preservedPrefix = options.preservedPrefix === undefined
+    ? currentAuthBoundNotificationPrefix()
+    : options.preservedPrefix;
+  const ownerIsCurrent = () => (
+    studentAuthMutationGeneration === ownerGeneration
+    && currentAuthBoundNotificationPrefix() === preservedPrefix
+  );
+  if (!ownerIsCurrent()) return false;
+  const firstInventory = await readInventory();
+  if (!firstInventory?.ok || !ownerIsCurrent()) return false;
+  // On an authenticated worker, notifications carrying the current exact
+  // context are still valid UI and must survive a retired-context retry/alarm.
+  // A cold signed-out worker has no trusted prefix, so it safely clears every
+  // extension-owned teacher notification left by an unknown prior context.
+  const extensionIds = Object.keys(firstInventory.notifications || {})
+    .filter((notificationId) => notificationId.startsWith('classpilot-message-'));
+  const ids = extensionIds.filter((notificationId) => (
+    !preservedPrefix || !notificationId.startsWith(preservedPrefix)
+  ));
+  await Promise.all(ids.map((notificationId) => (
+    clearNotification(notificationId).catch(() => ({ ok: false, cleared: false }))
+  )));
+  const verification = await readInventory();
+  if (!ownerIsCurrent()) return false;
+  const reconciled = Boolean(
+    verification?.ok
+    && !ids.some((notificationId) => (
+      Object.prototype.hasOwnProperty.call(verification.notifications || {}, notificationId)
+    )),
+  );
+  if (!reconciled) return false;
+  // Reconstruct the in-memory owner set on every successful pass so an MV3
+  // restart can later force a cleanup when this exact identity retires.
+  activeAuthBoundNotificationIds.clear();
+  if (preservedPrefix) {
+    for (const notificationId of Object.keys(verification.notifications || {})) {
+      if (notificationId.startsWith(preservedPrefix)) {
+        activeAuthBoundNotificationIds.add(notificationId);
+      }
+    }
+  }
+  return true;
+}
+
+function ensureAuthBoundNotificationInventory(options = {}) {
+  const force = options.force === true;
+  if (authBoundNotificationInventoryReconciled && !force) return Promise.resolve(true);
+  const runReconciliation = () => reconcileAuthBoundTeacherMessageNotifications(options)
+    .then((reconciled) => {
+      authBoundNotificationInventoryReconciled = reconciled === true;
+      authBoundNotificationCleanupRetryAt = reconciled
+        ? 0
+        : Date.now() + AUTH_BOUND_NOTIFICATION_RETRY_MS;
+      if (reconciled) {
+        clearAuthBoundNotificationCleanupRetry();
+      } else {
+        scheduleAuthBoundNotificationCleanupRetry();
+      }
+      return authBoundNotificationInventoryReconciled;
+    })
+    .catch(() => {
+      authBoundNotificationInventoryReconciled = false;
+      authBoundNotificationCleanupRetryAt = Date.now() + AUTH_BOUND_NOTIFICATION_RETRY_MS;
+      scheduleAuthBoundNotificationCleanupRetry();
+      return false;
+    });
+  const trackReconciliation = (pending) => {
+    let tracked;
+    tracked = Promise.resolve(pending).finally(() => {
+      if (authBoundNotificationCleanupInFlight === tracked) {
+        authBoundNotificationCleanupInFlight = null;
+      }
+    });
+    authBoundNotificationCleanupInFlight = tracked;
+    authBoundNotificationCleanupPromise = tracked;
+    return tracked;
+  };
+  if (authBoundNotificationCleanupInFlight) {
+    if (!force) return authBoundNotificationCleanupInFlight;
+    const priorReconciliation = authBoundNotificationCleanupInFlight;
+    // A forced pass is requested after a specific notification clear failed.
+    // It must observe state *after* the older inventory snapshot finishes;
+    // merely joining that snapshot can miss a notification created mid-race.
+    return trackReconciliation(
+      priorReconciliation.catch(() => false).then(() => {
+        authBoundNotificationInventoryReconciled = false;
+        return runReconciliation();
+      }),
+    );
+  }
+  const now = Date.now();
+  if (!force && now < authBoundNotificationCleanupRetryAt) {
+    return Promise.resolve(false);
+  }
+  return trackReconciliation(runReconciliation());
+}
+
+async function clearAllAuthBoundTeacherMessageNotifications(options = {}) {
+  authBoundNotificationInventoryReconciled = false;
+  authBoundNotificationCleanupRetryAt = 0;
+  return ensureAuthBoundNotificationInventory({ ...options, force: true });
+}
+
+function handleAuthBoundNotificationCleanupAlarm() {
+  authBoundNotificationInventoryReconciled = false;
+  authBoundNotificationCleanupRetryAt = 0;
+  authBoundNotificationCleanupPromise = ensureAuthBoundNotificationInventory({ force: true });
+  return authBoundNotificationCleanupPromise;
+}
+
+function observeStudentControlRevision(rawRevision, authContext = null, reason = 'control revision') {
+  const revision = Number(rawRevision);
+  if (!Number.isSafeInteger(revision) || revision < 0) return currentStudentControlRevision();
+  const context = authContext || captureAuthenticatedContext(reason);
+  assertAuthenticatedContextCurrent(context, reason);
+  const scope = authContextProtocolScope(context);
+  const priorRevision = studentControlRevisionAuthority.scope === scope
+    ? studentControlRevisionAuthority.revision
+    : null;
+  const nextRevision = Number.isSafeInteger(priorRevision)
+    ? Math.max(priorRevision, revision)
+    : revision;
+  studentControlRevisionAuthority = Object.freeze({ scope, revision: nextRevision });
+  return nextRevision;
+}
+
+function observeExactStudentControlRevision(raw, authContext = null, reason = 'exact control revision') {
+  const binding = exactStudentBinding(raw);
+  if (binding.bindingVersion !== 2) return currentStudentControlRevision();
+  const context = authContext || captureAuthenticatedContext(reason);
+  assertAuthenticatedContextCurrent(context, reason);
+  if (
+    binding.schoolId !== context.schoolId
+    || binding.deviceId !== context.deviceId
+    || binding.studentId !== context.studentId
+    || binding.studentSessionId !== context.studentSessionId
+    || !Number.isSafeInteger(binding.controlRevision)
+    || binding.controlRevision < 0
+  ) {
+    const error = new Error(`${reason} does not match the immutable authentication context`);
+    error.code = 'STUDENT_BINDING_MISMATCH';
+    throw error;
+  }
+  return observeStudentControlRevision(binding.controlRevision, context, reason);
+}
+
+function currentStudentControlRevision() {
+  let context;
+  try {
+    context = captureAuthenticatedContext('control revision');
+  } catch {
+    return null;
+  }
+  const scope = authContextProtocolScope(context);
+  if (studentControlRevisionAuthority.scope !== scope) return null;
+  const revision = Number(studentControlRevisionAuthority.revision);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
 }
 
 function assertCurrentStudentBinding(raw = {}, label = 'message', options = {}) {
   const binding = exactStudentBinding(raw);
   const context = options.authContext || null;
-  const requireFullAuthority = options.requireFullAuthority === true
-    || (options.requireFullAuthority !== false && fullAuthorityBindingNegotiated(context));
+  // Full authority is capability-specific. Ordinary commands, chat, FAB and
+  // lifecycle frames retain their established exact student/session check;
+  // callers opt in only for the operation governed by a negotiated V2
+  // capability (for example an ACK or an exact-reference tab close).
+  const requireFullAuthority = options.requireFullAuthority === true;
   const expectedSchoolId = context?.schoolId ?? (String(CONFIG.schoolId || '').trim() || null);
   const expectedDeviceId = context?.deviceId ?? CONFIG.deviceId;
   const expectedControlRevision = currentStudentControlRevision();
@@ -1893,9 +2937,9 @@ function assertCurrentStudentBinding(raw = {}, label = 'message', options = {}) 
   return binding;
 }
 
-function acceptsCurrentStudentBinding(raw = {}, label = 'message') {
+function acceptsCurrentStudentBinding(raw = {}, label = 'message', options = {}) {
   try {
-    assertCurrentStudentBinding(raw, label);
+    assertCurrentStudentBinding(raw, label, options);
     return true;
   } catch (error) {
     console.warn(`[Binding] Ignoring ${label}:`, safeDiagnosticError(error));
@@ -2006,6 +3050,14 @@ async function adoptAuthenticatedStudentBindingNow(raw, reason, responseGuard) {
   CONFIG.activeStudentSessionId = binding.studentSessionId;
   if (authenticatedSchoolId) CONFIG.schoolId = authenticatedSchoolId;
   studentAuthInvalidating = false;
+  const adoptedAuthContext = captureAuthenticatedContext(`${reason} storage adoption`);
+  await cleanupRetiredExactBoundStorage(adoptedAuthContext, `${reason} storage adoption`);
+  assertAuthMutationCurrent(mutationGeneration, reason);
+  assertAuthenticatedResponseGuardCurrent(responseGuard, reason);
+  if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
+  if (binding.bindingVersion === 2) {
+    observeExactStudentControlRevision(raw, adoptedAuthContext, `${reason} control revision`);
+  }
   if (
     !wasAuthenticated
     || priorStudentId !== binding.studentId
@@ -2103,7 +3155,7 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
     messagingEnabled: false,
     handRaisingEnabled: false,
   });
-  notifyStudentMessageStateCleared(reason);
+  await notifyStudentMessageStateCleared(reason);
   broadcastToAllTabs('fab-state', {
     schemaVersion: 1,
     revision: 0,
@@ -2126,14 +3178,29 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   if (!rawFabState || typeof rawFabState !== 'object') return {};
   const binding = fabIdentityBinding();
   if (!binding) return {};
+  const authContext = options.authContext || (() => {
+    try {
+      return captureAuthenticatedContext('FAB state');
+    } catch {
+      return null;
+    }
+  })();
+  const assertCurrent = (reason = 'FAB state') => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, reason);
+  };
+  const rawBinding = exactStudentBinding(rawFabState);
+  if (rawBinding.studentId || rawBinding.studentSessionId) {
+    assertCurrentStudentBinding(rawFabState, 'FAB state', { authContext });
+  }
+  assertCurrent();
   const stored = await kv.get([
     FAB_STATE_STORAGE_KEY,
     FAB_CONTEXT_STORAGE_KEY,
     FAB_CHAT_CONTEXT_STORAGE_KEY,
   ]);
-  const rawBinding = exactStudentBinding(rawFabState);
+  assertCurrent();
   if (rawBinding.studentId || rawBinding.studentSessionId) {
-    assertCurrentStudentBinding(rawFabState, 'FAB state');
+    assertCurrentStudentBinding(rawFabState, 'FAB state', { authContext });
   }
   const priorState = stored[FAB_STATE_STORAGE_KEY] || currentFabState || {};
   const priorContext = stored[FAB_CONTEXT_STORAGE_KEY] || {};
@@ -2208,41 +3275,116 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     updates.handRaised = false;
     nextState.handRaised = false;
   }
+  assertCurrent();
   await kv.set(updates);
+  assertCurrent();
   currentFabState = nextState;
+  const authorityEnvelope = options.authorityEnvelope || rawFabState;
+  const broadcastSource = (() => {
+    if (!authContext) return authorityEnvelope;
+    const authorityBinding = exactStudentBinding(authorityEnvelope);
+    return authorityBinding.studentId && authorityBinding.studentSessionId
+      ? authorityEnvelope
+      : browserPolicyEnvelopeForAuth(authContext);
+  })();
+  if (authContext) {
+    const authorityBinding = exactStudentBinding(authorityEnvelope);
+    if (authorityBinding.bindingVersion === 2) {
+      observeExactStudentControlRevision(
+        authorityEnvelope,
+        authContext,
+        'FAB control revision',
+      );
+    }
+  }
   if (lifecycleChanged) {
-    await clearClassroomOverlayState(`fab:${nextState.reason || 'lifecycle-change'}`);
+    await clearClassroomOverlayState(`fab:${nextState.reason || 'lifecycle-change'}`, {
+      authContext,
+      sourceMessage: broadcastSource,
+      expectedBinding: binding,
+    });
+    assertCurrent('FAB lifecycle overlay clear');
   }
   if (options.broadcast !== false) {
-    broadcastToAllTabs('fab-state', { ...nextState, context });
+    if (authContext) {
+      await broadcastToAllTabsForAuth(
+        'fab-state',
+        { ...nextState, context },
+        authContext,
+        broadcastSource,
+      );
+      assertCurrent('FAB state broadcast');
+    } else {
+      await broadcastToAllTabs('fab-state', { ...nextState, context });
+    }
   }
   return nextState;
 }
 
 function applyFabSettings(rawFabState, options = {}) {
-  return enqueueFabStateMutation(() => applyFabSettingsNow(rawFabState, options));
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('FAB state reservation');
+    } catch {
+      authContext = null;
+    }
+  }
+  const expectedBinding = fabIdentityBinding();
+  return enqueueFabStateMutation(async () => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'FAB state reservation');
+    if (expectedBinding !== fabIdentityBinding()) throw authContextSuperseded('FAB state reservation');
+    const result = await applyFabSettingsNow(rawFabState, { ...options, authContext });
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'FAB state reservation');
+    if (expectedBinding !== fabIdentityBinding()) throw authContextSuperseded('FAB state reservation');
+    return result;
+  });
 }
 
-async function updateLocalFabHandRaised(handRaised, reason) {
+async function updateLocalFabHandRaised(handRaised, reason, options = {}) {
+  const authContext = options.authContext || captureAuthenticatedContext(reason);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const expectedBinding = fabIdentityBinding();
   if (!currentFabState) {
-    await kv.set({ handRaised: handRaised === true });
+    const sessionIds = activeTeachingSessionIds();
+    const teachingSessionId = String(currentClassroomState?.teachingSessionId || '').trim();
+    if (!expectedBinding || !teachingSessionId || !sessionIds.includes(teachingSessionId)) {
+      throw authContextSuperseded(reason);
+    }
+    await applyFabSettings({
+      schemaVersion: 1,
+      revision: Number(currentClassroomState?.revision || 0),
+      activeSessionIds: sessionIds,
+      teachingSessionId,
+      handRaised: handRaised === true,
+      reason,
+    }, { authContext });
+    assertAuthenticatedContextCurrent(authContext, reason);
+    if (expectedBinding !== fabIdentityBinding()) throw authContextSuperseded(reason);
     return;
   }
   await applyFabSettings({
     ...currentFabState,
     handRaised: handRaised === true,
     reason,
-  });
+  }, { authContext });
+  assertAuthenticatedContextCurrent(authContext, reason);
 }
 
 let classroomOverlayMutation = Promise.resolve();
 
 function activeTeachingSessionIds() {
   const fabSessions = normalizeIdList(currentFabState?.activeSessionIds);
-  if (currentFabState) return fabSessions;
-  return normalizeIdList(currentClassroomState?.teachingSessionId
+  const classroomSessions = normalizeIdList(currentClassroomState?.teachingSessionId
     ? [currentClassroomState.teachingSessionId]
     : []);
+  if (!currentFabState) return classroomSessions;
+  if (currentFabState.ownershipRevisionKnown === true) {
+    const fabRevision = Number(currentFabState.ownershipRevision || 0);
+    const classroomRevision = Number(currentClassroomState?.revision || 0);
+    return fabRevision >= classroomRevision ? fabSessions : classroomSessions;
+  }
+  return fabSessions.length > 0 ? fabSessions : classroomSessions;
 }
 
 function commandTeachingSessionId(command = {}) {
@@ -2260,16 +3402,41 @@ function overlayExpiresAt(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function mutateClassroomOverlayState(operation) {
+function mutateClassroomOverlayState(operation, options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('classroom overlay reservation');
+    } catch {
+      authContext = null;
+    }
+  }
+  const expectedBinding = fabIdentityBinding();
   classroomOverlayMutation = classroomOverlayMutation.then(async () => {
-    const binding = fabIdentityBinding();
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
+    if (expectedBinding !== fabIdentityBinding()) {
+      throw authContextSuperseded('classroom overlay mutation');
+    }
+    const binding = expectedBinding;
     const stored = await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY);
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
+    if (expectedBinding !== fabIdentityBinding()) {
+      throw authContextSuperseded('classroom overlay mutation');
+    }
     const prior = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
     const state = prior?.binding === binding
       ? prior
       : { schemaVersion: 1, binding, timer: null, poll: null, updatedAt: Date.now() };
     const next = await operation(state, binding);
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
+    if (expectedBinding !== fabIdentityBinding()) {
+      throw authContextSuperseded('classroom overlay mutation');
+    }
     await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
+    if (expectedBinding !== fabIdentityBinding()) {
+      throw authContextSuperseded('classroom overlay mutation');
+    }
     scheduleClassroomOverlayExpiry(next);
     return next;
   }, async () => null);
@@ -2315,7 +3482,7 @@ function persistTimerOverlay(command, executionContext = {}) {
       },
       updatedAt: Date.now(),
     };
-  });
+  }, { authContext: executionContext.authContext });
 }
 
 function persistPollOverlay(command, executionContext = {}) {
@@ -2355,65 +3522,226 @@ function persistPollOverlay(command, executionContext = {}) {
       },
       updatedAt: Date.now(),
     };
-  });
+  }, { authContext: executionContext.authContext });
 }
 
-async function clearClassroomOverlayState(reason = 'cleared') {
-  classroomOverlayMutation = classroomOverlayMutation.then(async () => {
+async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
+  const authContext = options.authContext || null;
+  const expectedBinding = options.expectedBinding
+    || (authContext ? fabIdentityBinding() : null);
+  const sourceMessage = options.sourceMessage
+    || (authContext ? browserPolicyEnvelopeForAuth(authContext) : null);
+  const assertCurrent = (label = 'classroom overlay clear') => {
+    if (!authContext) return;
+    assertAuthenticatedContextCurrent(authContext, label);
+    if (!expectedBinding || fabIdentityBinding() !== expectedBinding) {
+      throw authContextSuperseded(label);
+    }
+    const binding = assertCurrentStudentBinding(sourceMessage, label, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, label);
+  };
+  const clearOperation = async () => {
+    assertCurrent();
     await chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+    assertCurrent();
     await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
-  }, async () => {
-    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+    assertCurrent();
+  };
+  classroomOverlayMutation = classroomOverlayMutation.then(clearOperation, clearOperation);
+  await classroomOverlayMutation;
+  assertCurrent();
+  if (authContext) {
+    await broadcastToAllTabsForAuth(
+      'timer',
+      { action: 'stop', reason },
+      authContext,
+      sourceMessage,
+    );
+    assertCurrent();
+    await broadcastToAllTabsForAuth(
+      'poll',
+      { action: 'close', reason },
+      authContext,
+      sourceMessage,
+    );
+    assertCurrent();
+  } else {
+    await broadcastToAllTabs('timer', { action: 'stop', reason });
+    await broadcastToAllTabs('poll', { action: 'close', reason });
+  }
+}
+
+function getRestorableClassroomOverlayState(options = {}) {
+  const authContext = options.authContext
+    || captureAuthenticatedContext('classroom overlay read');
+  const expectedBinding = options.expectedBinding || fabIdentityBinding();
+  return enqueueStudentAuthMutation(async () => {
+    const operation = async () => {
+      const assertCurrent = (reason = 'classroom overlay read') => {
+        assertAuthenticatedContextCurrent(authContext, reason);
+        if (!expectedBinding || fabIdentityBinding() !== expectedBinding) {
+          throw authContextSuperseded(reason);
+        }
+      };
+      assertCurrent();
+      const stored = await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY);
+      assertCurrent();
+      const state = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
+      if (state?.binding !== expectedBinding) {
+        if (state) {
+          const latest = (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY];
+          assertCurrent();
+          if (
+            latest?.binding === state.binding
+            && Number(latest?.updatedAt || 0) === Number(state.updatedAt || 0)
+          ) {
+            await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+            assertCurrent();
+          }
+        }
+        return { timer: null, poll: null };
+      }
+      const now = Date.now();
+      const sessionIds = activeTeachingSessionIds();
+      const sessionMatches = (overlay) => !overlay?.teachingSessionId
+        || sessionIds.includes(overlay.teachingSessionId);
+      const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
+        ? state.timer
+        : null;
+      const poll = state.poll && Number(state.poll.expiresAt) > now && sessionMatches(state.poll)
+        ? state.poll
+        : null;
+      if (timer !== state.timer || poll !== state.poll) {
+        const next = { ...state, timer, poll, updatedAt: now };
+        await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
+        assertCurrent();
+        scheduleClassroomOverlayExpiry(next);
+      }
+      return { timer, poll };
+    };
+    classroomOverlayMutation = classroomOverlayMutation.then(operation, operation);
+    return classroomOverlayMutation;
   });
-  await classroomOverlayMutation;
-  broadcastToAllTabs('timer', { action: 'stop', reason });
-  broadcastToAllTabs('poll', { action: 'close', reason });
 }
 
-async function getRestorableClassroomOverlayState() {
-  await classroomOverlayMutation;
-  const binding = fabIdentityBinding();
-  const stored = await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY);
-  const state = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
-  if (!binding || state?.binding !== binding) {
-    if (state) await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
-    return { timer: null, poll: null };
-  }
+async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI snapshot') {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  await Promise.all([
+    classroomStateRestorePromise,
+    classroomOverlayMutation.catch(() => undefined),
+    fabStateMutation.catch(() => undefined),
+  ]);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const stored = await kv.get([
+    CLASSROOM_OVERLAY_STORAGE_KEY,
+    FAB_STATE_STORAGE_KEY,
+    FAB_CONTEXT_STORAGE_KEY,
+  ]);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const expectedFabBinding = fabIdentityBinding();
+  const storedFabContext = stored[FAB_CONTEXT_STORAGE_KEY] || null;
+  const fabContext = expectedFabBinding && storedFabContext?.binding === expectedFabBinding
+    ? storedFabContext
+    : null;
+  const fabState = fabContext
+    ? (stored[FAB_STATE_STORAGE_KEY] || currentFabState)
+    : currentFabState;
+  const storedOverlay = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
   const now = Date.now();
-  const sessionIds = activeTeachingSessionIds();
+  const activeSessions = activeTeachingSessionIds();
+  const overlayCurrent = expectedFabBinding && storedOverlay?.binding === expectedFabBinding;
   const sessionMatches = (overlay) => !overlay?.teachingSessionId
-    || sessionIds.includes(overlay.teachingSessionId);
-  const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
-    ? state.timer
-    : null;
-  const poll = state.poll && Number(state.poll.expiresAt) > now && sessionMatches(state.poll)
-    ? state.poll
-    : null;
-  if (timer !== state.timer || poll !== state.poll) {
-    const next = { ...state, timer, poll, updatedAt: now };
-    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
-    scheduleClassroomOverlayExpiry(next);
-  }
-  return { timer, poll };
+    || activeSessions.includes(overlay.teachingSessionId);
+  const overlays = {
+    timer: overlayCurrent
+      && Number(storedOverlay.timer?.endsAt || 0) > now
+      && sessionMatches(storedOverlay.timer)
+      ? storedOverlay.timer
+      : null,
+    poll: overlayCurrent
+      && !storedOverlay.poll?.response
+      && Number(storedOverlay.poll?.expiresAt || 0) > now
+      && sessionMatches(storedOverlay.poll)
+      ? storedOverlay.poll
+      : null,
+  };
+  return {
+    classroomState: currentClassroomState,
+    overlays,
+    fabState,
+    fabContext,
+    fabBinding: expectedFabBinding,
+    studentMessageContext: studentMessageContextFor(authContext),
+  };
 }
 
-async function expireClassroomOverlays() {
+async function replayClassroomUiForAuth(authContext, reason = 'classroom UI replay') {
+  const snapshot = await getClassroomUiSnapshotForAuth(authContext, reason);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const sourceMessage = {
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  };
+  await broadcastToAllTabsForAuth(
+    'classroom-overlay-state-sync',
+    snapshot,
+    authContext,
+    sourceMessage,
+  );
+  assertAuthenticatedContextCurrent(authContext, reason);
+  return snapshot;
+}
+
+async function expireClassroomOverlays(options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('classroom overlay expiry');
+    } catch {
+      authContext = null;
+    }
+  }
+  let timerExpired = false;
+  let pollExpired = false;
   await mutateClassroomOverlayState(async (state) => {
     const now = Date.now();
-    const timerExpired = state.timer && Number(state.timer.endsAt) + 5000 <= now;
-    const pollExpired = state.poll && Number(state.poll.expiresAt) <= now;
-    if (timerExpired) broadcastToAllTabs('timer', { action: 'stop', reason: 'expired' });
-    if (pollExpired) broadcastToAllTabs('poll', { action: 'close', reason: 'expired' });
+    timerExpired = Boolean(state.timer && Number(state.timer.endsAt) + 5000 <= now);
+    pollExpired = Boolean(state.poll && Number(state.poll.expiresAt) <= now);
     return {
       ...state,
       timer: timerExpired ? null : state.timer,
       poll: pollExpired ? null : state.poll,
       updatedAt: now,
     };
-  });
+  }, { authContext });
+  if (authContext) {
+    assertAuthenticatedContextCurrent(authContext, 'classroom overlay expiry broadcast');
+    const sourceMessage = browserPolicyEnvelopeForAuth(authContext);
+    if (timerExpired) {
+      await broadcastToAllTabsForAuth(
+        'timer',
+        { action: 'stop', reason: 'expired' },
+        authContext,
+        sourceMessage,
+      );
+    }
+    assertAuthenticatedContextCurrent(authContext, 'classroom overlay expiry broadcast');
+    if (pollExpired) {
+      await broadcastToAllTabsForAuth(
+        'poll',
+        { action: 'close', reason: 'expired' },
+        authContext,
+        sourceMessage,
+      );
+    }
+    assertAuthenticatedContextCurrent(authContext, 'classroom overlay expiry broadcast');
+  } else {
+    if (timerExpired) await broadcastToAllTabs('timer', { action: 'stop', reason: 'expired' });
+    if (pollExpired) await broadcastToAllTabs('poll', { action: 'close', reason: 'expired' });
+  }
 }
 
-function markPollResponsePersisted(pollId, selectedOption) {
+function markPollResponsePersisted(pollId, selectedOption, authContext = null) {
   return mutateClassroomOverlayState(async (state) => {
     if (state.poll?.pollId !== pollId) return state;
     return {
@@ -2452,7 +3780,23 @@ async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expect
 }
 
 function determineTrackingState() {
-  const effectiveSettings = schoolSettings || { enableTrackingHours: false };
+  let expectedScope = null;
+  try {
+    expectedScope = schoolPolicyScopeForAuthContext(
+      captureAuthenticatedContext('tracking settings decision'),
+    );
+  } catch {
+    expectedScope = null;
+  }
+  if (
+    !expectedScope
+    || schoolSettingsScope !== expectedScope
+    || !validSchoolSettingsPayload(schoolSettings)
+  ) {
+    isScheduleHardOff = true;
+    return TRACKING_STATES.OFF;
+  }
+  const effectiveSettings = schoolSettings;
   const afterHoursMode = effectiveSettings.afterHoursMode || 'off';
   // School hours enforcement is based solely on admin-configured /api/settings values.
   const withinHours = isWithinTrackingHours(
@@ -2480,10 +3824,27 @@ function determineTrackingState() {
   return TRACKING_STATES.ACTIVE;
 }
 
-function disconnectWebSocket() {
+function disconnectWebSocket(options = {}) {
+  const assertInitiatorCurrent = () => {
+    if (options.authContext) {
+      assertAuthenticatedContextCurrent(options.authContext, 'WebSocket disconnect');
+    } else if (options.authMutationGeneration !== undefined) {
+      assertAuthMutationCurrent(options.authMutationGeneration, 'WebSocket disconnect');
+    }
+  };
+  assertInitiatorCurrent();
   chrome.alarms.clear('ws-reconnect');
-  cleanupTeacherBroadcast('websocket-disconnect', { notifyTeacher: false });
-  const hadActiveLiveView = Boolean(activeLiveViewNegotiationId);
+  const broadcastCleanupPromise = cleanupTeacherBroadcast('websocket-disconnect', {
+    notifyTeacher: false,
+    authContext: options.authContext || null,
+    sourceMessage: options.authContext
+      ? browserPolicyEnvelopeForAuth(options.authContext)
+      : null,
+  });
+  const closingLiveViewContext = activeLiveViewContext;
+  const closingLiveViewNegotiationId = activeLiveViewNegotiationId;
+  const closingLiveViewTeachingSessionId = activeLiveViewTeachingSessionId;
+  const hadActiveLiveView = Boolean(closingLiveViewNegotiationId);
   if (hadActiveLiveView) {
     setObservedState(false, 'websocket-disconnect');
   }
@@ -2491,6 +3852,7 @@ function disconnectWebSocket() {
   wsTransportConnected = false;
   wsAuthenticatedGeneration = 0;
   const closingIdentity = wsTransportIdentity;
+  assertInitiatorCurrent();
   // Tell offscreen document to close the WebSocket
   const closePromise = sendToOffscreen({
     type: 'WS_CLOSE',
@@ -2498,11 +3860,39 @@ function disconnectWebSocket() {
     authContextId: closingIdentity?.authContextId,
     serverOrigin: closingIdentity?.serverOrigin,
   }).then((response) => {
-    activeLiveViewNegotiationId = null;
-    activeLiveViewTeachingSessionId = null;
-    activeLiveViewContext = null;
+    // A WS_CLOSE can resolve after a replacement socket has authenticated and
+    // started a different exact Live View. Only retire the tuple that this
+    // close operation captured; never orphan a newer stream by erasing its
+    // worker-side stop authority.
+    if (
+      activeLiveViewContext === closingLiveViewContext
+      && activeLiveViewNegotiationId === closingLiveViewNegotiationId
+      && activeLiveViewTeachingSessionId === closingLiveViewTeachingSessionId
+    ) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
+    }
     return response;
-  }).catch(() => {}).finally(() => {
+  }).catch(async () => {
+    const replacementTransportExists = Boolean(
+      wsTransportIdentity && wsTransportIdentity !== closingIdentity
+    );
+    const replacementLiveViewExists = Boolean(
+      activeLiveViewContext && activeLiveViewContext !== closingLiveViewContext
+    );
+    if (replacementTransportExists || replacementLiveViewExists) return;
+    if (activeLiveViewContext === closingLiveViewContext) {
+      activeLiveViewNegotiationId = null;
+      activeLiveViewTeachingSessionId = null;
+      activeLiveViewContext = null;
+    }
+    if (wsTransportIdentity === closingIdentity) wsTransportIdentity = null;
+    // A rejected WS_CLOSE is not evidence that offscreen stopped its socket or
+    // MediaStream. Close the document fail-private while this captured owner
+    // is still current. Replacement creation waits for this close flight.
+    await closeOffscreenDocumentFailPrivate();
+  }).finally(() => {
     if (wsTransportIdentity === closingIdentity) wsTransportIdentity = null;
   });
   if (ws) {
@@ -2513,7 +3903,7 @@ function disconnectWebSocket() {
     }
   }
   ws = null;
-  return closePromise;
+  return Promise.all([closePromise, broadcastCleanupPromise]).then(([response]) => response);
 }
 
 function scheduleHeartbeat(periodInMinutes) {
@@ -2568,14 +3958,16 @@ function clearNetworkAlarms() {
   settingsAlarmScheduled = false;
 }
 
-async function pauseNetworkForOffHours(reason) {
+async function pauseNetworkForOffHours(reason, options = {}) {
+  options.assertCurrent?.();
   if (offHoursNetworkPaused) {
     return;
   }
   console.log(`[Network] Pausing off-hours traffic (${reason})`);
   clearNetworkAlarms();
   scheduleHeartbeat(null);
-  await disconnectWebSocket();
+  await disconnectWebSocket(options);
+  options.assertCurrent?.();
   chrome.alarms.create('wake-up', { periodInMinutes: 5 });
   offHoursNetworkPaused = true;
 }
@@ -2873,38 +4265,123 @@ function setObservedState(isObserved, _reason) {
   observedByTeacher = isObserved;
 }
 
-async function transitionTrackingState(nextState, reason) {
-  if (trackingState === nextState && persistedMonitoringState.state === nextState) return false;
+function transitionTrackingState(nextState, reason, options = {}) {
+  const authContext = options.authContext || (() => {
+    try {
+      return captureAuthenticatedContext(`tracking transition:${reason}`);
+    } catch {
+      return null;
+    }
+  })();
+  const mutationGeneration = options.authMutationGeneration ?? studentAuthMutationGeneration;
+  if (options.authMutationHeld !== true) {
+    return enqueueStudentAuthMutation(() => transitionTrackingStateNow(nextState, reason, {
+      ...options,
+      authContext,
+      authMutationGeneration: mutationGeneration,
+      authMutationHeld: true,
+    }));
+  }
+  return transitionTrackingStateNow(nextState, reason, {
+    ...options,
+    authContext,
+    authMutationGeneration: mutationGeneration,
+  });
+}
+
+async function transitionTrackingStateNow(nextState, reason, options = {}) {
+  const authContext = options.authContext || null;
+  const expectedScope = authContext ? monitoringEventAuthBindingForContext(authContext) : null;
+  const assertCurrent = (label = `tracking transition:${reason}`) => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, label);
+    else assertAuthMutationCurrent(options.authMutationGeneration, label);
+  };
+  assertCurrent();
+  if (
+    trackingState === nextState
+    && persistedMonitoringState.state === nextState
+    && persistedMonitoringStateScope === expectedScope
+  ) return false;
   const changedAt = Date.now();
   trackingState = nextState;
   persistedMonitoringState = { state: nextState, changedAt, reason };
-  await kv.set({ [MONITORING_STATE_STORAGE_KEY]: persistedMonitoringState });
+  persistedMonitoringStateScope = expectedScope;
+  await kv.set({
+    [MONITORING_STATE_STORAGE_KEY]: persistedMonitoringState,
+    ...(expectedScope ? { [MONITORING_STATE_SCOPE_KEY]: expectedScope } : {}),
+  });
+  try {
+    assertCurrent();
+  } catch (error) {
+    if (expectedScope) {
+      const stored = await kv.get([MONITORING_STATE_SCOPE_KEY]);
+      if (stored[MONITORING_STATE_SCOPE_KEY] === expectedScope) {
+        await kv.remove([MONITORING_STATE_STORAGE_KEY, MONITORING_STATE_SCOPE_KEY]);
+        if (persistedMonitoringStateScope === expectedScope) {
+          persistedMonitoringStateScope = null;
+        }
+      }
+    }
+    throw error;
+  }
   const queued = await enqueueMonitoringEvent('monitoring_state_changed', {
     state: nextState.toLowerCase(),
     reason,
-  }, { occurredAt: changedAt });
+  }, { occurredAt: changedAt, authContext });
+  assertCurrent();
   // Make a best-effort authenticated delivery while the socket/token/network
   // context is still intact. A retryable failure remains in the outbox.
   if (nextState === TRACKING_STATES.OFF && queued) {
     await flushMonitoringEventOutbox();
+    assertCurrent();
   }
   if (nextState === TRACKING_STATES.OFF) {
     await chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
+    assertCurrent();
   } else {
     await scheduleConnectivityHealthBoundary();
+    assertCurrent();
   }
   await setConnectivityBadge(connectivityStatus());
+  assertCurrent();
   console.log(`[Tracking] State updated to ${trackingState} (${reason})`);
   return true;
 }
 
 async function updateTrackingState(reason = 'state-check') {
-  if (!licenseActive) {
+  const decisionMutationGeneration = studentAuthMutationGeneration;
+  let decisionAuthContext = null;
+  try {
+    if (hasStudentAuth()) {
+      decisionAuthContext = captureAuthenticatedContext(`tracking decision:${reason}`);
+    }
+  } catch {
+    return;
+  }
+  const assertDecisionCurrent = () => {
+    if (decisionAuthContext) {
+      assertAuthenticatedContextCurrent(decisionAuthContext, `tracking decision:${reason}`);
+    } else {
+      assertAuthMutationCurrent(decisionMutationGeneration, `tracking decision:${reason}`);
+    }
+  };
+  const disconnectOptions = decisionAuthContext
+    ? { authContext: decisionAuthContext, assertCurrent: assertDecisionCurrent }
+    : {
+        authMutationGeneration: decisionMutationGeneration,
+        assertCurrent: assertDecisionCurrent,
+      };
+  assertDecisionCurrent();
+  if (!currentLicenseIsActive()) {
     if (trackingState !== TRACKING_STATES.OFF) {
-      await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive');
+      await transitionTrackingState(TRACKING_STATES.OFF, 'license_inactive', {
+        authContext: decisionAuthContext,
+        authMutationGeneration: decisionMutationGeneration,
+      });
+      assertDecisionCurrent();
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);  // Disable screenshots when license inactive
-      await disconnectWebSocket();
+      await disconnectWebSocket(disconnectOptions);
     }
     return;
   }
@@ -2912,15 +4389,20 @@ async function updateTrackingState(reason = 'state-check') {
   if (await expireManualAuthIfStale(`tracking:${reason}`)) {
     return;
   }
+  assertDecisionCurrent();
 
   if (!hasStudentAuth()) {
     scheduleHealthCheckAlarm(5);
     if (trackingState !== TRACKING_STATES.OFF) {
-      await transitionTrackingState(TRACKING_STATES.OFF, 'auth_required');
+      await transitionTrackingState(TRACKING_STATES.OFF, 'auth_required', {
+        authMutationGeneration: decisionMutationGeneration,
+      });
+      assertDecisionCurrent();
       scheduleHeartbeat(null);
       scheduleScreenshotCapture(false);
-      await disconnectWebSocket();
+      await disconnectWebSocket(disconnectOptions);
     }
+    assertDecisionCurrent();
     await notifyAuthGateStateToTabs();
     return;
   }
@@ -2928,9 +4410,13 @@ async function updateTrackingState(reason = 'state-check') {
   const nextState = determineTrackingState();
   if (nextState === TRACKING_STATES.OFF && isScheduleHardOff) {
     if (trackingState !== nextState) {
-      await transitionTrackingState(nextState, reason);
+      await transitionTrackingState(nextState, reason, {
+        authContext: decisionAuthContext,
+        authMutationGeneration: decisionMutationGeneration,
+      });
+      assertDecisionCurrent();
     }
-    await pauseNetworkForOffHours(reason);
+    await pauseNetworkForOffHours(reason, disconnectOptions);
     return;
   }
 
@@ -2943,7 +4429,11 @@ async function updateTrackingState(reason = 'state-check') {
     return;
   }
 
-  await transitionTrackingState(nextState, reason);
+  await transitionTrackingState(nextState, reason, {
+    authContext: decisionAuthContext,
+    authMutationGeneration: decisionMutationGeneration,
+  });
+  assertDecisionCurrent();
 
   if (trackingState === TRACKING_STATES.ACTIVE) {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
@@ -2958,7 +4448,7 @@ async function updateTrackingState(reason = 'state-check') {
   } else {
     scheduleHeartbeat(null);
     scheduleScreenshotCapture(false);  // Disable screenshots when tracking is off
-    await disconnectWebSocket();
+    await disconnectWebSocket(disconnectOptions);
   }
 }
 
@@ -3015,7 +4505,7 @@ const MONITORING_EVENT_AUTH_BINDING_KEY = 'monitoringEventOutboxAuthBindingV1';
 const MONITORING_EVENT_FLUSH_ALARM = 'monitoring-event-flush';
 const MONITORING_EVENT_FLUSH_MS = 5000;
 let monitoringEventFlushTimer = null;
-let monitoringEventFlushInFlight = false;
+let monitoringEventFlushInFlight = null;
 let monitoringEventMutation = Promise.resolve();
 let messageInboxMutation = Promise.resolve();
 
@@ -3027,13 +4517,13 @@ const COMMAND_ACK_MAX_ENTRIES = 200;
 const COMMAND_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const COMMAND_ACK_MAX_BYTES = 512 * 1024;
 let commandAckMutation = Promise.resolve();
-let commandAckFlushInFlight = false;
+let commandAckFlushInFlight = null;
 let commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
 const CHAT_ACK_OUTBOX_KEY = 'chatAckOutboxV1';
 const CHAT_ACK_BINDING_KEY = 'chatAckOutboxAuthBindingV1';
 const CHAT_ACK_FLUSH_ALARM = 'chat-ack-flush';
 let chatAckMutation = Promise.resolve();
-let chatAckFlushInFlight = false;
+let chatAckFlushInFlight = null;
 const STUDENT_CHAT_OUTBOX_KEY = 'studentChatOutboxV1';
 const STUDENT_CHAT_OUTBOX_BINDING_KEY = 'studentChatOutboxAuthBindingV1';
 const STUDENT_CHAT_FLUSH_ALARM = 'student-chat-flush';
@@ -3042,7 +4532,7 @@ const STUDENT_CHAT_MAX_BYTES = 128 * 1024;
 const STUDENT_CHAT_MAX_AGE_MS = 30 * 60 * 1000;
 const STUDENT_CHAT_RETRY_DELAYS_MS = Object.freeze([5000, 15000, 30000, 60000, 120000]);
 let studentChatMutation = Promise.resolve();
-let studentChatFlushInFlight = false;
+let studentChatFlushInFlight = null;
 
 function boundedAckObject(value, maxBytes = 16 * 1024) {
   if (value === undefined) return undefined;
@@ -3062,12 +4552,15 @@ function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
   const ackState = String(rawAck?.ackState || '').trim();
   if (!commandId || !['received', 'completed', 'failed', 'expired'].includes(ackState)) return null;
   const ackId = String(rawAck?.ackId || `${commandId}:${ackState}`).trim().slice(0, 512);
+  const normalizedErrorCode = rawAck?.error
+    ? commandDiagnosticCode({ code: rawAck?.errorCode })
+    : undefined;
   return {
     type: 'command-ack',
     ackId,
     commandId,
     ackState,
-    commandType: String(rawAck?.commandType || '').slice(0, 80) || undefined,
+    commandType: safeDiagnosticLabel(rawAck?.commandType),
     bindingVersion: Number(rawAck?.bindingVersion || 0) || undefined,
     authContextId: String(rawAck?.authContextId || '').slice(0, 128) || undefined,
     schoolId: String(rawAck?.schoolId || '').slice(0, 256) || undefined,
@@ -3080,8 +4573,8 @@ function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
       : undefined,
     result: boundedAckObject(rawAck?.result),
     state: boundedAckObject(rawAck?.state),
-    error: rawAck?.error ? String(rawAck.error).slice(0, 500) : undefined,
-    errorCode: rawAck?.errorCode ? String(rawAck.errorCode).slice(0, 120) : undefined,
+    error: normalizedErrorCode ? COMMAND_DIAGNOSTIC_MESSAGES[normalizedErrorCode] : undefined,
+    errorCode: normalizedErrorCode,
     deliveryPolicy: rawAck?.deliveryPolicy,
     expiresAt: rawAck?.expiresAt,
     appliedRevision: Number(rawAck?.appliedRevision || 0),
@@ -3103,14 +4596,46 @@ function boundCommandAckOutbox(entries, nowValue = Date.now()) {
   return bounded;
 }
 
+function scheduleCommandAckExpiry(entries, nowValue = Date.now()) {
+  const expiries = (Array.isArray(entries) ? entries : [])
+    .map((ack) => Number(ack?.queuedAt || 0) + COMMAND_ACK_MAX_AGE_MS + 1)
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > nowValue);
+  if (expiries.length === 0) return;
+  scheduleCommandAckFlush(Math.max(1000, Math.min(...expiries) - nowValue));
+}
+
+const TERMINAL_COMMAND_ACK_RECEIPT_CODES = new Set([
+  'COMMAND_ACK_MALFORMED',
+  'COMMAND_ACK_BINDING_MISMATCH',
+  'COMMAND_ACK_TARGET_GONE',
+  'COMMAND_ACK_TARGET_EXPIRED',
+  'COMMAND_ACK_INVALID_TRANSITION',
+]);
+
+function commandAckReceiptIsDrainable(receipt, requireDisposition = false) {
+  const disposition = String(receipt?.disposition || '').trim();
+  if (!disposition) return !requireDisposition && receipt?.accepted === true;
+  if (receipt?.retryable === true) return false;
+  if (disposition === 'applied' || disposition === 'idempotent') {
+    return receipt?.accepted === true;
+  }
+  if (disposition !== 'terminal_rejected' || receipt?.retryable !== false) return false;
+  return TERMINAL_COMMAND_ACK_RECEIPT_CODES.has(String(receipt?.code || '').trim());
+}
+
 function acceptedAckReceiptIds(receipts, entries, authContext, kind = 'command') {
   const storedByAckId = new Map((Array.isArray(entries) ? entries : [])
     .filter((entry) => entry?.ackId)
     .map((entry) => [String(entry.ackId), entry]));
-  const requireExact = hasNegotiatedCapability('exactBindingAckV2', authContext);
+  const requireExact = kind === 'command'
+    && hasNegotiatedCapability('exactBindingAckV2', authContext);
   const accepted = [];
   for (const receipt of Array.isArray(receipts) ? receipts : []) {
-    if (receipt?.accepted !== true) continue;
+    if (kind === 'command') {
+      if (!commandAckReceiptIsDrainable(receipt, requireExact)) continue;
+    } else if (receipt?.accepted !== true) {
+      continue;
+    }
     const ackId = String(receipt.ackId || '').trim();
     const stored = storedByAckId.get(ackId);
     if (!stored) continue;
@@ -3118,23 +4643,17 @@ function acceptedAckReceiptIds(receipts, entries, authContext, kind = 'command')
     const receiptTargetId = String(kind === 'chat'
       ? receipt.messageId || receipt.chatMessageId || ''
       : receipt.commandId || '');
-    if ((requireExact && receiptTargetId !== storedTargetId)
-      || (!requireExact && receiptTargetId && receiptTargetId !== storedTargetId)) continue;
+    if (kind === 'command' && (!receiptTargetId || receiptTargetId !== storedTargetId)) continue;
+    if (kind !== 'command' && receiptTargetId && receiptTargetId !== storedTargetId) continue;
     if (requireExact) {
-      const binding = exactStudentBinding(receipt);
       const storedControlRevision = Number(stored.studentControlRevision);
       if (
-        binding.bindingVersion !== 2
-        || binding.schoolId !== stored.schoolId
-        || binding.schoolId !== authContext.schoolId
-        || binding.deviceId !== stored.deviceId
-        || binding.deviceId !== authContext.deviceId
-        || binding.studentId !== stored.studentId
-        || binding.studentId !== authContext.studentId
-        || binding.studentSessionId !== stored.studentSessionId
-        || binding.studentSessionId !== authContext.studentSessionId
+        Number(stored.bindingVersion) !== 2
+        || stored.schoolId !== authContext.schoolId
+        || stored.deviceId !== authContext.deviceId
+        || stored.studentId !== authContext.studentId
+        || stored.studentSessionId !== authContext.studentSessionId
         || !Number.isSafeInteger(storedControlRevision)
-        || binding.controlRevision !== storedControlRevision
       ) continue;
     }
     accepted.push(ackId);
@@ -3158,7 +4677,11 @@ async function removeAcceptedCommandAckReceipts(receipts, authContext) {
 function scheduleCommandAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
   chrome.alarms.get(COMMAND_ACK_FLUSH_ALARM, (existing) => {
     const when = Date.now() + Math.max(1000, Number(delayMs || 0));
-    if (!existing || existing.scheduledTime > when) {
+    if (
+      !existing
+      || Number(existing.scheduledTime || 0) <= Date.now()
+      || existing.scheduledTime > when
+    ) {
       chrome.alarms.create(COMMAND_ACK_FLUSH_ALARM, { when });
     }
   });
@@ -3192,6 +4715,7 @@ function enqueueCommandAck(rawAck, authContext) {
       [COMMAND_ACK_BINDING_KEY]: binding,
     });
     assertAuthenticatedContextCurrent(authContext, 'command acknowledgement persistence');
+    scheduleCommandAckExpiry(entries);
     return true;
   });
   return commandAckMutation;
@@ -3218,6 +4742,8 @@ function removeCommandAcks(ackIds, expectedAuthContext = null) {
       commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
       await durableLocalKv.remove(COMMAND_ACK_BINDING_KEY);
       await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+    } else {
+      scheduleCommandAckExpiry(remaining);
     }
     return remaining.length;
   });
@@ -3233,8 +4759,47 @@ async function discardCommandAckOutbox() {
   return commandAckMutation;
 }
 
+function compactCommandAckStorageOnly(nowValue = Date.now()) {
+  commandAckMutation = commandAckMutation.catch(() => undefined).then(async () => {
+    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    const compacted = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY], nowValue);
+    await durableLocalKv.set({ [COMMAND_ACK_OUTBOX_KEY]: compacted });
+    if (compacted.length === 0) {
+      await durableLocalKv.remove(COMMAND_ACK_BINDING_KEY);
+      await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+    } else {
+      scheduleCommandAckExpiry(compacted, nowValue);
+    }
+    return compacted;
+  });
+  return commandAckMutation;
+}
+
+function compactCommandAckOutbox(authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  commandAckMutation = commandAckMutation.catch(() => undefined).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement compaction');
+    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement compaction');
+    if (!binding || stored[COMMAND_ACK_BINDING_KEY] !== binding) return null;
+    const compacted = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY]);
+    await durableLocalKv.set({ [COMMAND_ACK_OUTBOX_KEY]: compacted });
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement compaction');
+    if (compacted.length === 0) {
+      commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
+      await durableLocalKv.remove(COMMAND_ACK_BINDING_KEY);
+      await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
+    } else {
+      scheduleCommandAckExpiry(compacted);
+    }
+    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement compaction');
+    return compacted;
+  });
+  return commandAckMutation;
+}
+
 async function flushCommandAckOutbox(options = {}) {
-  if (commandAckFlushInFlight || !hasStudentAuth()) return;
+  if (!hasStudentAuth()) return;
   let authContext;
   try {
     authContext = captureAuthenticatedContext('command acknowledgement flush');
@@ -3242,84 +4807,95 @@ async function flushCommandAckOutbox(options = {}) {
     if (isAuthContextCancellation(error)) return;
     throw error;
   }
-  commandAckFlushInFlight = true;
-  try {
-    await commandAckMutation;
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
-    const binding = monitoringEventAuthBindingForContext(authContext);
-    const stored = await durableLocalKv.get([COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY]);
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
-    if (!binding || stored[COMMAND_ACK_BINDING_KEY] !== binding) {
-      await discardCommandAckOutbox();
-      return;
-    }
-    const batch = boundCommandAckOutbox(stored[COMMAND_ACK_OUTBOX_KEY]).slice(0, 50);
-    if (batch.length === 0) {
-      await chrome.alarms.clear(COMMAND_ACK_FLUSH_ALARM);
-      return;
-    }
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding) return;
+  const activeFlush = commandAckFlushInFlight;
+  if (activeFlush) {
+    if (activeFlush.binding === binding) return activeFlush.promise;
+    scheduleCommandAckFlush(1000);
+    return activeFlush.promise.catch(() => undefined).then(() => {
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush handoff');
+      return flushCommandAckOutbox(options);
+    }).catch((error) => {
+      if (!isAuthContextCancellation(error)) scheduleCommandAckFlush(1000);
+    });
+  }
+  const owner = { binding, promise: null };
+  const run = (async () => {
+    try {
+      const compacted = await compactCommandAckOutbox(authContext);
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
+      if (!compacted) return;
+      const batch = compacted.slice(0, 50);
+      if (batch.length === 0) return;
 
-    let wsAttempted = false;
-    if (wsConnected) {
-      for (const ack of batch) {
-        wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
+      let wsAttempted = false;
+      if (wsConnected) {
+        for (const ack of batch) {
+          wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
+        }
+      }
+      const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
+      if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
+        scheduleCommandAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
+        return;
+      }
+
+      const payload = {
+        acks: batch.map(({ queuedAt, lastWsAttemptAt, ...ack }) => ack),
+      };
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
+      const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/command-acks`, {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(authContext),
+        body: JSON.stringify(payload),
+        signal: authContext.signal,
+      }, {
+        context: 'command acknowledgement',
+        maxAttempts: 1,
+        retryStatuses: new Set([429, 503]),
+      });
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
+      if (!response.ok) {
+        commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+        scheduleCommandAckFlush(commandAckRetryDelayMs);
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+      const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'command');
+      if (receiptIds.length === 0) {
+        commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+        scheduleCommandAckFlush(commandAckRetryDelayMs);
+        return;
+      }
+      assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
+      const remaining = await removeCommandAcks(receiptIds, authContext);
+      commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
+      if (remaining > 0) scheduleCommandAckFlush();
+    } catch (error) {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Command ACK] Flush deferred:', safeDiagnosticError(error));
+        commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
+        scheduleCommandAckFlush(commandAckRetryDelayMs);
       }
     }
-    const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
-    if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
-      scheduleCommandAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
-      return;
-    }
-
-    const payload = {
-      acks: batch.map(({ queuedAt, lastWsAttemptAt, ...ack }) => ack),
-    };
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
-    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/command-acks`, {
-      method: 'POST',
-      headers: buildDeviceAuthHeaders(authContext),
-      body: JSON.stringify(payload),
-      signal: authContext.signal,
-    }, {
-      context: 'command acknowledgement',
-      maxAttempts: 1,
-      retryStatuses: new Set([429, 503]),
-    });
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
-    if (!response.ok) {
-      commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
-      scheduleCommandAckFlush(commandAckRetryDelayMs);
-      return;
-    }
-    const data = await response.json().catch(() => ({}));
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
-    const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'command');
-    if (receiptIds.length === 0) {
-      commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
-      scheduleCommandAckFlush(commandAckRetryDelayMs);
-      return;
-    }
-    assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
-    if (binding !== monitoringEventAuthBindingForContext(authContext)) {
-      await discardCommandAckOutbox();
-      return;
-    }
-    const remaining = await removeCommandAcks(receiptIds, authContext);
-    commandAckRetryDelayMs = COMMAND_ACK_HTTP_FALLBACK_MS;
-    if (remaining > 0) scheduleCommandAckFlush();
-  } catch (error) {
-    console.warn('[Command ACK] Flush deferred:', safeDiagnosticError(error));
-    commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
-    scheduleCommandAckFlush(commandAckRetryDelayMs);
-  } finally {
-    commandAckFlushInFlight = false;
-  }
+  })();
+  owner.promise = run.finally(() => {
+    if (commandAckFlushInFlight === owner) commandAckFlushInFlight = null;
+  });
+  commandAckFlushInFlight = owner;
+  return owner.promise;
 }
 
 function scheduleChatAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
   chrome.alarms.get(CHAT_ACK_FLUSH_ALARM, (existing) => {
     const when = Date.now() + Math.max(1000, Number(delayMs || 0));
-    if (!existing || existing.scheduledTime > when) {
+    if (
+      !existing
+      || Number(existing.scheduledTime || 0) <= Date.now()
+      || existing.scheduledTime > when
+    ) {
       chrome.alarms.create(CHAT_ACK_FLUSH_ALARM, { when });
     }
   });
@@ -3351,21 +4927,19 @@ function enqueueChatAck(rawAck, authContext) {
     assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
     const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
     assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
-    let entries = stored[CHAT_ACK_BINDING_KEY] === binding && Array.isArray(stored[CHAT_ACK_OUTBOX_KEY])
-      ? stored[CHAT_ACK_OUTBOX_KEY]
+    let entries = stored[CHAT_ACK_BINDING_KEY] === binding
+      ? boundChatAckOutbox(stored[CHAT_ACK_OUTBOX_KEY])
       : [];
     entries = entries.filter((item) => item.ackId !== ack.ackId);
     if (ack.status === 'delivered') {
       entries = entries.filter((item) => item.messageId !== ack.messageId);
     }
     entries.push(ack);
-    entries = entries
-      .filter((item) => Number(item.queuedAt || 0) >= Date.now() - COMMAND_ACK_MAX_AGE_MS)
-      .slice(-COMMAND_ACK_MAX_ENTRIES);
-    while (entries.length > 0 && RuntimeCore.utf8ByteLength(entries) > COMMAND_ACK_MAX_BYTES) entries.shift();
+    entries = boundChatAckOutbox(entries);
     assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
     await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: entries, [CHAT_ACK_BINDING_KEY]: binding });
     assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement persistence');
+    scheduleChatAckExpiry(entries);
     return true;
   });
   return chatAckMutation;
@@ -3377,7 +4951,7 @@ async function removeAcceptedChatAckReceipts(receipts, authContext) {
   const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
   assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
   if (stored[CHAT_ACK_BINDING_KEY] !== monitoringEventAuthBindingForContext(authContext)) return 0;
-  const entries = Array.isArray(stored[CHAT_ACK_OUTBOX_KEY]) ? stored[CHAT_ACK_OUTBOX_KEY] : [];
+  const entries = boundChatAckOutbox(stored[CHAT_ACK_OUTBOX_KEY]);
   const receiptIds = acceptedAckReceiptIds(receipts, entries, authContext, 'chat');
   if (receiptIds.length === 0) return 0;
   const remaining = await removeChatAcks(receiptIds, authContext);
@@ -3398,12 +4972,14 @@ function removeChatAcks(ackIds, expectedAuthContext = null) {
         !== monitoringEventAuthBindingForContext(expectedAuthContext)
       ) return (stored[CHAT_ACK_OUTBOX_KEY] || []).length;
     }
-    const remaining = (stored[CHAT_ACK_OUTBOX_KEY] || [])
+    const remaining = boundChatAckOutbox(stored[CHAT_ACK_OUTBOX_KEY])
       .filter((ack) => !acknowledged.has(ack.ackId));
     await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: remaining });
     if (remaining.length === 0) {
       await durableLocalKv.remove(CHAT_ACK_BINDING_KEY);
       await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+    } else {
+      scheduleChatAckExpiry(remaining);
     }
     return remaining.length;
   });
@@ -3419,8 +4995,46 @@ async function discardChatAckOutbox() {
   return chatAckMutation;
 }
 
+function compactChatAckStorageOnly(nowValue = Date.now()) {
+  chatAckMutation = chatAckMutation.catch(() => undefined).then(async () => {
+    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    const compacted = boundChatAckOutbox(stored[CHAT_ACK_OUTBOX_KEY], nowValue);
+    await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: compacted });
+    if (compacted.length === 0) {
+      await durableLocalKv.remove(CHAT_ACK_BINDING_KEY);
+      await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+    } else {
+      scheduleChatAckExpiry(compacted, nowValue);
+    }
+    return compacted;
+  });
+  return chatAckMutation;
+}
+
+function compactChatAckOutbox(authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  chatAckMutation = chatAckMutation.catch(() => undefined).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement compaction');
+    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement compaction');
+    if (!binding || stored[CHAT_ACK_BINDING_KEY] !== binding) return null;
+    const compacted = boundChatAckOutbox(stored[CHAT_ACK_OUTBOX_KEY]);
+    await durableLocalKv.set({ [CHAT_ACK_OUTBOX_KEY]: compacted });
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement compaction');
+    if (compacted.length === 0) {
+      await durableLocalKv.remove(CHAT_ACK_BINDING_KEY);
+      await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+    } else {
+      scheduleChatAckExpiry(compacted);
+    }
+    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement compaction');
+    return compacted;
+  });
+  return chatAckMutation;
+}
+
 async function flushChatAckOutbox(options = {}) {
-  if (chatAckFlushInFlight || !hasStudentAuth()) return;
+  if (!hasStudentAuth()) return;
   let authContext;
   try {
     authContext = captureAuthenticatedContext('chat acknowledgement flush');
@@ -3428,68 +5042,79 @@ async function flushChatAckOutbox(options = {}) {
     if (isAuthContextCancellation(error)) return;
     throw error;
   }
-  chatAckFlushInFlight = true;
-  try {
-    await chatAckMutation;
-    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
-    const binding = monitoringEventAuthBindingForContext(authContext);
-    const stored = await durableLocalKv.get([CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY]);
-    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
-    if (!binding || stored[CHAT_ACK_BINDING_KEY] !== binding) {
-      await discardChatAckOutbox();
-      return;
-    }
-    const batch = (stored[CHAT_ACK_OUTBOX_KEY] || []).slice(0, 50);
-    if (batch.length === 0) {
-      await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
-      return;
-    }
-    let wsAttempted = false;
-    if (wsConnected) {
-      for (const ack of batch) wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
-    }
-    const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
-    if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
-      scheduleChatAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
-      return;
-    }
-    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
-    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/chat-acks`, {
-      method: 'POST',
-      headers: buildDeviceAuthHeaders(authContext),
-      body: JSON.stringify({
-        acks: batch.map(({ queuedAt, type, chatMessageId, deliveryStatus, timestamp, sessionId, ...ack }) => ack),
-      }),
-      signal: authContext.signal,
-    }, {
-      context: 'chat acknowledgement',
-      maxAttempts: 1,
-      retryStatuses: new Set([429, 503]),
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding) return;
+  const activeFlush = chatAckFlushInFlight;
+  if (activeFlush) {
+    if (activeFlush.binding === binding) return activeFlush.promise;
+    scheduleChatAckFlush(1000);
+    return activeFlush.promise.catch(() => undefined).then(() => {
+      assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush handoff');
+      return flushChatAckOutbox(options);
+    }).catch((error) => {
+      if (!isAuthContextCancellation(error)) scheduleChatAckFlush(1000);
     });
-    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
-    if (!response.ok) {
-      scheduleChatAckFlush(30 * 1000);
-      return;
-    }
-    const data = await response.json().catch(() => ({}));
-    assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
-    const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'chat');
-    if (binding !== monitoringEventAuthBindingForContext(authContext)) {
-      await discardChatAckOutbox();
-      return;
-    }
-    if (receiptIds.length === 0) {
-      scheduleChatAckFlush(30 * 1000);
-      return;
-    }
-    const remaining = await removeChatAcks(receiptIds, authContext);
-    if (remaining > 0) scheduleChatAckFlush();
-  } catch (error) {
-    console.warn('[Chat ACK] Flush deferred:', safeDiagnosticError(error));
-    scheduleChatAckFlush(30 * 1000);
-  } finally {
-    chatAckFlushInFlight = false;
   }
+  const owner = { binding, promise: null };
+  const run = (async () => {
+    try {
+      const compacted = await compactChatAckOutbox(authContext);
+      assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
+      if (!compacted) return;
+      const batch = compacted.slice(0, 50);
+      if (batch.length === 0) {
+        await chrome.alarms.clear(CHAT_ACK_FLUSH_ALARM);
+        return;
+      }
+      let wsAttempted = false;
+      if (wsConnected) {
+        for (const ack of batch) wsAttempted = (await wsSend(ack, authContext)) || wsAttempted;
+      }
+      const oldestAge = Date.now() - Math.min(...batch.map((ack) => Number(ack.queuedAt || 0)));
+      if (wsAttempted && oldestAge < COMMAND_ACK_HTTP_FALLBACK_MS && options.forceHttp !== true) {
+        scheduleChatAckFlush(COMMAND_ACK_HTTP_FALLBACK_MS - oldestAge);
+        return;
+      }
+      assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
+      const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/chat-acks`, {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(authContext),
+        body: JSON.stringify({
+          acks: batch.map(({ queuedAt, type, chatMessageId, deliveryStatus, timestamp, sessionId, ...ack }) => ack),
+        }),
+        signal: authContext.signal,
+      }, {
+        context: 'chat acknowledgement',
+        maxAttempts: 1,
+        retryStatuses: new Set([429, 503]),
+      });
+      assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
+      if (!response.ok) {
+        scheduleChatAckFlush(30 * 1000);
+        return;
+      }
+      const data = await response.json().catch(() => ({}));
+      assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
+      const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'chat');
+      if (binding !== monitoringEventAuthBindingForContext(authContext)) return;
+      if (receiptIds.length === 0) {
+        scheduleChatAckFlush(30 * 1000);
+        return;
+      }
+      const remaining = await removeChatAcks(receiptIds, authContext);
+      if (remaining > 0) scheduleChatAckFlush();
+    } catch (error) {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Chat ACK] Flush deferred:', safeDiagnosticError(error));
+        scheduleChatAckFlush(30 * 1000);
+      }
+    }
+  })();
+  owner.promise = run.finally(() => {
+    if (chatAckFlushInFlight === owner) chatAckFlushInFlight = null;
+  });
+  chatAckFlushInFlight = owner;
+  return owner.promise;
 }
 
 function generateStudentChatClientMessageId() {
@@ -3547,15 +5172,30 @@ async function notifyStudentChatStatus(entry, status, details = {}, authContext 
   // Status updates contain no message body or identity. Content scripts can
   // update the exact optimistic bubble without exposing another student's
   // durable outbox after an authentication transition.
-  await broadcastToAllTabs('student-message-status', update).catch(() => {});
-  if (authContext) assertAuthenticatedContextCurrent(authContext, 'student message status');
+  if (authContext) {
+    await broadcastToAllTabsForAuth(
+      'student-message-status',
+      update,
+      authContext,
+      browserPolicyEnvelopeForAuth(authContext),
+    ).catch((error) => {
+      if (isAuthContextCancellation(error)) throw error;
+    });
+    assertAuthenticatedContextCurrent(authContext, 'student message status');
+  } else {
+    await broadcastToAllTabs('student-message-status', update).catch(() => {});
+  }
   return update;
 }
 
 function scheduleStudentChatFlush(delayMs = STUDENT_CHAT_RETRY_DELAYS_MS[0]) {
   const when = Date.now() + Math.max(1000, Number(delayMs || 0));
   chrome.alarms.get(STUDENT_CHAT_FLUSH_ALARM, (existing) => {
-    if (!existing || existing.scheduledTime > when) {
+    if (
+      !existing
+      || Number(existing.scheduledTime || 0) <= Date.now()
+      || existing.scheduledTime > when
+    ) {
       chrome.alarms.create(STUDENT_CHAT_FLUSH_ALARM, { when });
     }
   });
@@ -3594,6 +5234,7 @@ function persistStudentChatEntry(rawEntry, authContext) {
       [STUDENT_CHAT_OUTBOX_BINDING_KEY]: binding,
     });
     assertAuthenticatedContextCurrent(authContext, 'student message persistence');
+    scheduleStudentChatExpiry(next);
     return entry;
   });
 }
@@ -3619,6 +5260,7 @@ function updateStudentChatEntry(clientMessageId, updates, authContext) {
     if (!updated) throw new Error('Student message outbox entry is unavailable');
     await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: next });
     assertAuthenticatedContextCurrent(authContext, 'student message update');
+    scheduleStudentChatExpiry(next);
     return updated;
   });
 }
@@ -3641,6 +5283,8 @@ function removeDeliveredStudentChatEntry(clientMessageId, authContext) {
     if (remaining.length === 0) {
       await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
       await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+    } else {
+      scheduleStudentChatExpiry(remaining);
     }
     assertAuthenticatedContextCurrent(authContext, 'student message receipt');
     return remaining.length;
@@ -3655,6 +5299,81 @@ async function discardStudentChatOutbox() {
   });
 }
 
+function discardStudentChatOutboxForAuth(authContext) {
+  const expectedBinding = monitoringEventAuthBindingForContext(authContext);
+  return mutateStudentChatOutbox(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'student message conditional discard');
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message conditional discard');
+    if (!expectedBinding || stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== expectedBinding) {
+      return false;
+    }
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: [] });
+    assertAuthenticatedContextCurrent(authContext, 'student message conditional discard');
+    await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
+    await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+    assertAuthenticatedContextCurrent(authContext, 'student message conditional discard');
+    return true;
+  });
+}
+
+function compactStudentChatStorageOnly(nowValue = Date.now()) {
+  return mutateStudentChatOutbox(async () => {
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    const compacted = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY], nowValue);
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: compacted });
+    if (compacted.length === 0) {
+      await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
+      await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+    } else {
+      scheduleStudentChatExpiry(compacted, nowValue);
+    }
+    return compacted;
+  });
+}
+
+function boundChatAckOutbox(entries, nowValue = Date.now()) {
+  return boundCommandAckOutbox(entries, nowValue);
+}
+
+function scheduleChatAckExpiry(entries, nowValue = Date.now()) {
+  const expiries = (Array.isArray(entries) ? entries : [])
+    .map((ack) => Number(ack?.queuedAt || 0) + COMMAND_ACK_MAX_AGE_MS + 1)
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > nowValue);
+  if (expiries.length === 0) return;
+  scheduleChatAckFlush(Math.max(1000, Math.min(...expiries) - nowValue));
+}
+
+function compactStudentChatOutbox(authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  return mutateStudentChatOutbox(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'student message compaction');
+    const stored = await durableLocalKv.get([
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'student message compaction');
+    if (!binding || stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== binding) return null;
+    const compacted = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY]);
+    await durableLocalKv.set({ [STUDENT_CHAT_OUTBOX_KEY]: compacted });
+    assertAuthenticatedContextCurrent(authContext, 'student message compaction');
+    if (compacted.length === 0) {
+      await durableLocalKv.remove(STUDENT_CHAT_OUTBOX_BINDING_KEY);
+      await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
+    } else {
+      scheduleStudentChatExpiry(compacted);
+    }
+    assertAuthenticatedContextCurrent(authContext, 'student message compaction');
+    return compacted;
+  });
+}
+
 function studentChatRetryDelay(attempts) {
   return STUDENT_CHAT_RETRY_DELAYS_MS[Math.min(
     Math.max(0, Number(attempts || 1) - 1),
@@ -3662,21 +5381,61 @@ function studentChatRetryDelay(attempts) {
   )];
 }
 
+function scheduleStudentChatExpiry(entries, nowValue = Date.now()) {
+  const expiries = (Array.isArray(entries) ? entries : [])
+    .map((entry) => Number(entry?.queuedAt || 0) + STUDENT_CHAT_MAX_AGE_MS + 1)
+    .filter((expiresAt) => Number.isFinite(expiresAt) && expiresAt > nowValue);
+  if (expiries.length === 0) return;
+  scheduleStudentChatFlush(Math.max(1000, Math.min(...expiries) - nowValue));
+}
+
+function assertStudentChatSessionCurrent(entry, authContext, reason = 'student message session') {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const sessionId = String(entry?.sessionId || '').trim();
+  if (!sessionId || !activeTeachingSessionIds().includes(sessionId)) {
+    const error = new Error('Student message belongs to a retired teaching session');
+    error.code = 'STUDENT_CHAT_SESSION_RETIRED';
+    throw error;
+  }
+  return sessionId;
+}
+
+async function discardRetiredStudentChatEntry(entry, authContext) {
+  await removeDeliveredStudentChatEntry(entry.clientMessageId, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'retired student message removal');
+  await notifyStudentChatStatus(entry, 'Failed', {
+    errorCode: 'STUDENT_CHAT_SESSION_RETIRED',
+  }, authContext);
+  return {
+    success: false,
+    queued: false,
+    dropped: true,
+    clientMessageId: entry.clientMessageId,
+    status: 'Failed',
+    errorCode: 'STUDENT_CHAT_SESSION_RETIRED',
+  };
+}
+
 async function deliverStudentChatEntry(rawEntry, authContext) {
   assertAuthenticatedContextCurrent(authContext, 'student message delivery');
   const binding = monitoringEventAuthBindingForContext(authContext);
   const entry = normalizeStudentChatEntry(rawEntry);
   if (!entry || entry.binding !== binding) throw authContextSuperseded('student message delivery');
-  const attemptStatus = entry.attempts > 0 ? 'Retrying' : 'Sending';
-  await notifyStudentChatStatus(entry, attemptStatus, {}, authContext);
-  const attempted = await updateStudentChatEntry(entry.clientMessageId, {
-    attempts: entry.attempts + 1,
-    lastAttemptAt: Date.now(),
-    status: entry.attempts > 0 ? 'retrying' : 'sending',
-    errorCode: null,
-  }, authContext);
+  let attempted = entry;
   try {
+    assertStudentChatSessionCurrent(entry, authContext, 'student message delivery');
+    const attemptStatus = entry.attempts > 0 ? 'Retrying' : 'Sending';
+    await notifyStudentChatStatus(entry, attemptStatus, {}, authContext);
+    assertStudentChatSessionCurrent(entry, authContext, 'student message status');
+    attempted = await updateStudentChatEntry(entry.clientMessageId, {
+      attempts: entry.attempts + 1,
+      lastAttemptAt: Date.now(),
+      status: entry.attempts > 0 ? 'retrying' : 'sending',
+      errorCode: null,
+    }, authContext);
+    assertStudentChatSessionCurrent(attempted, authContext, 'student message persistence');
     assertAuthenticatedContextCurrent(authContext, 'student message transmission');
+    assertStudentChatSessionCurrent(attempted, authContext, 'student message transmission');
     const response = await fetchWithBackoff(
       `${authContext.serverOrigin}/api/student/send-message`,
       {
@@ -3697,8 +5456,10 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
       },
     );
     assertAuthenticatedContextCurrent(authContext, 'student message response');
+    assertStudentChatSessionCurrent(attempted, authContext, 'student message response');
     const data = await response.json().catch(() => ({}));
     assertAuthenticatedContextCurrent(authContext, 'student message response body');
+    assertStudentChatSessionCurrent(attempted, authContext, 'student message response body');
     if (response.ok
       && data?.delivered === true
       && String(data.clientMessageId || '') === attempted.clientMessageId
@@ -3741,6 +5502,9 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
     };
   } catch (error) {
     if (isAuthContextCancellation(error)) throw error;
+    if (error?.code === 'STUDENT_CHAT_SESSION_RETIRED') {
+      return discardRetiredStudentChatEntry(attempted, authContext);
+    }
     const updated = await updateStudentChatEntry(attempted.clientMessageId, {
       status: 'retrying',
       errorCode: 'STUDENT_CHAT_RETRY_SCHEDULED',
@@ -3824,8 +5588,9 @@ async function sendLegacyStudentChatMessage(raw, authContext, sessionId) {
   }
 }
 
-async function queueAndSendStudentChatMessage(raw = {}) {
-  const authContext = captureAuthenticatedContext('student message');
+async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = null) {
+  const authContext = expectedAuthContext || captureAuthenticatedContext('student message');
+  assertAuthenticatedContextCurrent(authContext, 'student message');
   const message = String(raw.message || '').trim();
   if (!message || message.length > 500) {
     const error = new Error(message ? 'Message is too long' : 'Message is required');
@@ -3833,7 +5598,7 @@ async function queueAndSendStudentChatMessage(raw = {}) {
     throw error;
   }
   const activeSessionIds = activeTeachingSessionIds();
-  const requestedSessionId = String(raw.sessionId || activeSessionIds[0] || '').trim();
+  const requestedSessionId = String(raw.sessionId || '').trim();
   if (!requestedSessionId || !activeSessionIds.includes(requestedSessionId)) {
     const error = new Error('No exact active class session for messaging');
     error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
@@ -3856,7 +5621,7 @@ async function queueAndSendStudentChatMessage(raw = {}) {
 }
 
 async function flushStudentChatOutbox() {
-  if (studentChatFlushInFlight || !hasStudentAuth()) return;
+  if (!hasStudentAuth()) return;
   let authContext;
   try {
     authContext = captureAuthenticatedContext('student message retry');
@@ -3864,38 +5629,54 @@ async function flushStudentChatOutbox() {
     if (isAuthContextCancellation(error)) return;
     throw error;
   }
-  studentChatFlushInFlight = true;
-  try {
-    if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
-      await discardStudentChatOutbox();
-      return;
-    }
-    await studentChatMutation;
-    assertAuthenticatedContextCurrent(authContext, 'student message retry');
-    const binding = monitoringEventAuthBindingForContext(authContext);
-    const stored = await durableLocalKv.get([
-      STUDENT_CHAT_OUTBOX_KEY,
-      STUDENT_CHAT_OUTBOX_BINDING_KEY,
-    ]);
-    assertAuthenticatedContextCurrent(authContext, 'student message retry');
-    if (stored[STUDENT_CHAT_OUTBOX_BINDING_KEY] !== binding) {
-      await discardStudentChatOutbox();
-      return;
-    }
-    const entries = boundedStudentChatOutbox(stored[STUDENT_CHAT_OUTBOX_KEY]);
-    for (const entry of entries) {
-      assertAuthenticatedContextCurrent(authContext, 'student message retry');
-      if (entry.status === 'failed') continue;
-      const result = await deliverStudentChatEntry(entry, authContext);
-      if (result?.queued) break;
-    }
-  } catch (error) {
-    if (!isAuthContextCancellation(error)) {
-      scheduleStudentChatFlush(STUDENT_CHAT_RETRY_DELAYS_MS[0]);
-    }
-  } finally {
-    studentChatFlushInFlight = false;
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding) return;
+  const activeFlush = studentChatFlushInFlight;
+  if (activeFlush) {
+    if (activeFlush.binding === binding) return activeFlush.promise;
+    // A global boolean allowed a B alarm to be consumed while an aborted A
+    // request was still settling. Chain one exact B pass after A so the new
+    // outbox receives its bounded retry instead of waiting for its 30-minute
+    // retention alarm.
+    // Also retain a durable near-term alarm in case MV3 suspends before the
+    // in-memory handoff continuation runs.
+    scheduleStudentChatFlush(1000);
+    return activeFlush.promise.catch(() => undefined).then(() => {
+      assertAuthenticatedContextCurrent(authContext, 'student message retry handoff');
+      return flushStudentChatOutbox();
+    }).catch((error) => {
+      if (!isAuthContextCancellation(error)) {
+        scheduleStudentChatFlush(STUDENT_CHAT_RETRY_DELAYS_MS[0]);
+      }
+    });
   }
+  const owner = { binding, promise: null };
+  const run = (async () => {
+    try {
+      if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
+        await discardStudentChatOutboxForAuth(authContext);
+        return;
+      }
+      const entries = await compactStudentChatOutbox(authContext);
+      assertAuthenticatedContextCurrent(authContext, 'student message retry');
+      if (!entries) return;
+      for (const entry of entries) {
+        assertAuthenticatedContextCurrent(authContext, 'student message retry');
+        if (entry.status === 'failed') continue;
+        const result = await deliverStudentChatEntry(entry, authContext);
+        if (result?.queued) break;
+      }
+    } catch (error) {
+      if (!isAuthContextCancellation(error)) {
+        scheduleStudentChatFlush(STUDENT_CHAT_RETRY_DELAYS_MS[0]);
+      }
+    }
+  })();
+  owner.promise = run.finally(() => {
+    if (studentChatFlushInFlight === owner) studentChatFlushInFlight = null;
+  });
+  studentChatFlushInFlight = owner;
+  return owner.promise;
 }
 
 function generateMonitoringEventId() {
@@ -3931,10 +5712,302 @@ function monitoringEventAuthBinding() {
   }
 }
 
+let retiredExactBoundStorageCleanupMutation = Promise.resolve();
+
+function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adoption') {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const expectedBinding = monitoringEventAuthBindingForContext(authContext);
+  const expectedLicenseScope = licenseScopeForAuthContext(authContext);
+  if (!expectedBinding) throw authContextSuperseded(reason);
+  const priorMutations = [
+    retiredExactBoundStorageCleanupMutation,
+    monitoringEventMutation,
+    commandAckMutation,
+    chatAckMutation,
+    studentChatMutation,
+    tabSnapshotMutation,
+    messageInboxMutation,
+    fabStateMutation,
+    classroomOverlayMutation,
+    schoolPolicyMutation,
+    schoolSettingsMutation,
+    classroomStateApplicationTail,
+  ].map((pending) => Promise.resolve(pending).catch(() => undefined));
+  const cleanup = Promise.all(priorMutations).then(async () => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const keys = [
+      MONITORING_EVENT_OUTBOX_KEY,
+      MONITORING_EVENT_AUTH_BINDING_KEY,
+      COMMAND_ACK_OUTBOX_KEY,
+      COMMAND_ACK_BINDING_KEY,
+      CHAT_ACK_OUTBOX_KEY,
+      CHAT_ACK_BINDING_KEY,
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+      TAB_SNAPSHOT_STORAGE_KEY,
+      MESSAGE_INBOX_STORAGE_KEY,
+      MESSAGE_INBOX_BINDING_KEY,
+      MESSAGE_INBOX_DEDUP_KEY,
+      'fabChatMessages',
+      'fabChatClosed',
+      PENDING_CHECK_IN_KEY,
+      FAB_STATE_STORAGE_KEY,
+      FAB_CONTEXT_STORAGE_KEY,
+      FAB_CHAT_CONTEXT_STORAGE_KEY,
+      CLASSROOM_OVERLAY_STORAGE_KEY,
+      'handRaised',
+      'messagingEnabled',
+      'handRaisingEnabled',
+      'globalBlockedDomains',
+      GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY,
+      SCHOOL_SETTINGS_CACHE_KEY,
+      SCHOOL_SETTINGS_FETCHED_AT_KEY,
+      SCHOOL_SETTINGS_SCOPE_KEY,
+      'licenseActive',
+      'planStatus',
+      'licenseDisabledAt',
+      LICENSE_STATE_SCOPE_KEY,
+    ];
+    const stored = await durableLocalKv.get(keys);
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const updates = {};
+    const removals = [];
+    const alarmsToClear = [];
+    const purgePair = (outboxKey, bindingKey, alarmName = null) => {
+      const entries = stored[outboxKey];
+      const storedBinding = stored[bindingKey];
+      const containsData = Array.isArray(entries) ? entries.length > 0 : Boolean(entries);
+      if ((storedBinding && storedBinding !== expectedBinding) || (!storedBinding && containsData)) {
+        updates[outboxKey] = [];
+        removals.push(bindingKey);
+        if (alarmName) alarmsToClear.push(alarmName);
+      }
+    };
+    if (
+      stored[LICENSE_STATE_SCOPE_KEY] !== expectedLicenseScope
+      && (
+        stored[LICENSE_STATE_SCOPE_KEY]
+        || stored.licenseActive !== undefined
+        || stored.planStatus !== undefined
+        || stored.licenseDisabledAt !== undefined
+      )
+    ) {
+      removals.push(
+        'licenseActive',
+        'planStatus',
+        'licenseDisabledAt',
+        LICENSE_STATE_SCOPE_KEY,
+      );
+    }
+    purgePair(
+      MONITORING_EVENT_OUTBOX_KEY,
+      MONITORING_EVENT_AUTH_BINDING_KEY,
+      MONITORING_EVENT_FLUSH_ALARM,
+    );
+    purgePair(COMMAND_ACK_OUTBOX_KEY, COMMAND_ACK_BINDING_KEY, COMMAND_ACK_FLUSH_ALARM);
+    purgePair(CHAT_ACK_OUTBOX_KEY, CHAT_ACK_BINDING_KEY, CHAT_ACK_FLUSH_ALARM);
+    purgePair(
+      STUDENT_CHAT_OUTBOX_KEY,
+      STUDENT_CHAT_OUTBOX_BINDING_KEY,
+      STUDENT_CHAT_FLUSH_ALARM,
+    );
+    if (
+      stored[TAB_SNAPSHOT_STORAGE_KEY]
+      && stored[TAB_SNAPSHOT_STORAGE_KEY].binding !== expectedBinding
+    ) {
+      removals.push(TAB_SNAPSHOT_STORAGE_KEY);
+      currentTabSnapshotRevision = 0;
+      lastKnownTabs = [];
+      lastKnownTabsAuthBinding = null;
+    }
+    const inboxContainsData = [
+      stored[MESSAGE_INBOX_STORAGE_KEY],
+      stored[MESSAGE_INBOX_DEDUP_KEY],
+      stored.fabChatMessages,
+    ].some((value) => Array.isArray(value) && value.length > 0)
+      || stored.fabChatClosed === true;
+    if (
+      (stored[MESSAGE_INBOX_BINDING_KEY]
+        && stored[MESSAGE_INBOX_BINDING_KEY] !== expectedBinding)
+      || (!stored[MESSAGE_INBOX_BINDING_KEY] && inboxContainsData)
+    ) {
+      updates[MESSAGE_INBOX_STORAGE_KEY] = [];
+      updates[MESSAGE_INBOX_DEDUP_KEY] = [];
+      updates.fabChatMessages = [];
+      updates.fabChatClosed = false;
+      updates[MESSAGE_INBOX_BINDING_KEY] = expectedBinding;
+    }
+    const expectedFabBinding = fabIdentityBinding();
+    const storedFabContext = stored[FAB_CONTEXT_STORAGE_KEY];
+    const storedChatContext = stored[FAB_CHAT_CONTEXT_STORAGE_KEY];
+    const storedOverlay = stored[CLASSROOM_OVERLAY_STORAGE_KEY];
+    const retiredFabState = Boolean(stored[FAB_STATE_STORAGE_KEY])
+      && (!expectedFabBinding || storedFabContext?.binding !== expectedFabBinding);
+    const retiredChatState = (
+      (Array.isArray(stored.fabChatMessages) && stored.fabChatMessages.length > 0)
+      || stored.fabChatClosed === true
+    ) && (!expectedFabBinding || storedChatContext?.binding !== expectedFabBinding);
+    const retiredOverlay = Boolean(storedOverlay)
+      && (!expectedFabBinding || storedOverlay.binding !== expectedFabBinding);
+    const retiredUnboundFabValues = (
+      stored.handRaised === true
+      || stored.messagingEnabled !== undefined
+      || stored.handRaisingEnabled !== undefined
+    ) && (!expectedFabBinding || storedFabContext?.binding !== expectedFabBinding);
+    if (retiredFabState || retiredChatState || retiredOverlay || retiredUnboundFabValues) {
+      updates[FAB_STATE_STORAGE_KEY] = null;
+      updates[FAB_CONTEXT_STORAGE_KEY] = null;
+      updates[FAB_CHAT_CONTEXT_STORAGE_KEY] = null;
+      updates[CLASSROOM_OVERLAY_STORAGE_KEY] = null;
+      updates.fabChatMessages = [];
+      updates.fabChatClosed = true;
+      updates.handRaised = false;
+      updates.messagingEnabled = false;
+      updates.handRaisingEnabled = false;
+      alarmsToClear.push(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+      currentFabState = null;
+    }
+    const pendingCheckIn = stored[PENDING_CHECK_IN_KEY];
+    if (
+      pendingCheckIn
+      && (pendingCheckIn.binding !== expectedBinding
+        || Number(pendingCheckIn.expiresAt || 0) <= Date.now())
+    ) {
+      removals.push(PENDING_CHECK_IN_KEY);
+      alarmsToClear.push(PENDING_CHECK_IN_EXPIRY_ALARM);
+    }
+    const expectedSchoolScope = schoolPolicyScopeForAuthContext(authContext);
+    const storedSchoolPolicy = classifyStoredSchoolPolicy(stored, expectedSchoolScope);
+    if (storedSchoolPolicy.status === 'matched') {
+      globalBlockedDomains = storedSchoolPolicy.domains;
+      globalBlockedDomainsStateTrusted = true;
+      globalBlockedDomainsScope = expectedSchoolScope;
+    } else if (storedSchoolPolicy.status === 'mismatch') {
+      updates.globalBlockedDomains = [];
+      if (expectedSchoolScope) updates[GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY] = expectedSchoolScope;
+      else removals.push(GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY);
+      globalBlockedDomains = [];
+      globalBlockedDomainsStateTrusted = true;
+      globalBlockedDomainsScope = expectedSchoolScope;
+      await composeDynamicRules(['school'], { globalBlockedDomains: [] });
+      assertAuthenticatedContextCurrent(authContext, reason);
+    } else {
+      // A legacy unscoped or malformed policy has no safe tenant owner here.
+      // Keep Chrome's surviving rules fail-closed until worker-wake migration
+      // proves the prior persisted owner or the server supplies a fresh list.
+      globalBlockedDomains = [];
+      globalBlockedDomainsStateTrusted = false;
+      globalBlockedDomainsScope = null;
+    }
+    if (!expectedSchoolScope || stored[SCHOOL_SETTINGS_SCOPE_KEY] !== expectedSchoolScope) {
+      removals.push(
+        SCHOOL_SETTINGS_CACHE_KEY,
+        SCHOOL_SETTINGS_FETCHED_AT_KEY,
+        SCHOOL_SETTINGS_SCOPE_KEY,
+      );
+      schoolSettings = null;
+      schoolSettingsFetchedAt = 0;
+      schoolSettingsScope = null;
+    }
+    if (Object.keys(updates).length > 0) {
+      await durableLocalKv.set(updates);
+      assertAuthenticatedContextCurrent(authContext, reason);
+    }
+    if (removals.length > 0) {
+      await durableLocalKv.remove([...new Set(removals)]);
+      assertAuthenticatedContextCurrent(authContext, reason);
+    }
+    await Promise.all([...new Set(alarmsToClear)].map((name) => (
+      Promise.resolve(chrome.alarms.clear(name)).catch(() => false)
+    )));
+    assertAuthenticatedContextCurrent(authContext, reason);
+    return {
+      purgedKeys: [...new Set([...Object.keys(updates), ...removals])],
+      binding: expectedBinding,
+    };
+  });
+  retiredExactBoundStorageCleanupMutation = cleanup.catch(() => undefined);
+  // Serialize every exact-bound writer behind the transition cleanup. Future
+  // writes chain from these globals, so a newly adopted identity cannot race
+  // the physical removal of a retired identity's payloads.
+  monitoringEventMutation = retiredExactBoundStorageCleanupMutation;
+  commandAckMutation = retiredExactBoundStorageCleanupMutation;
+  chatAckMutation = retiredExactBoundStorageCleanupMutation;
+  studentChatMutation = retiredExactBoundStorageCleanupMutation;
+  tabSnapshotMutation = retiredExactBoundStorageCleanupMutation;
+  messageInboxMutation = retiredExactBoundStorageCleanupMutation;
+  fabStateMutation = retiredExactBoundStorageCleanupMutation;
+  classroomOverlayMutation = retiredExactBoundStorageCleanupMutation;
+  schoolPolicyMutation = retiredExactBoundStorageCleanupMutation;
+  return cleanup;
+}
+
 function messageInboxAuthBinding() {
   // The monitoring binding already captures the exact student, device, and
   // token-backed session without persisting the raw credential.
   return monitoringEventAuthBinding();
+}
+
+function assertMessageInboxOperationCurrent(options = {}, reason = 'message inbox mutation') {
+  const authContext = options.authContext || null;
+  if (!authContext) return messageInboxAuthBinding();
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const contextBinding = monitoringEventAuthBindingForContext(authContext);
+  const currentBinding = authContext.allowCommitPending === true
+    ? monitoringEventAuthBindingForContext(authContext)
+    : messageInboxAuthBinding();
+  if (
+    !contextBinding
+    || (Object.prototype.hasOwnProperty.call(options, 'expectedBinding')
+      && options.expectedBinding !== contextBinding)
+    || contextBinding !== currentBinding
+  ) {
+    throw authContextSuperseded(reason);
+  }
+  if (options.sourceMessage) {
+    const binding = assertCurrentStudentBinding(
+      options.sourceMessage,
+      reason,
+      { authContext },
+    );
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  }
+  return contextBinding;
+}
+
+async function clearSupersededMessageInboxWrite(retiredBinding) {
+  if (!retiredBinding) return;
+  const stored = await kv.get([
+    MESSAGE_INBOX_STORAGE_KEY,
+    MESSAGE_INBOX_BINDING_KEY,
+    MESSAGE_INBOX_DEDUP_KEY,
+  ]);
+  // Never overwrite a newer authenticated context's inbox. All inbox writers
+  // are serialized, and this equality also protects against an external
+  // storage event replacing the tuple while the retired write was in flight.
+  if (stored[MESSAGE_INBOX_BINDING_KEY] !== retiredBinding) return;
+  const activeBinding = messageInboxAuthBinding();
+  await kv.set({
+    [MESSAGE_INBOX_STORAGE_KEY]: [],
+    [MESSAGE_INBOX_DEDUP_KEY]: [],
+    fabChatMessages: [],
+    fabChatClosed: false,
+    ...(activeBinding ? { [MESSAGE_INBOX_BINDING_KEY]: activeBinding } : {}),
+  });
+  if (!activeBinding) await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+}
+
+async function setMessageInboxStorageFenced(updates, options = {}, reason = 'message inbox write') {
+  const expectedBinding = assertMessageInboxOperationCurrent(options, reason);
+  await kv.set(updates);
+  try {
+    assertMessageInboxOperationCurrent(options, reason);
+  } catch (error) {
+    if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') {
+      await clearSupersededMessageInboxWrite(expectedBinding);
+    }
+    throw error;
+  }
 }
 
 function enqueueMessageInboxMutation(operation) {
@@ -3951,12 +6024,22 @@ function messageWithStableLocalId(rawMessage, prefix = 'message') {
   };
 }
 
-function notifyStudentMessageStateCleared(reason) {
-  broadcastToAllTabs('student-message-state-cleared', { reason });
+function notifyStudentMessageStateCleared(
+  reason,
+  retiredStudentMessageContext = lastRetiredStudentMessageContext,
+) {
+  return broadcastToAllTabs('student-message-state-cleared', {
+    reason,
+    retiredStudentMessageContext: retiredStudentMessageContext
+      ? { ...retiredStudentMessageContext }
+      : null,
+  });
 }
 
-async function reconcileMessageInboxIdentityNow(reason = 'identity-check') {
-  const binding = messageInboxAuthBinding();
+async function reconcileMessageInboxIdentityNow(reason = 'identity-check', options = {}) {
+  const binding = assertMessageInboxOperationCurrent(options, reason);
+  await authBoundNotificationCleanupPromise;
+  assertMessageInboxOperationCurrent(options, reason);
   const stored = await kv.get([
     MESSAGE_INBOX_STORAGE_KEY,
     MESSAGE_INBOX_BINDING_KEY,
@@ -3964,24 +6047,28 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check') {
     'fabChatMessages',
     'fabChatClosed',
   ]);
+  assertMessageInboxOperationCurrent(options, reason);
   const storedBinding = stored[MESSAGE_INBOX_BINDING_KEY] || null;
   const bindingChanged = storedBinding !== binding;
 
   if (!binding || bindingChanged) {
-    await kv.set({
+    await setMessageInboxStorageFenced({
       [MESSAGE_INBOX_STORAGE_KEY]: [],
       [MESSAGE_INBOX_DEDUP_KEY]: [],
       fabChatMessages: [],
       fabChatClosed: false,
       ...(binding ? { [MESSAGE_INBOX_BINDING_KEY]: binding } : {}),
-    });
-    if (!binding) await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+    }, options, reason);
+    if (!binding) {
+      await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+      assertMessageInboxOperationCurrent(options, reason);
+    }
     if (
       storedBinding
       || (Array.isArray(stored[MESSAGE_INBOX_STORAGE_KEY]) && stored[MESSAGE_INBOX_STORAGE_KEY].length > 0)
       || (Array.isArray(stored.fabChatMessages) && stored.fabChatMessages.length > 0)
     ) {
-      notifyStudentMessageStateCleared(reason);
+      await notifyStudentMessageStateCleared(reason);
     }
     return { binding, bindingChanged, messages: [], seenIds: [] };
   }
@@ -3998,13 +6085,16 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check') {
   };
 }
 
-function reconcileMessageInboxIdentity(reason = 'identity-check') {
-  return enqueueMessageInboxMutation(() => reconcileMessageInboxIdentityNow(reason));
+function reconcileMessageInboxIdentity(reason = 'identity-check', options = {}) {
+  return enqueueMessageInboxMutation(() => reconcileMessageInboxIdentityNow(reason, options));
 }
 
 function persistTeacherMessages(rawMessages, options = {}) {
   return enqueueMessageInboxMutation(async () => {
-    const identity = await reconcileMessageInboxIdentityNow(options.reason || 'message-delivery');
+    const reason = options.reason || 'message-delivery';
+    assertMessageInboxOperationCurrent(options, reason);
+    const identity = await reconcileMessageInboxIdentityNow(reason, options);
+    assertMessageInboxOperationCurrent(options, reason);
     if (!identity.binding) {
       return { messages: [], seenIds: [], addedMessageIds: [] };
     }
@@ -4022,54 +6112,71 @@ function persistTeacherMessages(rawMessages, options = {}) {
       rawMessages,
       options.nowValue ?? Date.now()
     );
-    await kv.set({
+    await setMessageInboxStorageFenced({
       [MESSAGE_INBOX_STORAGE_KEY]: merged.messages,
       [MESSAGE_INBOX_DEDUP_KEY]: merged.seenIds,
       [MESSAGE_INBOX_BINDING_KEY]: identity.binding,
-    });
-    if (merged.addedMessageIds.length > 0) {
-      chrome.runtime.sendMessage({ type: 'messages-updated' }).catch(() => {});
-    }
+    }, options, reason);
+    assertMessageInboxOperationCurrent(options, reason);
     return merged;
   });
 }
 
-function persistHeartbeatPendingMessages(rawMessages, expectedBinding = messageInboxAuthBinding()) {
+function persistHeartbeatPendingMessages(
+  rawMessages,
+  expectedBinding = messageInboxAuthBinding(),
+  options = {},
+) {
   // Heartbeat inbox rows must carry a backend-stable id. Do not synthesize an
   // id here: a malformed row repeated on every heartbeat would otherwise be
   // displayed repeatedly.
   return persistTeacherMessages(rawMessages, {
     reason: 'heartbeat-pending-messages',
     expectedBinding,
+    ...options,
   });
 }
 
-function getCurrentMessageInbox() {
+function getCurrentMessageInbox(options = {}) {
   return enqueueMessageInboxMutation(async () => {
-    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read');
+    assertMessageInboxOperationCurrent(options, 'message-inbox-read');
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read', options);
+    assertMessageInboxOperationCurrent(options, 'message-inbox-read');
     return identity.messages;
   });
 }
 
-function markCurrentMessageInboxRead() {
+function markCurrentMessageInboxRead(options = {}) {
   return enqueueMessageInboxMutation(async () => {
-    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read-state');
+    assertMessageInboxOperationCurrent(options, 'message-inbox-read-state');
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-read-state', options);
+    assertMessageInboxOperationCurrent(options, 'message-inbox-read-state');
     if (!identity.binding || !identity.messages.some((message) => message?.read !== true)) {
       return identity.messages;
     }
     const messages = identity.messages.map((message) => ({ ...message, read: true }));
-    await kv.set({ [MESSAGE_INBOX_STORAGE_KEY]: messages });
+    await setMessageInboxStorageFenced(
+      { [MESSAGE_INBOX_STORAGE_KEY]: messages },
+      options,
+      'message-inbox-read-state',
+    );
     return messages;
   });
 }
 
-function clearCurrentMessageInboxDisplay() {
+function clearCurrentMessageInboxDisplay(options = {}) {
   return enqueueMessageInboxMutation(async () => {
-    const identity = await reconcileMessageInboxIdentityNow('message-inbox-clear-display');
+    assertMessageInboxOperationCurrent(options, 'message-inbox-clear-display');
+    const identity = await reconcileMessageInboxIdentityNow('message-inbox-clear-display', options);
+    assertMessageInboxOperationCurrent(options, 'message-inbox-clear-display');
     if (!identity.binding) return [];
     // Keep the bounded seen-id ledger so a backend retry cannot resurrect a
     // message the student deliberately cleared from the display.
-    await kv.set({ [MESSAGE_INBOX_STORAGE_KEY]: [] });
+    await setMessageInboxStorageFenced(
+      { [MESSAGE_INBOX_STORAGE_KEY]: [] },
+      options,
+      'message-inbox-clear-display',
+    );
     return [];
   });
 }
@@ -4083,7 +6190,7 @@ function clearStudentMessageState(reason = 'student-auth-cleared') {
       fabChatClosed: false,
     });
     await kv.remove(MESSAGE_INBOX_BINDING_KEY);
-    notifyStudentMessageStateCleared(reason);
+    await notifyStudentMessageStateCleared(reason);
   });
 }
 
@@ -4105,10 +6212,14 @@ function scheduleMonitoringEventFlush(delayMs = MONITORING_EVENT_FLUSH_MS) {
     }, normalizedDelay);
   }
   chrome.alarms.get(MONITORING_EVENT_FLUSH_ALARM, (existing) => {
-    if (existing) return;
-    chrome.alarms.create(MONITORING_EVENT_FLUSH_ALARM, {
-      when: Date.now() + Math.max(MONITORING_EVENT_FLUSH_MS, normalizedDelay),
-    });
+    const when = Date.now() + Math.max(MONITORING_EVENT_FLUSH_MS, normalizedDelay);
+    if (
+      !existing
+      || Number(existing.scheduledTime || 0) <= Date.now()
+      || existing.scheduledTime > when
+    ) {
+      chrome.alarms.create(MONITORING_EVENT_FLUSH_ALARM, { when });
+    }
   });
 }
 
@@ -4116,7 +6227,8 @@ function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
   if (!hasStudentAuth() && !options.allowWithoutAuth) return Promise.resolve(false);
   let authContext;
   try {
-    authContext = captureAuthenticatedContext('monitoring event');
+    authContext = options.authContext || captureAuthenticatedContext('monitoring event');
+    assertAuthenticatedContextCurrent(authContext, 'monitoring event');
   } catch {
     return Promise.resolve(false);
   }
@@ -4217,89 +6329,120 @@ async function discardMonitoringEventOutbox(expectedAuthContext = null) {
 }
 
 async function flushMonitoringEventOutbox() {
-  if (monitoringEventFlushInFlight || !hasStudentAuth()) return;
+  if (!hasStudentAuth()) return;
   let authContext;
   try {
     authContext = captureAuthenticatedContext('monitoring event flush');
   } catch {
     return;
   }
-  monitoringEventFlushInFlight = true;
-  try {
-    await monitoringEventMutation;
-    assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
-    const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_AUTH_BINDING_KEY]);
-    assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
-    const batch = (stored[MONITORING_EVENT_OUTBOX_KEY] || []).slice(0, 50);
-    if (batch.length === 0) {
-      chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
-      return;
-    }
-    const currentBinding = monitoringEventAuthBindingForContext(authContext);
-    if (!currentBinding || stored[MONITORING_EVENT_AUTH_BINDING_KEY] !== currentBinding) {
-      await discardMonitoringEventOutbox(authContext);
-      chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
-      return;
-    }
-
-    const payload = { events: batch };
-    const headers = buildDeviceAuthHeaders(authContext);
-    attachLegacyStudentToken(payload, headers, authContext);
-    assertAuthenticatedContextCurrent(authContext, 'monitoring event transmission');
-    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/events`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-      signal: authContext.signal,
-    }, {
-      context: 'device event',
-      maxAttempts: 1,
-      retryStatuses: new Set([429, 503]),
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding) return;
+  const activeFlush = monitoringEventFlushInFlight;
+  if (activeFlush) {
+    if (activeFlush.binding === binding) return activeFlush.promise;
+    scheduleMonitoringEventFlush(1000);
+    return activeFlush.promise.catch(() => undefined).then(() => {
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event flush handoff');
+      return flushMonitoringEventOutbox();
+    }).catch((error) => {
+      if (!isAuthContextCancellation(error)) scheduleMonitoringEventFlush(1000);
     });
-    assertAuthenticatedContextCurrent(authContext, 'monitoring event response');
+  }
+  const owner = { binding, promise: null };
+  const run = (async () => {
+    try {
+      await monitoringEventMutation;
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
+      const stored = await kv.get([MONITORING_EVENT_OUTBOX_KEY, MONITORING_EVENT_AUTH_BINDING_KEY]);
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event flush');
+      const batch = (stored[MONITORING_EVENT_OUTBOX_KEY] || []).slice(0, 50);
+      if (batch.length === 0) {
+        chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
+        return;
+      }
+      const currentBinding = monitoringEventAuthBindingForContext(authContext);
+      if (!currentBinding || stored[MONITORING_EVENT_AUTH_BINDING_KEY] !== currentBinding) {
+        await discardMonitoringEventOutbox(authContext);
+        chrome.alarms.clear(MONITORING_EVENT_FLUSH_ALARM);
+        return;
+      }
 
-    if (response.status === 429 || response.status === 503) {
-      scheduleMonitoringEventFlush();
-      return;
-    }
-    if (response.status === 402) {
-      const data = await response.json().catch(() => ({}));
-      assertAuthenticatedContextCurrent(authContext, 'monitoring event license response');
-      await disableForInactiveLicense(data.planStatus, authContext);
-    }
+      const payload = { events: batch };
+      const headers = buildDeviceAuthHeaders(authContext);
+      attachLegacyStudentToken(payload, headers, authContext);
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event transmission');
+      const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/events`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: authContext.signal,
+      }, {
+        context: 'device event',
+        maxAttempts: 1,
+        retryStatuses: new Set([429, 503]),
+      });
+      assertAuthenticatedContextCurrent(authContext, 'monitoring event response');
 
-    // A successful batch acknowledges each source event independently. Keep
-    // any event omitted from the response queued: ingestion is idempotent, so
-    // retrying it is safer than silently losing telemetry after a partial or
-    // malformed response. Other non-retryable responses are discarded so one
-    // rejected batch cannot permanently block later telemetry.
-    let acknowledgedIds = batch.map((event) => event.sourceEventId);
-    if (response.ok) {
-      const data = await response.json().catch(() => null);
-      assertAuthenticatedContextCurrent(authContext, 'monitoring event receipt');
-      acknowledgedIds = RuntimeCore.acknowledgedMonitoringEventIds(batch, data);
-      if (acknowledgedIds.length === 0) {
+      if (response.status === 429 || response.status === 503) {
         scheduleMonitoringEventFlush();
         return;
       }
+      if (response.status === 402) {
+        const data = await response.json().catch(() => ({}));
+        assertAuthenticatedContextCurrent(authContext, 'monitoring event license response');
+        await disableForInactiveLicense(data.planStatus, authContext);
+      }
+
+      // A successful batch acknowledges each source event independently. Keep
+      // any event omitted from the response queued: ingestion is idempotent, so
+      // retrying it is safer than silently losing telemetry after a partial or
+      // malformed response. Other non-retryable responses are discarded so one
+      // rejected batch cannot permanently block later telemetry.
+      let acknowledgedIds = batch.map((event) => event.sourceEventId);
+      if (response.ok) {
+        const data = await response.json().catch(() => null);
+        assertAuthenticatedContextCurrent(authContext, 'monitoring event receipt');
+        acknowledgedIds = RuntimeCore.acknowledgedMonitoringEventIds(batch, data);
+        if (acknowledgedIds.length === 0) {
+          scheduleMonitoringEventFlush();
+          return;
+        }
+      }
+      const remaining = await removeMonitoringEventBatch(acknowledgedIds, authContext);
+      if (remaining > 0) scheduleMonitoringEventFlush();
+    } catch (error) {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Monitoring Events] Flush deferred:', safeDiagnosticError(error));
+        scheduleMonitoringEventFlush();
+      }
     }
-    const remaining = await removeMonitoringEventBatch(acknowledgedIds, authContext);
-    if (remaining > 0) scheduleMonitoringEventFlush();
-  } catch (error) {
-    console.warn('[Monitoring Events] Flush deferred:', safeDiagnosticError(error));
-    scheduleMonitoringEventFlush();
-  } finally {
-    monitoringEventFlushInFlight = false;
-  }
+  })();
+  owner.promise = run.finally(() => {
+    if (monitoringEventFlushInFlight === owner) monitoringEventFlushInFlight = null;
+  });
+  monitoringEventFlushInFlight = owner;
+  return owner.promise;
 }
 
 function queueNavigationEvent(eventType, url, title, metadata = {}) {
-  if (!licenseActive || trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !isHttpUrl(url)) {
+  if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || !hasStudentAuth() || !isHttpUrl(url)) {
+    return;
+  }
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('navigation event');
+  } catch {
     return;
   }
   const normalizedType = eventType === 'tab_change' ? 'tab_changed' : 'navigation_changed';
   const key = `${normalizedType}:${metadata.tabId ?? 'unknown'}`;
-  pendingNavigationEvents.set(key, { eventType: normalizedType, url, title });
+  pendingNavigationEvents.set(key, {
+    eventType: normalizedType,
+    url,
+    title,
+    authContext,
+  });
 
   if (navigationDebounceTimers.has(key)) clearTimeout(navigationDebounceTimers.get(key));
   navigationDebounceTimers.set(key, setTimeout(() => {
@@ -4307,8 +6450,64 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
     pendingNavigationEvents.delete(key);
     navigationDebounceTimers.delete(key);
     if (!event || trackingState === TRACKING_STATES.OFF) return;
-    enqueueMonitoringEvent(event.eventType, { url: event.url, title: event.title }).catch(() => {});
+    try {
+      assertAuthenticatedContextCurrent(event.authContext, 'navigation event dispatch');
+    } catch {
+      return;
+    }
+    enqueueMonitoringEvent(
+      event.eventType,
+      { url: event.url, title: event.title },
+      { authContext: event.authContext },
+    ).catch(() => {});
   }, NAVIGATION_DEBOUNCE_MS));
+}
+
+function persistFabChatStateForRequest(message, actionRequest) {
+  const allowedStatuses = new Set(['Sending', 'Retrying', 'Delivered', 'Failed']);
+  const messages = (Array.isArray(message?.messages) ? message.messages : [])
+    .slice(-50)
+    .map((entry) => ({
+      id: String(entry?.id || '').slice(0, 200) || null,
+      clientMessageId: String(entry?.clientMessageId || '').slice(0, 200) || null,
+      sessionId: String(entry?.sessionId || actionRequest.sessionId).slice(0, 200),
+      sender: entry?.sender === 'teacher' ? 'teacher' : 'student',
+      text: String(entry?.text || '').slice(0, 500),
+      fromName: String(entry?.fromName || '').slice(0, 100) || null,
+      time: Number.isFinite(Number(entry?.time)) ? Number(entry.time) : Date.now(),
+      status: allowedStatuses.has(entry?.status) ? entry.status : null,
+    }))
+    .filter((entry) => entry.text && entry.sessionId === actionRequest.sessionId);
+  const options = {
+    authContext: actionRequest.authContext,
+    expectedBinding: monitoringEventAuthBindingForContext(actionRequest.authContext),
+  };
+  return enqueueMessageInboxMutation(async () => {
+    assertStudentActionRequestCurrent(actionRequest, 'FAB chat state persistence');
+    const context = {
+      schemaVersion: 1,
+      binding: actionRequest.fabBinding,
+      teachingSessionId: actionRequest.sessionId,
+      activeSessionIds: activeTeachingSessionIds(),
+      revision: Number(currentFabState?.revision || 0),
+      lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
+      ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
+      ownershipRevisionKnown: currentFabState?.ownershipRevisionKnown === true,
+    };
+    await setMessageInboxStorageFenced({
+      fabChatMessages: messages,
+      fabChatClosed: message?.chatClosed === true,
+      [FAB_CHAT_CONTEXT_STORAGE_KEY]: context,
+    }, options, 'FAB chat state persistence');
+    assertStudentActionRequestCurrent(actionRequest, 'FAB chat state persistence');
+    return true;
+  });
+}
+
+function clearPendingNavigationEvents() {
+  for (const timer of navigationDebounceTimers.values()) clearTimeout(timer);
+  navigationDebounceTimers.clear();
+  pendingNavigationEvents.clear();
 }
 
 function generateAuthContextId() {
@@ -4317,18 +6516,141 @@ function generateAuthContextId() {
   return `auth_${String(random).replace(/[^a-zA-Z0-9_-]/g, '')}`;
 }
 
+function failPrivateRetiredOffscreenAuthority() {
+  if (activeLiveViewContext || wsTransportIdentity) return;
+  // Share the same close flight used by replacement creation. A delayed
+  // retired-context failure must finish closing the old offscreen document
+  // before a new authority is allowed to create/authenticate its proxy.
+  closeOffscreenDocumentFailPrivate().catch(() => {});
+}
+
+function revokeRetiredOffscreenAuthority(liveViewContext, transportIdentity) {
+  const messages = [];
+  if (liveViewContext) {
+    messages.push({
+      type: 'STOP_SHARE',
+      ...liveViewOffscreenIdentity(liveViewContext),
+    });
+  }
+  if (transportIdentity) {
+    messages.push({
+      type: 'WS_CLOSE',
+      connectionGeneration: transportIdentity.connectionGeneration,
+      authContextId: transportIdentity.authContextId,
+      serverOrigin: transportIdentity.serverOrigin,
+    });
+  }
+  for (const message of messages) {
+    try {
+      const result = chrome.runtime?.sendMessage?.(message);
+      Promise.resolve(result).then((response) => {
+        if (response?.success !== true) failPrivateRetiredOffscreenAuthority();
+      }, failPrivateRetiredOffscreenAuthority);
+    } catch {
+      failPrivateRetiredOffscreenAuthority();
+    }
+  }
+}
+
 function abortActiveAuthContext() {
+  if (
+    activeAuthContextGeneration === studentAuthMutationGeneration
+    && !authContextAbortController.signal.aborted
+    && CONFIG.authContextId
+    && CONFIG.activeStudentId
+    && CONFIG.activeStudentSessionId
+  ) {
+    lastRetiredStudentMessageContext = Object.freeze({
+      authContextId: String(CONFIG.authContextId),
+      schoolId: String(CONFIG.schoolId || '').trim() || null,
+      studentId: String(CONFIG.activeStudentId),
+      studentSessionId: String(CONFIG.activeStudentSessionId),
+    });
+  }
+  const retiredLiveViewContext = activeLiveViewContext;
+  const retiredTransportIdentity = wsTransportIdentity;
+  // Initiate exact-context revocation before invalidating local pointers. A
+  // login that pauses or fails must not leave the prior student's offscreen
+  // MediaStream or authenticated socket alive.
+  revokeRetiredOffscreenAuthority(retiredLiveViewContext, retiredTransportIdentity);
   try {
     authContextAbortController.abort();
   } catch {
     // AbortController cleanup is best effort; the generation fence is authoritative.
   }
   activeAuthContextGeneration = -1;
+  clearPendingNavigationEvents();
+  lastKnownTabs = [];
+  lastKnownTabsAuthBinding = null;
+  currentTabSnapshotRevision = 0;
+  cameraActiveTabs.clear();
+  cameraActive = false;
+  // Teacher-broadcast viewing state is student authority, not a school-global
+  // transport flag. Do not let a new identity send a leave for the retired
+  // student's broadcast session over its new socket.
+  teacherBroadcastActive = false;
+  teacherBroadcastSessionId = null;
+  currentFabState = null;
+  lastClassroomStateOutcome = 'pending';
+  lastClassroomStateAckRevision = 0;
+  lastClassroomStateAckAuthBinding = null;
+  resetLicenseStateForAuthorityTransition();
+  // A control-cleanup retry belongs to the retired exact license scope. The
+  // alarm callback independently validates its durable scope in case the
+  // event was already queued before this best-effort clear completed.
+  try {
+    Promise.resolve(chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM)).catch(() => {});
+    Promise.resolve(chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM)).catch(() => {});
+  } catch {
+    // Alarm scope validation remains authoritative.
+  }
+  trackingState = TRACKING_STATES.OFF;
+  persistedMonitoringState = {
+    state: TRACKING_STATES.OFF,
+    changedAt: Date.now(),
+    reason: 'authority_transition',
+  };
+  persistedMonitoringStateScope = null;
+  scheduleHeartbeat(null);
+  scheduleScreenshotCapture(false);
+  schoolSettings = null;
+  schoolSettingsFetchedAt = 0;
+  schoolSettingsScope = null;
+  schoolMaxTabs = null;
+  currentMaxTabs = effectiveTabLimit();
+  resetStudentControlRevisionAuthority();
+  const hadAuthBoundNotifications = activeAuthBoundNotificationIds.size > 0;
+  const notificationCleanupWasInFlight = Boolean(authBoundNotificationCleanupInFlight);
+  const notificationInventoryNeededReconciliation = !authBoundNotificationInventoryReconciled;
+  activeAuthBoundNotificationIds.clear();
+  if (
+    hadAuthBoundNotifications
+    || notificationCleanupWasInFlight
+    || notificationInventoryNeededReconciliation
+  ) {
+    authBoundNotificationInventoryReconciled = false;
+    authBoundNotificationCleanupRetryAt = 0;
+  }
+  // A transition that overlaps a pass must chain a fresh current-owner pass;
+  // merely joining a B-prefix snapshot could mark the inventory reconciled
+  // after C becomes current and leave B's notification visible under C.
+  const forceNotificationCleanup = hadAuthBoundNotifications
+    || notificationCleanupWasInFlight
+    || notificationInventoryNeededReconciliation;
+  authBoundNotificationCleanupPromise = ensureAuthBoundNotificationInventory({
+    force: forceNotificationCleanup,
+  });
   negotiatedProtocolState = null;
   activeLiveViewContext = null;
   activeLiveViewNegotiationId = null;
   activeLiveViewTeachingSessionId = null;
   liveViewTelemetryAttempts = new Set();
+  liveViewSeenNegotiationScope = null;
+  liveViewSeenNegotiationIds = new Set();
+  wsConnected = false;
+  wsTransportConnected = false;
+  wsAuthenticatedGeneration = 0;
+  wsTransportIdentity = null;
   screenshotPolicyState = Object.freeze({
     mode: 'pending',
     observed: false,
@@ -4336,6 +6658,9 @@ function abortActiveAuthContext() {
     scope: null,
     valid: false,
   });
+  screenshotPolicyGeneration += 1;
+  screenshotImmediateCapturePending = false;
+  protocolPolicyAppliedGeneration = 0;
   chrome.alarms?.clear?.('screenshot-observation-lease-expiry');
 }
 
@@ -4398,6 +6723,11 @@ function captureAuthenticatedContext(reason = 'authenticated operation') {
 }
 
 function assertAuthenticatedContextCurrent(context, reason = 'authenticated operation') {
+  const commitPendingAllowed = Boolean(
+    context?.allowCommitPending === true
+    && studentAuthCommitPending
+    && studentAuthCommitPendingGeneration === context.mutationGeneration
+  );
   if (
     !context
     || context.signal?.aborted
@@ -4410,7 +6740,7 @@ function assertAuthenticatedContextCurrent(context, reason = 'authenticated oper
     || context.studentId !== CONFIG.activeStudentId
     || context.studentSessionId !== CONFIG.activeStudentSessionId
     || context.studentToken !== CONFIG.studentToken
-    || !hasStudentAuth()
+    || (!hasStudentAuth() && !commitPendingAllowed)
   ) {
     throw authContextSuperseded(reason);
   }
@@ -4429,8 +6759,7 @@ function assertBindingMatchesAuthContext(
   reason = 'authenticated binding',
   options = {},
 ) {
-  const requireFullAuthority = options.requireFullAuthority === true
-    || (options.requireFullAuthority !== false && fullAuthorityBindingNegotiated(context));
+  const requireFullAuthority = options.requireFullAuthority === true;
   const expectedControlRevision = currentStudentControlRevision();
   if (
     !binding
@@ -4474,7 +6803,11 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
   // The accepted list, not the protocol number, is the behavior switch. Keep
   // only capabilities this exact build advertised so a server cannot turn on
   // an unknown or misspelled feature accidentally.
-  const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => advertised.has(name));
+  const scopedAuthorityAccepted = advertised.has('scopedAuthorityChecksV1');
+  const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => (
+    advertised.has(name)
+    && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
+  ));
   negotiatedProtocolState = Object.freeze({
     scope: authContextProtocolScope(context),
     serverProtocolVersion: Number.isSafeInteger(serverProtocolVersion) && serverProtocolVersion > 0
@@ -4484,6 +6817,26 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
     negotiatedAt: Date.now(),
   });
   return negotiatedProtocolState;
+}
+
+function reserveProtocolPolicyRequestGeneration() {
+  protocolPolicyRequestGeneration += 1;
+  return protocolPolicyRequestGeneration;
+}
+
+function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
+  assertAuthenticatedContextCurrent(context, 'protocol and screenshot policy');
+  const requestGeneration = Number(options.requestGeneration);
+  const generation = Number.isSafeInteger(requestGeneration) && requestGeneration > 0
+    ? requestGeneration
+    : reserveProtocolPolicyRequestGeneration();
+  if (generation < protocolPolicyAppliedGeneration) return false;
+  protocolPolicyAppliedGeneration = generation;
+  adoptNegotiatedProtocolState(raw, context);
+  // Capability and screenshot-policy adoption are one authority transition.
+  // In lease mode, an omitted or malformed policy is deliberately private.
+  adoptScreenshotPolicy(raw?.screenshotPolicy, context, options);
+  return true;
 }
 
 function hasNegotiatedCapability(name, context = null) {
@@ -4525,9 +6878,33 @@ function assertAmbientScreenshotAllowed(context, reason = 'ambient screenshot') 
   }
 }
 
-function adoptScreenshotPolicy(rawPolicy, context) {
+function assertAmbientScreenshotPolicyCurrent(
+  context,
+  expectedGeneration,
+  reason = 'ambient screenshot',
+) {
+  assertAuthenticatedContextCurrent(context, reason);
+  if (screenshotPolicyGeneration !== expectedGeneration) {
+    const error = new Error('Screenshot authority changed during capture');
+    error.code = 'SCREENSHOT_POLICY_SUPERSEDED';
+    throw error;
+  }
+  assertAmbientScreenshotAllowed(context, reason);
+}
+
+function requestImmediateObservedScreenshotCapture() {
+  if (screenshotCaptureInFlight) {
+    screenshotImmediateCapturePending = true;
+    return;
+  }
+  screenshotImmediateCapturePending = false;
+  captureAndSendScreenshot({ reason: 'lease-start' }).catch(() => {});
+}
+
+function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
   assertAuthenticatedContextCurrent(context, 'screenshot policy');
   const scope = screenshotPolicyScope(context);
+  const priorState = screenshotPolicyState;
   const priorAllowed = ambientScreenshotAllowed(context);
   let next;
   if (!hasNegotiatedCapability('screenshotObservationLeaseV1', context)) {
@@ -4541,17 +6918,43 @@ function adoptScreenshotPolicy(rawPolicy, context) {
   } else {
     const expiresInSeconds = Number(rawPolicy?.expiresInSeconds);
     const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
+    const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
+      ? Number(options.responseReceivedAt)
+      : Date.now();
+    const requestStartedAt = Number.isFinite(Number(options.requestStartedAt))
+      ? Number(options.requestStartedAt)
+      : responseReceivedAt;
+    const boundedLeaseMs = Number.isFinite(expiresInSeconds)
+      ? Math.min(120, Math.max(0, expiresInSeconds)) * 1000
+      : 0;
+    const roundTripMs = Math.max(0, responseReceivedAt - requestStartedAt);
+    const serverTimeIsCurrent = Number.isFinite(serverTime)
+      && requestStartedAt <= responseReceivedAt
+      && serverTime >= requestStartedAt - 30_000
+      && serverTime <= responseReceivedAt + 30_000;
+    // Subtract the whole request round-trip and also honor the server's
+    // absolute lease deadline. Either bound may shorten a lease; neither may
+    // extend it after a delayed/replayed response.
+    const remainingLeaseMs = serverTimeIsCurrent
+      ? Math.max(0, Math.min(
+        boundedLeaseMs - roundTripMs,
+        serverTime + boundedLeaseMs - responseReceivedAt,
+      ))
+      : 0;
     const validShape = rawPolicy?.mode === 'lease'
       && typeof rawPolicy?.observed === 'boolean'
       && Number.isFinite(expiresInSeconds)
       && expiresInSeconds >= 0
-      && Number.isFinite(serverTime);
-    const observed = validShape && rawPolicy.observed === true && expiresInSeconds > 0;
+      && serverTimeIsCurrent;
+    const observed = validShape
+      && rawPolicy.observed === true
+      && expiresInSeconds > 0
+      && remainingLeaseMs > 0;
     next = Object.freeze({
       mode: 'lease',
       observed,
       expiresAt: observed
-        ? Date.now() + Math.min(120, expiresInSeconds) * 1000
+        ? responseReceivedAt + remainingLeaseMs
         : 0,
       scope,
       valid: validShape,
@@ -4559,13 +6962,20 @@ function adoptScreenshotPolicy(rawPolicy, context) {
   }
   screenshotPolicyState = next;
   const nextAllowed = ambientScreenshotAllowed(context);
+  const authorityChanged = priorState.scope !== scope
+    || priorState.mode !== next.mode
+    || priorState.valid !== next.valid
+    || priorState.observed !== next.observed
+    || priorAllowed !== nextAllowed;
+  if (authorityChanged) screenshotPolicyGeneration += 1;
+  if (!nextAllowed) screenshotImmediateCapturePending = false;
   chrome.alarms.clear(SCREENSHOT_LEASE_EXPIRY_ALARM);
   if (next.mode === 'lease' && nextAllowed) {
     chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: next.expiresAt });
   }
   scheduleScreenshotCapture(nextAllowed);
   if (!priorAllowed && nextAllowed) {
-    captureAndSendScreenshot({ reason: 'lease-start' }).catch(() => {});
+    requestImmediateObservedScreenshotCapture();
   }
   return next;
 }
@@ -4878,6 +7288,7 @@ async function runManagedAuthGatePolicyRevalidation() {
       // A failed local read/write cannot prove the policy snapshot. Keep every
       // client fenced and fail closed without attaching an acknowledgement.
       managedAuthGateSetupUnavailable = true;
+      authoritativeManagedSchoolPolicyScope = null;
       CONFIG.serverUrl = DEFAULT_SERVER_URL;
       CONFIG.schoolId = null;
       CONFIG.schoolSlug = null;
@@ -5649,6 +8060,7 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
     }).catch((error) => {
       if (policyGeneration === managedAuthGatePolicyGeneration) {
         managedAuthGateSetupUnavailable = true;
+        authoritativeManagedSchoolPolicyScope = null;
         CONFIG.serverUrl = DEFAULT_SERVER_URL;
         CONFIG.schoolId = null;
         CONFIG.schoolSlug = null;
@@ -5871,6 +8283,13 @@ function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration
       }
       studentAuthInvalidating = false;
       activateAuthenticatedContext(CONFIG.authContextId);
+      const restoredAuthContext = captureAuthenticatedContext('worker wake storage adoption');
+      await cleanupRetiredExactBoundStorage(
+        restoredAuthContext,
+        'worker wake storage adoption',
+      );
+      assertCurrent();
+      if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
     }
     return { interruptedAuthClear, interruptedAuthCommit, manualAuthTimestampInvalid };
   });
@@ -5880,6 +8299,13 @@ function clearStudentAuth(reason = 'manual-clear', options = {}) {
   if (options.expectedAuthContext) {
     assertAuthenticatedContextCurrent(options.expectedAuthContext, `authentication clear:${reason}`);
   }
+  const signOutAuthority = Object.freeze({
+    token: options.expectedAuthContext?.studentToken || CONFIG.studentToken || null,
+    serverOrigin: options.expectedAuthContext?.serverOrigin
+      || normalizedServerOrigin(CONFIG.serverUrl),
+    deviceId: options.expectedAuthContext?.deviceId || CONFIG.deviceId || null,
+  });
+  const clearOptions = { ...options, signOutAuthority };
   // Reserve the mutation and revoke the current authority synchronously. A
   // login already waiting on the network must not briefly reinstall its old
   // response before this cleanup reaches the queue.
@@ -5892,14 +8318,58 @@ function clearStudentAuth(reason = 'manual-clear', options = {}) {
   const invalidationPersisted = durableLocalKv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true });
   return enqueueStudentAuthMutation(() => clearStudentAuthNow(
     reason,
-    options,
+    clearOptions,
     invalidationPersisted,
   ));
 }
 
+async function notifyBackendOfStudentSignOut(signOutAuthority, reason) {
+  if (
+    !signOutAuthority?.token
+    || !signOutAuthority.serverOrigin
+    || !signOutAuthority.deviceId
+  ) return;
+  const controller = new AbortController();
+  let timeoutId;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      resolve({ timedOut: true });
+    }, SIGN_OUT_REQUEST_TIMEOUT_MS);
+  });
+  const request = Promise.resolve().then(() => fetchWithBackoff(
+    `${signOutAuthority.serverOrigin}/api/extension/sign-out`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${signOutAuthority.token}`,
+      },
+      body: JSON.stringify({ deviceId: signOutAuthority.deviceId, reason }),
+      signal: controller.signal,
+    },
+    {
+      context: 'student sign-out',
+      maxAttempts: 1,
+      respectGlobalBackoff: false,
+    },
+  )).then(
+    () => ({ completed: true }),
+    (error) => ({ error }),
+  );
+  const outcome = await Promise.race([request, timeout]);
+  clearTimeout(timeoutId);
+  if (outcome?.timedOut) {
+    console.warn('[Auth] Session-end call timed out');
+  } else if (outcome?.error && !isAuthContextCancellation(outcome.error)) {
+    console.warn('[Auth] Session-end call failed:', safeDiagnosticError(outcome.error));
+  }
+}
+
 async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invalidationPersisted) {
   await invalidationPersisted;
-  const tokenToEnd = CONFIG.studentToken;
+  const signOutAuthority = options.signOutAuthority || {};
+  const tokenToEnd = signOutAuthority.token || null;
   const pauseAutoRegistration = options.pauseAutoRegistration === true;
   const disconnect = options.disconnectWebSocket !== false;
   // Revoke the in-memory authority before the first await. Cleanup and the
@@ -5940,27 +8410,11 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // message under a later credential.
   await discardStudentChatOutbox().catch(() => {});
   await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
+  await kv.remove(PENDING_CHECK_IN_KEY);
+  await chrome.alarms.clear(PENDING_CHECK_IN_EXPIRY_ALARM);
   currentTabSnapshotRevision = 0;
   lastKnownTabs = [];
-
-  if (options.notifyBackend && tokenToEnd && CONFIG.serverUrl) {
-    try {
-      await fetchWithBackoff(`${CONFIG.serverUrl}/api/extension/sign-out`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${tokenToEnd}`,
-        },
-        body: JSON.stringify({ deviceId: CONFIG.deviceId, reason }),
-      }, {
-        context: 'student sign-out',
-        maxAttempts: 1,
-        respectGlobalBackoff: false,
-      });
-    } catch (error) {
-      console.warn('[Auth] Session-end call failed:', safeDiagnosticError(error));
-    }
-  }
+  lastKnownTabsAuthBinding = null;
 
   // 2.6.8: the pause fence is MONOTONIC across clears — a later clear (e.g.
   // a second sign-out tap after identity was already nulled) must never lower
@@ -5991,6 +8445,12 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     registered: false,
     autoRegistrationPaused: nextAutoRegistrationPaused,
   });
+  // Local invalidation is durable before the optional server notification.
+  // A server or network stall is bounded so it can never hold the auth
+  // mutation queue—and therefore the next login—indefinitely.
+  if (options.notifyBackend && tokenToEnd) {
+    await notifyBackendOfStudentSignOut(signOutAuthority, reason);
+  }
   studentAuthCommitPending = false;
   studentAuthCommitPendingGeneration = 0;
   completeAuthCommitRecoveryBarrier();
@@ -6055,30 +8515,106 @@ function expireManualAuthIfStaleFailClosed(reason = 'stale-check') {
   return true;
 }
 
-async function clearSharedAuthLockTimer() {
-  sharedAuthLockedSinceAt = 0;
-  chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
-  if (isManualIdentitySource()) {
-    await setManualAuthState({ sharedAuthLockedSinceAt: null });
-  } else {
-    await kv.set({ sharedAuthLockedSinceAt: null });
-    if (hasSessionStorage()) await sessionKv.remove(['sharedAuthLockedSinceAt']);
-  }
+function sharedAuthLockOwnerFor(authContext, lockedSince) {
+  return {
+    schemaVersion: 1,
+    authContextId: authContext.authContextId,
+    binding: monitoringEventAuthBindingForContext(authContext),
+    lockedSince: Number(lockedSince || 0),
+  };
 }
 
-async function scheduleSharedAuthLockTimer(reason = 'locked') {
-  if (!hasStudentAuth() || !isManualIdentitySource()) {
-    await clearSharedAuthLockTimer();
+function sharedAuthLockOwnerMatches(owner, authContext) {
+  return Boolean(
+    owner
+    && authContext
+    && owner.schemaVersion === 1
+    && String(owner.authContextId || '') === authContext.authContextId
+    && String(owner.binding || '') === monitoringEventAuthBindingForContext(authContext)
+    && Number(owner.lockedSince || 0) > 0
+  );
+}
+
+async function persistSharedAuthLockState(values, useManualStorage) {
+  if (useManualStorage) {
+    await setManualAuthState(values);
     return;
   }
-  if (!sharedAuthLockedSinceAt) {
-    sharedAuthLockedSinceAt = Date.now();
-    await setManualAuthState({ sharedAuthLockedSinceAt });
+  await durableLocalKv.set(values);
+  if (hasSessionStorage()) await durableSessionKv.remove(Object.keys(values));
+}
+
+function clearSharedAuthLockTimer(options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext && hasStudentAuth()) {
+    try {
+      authContext = captureAuthenticatedContext('shared auth lock clear');
+    } catch {
+      authContext = null;
+    }
   }
-  chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, {
-    delayInMinutes: SHARED_AUTH_LOCK_TIMEOUT_MS / 60000,
+  const mutationGeneration = options.authMutationGeneration ?? studentAuthMutationGeneration;
+  return enqueueStudentAuthMutation(async () => {
+    if (authContext) {
+      assertAuthenticatedContextCurrent(authContext, 'shared auth lock clear');
+    } else {
+      assertAuthMutationCurrent(mutationGeneration, 'shared auth lock clear');
+    }
+    const stored = await getStoredAuthState([
+      'sharedAuthLockedSinceAt',
+      SHARED_AUTH_LOCK_OWNER_KEY,
+    ]);
+    if (authContext) {
+      assertAuthenticatedContextCurrent(authContext, 'shared auth lock clear');
+      const storedOwner = stored[SHARED_AUTH_LOCK_OWNER_KEY];
+      if (storedOwner && !sharedAuthLockOwnerMatches(storedOwner, authContext)) return false;
+    } else {
+      assertAuthMutationCurrent(mutationGeneration, 'shared auth lock clear');
+    }
+    sharedAuthLockedSinceAt = 0;
+    await chrome.alarms.clear(SHARED_AUTH_LOCK_ALARM_NAME);
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'shared auth lock clear');
+    await persistSharedAuthLockState({
+      sharedAuthLockedSinceAt: null,
+      [SHARED_AUTH_LOCK_OWNER_KEY]: null,
+    }, Boolean(authContext && isManualIdentitySource()));
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'shared auth lock clear');
+    return true;
   });
-  console.log(`[Auth] Shared-device lock timeout scheduled (${reason})`);
+}
+
+function scheduleSharedAuthLockTimer(reason = 'locked') {
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('shared auth lock schedule');
+  } catch {
+    return clearSharedAuthLockTimer({ authMutationGeneration: studentAuthMutationGeneration });
+  }
+  return enqueueStudentAuthMutation(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock schedule');
+    if (!isManualIdentitySource()) return false;
+    const stored = await getStoredAuthState([
+      'sharedAuthLockedSinceAt',
+      SHARED_AUTH_LOCK_OWNER_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock schedule');
+    const storedOwner = stored[SHARED_AUTH_LOCK_OWNER_KEY];
+    const lockedSince = sharedAuthLockOwnerMatches(storedOwner, authContext)
+      ? Number(storedOwner.lockedSince)
+      : Date.now();
+    const owner = sharedAuthLockOwnerFor(authContext, lockedSince);
+    await persistSharedAuthLockState({
+      sharedAuthLockedSinceAt: lockedSince,
+      [SHARED_AUTH_LOCK_OWNER_KEY]: owner,
+    }, true);
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock schedule');
+    sharedAuthLockedSinceAt = lockedSince;
+    chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, {
+      when: lockedSince + SHARED_AUTH_LOCK_TIMEOUT_MS,
+    });
+    console.log(`[Auth] Shared-device lock timeout scheduled (${reason})`);
+    return true;
+  });
 }
 
 async function handleIdleStateChanged(state, reason = 'idle-change') {
@@ -6092,35 +8628,53 @@ async function handleIdleStateChanged(state, reason = 'idle-change') {
 }
 
 async function handleSharedAuthLockTimeout() {
-  if (!hasStudentAuth() || !isManualIdentitySource()) {
-    await clearSharedAuthLockTimer();
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('shared auth lock timeout');
+  } catch {
+    await clearSharedAuthLockTimer({ authMutationGeneration: studentAuthMutationGeneration });
     return;
   }
-  const currentState = await new Promise(resolve => {
-    if (!chrome.idle?.queryState) {
-      resolve(idleState);
-      return;
+  const decision = await enqueueStudentAuthMutation(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock timeout');
+    if (!isManualIdentitySource()) return { clear: false };
+    const currentState = await new Promise(resolve => {
+      if (!chrome.idle?.queryState) {
+        resolve(idleState);
+        return;
+      }
+      chrome.idle.queryState(IDLE_DETECTION_SECONDS, resolve);
+    });
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock timeout');
+    idleState = currentState || idleState;
+    const stored = await getStoredAuthState([
+      'sharedAuthLockedSinceAt',
+      SHARED_AUTH_LOCK_OWNER_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'shared auth lock timeout');
+    const owner = stored[SHARED_AUTH_LOCK_OWNER_KEY];
+    if (!sharedAuthLockOwnerMatches(owner, authContext)) return { clear: false };
+    if (idleState !== 'locked') return { clear: true, expired: false };
+    const expiresAt = Number(owner.lockedSince) + SHARED_AUTH_LOCK_TIMEOUT_MS;
+    if (Date.now() < expiresAt) {
+      chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, { when: expiresAt });
+      return { clear: false };
     }
-    chrome.idle.queryState(IDLE_DETECTION_SECONDS, resolve);
+    return { clear: false, expired: true };
   });
-  idleState = currentState || idleState;
-  if (idleState !== 'locked') {
-    await clearSharedAuthLockTimer();
+  if (decision.clear) {
+    await clearSharedAuthLockTimer({ authContext });
     await updateTrackingState('lock-timeout-cancelled');
     return;
   }
-
-  const stored = await getStoredAuthState(['sharedAuthLockedSinceAt']);
-  const lockedSince = Number(sharedAuthLockedSinceAt || stored.sharedAuthLockedSinceAt || 0);
-  if (!lockedSince || Date.now() - lockedSince < SHARED_AUTH_LOCK_TIMEOUT_MS) {
-    chrome.alarms.create(SHARED_AUTH_LOCK_ALARM_NAME, {
-      delayInMinutes: SHARED_AUTH_LOCK_TIMEOUT_MS / 60000,
-    });
-    return;
-  }
-
+  if (!decision.expired) return;
+  assertAuthenticatedContextCurrent(authContext, 'shared auth lock timeout');
   console.log('[Auth] Shared-device student auth cleared after lock timeout');
-  await clearStudentAuth('auto_locked_timeout', { notifyBackend: true, pauseAutoRegistration: true });
+  await clearStudentAuth('auto_locked_timeout', {
+    notifyBackend: true,
+    pauseAutoRegistration: true,
+    expectedAuthContext: authContext,
+  });
 }
 
 async function fetchLoginRosterForGate(options = {}) {
@@ -6235,22 +8789,68 @@ async function fetchLoginRosterForGate(options = {}) {
 
 async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
   if (!data) return;
+  if (options.authMutationHeld !== true) {
+    const queuedAuthContext = options.authContext || (() => {
+      try {
+        return captureAuthenticatedContext(`${reason} classroom response queue`);
+      } catch {
+        return null;
+      }
+    })();
+    return enqueueStudentAuthMutation(async () => {
+      if (queuedAuthContext) {
+        assertAuthenticatedContextCurrent(
+          queuedAuthContext,
+          `${reason} classroom response queue`,
+        );
+      }
+      return applyClassroomStateFromAuthResponse(data, reason, {
+        ...options,
+        authContext: queuedAuthContext,
+        authMutationHeld: true,
+      });
+    });
+  }
+  const authContext = options.authContext || (() => {
+    try {
+      return captureAuthenticatedContext(`${reason} classroom response`);
+    } catch {
+      return null;
+    }
+  })();
+  const assertCurrent = (label = `${reason} classroom response`) => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, label);
+  };
+  const responseBinding = exactStudentBinding(data);
+  if (responseBinding.studentId || responseBinding.studentSessionId) {
+    assertCurrentStudentBinding(data, `${reason} classroom response`, { authContext });
+  }
+  if (responseBinding.bindingVersion === 2 && authContext) {
+    observeExactStudentControlRevision(data, authContext, `${reason} response control revision`);
+  }
   const fabState = data.fabState || data.fab || data.settings?.fab;
   if (!Object.prototype.hasOwnProperty.call(data, 'classroomState')) {
     if (fabState) {
-      await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
+      await applyFabSettings(
+        { ...fabState, reason: fabState.reason || reason },
+        { authContext, authorityEnvelope: data },
+      );
+      assertCurrent();
     }
     return;
   }
   const snapshot = data.classroomState;
   await classroomStateRestorePromise;
+  assertCurrent();
   const storedBinding = await kv.get(CLASSROOM_STATE_STUDENT_BINDING_KEY);
+  assertCurrent();
   const boundStudentId = storedBinding[CLASSROOM_STATE_STUDENT_BINDING_KEY] || null;
   if (
     currentClassroomState
     && (!boundStudentId || boundStudentId !== CONFIG.activeStudentId)
   ) {
     await clearTeacherSessionStateForSignOut({ emitEvent: false, reason: `${reason}_student_changed` });
+    assertCurrent();
   }
   if (!snapshot) {
     await clearTeacherSessionStateForSignOut({
@@ -6258,11 +8858,17 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
       reason: `${reason}_no_state`,
       preserveTransientOverlays: true,
     });
+    assertCurrent();
     if (CONFIG.activeStudentId) {
       await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
+      assertCurrent();
     }
     if (fabState) {
-      await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
+      await applyFabSettings(
+        { ...fabState, reason: fabState.reason || reason },
+        { authContext, authorityEnvelope: data },
+      );
+      assertCurrent();
     }
     return;
   }
@@ -6271,9 +8877,11 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
     // student/session/device token binding. It is authoritative across student
     // changes on a shared device, where revisions are not comparable between
     // the old and new student's independent control rows.
-    await applyClassroomState(snapshot, { reason });
+    await applyClassroomState(snapshot, { reason, authContext, authorityEnvelope: data });
+    assertCurrent();
     if (CONFIG.activeStudentId) {
       await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId });
+      assertCurrent();
     }
   } catch (error) {
     console.warn('[Classroom State] Login snapshot failed:', safeDiagnosticError(error));
@@ -6281,7 +8889,32 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
     if (options.requireApplied === true) throw error;
   }
   if (fabState) {
-    await applyFabSettings({ ...fabState, reason: fabState.reason || reason });
+    await applyFabSettings(
+      { ...fabState, reason: fabState.reason || reason },
+      { authContext, authorityEnvelope: data },
+    );
+    assertCurrent();
+  }
+}
+
+function assertAuthGatePolicyGuardCurrentAfterCanonicalSchoolAdoption(guard, reason) {
+  let priorBinding;
+  try {
+    const [serverOrigin, schoolId, schoolSlug] = JSON.parse(guard?.bindingKey || '[]');
+    priorBinding = { serverOrigin, schoolId, schoolSlug };
+  } catch {
+    throw authMutationSuperseded(reason);
+  }
+  const currentBinding = authGateConfigBinding();
+  if (
+    !guard
+    || guard.managedPolicyGeneration !== managedAuthGatePolicyGeneration
+    || guard.configGeneration !== sharedSignInConfigGeneration
+    || priorBinding.serverOrigin !== (currentBinding.serverOrigin || '')
+    || (priorBinding.schoolId && priorBinding.schoolId !== currentBinding.schoolId)
+    || priorBinding.schoolSlug !== (currentBinding.schoolSlug || '')
+  ) {
+    throw authMutationSuperseded(reason);
   }
 }
 
@@ -6456,6 +9089,19 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   CONFIG.autoRegistrationPaused = false;
   studentAuthInvalidating = false;
   activateAuthenticatedContext(authContextId);
+  const committedAuthContext = capturePendingAuthenticatedContext(
+    'student login storage adoption',
+    mutationGeneration,
+  );
+  await cleanupRetiredExactBoundStorage(
+    committedAuthContext,
+    'student login storage adoption',
+  );
+  assertAuthMutationCurrent(mutationGeneration, 'student login');
+  assertAuthGatePolicyGuardCurrentAfterCanonicalSchoolAdoption(
+    policyGuard,
+    'student login adoption',
+  );
   resetSharedSignInLoginConfigCache({ clearPersisted: true });
   // Authentication intentionally invalidates the pre-login presentation
   // generation, and a slug-based setup may learn its canonical schoolId from
@@ -6465,16 +9111,26 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   if (committedPolicyGuard.managedPolicyGeneration !== policyGuard.managedPolicyGeneration) {
     throw authMutationSuperseded('student login adoption');
   }
-  await reconcileMessageInboxIdentity('student-login');
+  await reconcileMessageInboxIdentity('student-login', {
+    authContext: committedAuthContext,
+    expectedBinding: monitoringEventAuthBindingForContext(committedAuthContext),
+  });
 
   // Login-provided classroom restrictions are local enforcement authority and
   // must be reconciled before any page unlocks. License/settings refreshes are
   // not part of that critical path.
-  await applyClassroomStateFromAuthResponse(data, 'student_login', { requireApplied: true });
+  await applyClassroomStateFromAuthResponse(data, 'student_login', {
+    requireApplied: true,
+    authContext: committedAuthContext,
+    authMutationHeld: true,
+  });
   assertAuthMutationCurrent(mutationGeneration, 'student login');
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
   await completeStudentAuthCommit(mutationGeneration, 'student login commit');
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
+  await replayClassroomUiForAuth(committedAuthContext, 'student login UI replay');
+  assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
+  if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
 
   const committedAuthBinding = {
     deviceId: CONFIG.deviceId,
@@ -6831,17 +9487,38 @@ async function ensureRegisteredNow() {
           CONFIG.autoRegistrationPaused = false;
           studentAuthInvalidating = false;
           activateAuthenticatedContext(authContextId);
-          await reconcileMessageInboxIdentity('student-registration');
+          const committedAuthContext = capturePendingAuthenticatedContext(
+            'student registration storage adoption',
+            registrationGeneration,
+          );
+          await cleanupRetiredExactBoundStorage(
+            committedAuthContext,
+            'student registration storage adoption',
+          );
+          assertAuthMutationCurrent(registrationGeneration, 'student registration');
+          await reconcileMessageInboxIdentity('student-registration', {
+            authContext: committedAuthContext,
+            expectedBinding: monitoringEventAuthBindingForContext(committedAuthContext),
+          });
           await applyClassroomStateFromAuthResponse(
             data,
             'student_registration',
-            { requireApplied: true },
+            {
+              requireApplied: true,
+              authContext: committedAuthContext,
+              authMutationHeld: true,
+            },
           );
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
           await completeStudentAuthCommit(
             registrationGeneration,
             'student registration commit',
           );
+          await replayClassroomUiForAuth(
+            committedAuthContext,
+            'student registration UI replay',
+          );
+          if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
         });
         registrationRetryCount = 0; // Reset on success
       } catch (error) {
@@ -6859,9 +9536,9 @@ async function ensureRegisteredNow() {
             registrationGeneration = studentAuthMutationGeneration;
           } catch (cleanupError) {
             failAuthCommitRecoveryBarrier(cleanupError);
-            console.warn(
+            warnAuthCleanupFailure(
               '[Auth] Failed Chrome-profile registration commit cleanup:',
-              cleanupError?.message || cleanupError,
+              cleanupError,
             );
             return stored;
           }
@@ -6973,6 +9650,10 @@ const authStateRestorePromise = new Promise((resolve) => {
 (async () => {
   console.log('[Service Worker] Waking up...');
   disableToolbarAction();
+  // Chrome notifications outlive MV3 worker memory. Reconcile the persisted
+  // extension-owned inventory on every wake before any new teacher message is
+  // allowed to create a notification; failures retain a durable retry alarm.
+  authBoundNotificationCleanupPromise = ensureAuthBoundNotificationInventory({ force: true });
   const wakePolicyGeneration = ++managedAuthGatePolicyGeneration;
   let resolveWakePolicyRestore;
   let rejectWakePolicyRestore;
@@ -7023,6 +9704,10 @@ const authStateRestorePromise = new Promise((resolve) => {
   const fastResolvedServerUrl = isHttpUrl(storedServerUrl)
     ? storedServerUrl
     : isHttpUrl(INJECTED_SERVER_URL) ? INJECTED_SERVER_URL : DEFAULT_SERVER_URL;
+  const legacySchoolPolicyOwnerScopeAtWake = schoolPolicyScope(
+    fastResolvedServerUrl,
+    authStored.config?.schoolId,
+  );
   const [restoredAuth] = await Promise.all([
     restoreWorkerWakeAuthState(
       authStored,
@@ -7052,6 +9737,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     if (error) {
       managedSetupUnavailable = true;
       managedAuthGateSetupUnavailable = true;
+      authoritativeManagedSchoolPolicyScope = null;
       CONFIG.serverUrl = DEFAULT_SERVER_URL;
       CONFIG.schoolId = null;
       CONFIG.schoolSlug = null;
@@ -7157,12 +9843,15 @@ const authStateRestorePromise = new Promise((resolve) => {
     'lockScreenState',
     'licenseActive',
     'planStatus',
+    LICENSE_STATE_SCOPE_KEY,
     'globalBlockedDomains',
+    GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY,
     'teacherBlockListState',
     'classroomControlStateV1',
     'classroomStateFailSafeExpiryAt',
     'classroomStateStudentBindingV1',
     MONITORING_STATE_STORAGE_KEY,
+    MONITORING_STATE_SCOPE_KEY,
     MONITORING_EVENT_OUTBOX_KEY,
     CONNECTIVITY_HEALTH_STORAGE_KEY,
     SCREENSHOT_HEALTH_STORAGE_KEY,
@@ -7179,6 +9868,15 @@ const authStateRestorePromise = new Promise((resolve) => {
     STUDENT_AUTH_INVALIDATING_KEY,
     SHARED_SIGN_IN_CONFIG_CACHE_KEY,
   ]);
+  // Rebuild retention alarms and physically remove expired sensitive outbox
+  // rows on every MV3 wake, even when no student is signed in and therefore no
+  // network flush is permitted.
+  await Promise.all([
+    compactCommandAckStorageOnly(),
+    compactChatAckStorageOnly(),
+    compactStudentChatStorageOnly(),
+  ]);
+  assertWorkerWakeCurrent();
   // The authoritative managed snapshot above has already selected or reset
   // the endpoint. Re-running the legacy fallback resolver here could resurrect
   // a stale locally persisted URL after policy removal or malformed input.
@@ -7189,8 +9887,19 @@ const authStateRestorePromise = new Promise((resolve) => {
   CONFIG.serverUrl = resolvedServerUrl;
   scheduleLicenseCheck();
   const storedMonitoringState = stored[MONITORING_STATE_STORAGE_KEY];
+  let workerWakeAuthContext = null;
+  try {
+    workerWakeAuthContext = captureAuthenticatedContext('worker entitlement restore');
+  } catch {
+    workerWakeAuthContext = null;
+  }
+  const expectedMonitoringScope = workerWakeAuthContext
+    ? monitoringEventAuthBindingForContext(workerWakeAuthContext)
+    : null;
   if (
     storedMonitoringState
+    && expectedMonitoringScope
+    && stored[MONITORING_STATE_SCOPE_KEY] === expectedMonitoringScope
     && Object.values(TRACKING_STATES).includes(storedMonitoringState.state)
     && Number.isFinite(Number(storedMonitoringState.changedAt))
   ) {
@@ -7201,6 +9910,7 @@ const authStateRestorePromise = new Promise((resolve) => {
         ? storedMonitoringState.reason.slice(0, 80)
         : 'restored',
     };
+    persistedMonitoringStateScope = expectedMonitoringScope;
   }
   connectivityHealth = RuntimeCore.normalizeConnectivityHealth(
     stored[CONNECTIVITY_HEALTH_STORAGE_KEY]
@@ -7222,6 +9932,18 @@ const authStateRestorePromise = new Promise((resolve) => {
   assertWorkerWakeCurrent();
   if (stored[FAB_CONTEXT_STORAGE_KEY]?.binding === fabIdentityBinding()) {
     currentFabState = normalizeFabState(stored[FAB_STATE_STORAGE_KEY] || {});
+    if (currentFabState.ownershipRevisionKnown === true) {
+      try {
+        const authContext = captureAuthenticatedContext('worker FAB control revision restore');
+        observeStudentControlRevision(
+          currentFabState.ownershipRevision,
+          authContext,
+          'worker FAB control revision restore',
+        );
+      } catch (error) {
+        if (!isAuthContextCancellation(error)) throw error;
+      }
+    }
     scheduleClassroomOverlayExpiry(stored[CLASSROOM_OVERLAY_STORAGE_KEY]);
   } else if (stored[FAB_STATE_STORAGE_KEY] || stored[CLASSROOM_OVERLAY_STORAGE_KEY]) {
     await clearFabAndOverlayState('worker-identity-reconcile', { closeChat: true });
@@ -7249,79 +9971,91 @@ const authStateRestorePromise = new Promise((resolve) => {
   // Load school policy into memory first. The classroom-state composer will
   // include it in the same atomic DNR update without allowing the two ranges
   // to erase one another.
-  try {
-    if (!Object.prototype.hasOwnProperty.call(stored, 'globalBlockedDomains')) {
-      throw new Error('Stored school block list is unavailable');
-    }
-    globalBlockedDomains = RuntimeCore.normalizeDomainList(
-      stored.globalBlockedDomains,
-      'school block list'
-    );
+  const expectedSchoolScope = schoolPolicyScope();
+  const restoredSchoolPolicy = classifyStoredSchoolPolicy(stored, expectedSchoolScope, {
+    legacyOwnerScope: legacySchoolPolicyOwnerScopeAtWake,
+  });
+  if (
+    restoredSchoolPolicy.status === 'matched'
+    || restoredSchoolPolicy.status === 'legacy_migratable'
+  ) {
+    globalBlockedDomains = restoredSchoolPolicy.domains;
     globalBlockedDomainsStateTrusted = true;
-  } catch (error) {
+    globalBlockedDomainsScope = expectedSchoolScope;
+    if (restoredSchoolPolicy.status === 'legacy_migratable') {
+      await durableLocalKv.set({ [GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY]: expectedSchoolScope });
+      assertWorkerWakeCurrent();
+    }
+  } else if (restoredSchoolPolicy.status === 'mismatch' && expectedSchoolScope) {
+    globalBlockedDomains = [];
+    globalBlockedDomainsStateTrusted = true;
+    globalBlockedDomainsScope = expectedSchoolScope;
+    await durableLocalKv.set({
+      globalBlockedDomains: [],
+      [GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY]: expectedSchoolScope,
+    });
+    assertWorkerWakeCurrent();
+  } else {
+    // Missing, malformed, or unowned legacy data cannot authorize a DNR
+    // replacement. Preserve the surviving browser rules until an exact
+    // managed owner is proven or the server supplies a fresh policy.
+    globalBlockedDomains = [];
     globalBlockedDomainsStateTrusted = false;
-    console.warn('[Service Worker] Stored school block list is invalid; retaining existing Chrome rules');
+    globalBlockedDomainsScope = null;
+    console.warn('[Service Worker] Stored school block list is unverified; preserving existing rules');
   }
 
   assertWorkerWakeCurrent();
-  if (stored[CLASSROOM_STATE_STORAGE_KEY]) {
+  const authRecoveryPending = interruptedAuthClear
+    || interruptedAuthCommit
+    || manualAuthTimestampInvalid;
+  if (stored[CLASSROOM_STATE_STORAGE_KEY] && !authRecoveryPending) {
+    let restoreAuthContext = null;
     try {
-      await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], { force: true, reason: 'worker_wake' });
+      restoreAuthContext = captureAuthenticatedContext('worker classroom-state restore');
+      if (stored[CLASSROOM_STATE_STUDENT_BINDING_KEY] !== restoreAuthContext.studentId) {
+        throw authContextSuperseded('worker classroom-state restore');
+      }
+      await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], {
+        force: true,
+        reason: 'worker_wake',
+        authContext: restoreAuthContext,
+        authorityEnvelope: {
+          studentId: restoreAuthContext.studentId,
+          studentSessionId: restoreAuthContext.studentSessionId,
+        },
+      });
       console.log('[Service Worker] Restored revisioned classroom state');
     } catch (error) {
+      if (
+        isAuthContextCancellation(error)
+        || error?.code === 'AUTH_MUTATION_SUPERSEDED'
+      ) throw error;
       // DNR rules survive an MV3 worker restart. If storage is corrupt, do not
       // clear those rules; request the authoritative server snapshot instead.
       // A separately stored deadline still prevents orphaned rules from
       // surviving forever if the server remains unreachable.
-      const storedFailSafeExpiryAt = Number(stored.classroomStateFailSafeExpiryAt);
-      const failSafeExpiryAt = Number.isFinite(storedFailSafeExpiryAt) && storedFailSafeExpiryAt > 0
-        ? storedFailSafeExpiryAt
-        : Date.now();
-      await kv.set({ classroomStateFailSafeExpiryAt: failSafeExpiryAt });
-      if (failSafeExpiryAt > Date.now()) {
-        chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, { when: failSafeExpiryAt });
-      } else {
-        // Never invent a fresh twelve-hour window when the independently
-        // stored original cutoff is missing or already elapsed.
-        await checkClassroomStateExpiry();
-        await kv.remove(CLASSROOM_STATE_STORAGE_KEY);
-      }
+      if (!restoreAuthContext) throw error;
+      await recoverInvalidStoredClassroomState(
+        stored[CLASSROOM_STATE_STORAGE_KEY],
+        stored[CLASSROOM_STATE_STUDENT_BINDING_KEY],
+        stored.classroomStateFailSafeExpiryAt,
+        restoreAuthContext,
+      );
       console.warn('[Service Worker] Stored classroom state is invalid; existing rules retained:', safeDiagnosticError(error));
     }
+  } else if (stored[CLASSROOM_STATE_STORAGE_KEY] && authRecoveryPending) {
+    // Crash recovery deliberately does not adopt credentials. Therefore no
+    // exact student/session authority exists with which to relabel or apply
+    // the stored classroom snapshot. The recovery clear below removes the
+    // snapshot and its surviving teacher DNR ranges before the gate opens.
+    console.warn('[Service Worker] Skipping classroom restore during authentication recovery');
   } else if (stored.flightPathState || stored.lockScreenState || stored.teacherBlockListState) {
-    // One-time migration for controls persisted by older extension versions.
-    const legacyTimestamp = Number(
-      stored.flightPathState?.timestamp || stored.lockScreenState?.timestamp || Date.now()
-    );
-    const legacyState = {
-      schemaVersion: 1,
-      revision: 0,
-      receivedAt: legacyTimestamp,
-      hardExpiresAt: legacyTimestamp + RuntimeCore.CLASSROOM_STATE_MAX_LIFETIME_MS,
-      restrictions: {
-        screenLock: stored.lockScreenState ? {
-          active: true,
-          url: stored.lockScreenState.lockedUrl,
-          domain: stored.lockScreenState.lockedDomain,
-        } : { active: false },
-        flightPath: stored.flightPathState ? {
-          active: true,
-          allowedDomains: stored.flightPathState.allowedDomains,
-          name: stored.flightPathState.activeFlightPathName,
-        } : { active: false },
-        blockList: stored.teacherBlockListState ? {
-          active: true,
-          blockedDomains: stored.teacherBlockListState.blockedDomains,
-          name: stored.teacherBlockListState.name,
-        } : { active: false },
-      },
-    };
-    try {
-      await applyClassroomState(legacyState, { force: true, reason: 'legacy_migration' });
-      console.log('[Service Worker] Migrated legacy classroom restrictions');
-    } catch (error) {
-      console.warn('[Service Worker] Legacy classroom state could not be restored:', safeDiagnosticError(error));
-    }
+    // 2.6.x restriction records have no student/session/school authority. The
+    // browser's surviving DNR rules remain fail-closed while the worker asks
+    // SchoolPilot for a current exact snapshot below, but raw legacy URLs and
+    // lists must never be relabelled as the student who happens to sign in.
+    console.warn('[Service Worker] Unowned legacy classroom state was not adopted; awaiting exact server state');
   } else {
     // No teacher state is known. Reconcile only the school range; never clear
     // teacher ranges merely because the worker was restarted.
@@ -7361,9 +10095,34 @@ const authStateRestorePromise = new Promise((resolve) => {
     return;
   }
 
-  if (stored.licenseActive === false) {
+  const expectedLicenseScope = workerWakeAuthContext
+    ? licenseScopeForAuthContext(workerWakeAuthContext)
+    : null;
+  if (
+    stored.licenseActive === false
+    && expectedLicenseScope
+    && stored[LICENSE_STATE_SCOPE_KEY] === expectedLicenseScope
+  ) {
     assertWorkerWakeCurrent();
-    await disableForInactiveLicense(stored.planStatus);
+    await disableForInactiveLicense(stored.planStatus, workerWakeAuthContext);
+  } else {
+    resetLicenseStateForAuthorityTransition();
+    if (
+      stored[LICENSE_STATE_SCOPE_KEY] !== expectedLicenseScope
+      && (
+        stored.licenseActive !== undefined
+        || stored.planStatus !== undefined
+        || stored[LICENSE_STATE_SCOPE_KEY] !== undefined
+      )
+    ) {
+      await kv.remove([
+        'licenseActive',
+        'planStatus',
+        'licenseDisabledAt',
+        LICENSE_STATE_SCOPE_KEY,
+      ]);
+      assertWorkerWakeCurrent();
+    }
   }
 
   assertWorkerWakeCurrent();
@@ -7394,19 +10153,21 @@ async function safeNotify(opts) {
   if (!chrome?.notifications) return;
 
   // Required defaults
+  const notificationId = String(opts?.notificationId || '').slice(0, 240);
+  const { notificationId: _ignoredNotificationId, ...notificationOptions } = opts || {};
   const options = {
     type: 'basic',
     iconUrl: 'icons/icon48.png',
     title: 'ClassPilot',
     message: '',
     priority: 0,
-    ...opts, // allow caller to override title/message/iconUrl if needed
+    ...notificationOptions, // allow caller to override title/message/iconUrl if needed
   };
 
   try {
     // In MV3, callbacks can surface runtime.lastError; prefer Promises
     await new Promise((resolve) => {
-      chrome.notifications.create('', options, () => {
+      chrome.notifications.create(notificationId, options, () => {
         // swallow runtime.lastError quietly
         void chrome.runtime.lastError;
         resolve();
@@ -7435,7 +10196,7 @@ function runtimeClassroomStateForRules() {
   };
 }
 
-function composeDynamicRules(rangeNames) {
+function composeDynamicRules(rangeNames, options = {}) {
   const requestedRanges = [...new Set(rangeNames)].filter((name) => RuntimeCore.DNR_RANGES[name]);
   if (requestedRanges.length === 0) return Promise.resolve();
 
@@ -7444,7 +10205,9 @@ function composeDynamicRules(rangeNames) {
     // lists therefore leave the previous complete ruleset intact.
     const addRules = RuntimeCore.buildDnrRules({
       classroomState: runtimeClassroomStateForRules(),
-      globalBlockedDomains,
+      globalBlockedDomains: Object.prototype.hasOwnProperty.call(options, 'globalBlockedDomains')
+        ? options.globalBlockedDomains
+        : globalBlockedDomains,
     }, requestedRanges, Date.now());
     const existingRules = await chrome.declarativeNetRequest.getDynamicRules();
     const removeRuleIds = existingRules
@@ -7470,19 +10233,59 @@ async function clearClassroomBlockingRule() {
   await composeDynamicRules(['classroom']);
 }
 
-async function updateGlobalBlacklistRules(blockedDomains) {
-  const previous = globalBlockedDomains;
-  const previousTrusted = globalBlockedDomainsStateTrusted;
-  const normalized = RuntimeCore.normalizeDomainList(blockedDomains, 'school block list');
-  globalBlockedDomains = normalized;
-  globalBlockedDomainsStateTrusted = true;
-  try {
-    await composeDynamicRules(['school']);
-  } catch (error) {
-    globalBlockedDomains = previous;
-    globalBlockedDomainsStateTrusted = previousTrusted;
-    throw error;
+function updateGlobalBlacklistRules(blockedDomains, options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext && hasStudentAuth()) {
+    authContext = captureAuthenticatedContext('school block list reservation');
   }
+  const expectedScope = authContext
+    ? schoolPolicyScopeForAuthContext(authContext)
+    : options.scope || schoolPolicyScope();
+  const normalized = RuntimeCore.normalizeDomainList(blockedDomains, 'school block list');
+  if (!expectedScope) throw new Error('School block list scope is unavailable');
+  const assertCurrent = (reason = 'school block list') => {
+    if (authContext) {
+      assertAuthenticatedContextCurrent(authContext, reason);
+      if (schoolPolicyScopeForAuthContext(authContext) !== expectedScope) {
+        throw authContextSuperseded(reason);
+      }
+      if (options.sourceMessage) {
+        const binding = assertCurrentStudentBinding(options.sourceMessage, reason, { authContext });
+        assertBindingMatchesAuthContext(binding, authContext, reason);
+      }
+    } else if (schoolPolicyScope() !== expectedScope) {
+      throw authContextSuperseded(reason);
+    }
+  };
+  const run = async () => {
+    assertCurrent('school block list reservation');
+    try {
+      await composeDynamicRules(['school'], { globalBlockedDomains: normalized });
+      assertCurrent('school block list rule application');
+      await durableLocalKv.set({
+        globalBlockedDomains: normalized,
+        [GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY]: expectedScope,
+      });
+      assertCurrent('school block list persistence');
+      globalBlockedDomains = normalized;
+      globalBlockedDomainsStateTrusted = true;
+      globalBlockedDomainsScope = expectedScope;
+      return normalized;
+    } catch (error) {
+      if (isAuthContextCancellation(error)) {
+        const activeScope = schoolPolicyScope();
+        const activeDomains = globalBlockedDomainsStateTrusted
+          && globalBlockedDomainsScope === activeScope
+          ? globalBlockedDomains
+          : [];
+        await composeDynamicRules(['school'], { globalBlockedDomains: activeDomains }).catch(() => {});
+      }
+      throw error;
+    }
+  };
+  const next = schoolPolicyMutation.catch(() => undefined).then(run);
+  schoolPolicyMutation = next.catch(() => undefined);
+  return next;
 }
 
 async function updateTeacherBlockListRules(blockedDomains) {
@@ -7773,18 +10576,39 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
       CONFIG.autoRegistrationPaused = false;
       studentAuthInvalidating = false;
       activateAuthenticatedContext(authContextId);
+      const committedAuthContext = capturePendingAuthenticatedContext(
+        'student auto-registration storage adoption',
+        registrationGeneration,
+      );
+      await cleanupRetiredExactBoundStorage(
+        committedAuthContext,
+        'student auto-registration storage adoption',
+      );
+      assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
       resetSharedSignInLoginConfigCache({ clearPersisted: true });
-      await reconcileMessageInboxIdentity('student-registration');
+      await reconcileMessageInboxIdentity('student-registration', {
+        authContext: committedAuthContext,
+        expectedBinding: monitoringEventAuthBindingForContext(committedAuthContext),
+      });
       await applyClassroomStateFromAuthResponse(
         data,
         'student_registration',
-        { requireApplied: true },
+        {
+          requireApplied: true,
+          authContext: committedAuthContext,
+          authMutationHeld: true,
+        },
       );
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
       await completeStudentAuthCommit(
         registrationGeneration,
         'student auto-registration commit',
       );
+      await replayClassroomUiForAuth(
+        committedAuthContext,
+        'student auto-registration UI replay',
+      );
+      if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
     });
     
     // Start adaptive tracking after registration
@@ -7801,9 +10625,9 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         });
       } catch (cleanupError) {
         failAuthCommitRecoveryBarrier(cleanupError);
-        console.warn(
+        warnAuthCleanupFailure(
           '[Auth] Failed student auto-registration commit cleanup:',
-          cleanupError?.message || cleanupError,
+          cleanupError,
         );
       }
     }
@@ -7812,10 +10636,25 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
   }
 }
 
+async function invalidateStudentTokenFromHeartbeat(authContext, reason, options = {}) {
+  assertAuthenticatedContextCurrent(authContext, `heartbeat:${reason}:token-clear`);
+  await clearStudentAuth('student-token-invalid', {
+    notifyBackend: false,
+    pauseAutoRegistration: false,
+    expectedAuthContext: authContext,
+  });
+  if (options.scheduleRegistration === false) return;
+  registrationRetryCount++;
+  if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
+    const backoff = Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000);
+    setTimeout(() => ensureRegistered().catch(() => {}), backoff);
+  }
+}
+
 // Send heartbeat with current tab info
 async function sendHeartbeat(reason = 'manual') {
   await classroomStateRestorePromise;
-  if (!licenseActive) {
+  if (!currentLicenseIsActive()) {
     return;
   }
   if (trackingState === TRACKING_STATES.OFF) {
@@ -7848,6 +10687,8 @@ async function sendHeartbeat(reason = 'manual') {
 
   let heartbeatRequestStarted = false;
   let heartbeatResponseReceived = false;
+  let heartbeatRequestTimedOut = false;
+  const protocolPolicyGeneration = reserveProtocolPolicyRequestGeneration();
 
   try {
     // Get the active tab from the LAST FOCUSED window (the one the user is actually looking at)
@@ -7891,10 +10732,14 @@ async function sendHeartbeat(reason = 'manual') {
       tabSnapshotRevision = tabSnapshot.revision;
       activeTabRef = tabSnapshot.localEntries.find((entry) => entry.tabId === activeTabId)?.tabRef || null;
       lastKnownTabs = allOpenTabs;
+      lastKnownTabsAuthBinding = monitoringEventAuthBindingForContext(heartbeatAuthContext);
     } catch (error) {
       console.warn('[Heartbeat] Failed to collect tabs:', safeDiagnosticError(error));
       // Use cached tabs on error to prevent flickering
-      if (lastKnownTabs.length > 0) {
+      if (
+        lastKnownTabs.length > 0
+        && lastKnownTabsAuthBinding === monitoringEventAuthBindingForContext(heartbeatAuthContext)
+      ) {
         allOpenTabs = lastKnownTabs;
         console.log(`[Heartbeat] Using cached ${lastKnownTabs.length} tabs after error`);
       }
@@ -7902,6 +10747,8 @@ async function sendHeartbeat(reason = 'manual') {
     
     // Send heartbeat even without active tab (keeps student "online")
     // Server will display "No active tab" when title/URL are empty strings
+    const heartbeatClassroomAckIsCurrent = lastClassroomStateAckAuthBinding
+      === monitoringEventAuthBindingForContext(heartbeatAuthContext);
     const heartbeatData = {
       studentEmail: heartbeatAuthContext.studentEmail, // JWT is the authority for manual shared-device login
       deviceId: heartbeatAuthContext.deviceId,         // Internal device tracking
@@ -7924,8 +10771,12 @@ async function sendHeartbeat(reason = 'manual') {
       ...extensionProtocolDescriptor(),
       chromeVersion: currentChromiumVersion(),
       classroomStateRevision: currentClassroomState?.revision ?? 0,
-      appliedClassroomStateRevision: lastClassroomStateAckRevision || currentClassroomState?.revision || 0,
-      classroomStateOutcome: lastClassroomStateOutcome,
+      appliedClassroomStateRevision: heartbeatClassroomAckIsCurrent
+        ? lastClassroomStateAckRevision
+        : 0,
+      classroomStateOutcome: heartbeatClassroomAckIsCurrent
+        ? lastClassroomStateOutcome
+        : 'pending',
       classroomStateSessionId: currentClassroomState?.teachingSessionId || undefined,
       classroomStateSupervisionContextId: currentClassroomState?.supervisionContextId || undefined,
       requestClassroomState: requestClassroomStateOnHeartbeat(),
@@ -7959,15 +10810,30 @@ async function sendHeartbeat(reason = 'manual') {
 
     assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:send`);
     heartbeatRequestStarted = true;
-    const response = await fetchWithBackoff(`${heartbeatAuthContext.serverOrigin}/api/device/heartbeat`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(heartbeatData),
-      signal: heartbeatAuthContext.signal,
-    }, {
-      context: 'device heartbeat',
-      maxAttempts: 2,
-    });
+    const heartbeatRequestStartedAt = Date.now();
+    const heartbeatRequestController = new AbortController();
+    const abortHeartbeatForAuth = () => heartbeatRequestController.abort();
+    heartbeatAuthContext.signal.addEventListener('abort', abortHeartbeatForAuth, { once: true });
+    const heartbeatTimeoutId = setTimeout(() => {
+      heartbeatRequestTimedOut = true;
+      heartbeatRequestController.abort();
+    }, HEARTBEAT_REQUEST_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetchWithBackoff(`${heartbeatAuthContext.serverOrigin}/api/device/heartbeat`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(heartbeatData),
+        signal: heartbeatRequestController.signal,
+      }, {
+        context: 'device heartbeat',
+        maxAttempts: 2,
+      });
+    } finally {
+      clearTimeout(heartbeatTimeoutId);
+      heartbeatAuthContext.signal.removeEventListener('abort', abortHeartbeatForAuth);
+    }
+    const heartbeatResponseReceivedAt = Date.now();
     heartbeatResponseReceived = true;
     assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response`);
 
@@ -8028,20 +10894,7 @@ async function sendHeartbeat(reason = 'manual') {
       }
       // ✅ JWT INVALID/EXPIRED: Token expired (401) or invalid (403) - need to re-register
       console.warn(`❌ [JWT] Token ${response.status === 401 ? 'expired' : 'invalid'} (${response.status}) - clearing token and re-registering`);
-      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
-      await clearStudentMessageState('student-token-invalid');
-      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
-      await durableLocalKv.set({ studentToken: null, registered: false });
-      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
-      if (hasSessionStorage()) await durableSessionKv.remove(['studentToken']);
-      assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:token-clear`);
-      CONFIG.studentToken = null;
-      // Trigger re-registration with backoff (shares retry counter with registration)
-      registrationRetryCount++;
-      if (registrationRetryCount <= MAX_REGISTRATION_RETRIES) {
-        const backoff = Math.min(5000 * Math.pow(2, registrationRetryCount - 1), 300000);
-        setTimeout(() => ensureRegistered().catch(() => {}), backoff);
-      }
+      await invalidateStudentTokenFromHeartbeat(heartbeatAuthContext, reason);
       return; // Skip rest of error handling
     } else if (response.status === 408 || response.status >= 500) {
       await recordHeartbeatFailure('server_unavailable', Date.now(), heartbeatAuthContext);
@@ -8058,14 +10911,17 @@ async function sendHeartbeat(reason = 'manual') {
       try {
         const data = await response.json();
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response-body`);
-        adoptNegotiatedProtocolState(data, heartbeatAuthContext);
-        adoptScreenshotPolicy(data.screenshotPolicy, heartbeatAuthContext);
         await adoptAuthenticatedStudentBinding(
           data,
           'heartbeat response',
           heartbeatAuthResponseGuard,
         );
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:binding-adoption`);
+        adoptProtocolAndScreenshotPolicy(data, heartbeatAuthContext, {
+          requestGeneration: protocolPolicyGeneration,
+          requestStartedAt: heartbeatRequestStartedAt,
+          responseReceivedAt: heartbeatResponseReceivedAt,
+        });
         await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:classroom-state`);
         if (Object.prototype.hasOwnProperty.call(data, 'fab')) {
@@ -8078,7 +10934,8 @@ async function sendHeartbeat(reason = 'manual') {
         if (Array.isArray(data.pendingMessages) && data.pendingMessages.length > 0) {
           const inboxResult = await handleHeartbeatPendingMessages(
             data.pendingMessages,
-            heartbeatMessageBinding
+            heartbeatMessageBinding,
+            heartbeatAuthContext,
           );
           assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:pending-messages`);
           if (inboxResult.addedMessageIds.length > 0) {
@@ -8095,7 +10952,7 @@ async function sendHeartbeat(reason = 'manual') {
     }
     
   } catch (error) {
-    if (isAuthContextCancellation(error)) {
+    if (isAuthContextCancellation(error) && !heartbeatRequestTimedOut) {
       console.info(`[Heartbeat] Discarded ${reason} work for a retired authentication context`);
       if (hasStudentAuth()) {
         scheduleEventHeartbeat('identity-changed-reconcile');
@@ -8156,6 +11013,86 @@ async function healthCheck() {
   console.log('[Health Check] Complete - tracking state checked');
 }
 
+async function handleLicenseControlCleanupAlarm() {
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('license control cleanup alarm');
+  } catch (error) {
+    await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+    return;
+  }
+  const expectedScope = licenseScopeForAuthContext(authContext);
+  if (!expectedScope) {
+    await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+    return;
+  }
+
+  try {
+    const stored = await kv.get([
+      'licenseActive',
+      'planStatus',
+      LICENSE_STATE_SCOPE_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'license control cleanup alarm');
+    if (
+      stored.licenseActive !== false
+      || stored[LICENSE_STATE_SCOPE_KEY] !== expectedScope
+    ) {
+      await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+      return;
+    }
+    await disableForInactiveLicense(stored.planStatus, authContext);
+    assertAuthenticatedContextCurrent(authContext, 'license control cleanup alarm');
+  } catch (error) {
+    if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') {
+      await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+      return;
+    }
+    try {
+      assertAuthenticatedContextCurrent(authContext, 'license control cleanup alarm retry');
+      const stored = await kv.get(['licenseActive', LICENSE_STATE_SCOPE_KEY]);
+      assertAuthenticatedContextCurrent(authContext, 'license control cleanup alarm retry');
+      if (
+        stored.licenseActive === false
+        && stored[LICENSE_STATE_SCOPE_KEY] === expectedScope
+      ) {
+        chrome.alarms.create(LICENSE_CONTROL_CLEANUP_ALARM, {
+          when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
+        });
+      } else {
+        await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+      }
+    } catch {
+      await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+    }
+  }
+}
+
+function handleScreenshotLeaseExpiryAlarm(alarm = {}, nowValue = Date.now()) {
+  if (
+    screenshotPolicyState.mode !== 'lease'
+    || screenshotPolicyState.valid !== true
+  ) return false;
+  const expiresAt = Number(screenshotPolicyState.expiresAt || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+  if (expiresAt > nowValue) {
+    // Chrome may already have queued the prior alarm when a heartbeat or WS
+    // response renews/replaces the lease. The current exact policy is the
+    // authority; preserve it and schedule its own deadline.
+    chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: expiresAt });
+    return false;
+  }
+  screenshotPolicyGeneration += 1;
+  screenshotImmediateCapturePending = false;
+  screenshotPolicyState = Object.freeze({
+    ...screenshotPolicyState,
+    observed: false,
+    expiresAt: 0,
+  });
+  scheduleScreenshotCapture(false);
+  return true;
+}
+
 // Alarm listener for heartbeat and WebSocket reconnection
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'heartbeat') {
@@ -8187,13 +11124,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   } else if (alarm.name === 'license-check') {
     checkLicenseStatus('alarm').catch(() => {});
   } else if (alarm.name === LICENSE_CONTROL_CLEANUP_ALARM) {
-    kv.get(['planStatus']).then((stored) => (
-      disableForInactiveLicense(stored.planStatus)
-    )).catch(() => {
-      chrome.alarms.create(LICENSE_CONTROL_CLEANUP_ALARM, {
-        when: Date.now() + LICENSE_CONTROL_CLEANUP_RETRY_MS,
-      });
-    });
+    handleLicenseControlCleanupAlarm().catch(() => {});
   } else if (alarm.name === SHARED_SIGN_IN_CONFIG_RETRY_ALARM) {
     authStateRestorePromise.then(() => {
       if (!fastAuthGateEnabled || hasStudentAuth()) {
@@ -8209,35 +11140,35 @@ chrome.alarms.onAlarm.addListener((alarm) => {
       console.warn('[Classroom State] Expiry check failed:', safeDiagnosticError(error));
     });
   } else if (alarm.name === CLASSROOM_STATE_RECONCILE_ALARM) {
-    classroomStateRestorePromise.then(() => enqueueClassroomStateOperation(async () => {
-      if (!currentClassroomState) {
-        await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
-        return;
-      }
-      await reconcileClassroomStateTabsBestEffort(currentClassroomState);
-    })).catch((error) => {
+    handleClassroomStateReconcileAlarm().catch((error) => {
+      if (isAuthContextCancellation(error)) return;
       console.warn('[Classroom State] Reconciliation retry failed:', safeDiagnosticError(error));
       scheduleClassroomStateReconciliationRetry();
     });
   } else if (alarm.name === MONITORING_EVENT_FLUSH_ALARM) {
     flushMonitoringEventOutbox().catch(() => {});
   } else if (alarm.name === COMMAND_ACK_FLUSH_ALARM) {
-    flushCommandAckOutbox({ forceHttp: true }).catch(() => {});
+    compactCommandAckStorageOnly()
+      .then(() => flushCommandAckOutbox({ forceHttp: true }))
+      .catch(() => {});
   } else if (alarm.name === CHAT_ACK_FLUSH_ALARM) {
-    flushChatAckOutbox({ forceHttp: true }).catch(() => {});
+    compactChatAckStorageOnly()
+      .then(() => flushChatAckOutbox({ forceHttp: true }))
+      .catch(() => {});
   } else if (alarm.name === STUDENT_CHAT_FLUSH_ALARM) {
-    flushStudentChatOutbox().catch(() => {});
+    compactStudentChatStorageOnly()
+      .then(() => flushStudentChatOutbox())
+      .catch(() => {});
+  } else if (alarm.name === AUTH_BOUND_NOTIFICATION_CLEANUP_ALARM) {
+    handleAuthBoundNotificationCleanupAlarm().catch(() => {});
+  } else if (alarm.name === PENDING_CHECK_IN_EXPIRY_ALARM) {
+    expirePendingCheckIn(alarm).catch(() => {});
   } else if (alarm.name === CLASSROOM_OVERLAY_EXPIRY_ALARM) {
     expireClassroomOverlays().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot({ reason: 'alarm' });
   } else if (alarm.name === SCREENSHOT_LEASE_EXPIRY_ALARM) {
-    screenshotPolicyState = Object.freeze({
-      ...screenshotPolicyState,
-      observed: false,
-      expiresAt: 0,
-    });
-    scheduleScreenshotCapture(false);
+    handleScreenshotLeaseExpiryAlarm(alarm);
   }
 });
 
@@ -8277,11 +11208,62 @@ function scheduleScreenshotCapture(enable) {
   }
 }
 
+function subscribeTabActivationFence(expectedTab, onChanged, override = null) {
+  if (typeof override === 'function') return override(onChanged);
+  if (!chrome.tabs?.onActivated?.addListener) return () => {};
+  const listener = (activeInfo) => {
+    if (
+      activeInfo?.windowId === expectedTab.windowId
+      && activeInfo?.tabId !== expectedTab.id
+    ) onChanged(activeInfo);
+  };
+  chrome.tabs.onActivated.addListener(listener);
+  return () => chrome.tabs.onActivated.removeListener(listener);
+}
+
+function subscribeTabNavigationFence(expectedTab, onChanged, override = null) {
+  if (typeof override === 'function') return override(onChanged);
+  if (!chrome.tabs?.onUpdated?.addListener) return () => {};
+  const listener = (tabId, changeInfo = {}, updatedTab = null) => {
+    if (tabId !== expectedTab.id) return;
+    const changedUrl = String(changeInfo.url || updatedTab?.pendingUrl || '').trim();
+    if (
+      changeInfo.status === 'loading'
+      || (changedUrl && changedUrl !== expectedTab.url)
+    ) onChanged(changeInfo);
+  };
+  chrome.tabs.onUpdated.addListener(listener);
+  return () => chrome.tabs.onUpdated.removeListener(listener);
+}
+
+function subscribeWindowFocusFence(expectedTab, onChanged, override = null) {
+  if (typeof override === 'function') return override(onChanged);
+  if (!chrome.windows?.onFocusChanged?.addListener) return () => {};
+  const listener = (windowId) => {
+    if (windowId !== expectedTab.windowId) onChanged(windowId);
+  };
+  chrome.windows.onFocusChanged.addListener(listener);
+  return () => chrome.windows.onFocusChanged.removeListener(listener);
+}
+
+function isSameActiveCaptureTab(candidate, expected) {
+  return Boolean(
+    candidate
+    && Number.isInteger(expected?.id)
+    && candidate.id === expected.id
+    && candidate.windowId === expected.windowId
+    && candidate.active === true
+    && String(candidate.url || '') === String(expected.url || '')
+  );
+}
+
 async function captureAndSendScreenshot(options = {}) {
   const reason = options.reason || 'scheduled';
-  const minimumGap = reason === 'command'
-    ? SCREENSHOT_COMMAND_MIN_GAP_MS
-    : SCREENSHOT_SCHEDULED_MIN_GAP_MS;
+  const minimumGap = reason === 'lease-start'
+    ? 0
+    : reason === 'command'
+      ? SCREENSHOT_COMMAND_MIN_GAP_MS
+      : SCREENSHOT_SCHEDULED_MIN_GAP_MS;
   if (lastScreenshotAttemptAt && Date.now() - lastScreenshotAttemptAt < minimumGap) {
     console.log(`[Screenshot] Coalescing ${reason} capture; cadence guard active`);
     return;
@@ -8290,7 +11272,7 @@ async function captureAndSendScreenshot(options = {}) {
     console.log('[Screenshot] Skipping capture; previous capture still in flight');
     return;
   }
-  if (!licenseActive || trackingState === TRACKING_STATES.OFF) {
+  if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF) {
     return;
   }
   if (await expireManualAuthIfStale('screenshot-capture')) {
@@ -8315,25 +11297,35 @@ async function captureAndSendScreenshot(options = {}) {
     // This is an expected privacy state, not an operational failure.
     return { status: 'paused_unobserved' };
   }
-  await recordScreenshotAttempt(Date.now(), screenshotAuthContext);
-  screenshotAttemptCount++;
-  if (Date.now() < apiBackoffUntilMs) {
-    await recordScreenshotError('rate_limited_backoff', Date.now(), screenshotAuthContext);
-    console.log('[Screenshot] Skipping capture during API backoff');
-    return;
-  }
-
+  const capturePolicyGeneration = screenshotPolicyGeneration;
   screenshotCaptureInFlight = true;
   let screenshotPhase = 'capture';
   try {
+    await recordScreenshotAttempt(Date.now(), screenshotAuthContext);
+    assertAmbientScreenshotPolicyCurrent(
+      screenshotAuthContext,
+      capturePolicyGeneration,
+      `screenshot:${reason}:attempt`,
+    );
+    screenshotAttemptCount++;
+    if (Date.now() < apiBackoffUntilMs) {
+      await recordScreenshotError('rate_limited_backoff', Date.now(), screenshotAuthContext);
+      console.log('[Screenshot] Skipping capture during API backoff');
+      return;
+    }
+
     // Get the last focused window
     const queryActiveTab = options.queryActiveTab
-      || (() => chrome.tabs.query({ active: true, lastFocusedWindow: true }));
+      || ((queryInfo) => chrome.tabs.query(queryInfo));
     const captureVisibleTab = options.captureVisibleTab
       || ((windowId, captureOptions) => chrome.tabs.captureVisibleTab(windowId, captureOptions));
-    const [tab] = await queryActiveTab();
+    const [tab] = await queryActiveTab({ active: true, lastFocusedWindow: true });
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:active-tab`);
-    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:active-tab`);
+    assertAmbientScreenshotPolicyCurrent(
+      screenshotAuthContext,
+      capturePolicyGeneration,
+      `screenshot:${reason}:active-tab`,
+    );
     if (!tab || !tab.windowId) {
       await recordScreenshotError('no_active_tab', Date.now(), screenshotAuthContext);
       console.log('[Screenshot] No active tab in focused window');
@@ -8347,13 +11339,63 @@ async function captureAndSendScreenshot(options = {}) {
       return;
     }
 
-    // Capture the visible tab as JPEG with quality for compression
-    const dataUrl = await captureVisibleTab(tab.windowId, {
-      format: 'jpeg',
-      quality: 50  // Lower quality for smaller file size (~30-50KB)
-    });
-    assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
-    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
+    let activationChanged = false;
+    const unsubscribeActivation = subscribeTabActivationFence(
+      tab,
+      () => { activationChanged = true; },
+      options.subscribeTabActivation,
+    );
+    const unsubscribeNavigation = subscribeTabNavigationFence(
+      tab,
+      () => { activationChanged = true; },
+      options.subscribeTabUpdate,
+    );
+    const unsubscribeWindowFocus = subscribeWindowFocusFence(
+      tab,
+      () => { activationChanged = true; },
+      options.subscribeWindowFocus,
+    );
+    let dataUrl;
+    try {
+      const [beforeCaptureTab] = await queryActiveTab({ active: true, lastFocusedWindow: true });
+      assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:pre-capture-tab`);
+      assertAmbientScreenshotPolicyCurrent(
+        screenshotAuthContext,
+        capturePolicyGeneration,
+        `screenshot:${reason}:pre-capture-tab`,
+      );
+      if (activationChanged || !isSameActiveCaptureTab(beforeCaptureTab, tab)) {
+        await recordScreenshotError('active_tab_changed', Date.now(), screenshotAuthContext);
+        return { status: 'unavailable', reason: 'active_tab_changed' };
+      }
+      // captureVisibleTab is window-scoped rather than tab-scoped. Fence every
+      // activation in that window and confirm the exact tab on both sides.
+      dataUrl = await captureVisibleTab(tab.windowId, {
+        format: 'jpeg',
+        quality: 50  // Lower quality for smaller file size (~30-50KB)
+      });
+      assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
+      assertAmbientScreenshotPolicyCurrent(
+        screenshotAuthContext,
+        capturePolicyGeneration,
+        `screenshot:${reason}:captured-pixels`,
+      );
+      const [afterCaptureTab] = await queryActiveTab({ active: true, lastFocusedWindow: true });
+      assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:post-capture-tab`);
+      assertAmbientScreenshotPolicyCurrent(
+        screenshotAuthContext,
+        capturePolicyGeneration,
+        `screenshot:${reason}:post-capture-tab`,
+      );
+      if (activationChanged || !isSameActiveCaptureTab(afterCaptureTab, tab)) {
+        await recordScreenshotError('active_tab_changed', Date.now(), screenshotAuthContext);
+        return { status: 'unavailable', reason: 'active_tab_changed' };
+      }
+    } finally {
+      unsubscribeActivation?.();
+      unsubscribeNavigation?.();
+      unsubscribeWindowFocus?.();
+    }
 
     if (!dataUrl) {
       await recordScreenshotError('capture_empty', Date.now(), screenshotAuthContext);
@@ -8365,7 +11407,11 @@ async function captureAndSendScreenshot(options = {}) {
     screenshotPhase = 'upload';
     const headers = buildDeviceAuthHeaders(screenshotAuthContext);
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload`);
-    assertAmbientScreenshotAllowed(screenshotAuthContext, `screenshot:${reason}:upload`);
+    assertAmbientScreenshotPolicyCurrent(
+      screenshotAuthContext,
+      capturePolicyGeneration,
+      `screenshot:${reason}:upload`,
+    );
     const screenshotUploadPath = hasNegotiatedCapability(
       'screenshotObservationLeaseV1',
       screenshotAuthContext,
@@ -8390,6 +11436,11 @@ async function captureAndSendScreenshot(options = {}) {
       maxAttempts: 2,
     });
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
+    assertAmbientScreenshotPolicyCurrent(
+      screenshotAuthContext,
+      capturePolicyGeneration,
+      `screenshot:${reason}:upload-response`,
+    );
 
     if (!response.ok) {
       await recordScreenshotError(response.status >= 500
@@ -8410,6 +11461,10 @@ async function captureAndSendScreenshot(options = {}) {
       console.info('[Screenshot] Capture paused because no current observation lease is active');
       return { status: 'paused_unobserved' };
     }
+    if (error?.code === 'SCREENSHOT_POLICY_SUPERSEDED') {
+      console.info('[Screenshot] Discarded capture after screenshot authority changed');
+      return { status: 'paused_unobserved' };
+    }
     await recordScreenshotError(
       screenshotPhase === 'upload' ? 'upload_failed' : 'capture_failed',
       Date.now(),
@@ -8418,6 +11473,13 @@ async function captureAndSendScreenshot(options = {}) {
     console.warn('[Screenshot] Capture error:', safeDiagnosticError(error));
   } finally {
     screenshotCaptureInFlight = false;
+    if (screenshotImmediateCapturePending) {
+      screenshotImmediateCapturePending = false;
+      Promise.resolve().then(() => captureAndSendScreenshot({
+        ...options,
+        reason: 'lease-start',
+      })).catch(() => {});
+    }
   }
 }
 
@@ -8444,7 +11506,7 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
     || expiresAt > Date.now() + 35 * 1000) {
     return { status: 'unavailable', reason: 'invalid_or_unnegotiated_request' };
   }
-  if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+  if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
     return { status: 'unavailable', reason: 'monitoring_inactive' };
   }
 
@@ -8465,7 +11527,7 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
   try {
     return await Promise.race([(async () => {
       assertAuthenticatedContextCurrent(authContext, 'safety evidence capture');
-      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+      if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
         return { status: 'unavailable', reason: 'monitoring_inactive' };
       }
       const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
@@ -8479,15 +11541,42 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
       }
       const tab = await getTab(verifiedTarget.tabId);
       assertAuthenticatedContextCurrent(authContext, 'safety evidence tab');
-      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+      if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
         return { status: 'unavailable', reason: 'monitoring_inactive' };
       }
       if (!tab?.active || !Number.isInteger(tab.windowId) || !isHttpUrl(tab.url)) {
         return { status: 'unavailable', reason: 'target_not_visible' };
       }
-      const dataUrl = await captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 50 });
-      assertAuthenticatedContextCurrent(authContext, 'safety evidence pixels');
-      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+      let activationChanged = false;
+      const unsubscribeActivation = subscribeTabActivationFence(
+        tab,
+        () => { activationChanged = true; },
+        options.subscribeTabActivation,
+      );
+      const unsubscribeNavigation = subscribeTabNavigationFence(
+        tab,
+        () => { activationChanged = true; },
+        options.subscribeTabUpdate,
+      );
+      let dataUrl;
+      try {
+        const beforeCaptureTab = await getTab(verifiedTarget.tabId);
+        assertAuthenticatedContextCurrent(authContext, 'safety evidence pre-capture tab');
+        if (activationChanged || !isSameActiveCaptureTab(beforeCaptureTab, tab)) {
+          return { status: 'unavailable', reason: 'active_tab_changed' };
+        }
+        dataUrl = await captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 50 });
+        assertAuthenticatedContextCurrent(authContext, 'safety evidence pixels');
+        const afterCaptureTab = await getTab(verifiedTarget.tabId);
+        assertAuthenticatedContextCurrent(authContext, 'safety evidence post-capture tab');
+        if (activationChanged || !isSameActiveCaptureTab(afterCaptureTab, tab)) {
+          return { status: 'unavailable', reason: 'active_tab_changed' };
+        }
+      } finally {
+        unsubscribeActivation?.();
+        unsubscribeNavigation?.();
+      }
+      if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
         return { status: 'unavailable', reason: 'monitoring_inactive' };
       }
       verified = await revalidateExactTabTargets(exactTargets, authContext, resolveExactTargets);
@@ -8526,7 +11615,7 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
         },
       );
       assertAuthenticatedContextCurrent(authContext, 'safety evidence upload');
-      if (!licenseActive || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
+      if (!currentLicenseIsActive() || trackingState === TRACKING_STATES.OFF || isScheduleHardOff) {
         return { status: 'unavailable', reason: 'monitoring_inactive' };
       }
       return response.ok
@@ -8569,6 +11658,8 @@ function flightPathIsActive() {
 }
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let globalBlockedDomainsStateTrusted = false;
+let globalBlockedDomainsScope = null;
+let schoolPolicyMutation = Promise.resolve();
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
@@ -8594,6 +11685,11 @@ const STATEFUL_COMMAND_TYPES = new Set([
   'limit-tabs',
   'attention-mode',
 ]);
+const AUTHORITY_BOUND_TAB_COMMAND_TYPES = new Set([
+  'open-tab',
+  'close-tab',
+  'close-tabs',
+]);
 let currentClassroomState = null;
 let lastClassroomStateSyncRequestAt = 0;
 let lastClassroomHeartbeatSyncRequestAt = 0;
@@ -8602,7 +11698,124 @@ const FAB_HEARTBEAT_DISCONNECTED_SYNC_INTERVAL_MS = 30 * 1000;
 const FAB_HEARTBEAT_CONNECTED_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 let lastClassroomStateOutcome = 'pending';
 let lastClassroomStateAckRevision = 0;
+let lastClassroomStateAckAuthBinding = null;
 let classroomStateApplicationTail = Promise.resolve();
+let classroomRuntimeOwnerSequence = 0;
+let classroomRuntimeOwner = null;
+
+function createClassroomRuntimeOwner(authContext, revision = 0) {
+  classroomRuntimeOwnerSequence += 1;
+  return Object.freeze({
+    id: classroomRuntimeOwnerSequence,
+    authContextId: authContext?.authContextId || null,
+    authGeneration: authContext?.generation ?? null,
+    revision: Number.isSafeInteger(Number(revision)) ? Number(revision) : 0,
+  });
+}
+
+function classroomRuntimeIsOwnedBy(owner) {
+  return Boolean(owner && classroomRuntimeOwner === owner);
+}
+
+function createClassroomTabMutationJournal() {
+  return {
+    createdTabIds: new Set(),
+    updatedTabs: new Map(),
+    removedTabs: new Map(),
+  };
+}
+
+function snapshotRestorableTab(tab) {
+  if (!Number.isInteger(tab?.id) || !isHttpUrl(tab.url)) return null;
+  return {
+    id: tab.id,
+    url: tab.url,
+    active: tab.active === true,
+    pinned: tab.pinned === true,
+    windowId: Number.isInteger(tab.windowId) ? tab.windowId : undefined,
+    index: Number.isInteger(tab.index) ? tab.index : undefined,
+  };
+}
+
+function rememberClassroomTabUpdate(journal, tab) {
+  const snapshot = snapshotRestorableTab(tab);
+  if (!journal || !snapshot || journal.updatedTabs.has(snapshot.id)) return;
+  journal.updatedTabs.set(snapshot.id, snapshot);
+}
+
+function rememberClassroomTabRemoval(journal, tab) {
+  const snapshot = snapshotRestorableTab(tab);
+  if (!journal || !snapshot || journal.removedTabs.has(snapshot.id)) return;
+  journal.removedTabs.set(snapshot.id, snapshot);
+}
+
+async function compensateClassroomTabMutations(journal) {
+  if (!journal) return true;
+  let complete = true;
+  const currentTabs = await chrome.tabs.query({}).catch(() => []);
+  const currentById = new Map(currentTabs.map((tab) => [tab.id, tab]));
+
+  for (const tabId of journal.createdTabIds) {
+    if (!currentById.has(tabId)) continue;
+    try {
+      await chrome.tabs.remove(tabId);
+      currentById.delete(tabId);
+    } catch {
+      complete = false;
+    }
+  }
+
+  for (const [tabId, removed] of journal.removedTabs) {
+    if (journal.createdTabIds.has(tabId) || currentById.has(tabId)) continue;
+    const original = journal.updatedTabs.get(tabId) || removed;
+    try {
+      await chrome.tabs.create({
+        url: original.url,
+        active: original.active,
+        pinned: original.pinned,
+        ...(Number.isInteger(original.windowId) ? { windowId: original.windowId } : {}),
+        ...(Number.isInteger(original.index) ? { index: original.index } : {}),
+      });
+    } catch {
+      complete = false;
+    }
+  }
+
+  for (const [tabId, original] of journal.updatedTabs) {
+    if (journal.removedTabs.has(tabId) || !currentById.has(tabId)) continue;
+    try {
+      await chrome.tabs.update(tabId, {
+        url: original.url,
+        active: original.active,
+        pinned: original.pinned,
+      });
+    } catch {
+      complete = false;
+    }
+  }
+  return complete;
+}
+
+async function scrubRetiredClassroomTabMutations(journal) {
+  if (!journal) return true;
+  // Never recreate or navigate to URLs captured under retired authority. Close
+  // tabs that the retired operation created or redirected; already-removed
+  // tabs remain removed. This avoids rehydrating A's URL/title data while B is
+  // waiting to adopt the shared browser.
+  const tabIds = new Set([
+    ...journal.createdTabIds,
+    ...journal.updatedTabs.keys(),
+  ]);
+  let complete = true;
+  for (const tabId of tabIds) {
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch {
+      complete = false;
+    }
+  }
+  return complete;
+}
 
 function enqueueClassroomStateOperation(operation) {
   const run = () => operation();
@@ -8681,8 +11894,19 @@ function classroomStateAckTarget(rawState) {
   };
 }
 
-function sendClassroomStateAck(state, outcome, error) {
+function sendClassroomStateAck(state, outcome, error, authContext = null) {
+  if (authContext) {
+    try {
+      assertAuthenticatedContextCurrent(authContext, 'classroom state acknowledgement');
+    } catch (contextError) {
+      if (isAuthContextCancellation(contextError)) return false;
+      throw contextError;
+    }
+  }
   lastClassroomStateOutcome = outcome;
+  lastClassroomStateAckAuthBinding = authContext
+    ? monitoringEventAuthBindingForContext(authContext)
+    : null;
   if (Number.isSafeInteger(Number(state?.revision)) && Number(state.revision) >= 0) {
     lastClassroomStateAckRevision = Number(state.revision);
   }
@@ -8745,17 +11969,34 @@ function scheduleClassroomStateExpiryRetry() {
   });
 }
 
-async function enforceCurrentTabLimit() {
+async function enforceCurrentTabLimit(assertCurrent = () => {}, tabMutationJournal = null) {
+  assertCurrent('classroom tab-limit query');
   if (!currentMaxTabs || currentMaxTabs < 1) return;
   const tabs = await chrome.tabs.query({});
+  assertCurrent('classroom tab-limit query');
   const closeable = tabs.filter((tab) => tab.id && !tab.url?.startsWith('chrome://'));
   const excess = Math.max(0, tabs.length - currentMaxTabs);
   for (const tab of closeable.slice(0, excess)) {
+    assertCurrent('classroom tab-limit removal');
+    rememberClassroomTabRemoval(tabMutationJournal, tab);
     await chrome.tabs.remove(tab.id).catch(() => {});
+    assertCurrent('classroom tab-limit removal');
   }
 }
 
-async function setRuntimeFromClassroomState(state) {
+async function setRuntimeFromClassroomState(state, options = {}) {
+  const authContext = options.authContext || null;
+  const authorityEnvelope = options.authorityEnvelope || state;
+  const runtimeOwner = options.runtimeOwner
+    || createClassroomRuntimeOwner(authContext, state?.revision);
+  const assertCurrent = (reason = 'classroom runtime application') => {
+    if (!authContext) return;
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(authorityEnvelope, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
+  classroomRuntimeOwner = runtimeOwner;
   const restrictions = state.restrictions;
   const backup = classroomRuntimeBackup();
   screenLocked = Boolean(restrictions.screenLock.active);
@@ -8771,24 +12012,71 @@ async function setRuntimeFromClassroomState(state) {
   currentMaxTabs = effectiveTabLimit();
 
   try {
+    assertCurrent();
     await composeAllManagedDynamicRules();
+    assertCurrent('classroom DNR application');
   } catch (error) {
-    restoreClassroomRuntimeBackup(backup);
+    if (!isAuthContextCancellation(error) && classroomRuntimeIsOwnedBy(runtimeOwner)) {
+      restoreClassroomRuntimeBackup(backup);
+      classroomRuntimeOwner = null;
+    }
     throw error;
   }
 
   try {
-    broadcastToAllTabs('attention-mode', {
+    assertCurrent();
+    if (authContext) await broadcastToAllTabsForAuth('attention-mode', {
+      active: attentionModeActive,
+      message: restrictions.attentionMode.message || 'Please look up!',
+    }, authContext, authorityEnvelope);
+    else await broadcastToAllTabs('attention-mode', {
       active: attentionModeActive,
       message: restrictions.attentionMode.message || 'Please look up!',
     });
+    assertCurrent('classroom attention reconciliation');
   } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
     console.warn('[Classroom State] Attention overlay reconciliation failed:', safeDiagnosticError(error));
   }
   // DNR is the durable enforcement boundary. Browser tabs are inherently
   // racy, so failure to query/update one must never roll back or clear the
   // newly composed rules. Retry tab reconciliation independently instead.
-  await reconcileClassroomStateTabsBestEffort(state);
+  await reconcileClassroomStateTabsBestEffort(state, {
+    authContext,
+    assertCurrent,
+    runtimeOwner,
+    tabMutationJournal: options.tabMutationJournal,
+  });
+  return runtimeOwner;
+}
+
+async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
+  if (expectedOwner && !classroomRuntimeIsOwnedBy(expectedOwner)) return false;
+  const cleanupOwner = expectedOwner || classroomRuntimeOwner;
+  classroomRuntimeOwner = null;
+  screenLocked = false;
+  lockedUrl = null;
+  lockedDomain = null;
+  allowedDomains = [];
+  activeFlightPathName = null;
+  teacherMaxTabs = null;
+  currentMaxTabs = effectiveTabLimit();
+  teacherBlockedDomains = [];
+  activeBlockListName = null;
+  temporaryAllowedDomains = [];
+  attentionModeActive = false;
+  currentClassroomState = null;
+  await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+  await kv.remove([
+    'lockScreenState',
+    'flightPathState',
+    'teacherBlockListState',
+    CLASSROOM_STATE_STORAGE_KEY,
+    CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+    CLASSROOM_STATE_STUDENT_BINDING_KEY,
+  ]);
+  await chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+  return !classroomRuntimeOwner || classroomRuntimeOwner === cleanupOwner;
 }
 
 function scheduleClassroomStateReconciliationRetry() {
@@ -8797,28 +12085,111 @@ function scheduleClassroomStateReconciliationRetry() {
   });
 }
 
-async function reconcileClassroomStateTabsBestEffort(state) {
+async function handleClassroomStateReconcileAlarm(options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('classroom reconciliation alarm');
+    } catch {
+      // On worker wake, authentication may not be restored until the same
+      // startup barrier that restores the classroom snapshot completes.
+    }
+  }
+  await (options.restorePromise || classroomStateRestorePromise);
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext('classroom reconciliation alarm');
+    } catch {
+      await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
+      return false;
+    }
+  }
+  const reconcile = options.reconcile || reconcileClassroomStateTabsBestEffort;
+
+  return enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(async () => {
+    assertAuthenticatedContextCurrent(authContext, 'classroom reconciliation alarm');
+    const state = currentClassroomState;
+    const runtimeOwner = classroomRuntimeOwner;
+    if (!state) {
+      await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
+      return false;
+    }
+    const journal = createClassroomTabMutationJournal();
+    const assertCurrent = (reason = 'classroom reconciliation alarm') => {
+      assertAuthenticatedContextCurrent(authContext, reason);
+      if (currentClassroomState !== state || classroomRuntimeOwner !== runtimeOwner) {
+        throw authContextSuperseded(reason);
+      }
+    };
+    try {
+      assertCurrent();
+      await reconcile(state, {
+        authContext,
+        assertCurrent,
+        runtimeOwner,
+        tabMutationJournal: journal,
+      });
+      assertCurrent();
+      return true;
+    } catch (error) {
+      if (isAuthContextCancellation(error)) {
+        if (currentClassroomState === state && classroomRuntimeOwner === runtimeOwner) {
+          await failPrivateRetiredClassroomRuntime(runtimeOwner).catch(() => false);
+        }
+        await scrubRetiredClassroomTabMutations(journal).catch(() => false);
+      }
+      throw error;
+    }
+  }));
+}
+
+async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
+  const assertCurrent = options.assertCurrent || (() => {});
   try {
-    await reconcileExistingTabsForClassroomState(state);
-    await enforceCurrentTabLimit();
+    assertCurrent('classroom tab reconciliation');
+    await reconcileExistingTabsForClassroomState(
+      state,
+      assertCurrent,
+      options.authContext,
+      options.tabMutationJournal,
+    );
+    assertCurrent('classroom tab reconciliation');
+    await enforceCurrentTabLimit(assertCurrent, options.tabMutationJournal);
+    assertCurrent('classroom tab reconciliation');
     await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
+    assertCurrent('classroom tab reconciliation');
     return true;
   } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
     console.warn('[Classroom State] Existing-tab reconciliation deferred:', safeDiagnosticError(error));
     scheduleClassroomStateReconciliationRetry();
     return false;
   }
 }
 
-async function reconcileExistingTabsForClassroomState(state) {
+async function reconcileExistingTabsForClassroomState(
+  state,
+  assertCurrent = () => {},
+  authContext = null,
+  tabMutationJournal = null,
+) {
+  assertCurrent('classroom tab query');
   const tabs = await chrome.tabs.query({});
+  assertCurrent('classroom tab query');
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs);
   let updateSucceeded = plan.updates.length === 0;
   for (const update of plan.updates) {
     try {
+      assertCurrent('classroom tab update');
+      rememberClassroomTabUpdate(
+        tabMutationJournal,
+        tabs.find((tab) => tab.id === update.tabId),
+      );
       await chrome.tabs.update(update.tabId, { url: update.url });
+      assertCurrent('classroom tab update');
       updateSucceeded = true;
     } catch (error) {
+      if (isAuthContextCancellation(error)) throw error;
       // A tab may disappear between query and update. A replacement below
       // prevents that race from leaving the student without the lock target.
       console.warn('[Classroom State] Retained tab disappeared during reconciliation:', safeDiagnosticError(error));
@@ -8826,23 +12197,38 @@ async function reconcileExistingTabsForClassroomState(state) {
   }
   for (const tabId of plan.removeTabIds) {
     try {
+      assertCurrent('classroom tab removal');
+      rememberClassroomTabRemoval(
+        tabMutationJournal,
+        tabs.find((tab) => tab.id === tabId),
+      );
       await chrome.tabs.remove(tabId);
+      assertCurrent('classroom tab removal');
     } catch (error) {
+      if (isAuthContextCancellation(error)) throw error;
       // Closed-by-user races are already compliant with the desired state.
       console.info('[Classroom State] Exact retained tab already closed during reconciliation');
     }
   }
   const fallbackUrl = plan.createUrl || (!updateSucceeded ? plan.updates[0]?.url : null);
-  if (fallbackUrl) await chrome.tabs.create({ url: fallbackUrl, active: true });
-  await refreshTabCache();
+  if (fallbackUrl) {
+    assertCurrent('classroom tab creation');
+    const createdTab = await chrome.tabs.create({ url: fallbackUrl, active: true });
+    if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
+    assertCurrent('classroom tab creation');
+  }
+  await refreshTabCache(authContext);
+  assertCurrent('classroom tab cache refresh');
 }
 
-async function resolveCurrentUrlMarker(rawState) {
+async function resolveCurrentUrlMarker(rawState, assertCurrent = () => {}) {
   const cloned = JSON.parse(JSON.stringify(rawState));
   const restrictions = cloned.restrictions || cloned.desiredRestrictions || cloned.desiredState;
   const screenLock = restrictions?.screenLock || restrictions?.screen_lock;
   if (screenLock?.url !== 'CURRENT_URL' && screenLock?.lockedUrl !== 'CURRENT_URL') return cloned;
+  assertCurrent('classroom current-tab marker');
   const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  assertCurrent('classroom current-tab marker');
   const activeTab = tabs.find((tab) => isHttpUrl(tab.url));
   if (!activeTab?.url) throw new Error('No active web tab is available for the screen lock');
   screenLock.url = activeTab.url;
@@ -8853,23 +12239,65 @@ async function resolveCurrentUrlMarker(rawState) {
 }
 
 async function applyClassroomStateNow(rawState, options = {}) {
+  const authContext = options.authContext || (() => {
+    try {
+      return captureAuthenticatedContext('classroom state');
+    } catch {
+      return null;
+    }
+  })();
+  const suppliedAuthorityEnvelope = options.authorityEnvelope || rawState;
+  const suppliedAuthorityBinding = exactStudentBinding(suppliedAuthorityEnvelope);
+  // Protocol-2 classroom snapshots did not carry student/session aliases. They
+  // arrive only after the authenticated channel itself has been fenced, so use
+  // that immutable context when the envelope supplies no authority fields at
+  // all. Any supplied, partial, conflicting, or explicit V2 tuple continues to
+  // validate on its own and is never completed from another object.
+  const authorityEnvelope = authContext
+    && suppliedAuthorityBinding.bindingVersion !== 2
+    && !suppliedAuthorityBinding.studentId
+    && !suppliedAuthorityBinding.studentSessionId
+    ? {
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+      }
+    : suppliedAuthorityEnvelope;
+  const runtimeOwner = createClassroomRuntimeOwner(
+    authContext,
+    rawState?.revision ?? rawState?.studentControlRevision,
+  );
+  const tabMutationJournal = createClassroomTabMutationJournal();
+  const assertCurrent = (reason = 'classroom state') => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, reason);
+  };
   let normalized;
   try {
-    const prepared = await resolveCurrentUrlMarker(rawState);
+    assertCurrent();
+    const prepared = await resolveCurrentUrlMarker(rawState, assertCurrent);
+    assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (authContext && exactStudentBinding(authorityEnvelope).bindingVersion === 2) {
+      observeExactStudentControlRevision(
+        authorityEnvelope,
+        authContext,
+        'classroom state control revision',
+      );
+    }
   } catch (error) {
+    if (isAuthContextCancellation(error)) throw error;
     const ackState = classroomStateAckTarget(rawState);
     const outcome = error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA'
       ? 'unsupported'
       : 'failed';
-    sendClassroomStateAck(ackState, outcome, error);
+    sendClassroomStateAck(ackState, outcome, error, authContext);
     enqueueMonitoringEvent('restriction_state_failed', {
       revision: ackState.revision,
       restrictionTypes: [],
-      errorCode: error?.code || error?.name || 'invalid_snapshot',
+      errorCode: commandDiagnosticCode(error, 'CLASSROOM_STATE_INVALID'),
     }, {
       teachingSessionId: ackState.teachingSessionId,
       supervisionContextId: ackState.supervisionContextId,
+      authContext,
     }).catch(() => {});
     throw error;
   }
@@ -8883,7 +12311,12 @@ async function applyClassroomStateNow(rawState, options = {}) {
         : 'stale';
     // `stale` is useful to the command caller but is not an enforcement-health
     // state. Acknowledge the higher revision that remains actively applied.
-    sendClassroomStateAck(currentClassroomState, currentExpiry.expired ? 'expired' : 'applied');
+    sendClassroomStateAck(
+      currentClassroomState,
+      currentExpiry.expired ? 'expired' : 'applied',
+      undefined,
+      authContext,
+    );
     return {
       outcome,
       appliedRevision: currentClassroomState?.revision ?? 0,
@@ -8892,23 +12325,39 @@ async function applyClassroomStateNow(rawState, options = {}) {
 
   const expiry = RuntimeCore.classroomStateExpiry(normalized, Date.now());
   if (expiry.expired) {
+    assertCurrent();
     currentClassroomState = normalized;
-    await expireClassroomState(expiry.reason);
+    await expireClassroomState(expiry.reason, {
+      authContext,
+      authorityEnvelope,
+      runtimeOwner,
+      tabMutationJournal,
+    });
+    assertCurrent();
     return { outcome: 'expired', appliedRevision: normalized.revision };
   }
 
   const runtimeBackup = classroomRuntimeBackup();
   let statePersisted = false;
   try {
-    await setRuntimeFromClassroomState(normalized);
+    assertCurrent();
+    await setRuntimeFromClassroomState(normalized, {
+      authContext,
+      authorityEnvelope,
+      runtimeOwner,
+      tabMutationJournal,
+    });
+    assertCurrent();
     currentClassroomState = normalized;
+    assertCurrent();
     await kv.set({
       [CLASSROOM_STATE_STORAGE_KEY]: normalized,
       [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: normalized.hardExpiresAt,
-      ...(CONFIG.activeStudentId
-        ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
+      ...(authContext?.studentId
+        ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: authContext.studentId }
         : {}),
     });
+    assertCurrent();
     statePersisted = true;
     await kv.remove([
       'lockScreenState',
@@ -8917,8 +12366,9 @@ async function applyClassroomStateNow(rawState, options = {}) {
     ]).catch((error) => {
       console.warn('[Classroom State] Legacy state cleanup failed:', safeDiagnosticError(error));
     });
+    assertCurrent();
     scheduleClassroomStateExpiry(normalized);
-    sendClassroomStateAck(normalized, 'applied');
+    sendClassroomStateAck(normalized, 'applied', undefined, authContext);
     const restrictionTypes = classroomRestrictionTypes(normalized);
     const eventScope = normalized.teachingSessionId || normalized.supervisionContextId
       ? {
@@ -8932,7 +12382,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
     enqueueMonitoringEvent(
       restrictionTypes.length ? 'restriction_state_applied' : 'restriction_state_cleared',
       { revision: normalized.revision, restrictionTypes, reason: options.reason || 'state_sync' },
-      eventScope
+      { ...eventScope, authContext }
     ).catch(() => {});
     const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
       || normalized.supervisionContextId !== previousState?.supervisionContextId;
@@ -8957,49 +12407,100 @@ async function applyClassroomStateNow(rawState, options = {}) {
         // old transition timestamp could precede the scope and be rejected by
         // the server's authoritative scope resolver.
         occurredAt: Date.now(),
+        authContext,
       }).catch((error) => {
         console.warn('[Classroom State] Scope monitoring event was deferred:', safeDiagnosticError(error));
       });
     }
     return { outcome: 'applied', appliedRevision: normalized.revision };
   } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      await failPrivateRetiredClassroomRuntime(runtimeOwner).then((cleaned) => {
+        if (!cleaned && classroomRuntimeIsOwnedBy(runtimeOwner)) {
+          scheduleClassroomStateReconciliationRetry();
+        }
+      }).catch((cleanupError) => {
+        console.warn(
+          '[Classroom State] Retired snapshot cleanup deferred:',
+          safeDiagnosticError(cleanupError),
+        );
+        scheduleClassroomStateReconciliationRetry();
+      });
+      await scrubRetiredClassroomTabMutations(tabMutationJournal).catch(() => false);
+      throw error;
+    }
     // Once the snapshot and its fail-safe deadline are durable, retain them.
     // Non-critical notification/event failures must never clear enforcement
     // or resurrect the previous revision.
     if (statePersisted) {
       currentClassroomState = normalized;
       scheduleClassroomStateExpiry(normalized);
-      sendClassroomStateAck(normalized, 'applied');
+      sendClassroomStateAck(normalized, 'applied', undefined, authContext);
       console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', safeDiagnosticError(error));
       return { outcome: 'applied', appliedRevision: normalized.revision };
     }
-    restoreClassroomRuntimeBackup(runtimeBackup);
-    currentClassroomState = previousState;
-    await composeAllManagedDynamicRules().catch((rollbackError) => {
-      console.warn('[Classroom State] Snapshot rule rollback failed:', safeDiagnosticError(rollbackError));
-    });
-    broadcastToAllTabs('attention-mode', {
-      active: attentionModeActive,
-      message: previousState?.restrictions?.attentionMode?.message || '',
-    });
-    if (previousState) {
-      await kv.set({
-        [CLASSROOM_STATE_STORAGE_KEY]: previousState,
-        [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: previousState.hardExpiresAt,
-        ...(CONFIG.activeStudentId
-          ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
-          : {}),
-      }).catch(() => {});
-      scheduleClassroomStateExpiry(previousState);
-    } else {
-      await kv.remove([
-        CLASSROOM_STATE_STORAGE_KEY,
-        CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
-        CLASSROOM_STATE_STUDENT_BINDING_KEY,
-      ]).catch(() => {});
-      chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+    try {
+      assertCurrent('classroom state rollback');
+      if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
+        throw authContextSuperseded('classroom state rollback');
+      }
+      restoreClassroomRuntimeBackup(runtimeBackup);
+      currentClassroomState = previousState;
+      await composeAllManagedDynamicRules();
+      assertCurrent('classroom state rollback');
+      if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
+        throw authContextSuperseded('classroom state rollback');
+      }
+      if (authContext) {
+        await broadcastToAllTabsForAuth('attention-mode', {
+          active: attentionModeActive,
+          message: previousState?.restrictions?.attentionMode?.message || '',
+        }, authContext, authorityEnvelope);
+      } else {
+        await broadcastToAllTabs('attention-mode', {
+          active: attentionModeActive,
+          message: previousState?.restrictions?.attentionMode?.message || '',
+        });
+      }
+      assertCurrent('classroom state rollback');
+      if (previousState) {
+        await kv.set({
+          [CLASSROOM_STATE_STORAGE_KEY]: previousState,
+          [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: previousState.hardExpiresAt,
+          ...(authContext?.studentId
+            ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: authContext.studentId }
+            : {}),
+        });
+        assertCurrent('classroom state rollback');
+        scheduleClassroomStateExpiry(previousState);
+      } else {
+        await kv.remove([
+          CLASSROOM_STATE_STORAGE_KEY,
+          CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+          CLASSROOM_STATE_STUDENT_BINDING_KEY,
+        ]);
+        assertCurrent('classroom state rollback');
+        await chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
+        assertCurrent('classroom state rollback');
+      }
+      await compensateClassroomTabMutations(tabMutationJournal);
+      assertCurrent('classroom state rollback');
+    } catch (rollbackError) {
+      if (isAuthContextCancellation(rollbackError)) {
+        await failPrivateRetiredClassroomRuntime(runtimeOwner).catch((cleanupError) => {
+          console.warn(
+            '[Classroom State] Retired rollback cleanup deferred:',
+            safeDiagnosticError(cleanupError),
+          );
+          scheduleClassroomStateReconciliationRetry();
+        });
+        await scrubRetiredClassroomTabMutations(tabMutationJournal).catch(() => false);
+        throw rollbackError;
+      }
+      console.warn('[Classroom State] Snapshot rollback failed:', safeDiagnosticError(rollbackError));
+      scheduleClassroomStateReconciliationRetry();
     }
-    sendClassroomStateAck(normalized, 'failed', error);
+    sendClassroomStateAck(normalized, 'failed', error, authContext);
     enqueueMonitoringEvent('restriction_state_failed', {
       revision: normalized.revision,
       restrictionTypes: classroomRestrictionTypes(normalized),
@@ -9007,6 +12508,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
     }, {
       teachingSessionId: normalized.teachingSessionId,
       supervisionContextId: normalized.supervisionContextId,
+      authContext,
     }).catch(() => {});
     throw error;
   }
@@ -9016,33 +12518,91 @@ function applyClassroomState(rawState, options = {}) {
   return enqueueClassroomStateOperation(() => applyClassroomStateNow(rawState, options));
 }
 
-async function expireClassroomState(reason = 'hard_expiry') {
+async function expireClassroomState(reason = 'hard_expiry', options = {}) {
   if (!currentClassroomState) return;
-  if (activeLiveViewNegotiationId) {
-    await stopScreenShare({ reason: `classroom-state-${reason}` });
-  }
-  const expiredState = {
-    ...currentClassroomState,
-    restrictions: RuntimeCore.emptyRestrictions(),
-    expiredAt: Date.now(),
-    expiryReason: reason,
+  const authContext = options.authContext || (() => {
+    try {
+      return captureAuthenticatedContext('classroom state expiry');
+    } catch {
+      return null;
+    }
+  })();
+  const authorityEnvelope = options.authorityEnvelope || (authContext ? {
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  } : null);
+  const runtimeOwner = options.runtimeOwner
+    || createClassroomRuntimeOwner(authContext, currentClassroomState.revision);
+  const assertCurrent = (label = 'classroom state expiry') => {
+    if (!authContext) return;
+    assertAuthenticatedContextCurrent(authContext, label);
+    const binding = assertCurrentStudentBinding(authorityEnvelope, label, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, label);
   };
-  await setRuntimeFromClassroomState(expiredState);
-  currentClassroomState = expiredState;
-  await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: expiredState });
-  await kv.remove(CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY);
-  scheduleClassroomStateExpiry(expiredState);
-  sendClassroomStateAck(expiredState, 'expired');
-  enqueueMonitoringEvent('restriction_state_cleared', {
-    revision: expiredState.revision,
-    restrictionTypes: [],
-    reason,
-  }).catch(() => {});
+  try {
+    assertCurrent();
+    if (activeLiveViewNegotiationId) {
+      await stopScreenShare({ reason: `classroom-state-${reason}` });
+      assertCurrent();
+    }
+    const expiredState = {
+      ...currentClassroomState,
+      restrictions: RuntimeCore.emptyRestrictions(),
+      expiredAt: Date.now(),
+      expiryReason: reason,
+    };
+    await setRuntimeFromClassroomState(expiredState, {
+      authContext,
+      authorityEnvelope,
+      runtimeOwner,
+      tabMutationJournal: options.tabMutationJournal,
+    });
+    assertCurrent();
+    currentClassroomState = expiredState;
+    await kv.set({
+      [CLASSROOM_STATE_STORAGE_KEY]: expiredState,
+      ...(authContext?.studentId
+        ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: authContext.studentId }
+        : {}),
+    });
+    assertCurrent();
+    await kv.remove(CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY);
+    assertCurrent();
+    scheduleClassroomStateExpiry(expiredState);
+    sendClassroomStateAck(expiredState, 'expired', undefined, authContext);
+    enqueueMonitoringEvent('restriction_state_cleared', {
+      revision: expiredState.revision,
+      restrictionTypes: [],
+      reason,
+    }, {
+      teachingSessionId: expiredState.teachingSessionId,
+      supervisionContextId: expiredState.supervisionContextId,
+      authContext,
+    }).catch(() => {});
+  } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      await failPrivateRetiredClassroomRuntime(runtimeOwner).catch((cleanupError) => {
+        console.warn(
+          '[Classroom State] Retired expiry cleanup deferred:',
+          safeDiagnosticError(cleanupError),
+        );
+        scheduleClassroomStateReconciliationRetry();
+      });
+      await scrubRetiredClassroomTabMutations(options.tabMutationJournal).catch(() => false);
+    }
+    throw error;
+  }
 }
 
-async function checkClassroomStateExpiryNow() {
+async function checkClassroomStateExpiryNow(options = {}) {
+  const authContext = options.authContext || null;
+  const assertCurrent = (reason = 'classroom-state expiry check') => {
+    if (authContext) assertAuthenticatedContextCurrent(authContext, reason);
+  };
+  assertCurrent();
   if (!currentClassroomState) {
     const stored = await kv.get([CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]);
+    assertCurrent();
     const failSafeExpiryAt = Number(stored[CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY] || 0);
     if (!failSafeExpiryAt) return;
     if (Date.now() < failSafeExpiryAt) {
@@ -9061,13 +12621,31 @@ async function checkClassroomStateExpiryNow() {
     temporaryAllowedDomains = [];
     attentionModeActive = false;
     await composeDynamicRules(['classroom', 'teacher', 'temporary']);
-    broadcastToAllTabs('attention-mode', { active: false, message: '' });
+    assertCurrent();
+    if (authContext) {
+      await broadcastToAllTabsForAuth(
+        'attention-mode',
+        { active: false, message: '' },
+        authContext,
+        browserPolicyEnvelopeForAuth(authContext),
+      );
+    } else {
+      await broadcastToAllTabs('attention-mode', { active: false, message: '' });
+    }
+    assertCurrent();
     await kv.remove(CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY);
+    assertCurrent();
     return;
   }
   const expiry = RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now());
   if (expiry.expired) {
-    await expireClassroomState(expiry.reason);
+    await expireClassroomState(expiry.reason, {
+      authContext,
+      authorityEnvelope: authContext ? {
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+      } : null,
+    });
     return;
   }
   const validAllows = RuntimeCore.normalizeTemporaryAllows(
@@ -9079,19 +12657,110 @@ async function checkClassroomStateExpiryNow() {
       ...currentClassroomState,
       restrictions: { ...currentClassroomState.restrictions, temporaryAllows: validAllows },
     };
+    assertCurrent();
     await updateTemporaryAllowRules(validAllows);
+    assertCurrent();
     // Commit the durable snapshot only after Chrome accepted the corresponding
     // DNR update. On failure, the retry must still see the expired entry and
     // attempt the clear again rather than treating the in-memory mutation as
     // already enforced.
     currentClassroomState = stateWithoutExpiredAllows;
     await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: currentClassroomState });
+    assertCurrent();
   }
   scheduleClassroomStateExpiry(currentClassroomState);
 }
 
+function storedClassroomStateMatches(value, expectedValue) {
+  try {
+    return JSON.stringify(value ?? null) === JSON.stringify(expectedValue ?? null);
+  } catch {
+    return false;
+  }
+}
+
+function recoverInvalidStoredClassroomState(
+  expectedState,
+  expectedStudentId,
+  rawFailSafeExpiryAt,
+  authContext,
+) {
+  return enqueueStudentAuthMutation(async () => {
+    const assertCurrent = () => assertAuthenticatedContextCurrent(
+      authContext,
+      'worker classroom-state recovery',
+    );
+    assertCurrent();
+    const latest = await kv.get([
+      CLASSROOM_STATE_STORAGE_KEY,
+      CLASSROOM_STATE_STUDENT_BINDING_KEY,
+      CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+    ]);
+    assertCurrent();
+    if (
+      latest[CLASSROOM_STATE_STUDENT_BINDING_KEY] !== expectedStudentId
+      || !storedClassroomStateMatches(latest[CLASSROOM_STATE_STORAGE_KEY], expectedState)
+    ) {
+      // A newer exact snapshot won the race. Its writer owns both the state and
+      // deadline, so stale recovery has nothing to mutate.
+      return false;
+    }
+    const storedFailSafeExpiryAt = Number(
+      latest[CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY] ?? rawFailSafeExpiryAt,
+    );
+    const failSafeExpiryAt = Number.isFinite(storedFailSafeExpiryAt)
+      && storedFailSafeExpiryAt > 0
+      ? storedFailSafeExpiryAt
+      : Date.now();
+    await kv.set({ [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: failSafeExpiryAt });
+    assertCurrent();
+    if (failSafeExpiryAt > Date.now()) {
+      chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, { when: failSafeExpiryAt });
+      return true;
+    }
+    // Never invent a fresh twelve-hour window when the independently stored
+    // original cutoff is absent/already elapsed. Run the fail-safe under the
+    // same auth->classroom lock order, then conditionally remove only the exact
+    // corrupt snapshot this recovery read.
+    await enqueueClassroomStateOperation(() => checkClassroomStateExpiryNow({ authContext }));
+    assertCurrent();
+    const beforeRemove = await kv.get([
+      CLASSROOM_STATE_STORAGE_KEY,
+      CLASSROOM_STATE_STUDENT_BINDING_KEY,
+    ]);
+    assertCurrent();
+    if (
+      beforeRemove[CLASSROOM_STATE_STUDENT_BINDING_KEY] === expectedStudentId
+      && storedClassroomStateMatches(beforeRemove[CLASSROOM_STATE_STORAGE_KEY], expectedState)
+    ) {
+      await kv.remove(CLASSROOM_STATE_STORAGE_KEY);
+      assertCurrent();
+    }
+    return true;
+  });
+}
+
 function checkClassroomStateExpiry() {
-  return enqueueClassroomStateOperation(checkClassroomStateExpiryNow).catch((error) => {
+  let capturedAuthContext = null;
+  try {
+    capturedAuthContext = captureAuthenticatedContext('classroom-state expiry queue');
+  } catch {
+    // Signed-out fail-safe expiry still clears orphaned controls. A pending auth
+    // mutation is serialized below before this unscoped cleanup can run.
+  }
+  return enqueueStudentAuthMutation(async () => {
+    let authContext = capturedAuthContext;
+    if (authContext) {
+      assertAuthenticatedContextCurrent(authContext, 'classroom-state expiry queue');
+    } else {
+      try {
+        authContext = captureAuthenticatedContext('classroom-state expiry queue');
+      } catch {
+        authContext = null;
+      }
+    }
+    return enqueueClassroomStateOperation(() => checkClassroomStateExpiryNow({ authContext }));
+  }).catch((error) => {
     // A transient DNR/storage failure must not turn a scheduled or absolute
     // cutoff into a permanent restriction. Retain the original deadline and
     // retry the teacher/class/temporary range clear until it succeeds.
@@ -9100,7 +12769,28 @@ function checkClassroomStateExpiry() {
   });
 }
 
-async function persistLegacyClassroomState(command, envelope = {}) {
+function assertRemoteCommandExecutionContextCurrent(
+  command,
+  envelope,
+  executionContext,
+  reason = 'remote-control command',
+) {
+  const authContext = executionContext?.authContext;
+  if (!authContext) throw authContextSuperseded(reason);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const binding = assertCurrentStudentBinding(envelope, reason, { authContext });
+  assertBindingMatchesAuthContext(binding, authContext, reason);
+  assertCurrentCommandAuthority(command, envelope);
+  return authContext;
+}
+
+async function persistLegacyClassroomState(command, envelope = {}, executionContext = {}) {
+  const authContext = assertRemoteCommandExecutionContextCurrent(
+    command,
+    envelope,
+    executionContext,
+    'legacy classroom state persistence',
+  );
   const now = Date.now();
   const base = currentClassroomState || {
     schemaVersion: 1,
@@ -9113,19 +12803,37 @@ async function persistLegacyClassroomState(command, envelope = {}) {
     teachingSessionId: envelope.teachingSessionId || envelope.sessionId || command?.data?.teachingSessionId || base.teachingSessionId,
     restrictions: classroomRestrictionsFromRuntime(),
   }, now);
+  assertRemoteCommandExecutionContextCurrent(
+    command,
+    envelope,
+    executionContext,
+    'legacy classroom state persistence',
+  );
   currentClassroomState = normalized;
   await kv.set({
     [CLASSROOM_STATE_STORAGE_KEY]: normalized,
     [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: normalized.hardExpiresAt,
-    ...(CONFIG.activeStudentId
-      ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId }
+    ...(authContext.studentId
+      ? { [CLASSROOM_STATE_STUDENT_BINDING_KEY]: authContext.studentId }
       : {}),
   });
+  assertRemoteCommandExecutionContextCurrent(
+    command,
+    envelope,
+    executionContext,
+    'legacy classroom state persistence',
+  );
   await kv.remove([
     'lockScreenState',
     'flightPathState',
     'teacherBlockListState',
   ]);
+  assertRemoteCommandExecutionContextCurrent(
+    command,
+    envelope,
+    executionContext,
+    'legacy classroom state persistence',
+  );
   scheduleClassroomStateExpiry(normalized);
 }
 
@@ -9153,6 +12861,15 @@ function requestClassroomStateOnHeartbeat() {
 }
 
 async function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
+  const authContext = options.authContext || null;
+  const sourceMessage = options.sourceMessage || null;
+  const assertCurrent = (label = 'teacher broadcast cleanup') => {
+    if (!authContext) return;
+    assertAuthenticatedContextCurrent(authContext, label);
+    const binding = assertCurrentStudentBinding(sourceMessage, label, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, label);
+  };
+  assertCurrent();
   if (!teacherBroadcastActive && !teacherBroadcastSessionId) {
     return;
   }
@@ -9160,50 +12877,87 @@ async function cleanupTeacherBroadcast(reason = 'stopped', options = {}) {
   teacherBroadcastActive = false;
   teacherBroadcastSessionId = null;
   if (options.notifyTeacher && wsConnected) {
+    assertCurrent();
     await wsSend({
       type: 'broadcast-leave',
       sessionId: previousSessionId || undefined,
       reason,
-    });
+    }, authContext);
+    assertCurrent();
   }
-  broadcastToAllTabs('teacher-broadcast-stop', {
-    sessionId: previousSessionId,
-    reason,
-  });
+  if (authContext) {
+    await broadcastToAllTabsForAuth('teacher-broadcast-stop', {
+      sessionId: previousSessionId,
+      reason,
+    }, authContext, sourceMessage);
+    assertCurrent();
+  }
 }
 
-async function handleBroadcastStart(message = {}) {
+async function handleBroadcastStart(message = {}, authContext) {
+  const assertCurrent = (reason = 'teacher broadcast start') => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(message, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
   const nextSessionId = message.sessionId || message.broadcastSessionId || null;
   if (teacherBroadcastActive && teacherBroadcastSessionId !== nextSessionId) {
-    await cleanupTeacherBroadcast('replaced-by-new-broadcast', { notifyTeacher: true });
+    await cleanupTeacherBroadcast('replaced-by-new-broadcast', {
+      notifyTeacher: true,
+      authContext,
+      sourceMessage: message,
+    });
+    assertCurrent();
   }
   teacherBroadcastActive = true;
   teacherBroadcastSessionId = nextSessionId;
+  assertCurrent();
   await wsSend({
     type: 'broadcast-join',
     sessionId: nextSessionId || undefined,
-  });
+  }, authContext);
+  assertCurrent();
 }
 
-async function handleBroadcastStop() {
-  await cleanupTeacherBroadcast('teacher-stop', { notifyTeacher: false });
+async function handleBroadcastStop(message, authContext) {
+  await cleanupTeacherBroadcast('teacher-stop', {
+    notifyTeacher: false,
+    authContext,
+    sourceMessage: message,
+  }, authContext).catch(() => {});
+  return true;
 }
 
-async function handleBroadcastOffer(sdp) {
+async function handleBroadcastOffer(message, authContext) {
+  const assertCurrent = (reason = 'teacher broadcast offer') => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(message, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
   if (!teacherBroadcastActive) {
     console.warn('[Broadcast] Ignoring offer because no broadcast session is active');
     return;
   }
-  if (!sdp) {
+  if (!message?.sdp) {
     console.warn('[Broadcast] Ignoring empty broadcast offer');
     return;
   }
   console.warn('[Broadcast] Student-side teacher broadcast viewing is not available in this extension build; leaving broadcast');
-  await cleanupTeacherBroadcast('unsupported-broadcast-offer', { notifyTeacher: true });
+  await cleanupTeacherBroadcast('unsupported-broadcast-offer', {
+    notifyTeacher: true,
+    authContext,
+    sourceMessage: message,
+  });
+  assertCurrent();
 }
 
-function handleBroadcastIce(candidate) {
-  if (!teacherBroadcastActive || !candidate) {
+function handleBroadcastIce(message, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'teacher broadcast ICE');
+  const binding = assertCurrentStudentBinding(message, 'teacher broadcast ICE', { authContext });
+  assertBindingMatchesAuthContext(binding, authContext, 'teacher broadcast ICE');
+  if (!teacherBroadcastActive || !message?.candidate) {
     return;
   }
   console.log('[Broadcast] Ignoring broadcast ICE after cleanup-only handling');
@@ -9402,14 +13156,9 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
   }
 
   if (authority.teachingSessionId) {
-    const stateScope = currentClassroomState?.supervisionContextId
-      ? null
-      : currentClassroomState?.teachingSessionId || null;
     const activeSessionIds = activeTeachingSessionIds();
     if (
-      (stateScope
-        ? stateScope !== authority.teachingSessionId
-        : !activeSessionIds.includes(authority.teachingSessionId))
+      !activeSessionIds.includes(authority.teachingSessionId)
       || currentClassroomState?.supervisionContextId
     ) {
       const error = new Error('Command belongs to an inactive teaching session');
@@ -9427,15 +13176,33 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
   return authority;
 }
 
-async function handleRemoteControl(command, envelope = {}) {
+chrome.notifications?.onClosed?.addListener?.((notificationId) => {
+  activeAuthBoundNotificationIds.delete(notificationId);
+});
+
+function exactTabCloseV2AuthorityRequired(command = {}, authContext = null) {
+  return Boolean(
+    (command.type === 'close-tab' || command.type === 'close-tabs')
+    && (Array.isArray(command.data?.tabRefs) || command.data?.tabRef)
+    && hasNegotiatedCapability('exactTabCloseV2', authContext)
+  );
+}
+
+async function handleRemoteControl(command, envelope = {}, executionOverrides = {}) {
   const commandId = getCommandIdFromMessage(envelope, command);
   const commandType = command?.type || 'unknown';
   let authContext;
   let commandBinding;
   try {
     authContext = captureAuthenticatedContext('remote-control command');
-    commandBinding = assertCurrentStudentBinding(envelope, 'remote-control command');
-    assertBindingMatchesAuthContext(commandBinding, authContext, 'remote-control command');
+    const requireExactTabAuthority = exactTabCloseV2AuthorityRequired(command, authContext);
+    commandBinding = assertCurrentStudentBinding(envelope, 'remote-control command', {
+      authContext,
+      requireFullAuthority: requireExactTabAuthority,
+    });
+    assertBindingMatchesAuthContext(commandBinding, authContext, 'remote-control command', {
+      requireFullAuthority: requireExactTabAuthority,
+    });
     assertAuthenticatedContextCurrent(authContext, 'remote-control command');
   } catch (error) {
     // A command that cannot prove its exact student/session binding is not
@@ -9480,7 +13247,7 @@ async function handleRemoteControl(command, envelope = {}) {
           binding: commandBinding,
           commandType,
           error: commandErrorMessage(error),
-          errorCode: error?.code || 'COMMAND_AUTHORITY_MISMATCH',
+          errorCode: commandDiagnosticCode(error, 'COMMAND_AUTHORITY_MISMATCH'),
           state,
           outcome: 'failed',
           deliveryPolicy: delivery.deliveryPolicy,
@@ -9508,9 +13275,13 @@ async function handleRemoteControl(command, envelope = {}) {
     // have arrived while the durable ACK was being persisted.
     assertAuthenticatedContextCurrent(authContext, 'remote-control command');
     assertBindingMatchesAuthContext(
-      assertCurrentStudentBinding(envelope, 'remote-control command'),
+      assertCurrentStudentBinding(envelope, 'remote-control command', {
+        authContext,
+        requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext),
+      }),
       authContext,
       'remote-control command',
+      { requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext) },
     );
     assertCurrentCommandAuthority(command, envelope);
     if (authority?.teachingSessionId) {
@@ -9532,7 +13303,19 @@ async function handleRemoteControl(command, envelope = {}) {
     let application = null;
     let result;
     if (classroomState && isClassroomStatefulCommand) {
-      application = await applyClassroomState(classroomState, { reason: 'stateful_command' });
+      application = await enqueueStudentAuthMutation(async () => {
+        assertRemoteCommandExecutionContextCurrent(
+          command,
+          envelope,
+          { authContext, binding: commandBinding },
+          'stateful classroom command reservation',
+        );
+        return applyClassroomState(classroomState, {
+          reason: 'stateful_command',
+          authContext,
+          authorityEnvelope: envelope,
+        });
+      });
       result = {
         commandType,
         stateReconciled: true,
@@ -9541,18 +13324,44 @@ async function handleRemoteControl(command, envelope = {}) {
         completedAt: new Date().toISOString(),
       };
     } else if (isClassroomStatefulCommand) {
-      result = await enqueueClassroomStateOperation(async () => {
+      result = await enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(async () => {
+        const legacyExecutionContext = {
+          ...executionOverrides,
+          commandId,
+          envelope,
+          delivery,
+          authContext,
+          binding: commandBinding,
+        };
+        assertRemoteCommandExecutionContextCurrent(
+          command,
+          envelope,
+          legacyExecutionContext,
+          'legacy classroom command reservation',
+        );
         const runtimeBackup = classroomRuntimeBackup();
         const stateBackup = currentClassroomState;
+        const runtimeOwnerBackup = classroomRuntimeOwner;
+        const runtimeOwner = createClassroomRuntimeOwner(
+          authContext,
+          currentClassroomState?.revision ?? currentStudentControlRevision() ?? 0,
+        );
+        const tabMutationJournal = createClassroomTabMutationJournal();
+        legacyExecutionContext.runtimeOwner = runtimeOwner;
+        legacyExecutionContext.tabMutationJournal = tabMutationJournal;
+        classroomRuntimeOwner = runtimeOwner;
         try {
-          const legacyResult = await executeRemoteControlCommand(command || {}, {
-            commandId,
+          const legacyResult = await executeRemoteControlCommand(
+            command || {},
+            legacyExecutionContext,
+          );
+          assertRemoteCommandExecutionContextCurrent(
+            command,
             envelope,
-            delivery,
-            authContext,
-            binding: commandBinding,
-          });
-          await persistLegacyClassroomState(command, envelope);
+            legacyExecutionContext,
+            'legacy classroom command completion',
+          );
+          await persistLegacyClassroomState(command, envelope, legacyExecutionContext);
           application = {
             outcome: 'applied',
             appliedRevision: currentClassroomState?.revision ?? 0,
@@ -9561,31 +13370,115 @@ async function handleRemoteControl(command, envelope = {}) {
             revision: application.appliedRevision,
             restrictionTypes: classroomRestrictionTypes(),
             reason: 'legacy_command',
-          }).catch(() => {});
+          }, { authContext }).catch(() => {});
           return legacyResult;
         } catch (error) {
-          restoreClassroomRuntimeBackup(runtimeBackup);
-          currentClassroomState = stateBackup;
-          await composeAllManagedDynamicRules().catch((rollbackError) => {
-            console.warn('[Classroom State] Legacy command rule rollback failed:', safeDiagnosticError(rollbackError));
-          });
-          broadcastToAllTabs('attention-mode', {
-            active: attentionModeActive,
-            message: stateBackup?.restrictions?.attentionMode?.message || '',
-          });
-          await kv.remove(['lockScreenState', 'flightPathState', 'teacherBlockListState']);
-          scheduleClassroomStateExpiry(stateBackup);
+          if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') {
+            const ownsRetiredRuntime = classroomRuntimeIsOwnedBy(runtimeOwner);
+            if (ownsRetiredRuntime) {
+              await failPrivateRetiredClassroomRuntime(runtimeOwner).catch((cleanupError) => {
+                console.warn(
+                  '[Classroom State] Retired legacy command cleanup deferred:',
+                  safeDiagnosticError(cleanupError),
+                );
+                scheduleClassroomStateReconciliationRetry();
+              });
+              await scrubRetiredClassroomTabMutations(tabMutationJournal).catch(() => false);
+            }
+            throw error;
+          }
+          try {
+            assertRemoteCommandExecutionContextCurrent(
+              command,
+              envelope,
+              legacyExecutionContext,
+              'legacy classroom command rollback',
+            );
+            if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
+              throw authContextSuperseded('legacy classroom command rollback');
+            }
+            restoreClassroomRuntimeBackup(runtimeBackup);
+            currentClassroomState = stateBackup;
+            await composeAllManagedDynamicRules();
+            assertRemoteCommandExecutionContextCurrent(
+              command,
+              envelope,
+              legacyExecutionContext,
+              'legacy classroom command rollback',
+            );
+            await broadcastToAllTabsForAuth('attention-mode', {
+              active: attentionModeActive,
+              message: stateBackup?.restrictions?.attentionMode?.message || '',
+            }, authContext, envelope);
+            assertRemoteCommandExecutionContextCurrent(
+              command,
+              envelope,
+              legacyExecutionContext,
+              'legacy classroom command rollback',
+            );
+            await kv.remove(['lockScreenState', 'flightPathState', 'teacherBlockListState']);
+            assertRemoteCommandExecutionContextCurrent(
+              command,
+              envelope,
+              legacyExecutionContext,
+              'legacy classroom command rollback',
+            );
+            await compensateClassroomTabMutations(tabMutationJournal);
+            assertRemoteCommandExecutionContextCurrent(
+              command,
+              envelope,
+              legacyExecutionContext,
+              'legacy classroom command rollback',
+            );
+            classroomRuntimeOwner = runtimeOwnerBackup;
+            scheduleClassroomStateExpiry(stateBackup);
+          } catch (rollbackError) {
+            if (isAuthContextCancellation(rollbackError)
+              || rollbackError?.code === 'STUDENT_BINDING_MISMATCH') {
+              const ownsRetiredRuntime = classroomRuntimeIsOwnedBy(runtimeOwner);
+              if (ownsRetiredRuntime) {
+                await failPrivateRetiredClassroomRuntime(runtimeOwner).catch(() => false);
+                await scrubRetiredClassroomTabMutations(tabMutationJournal).catch(() => false);
+              }
+            }
+            throw rollbackError;
+          }
           throw error;
         }
-      });
+      }));
     } else {
-      result = await executeRemoteControlCommand(command || {}, {
+      const ordinaryExecutionContext = {
+        ...executionOverrides,
         commandId,
         envelope,
         delivery,
         authContext,
         binding: commandBinding,
-      });
+      };
+      const executeOrdinaryCommand = () => executeRemoteControlCommand(
+        command || {},
+        ordinaryExecutionContext,
+      );
+      if (AUTHORITY_BOUND_TAB_COMMAND_TYPES.has(commandType)) {
+        result = await enqueueStudentAuthMutation(async () => {
+          assertRemoteCommandExecutionContextCurrent(
+            command,
+            envelope,
+            ordinaryExecutionContext,
+            'tab command reservation',
+          );
+          const commandResult = await executeOrdinaryCommand();
+          assertRemoteCommandExecutionContextCurrent(
+            command,
+            envelope,
+            ordinaryExecutionContext,
+            'tab command completion',
+          );
+          return commandResult;
+        });
+      } else {
+        result = await executeOrdinaryCommand();
+      }
     }
     if (commandId) {
       const state = await getClassroomCommandStateSnapshot();
@@ -9602,6 +13495,7 @@ async function handleRemoteControl(command, envelope = {}) {
         expiresAt: delivery.expiresAt,
       });
     }
+    return result;
   } catch (error) {
     console.warn('Error handling remote control command:', safeDiagnosticError(error));
     if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') {
@@ -9616,7 +13510,7 @@ async function handleRemoteControl(command, envelope = {}) {
           binding: commandBinding,
           commandType,
           error: commandErrorMessage(error),
-          errorCode: error?.code,
+          errorCode: commandDiagnosticCode(error),
           state,
           appliedRevision: currentClassroomState?.revision ?? 0,
           outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
@@ -9632,9 +13526,13 @@ async function handleRemoteControl(command, envelope = {}) {
 }
 
 async function executeRemoteControlCommand(command, executionContext = {}) {
-  console.log('[Command] Exact-bound remote control received:', command?.type || 'unknown');
+  console.log('[Command] Exact-bound remote control received:', safeDiagnosticLabel(command?.type));
   const commandAuthContext = executionContext.authContext
     || captureAuthenticatedContext(`remote-control:${command?.type || 'unknown'}`);
+  const exactTabAuthorityRequired = exactTabCloseV2AuthorityRequired(
+    command,
+    commandAuthContext,
+  );
   const commandControlRevision = executionContext.binding?.controlRevision
     ?? currentStudentControlRevision();
   const assertCommandExecutionCurrent = (reason = 'remote-control command execution') => {
@@ -9644,17 +13542,75 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         executionContext.binding,
         commandAuthContext,
         reason,
-        { requireFullAuthority: false },
+        { requireFullAuthority: exactTabAuthorityRequired },
       );
     }
     if (
-      fullAuthorityBindingNegotiated(commandAuthContext)
+      exactTabAuthorityRequired
       && currentStudentControlRevision() !== commandControlRevision
     ) {
       const error = new Error(`${reason} belongs to a retired control revision`);
       error.code = 'STUDENT_BINDING_MISMATCH';
       throw error;
     }
+  };
+  const commandSourceMessage = executionContext.envelope || command;
+  let commandNotificationSequence = 0;
+  const broadcastCommandUi = async (messageType, messageData) => {
+    assertCommandExecutionCurrent(`command ${messageType} broadcast`);
+    await broadcastToAllTabsForAuth(
+      messageType,
+      messageData,
+      commandAuthContext,
+      commandSourceMessage,
+    );
+    assertCommandExecutionCurrent(`command ${messageType} broadcast`);
+  };
+  const notifyCommandUi = async (opts, label = command?.type || 'command') => {
+    commandNotificationSequence += 1;
+    assertCommandExecutionCurrent(`command ${label} notification`);
+    await notifyTeacherMessageForAuth(
+      opts,
+      commandAuthContext,
+      commandSourceMessage,
+      `${executionContext.commandId || command?.commandId || label}-${commandNotificationSequence}`,
+    );
+    assertCommandExecutionCurrent(`command ${label} notification`);
+  };
+  const scheduleBoundCommandScreenshot = (delayMs) => {
+    setTimeout(() => {
+      try {
+        assertCommandExecutionCurrent('command screenshot timer');
+      } catch {
+        return;
+      }
+      captureAndSendScreenshot({ reason: 'command' }).catch(() => {});
+    }, delayMs);
+  };
+  const commandTabJournal = executionContext.tabMutationJournal || null;
+  const updateCommandTab = async (tabId, updateProperties, knownTab = null, reason = 'command tab update') => {
+    assertCommandExecutionCurrent(reason);
+    const before = knownTab || await getTab(tabId);
+    assertCommandExecutionCurrent(reason);
+    rememberClassroomTabUpdate(commandTabJournal, before);
+    const updated = await chrome.tabs.update(tabId, updateProperties);
+    assertCommandExecutionCurrent(reason);
+    return updated;
+  };
+  const removeCommandTab = async (tabId, knownTab = null, reason = 'command tab removal') => {
+    assertCommandExecutionCurrent(reason);
+    const before = knownTab || await getTab(tabId);
+    assertCommandExecutionCurrent(reason);
+    rememberClassroomTabRemoval(commandTabJournal, before);
+    await chrome.tabs.remove(tabId);
+    assertCommandExecutionCurrent(reason);
+  };
+  const createCommandTab = async (createProperties, reason = 'command tab creation') => {
+    assertCommandExecutionCurrent(reason);
+    const created = await chrome.tabs.create(createProperties);
+    if (Number.isInteger(created?.id)) commandTabJournal?.createdTabIds.add(created.id);
+    assertCommandExecutionCurrent(reason);
+    return created;
   };
   assertCommandExecutionCurrent();
   const result = {
@@ -9677,21 +13633,21 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           const tab = await createTab({ url: command.data.url, active: true });
           try {
             assertCommandExecutionCurrent('open-tab command');
+            const tabs = await queryTabs();
+            assertCommandExecutionCurrent('open-tab command');
+            const tabSnapshot = await buildOpaqueTabSnapshot(tabs, commandAuthContext);
+            assertCommandExecutionCurrent('open-tab command');
+            const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
+            result.openedUrl = command.data.url;
+            result.tabRef = openedEntry?.tabRef || null;
+            result.tabSnapshotRevision = tabSnapshot.revision;
+            console.log('[Command] Opened exact requested tab');
+            // Capture screenshot after tab loads so dashboard updates fast
+            scheduleBoundCommandScreenshot(2000);
           } catch (error) {
             if (Number.isInteger(tab?.id)) await removeTab(tab.id).catch(() => {});
             throw error;
           }
-          const tabs = await queryTabs();
-          assertCommandExecutionCurrent('open-tab command');
-          const tabSnapshot = await buildOpaqueTabSnapshot(tabs, commandAuthContext);
-          assertCommandExecutionCurrent('open-tab command');
-          const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
-          result.openedUrl = command.data.url;
-          result.tabRef = openedEntry?.tabRef || null;
-          result.tabSnapshotRevision = tabSnapshot.revision;
-          console.log('[Command] Opened exact requested tab');
-          // Capture screenshot after tab loads so dashboard updates fast
-          setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 2000);
         }
         break;
         
@@ -9705,6 +13661,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
               executionContext.binding,
               authContext,
               'tab close command',
+              {
+                requireFullAuthority: hasNegotiatedCapability('exactTabCloseV2', authContext)
+                  && (Array.isArray(command.data.tabRefs) || Boolean(command.data.tabRef)),
+              },
             );
           }
           let exact;
@@ -9765,7 +13725,9 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           } else if (command.type === 'close-tabs' && command.data.closeAll === true) {
             // Missing target data never implies a broadcast. Closing all tabs
             // requires the explicit close-tabs action and closeAll=true.
-            const tabs = await chrome.tabs.query({});
+            const queryTabs = executionContext.queryTabs || (() => chrome.tabs.query({}));
+            const removeTab = executionContext.removeTab || ((tabId) => chrome.tabs.remove(tabId));
+            const tabs = await queryTabs();
             assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
             const allowedDomainSet = new Set((Array.isArray(command.data.allowedDomains)
               ? command.data.allowedDomains
@@ -9779,10 +13741,14 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
               if (tabDomain && allowedDomainSet.has(tabDomain)) continue;
               assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
               try {
-                await chrome.tabs.remove(tab.id);
+                await removeTab(tab.id);
                 assertCommandExecutionCurrent('close-all-tabs command');
                 closedCount += 1;
               } catch (error) {
+                if (isAuthContextCancellation(error)
+                  || error?.code === 'STUDENT_BINDING_MISMATCH') {
+                  throw error;
+                }
                 console.warn('Could not close an explicitly targeted all-tabs entry:', safeDiagnosticError(error));
               }
             }
@@ -9795,11 +13761,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             targetError.code = 'TAB_TARGET_REQUIRED';
             throw targetError;
           }
-          await refreshTabCache(authContext);
+          const refreshTabs = executionContext.refreshTabCache || refreshTabCache;
+          await refreshTabs(authContext);
           assertCommandExecutionCurrent('tab cache refresh');
         }
         // Capture screenshot immediately after closing tabs so dashboard updates fast
-        setTimeout(() => captureAndSendScreenshot({ reason: 'command' }), 1500);
+        scheduleBoundCommandScreenshot(1500);
         break;
 
       case 'lock-screen':
@@ -9856,8 +13823,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           for (const tab of allTabs) {
             if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')) {
               try {
-                await chrome.tabs.remove(tab.id);
-                assertCommandExecutionCurrent('lock-screen tab reconciliation');
+                await removeCommandTab(
+                  tab.id,
+                  tab,
+                  'lock-screen tab reconciliation',
+                );
               } catch (error) {
                 console.warn('Could not close an excess tab:', safeDiagnosticError(error));
               }
@@ -9866,7 +13836,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
         
         // Show notification with domain
-        safeNotify({
+        await notifyCommandUi({
           title: 'Screen Locked',
           message: `Your teacher has locked your screen to the current domain: ${lockedDomain}. You cannot open new tabs or navigate to other websites.`,
           priority: 2,
@@ -9907,6 +13877,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           assertCommandExecutionCurrent('unlock-screen rules');
           await reconcileClassroomStateTabsBestEffort({
             restrictions: classroomRestrictionsFromRuntime(),
+          }, {
+            authContext: commandAuthContext,
+            assertCurrent: assertCommandExecutionCurrent,
+            runtimeOwner: executionContext.runtimeOwner,
+            tabMutationJournal: commandTabJournal,
           });
           assertCommandExecutionCurrent('unlock-screen reconciliation');
         } else {
@@ -9914,7 +13889,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           assertCommandExecutionCurrent('unlock-screen rules');
         }
         
-        safeNotify({
+        await notifyCommandUi({
           title: 'Screen Unlocked',
           message: preserveFlightPath
             ? 'Your screen lock was removed. Your class Flight Path is still active.'
@@ -9977,23 +13952,25 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           
           if (activeTab) {
             // Update the active tab to the first domain
-            await chrome.tabs.update(activeTab.id, { url: firstUrl });
-            assertCommandExecutionCurrent('flight-path navigation');
+            await updateCommandTab(
+              activeTab.id,
+              { url: firstUrl },
+              activeTab,
+              'flight-path navigation',
+            );
             
             // Close all other tabs
             for (const tab of allTabs) {
               if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')) {
-                await chrome.tabs.remove(tab.id);
-                assertCommandExecutionCurrent('flight-path tab close');
+                await removeCommandTab(tab.id, tab, 'flight-path tab close');
               }
             }
           } else {
             // No tabs exist, create one
-            await chrome.tabs.create({ url: firstUrl, active: true });
-            assertCommandExecutionCurrent('flight-path tab create');
+            await createCommandTab({ url: firstUrl, active: true }, 'flight-path tab create');
           }
           
-          safeNotify({
+          await notifyCommandUi({
             title: 'Flight Path Applied',
             message: `Your teacher has applied a flight path. You can only access: ${allowedDomains.join(', ')}`,
             priority: 2,
@@ -10020,7 +13997,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await clearBlockingRules();
         assertCommandExecutionCurrent('flight-path removal rules');
         
-        safeNotify({
+        await notifyCommandUi({
           title: 'Flight Path Removed',
           message: 'Your teacher has removed the flight path. You can now browse freely.',
           priority: 1,
@@ -10047,7 +14024,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await updateTemporaryAllowRules(temporaryAllowedDomains);
         assertCommandExecutionCurrent('temporary unblock rules');
 
-        safeNotify({
+        await notifyCommandUi({
           title: 'Temporary Access Granted',
           message: `Your teacher has temporarily unblocked ${tempDomain} for ${tempDuration} minutes.`,
           priority: 1,
@@ -10074,7 +14051,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('teacher block-list rules');
 
         if (teacherBlockedDomains.length > 0) {
-          safeNotify({
+          await notifyCommandUi({
             title: 'Block List Applied',
             message: `Your teacher has blocked: ${teacherBlockedDomains.slice(0, 3).join(', ')}${teacherBlockedDomains.length > 3 ? '...' : ''}`,
             priority: 1,
@@ -10094,7 +14071,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await clearTeacherBlockListRules();
         assertCommandExecutionCurrent('teacher block-list removal');
         
-        safeNotify({
+        await notifyCommandUi({
           title: 'Block List Removed',
           message: 'Your teacher has removed the block list.',
           priority: 1,
@@ -10130,8 +14107,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
             for (const tab of tabsToClose) {
               if (!tab.url.startsWith('chrome://')) {
-                await chrome.tabs.remove(tab.id);
-                assertCommandExecutionCurrent('tab-limit close');
+                await removeCommandTab(tab.id, tab, 'tab-limit close');
               }
             }
           }
@@ -10152,10 +14128,13 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('attention-mode rules');
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('attention-mode', { active: attentionActive, message: attentionMessage });
+        await broadcastCommandUi('attention-mode', {
+          active: attentionActive,
+          message: attentionMessage,
+        });
 
         if (attentionActive) {
-          safeNotify({
+          await notifyCommandUi({
             title: 'Attention Required',
             message: attentionMessage,
             priority: 2,
@@ -10175,7 +14154,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('timer persistence');
         const timerEndsAt = timerState?.timer?.endsAt || null;
 
-        broadcastToAllTabs('timer', {
+        await broadcastCommandUi('timer', {
           action: timerAction,
           seconds: timerSeconds,
           message: timerMessage,
@@ -10184,7 +14163,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         });
 
         if (timerAction === 'start') {
-          safeNotify({
+          await notifyCommandUi({
             title: 'Timer Started',
             message: `${Math.floor(timerSeconds / 60)}:${String(timerSeconds % 60).padStart(2, '0')} remaining`,
             priority: 1,
@@ -10195,7 +14174,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.seconds = timerSeconds;
         result.message = timerMessage;
         result.endsAt = timerEndsAt;
-        console.log('Timer:', timerAction, timerSeconds, 'seconds');
+        console.log('Timer:', safeDiagnosticLabel(timerAction), timerSeconds, 'seconds');
         break;
 
       case 'poll':
@@ -10226,7 +14205,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const pollState = await persistPollOverlay(command, executionContext);
         assertCommandExecutionCurrent('poll persistence');
 
-        broadcastToAllTabs('poll', {
+        await broadcastCommandUi('poll', {
           action: pollAction,
           pollId,
           question: pollQuestion,
@@ -10236,7 +14215,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         });
 
         if (pollAction === 'start') {
-          safeNotify({
+          await notifyCommandUi({
             title: 'Poll',
             message: pollQuestion,
             priority: 2,
@@ -10246,7 +14225,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.action = pollAction;
         result.pollId = pollId;
         result.question = pollQuestion;
-        console.log('Poll:', pollAction);
+        console.log('Poll:', safeDiagnosticLabel(pollAction));
         break;
 
       case 'chat-notification':
@@ -10255,7 +14234,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const chatFromName = command.data.fromName;
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('chat-notification', { message: chatMessage, fromName: chatFromName });
+        await broadcastCommandUi('chat-notification', {
+          message: chatMessage,
+          fromName: chatFromName,
+        });
 
         result.messageDelivered = true;
         result.fromName = chatFromName;
@@ -10268,7 +14250,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('hand dismissal');
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('hand-dismissed', command.data || {});
+        await broadcastCommandUi('hand-dismissed', command.data || {});
 
         result.handRaised = false;
         console.log('Hand dismissed notification sent');
@@ -10289,7 +14271,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('messaging toggle');
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('messaging-toggle', { ...(command.data || {}), enabled: messagingEnabled });
+        await broadcastCommandUi('messaging-toggle', {
+          ...(command.data || {}),
+          enabled: messagingEnabled,
+        });
 
         result.messagingEnabled = messagingEnabled;
         console.log('Messaging toggle sent:', messagingEnabled);
@@ -10310,7 +14295,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         assertCommandExecutionCurrent('hand-raising toggle');
 
         // Fire-and-forget - don't await to avoid any delay
-        broadcastToAllTabs('hand-raising-toggle', { ...(command.data || {}), enabled: handRaisingEnabled });
+        await broadcastCommandUi('hand-raising-toggle', {
+          ...(command.data || {}),
+          enabled: handRaisingEnabled,
+        });
 
         result.handRaisingEnabled = handRaisingEnabled;
         console.log('Hand raising toggle sent:', handRaisingEnabled);
@@ -10339,23 +14327,22 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             sessions: [],
             sessionId: command.data.sessionId || '',
             reason: signOutReason,
+            studentId: commandAuthContext.studentId,
+            studentSessionId: commandAuthContext.studentSessionId,
+          }, {
+            authContext: commandAuthContext,
+            authorityEnvelope: commandSourceMessage,
           });
           assertCommandExecutionCurrent('student sign-out FAB cleanup');
-          await chrome.storage.local.set({
-            fabChatMessages: [],
-            fabChatClosed: false,
-          });
-          assertCommandExecutionCurrent('student sign-out chat cleanup');
+          // clearStudentAuth owns and serializes FAB/chat/inbox deletion. An
+          // independent storage write could otherwise land after a newer
+          // identity commits and wipe that student's hydrated UI.
           await clearStudentAuth(signOutReason, {
             notifyBackend: false,
             pauseAutoRegistration: true,
             disconnectWebSocket: false,
             expectedAuthContext: commandAuthContext,
           });
-          setTimeout(() => {
-            disconnectWebSocket();
-          }, 250);
-
           result.signedOut = true;
           result.reason = signOutReason;
           result.sessionId = command.data.sessionId || null;
@@ -10405,34 +14392,259 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   injectedTabs.delete(tabId);
 });
 
-// Helper function to broadcast message to all tabs in parallel (fastest delivery)
-async function broadcastToAllTabs(messageType, messageData) {
+// Unbound delivery is reserved for identity-clearing messages whose only side
+// effect is removing retired UI. Student-targeted content always uses the
+// immutable authentication-context path below.
+async function broadcastToAllTabsUnbound(messageType, messageData) {
   const tabs = await chrome.tabs.query({});
   const validTabs = tabs.filter(tab =>
     tab.url && !tab.url.startsWith('chrome://') && !tab.url.startsWith('chrome-extension://')
   );
 
-  // Immediate fire-and-forget to all tabs for fastest possible delivery
-  // Don't wait for injection - just try to send immediately
-  for (const tab of validTabs) {
-    // Try to send message immediately (content script might already be loaded)
-    chrome.tabs.sendMessage(tab.id, {
-      type: messageType,
-      data: messageData
-    }).catch(() => {
-      // If send fails, inject content script and retry once
-      chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content.js']
-      }).then(() => {
+  // Identity clearing must settle before a replacement identity replays its
+  // exact UI snapshot. Otherwise a delayed injection retry for student A can
+  // erase student B's newly rendered state.
+  await Promise.all(validTabs.map(async (tab) => {
+    try {
+      await chrome.tabs.sendMessage(tab.id, {
+        type: messageType,
+        data: messageData,
+      });
+    } catch {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
         injectedTabs.add(tab.id);
-        // Retry sending after injection
-        chrome.tabs.sendMessage(tab.id, {
+        await chrome.tabs.sendMessage(tab.id, {
           type: messageType,
-          data: messageData
-        }).catch(() => {}); // Ignore final errors
-      }).catch(() => {}); // Ignore injection errors
-    });
+          data: messageData,
+        });
+      } catch {
+        // Unsupported/internal pages and tabs that close during cleanup are
+        // best effort. The target-context guard in content.js is authoritative.
+      }
+    }
+  }));
+}
+
+async function broadcastToAllTabs(messageType, messageData) {
+  if (messageType === 'student-message-state-cleared') {
+    return broadcastToAllTabsUnbound(messageType, messageData);
+  }
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext(`student UI broadcast:${messageType}`);
+    return await broadcastToAllTabsForAuth(
+      messageType,
+      messageData,
+      authContext,
+      {
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+      },
+    );
+  } catch (error) {
+    if (!isAuthContextCancellation(error)) {
+      console.warn('[Student UI] Broadcast skipped:', safeDiagnosticError(error));
+    }
+    return false;
+  }
+}
+
+function studentMessageContextFor(authContext) {
+  return Object.freeze({
+    authContextId: authContext.authContextId,
+    schoolId: authContext.schoolId,
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  });
+}
+
+function capturePendingAuthenticatedContext(reason, mutationGeneration) {
+  if (
+    !studentAuthCommitPending
+    || studentAuthCommitPendingGeneration !== mutationGeneration
+    || activeAuthContextGeneration !== mutationGeneration
+  ) throw authContextSuperseded(reason);
+  const serverOrigin = normalizedServerOrigin(CONFIG.serverUrl);
+  const authContextId = String(CONFIG.authContextId || '').trim();
+  if (!serverOrigin || !authContextId || ![
+    CONFIG.deviceId,
+    CONFIG.studentToken,
+    CONFIG.activeStudentId,
+    CONFIG.activeStudentSessionId,
+  ].every((value) => typeof value === 'string' && value.trim())) {
+    throw authContextSuperseded(reason);
+  }
+  return Object.freeze({
+    authContextId,
+    mutationGeneration,
+    serverOrigin,
+    schoolId: String(CONFIG.schoolId || '').trim() || null,
+    deviceId: CONFIG.deviceId,
+    studentId: CONFIG.activeStudentId,
+    studentSessionId: CONFIG.activeStudentSessionId,
+    studentToken: CONFIG.studentToken,
+    studentEmail: CONFIG.studentEmail || '',
+    signal: authContextAbortController.signal,
+    allowCommitPending: true,
+  });
+}
+
+function studentMessageContextIsCurrent(value) {
+  try {
+    const authContext = captureAuthenticatedContext('student message receiver validation');
+    return Boolean(
+      value
+      && value.authContextId === authContext.authContextId
+      && value.schoolId === authContext.schoolId
+      && value.studentId === authContext.studentId
+      && value.studentSessionId === authContext.studentSessionId
+    );
+  } catch {
+    return false;
+  }
+}
+
+function captureStudentActionRequest(message, reason = 'student action') {
+  const authContext = captureAuthenticatedContext(reason);
+  const expectedContext = studentMessageContextFor(authContext);
+  const suppliedContext = message?.studentMessageContext;
+  if (
+    !suppliedContext
+    || suppliedContext.authContextId !== expectedContext.authContextId
+    || suppliedContext.schoolId !== expectedContext.schoolId
+    || suppliedContext.studentId !== expectedContext.studentId
+    || suppliedContext.studentSessionId !== expectedContext.studentSessionId
+  ) throw authContextSuperseded(reason);
+  const expectedFabBinding = fabIdentityBinding();
+  if (!expectedFabBinding || message?.fabBinding !== expectedFabBinding) {
+    throw authContextSuperseded(reason);
+  }
+  const sessionId = String(message?.sessionId || '').trim();
+  if (!sessionId || !activeTeachingSessionIds().includes(sessionId)) {
+    const error = new Error('Student action has no exact active teaching session');
+    error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
+    throw error;
+  }
+  return Object.freeze({ authContext, fabBinding: expectedFabBinding, sessionId });
+}
+
+function captureStudentIdentityRequest(message, reason = 'student identity action') {
+  const authContext = captureAuthenticatedContext(reason);
+  const expectedContext = studentMessageContextFor(authContext);
+  const suppliedContext = message?.studentMessageContext;
+  if (
+    !suppliedContext
+    || suppliedContext.authContextId !== expectedContext.authContextId
+    || suppliedContext.schoolId !== expectedContext.schoolId
+    || suppliedContext.studentId !== expectedContext.studentId
+    || suppliedContext.studentSessionId !== expectedContext.studentSessionId
+  ) throw authContextSuperseded(reason);
+  return Object.freeze({ authContext });
+}
+
+function assertStudentActionRequestCurrent(request, reason = 'student action') {
+  assertAuthenticatedContextCurrent(request.authContext, reason);
+  if (
+    request.fabBinding !== fabIdentityBinding()
+    || !activeTeachingSessionIds().includes(request.sessionId)
+  ) throw authContextSuperseded(reason);
+}
+
+async function notifyTeacherMessageForAuth(opts, authContext, sourceMessage, messageId) {
+  const notificationPrefix = authBoundNotificationPrefixForContext(authContext);
+  if (!notificationPrefix) throw authContextSuperseded('teacher message notification');
+  const notificationId = `${notificationPrefix}${String(messageId || 'message')}`
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 240);
+  const assertCurrent = (reason = 'teacher message notification') => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(sourceMessage, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
+  const inventoryReady = await ensureAuthBoundNotificationInventory();
+  if (!inventoryReady) {
+    const error = new Error('Teacher notification identity inventory is unavailable');
+    error.code = 'AUTH_BOUND_NOTIFICATION_UNVERIFIED';
+    throw error;
+  }
+  assertCurrent();
+  activeAuthBoundNotificationIds.add(notificationId);
+  try {
+    await safeNotify({ ...opts, notificationId });
+    assertCurrent();
+  } catch (error) {
+    const cleared = await clearAuthBoundNotification(notificationId).catch(() => false);
+    activeAuthBoundNotificationIds.delete(notificationId);
+    if (!cleared) {
+      authBoundNotificationInventoryReconciled = false;
+      authBoundNotificationCleanupRetryAt = 0;
+      await clearAllAuthBoundTeacherMessageNotifications().catch(() => false);
+    }
+    throw error;
+  }
+  return notificationId;
+}
+
+async function broadcastToAllTabsForAuth(
+  messageType,
+  messageData,
+  authContext,
+  sourceMessage,
+  transport = {},
+) {
+  const assertCurrent = (reason = 'teacher message broadcast') => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(sourceMessage, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
+  const queryTabs = transport.queryTabs || (() => chrome.tabs.query({}));
+  const sendTabMessage = transport.sendMessage
+    || ((tabId, payload) => chrome.tabs.sendMessage(tabId, payload));
+  const injectContentScript = transport.executeScript
+    || ((details) => chrome.scripting.executeScript(details));
+  const tabs = await queryTabs();
+  assertCurrent();
+  const validTabs = tabs.filter((tab) => (
+    tab.url
+    && !tab.url.startsWith('chrome://')
+    && !tab.url.startsWith('chrome-extension://')
+  ));
+  const messageContext = studentMessageContextFor(authContext);
+  for (const tab of validTabs) {
+    assertCurrent();
+    try {
+      await sendTabMessage(tab.id, {
+        type: messageType,
+        data: messageData,
+        studentMessageContext: messageContext,
+      });
+      assertCurrent();
+    } catch (error) {
+      assertCurrent();
+      try {
+        await injectContentScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
+        assertCurrent();
+        injectedTabs.add(tab.id);
+        await sendTabMessage(tab.id, {
+          type: messageType,
+          data: messageData,
+          studentMessageContext: messageContext,
+        });
+        assertCurrent();
+      } catch (retryError) {
+        assertCurrent();
+        if (isAuthContextCancellation(retryError)) throw retryError;
+      }
+    }
   }
 }
 
@@ -10449,46 +14661,61 @@ function messageMatchesActiveFabSession(message = {}) {
   return activeSessions.includes(sessionId);
 }
 
-async function handleChatMessage(message) {
+async function handleChatMessage(message, options = {}) {
   console.log('[Chat] Exact-bound teacher message received');
-
-  if (!acceptsCurrentStudentBinding(message, 'teacher chat message')) return;
+  const authContext = options.authContext
+    || captureAuthenticatedContext('teacher chat message');
+  assertAuthenticatedContextCurrent(authContext, 'teacher chat message');
+  const commandBinding = assertCurrentStudentBinding(
+    message,
+    'teacher chat message',
+    { authContext },
+  );
+  assertBindingMatchesAuthContext(commandBinding, authContext, 'teacher chat message');
 
   if (!messageMatchesActiveFabSession(message)) {
     console.warn('[FAB] Ignoring chat for an inactive teaching session');
     return;
   }
 
-  const expectedBinding = messageInboxAuthBinding();
+  const expectedBinding = monitoringEventAuthBindingForContext(authContext);
   const inboxMessage = messageWithStableLocalId(message, 'chat');
   const inboxResult = await persistTeacherMessages([inboxMessage], {
     reason: 'websocket-chat',
     expectedBinding,
+    authContext,
+    sourceMessage: message,
   });
+  assertAuthenticatedContextCurrent(authContext, 'teacher chat message persistence');
+  assertCurrentStudentBinding(message, 'teacher chat message persistence', { authContext });
   if (!inboxResult.addedMessageIds.includes(inboxMessage.id)) {
     console.log('Dedup: skipping duplicate chat message');
     return;
   }
 
   // Show browser notification immediately (fastest feedback)
-  safeNotify({
+  assertAuthenticatedContextCurrent(authContext, 'teacher chat notification');
+  await notifyTeacherMessageForAuth({
     title: `Message from ${inboxMessage.fromName || 'Teacher'}`,
     message: inboxMessage.message,
     priority: 2,
     requireInteraction: false,
-  });
+  }, authContext, message, inboxMessage.id);
+  assertAuthenticatedContextCurrent(authContext, 'teacher chat notification');
+  assertCurrentStudentBinding(message, 'teacher chat notification', { authContext });
 
   // Fire-and-forget broadcast to all tabs for instant delivery
-  broadcastToAllTabs('show-message', {
+  await broadcastToAllTabsForAuth('show-message', {
     id: inboxMessage.id,
     message: inboxMessage.message,
     fromName: inboxMessage.fromName || 'Teacher',
     timestamp: inboxMessage.timestamp || Date.now(),
-  });
+  }, authContext, message);
+  assertAuthenticatedContextCurrent(authContext, 'teacher chat broadcast');
 }
 
 async function handleDurableTeacherMessage(message, options = {}) {
-  const expectedBinding = options.expectedBinding || messageInboxAuthBinding();
+  let expectedBinding = options.expectedBinding || null;
   const commandId = getCommandIdFromMessage(message);
   let authContext = null;
   let commandBinding = null;
@@ -10499,7 +14726,13 @@ async function handleDurableTeacherMessage(message, options = {}) {
     Date.now()
   );
   try {
-    authContext = captureAuthenticatedContext('durable teacher message');
+    authContext = options.authContext || captureAuthenticatedContext('durable teacher message');
+    assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
+    const authBinding = monitoringEventAuthBindingForContext(authContext);
+    if (expectedBinding && expectedBinding !== authBinding) {
+      throw authContextSuperseded('durable teacher message');
+    }
+    expectedBinding = authBinding;
     commandBinding = assertCurrentStudentBinding(message, 'durable teacher message');
     assertBindingMatchesAuthContext(commandBinding, authContext, 'durable teacher message');
     if (!expectedBinding || expectedBinding !== messageInboxAuthBinding()) {
@@ -10517,7 +14750,21 @@ async function handleDurableTeacherMessage(message, options = {}) {
     if (!messageMatchesActiveFabSession(message)) {
       throw new Error('Teacher message belongs to an inactive teaching session');
     }
+    assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
+    assertCurrentStudentBinding(message, 'durable teacher message');
+    const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
+    const inboxResult = await persistTeacherMessages([inboxMessage], {
+      reason: 'websocket-teacher-message',
+      expectedBinding,
+      authContext,
+      sourceMessage: message,
+    });
+    assertAuthenticatedContextCurrent(authContext, 'durable teacher message persistence');
+    assertCurrentStudentBinding(message, 'durable teacher message persistence', { authContext });
+    const deduplicated = !inboxResult.addedMessageIds.includes(inboxMessage.id);
+
     if (commandId) {
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message received acknowledgement');
       await sendCommandAck(commandId, 'received', {
         authContext,
         binding: commandBinding,
@@ -10525,26 +14772,23 @@ async function handleDurableTeacherMessage(message, options = {}) {
         deliveryPolicy: delivery.deliveryPolicy,
         expiresAt: delivery.expiresAt,
       });
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message received acknowledgement');
+      assertCurrentStudentBinding(message, 'durable teacher message received acknowledgement', { authContext });
     }
-    assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
-    assertCurrentStudentBinding(message, 'durable teacher message');
-    const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
-    const inboxResult = await persistTeacherMessages([inboxMessage], {
-      reason: 'websocket-teacher-message',
-      expectedBinding,
-    });
-    const deduplicated = !inboxResult.addedMessageIds.includes(inboxMessage.id);
 
     if (deduplicated) {
       console.log('Dedup: skipping duplicate teacher-message');
     } else {
-      safeNotify({
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
+      await notifyTeacherMessageForAuth({
         title: 'Reply from Teacher',
         message: inboxMessage.message || 'New message',
         priority: 2,
         requireInteraction: false,
-      });
-      broadcastToAllTabs('chat-reply', {
+      }, authContext, message, inboxMessage.id);
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
+      assertCurrentStudentBinding(message, 'durable teacher message notification', { authContext });
+      await broadcastToAllTabsForAuth('chat-reply', {
         _msgId: inboxMessage.id,
         chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
         messageId: message.chatMessageId || message.messageId || inboxMessage.id,
@@ -10553,15 +14797,26 @@ async function handleDurableTeacherMessage(message, options = {}) {
         message: inboxMessage.message,
         fromName: inboxMessage.fromName || 'Teacher',
         timestamp: inboxMessage.timestamp || Date.now(),
-      });
+      }, authContext, message);
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
     }
 
     if (hasChatDelivery) {
-      await sendChatDeliveryAck(message, 'delivered', null, authContext).catch((error) => {
+      assertAuthenticatedContextCurrent(authContext, 'teacher chat delivery acknowledgement');
+      try {
+        await sendChatDeliveryAck(message, 'delivered', null, authContext);
+      } catch (error) {
+        if (isAuthContextCancellation(error)) throw error;
         console.warn('[Chat ACK] Could not persist delivered acknowledgement:', safeDiagnosticError(error));
-      });
+      }
+      assertAuthenticatedContextCurrent(authContext, 'teacher chat delivery acknowledgement');
+      assertCurrentStudentBinding(message, 'teacher chat delivery acknowledgement', { authContext });
     }
     if (commandId) {
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message completed state');
+      const commandState = await getClassroomCommandStateSnapshot();
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message completed state');
+      assertCurrentStudentBinding(message, 'durable teacher message completed state', { authContext });
       await sendCommandAck(commandId, 'completed', {
         authContext,
         binding: commandBinding,
@@ -10572,10 +14827,12 @@ async function handleDurableTeacherMessage(message, options = {}) {
               delivered: true,
               messageLength: String(inboxMessage.message || '').length,
             },
-        state: await getClassroomCommandStateSnapshot(),
+        state: commandState,
         deliveryPolicy: delivery.deliveryPolicy,
         expiresAt: delivery.expiresAt,
       });
+      assertAuthenticatedContextCurrent(authContext, 'durable teacher message completed acknowledgement');
+      assertCurrentStudentBinding(message, 'durable teacher message completed acknowledgement', { authContext });
     }
     return { messageId: inboxMessage.id, deduplicated };
   } catch (error) {
@@ -10608,7 +14865,9 @@ async function handleDurableTeacherMessage(message, options = {}) {
   }
 }
 
-async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
+async function handleHeartbeatPendingMessages(rawMessages, expectedBinding, authContext = null) {
+  const operationAuthContext = authContext
+    || captureAuthenticatedContext('heartbeat teacher messages');
   const legacyMessages = [];
   const addedMessageIds = [];
   for (const rawMessage of rawMessages || []) {
@@ -10631,7 +14890,7 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
         authority: rawMessage.authority || { teachingSessionId, supervisionContextId },
         studentId: CONFIG.activeStudentId,
         fromName: rawMessage.fromName || 'Teacher',
-      }, { expectedBinding });
+      }, { expectedBinding, authContext: operationAuthContext });
       if (!result.deduplicated) addedMessageIds.push(result.messageId);
     } catch (error) {
       console.warn('[Heartbeat] Durable teacher message was not applied:', safeDiagnosticError(error));
@@ -10639,220 +14898,428 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding) {
   }
 
   if (legacyMessages.length > 0) {
-    const legacyResult = await persistHeartbeatPendingMessages(legacyMessages, expectedBinding);
+    const legacyResult = await persistHeartbeatPendingMessages(legacyMessages, expectedBinding, {
+      authContext: operationAuthContext,
+      // Heartbeat rows are already authenticated as a batch. Each durable row
+      // above supplies its own exact envelope; legacy rows are fenced to the
+      // immutable response context and local inbox binding.
+    });
     addedMessageIds.push(...legacyResult.addedMessageIds);
   }
   return { addedMessageIds };
 }
 
 // Check-in Request Handler (Phase 3)
-async function handleCheckInRequest(request) {
+function handleCheckInRequest(request, options = {}) {
+  const authContext = options.authContext
+    || captureAuthenticatedContext('teacher check-in');
+  return enqueueStudentAuthMutation(() => handleCheckInRequestNow(request, {
+    ...options,
+    authContext,
+  }));
+}
+
+async function handleCheckInRequestNow(request, options = {}) {
   console.log('Check-in request received');
-  
-  // Show notification with check-in question
-  safeNotify({
+  const authContext = options.authContext
+    || captureAuthenticatedContext('teacher check-in');
+  const assertCurrent = (reason = 'teacher check-in') => {
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const binding = assertCurrentStudentBinding(request, reason, { authContext });
+    assertBindingMatchesAuthContext(binding, authContext, reason);
+  };
+  assertCurrent();
+  const now = Date.now();
+  const expiresAt = Math.min(
+    Number(request.expiresAt || now + PENDING_CHECK_IN_MAX_AGE_MS),
+    now + PENDING_CHECK_IN_MAX_AGE_MS,
+  );
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  await notifyTeacherMessageForAuth({
     title: 'Teacher Check-in',
-    message: request.question,
+    message: String(request.question || '').slice(0, 500),
     priority: 2,
     requireInteraction: true,
-  });
-  
-  // Store check-in request for popup to display
-  await chrome.storage.local.set({
-    pendingCheckIn: {
-      question: request.question,
-      options: request.options,
-      timestamp: Date.now(),
+  }, authContext, request, request.requestId || request._msgId || 'check-in');
+  assertCurrent();
+  await durableLocalKv.set({
+    [PENDING_CHECK_IN_KEY]: {
+      question: String(request.question || '').slice(0, 500),
+      options: (Array.isArray(request.options) ? request.options : [])
+        .slice(0, 20)
+        .map((option) => String(option).slice(0, 200)),
+      timestamp: now,
+      expiresAt,
+      binding,
     },
+  });
+  try {
+    assertCurrent();
+  } catch (error) {
+    const stored = await durableLocalKv.get(PENDING_CHECK_IN_KEY);
+    if (stored[PENDING_CHECK_IN_KEY]?.binding === binding) {
+      await durableLocalKv.remove(PENDING_CHECK_IN_KEY);
+    }
+    throw error;
+  }
+  chrome.alarms.create(PENDING_CHECK_IN_EXPIRY_ALARM, { when: expiresAt + 1 });
+  return true;
+}
+
+function pendingCheckInOwnerMatches(left, right) {
+  return Boolean(left && right)
+    && left.binding === right.binding
+    && Number(left.timestamp || 0) === Number(right.timestamp || 0)
+    && Number(left.expiresAt || 0) === Number(right.expiresAt || 0);
+}
+
+function expirePendingCheckIn(alarm = {}, options = {}) {
+  const nowValue = Number(options.now ?? Date.now());
+  return enqueueStudentAuthMutation(async () => {
+    const stored = await durableLocalKv.get(PENDING_CHECK_IN_KEY);
+    const pending = stored[PENDING_CHECK_IN_KEY];
+    if (!pending) {
+      await chrome.alarms.clear(PENDING_CHECK_IN_EXPIRY_ALARM);
+      return false;
+    }
+    const expiresAt = Number(pending.expiresAt || 0);
+    const scheduledTime = Number(alarm?.scheduledTime || 0);
+    if (
+      !Number.isFinite(expiresAt)
+      || expiresAt <= 0
+      || expiresAt > nowValue
+      || (scheduledTime > 0 && scheduledTime + 1 < expiresAt)
+    ) {
+      if (Number.isFinite(expiresAt) && expiresAt > nowValue) {
+        chrome.alarms.create(PENDING_CHECK_IN_EXPIRY_ALARM, { when: expiresAt + 1 });
+      } else if (!Number.isFinite(expiresAt) || expiresAt <= 0) {
+        const latest = await durableLocalKv.get(PENDING_CHECK_IN_KEY);
+        if (pendingCheckInOwnerMatches(pending, latest[PENDING_CHECK_IN_KEY])) {
+          await durableLocalKv.remove(PENDING_CHECK_IN_KEY);
+        }
+        const remaining = (await durableLocalKv.get(PENDING_CHECK_IN_KEY))[PENDING_CHECK_IN_KEY];
+        if (remaining && Number(remaining.expiresAt || 0) > nowValue) {
+          chrome.alarms.create(PENDING_CHECK_IN_EXPIRY_ALARM, {
+            when: Number(remaining.expiresAt) + 1,
+          });
+        } else {
+          await chrome.alarms.clear(PENDING_CHECK_IN_EXPIRY_ALARM);
+        }
+        return !remaining;
+      }
+      return false;
+    }
+
+    // Re-read the exact row immediately before deleting. Check-in writers and
+    // auth adoption use the same mutation queue, so a stale A expiry can never
+    // remove or clear the alarm for a newer B prompt.
+    const latest = await durableLocalKv.get(PENDING_CHECK_IN_KEY);
+    if (pendingCheckInOwnerMatches(pending, latest[PENDING_CHECK_IN_KEY])) {
+      await durableLocalKv.remove(PENDING_CHECK_IN_KEY);
+    }
+    const remaining = (await durableLocalKv.get(PENDING_CHECK_IN_KEY))[PENDING_CHECK_IN_KEY];
+    if (remaining && Number(remaining.expiresAt || 0) > nowValue) {
+      chrome.alarms.create(PENDING_CHECK_IN_EXPIRY_ALARM, {
+        when: Number(remaining.expiresAt) + 1,
+      });
+    } else {
+      await chrome.alarms.clear(PENDING_CHECK_IN_EXPIRY_ALARM);
+    }
+    return !remaining;
+  });
+}
+
+function browserPolicyEnvelopeForAuth(authContext) {
+  return {
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  };
+}
+
+async function recordNavigationBlockedForAuth(authContext, url, policySource) {
+  assertAuthenticatedContextCurrent(authContext, 'navigation policy telemetry');
+  await enqueueMonitoringEvent('navigation_blocked', {
+    url,
+    title: '',
+    policySource,
+  }, { authContext });
+  assertAuthenticatedContextCurrent(authContext, 'navigation policy telemetry');
+}
+
+async function notifyNavigationBlockedForAuth(authContext, notification, policySource) {
+  assertAuthenticatedContextCurrent(authContext, 'navigation policy notification');
+  await notifyTeacherMessageForAuth(
+    notification,
+    authContext,
+    browserPolicyEnvelopeForAuth(authContext),
+    `navigation-${policySource}`,
+  );
+  assertAuthenticatedContextCurrent(authContext, 'navigation policy notification');
+}
+
+async function goBackOrBlankForAuth(tabId, authContext, reason) {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  try {
+    await chrome.tabs.goBack(tabId);
+    assertAuthenticatedContextCurrent(authContext, reason);
+  } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+      throw error;
+    }
+    assertAuthenticatedContextCurrent(authContext, reason);
+    try {
+      await chrome.tabs.update(tabId, { url: 'about:blank' });
+      assertAuthenticatedContextCurrent(authContext, reason);
+    } catch (fallbackError) {
+      if (isAuthContextCancellation(fallbackError)) {
+        await chrome.tabs.remove(tabId).catch(() => {});
+      }
+      throw fallbackError;
+    }
+  }
+}
+
+async function updateTabForAuth(tabId, updateProperties, authContext, reason) {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  try {
+    const updated = await chrome.tabs.update(tabId, updateProperties);
+    assertAuthenticatedContextCurrent(authContext, reason);
+    return updated;
+  } catch (error) {
+    if (isAuthContextCancellation(error)) {
+      await chrome.tabs.remove(tabId).catch(() => {});
+    }
+    throw error;
+  }
+}
+
+async function removeTabForAuth(tabId, authContext, reason) {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  await chrome.tabs.remove(tabId);
+  assertAuthenticatedContextCurrent(authContext, reason);
+}
+
+function tabLimitTargetMatches(captured, current) {
+  return Number.isInteger(captured?.id)
+    && current?.id === captured.id
+    && Number(current?.windowId) === Number(captured.windowId)
+    && String(current?.url || '') === String(captured.url || '')
+    && String(current?.pendingUrl || '') === String(captured.pendingUrl || '');
+}
+
+async function applyWebSocketTabLimitSetting(message, authContext, options = {}) {
+  if (!Object.prototype.hasOwnProperty.call(message?.settings || {}, 'maxTabsPerStudent')) {
+    return { applied: false, limit: currentMaxTabs, closed: 0 };
+  }
+  const queryTabs = options.queryTabs || ((query) => chrome.tabs.query(query));
+  const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
+  const removeTab = options.removeTab || ((tabId) => chrome.tabs.remove(tabId));
+  const notify = options.notify || ((notification, expectedAuthContext, sourceMessage, messageId) => (
+    notifyTeacherMessageForAuth(notification, expectedAuthContext, sourceMessage, messageId)
+  ));
+
+  // Tab enumeration and destructive enforcement share the authentication
+  // mutation queue with identity adoption. Chrome tab removal is not
+  // abortable, so the remove invocation is the linearization point: a new
+  // identity may reserve its generation, but cannot commit CONFIG/auth state
+  // until all already-authorized A targets have settled and this operation
+  // has observed the retirement fence.
+  return enqueueStudentAuthMutation(async () => {
+    const reason = 'WebSocket tab-limit enforcement';
+    assertAuthenticatedContextCurrent(authContext, reason);
+    assertCurrentStudentBinding(message, reason, { authContext });
+    const parsedLimit = Number(message.settings.maxTabsPerStudent);
+    schoolMaxTabs = Number.isFinite(parsedLimit) && parsedLimit > 0
+      ? Math.min(parsedLimit, 1000)
+      : null;
+    currentMaxTabs = effectiveTabLimit();
+    const appliedLimit = currentMaxTabs;
+    console.log('Applied tab limit from settings:', appliedLimit === null ? 'unlimited' : appliedLimit);
+    if (appliedLimit === null || appliedLimit <= 0) {
+      return { applied: true, limit: appliedLimit, closed: 0 };
+    }
+
+    const tabs = await queryTabs({});
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit query');
+    assertCurrentStudentBinding(message, 'WebSocket tab-limit query', { authContext });
+    if (!Array.isArray(tabs) || tabs.length <= appliedLimit) {
+      return { applied: true, limit: appliedLimit, closed: 0 };
+    }
+
+    const targets = tabs.slice(0, tabs.length - appliedLimit).map((tab) => Object.freeze({
+      id: tab?.id,
+      windowId: tab?.windowId,
+      url: String(tab?.url || ''),
+      pendingUrl: String(tab?.pendingUrl || ''),
+    }));
+    let closed = 0;
+    for (const target of targets) {
+      if (!Number.isInteger(target.id) || target.url.startsWith('chrome://')) continue;
+      try {
+        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit target check');
+        const current = await getTab(target.id);
+        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit target check');
+        assertCurrentStudentBinding(message, 'WebSocket tab-limit target check', { authContext });
+        if (!tabLimitTargetMatches(target, current)) continue;
+        await removeTab(target.id);
+        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
+        assertCurrentStudentBinding(message, 'WebSocket tab-limit close', { authContext });
+        closed += 1;
+      } catch (tabError) {
+        if (isAuthContextCancellation(tabError)) throw tabError;
+        console.warn('Failed to close an excess tab:', safeDiagnosticError(tabError));
+      }
+    }
+
+    if (closed > 0) {
+      await notify({
+        title: 'Tab Limit Enforced',
+        message: `Your teacher has set a limit of ${appliedLimit} tab${appliedLimit === 1 ? '' : 's'}. Extra tabs have been closed.`,
+        priority: 1,
+      }, authContext, message, `tab-limit-${appliedLimit}`);
+      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit notification');
+      assertCurrentStudentBinding(message, 'WebSocket tab-limit notification', { authContext });
+    }
+    return { applied: true, limit: appliedLimit, closed };
   });
 }
 
 // Prevent navigation when screen is locked (domain-based blocking)
-chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-  try {
-  await classroomStateRestorePromise;
-  // Only check main frame navigations
+async function handleBeforeNavigateForPolicy(details) {
   if (details.frameId !== 0) return;
-
-  // Allow chrome:// URLs
-  if (details.url.startsWith('chrome://') || details.url.startsWith('about:')) {
+  let eventAuthContext;
+  try {
+    eventAuthContext = captureAuthenticatedContext('navigation policy event');
+  } catch {
     return;
   }
+  try {
+    await classroomStateRestorePromise;
+    await enqueueStudentAuthMutation(async () => {
+      assertAuthenticatedContextCurrent(eventAuthContext, 'navigation policy event');
+      if (details.url.startsWith('chrome://') || details.url.startsWith('about:')) return;
+      const targetDomain = extractDomain(details.url);
+      if (!targetDomain) return;
 
-  // Block ALL navigation when attention mode is active
-  if (attentionModeActive) {
-    console.log('[Attention Mode] Blocked navigation');
-    enqueueMonitoringEvent('navigation_blocked', {
-      url: details.url,
-      title: '',
-      policySource: 'attention_mode',
-    }).catch(() => {});
-
-    chrome.tabs.goBack(details.tabId).catch(() => {
-      // If can't go back, just stay on current page
-    });
-
-    return;
-  }
-
-  const targetDomain = extractDomain(details.url);
-  if (!targetDomain) return;
-
-  // Clean up expired temporary allowed domains
-  const now = Date.now();
-  if (temporaryAllowedDomains.some((item) => item.expiresAt <= now)) {
-    await checkClassroomStateExpiry();
-  }
-
-  // School policy is authoritative. A teacher temporary allow may bypass a
-  // teacher block, but it must never bypass a school-wide block. Keep this
-  // imperative fallback in the same order as the serialized DNR priorities.
-  if (globalBlockedDomains.length > 0) {
-    const isBlacklisted = globalBlockedDomains.some(blockedDomain => {
-      const normalizedBlocked = blockedDomain.replace(/^www./, '');
-      return targetDomain === normalizedBlocked || targetDomain.endsWith('.' + normalizedBlocked);
-    });
-    
-    if (isBlacklisted) {
-      console.log('[Blacklist] Blocked navigation');
-      enqueueMonitoringEvent('navigation_blocked', {
-        url: details.url,
-        title: '',
-        policySource: 'school',
-      }).catch(() => {});
-      
-      // Go back or close the tab
-      chrome.tabs.goBack(details.tabId).catch(() => {
-        // If can't go back, try to navigate to a safe page
-        chrome.tabs.update(details.tabId, { url: 'about:blank' });
-      });
-      
-      // Show notification
-      safeNotify({
-        title: 'Website Blocked',
-        message: `Access to ${targetDomain} is blocked by your school.`,
-        priority: 2,
-      });
-      return;
-    }
-  }
-
-  // Screen Lock is the foreground teacher control. It permits only its exact
-  // target domain and cannot be widened by a retained temporary unblock or
-  // teacher block-list state. School policy above remains authoritative.
-  if (screenLocked) {
-    if (lockedDomain && isOnSameDomain(details.url, lockedDomain)) return;
-    console.log('[Screen Lock] Blocked navigation');
-    enqueueMonitoringEvent('navigation_blocked', {
-      url: details.url,
-      title: '',
-      policySource: 'screen_lock',
-    }).catch(() => {});
-    if (lockedUrl) {
-      chrome.tabs.update(details.tabId, { url: lockedUrl });
-    } else {
-      chrome.tabs.goBack(details.tabId).catch(() => {
-        chrome.tabs.update(details.tabId, { url: 'about:blank' });
-      });
-    }
-    safeNotify({
-      title: 'Navigation Blocked',
-      message: lockedDomain
-        ? `You can only browse within ${lockedDomain}`
-        : 'Your screen is locked by your teacher.',
-      priority: 2,
-    });
-    return;
-  }
-
-  // Check if domain is temporarily allowed after school policy has had the
-  // opportunity to block it.
-  const isTempAllowed = temporaryAllowedDomains.some(d => {
-    const normalizedAllowed = d.domain.replace(/^www\./, '');
-    return targetDomain === normalizedAllowed || targetDomain.endsWith('.' + normalizedAllowed);
-  });
-
-  if (isTempAllowed) {
-    console.log('[Temp Unblock] Allowing bounded exception');
-    return; // Allow navigation
-  }
-
-  // Check teacher block list (session-based)
-  if (teacherBlockedDomains.length > 0) {
-    const isTeacherBlocked = teacherBlockedDomains.some(blockedDomain => {
-      const normalizedBlocked = blockedDomain.replace(/^www./, '');
-      return targetDomain === normalizedBlocked || targetDomain.endsWith('.' + normalizedBlocked);
-    });
-    
-    if (isTeacherBlocked) {
-      console.log('[Teacher Block List] Blocked navigation');
-      enqueueMonitoringEvent('navigation_blocked', {
-        url: details.url,
-        title: '',
-        policySource: 'teacher',
-      }).catch(() => {});
-      
-      chrome.tabs.goBack(details.tabId).catch(() => {
-        chrome.tabs.update(details.tabId, { url: 'about:blank' });
-      });
-      
-      safeNotify({
-        title: 'Website Blocked',
-        message: `Access to ${targetDomain} is blocked by your teacher.`,
-        priority: 2,
-      });
-      return;
-    }
-  }
-  
-  // With no foreground Screen Lock, the independently retained Flight Path
-  // continues to constrain navigation (subject to temporary allows above).
-  if (allowedDomains.length > 0) {
-    let isAllowed = false;
-    let blockedMessage = '';
-    
-    isAllowed = allowedDomains.some(domain => isOnSameDomain(details.url, domain));
-    blockedMessage = `You can only access: ${allowedDomains.join(', ')}`;
-    
-    if (!isAllowed) {
-      // Redirect back to locked URL or prevent navigation
-      console.log('[Flight Path] Blocked navigation');
-      enqueueMonitoringEvent('navigation_blocked', {
-        url: details.url,
-        title: '',
-        policySource: 'flight_path',
-      }).catch(() => {});
-      
-      // If we have a single locked URL, redirect to it
-      if (lockedUrl) {
-        chrome.tabs.update(details.tabId, { url: lockedUrl });
-      } else {
-        // For scenes without a specific locked URL, just prevent navigation
-        chrome.tabs.goBack(details.tabId).catch(() => {
-          // If can't go back, stay where we are
-        });
+      if (temporaryAllowedDomains.some((item) => item.expiresAt <= Date.now())) {
+        await enqueueClassroomStateOperation(() => checkClassroomStateExpiryNow({
+          authContext: eventAuthContext,
+        }));
+        assertAuthenticatedContextCurrent(eventAuthContext, 'navigation policy expiry');
       }
-      
-      // Show warning notification
-      safeNotify({
-        title: 'Navigation Blocked',
-        message: blockedMessage,
-        priority: 1,
-      });
-      return;
-    }
-  }
+
+      const policy = {
+        attentionModeActive,
+        globalBlockedDomains: [...globalBlockedDomains],
+        screenLocked,
+        lockedDomain,
+        lockedUrl,
+        temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
+        teacherBlockedDomains: [...teacherBlockedDomains],
+        allowedDomains: [...allowedDomains],
+      };
+      let policySource = null;
+      let notification = null;
+      let action = 'back';
+
+      if (policy.attentionModeActive) {
+        policySource = 'attention_mode';
+      } else if (policy.globalBlockedDomains.some((domain) => {
+        const normalized = domain.replace(/^www\./, '');
+        return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
+      })) {
+        policySource = 'school';
+        notification = {
+          title: 'Website Blocked',
+          message: `Access to ${targetDomain} is blocked by your school.`,
+          priority: 2,
+        };
+      } else if (policy.screenLocked) {
+        if (policy.lockedDomain && isOnSameDomain(details.url, policy.lockedDomain)) return;
+        policySource = 'screen_lock';
+        action = policy.lockedUrl ? 'locked_url' : 'back';
+        notification = {
+          title: 'Navigation Blocked',
+          message: policy.lockedDomain
+            ? `You can only browse within ${policy.lockedDomain}`
+            : 'Your screen is locked by your teacher.',
+          priority: 2,
+        };
+      } else {
+        const temporarilyAllowed = policy.temporaryAllowedDomains.some((item) => {
+          const normalized = item.domain.replace(/^www\./, '');
+          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
+        });
+        if (temporarilyAllowed) return;
+        if (policy.teacherBlockedDomains.some((domain) => {
+          const normalized = domain.replace(/^www\./, '');
+          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
+        })) {
+          policySource = 'teacher';
+          notification = {
+            title: 'Website Blocked',
+            message: `Access to ${targetDomain} is blocked by your teacher.`,
+            priority: 2,
+          };
+        } else if (
+          policy.allowedDomains.length > 0
+          && !policy.allowedDomains.some((domain) => isOnSameDomain(details.url, domain))
+        ) {
+          policySource = 'flight_path';
+          action = policy.lockedUrl ? 'locked_url' : 'back';
+          notification = {
+            title: 'Navigation Blocked',
+            message: `You can only access: ${policy.allowedDomains.join(', ')}`,
+            priority: 1,
+          };
+        }
+      }
+
+      if (!policySource) return;
+      await recordNavigationBlockedForAuth(eventAuthContext, details.url, policySource);
+      if (action === 'locked_url') {
+        await updateTabForAuth(
+          details.tabId,
+          { url: policy.lockedUrl },
+          eventAuthContext,
+          'navigation policy redirect',
+        );
+      } else {
+        await goBackOrBlankForAuth(
+          details.tabId,
+          eventAuthContext,
+          'navigation policy back',
+        );
+      }
+      if (notification) {
+        await notifyNavigationBlockedForAuth(
+          eventAuthContext,
+          notification,
+          policySource,
+        );
+      }
+    });
   } catch (error) {
+    if (isAuthContextCancellation(error)) return;
     console.warn('[Service Worker] Navigation handler error:', safeDiagnosticError(error));
   }
-});
+}
+chrome.webNavigation.onBeforeNavigate.addListener(handleBeforeNavigateForPolicy);
 
 // Track navigation commits for instant URL updates (fires immediately when navigation commits)
 chrome.webNavigation.onCommitted.addListener(async (details) => {
+  if (details.frameId !== 0) return;
+  let eventAuthContext;
+  try {
+    eventAuthContext = captureAuthenticatedContext('navigation committed event');
+  } catch {
+    return;
+  }
   try {
     await classroomStateRestorePromise;
-    // Only track main frame navigations
-    if (details.frameId !== 0) return;
+    assertAuthenticatedContextCurrent(eventAuthContext, 'navigation committed event');
     if (isHttpUrl(details.url)) {
       enforceAuthGateForTab(details.tabId).catch(() => {});
     }
@@ -10863,88 +15330,97 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
     // Send immediate heartbeat - this fires the moment navigation commits
     // (before page is loaded, so teacher sees URL change instantly)
+    assertAuthenticatedContextCurrent(eventAuthContext, 'navigation committed event');
     scheduleEventHeartbeat('navigation-committed');
   } catch (error) {
+    if (isAuthContextCancellation(error)) return;
     console.warn('[Service Worker] Navigation committed handler error:', safeDiagnosticError(error));
   }
 });
 
 // Enforce tab limit and screen lock
-chrome.tabs.onCreated.addListener(async (tab) => {
+async function handleCreatedTabForPolicy(tab) {
+  let eventAuthContext;
+  try {
+    eventAuthContext = captureAuthenticatedContext('tab created policy event');
+  } catch {
+    enforceAuthGateForTab(tab).catch(() => {});
+    return;
+  }
   try {
     await classroomStateRestorePromise;
-    enforceAuthGateForTab(tab).catch(() => {});
+    await enqueueStudentAuthMutation(async () => {
+      assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy event');
+      enforceAuthGateForTab(tab).catch(() => {});
+      if (!Number.isInteger(tab?.id)) return;
 
-    // Block new tabs when attention mode is active
-    if (attentionModeActive) {
-      if (tab.id) {
-        enqueueMonitoringEvent('navigation_blocked', {
-          url: tab.pendingUrl || tab.url || '',
-          title: tab.title || '',
-          policySource: 'attention_mode',
-        }).catch(() => {});
-        chrome.tabs.remove(tab.id);
-        console.log('[Attention Mode] Blocked new tab creation');
-      }
-      return;
-    }
-
-    // First check: if screen is locked to a SINGLE domain/URL, prevent opening new tabs entirely
-    // BUT if it's a scene (multiple allowed domains), allow new tabs - navigation will be checked separately
-    if (screenLocked && lockedDomain) {
-      // Single domain lock mode - block all new tabs
-      if (tab.id) {
-        enqueueMonitoringEvent('navigation_blocked', {
-          url: tab.pendingUrl || tab.url || '',
-          title: tab.title || '',
-          policySource: 'screen_lock',
-        }).catch(() => {});
-        chrome.tabs.remove(tab.id);
-
-        let message = `Your screen is locked to ${lockedDomain}. You cannot open new tabs.`;
-
-        safeNotify({
+      const policy = {
+        attentionModeActive,
+        screenLocked,
+        lockedDomain,
+        currentMaxTabs,
+      };
+      let policySource = null;
+      let notification = null;
+      if (policy.attentionModeActive) {
+        policySource = 'attention_mode';
+      } else if (policy.screenLocked && policy.lockedDomain) {
+        policySource = 'screen_lock';
+        notification = {
           title: 'Screen Locked',
-          message: message,
+          message: `Your screen is locked to ${policy.lockedDomain}. You cannot open new tabs.`,
           priority: 2,
-        });
+        };
+      } else if (policy.currentMaxTabs) {
+        const tabs = await chrome.tabs.query({});
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created limit query');
+        if (tabs.length > policy.currentMaxTabs) {
+          policySource = 'tab_limit';
+          notification = {
+            title: 'Tab Limit Reached',
+            message: `You can only have ${policy.currentMaxTabs} tabs open at a time.`,
+            priority: 1,
+          };
+        }
       }
-      return; // Don't check tab limit if screen is locked
-    }
 
-    // For scene mode (allowedDomains.length > 0), allow new tabs
-    // Navigation restrictions will be enforced by onBeforeNavigate listener
-
-    // Second check: enforce tab limit (only if screen is not locked)
-    if (currentMaxTabs) {
-      const tabs = await chrome.tabs.query({});
-      if (tabs.length > currentMaxTabs) {
-        // Close the newly created tab if over limit
-        enqueueMonitoringEvent('navigation_blocked', {
-          url: tab.pendingUrl || tab.url || '',
-          title: tab.title || '',
-          policySource: 'tab_limit',
-        }).catch(() => {});
-        chrome.tabs.remove(tab.id);
-
-        safeNotify({
-          title: 'Tab Limit Reached',
-          message: `You can only have ${currentMaxTabs} tabs open at a time.`,
-          priority: 1,
-        });
+      if (policySource) {
+        await recordNavigationBlockedForAuth(
+          eventAuthContext,
+          tab.pendingUrl || tab.url || '',
+          policySource,
+        );
+        await removeTabForAuth(tab.id, eventAuthContext, 'tab created policy removal');
+        if (notification) {
+          await notifyNavigationBlockedForAuth(
+            eventAuthContext,
+            notification,
+            policySource,
+          );
+        }
+        return;
       }
-    }
-
-    // Refresh tab cache when a new tab is created
-    refreshTabCache();
+      await refreshTabCache(eventAuthContext);
+      assertAuthenticatedContextCurrent(eventAuthContext, 'tab created cache refresh');
+    });
   } catch (error) {
+    if (isAuthContextCancellation(error)) return;
     console.warn('[Service Worker] Tab created handler error:', safeDiagnosticError(error));
   }
-});
+}
+chrome.tabs.onCreated.addListener(handleCreatedTabForPolicy);
 
 // Refresh tab cache when tabs are removed
-chrome.tabs.onRemoved.addListener(() => {
-  refreshTabCache();
+chrome.tabs.onRemoved.addListener((tabId) => {
+  cameraActiveTabs.delete(tabId);
+  cameraActive = cameraActiveTabs.size > 0;
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext('tab removed cache refresh');
+  } catch {
+    return;
+  }
+  refreshTabCache(authContext).catch(() => false);
 });
 
 // ============================================================================
@@ -10954,6 +15430,7 @@ chrome.tabs.onRemoved.addListener(() => {
 // All WebRTC logic moved to offscreen.js which runs in a page context
 
 async function ensureOffscreenDocument() {
+  if (offscreenCloseInFlight) await offscreenCloseInFlight;
   if (await hasOffscreenDocument()) return;
   if (creatingOffscreen) return creatingOffscreen;
 
@@ -10999,24 +15476,44 @@ async function hasOffscreenDocument() {
 }
 
 async function closeOffscreenDocument() {
-  if (await hasOffscreenDocument()) {
-    await chrome.offscreen.closeDocument();
-  }
+  return closeOffscreenDocumentFailPrivate();
+}
+
+function closeOffscreenDocumentFailPrivate() {
+  if (offscreenCloseInFlight) return offscreenCloseInFlight;
   creatingOffscreen = null;
   offscreenReady = false;
+  let closeRequest;
+  try {
+    // Invoke synchronously after the caller's exact-owner check. A replacement
+    // ensureOffscreenDocument observes offscreenCloseInFlight and waits before
+    // creating/authenticating its own proxy.
+    closeRequest = chrome.offscreen?.closeDocument?.();
+  } catch {
+    closeRequest = undefined;
+  }
+  let tracked;
+  tracked = Promise.resolve(closeRequest).catch(() => undefined).finally(() => {
+    if (offscreenCloseInFlight === tracked) offscreenCloseInFlight = null;
+  });
+  offscreenCloseInFlight = tracked;
+  return tracked;
 }
 
 // Send message to offscreen with retry if not ready
-async function sendToOffscreen(message) {
+async function sendToOffscreen(message, options = {}) {
   await ensureOffscreenDocument();
+  options.assertCurrent?.('offscreen document');
   
   // Wait for offscreen to be ready if not yet
   if (!offscreenReady) {
     await new Promise(resolve => setTimeout(resolve, 100));
+    options.assertCurrent?.('offscreen readiness');
   }
   
   let response;
   try {
+    options.assertCurrent?.('offscreen transmission');
     response = await chrome.runtime.sendMessage(message);
   } catch (error) {
     offscreenReady = false;
@@ -11085,15 +15582,34 @@ async function fetchLiveViewIceConfiguration(negotiationId, authContext) {
 }
 
 function liveViewContextFor(authContext, negotiationId, teachingSessionId) {
+  liveViewStartGeneration = Math.max(liveViewStartGeneration + 1, Date.now());
   return Object.freeze({
     negotiationId,
     teachingSessionId,
+    startGeneration: liveViewStartGeneration,
     authContextId: authContext.authContextId,
     authGeneration: authContext.mutationGeneration,
     connectionGeneration: wsConnectionGeneration,
     serverOrigin: authContext.serverOrigin,
     studentSessionId: authContext.studentSessionId,
   });
+}
+
+function reserveLiveViewNegotiation(negotiationId, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'Live View negotiation reservation');
+  const normalizedId = String(negotiationId || '').trim();
+  if (!normalizedId) return false;
+  const scope = authContextProtocolScope(authContext);
+  if (liveViewSeenNegotiationScope !== scope) {
+    liveViewSeenNegotiationScope = scope;
+    liveViewSeenNegotiationIds = new Set();
+  }
+  if (liveViewSeenNegotiationIds.has(normalizedId)) return false;
+  liveViewSeenNegotiationIds.add(normalizedId);
+  if (liveViewSeenNegotiationIds.size > 64) {
+    liveViewSeenNegotiationIds = new Set([...liveViewSeenNegotiationIds].slice(-32));
+  }
+  return true;
 }
 
 function liveViewContextMatches(value, authContext = null) {
@@ -11106,6 +15622,7 @@ function liveViewContextMatches(value, authContext = null) {
     return false;
   }
   return String(value.negotiationId || '') === activeLiveViewContext.negotiationId
+    && Number(value.startGeneration) === activeLiveViewContext.startGeneration
     && String(value.authContextId || '') === activeLiveViewContext.authContextId
     && Number(value.authGeneration) === activeLiveViewContext.authGeneration
     && Number(value.connectionGeneration) === activeLiveViewContext.connectionGeneration
@@ -11114,9 +15631,35 @@ function liveViewContextMatches(value, authContext = null) {
     && currentContext.studentSessionId === activeLiveViewContext.studentSessionId;
 }
 
+function assertLiveViewRequestCurrent(requestContext, authContext, reason = 'Live View request') {
+  assertAuthenticatedContextCurrent(authContext, reason);
+  if (activeLiveViewContext !== requestContext
+    || !liveViewContextMatches(requestContext, authContext)) {
+    const error = new Error('Live View request was replaced by a newer negotiation');
+    error.code = 'LIVE_VIEW_CONTEXT_SUPERSEDED';
+    throw error;
+  }
+  return requestContext;
+}
+
+async function notifyLiveViewErrorForAuth(authContext, requestContext, reason = 'capture') {
+  assertLiveViewRequestCurrent(requestContext, authContext, 'Live View error notification');
+  await notifyTeacherMessageForAuth({
+    title: 'Screen Sharing Error',
+    // Never surface the offscreen/browser error body. It can contain page,
+    // device, or media details and is not part of the user-facing allowlist.
+    message: 'Unable to start the requested screen share.',
+    priority: 1,
+  }, authContext, browserPolicyEnvelopeForAuth(authContext), (
+    `live-view-${requestContext.negotiationId}-${requestContext.startGeneration}-${reason}`
+  ));
+  assertLiveViewRequestCurrent(requestContext, authContext, 'Live View error notification');
+}
+
 function liveViewOffscreenIdentity(context = activeLiveViewContext) {
   return context ? {
     negotiationId: context.negotiationId,
+    startGeneration: context.startGeneration,
     authContextId: context.authContextId,
     authGeneration: context.authGeneration,
     connectionGeneration: context.connectionGeneration,
@@ -11199,6 +15742,7 @@ async function handleScreenShareRequest(
 ) {
   let authContext;
   let requestContext = null;
+  let startTransmissionAttempted = false;
   try {
     authContext = captureAuthenticatedContext('Live View start');
     requestContext = activeLiveViewContext;
@@ -11206,15 +15750,14 @@ async function handleScreenShareRequest(
       || negotiationId !== activeLiveViewNegotiationId
       || teachingSessionId !== activeLiveViewTeachingSessionId
       || !liveViewContextMatches(requestContext, authContext)) return;
-    console.log('[WebRTC] Teacher requested screen share, mode:', mode);
+    console.log('[WebRTC] Teacher requested screen share, mode:', safeDiagnosticLabel(mode));
 
     const iceConfiguration = await fetchLiveViewIceConfiguration(negotiationId, authContext);
-    assertAuthenticatedContextCurrent(authContext, 'Live View ICE configuration');
-    if (!liveViewContextMatches(requestContext, authContext)) return;
+    assertLiveViewRequestCurrent(requestContext, authContext, 'Live View ICE configuration');
 
     // Ensure offscreen document exists
     await ensureOffscreenDocument();
-    assertAuthenticatedContextCurrent(authContext, 'Live View offscreen setup');
+    assertLiveViewRequestCurrent(requestContext, authContext, 'Live View offscreen setup');
 
     // MV3: Get a stream ID from the service worker via tabCapture.getMediaStreamId
     // This is the correct MV3 approach - tabCapture.capture() doesn't work in offscreen docs
@@ -11223,21 +15766,25 @@ async function handleScreenShareRequest(
     if (mode === 'auto' || mode === 'tab') {
       try {
         const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        assertAuthenticatedContextCurrent(authContext, 'Live View active tab');
+        assertLiveViewRequestCurrent(requestContext, authContext, 'Live View active tab');
         if (activeTab?.id) {
           // Try without consumerTabId first (for offscreen document consumption)
           try {
             streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id });
-            assertAuthenticatedContextCurrent(authContext, 'Live View stream id');
+            assertLiveViewRequestCurrent(requestContext, authContext, 'Live View stream id');
             console.log('[WebRTC] Got tab capture stream ID (method 1)');
           } catch (e1) {
+            if (e1?.code === 'LIVE_VIEW_CONTEXT_SUPERSEDED'
+              || isAuthContextCancellation(e1)) throw e1;
             console.info('[WebRTC] Method 1 failed; trying without targetTabId');
             // Some Chrome versions need no targetTabId for offscreen docs
             try {
               streamId = await chrome.tabCapture.getMediaStreamId({});
-              assertAuthenticatedContextCurrent(authContext, 'Live View stream id');
+              assertLiveViewRequestCurrent(requestContext, authContext, 'Live View stream id');
               console.log('[WebRTC] Got tab capture stream ID (method 2, no target)');
             } catch (e2) {
+              if (e2?.code === 'LIVE_VIEW_CONTEXT_SUPERSEDED'
+                || isAuthContextCancellation(e2)) throw e2;
               console.info('[WebRTC] Method 2 also failed:', safeDiagnosticError(e2));
             }
           }
@@ -11245,11 +15792,15 @@ async function handleScreenShareRequest(
           console.info('[WebRTC] No active tab found for tab capture');
         }
       } catch (tabErr) {
+        if (tabErr?.code === 'LIVE_VIEW_CONTEXT_SUPERSEDED'
+          || isAuthContextCancellation(tabErr)) throw tabErr;
         console.info('[WebRTC] tabCapture.getMediaStreamId failed:', safeDiagnosticError(tabErr));
       }
     }
 
     // Tell offscreen to start capture with the streamId (if available)
+    assertLiveViewRequestCurrent(requestContext, authContext, 'Live View start transmission');
+    startTransmissionAttempted = true;
     const result = await sendToOffscreen({
       type: 'START_SHARE',
       mode: mode,
@@ -11261,28 +15812,46 @@ async function handleScreenShareRequest(
       iceServers: iceConfiguration.iceServers,
       iceConfigurationExpiresAt: iceConfiguration.expiresAt,
       ...liveViewOffscreenIdentity(requestContext),
+    }, {
+      assertCurrent: (phase) => assertLiveViewRequestCurrent(
+        requestContext,
+        authContext,
+        `Live View ${phase}`,
+      ),
     });
-    assertAuthenticatedContextCurrent(authContext, 'Live View start response');
+    assertLiveViewRequestCurrent(requestContext, authContext, 'Live View start response');
 
     if (!result?.success) {
-      await stopScreenShare({
-        reason: result?.status || 'capture-start-failed',
-        expectedContext: requestContext,
-      });
       // Check if this is an expected failure (user denied, etc.)
       if (result?.status === 'user-denied') {
+        await stopScreenShare({
+          reason: result.status,
+          expectedContext: requestContext,
+        });
         console.info('[WebRTC] User denied screen share (expected behavior)');
         return;
       } else if (result?.status === 'tab-capture-unavailable') {
+        await stopScreenShare({
+          reason: result.status,
+          expectedContext: requestContext,
+        });
         console.info('[WebRTC] Silent tab capture not available (expected on unmanaged devices)');
         return;
       } else {
-        // Unexpected error
         console.warn('[WebRTC] Unexpected screen share error');
-        safeNotify({
-          title: 'Screen Sharing Error',
-          message: 'Unable to start the requested screen share.',
+        let notificationError = null;
+        try {
+          await notifyLiveViewErrorForAuth(authContext, requestContext, 'start-result');
+        } catch (error) {
+          notificationError = error;
+        }
+        await stopScreenShare({
+          reason: result?.status || 'capture-start-failed',
+          expectedContext: requestContext,
         });
+        if (notificationError && !isAuthContextCancellation(notificationError)) {
+          console.warn('[WebRTC] Screen share error notification unavailable:', safeDiagnosticError(notificationError));
+        }
         return;
       }
     }
@@ -11298,6 +15867,30 @@ async function handleScreenShareRequest(
     console.log('[WebRTC] Screen capture initiated in offscreen document');
 
   } catch (error) {
+    if (error?.code === 'LIVE_VIEW_CONTEXT_SUPERSEDED'
+      || isAuthContextCancellation(error)) {
+      if (startTransmissionAttempted && requestContext) {
+        // START_SHARE may have reached offscreen before the post-response
+        // authority fence observed retirement. Retire only that exact start;
+        // an offscreen replacement rejects the stale tuple and remains intact.
+        await sendToOffscreen({
+          type: 'STOP_SHARE',
+          ...liveViewOffscreenIdentity(requestContext),
+        }).catch(() => {});
+      }
+      return;
+    }
+    // Bind the user-visible error to the exact negotiation before cleanup
+    // clears activeLiveViewContext. If authority changes during notification
+    // creation, the auth-bound notification helper removes the stale item.
+    let notificationError = null;
+    if (authContext && requestContext && liveViewContextMatches(requestContext, authContext)) {
+      try {
+        await notifyLiveViewErrorForAuth(authContext, requestContext, 'start-exception');
+      } catch (notifyError) {
+        notificationError = notifyError;
+      }
+    }
     await stopScreenShare({
       reason: 'capture-start-error',
       notifyServer: !isAuthContextCancellation(error),
@@ -11305,16 +15898,17 @@ async function handleScreenShareRequest(
     });
     // Only unexpected errors reach here
     console.warn('[WebRTC] Unexpected screen share request error:', safeDiagnosticError(error));
-    safeNotify({
-      title: 'Screen Sharing Error',
-      message: 'Unable to start the requested screen share.',
-    });
+    if (notificationError && !isAuthContextCancellation(notificationError)) {
+      console.warn('[WebRTC] Screen share error notification unavailable:', safeDiagnosticError(notificationError));
+    }
   }
 }
 
 // WebRTC: Handle stop screen share request from teacher
 async function handleStopScreenShare(negotiationId = null) {
   const expectedContext = activeLiveViewContext;
+  const expectedTransportIdentity = wsTransportIdentity;
+  let stopFailed = false;
   try {
     const authContext = captureAuthenticatedContext('Live View stop');
     if (!negotiationId
@@ -11343,12 +15937,25 @@ async function handleStopScreenShare(negotiationId = null) {
     }
     
   } catch (error) {
+    stopFailed = true;
     console.warn('[WebRTC] Error stopping screen share:', safeDiagnosticError(error));
   } finally {
     if (activeLiveViewContext === expectedContext) {
-      activeLiveViewNegotiationId = null;
-      activeLiveViewTeachingSessionId = null;
-      activeLiveViewContext = null;
+      if (
+        stopFailed
+        && expectedContext
+        && wsTransportIdentity === expectedTransportIdentity
+      ) {
+        // A rejected STOP is not proof that offscreen released its MediaStream.
+        // Close the captured owner's document fail-private; replacement setup
+        // observes the close flight and cannot be killed by this cleanup.
+        await closeOffscreenDocumentFailPrivate();
+      }
+      if (activeLiveViewContext === expectedContext) {
+        activeLiveViewNegotiationId = null;
+        activeLiveViewTeachingSessionId = null;
+        activeLiveViewContext = null;
+      }
     }
   }
 }
@@ -11425,7 +16032,9 @@ async function handleIceCandidate(candidate, negotiationId, restartGeneration = 
 // WebRTC: Stop screen sharing (cleanup in offscreen)
 async function stopScreenShare(options = {}) {
   const expectedContext = options.expectedContext || activeLiveViewContext;
+  const expectedTransportIdentity = wsTransportIdentity;
   const negotiationId = expectedContext?.negotiationId || activeLiveViewNegotiationId || null;
+  let stopFailed = false;
   if (negotiationId
     && activeLiveViewContext === expectedContext
     && options.notifyServer !== false) {
@@ -11444,16 +16053,31 @@ async function stopScreenShare(options = {}) {
     });
     // The offscreen document also owns the durable student WebSocket. Keep it
     // alive while monitoring is ACTIVE/IDLE; OFF/sign-out performs the close.
-    if (trackingState === TRACKING_STATES.OFF && activeLiveViewContext === expectedContext) {
+    if (
+      trackingState === TRACKING_STATES.OFF
+      && activeLiveViewContext === expectedContext
+      && wsTransportIdentity === expectedTransportIdentity
+    ) {
       await closeOffscreenDocument();
     }
   } catch (error) {
+    stopFailed = true;
     console.warn('[WebRTC] Error stopping screen share:', safeDiagnosticError(error));
   } finally {
     if (!expectedContext || activeLiveViewContext === expectedContext) {
-      activeLiveViewNegotiationId = null;
-      activeLiveViewTeachingSessionId = null;
-      activeLiveViewContext = null;
+      if (
+        stopFailed
+        && expectedContext
+        && activeLiveViewContext === expectedContext
+        && wsTransportIdentity === expectedTransportIdentity
+      ) {
+        await closeOffscreenDocumentFailPrivate();
+      }
+      if (!expectedContext || activeLiveViewContext === expectedContext) {
+        activeLiveViewNegotiationId = null;
+        activeLiveViewTeachingSessionId = null;
+        activeLiveViewContext = null;
+      }
     }
   }
 }
@@ -11523,14 +16147,34 @@ async function handleOffscreenMessage(message) {
   }
 
   if (message.type === 'CAPTURE_ERROR') {
-    if (!liveViewContextMatches(message)) return { success: true, ignored: true };
-    safeNotify({
-      title: 'Screen Sharing Error',
-      message: message.error || 'Failed to capture screen',
-    });
-    await stopScreenShare();
-    setObservedState(false, 'capture-error');
-    return { success: true };
+    const requestContext = activeLiveViewContext;
+    let authContext;
+    try {
+      authContext = captureAuthenticatedContext('Live View capture error');
+      if (!requestContext || !liveViewContextMatches(message, authContext)) {
+        return { success: true, ignored: true };
+      }
+      setObservedState(false, 'capture-error');
+      let notificationError = null;
+      try {
+        await notifyLiveViewErrorForAuth(authContext, requestContext, 'capture-error');
+      } catch (error) {
+        notificationError = error;
+      }
+      await stopScreenShare({
+        reason: 'capture-error',
+        expectedContext: requestContext,
+      });
+      if (notificationError && !isAuthContextCancellation(notificationError)) {
+        console.warn('[WebRTC] Capture error notification unavailable:', safeDiagnosticError(notificationError));
+      }
+      return { success: true, ignored: Boolean(notificationError && isAuthContextCancellation(notificationError)) };
+    } catch (error) {
+      if (isAuthContextCancellation(error) || error?.code === 'LIVE_VIEW_CONTEXT_SUPERSEDED') {
+        return { success: true, ignored: true };
+      }
+      throw error;
+    }
   }
 
   if (message.type === 'LIVE_VIEW_EXPIRED') {
@@ -11573,7 +16217,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
-  console.log('[Service Worker] Message from offscreen:', message.type);
+  console.log('[Service Worker] Message from offscreen:', safeDiagnosticLabel(message.type));
 
   handleOffscreenMessage(message)
     .then(sendResponse)
@@ -11656,6 +16300,37 @@ async function recoverOffscreenWebSocketStatus(authContext) {
   if (Number.isSafeInteger(generation) && generation > wsConnectionGeneration) {
     wsConnectionGeneration = generation;
   }
+  // An offscreen MediaStream can outlive the MV3 service worker that created
+  // it. The restarted worker has no safely reauthorized negotiation state, so
+  // fail private and stop the exact surviving capture before adopting the
+  // otherwise valid socket.
+  if (status.liveViewIdentity) {
+    const liveIdentity = status.liveViewIdentity;
+    const liveIdentityMatchesSocket = String(liveIdentity.authContextId || '')
+        === authContext.authContextId
+      && Number(liveIdentity.connectionGeneration) === generation
+      && normalizedServerOrigin(liveIdentity.serverOrigin) === authContext.serverOrigin;
+    if (!liveIdentityMatchesSocket) {
+      await closeReportedOffscreenWebSocket(status);
+      return false;
+    }
+    await sendToOffscreen({
+      type: 'STOP_SHARE',
+      ...liveIdentity,
+    });
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket recovery');
+    // Establish a fresh proxy generation after stopping an orphaned stream.
+    // This is the durable worker-epoch boundary: delayed START_SHARE frames
+    // from the retired worker no longer match the authenticated proxy even if
+    // its local start counter or system clock was higher.
+    await closeReportedOffscreenWebSocket(status);
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket recovery');
+    wsConnected = false;
+    wsTransportConnected = false;
+    wsAuthenticatedGeneration = 0;
+    wsTransportIdentity = null;
+    return false;
+  }
   wsTransportIdentity = {
     connectionGeneration: wsConnectionGeneration,
     authContextId: authContext.authContextId,
@@ -11677,16 +16352,32 @@ async function recoverOffscreenWebSocketStatus(authContext) {
 }
 
 async function connectWebSocket() {
-  if (wsConnectInFlight) return wsConnectInFlight;
-  wsConnectInFlight = connectWebSocketNow();
+  let requestedAuthContext = null;
   try {
-    return await wsConnectInFlight;
+    requestedAuthContext = captureAuthenticatedContext('WebSocket connect reservation');
+  } catch {
+    // connectWebSocketNow retains the established signed-out/off-hours path.
+  }
+  const requestedIdentity = requestedAuthContext
+    ? authContextProtocolScope(requestedAuthContext)
+    : 'signed-out';
+  if (wsConnectInFlight && wsConnectInFlightIdentity === requestedIdentity) {
+    return wsConnectInFlight;
+  }
+  const pending = connectWebSocketNow(requestedAuthContext);
+  wsConnectInFlight = pending;
+  wsConnectInFlightIdentity = requestedIdentity;
+  try {
+    return await pending;
   } finally {
-    wsConnectInFlight = null;
+    if (wsConnectInFlight === pending) {
+      wsConnectInFlight = null;
+      wsConnectInFlightIdentity = null;
+    }
   }
 }
 
-async function connectWebSocketNow() {
+async function connectWebSocketNow(requestedAuthContext = null) {
   if (trackingState === TRACKING_STATES.OFF) {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
@@ -11701,7 +16392,8 @@ async function connectWebSocketNow() {
   }
   let authContext;
   try {
-    authContext = captureAuthenticatedContext('WebSocket connect');
+    authContext = requestedAuthContext || captureAuthenticatedContext('WebSocket connect');
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
   } catch (error) {
     if (isAuthContextCancellation(error)) return false;
     throw error;
@@ -11828,15 +16520,36 @@ async function processWsEvent(event, data, generation, authContext) {
     console.warn('WebSocket connection issue');
     scheduleWsReconnect();
   } else if (event === 'close') {
+    const closingTransportIdentity = wsTransportIdentity;
+    const closingLiveViewContext = activeLiveViewContext;
+    const closingLiveViewNegotiationId = activeLiveViewNegotiationId;
+    const closingLiveViewTeachingSessionId = activeLiveViewTeachingSessionId;
+    const sourceMessage = browserPolicyEnvelopeForAuth(authContext);
     console.log('WebSocket disconnected');
     wsConnected = false;
     wsTransportConnected = false;
     wsAuthenticatedGeneration = 0;
-    wsTransportIdentity = null;
+    if (wsTransportIdentity === closingTransportIdentity) wsTransportIdentity = null;
     setObservedState(false, 'ws-closed');
-    await cleanupTeacherBroadcast('ws-closed', { notifyTeacher: false });
-    if (activeLiveViewNegotiationId) {
-      await stopScreenShare({ notifyServer: false, reason: 'student-websocket-closed' });
+    await cleanupTeacherBroadcast('ws-closed', {
+      notifyTeacher: false,
+      authContext,
+      sourceMessage,
+    });
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket close cleanup');
+    if (generation !== wsConnectionGeneration) return { ignored: true };
+    if (
+      closingLiveViewNegotiationId
+      && activeLiveViewContext === closingLiveViewContext
+      && activeLiveViewNegotiationId === closingLiveViewNegotiationId
+      && activeLiveViewTeachingSessionId === closingLiveViewTeachingSessionId
+    ) {
+      await stopScreenShare({
+        notifyServer: false,
+        reason: 'student-websocket-closed',
+        expectedContext: closingLiveViewContext,
+      });
+      assertAuthenticatedContextCurrent(authContext, 'WebSocket close screen-share cleanup');
     }
     scheduleWsReconnect();
   } else if (event === 'message') {
@@ -11856,7 +16569,7 @@ async function handleWsMessage(
       const authContext = expectedAuthContext || captureAuthenticatedContext('WebSocket message');
       assertAuthenticatedContextCurrent(authContext, 'WebSocket message');
       const message = JSON.parse(rawData);
-      console.log('[WebSocket] Received frame:', String(message?.type || 'unknown').slice(0, 80));
+      console.log('[WebSocket] Received frame:', safeDiagnosticLabel(message?.type));
 
       if (message.type === 'command-ack-receipt') {
         assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
@@ -11891,6 +16604,7 @@ async function handleWsMessage(
       // Handle authentication success with settings
       if (message.type === 'auth-success') {
         console.log('WebSocket authenticated successfully');
+        const protocolPolicyGeneration = reserveProtocolPolicyRequestGeneration();
         try {
           if (
             wsAuthenticatedResponseGuard?.authContext?.authContextId !== authContext.authContextId
@@ -11903,15 +16617,16 @@ async function handleWsMessage(
             : null;
           await adoptAuthenticatedStudentBinding(message, 'websocket auth', responseGuard);
           assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication');
-          adoptNegotiatedProtocolState(message, authContext);
-          if (Object.prototype.hasOwnProperty.call(message, 'screenshotPolicy')) {
-            adoptScreenshotPolicy(message.screenshotPolicy, authContext);
-          }
+          adoptProtocolAndScreenshotPolicy(message, authContext, {
+            requestGeneration: protocolPolicyGeneration,
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+          });
         } catch (error) {
           console.warn('[WebSocket] Exact student binding was rejected:', safeDiagnosticError(error));
           wsConnected = false;
           wsAuthenticatedGeneration = 0;
-          await disconnectWebSocket();
+          await disconnectWebSocket({ authContext });
           return;
         }
         wsTransportConnected = true;
@@ -11924,49 +16639,14 @@ async function handleWsMessage(
         await flushChatAckOutbox().catch(() => {});
         assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication chat ACK flush');
         
-        // Always update maxTabsPerStudent setting (including null for unlimited)
-        if (message.settings && message.settings.hasOwnProperty('maxTabsPerStudent')) {
-          const newLimit = message.settings.maxTabsPerStudent;
-          
-          // Update currentMaxTabs (null or non-positive means unlimited)
-          // Treat 0 and negative as unlimited by converting to null
-          schoolMaxTabs = (newLimit !== null && newLimit > 0) ? Math.min(Number(newLimit), 1000) : null;
-          currentMaxTabs = effectiveTabLimit();
-          console.log('Applied tab limit from settings:', currentMaxTabs === null ? 'unlimited' : currentMaxTabs);
-          
-          // Immediately enforce the limit if set (null or non-positive means no limit)
-          if (currentMaxTabs !== null && currentMaxTabs > 0) {
-            try {
-              const tabs = await chrome.tabs.query({});
-              assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit query');
-              if (tabs.length > currentMaxTabs) {
-                // Close oldest tabs first (keep most recent)
-                const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
-                for (const tab of tabsToClose) {
-                  try {
-                    // Only close if it's not a protected chrome:// URL and has a valid id
-                    if (tab.id && !tab.url?.startsWith('chrome://')) {
-                      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
-                      await chrome.tabs.remove(tab.id);
-                      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
-                    }
-                  } catch (tabError) {
-                    if (isAuthContextCancellation(tabError)) throw tabError;
-                    console.warn('Failed to close an excess tab:', safeDiagnosticError(tabError));
-                    // Continue closing other tabs even if one fails
-                  }
-                }
-
-                safeNotify({
-                  title: 'Tab Limit Enforced',
-                  message: `Your teacher has set a limit of ${currentMaxTabs} tab${currentMaxTabs === 1 ? '' : 's'}. Extra tabs have been closed.`,
-                  priority: 1,
-                });
-              }
-            } catch (error) {
-              if (isAuthContextCancellation(error)) throw error;
-              console.warn('Error enforcing tab limit:', safeDiagnosticError(error));
-            }
+        // Always update maxTabsPerStudent (including null for unlimited), but
+        // serialize destructive enforcement with authentication adoption.
+        if (Object.prototype.hasOwnProperty.call(message.settings || {}, 'maxTabsPerStudent')) {
+          try {
+            await applyWebSocketTabLimitSetting(message, authContext);
+          } catch (error) {
+            if (isAuthContextCancellation(error)) throw error;
+            console.warn('Error enforcing tab limit:', safeDiagnosticError(error));
           }
         }
 
@@ -11977,9 +16657,10 @@ async function handleWsMessage(
 
           // Apply blacklist rules and persist to storage
           try {
-            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
-            assertAuthenticatedContextCurrent(authContext, 'WebSocket blacklist rules');
-            await chrome.storage.local.set({ globalBlockedDomains });
+            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains, {
+              authContext,
+              sourceMessage: message,
+            });
             assertAuthenticatedContextCurrent(authContext, 'WebSocket blacklist persistence');
             console.log('[Blacklist] Persisted to storage');
           } catch (error) {
@@ -12018,7 +16699,11 @@ async function handleWsMessage(
         } else {
           const snapshot = message.state || message.snapshot;
           if (!snapshot) return;
-          await applyClassroomState(snapshot, { reason: 'websocket_reconcile' }).catch((error) => {
+          await applyClassroomStateFromAuthResponse(
+            { ...message, classroomState: snapshot },
+            'websocket_reconcile',
+            { authContext },
+          ).catch((error) => {
             console.warn('[Classroom State] WebSocket snapshot failed:', safeDiagnosticError(error));
           });
         }
@@ -12027,7 +16712,7 @@ async function handleWsMessage(
       if (message.type === 'fab-state-sync' || message.type === 'fab-state') {
         if (!acceptsCurrentStudentBinding(message, 'FAB state')) return;
         const fabState = message.fabState || message.state || message.data || message;
-        await applyFabSettings(fabState).catch((error) => {
+        await applyFabSettings(fabState, { authContext, authorityEnvelope: message }).catch((error) => {
           console.warn('[FAB] WebSocket snapshot failed:', safeDiagnosticError(error));
         });
       }
@@ -12043,7 +16728,7 @@ async function handleWsMessage(
           await applyFabSettings({
             ...authoritativeFabState,
             reason: authoritativeFabState.reason || 'session-ended',
-          }).catch((error) => {
+          }, { authContext, authorityEnvelope: message }).catch((error) => {
             console.warn('[FAB] Session-end snapshot failed:', safeDiagnosticError(error));
           });
         } else if (!endedSessionId || activeSessionIds.includes(endedSessionId)) {
@@ -12063,7 +16748,7 @@ async function handleWsMessage(
             handRaisingEnabled: remainingSessionIds.length > 0 && currentFabState?.handRaisingEnabled === true,
             handRaised: false,
             reason: 'session-ended',
-          }).catch((error) => {
+          }, { authContext, authorityEnvelope: message }).catch((error) => {
             console.warn('[FAB] Session-end snapshot failed:', safeDiagnosticError(error));
           });
         }
@@ -12071,22 +16756,27 @@ async function handleWsMessage(
 
       // Handle global blacklist updates from server
       if (message.type === 'update-global-blacklist') {
+        if (!acceptsCurrentStudentBinding(message, 'school block list update', { authContext })) return;
         const receivedGlobalBlockedDomains = message.blockedDomains || [];
         console.log('[Blacklist] Update received from server');
         
         // Apply updated blacklist rules and persist to storage
         try {
-          await updateGlobalBlacklistRules(receivedGlobalBlockedDomains);
-          await chrome.storage.local.set({ globalBlockedDomains });
+          await updateGlobalBlacklistRules(receivedGlobalBlockedDomains, {
+            authContext,
+            sourceMessage: message,
+          });
+          assertAuthenticatedContextCurrent(authContext, 'school block list update persistence');
           console.log('[Blacklist] Persisted updated blacklist to storage');
 
           // Notify user if blacklist was updated
           if (globalBlockedDomains.length > 0) {
-            safeNotify({
+            await notifyTeacherMessageForAuth({
               title: 'Website Restrictions Updated',
               message: `Your school has blocked access to: ${globalBlockedDomains.slice(0, 3).join(', ')}${globalBlockedDomains.length > 3 ? '...' : ''}`,
               priority: 1,
-            });
+            }, authContext, message, `school-block-list-${Date.now()}`);
+            assertAuthenticatedContextCurrent(authContext, 'school block list update notification');
           }
         } catch (error) {
           console.warn('[Blacklist] Error applying updated rules:', safeDiagnosticError(error));
@@ -12110,11 +16800,47 @@ async function handleWsMessage(
           && !currentClassroomState?.supervisionContextId
         );
         if (authorityMatches) {
+          if (!reserveLiveViewNegotiation(negotiationId, authContext)) {
+            await wsSend({
+              type: 'stop-share',
+              to: 'teacher',
+              negotiationId,
+              reason: 'duplicate-live-view-negotiation',
+            }, authContext);
+            return;
+          }
           if (
             activeLiveViewNegotiationId
             && activeLiveViewNegotiationId !== negotiationId
           ) {
-            await stopScreenShare({ reason: 'live-view-replaced' });
+            const replacedContext = activeLiveViewContext;
+            await stopScreenShare({
+              reason: 'live-view-replaced',
+              expectedContext: replacedContext,
+            });
+          }
+          assertAuthenticatedContextCurrent(authContext, 'Live View replacement');
+          if (
+            connectionGeneration !== wsConnectionGeneration
+            || !wsIdentityMatchesContext(wsTransportIdentity, authContext)
+          ) {
+            throw authContextSuperseded('Live View replacement transport');
+          }
+          const currentBinding = assertCurrentStudentBinding(
+            message,
+            'Live View replacement',
+            { authContext },
+          );
+          assertBindingMatchesAuthContext(
+            currentBinding,
+            authContext,
+            'Live View replacement',
+          );
+          if (
+            currentClassroomState?.teachingSessionId !== teachingSessionId
+            || currentClassroomState?.supervisionContextId
+          ) {
+            throw authContextSuperseded('Live View replacement classroom authority');
           }
           activeLiveViewNegotiationId = negotiationId;
           activeLiveViewTeachingSessionId = teachingSessionId;
@@ -12182,14 +16908,13 @@ async function handleWsMessage(
       if (message.type === 'ping') {
         if (!acceptsCurrentStudentBinding(message, 'teacher notification')) return;
         const { message: pingMessage } = message.data;
-        
-        // Show browser notification
-        safeNotify({
+        await notifyTeacherMessageForAuth({
           title: 'Teacher Notification',
           message: pingMessage || 'Your teacher is requesting your attention',
           priority: 2,
           requireInteraction: true, // Keeps notification visible until user dismisses
-        });
+        }, authContext, message, message._msgId || message.messageId || 'teacher-ping');
+        assertAuthenticatedContextCurrent(authContext, 'teacher notification');
         
         // Also play a sound (beep)
         // Note: Service workers cannot play audio directly, but the notification will make a sound
@@ -12199,7 +16924,10 @@ async function handleWsMessage(
       if (message.type === 'remote-control') {
         // Binding validation deliberately precedes deduplication. A stale or
         // cross-target frame must never poison the current student's dedup set.
-        if (!acceptsCurrentStudentBinding(message, 'remote-control command')) return;
+        if (!acceptsCurrentStudentBinding(message, 'remote-control command', {
+          authContext,
+          requireFullAuthority: exactTabCloseV2AuthorityRequired(message.command, authContext),
+        })) return;
         const msgId = message._msgId;
         if (msgId) {
           if (recentMsgIds.has(msgId)) {
@@ -12216,14 +16944,14 @@ async function handleWsMessage(
       
       // Handle chat messages (Phase 2)
       if (message.type === 'chat') {
-        await handleChatMessage(message);
+        await handleChatMessage(message, { authContext });
       }
 
       // Handle teacher reply messages — send to chat thread
       // A storage-backed, identity-bound ledger deduplicates local + Redis
       // delivery as well as later heartbeat inbox retries across worker restarts.
       if (message.type === 'teacher-message') {
-        await handleDurableTeacherMessage(message).catch((error) => {
+        await handleDurableTeacherMessage(message, { authContext }).catch((error) => {
           console.warn('Teacher message delivery failed:', safeDiagnosticError(error));
         });
       }
@@ -12231,7 +16959,7 @@ async function handleWsMessage(
       // Handle teacher closing the chat
       // Dedup: local + Redis both deliver the same message
       if (message.type === 'chat-closed') {
-        if (!acceptsCurrentStudentBinding(message, 'chat close')) return;
+        if (!acceptsCurrentStudentBinding(message, 'chat close', { authContext })) return;
         if (!messageMatchesActiveFabSession(message)) {
           console.warn('[FAB] Ignoring chat close for an inactive teaching session');
           return;
@@ -12240,17 +16968,23 @@ async function handleWsMessage(
         if (!recentMsgIds.has(dedupKey)) {
           recentMsgIds.add(dedupKey);
           setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
-          broadcastToAllTabs('chat-closed', {
-            sessionId: message.sessionId,
-            studentId: message.studentId,
-          });
+          try {
+            await broadcastToAllTabsForAuth('chat-closed', {
+              sessionId: message.sessionId,
+              studentId: message.studentId,
+            }, authContext, message);
+            assertAuthenticatedContextCurrent(authContext, 'chat close broadcast');
+          } catch (error) {
+            recentMsgIds.delete(dedupKey);
+            throw error;
+          }
         }
       }
 
       // Handle check-in requests (Phase 3)
       if (message.type === 'check-in-request') {
-        if (!acceptsCurrentStudentBinding(message, 'check-in request')) return;
-        await handleCheckInRequest(message);
+        if (!acceptsCurrentStudentBinding(message, 'check-in request', { authContext })) return;
+        await handleCheckInRequest(message, { authContext });
       }
 
       // ====================================
@@ -12259,31 +16993,31 @@ async function handleWsMessage(
 
       // Teacher started broadcasting - request to join
       if (message.type === 'teacher-broadcast-start') {
-        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast start')) return;
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast start', { authContext })) return;
         console.log('[Broadcast] Teacher started broadcasting, requesting to join');
-        await handleBroadcastStart(message);
+        await handleBroadcastStart(message, authContext);
       }
 
       // Teacher stopped broadcasting
       if (message.type === 'teacher-broadcast-stop') {
-        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast stop')) return;
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast stop', { authContext })) return;
         console.log('[Broadcast] Teacher stopped broadcasting');
-        await handleBroadcastStop();
+        await handleBroadcastStop(message, authContext);
       }
 
       // Received broadcast offer from teacher
       if (message.type === 'broadcast-offer') {
-        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast offer')) return;
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast offer', { authContext })) return;
         console.log('[Broadcast] Received offer from teacher');
-        await handleBroadcastOffer(message.sdp);
+        await handleBroadcastOffer(message, authContext);
       }
 
       // Received ICE candidate for broadcast
       if (message.type === 'broadcast-ice') {
-        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast ICE')) return;
+        if (!acceptsCurrentStudentBinding(message, 'teacher broadcast ICE', { authContext })) return;
         console.log('[Broadcast] Received ICE candidate from teacher');
         if (message.candidate) {
-          handleBroadcastIce(message.candidate);
+          handleBroadcastIce(message, authContext);
         }
       }
     } catch (error) {
@@ -12297,12 +17031,25 @@ async function handleWsMessage(
 
 // Tab change listener - send immediate heartbeat when user switches tabs
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  let navigationAuthContext = null;
+  try {
+    navigationAuthContext = captureAuthenticatedContext('tab activation');
+  } catch {
+    // Auth-gate enforcement still runs below for configured signed-out tabs.
+  }
   await classroomStateRestorePromise;
   enforceAuthGateForTab(activeInfo.tabId).catch(() => {});
+  if (!navigationAuthContext) return;
+  try {
+    assertAuthenticatedContextCurrent(navigationAuthContext, 'tab activation');
+  } catch {
+    return;
+  }
   // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
   if (trackingState === TRACKING_STATES.OFF) return;
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
+    assertAuthenticatedContextCurrent(navigationAuthContext, 'tab activation');
     queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
     // Send immediate heartbeat to update teacher dashboard quickly
     scheduleEventHeartbeat('tab-activated');
@@ -12313,11 +17060,19 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  let navigationAuthContext = null;
+  try {
+    navigationAuthContext = captureAuthenticatedContext('tab update');
+  } catch {
+    // Auth-gate enforcement still runs below for configured signed-out tabs.
+  }
   try {
     await classroomStateRestorePromise;
     if (changeInfo.status === 'complete') {
       enforceAuthGateForTab(tab).catch(() => {});
     }
+    if (!navigationAuthContext) return;
+    assertAuthenticatedContextCurrent(navigationAuthContext, 'tab update');
     // Allow both ACTIVE and IDLE states
     if (trackingState === TRACKING_STATES.OFF) return;
     if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
@@ -12352,8 +17107,54 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   }
 });
 
+function handleCameraStatusChanged(message = {}, sender = {}) {
+  if (
+    !studentMessageContextIsCurrent(message.studentMessageContext)
+    || !Number.isInteger(sender?.tab?.id)
+  ) {
+    return { success: false, ignored: true };
+  }
+  if (message.cameraActive === true) cameraActiveTabs.add(sender.tab.id);
+  else cameraActiveTabs.delete(sender.tab.id);
+  cameraActive = cameraActiveTabs.size > 0;
+  scheduleEventHeartbeat('camera-status');
+  return { success: true, cameraActive };
+}
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'get-student-message-context') {
+    try {
+      const authContext = captureAuthenticatedContext('student content context');
+      const activeSessionIds = activeTeachingSessionIds();
+      const preferredSessionId = String(
+        currentFabState?.teachingSessionId || currentClassroomState?.teachingSessionId || '',
+      ).trim();
+      sendResponse({
+        success: true,
+        studentMessageContext: studentMessageContextFor(authContext),
+        fabBinding: fabIdentityBinding(),
+        activeTeachingSessionIds: activeSessionIds,
+        activeTeachingSessionId: activeSessionIds.includes(preferredSessionId)
+          ? preferredSessionId
+          : activeSessionIds.length === 1 ? activeSessionIds[0] : null,
+      });
+    } catch {
+      sendResponse({ success: false });
+    }
+    return true;
+  }
+
+  if (message.type === 'validate-student-message-context') {
+    sendResponse({
+      success: true,
+      current: studentMessageContextIsCurrent(message.studentMessageContext),
+      fabBinding: fabIdentityBinding(),
+      activeTeachingSessionIds: activeTeachingSessionIds(),
+    });
+    return true;
+  }
+
   if (message.type === 'dev-throw') {
     if (!SENTRY_DEV_MODE) {
       sendResponse({ success: false, error: 'Sentry dev mode is disabled' });
@@ -12414,26 +17215,91 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-message-inbox') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'message inbox read');
+    } catch {
+      sendResponse({ success: false, error: 'Messages unavailable' });
+      return true;
+    }
     classroomStateRestorePromise
-      .then(() => getCurrentMessageInbox())
-      .then((messages) => sendResponse({ success: true, messages }))
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox read');
+        return getCurrentMessageInbox({
+          authContext: actionRequest.authContext,
+          expectedBinding: monitoringEventAuthBindingForContext(actionRequest.authContext),
+        });
+      })
+      .then((messages) => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox read completion');
+        sendResponse({ success: true, messages });
+      })
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
     return true;
   }
 
   if (message.type === 'mark-message-inbox-read') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'message inbox read state');
+    } catch {
+      sendResponse({ success: false, error: 'Messages unavailable' });
+      return true;
+    }
     classroomStateRestorePromise
-      .then(() => markCurrentMessageInboxRead())
-      .then((messages) => sendResponse({ success: true, messages }))
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox read state');
+        return markCurrentMessageInboxRead({
+          authContext: actionRequest.authContext,
+          expectedBinding: monitoringEventAuthBindingForContext(actionRequest.authContext),
+        });
+      })
+      .then((messages) => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox read state completion');
+        sendResponse({ success: true, messages });
+      })
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
     return true;
   }
 
   if (message.type === 'clear-message-inbox-display') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'message inbox clear');
+    } catch {
+      sendResponse({ success: false, error: 'Messages unavailable' });
+      return true;
+    }
     classroomStateRestorePromise
-      .then(() => clearCurrentMessageInboxDisplay())
-      .then(() => sendResponse({ success: true }))
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox clear');
+        return clearCurrentMessageInboxDisplay({
+          authContext: actionRequest.authContext,
+          expectedBinding: monitoringEventAuthBindingForContext(actionRequest.authContext),
+        });
+      })
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'message inbox clear completion');
+        sendResponse({ success: true });
+      })
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'persist-fab-chat-state') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'FAB chat state request');
+    } catch {
+      sendResponse({ success: false, ignored: true });
+      return true;
+    }
+    persistFabChatStateForRequest(message, actionRequest)
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'FAB chat state request completion');
+        sendResponse({ success: true });
+      })
+      .catch(() => sendResponse({ success: false, ignored: true }));
     return true;
   }
 
@@ -12450,28 +17316,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-classroom-overlay-state') {
-    Promise.all([
-      classroomStateRestorePromise,
-      getRestorableClassroomOverlayState(),
-      kv.get([FAB_STATE_STORAGE_KEY, FAB_CONTEXT_STORAGE_KEY]),
-    ])
-      .then(([, overlays, stored]) => sendResponse({
-        success: true,
-        classroomState: currentClassroomState,
-        overlays,
-        fabState: stored[FAB_STATE_STORAGE_KEY] || currentFabState,
-        fabContext: stored[FAB_CONTEXT_STORAGE_KEY] || null,
-      }))
+    let snapshotRequest;
+    try {
+      snapshotRequest = captureStudentIdentityRequest(message, 'classroom UI snapshot request');
+    } catch {
+      sendResponse({ success: false, error: 'Overlay state unavailable' });
+      return true;
+    }
+    getClassroomUiSnapshotForAuth(
+      snapshotRequest.authContext,
+      'classroom UI snapshot request',
+    )
+      .then((snapshot) => {
+        assertAuthenticatedContextCurrent(
+          snapshotRequest.authContext,
+          'classroom UI snapshot response',
+        );
+        sendResponse({ success: true, ...snapshot });
+      })
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Overlay state unavailable' }));
     return true;
   }
 
   if (message.type === 'request-kiosk-launch') {
+    let responseGuard;
     authStateRestorePromise
       .then(() => awaitManagedAuthGatePolicyStable())
-      .then(() => requestKioskLaunchUrl())
+      .then(() => {
+        responseGuard = captureKioskLaunchGuard();
+        return requestKioskLaunchUrl({ guard: responseGuard });
+      })
       .then((url) => {
-        if (!url || !isKioskGateUrl(url)) {
+        if (!kioskLaunchGuardIsCurrent(responseGuard) || !url || !isKioskGateUrl(url)) {
           sendResponse({ success: false, error: 'PassPilot kiosk is unavailable' });
           return;
         }
@@ -12480,9 +17356,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           success: true,
           url,
           continuity: parsed.hash.startsWith('#launchTicket='),
+          launchGuard: publishableKioskLaunchGuard(responseGuard),
         });
       })
       .catch(() => sendResponse({ success: false, error: 'PassPilot kiosk is unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'validate-kiosk-launch') {
+    sendResponse({
+      success: true,
+      current: kioskLaunchValidationIsCurrent(message.launchGuard, message.url),
+    });
     return true;
   }
 
@@ -12623,7 +17508,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // chrome_profile student (or a sign-out racing an already-cleared
     // identity) left auto-registration enabled and the next worker wake —
     // the 5-minute 'wake-up' alarm — silently signed the student back in.
-    clearStudentAuth('explicit_sign_out', { notifyBackend: true, pauseAutoRegistration: true })
+    let signOutRequest;
+    try {
+      signOutRequest = captureStudentIdentityRequest(message, 'student sign out');
+    } catch {
+      sendResponse({ success: false, error: 'The signed-in student changed. Please try again.' });
+      return true;
+    }
+    clearStudentAuth('explicit_sign_out', {
+      notifyBackend: true,
+      pauseAutoRegistration: true,
+      expectedAuthContext: signOutRequest.authContext,
+    })
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message || 'Could not sign out' }));
     return true;
@@ -12635,43 +17531,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('[Poll] Response received');
 
     (async () => {
-      if (!CONFIG.deviceId || !CONFIG.serverUrl || !hasStudentAuth()) {
-        throw new Error('Not connected to server');
-      }
-
-      const expectedBinding = fabIdentityBinding();
-      const overlays = await getRestorableClassroomOverlayState();
-      if (!overlays.poll || overlays.poll.pollId !== pollId) {
+      const actionRequest = captureStudentActionRequest(message, 'poll response');
+      assertStudentActionRequestCurrent(actionRequest, 'poll response');
+      const overlays = await getRestorableClassroomOverlayState({
+        authContext: actionRequest.authContext,
+        expectedBinding: actionRequest.fabBinding,
+      });
+      assertStudentActionRequestCurrent(actionRequest, 'poll response overlay read');
+      if (
+        !overlays.poll
+        || overlays.poll.pollId !== pollId
+        || overlays.poll.teachingSessionId !== actionRequest.sessionId
+      ) {
         throw new Error('This poll is no longer active for the signed-in student');
       }
       const option = Number(selectedOption);
       if (!Number.isSafeInteger(option) || option < 0 || option >= overlays.poll.options.length) {
         throw new Error('Invalid poll option');
       }
-      const response = await fetchWithBackoff(`${CONFIG.serverUrl}/api/polls/${encodeURIComponent(pollId)}/respond`, {
+      assertStudentActionRequestCurrent(actionRequest, 'poll response transmission');
+      const response = await fetchWithBackoff(`${actionRequest.authContext.serverOrigin}/api/polls/${encodeURIComponent(pollId)}/respond`, {
         method: 'POST',
-        headers: buildDeviceAuthHeaders(),
+        headers: buildDeviceAuthHeaders(actionRequest.authContext),
         body: JSON.stringify({
-          deviceId: CONFIG.deviceId,
-          studentId: CONFIG.activeStudentId,
+          deviceId: actionRequest.authContext.deviceId,
+          studentId: actionRequest.authContext.studentId,
+          studentSessionId: actionRequest.authContext.studentSessionId,
+          teachingSessionId: actionRequest.sessionId,
           selectedOption: option,
         }),
+        signal: actionRequest.authContext.signal,
       }, {
         context: 'poll response',
         maxAttempts: 2,
         respectGlobalBackoff: false,
       });
+      assertStudentActionRequestCurrent(actionRequest, 'poll response result');
       const data = await response.json().catch(() => ({}));
+      assertStudentActionRequestCurrent(actionRequest, 'poll response body');
       if (!response.ok) {
         throw buildResponseError(response, data, response.status === 409
           ? 'A response was already recorded for this poll'
           : 'Could not submit poll response');
       }
-      if (expectedBinding !== fabIdentityBinding()) {
-        throw new Error('Student identity changed while submitting the poll');
-      }
-      await markPollResponsePersisted(pollId, option);
-      broadcastToAllTabs('poll-response-succeeded', { pollId, selectedOption: option });
+      await markPollResponsePersisted(pollId, option, actionRequest.authContext);
+      assertStudentActionRequestCurrent(actionRequest, 'poll response persistence');
+      await broadcastToAllTabsForAuth(
+        'poll-response-succeeded',
+        { pollId, selectedOption: option, teachingSessionId: actionRequest.sessionId },
+        actionRequest.authContext,
+        {
+          studentId: actionRequest.authContext.studentId,
+          studentSessionId: actionRequest.authContext.studentSessionId,
+        },
+      );
+      assertStudentActionRequestCurrent(actionRequest, 'poll response completion');
       console.log('[Poll] Response submitted');
       return data;
     })()
@@ -12686,49 +17600,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle raise hand from popup
   if (message.type === 'raise-hand') {
     console.log('Raise hand requested');
-
-    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
-      sendResponse({ success: false, error: 'Not connected to server' });
-      return true;
-    }
-
-    const headers = buildDeviceAuthHeaders();
-    headers['Content-Type'] = 'application/json';
-    const fabBindingAtRaise = fabIdentityBinding();
-    const fabSessionsAtRaise = activeTeachingSessionIds();
-    if (currentFabState && fabSessionsAtRaise.length === 0) {
-      sendResponse({ success: false, error: 'No active class session for hand raising' });
-      return true;
-    }
-
-    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/raise-hand`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
-        studentId: CONFIG.activeStudentId,
-        studentEmail: CONFIG.studentEmail,
-        studentName: CONFIG.studentName,
-      }),
-    }, {
-      context: 'raise hand',
-      maxAttempts: 2,
-      respectGlobalBackoff: false,
-    })
-      .then(parseJsonResponse)
-      .then(async data => {
-        if (
-          fabBindingAtRaise !== fabIdentityBinding() ||
-          JSON.stringify(fabSessionsAtRaise) !== JSON.stringify(activeTeachingSessionIds())
-        ) throw new Error('Class session changed while raising the hand');
-        console.log('[FAB] Hand raised');
-        await updateLocalFabHandRaised(true, 'student-raised-hand');
-        sendResponse({ success: true, data });
-      })
-      .catch(err => {
-        console.warn('Failed to raise hand:', safeDiagnosticError(err));
-        sendResponse({ success: false, error: err.message });
+    (async () => {
+      const actionRequest = captureStudentActionRequest(message, 'raise hand');
+      assertStudentActionRequestCurrent(actionRequest, 'raise hand');
+      const response = await fetchWithBackoff(`${actionRequest.authContext.serverOrigin}/api/student/raise-hand`, {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(actionRequest.authContext),
+        body: JSON.stringify({
+          deviceId: actionRequest.authContext.deviceId,
+          studentId: actionRequest.authContext.studentId,
+          studentSessionId: actionRequest.authContext.studentSessionId,
+          teachingSessionId: actionRequest.sessionId,
+        }),
+        signal: actionRequest.authContext.signal,
+      }, {
+        context: 'raise hand',
+        maxAttempts: 2,
+        respectGlobalBackoff: false,
       });
+      assertStudentActionRequestCurrent(actionRequest, 'raise hand response');
+      const data = await parseJsonResponse(response);
+      assertStudentActionRequestCurrent(actionRequest, 'raise hand response body');
+      await updateLocalFabHandRaised(true, 'student-raised-hand', {
+        authContext: actionRequest.authContext,
+      });
+      assertStudentActionRequestCurrent(actionRequest, 'raise hand completion');
+      console.log('[FAB] Hand raised');
+      return data;
+    })().then((data) => sendResponse({ success: true, data })).catch((err) => {
+      console.warn('Failed to raise hand:', safeDiagnosticError(err));
+      sendResponse({ success: false, error: 'Could not raise hand' });
+    });
 
     return true;
   }
@@ -12736,55 +17638,63 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle lower hand from popup
   if (message.type === 'lower-hand') {
     console.log('Lower hand requested');
-
-    if (!CONFIG.deviceId || !CONFIG.serverUrl) {
-      sendResponse({ success: false, error: 'Not connected to server' });
-      return true;
-    }
-
-    const headers = buildDeviceAuthHeaders();
-    headers['Content-Type'] = 'application/json';
-    const fabBindingAtLower = fabIdentityBinding();
-    const fabSessionsAtLower = activeTeachingSessionIds();
-
-    fetchWithBackoff(`${CONFIG.serverUrl}/api/student/lower-hand`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        deviceId: CONFIG.deviceId,
-        studentId: CONFIG.activeStudentId,
-      }),
-    }, {
-      context: 'lower hand',
-      maxAttempts: 2,
-      respectGlobalBackoff: false,
-    })
-      .then(parseJsonResponse)
-      .then(async data => {
-        if (
-          fabBindingAtLower !== fabIdentityBinding() ||
-          JSON.stringify(fabSessionsAtLower) !== JSON.stringify(activeTeachingSessionIds())
-        ) throw new Error('Class session changed while lowering the hand');
-        console.log('[FAB] Hand lowered');
-        await updateLocalFabHandRaised(false, 'student-lowered-hand');
-        sendResponse({ success: true, data });
-      })
-      .catch(err => {
-        console.warn('Failed to lower hand:', safeDiagnosticError(err));
-        sendResponse({ success: false, error: err.message });
+    (async () => {
+      const actionRequest = captureStudentActionRequest(message, 'lower hand');
+      assertStudentActionRequestCurrent(actionRequest, 'lower hand');
+      const response = await fetchWithBackoff(`${actionRequest.authContext.serverOrigin}/api/student/lower-hand`, {
+        method: 'POST',
+        headers: buildDeviceAuthHeaders(actionRequest.authContext),
+        body: JSON.stringify({
+          deviceId: actionRequest.authContext.deviceId,
+          studentId: actionRequest.authContext.studentId,
+          studentSessionId: actionRequest.authContext.studentSessionId,
+          teachingSessionId: actionRequest.sessionId,
+        }),
+        signal: actionRequest.authContext.signal,
+      }, {
+        context: 'lower hand',
+        maxAttempts: 2,
+        respectGlobalBackoff: false,
       });
+      assertStudentActionRequestCurrent(actionRequest, 'lower hand response');
+      const data = await parseJsonResponse(response);
+      assertStudentActionRequestCurrent(actionRequest, 'lower hand response body');
+      await updateLocalFabHandRaised(false, 'student-lowered-hand', {
+        authContext: actionRequest.authContext,
+      });
+      assertStudentActionRequestCurrent(actionRequest, 'lower hand completion');
+      console.log('[FAB] Hand lowered');
+      return data;
+    })().then((data) => sendResponse({ success: true, data })).catch((err) => {
+      console.warn('Failed to lower hand:', safeDiagnosticError(err));
+      sendResponse({ success: false, error: 'Could not lower hand' });
+    });
 
     return true;
   }
 
   // Handle send message from popup (two-way chat)
   if (message.type === 'send-student-message') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'student message request');
+    } catch (error) {
+      sendResponse({
+        success: false,
+        error: 'Student changed before the message could be sent',
+        errorCode: error?.code || 'AUTH_CONTEXT_SUPERSEDED',
+      });
+      return true;
+    }
     queueAndSendStudentChatMessage({
       clientMessageId: message.clientMessageId,
       message: message.message,
       messageType: message.messageType,
-      sessionId: message.sessionId,
-    }).then(sendResponse).catch((error) => {
+      sessionId: actionRequest.sessionId,
+    }, actionRequest.authContext).then((result) => {
+      assertStudentActionRequestCurrent(actionRequest, 'student message request completion');
+      sendResponse(result);
+    }).catch((error) => {
       if (isAuthContextCancellation(error)) {
         sendResponse({
           success: false,
@@ -12852,14 +17762,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   if (message.type === 'camera-status-changed') {
-    // Update camera status from content script
-    cameraActive = message.cameraActive;
-    console.log('[Service Worker] Camera status updated:', cameraActive);
-    
-    // Send immediate heartbeat with camera status
-    scheduleEventHeartbeat('camera-status');
-    
-    sendResponse({ success: true });
+    sendResponse(handleCameraStatusChanged(message, sender));
     return true;
   }
 });

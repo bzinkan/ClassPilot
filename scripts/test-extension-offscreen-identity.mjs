@@ -216,12 +216,42 @@ function createLiveIdentity(label) {
   const generation = nextRaceIdentity++;
   return {
     negotiationId: `negotiation-${label}`,
+    startGeneration: generation,
     authContextId: `live-context-${label}`,
     authGeneration: generation,
     connectionGeneration: generation,
     serverOrigin: 'https://school-pilot.net',
     studentSessionId: `student-session-${label}`,
   };
+}
+
+function activateAuthenticatedProxy(identity) {
+  evaluate(`handleWsConnect(
+    'wss://school-pilot.net/ws',
+    { type: 'auth' },
+    ${JSON.stringify(identity.connectionGeneration)},
+    ${JSON.stringify(identity.authContextId)},
+    ${JSON.stringify(identity.serverOrigin)}
+  )`);
+  evaluate(`proxyWs.readyState = WebSocket.OPEN; proxyWs.onopen()`);
+  evaluate(`proxyWs.onmessage({ data: ${JSON.stringify(JSON.stringify({ type: 'auth-success' }))} })`);
+  const proxyStatus = evaluate('wsStatus()');
+  assert.equal(proxyStatus.connectionGeneration, identity.connectionGeneration);
+  assert.equal(proxyStatus.authContextId, identity.authContextId);
+  assert.equal(proxyStatus.serverOrigin, identity.serverOrigin);
+  assert.equal(proxyStatus.transportOpen, true);
+  assert.equal(proxyStatus.authenticated, true);
+}
+
+function dispatchOffscreenMessage(message) {
+  return new Promise((resolveResponse, rejectResponse) => {
+    try {
+      const asynchronous = runtimeListeners[0](message, {}, resolveResponse);
+      assert.equal(asynchronous, true);
+    } catch (error) {
+      rejectResponse(error);
+    }
+  });
 }
 
 function startLiveView(identity, { mode = 'tab', streamId = 'stream-id' } = {}) {
@@ -311,12 +341,20 @@ assert.ok(relayed.some((message) => (
 
 const liveIdentity = {
   negotiationId: 'negotiation-a',
+  startGeneration: 7,
   authContextId: 'live-context-a',
   authGeneration: 7,
   connectionGeneration: 3,
   serverOrigin: 'https://school-pilot.net',
   studentSessionId: 'student-session-a',
 };
+const streamCountBeforeUnauthenticatedStart = createdStreams.length;
+const unauthenticatedStart = await startLiveView(liveIdentity);
+assert.equal(unauthenticatedStart.success, false);
+assert.equal(unauthenticatedStart.status, 'stale-negotiation');
+assert.equal(createdStreams.length, streamCountBeforeUnauthenticatedStart);
+
+activateAuthenticatedProxy(liveIdentity);
 const startResult = await evaluate(`startScreenCapture(
   'tab',
   'stream-id',
@@ -333,6 +371,62 @@ assert.equal(evaluate(`liveViewIdentityMatches(${JSON.stringify({
   ...liveIdentity,
   authContextId: 'stale-context',
 })})`), false);
+
+const activePeerBeforeExpiredRequests = evaluate('peerConnection');
+for (const expiryCase of [
+  {
+    setupExpiresAt: Date.now() - 1,
+    expiresAt: Date.now() + 15 * 60_000,
+    iceConfigurationExpiresAt: Date.now() + 10 * 60_000,
+  },
+  {
+    setupExpiresAt: Date.now() + 90_000,
+    expiresAt: Date.now() - 1,
+    iceConfigurationExpiresAt: Date.now() + 10 * 60_000,
+  },
+  {
+    setupExpiresAt: Date.now() + 90_000,
+    expiresAt: Date.now() + 15 * 60_000,
+    iceConfigurationExpiresAt: Date.now() - 1,
+  },
+]) {
+  const expiredIdentity = {
+    ...liveIdentity,
+    negotiationId: `expired-${expiryCase.setupExpiresAt}-${expiryCase.expiresAt}`,
+    startGeneration: 8,
+  };
+  const expiredResult = await evaluate(`startScreenCapture(
+    'tab',
+    'expired-stream-id',
+    ${JSON.stringify(expiredIdentity)},
+    ${JSON.stringify(expiryCase.setupExpiresAt)},
+    ${JSON.stringify(expiryCase.expiresAt)},
+    [{ urls: 'turns:turn.example:443', username: 'opaque', credential: 'secret' }],
+    ${JSON.stringify(expiryCase.iceConfigurationExpiresAt)}
+  )`);
+  assert.equal(expiredResult.success, false);
+  assert.equal(expiredResult.status, 'expired-request');
+  assert.equal(evaluate('activeNegotiationId'), liveIdentity.negotiationId);
+  assert.equal(evaluate('peerConnection'), activePeerBeforeExpiredRequests);
+}
+
+const staleStartResult = await evaluate(`startScreenCapture(
+  'tab',
+  'stale-stream-id',
+  ${JSON.stringify({
+    ...liveIdentity,
+    negotiationId: 'stale-start-negotiation',
+    startGeneration: 6,
+  })},
+  ${Date.now() + 90_000},
+  ${Date.now() + 15 * 60_000},
+  [{ urls: 'turns:turn.example:443', username: 'opaque', credential: 'secret' }],
+  ${Date.now() + 10 * 60_000}
+)`);
+assert.equal(staleStartResult.success, false);
+assert.equal(staleStartResult.status, 'stale-negotiation');
+assert.equal(evaluate('activeNegotiationId'), liveIdentity.negotiationId);
+assert.equal(evaluate('peerConnection'), activePeerBeforeExpiredRequests);
 
 evaluate(`peerConnection.connectionState = 'connected'; peerConnection.onconnectionstatechange()`);
 await new Promise((resolve) => setTimeout(resolve, 0));
@@ -406,6 +500,7 @@ async function assertMediaAwaitIsFenced(method, startOptions) {
   const streamCountBefore = createdStreams.length;
   mediaAwaitGates[method] = gate;
 
+  activateAuthenticatedProxy(identityA);
   const staleStart = startLiveView(identityA, startOptions);
   assert.equal(
     createdStreams.length,
@@ -415,6 +510,7 @@ async function assertMediaAwaitIsFenced(method, startOptions) {
   const detachedStream = createdStreams.at(-1);
 
   mediaAwaitGates[method] = null;
+  activateAuthenticatedProxy(identityB);
   const currentStart = await startLiveView(identityB);
   assert.equal(currentStart.success, true);
   const currentPeer = evaluate('peerConnection');
@@ -448,6 +544,7 @@ await assertMediaAwaitIsFenced('getDisplayMedia', { mode: 'screen', streamId: nu
 async function assertRtcAwaitIsFenced(method) {
   const identityA = createLiveIdentity(`${method}-a`);
   const identityB = createLiveIdentity(`${method}-b`);
+  activateAuthenticatedProxy(identityA);
   const initialStart = await startLiveView(identityA);
   assert.equal(initialStart.success, true);
   const stalePeer = evaluate('peerConnection');
@@ -466,6 +563,7 @@ async function assertRtcAwaitIsFenced(method) {
   await waitForPeerMethod(method, previousCallCount);
 
   peerAwaitGates[method] = null;
+  activateAuthenticatedProxy(identityB);
   const currentStart = await startLiveView(identityB);
   assert.equal(currentStart.success, true);
   const currentPeer = evaluate('peerConnection');
@@ -493,5 +591,124 @@ async function assertRtcAwaitIsFenced(method) {
 await assertRtcAwaitIsFenced('setRemoteDescription');
 await assertRtcAwaitIsFenced('createAnswer');
 await assertRtcAwaitIsFenced('setLocalDescription');
+
+const captureBeforeSocketReplacement = evaluate('peerConnection');
+const streamBeforeSocketReplacement = evaluate('localStream');
+const cancelledLiveViewIdentity = evaluate('({ ...latestLiveViewIdentity })');
+const streamCountBeforeSocketReplacement = createdStreams.length;
+evaluate(`handleWsConnect(
+  'wss://school-pilot.net/ws',
+  { type: 'auth' },
+  99,
+  'replacement-worker-auth-context',
+  'https://school-pilot.net'
+)`);
+assert.equal(captureBeforeSocketReplacement.closed, true);
+assert.equal(streamBeforeSocketReplacement.track.stopped, true);
+assert.equal(evaluate('activeNegotiationId'), null);
+assert.equal(evaluate('peerConnection'), null);
+assert.equal(evaluate('localStream'), null);
+const delayedCancelledStart = await startLiveView(cancelledLiveViewIdentity);
+assert.equal(delayedCancelledStart.success, false);
+assert.equal(delayedCancelledStart.status, 'stale-negotiation');
+const delayedOlderStart = await startLiveView({
+  ...cancelledLiveViewIdentity,
+  negotiationId: 'older-cancelled-negotiation',
+  startGeneration: cancelledLiveViewIdentity.startGeneration - 1,
+});
+assert.equal(delayedOlderStart.success, false);
+assert.equal(delayedOlderStart.status, 'stale-negotiation');
+assert.equal(createdStreams.length, streamCountBeforeSocketReplacement);
+
+const stopBeforeStartIdentity = {
+  negotiationId: 'stop-before-first-start',
+  startGeneration: 10,
+  authContextId: 'stop-before-start-context',
+  authGeneration: 0,
+  connectionGeneration: 100,
+  serverOrigin: 'https://school-pilot.net',
+  studentSessionId: 'stop-before-start-session',
+};
+activateAuthenticatedProxy(stopBeforeStartIdentity);
+const streamCountBeforeStopTombstone = createdStreams.length;
+const inactiveStop = await dispatchOffscreenMessage({
+  type: 'STOP_SHARE',
+  ...stopBeforeStartIdentity,
+});
+assert.equal(inactiveStop.success, true);
+assert.equal(evaluate('activeNegotiationId'), null);
+const delayedStoppedStart = await startLiveView(stopBeforeStartIdentity);
+assert.equal(delayedStoppedStart.success, false);
+assert.equal(delayedStoppedStart.status, 'stale-negotiation');
+const delayedPredecessorStart = await startLiveView({
+  ...stopBeforeStartIdentity,
+  negotiationId: 'stop-before-first-start-older',
+  startGeneration: stopBeforeStartIdentity.startGeneration - 1,
+});
+assert.equal(delayedPredecessorStart.success, false);
+assert.equal(delayedPredecessorStart.status, 'stale-negotiation');
+assert.equal(createdStreams.length, streamCountBeforeStopTombstone);
+
+const preRestartIdentity = {
+  negotiationId: 'pre-worker-restart-high-generation',
+  startGeneration: 900,
+  authContextId: 'restart-stable-auth-context',
+  authGeneration: 17,
+  connectionGeneration: 200,
+  serverOrigin: 'https://school-pilot.net',
+  studentSessionId: 'restart-stable-student-session',
+};
+activateAuthenticatedProxy(preRestartIdentity);
+const preRestartStart = await startLiveView(preRestartIdentity);
+assert.equal(preRestartStart.success, true);
+const orphanedStream = evaluate('localStream');
+const orphanedPeer = evaluate('peerConnection');
+const recoveredStatus = evaluate('wsStatus()');
+assert.deepEqual(
+  JSON.parse(JSON.stringify(recoveredStatus.liveViewIdentity)),
+  {
+    ...preRestartIdentity,
+    restartGeneration: 0,
+  },
+);
+
+const recoveredStop = await dispatchOffscreenMessage({
+  type: 'STOP_SHARE',
+  ...recoveredStatus.liveViewIdentity,
+});
+assert.equal(recoveredStop.success, true);
+assert.equal(orphanedStream.track.stopped, true);
+assert.equal(orphanedPeer.closed, true);
+assert.equal(evaluate('activeNegotiationId'), null);
+
+const restartedWorkerIdentity = {
+  negotiationId: 'post-worker-restart-low-generation',
+  startGeneration: 1,
+  authContextId: preRestartIdentity.authContextId,
+  authGeneration: 0,
+  connectionGeneration: 201,
+  serverOrigin: preRestartIdentity.serverOrigin,
+  studentSessionId: preRestartIdentity.studentSessionId,
+};
+activateAuthenticatedProxy(restartedWorkerIdentity);
+const restartedWorkerStart = await startLiveView(restartedWorkerIdentity);
+assert.equal(restartedWorkerStart.success, true);
+const restartedStream = evaluate('localStream');
+assert.equal(restartedStream.track.stopped, false);
+const streamCountAfterRestart = createdStreams.length;
+
+const delayedPreRestartStart = await startLiveView(preRestartIdentity);
+assert.equal(delayedPreRestartStart.success, false);
+assert.equal(delayedPreRestartStart.status, 'stale-negotiation');
+const retiredSocketStart = await startLiveView({
+  ...preRestartIdentity,
+  negotiationId: 'retired-socket-newer-start',
+  startGeneration: preRestartIdentity.startGeneration + 1,
+});
+assert.equal(retiredSocketStart.success, false);
+assert.equal(retiredSocketStart.status, 'stale-negotiation');
+assert.equal(createdStreams.length, streamCountAfterRestart);
+assert.equal(evaluate('localStream'), restartedStream);
+assert.equal(restartedStream.track.stopped, false);
 
 console.log('ClassPilot offscreen WebSocket and Live View identity test passed.');
