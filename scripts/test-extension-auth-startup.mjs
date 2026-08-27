@@ -44,7 +44,11 @@ async function startFixtureServer() {
     rosterDisconnect: false,
     rosterStallBody: false,
     rosterRawBody: null,
+    rosterAuthorizations: [],
     studentLoginRequests: [],
+    studentLoginAuthorizations: [],
+    sessionReleaseRequests: 0,
+    sessionReleaseStatus: 204,
     configDelayMs: 5_500,
     configStatus: 200,
     configDisconnect: false,
@@ -88,6 +92,7 @@ async function startFixtureServer() {
     }
     if (url.pathname === '/api/extension/login-roster') {
       state.rosterRequests += 1;
+      state.rosterAuthorizations.push(request.headers.authorization || null);
       setTimeout(() => {
         if (state.rosterDisconnect) {
           request.socket.destroy();
@@ -110,7 +115,13 @@ async function startFixtureServer() {
         json(response, state.rosterStatus, state.rosterStatus === 200 ? {
           loginMethod: 'name_pin',
           grades: [{ value: '5', label: 'Grade 5' }],
-          students: [{ id: 'student-1', name: 'Jordan Student', gradeLevel: '5', hasPin: true }],
+          students: [{
+            id: 'student-1',
+            name: 'Jordan Student',
+            gradeLevel: '5',
+            hasPin: true,
+            reclaimable: String(request.headers.authorization || '').startsWith('ClassPilot-Recovery '),
+          }],
         } : { error: `roster_${state.rosterStatus}` });
       }, state.rosterDelayMs);
       return;
@@ -121,14 +132,24 @@ async function startFixtureServer() {
       request.on('end', () => {
         const rawBody = Buffer.concat(chunks).toString('utf8');
         state.studentLoginRequests.push(JSON.parse(rawBody || '{}'));
+        state.studentLoginAuthorizations.push(request.headers.authorization || null);
         json(response, 200, {
           studentToken: 'fixture-token',
           studentSessionId: 'fixture-session',
+          sessionRecovery: { token: 'R'.repeat(43) },
           schoolId: 'cold-start-school',
           student: { id: 'student-1', firstName: 'Jordan', lastName: 'Student', email: 'jordan@example.edu' },
           classroomState: null,
         });
       });
+      return;
+    }
+    if (url.pathname === '/api/extension/session-release') {
+      state.sessionReleaseRequests += 1;
+      response.writeHead(state.sessionReleaseStatus, {
+        'access-control-allow-origin': '*',
+      });
+      response.end();
       return;
     }
     if (url.pathname === '/phishing-observed') {
@@ -492,6 +513,192 @@ async function evaluateInAuthGateWorld(world, expression) {
     );
   }
   return result.result?.value;
+}
+
+async function exerciseLegacyEmptyGradeRecovery(context, page, extensionId) {
+  const world = await openAuthGateIsolatedWorld(context, page, extensionId);
+  try {
+    const result = await evaluateInAuthGateWorld(world, `(async () => {
+      const state = {
+        authRequired: true,
+        phase: 'ready',
+        loginMethod: 'name_pin',
+        sharedSignInEnabled: true,
+        rosterContextGeneration: 1,
+      };
+      showAuthGate(state);
+      stopAuthGateConnectionWatchdog();
+      removeAuthGateBlockers();
+      globalThis.__classpilotAuthGateBootstrap?.release?.({ fromContent: true });
+      document.getElementById('classpilot-auth-gate')?.remove();
+      const root = document.createElement('div');
+      root.id = 'classpilot-legacy-auth-gate-test';
+      root.innerHTML = buildAuthGateMarkup(state);
+      document.documentElement.appendChild(root);
+
+      const originalSendMessage = chrome.runtime.sendMessage;
+      const originalSetTimeout = window.setTimeout.bind(window);
+      const originalClearTimeout = window.clearTimeout.bind(window);
+      const harness = {
+        responses: [{ success: true, grades: [] }],
+        defaultResponse: { success: true, grades: [] },
+        requests: [],
+        refreshTimers: new Map(),
+        nextTimerId: -1,
+        enqueue(response) {
+          this.responses.push(response);
+        },
+        runLatestTimer() {
+          const latest = Array.from(this.refreshTimers.entries()).at(-1);
+          if (!latest) return null;
+          const [timerId, timer] = latest;
+          this.refreshTimers.delete(timerId);
+          timer.callback(...timer.args);
+          return timer.delay;
+        },
+      };
+
+      window.setTimeout = function(callback, delay, ...args) {
+        if (Number(delay) >= 25_000 && Number(delay) <= 5 * 60_000) {
+          const timerId = harness.nextTimerId--;
+          harness.refreshTimers.set(timerId, { callback, delay: Number(delay), args });
+          return timerId;
+        }
+        return originalSetTimeout(callback, delay, ...args);
+      };
+      window.clearTimeout = function(timerId) {
+        if (harness.refreshTimers.delete(timerId)) return;
+        originalClearTimeout(timerId);
+      };
+      chrome.runtime.sendMessage = function(message, ...args) {
+        const callback = args.find((value) => typeof value === 'function');
+        if (message?.type === 'get-login-roster' && callback) {
+          harness.requests.push({ ...message });
+          const response = harness.responses.shift() || harness.defaultResponse;
+          queueMicrotask(() => callback(response));
+          return undefined;
+        }
+        return originalSendMessage.call(chrome.runtime, message, ...args);
+      };
+
+      const flush = async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      };
+      const availableGrades = {
+        success: true,
+        grades: [
+          { value: '4', label: 'Grade 4' },
+          { value: '5', label: 'Grade 5' },
+        ],
+      };
+
+      try {
+        attachAuthGateHandlers(state);
+        await flush();
+        const initial = {
+          status: document.getElementById('classpilot-auth-roster-status')?.textContent,
+          refreshDisabled: document.getElementById('classpilot-auth-roster-refresh')?.disabled,
+          request: harness.requests.at(-1),
+          refreshDelays: Array.from(harness.refreshTimers.values(), (timer) => timer.delay),
+        };
+
+        const pin = document.getElementById('classpilot-auth-pin');
+        pin.value = '2468';
+        pin.dispatchEvent(new Event('input', { bubbles: true }));
+        pin.focus();
+        harness.enqueue({ success: true, grades: [] });
+        document.getElementById('classpilot-auth-roster-refresh')?.click();
+        await flush();
+        const manual = {
+          status: document.getElementById('classpilot-auth-roster-status')?.textContent,
+          refreshDisabled: document.getElementById('classpilot-auth-roster-refresh')?.disabled,
+          pin: pin.value,
+          focus: document.activeElement?.id,
+          request: harness.requests.at(-1),
+          refreshDelays: Array.from(harness.refreshTimers.values(), (timer) => timer.delay),
+        };
+
+        harness.responses.length = 0;
+        harness.defaultResponse = availableGrades;
+        const automaticDelay = harness.runLatestTimer();
+        await flush();
+        const automatic = {
+          delay: automaticDelay,
+          request: harness.requests.at(-1),
+          gradeValues: Array.from(
+            document.getElementById('classpilot-auth-grade')?.options || [],
+            (option) => option.value,
+          ),
+          gradeDisabled: document.getElementById('classpilot-auth-grade')?.disabled,
+          pin: pin.value,
+          focus: document.activeElement?.id,
+        };
+
+        const events = [];
+        for (const name of ['online', 'pageshow', 'focus', 'visibilitychange']) {
+          if (name === 'visibilitychange') document.dispatchEvent(new Event(name));
+          else if (name === 'pageshow') window.dispatchEvent(new PageTransitionEvent(name));
+          else window.dispatchEvent(new Event(name));
+          await flush();
+          events.push({
+            name,
+            request: harness.requests.at(-1),
+            grade: document.getElementById('classpilot-auth-grade')?.value,
+            pin: pin.value,
+            focus: document.activeElement?.id,
+          });
+        }
+        return { initial, manual, automatic, events };
+      } finally {
+        clearAuthGateRosterRefreshTimer();
+        chrome.runtime.sendMessage = originalSendMessage;
+        window.setTimeout = originalSetTimeout;
+        window.clearTimeout = originalClearTimeout;
+        root.remove();
+        removeAuthGate();
+      }
+    })()`);
+
+    assert.equal(result.initial.status, 'No roster grades are currently available.');
+    assert.equal(result.initial.refreshDisabled, false, 'legacy empty grades disabled Refresh names');
+    assert.equal(result.initial.request?.type, 'get-login-roster');
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result.initial.request || {}, 'gradeLevel'),
+      false,
+      'legacy empty-grade refresh invented a grade target',
+    );
+    assert.equal(result.initial.refreshDelays.length, 1, 'legacy empty grades did not schedule recovery');
+    assert.ok(result.initial.refreshDelays[0] >= 25_000 && result.initial.refreshDelays[0] <= 35_000);
+    assert.deepEqual(result.manual.request, {
+      type: 'get-login-roster',
+      forceRefresh: true,
+    });
+    assert.equal(result.manual.refreshDisabled, false);
+    assert.equal(result.manual.pin, '2468');
+    assert.equal(result.manual.focus, 'classpilot-auth-pin');
+    assert.equal(result.manual.refreshDelays.length, 1);
+    assert.ok(result.manual.refreshDelays[0] >= 25_000 && result.manual.refreshDelays[0] <= 35_000);
+    assert.ok(result.automatic.delay >= 25_000 && result.automatic.delay <= 35_000);
+    assert.deepEqual(result.automatic.request, { type: 'get-login-roster' });
+    assert.deepEqual(result.automatic.gradeValues, ['', '4', '5']);
+    assert.equal(result.automatic.gradeDisabled, false);
+    assert.equal(result.automatic.pin, '2468');
+    assert.equal(result.automatic.focus, 'classpilot-auth-pin');
+    assert.deepEqual(
+      result.events,
+      ['online', 'pageshow', 'focus', 'visibilitychange'].map((name) => ({
+        name,
+        request: { type: 'get-login-roster', forceRefresh: true },
+        grade: '',
+        pin: '2468',
+        focus: 'classpilot-auth-pin',
+      })),
+      'legacy browser lifecycle events did not refresh grades without clearing context',
+    );
+  } finally {
+    await world.cdp.detach();
+  }
 }
 
 async function waitForManagedFenceRequests(world, minimum, options = {}) {
@@ -1256,6 +1463,8 @@ async function main() {
     await requestLiveRefresh(worker);
     await waitForGatePhase(firstPage, 'ready', 7_000);
     await waitForGatePhase(secondPage, 'ready', 7_000);
+    await exerciseLegacyEmptyGradeRecovery(context, secondPage, extensionId);
+    await secondPage.close();
 
     // Host-page code cannot forge an unlocked phase or swap in a fake gate to
     // bypass the isolated-world blocker. Remove the authentic host after
@@ -2378,6 +2587,7 @@ async function main() {
       fixture.state.rosterDelayMs = scenario.delayMs;
       fixture.state.rosterStallBody = scenario.stallBody === true;
       fixture.state.rosterRawBody = null;
+      await worker.evaluate(() => resetLoginRosterRuntimeCache());
       const rosterPage = await context.newPage();
       await rosterPage.goto(`${fixture.origin}/roster-${scenario.name}`, { waitUntil: 'domcontentloaded' });
       let rosterFrame = await waitForAuthFramePhase(rosterPage, 'unavailable', 7_500);
@@ -2385,6 +2595,14 @@ async function main() {
       fixture.state.rosterStatus = 200;
       fixture.state.rosterDelayMs = 0;
       fixture.state.rosterStallBody = false;
+      // Production honors the server/automatic retry boundary even when the
+      // user presses Retry now. Advance this test cohort past that boundary
+      // without making the suite wait up to 35 seconds per scenario.
+      await worker.evaluate(() => {
+        for (const cacheKey of loginRosterBackoffUntil.keys()) {
+          loginRosterBackoffUntil.set(cacheKey, Date.now() - 1);
+        }
+      });
       await requestRetryNow(rosterPage, worker);
       rosterFrame = await waitForAuthFramePhase(rosterPage, 'ready', 7_000);
       await rosterFrame.locator('#classpilot-auth-student option[value="student-1"]').waitFor({ state: 'attached', timeout: 7_000 });
@@ -2400,6 +2618,7 @@ async function main() {
       fixture.state.rosterDelayMs = 0;
       fixture.state.rosterStallBody = false;
       fixture.state.rosterRawBody = scenario.rawBody;
+      await worker.evaluate(() => resetLoginRosterRuntimeCache());
       const rosterPage = await context.newPage();
       await rosterPage.goto(`${fixture.origin}/roster-${scenario.name}`, { waitUntil: 'domcontentloaded' });
       let rosterFrame = await waitForAuthFramePhase(rosterPage, 'unavailable', 7_500);
@@ -2409,6 +2628,11 @@ async function main() {
         `${scenario.name} roster response did not expose Retry now`,
       );
       fixture.state.rosterRawBody = null;
+      await worker.evaluate(() => {
+        for (const cacheKey of loginRosterBackoffUntil.keys()) {
+          loginRosterBackoffUntil.set(cacheKey, Date.now() - 1);
+        }
+      });
       await requestRetryNow(rosterPage, worker);
       rosterFrame = await waitForAuthFramePhase(rosterPage, 'ready', 7_000);
       await rosterFrame.locator('#classpilot-auth-student option[value="student-1"]').waitFor({
@@ -2563,13 +2787,136 @@ async function main() {
       'email/ID form did not submit the expected credentials'
     );
 
+    const committedManualStorage = await worker.evaluate(async () => ({
+      local: await chrome.storage.local.get([
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+        'studentName',
+        'studentEmail',
+        'studentSessionRecoveryV1',
+      ]),
+      session: await chrome.storage.session.get([
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+      ]),
+    }));
+    assert.equal(committedManualStorage.local.studentToken, undefined);
+    assert.equal(committedManualStorage.local.activeStudentId, undefined);
+    assert.equal(committedManualStorage.local.activeStudentSessionId, undefined);
+    assert.equal(committedManualStorage.local.studentName, undefined);
+    assert.equal(committedManualStorage.local.studentEmail, undefined);
+    assert.equal(committedManualStorage.session.studentToken, 'fixture-token');
+    assert.equal(committedManualStorage.session.activeStudentId, 'student-1');
+    assert.equal(committedManualStorage.session.activeStudentSessionId, 'fixture-session');
+    assert.equal(
+      committedManualStorage.local.studentSessionRecoveryV1?.armed?.token,
+      'R'.repeat(43),
+    );
+
+    const releasesBeforeOrdinaryTabClose = fixture.state.sessionReleaseRequests;
+    const ordinaryTab = await context.newPage();
+    await ordinaryTab.goto(`${fixture.origin}/ordinary-tab-close`, { waitUntil: 'domcontentloaded' });
+    await ordinaryTab.close();
+    await networkPage.waitForTimeout(150);
+    const afterOrdinaryTabClose = await worker.evaluate(() => ({
+      authenticated: hasStudentAuth(),
+      armed: Boolean(studentSessionRecoveryState.armed),
+    }));
+    assert.deepEqual(afterOrdinaryTabClose, { authenticated: true, armed: true });
+    assert.equal(fixture.state.sessionReleaseRequests, releasesBeforeOrdinaryTabClose);
+
+    // Stopping only the MV3 worker preserves storage.session and the exact
+    // armed recovery context; this must not be mistaken for a browser restart.
+    const suspensionPage = await context.newPage();
+    await suspensionPage.goto('chrome://version');
+    const suspensionStop = await stopExtensionWorker(context, suspensionPage, extensionId);
+    assert.equal(suspensionStop.stopped, true, 'could not suspend the MV3 worker');
+    await suspensionPage.goto(`${fixture.origin}/mv3-worker-suspension`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    const suspensionAuthState = await worker.evaluate(async () => {
+      await authStateRestorePromise;
+      return {
+        phase: getAuthGateState().phase,
+        recoveryState: studentSessionRecoveryState.armed?.state || null,
+      };
+    });
+    assert.deepEqual(suspensionAuthState, {
+      phase: 'authenticated',
+      recoveryState: 'armed',
+    });
+    assert.equal(await suspensionPage.locator(GATE_SELECTOR).count(), 0);
+
+    // A full Chrome restart clears storage.session. Keep exact release
+    // temporarily unavailable so the PIN roster must offer same-Chromebook
+    // reclaim and the subsequent login must present that exact capability.
+    fixture.state.sessionReleaseStatus = 503;
+    fixture.state.configDelayMs = 0;
+    fixture.state.configStatus = 200;
+    fixture.state.configBody = {
+      sharedSignInEnabled: true,
+      loginMethod: 'name_pin',
+      schoolId: 'cold-start-school',
+      passpilotKioskAvailable: true,
+    };
+    await context.close();
+    context = await launchContext(executablePath, profilePath, extensionPath);
+    const recoveryPage = context.pages()[0] || await context.newPage();
+    await recoveryPage.goto(`${fixture.origin}/browser-restart-recovery`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    await requestLiveRefresh(worker);
+    const recoveryFrame = await waitForAuthFramePhase(recoveryPage, 'ready', 10_000);
+    const reclaimOption = recoveryFrame.locator(
+      '#classpilot-auth-student option[value="student-1"]',
+    );
+    await reclaimOption.waitFor({ state: 'attached', timeout: 10_000 });
+    assert.match(await reclaimOption.textContent(), /Resume on this Chromebook/);
+    assert.ok(
+      fixture.state.rosterAuthorizations.some(
+        (value) => value === `ClassPilot-Recovery ${'R'.repeat(43)}`,
+      ),
+      'restart roster did not present the exact recovery capability',
+    );
+    await recoveryFrame.locator('#classpilot-auth-student').selectOption('student-1');
+    await recoveryFrame.locator('#classpilot-auth-pin').fill('1234');
+    await recoveryFrame.locator('#classpilot-auth-pin-submit').click();
+    await recoveryPage.waitForSelector(GATE_SELECTOR, { state: 'detached', timeout: 12_000 });
+    assert.equal(
+      fixture.state.studentLoginAuthorizations.at(-1),
+      `ClassPilot-Recovery ${'R'.repeat(43)}`,
+      'same-Chromebook PIN reclaim did not bind the exact recovery capability',
+    );
+    fixture.state.sessionReleaseStatus = 204;
+    // Remove the recovery gate before clearing auth so its asynchronous
+    // refresh cannot race the synthetic authenticated-session baseline below.
+    await recoveryPage.goto('chrome://version');
+    await worker.evaluate(async () => {
+      await sharedSignInConfigPromise?.catch(() => {});
+      clearSharedSignInConfigRetry();
+      const current = captureAuthenticatedContext('startup test recovery cleanup');
+      await clearStudentAuth('startup-test-recovery-cleanup', {
+        notifyBackend: false,
+        serverSessionEnded: true,
+        pauseAutoRegistration: true,
+        notifyAuthGateTabs: false,
+        expectedAuthContext: current,
+      });
+      await sharedSignInConfigPromise?.catch(() => {});
+      clearSharedSignInConfigRetry();
+    });
+
     // A locally restored, complete auth binding answers without a network wait
     // and releases a fail-closed gate promptly.
     const rollbackRevisionCeiling = await worker.evaluate(async () => {
       const auth = {
         studentToken: 'persisted-token', activeStudentId: 'student-1',
         activeStudentSessionId: 'session-1', studentName: 'Jordan Student',
-        identitySource: 'manual_pin', manualLoginLastSeenAt: Date.now(),
+        identitySource: 'integration_test', manualLoginLastSeenAt: null,
       };
       const storedRevision = await chrome.storage.local.get('authGateRevisionV1');
       const rollbackCeiling = Math.max(
@@ -2582,8 +2929,6 @@ async function main() {
       return rollbackCeiling;
     });
     const authenticatedConfigRequestsBeforeNavigation = fixture.state.loginConfigRequests;
-    await context.close();
-    context = await launchContext(executablePath, profilePath, extensionPath);
     const authenticatedPage = context.pages()[0] || await context.newPage();
     await authenticatedPage.goto('chrome://version');
     const cohortStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
@@ -2612,10 +2957,17 @@ async function main() {
       false,
       'ordinary auth requests stayed cold after the first-response cohort completed',
     );
+    assert.equal(
+      fixture.state.loginConfigRequests,
+      authenticatedConfigRequestsBeforeNavigation,
+      'cold authenticated response cohort started login configuration network I/O',
+    );
 
     await authenticatedPage.goto('chrome://version');
     const authenticatedStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
     assert.equal(authenticatedStop.stopped, true, 'could not stop the MV3 worker before authenticated navigation');
+    const authenticatedConfigRequestsImmediatelyBeforeNavigation =
+      fixture.state.loginConfigRequests;
     const authenticatedNavigationStartedAt = Date.now();
     await authenticatedPage.goto(`${fixture.origin}/authenticated`, { waitUntil: 'domcontentloaded' });
     worker = await waitForLiveWorker(context);
@@ -2654,7 +3006,7 @@ async function main() {
     );
     assert.equal(
       fixture.state.loginConfigRequests,
-      authenticatedConfigRequestsBeforeNavigation,
+      authenticatedConfigRequestsImmediatelyBeforeNavigation,
       'cold local get-auth-state response waited on or started login configuration network I/O',
     );
     await authenticatedPage.waitForTimeout(350);
@@ -3114,6 +3466,7 @@ async function main() {
     // held, then prove a cold successor cannot revive the prior token.
     await worker.evaluate(async (serverUrl) => {
       const auth = {
+        authContextId: 'managed-change-crash-auth-context',
         deviceId: 'managed-change-crash-device',
         studentToken: 'managed-change-crash-old-token',
         activeStudentId: 'managed-change-crash-student',
@@ -3127,7 +3480,7 @@ async function main() {
         schoolSlug: 'cold-start-school',
         enrollmentKey: 'fixture-enrollment-key',
       };
-      await chrome.storage.local.set({ config, ...auth });
+      await chrome.storage.local.set({ config, deviceId: auth.deviceId });
       await chrome.storage.local.remove([
         'studentAuthInvalidatingV1',
         'studentAuthCommitPendingV1',
@@ -3142,7 +3495,10 @@ async function main() {
       waitUntil: 'domcontentloaded',
     });
     worker = await waitForLiveWorker(context);
-    await corruptPage.waitForTimeout(350);
+    await corruptPage.waitForSelector(GATE_SELECTOR, {
+      state: 'detached',
+      timeout: LOADING_LIMIT_MS,
+    });
     assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 0, 'managed onChanged crash auth did not restore');
 
     const managedChangeHarnessInstalled = await worker.evaluate(async (serverUrl) => {

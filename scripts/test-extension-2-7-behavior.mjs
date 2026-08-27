@@ -283,6 +283,7 @@ async function main() {
         authStateRestorePromise.catch(() => {}),
         classroomStateRestorePromise.catch(() => {}),
       ]);
+      await studentAuthMutationTail.catch(() => {});
       scheduleHeartbeat(null);
       await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
 
@@ -344,7 +345,7 @@ async function main() {
           messageType: 'question',
           sessionId: 'teaching-session-a',
         });
-        const afterResponseLoss = await chrome.storage.local.get([
+        const afterResponseLoss = await kv.get([
           STUDENT_CHAT_OUTBOX_KEY,
           STUDENT_CHAT_OUTBOX_BINDING_KEY,
         ]);
@@ -364,7 +365,7 @@ async function main() {
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         };
         await flushStudentChatOutbox();
-        const afterReceipt = await chrome.storage.local.get(STUDENT_CHAT_OUTBOX_KEY);
+        const afterReceipt = await kv.get(STUDENT_CHAT_OUTBOX_KEY);
 
         fetchWithBackoff = async () => { throw new Error('simulated response loss'); };
         const retiredSessionClientMessageId = '16161616-1616-4616-8616-161616161616';
@@ -388,7 +389,7 @@ async function main() {
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         };
         await flushStudentChatOutbox();
-        const afterRetiredSessionFlush = await chrome.storage.local.get(STUDENT_CHAT_OUTBOX_KEY);
+        const afterRetiredSessionFlush = await kv.get(STUDENT_CHAT_OUTBOX_KEY);
         currentFabState = {
           ...(currentFabState || {}),
           teachingSessionId: 'teaching-session-a',
@@ -416,7 +417,7 @@ async function main() {
         } finally {
           Date.now = originalDateNow;
         }
-        const afterChatRetentionExpiry = await chrome.storage.local.get([
+        const afterChatRetentionExpiry = await kv.get([
           STUDENT_CHAT_OUTBOX_KEY,
           STUDENT_CHAT_OUTBOX_BINDING_KEY,
         ]);
@@ -433,7 +434,7 @@ async function main() {
           message: 'Legacy compatibility',
           sessionId: 'teaching-session-a',
         });
-        const afterLegacyChat = await chrome.storage.local.get(STUDENT_CHAT_OUTBOX_KEY);
+        const afterLegacyChat = await kv.get(STUDENT_CHAT_OUTBOX_KEY);
         progress('chat complete');
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
@@ -494,7 +495,7 @@ async function main() {
           refreshTabCache = originalRefreshTabCache;
           enqueueCommandAck = originalEnqueueCommandAck;
         }
-        const generatedSchoolPilotFrameAcks = await chrome.storage.local.get(
+        const generatedSchoolPilotFrameAcks = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         currentFabState = {
@@ -513,7 +514,7 @@ async function main() {
             outcome: 'applied',
           },
         );
-        const exactTabAckAfterRevisionChangeOutbox = await chrome.storage.local.get(
+        const exactTabAckAfterRevisionChangeOutbox = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
 
@@ -554,7 +555,7 @@ async function main() {
             data: { tabRefs: ['generated-control-revision-tab'], tabSnapshotRevision: 42 },
           },
         }), wsConnectionGeneration, authA);
-        const generatedControlRevisionAcks = await chrome.storage.local.get(
+        const generatedControlRevisionAcks = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         resolveExactTabRefs = originalResolveExactTabRefs;
@@ -580,7 +581,7 @@ async function main() {
         } finally {
           Date.now = originalDateNow;
         }
-        const generatedCloseAllAcks = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const generatedCloseAllAcks = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         progress('generated command fixtures complete');
 
         fetchWithBackoff = async () => { throw new Error('offline'); };
@@ -641,7 +642,7 @@ async function main() {
           removeTab: async () => {},
         });
         enqueueCommandAck = originalEnqueueCommandAck;
-        const cleanAuthOrdinaryCommandAcks = await chrome.storage.local.get(
+        const cleanAuthOrdinaryCommandAcks = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         await applyClassroomStateFromAuthResponse(
@@ -692,7 +693,7 @@ async function main() {
             },
           },
         }), wsConnectionGeneration, authB);
-        const authRevisionRaceAcks = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const authRevisionRaceAcks = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         resolveExactTabRefs = originalResolveExactTabRefs;
         closeExactTabTargets = originalCloseExactTabTargets;
         refreshTabCache = originalRefreshTabCache;
@@ -738,7 +739,7 @@ async function main() {
             data: { tabRefs: ['same-session-n-plus-one-tab'], tabSnapshotRevision: 43 },
           },
         }), wsConnectionGeneration, authB);
-        const nPlusOneAcks = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const nPlusOneAcks = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         progress('revision fixtures complete');
         resolveExactTabRefs = originalResolveExactTabRefs;
         closeExactTabTargets = originalCloseExactTabTargets;
@@ -753,7 +754,7 @@ async function main() {
           return new Response('{}', { status: 500 });
         };
         await flushStudentChatOutbox();
-        const afterIdentityChange = await chrome.storage.local.get([
+        const afterIdentityChange = await kv.get([
           STUDENT_CHAT_OUTBOX_KEY,
           STUDENT_CHAT_OUTBOX_BINDING_KEY,
         ]);
@@ -853,7 +854,7 @@ async function main() {
             studentId: authB.studentId,
             studentSessionId: authB.studentSessionId,
           });
-          nullRevisionCommandOutbox = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+          nullRevisionCommandOutbox = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         } finally {
           executeRemoteControlCommand = ackAuthorityOriginalExecute;
           currentFabState = ackAuthorityPriorFabState;
@@ -1994,7 +1995,7 @@ async function main() {
           acceptedCapabilities: allSupportedCapabilities,
         }, authB);
 
-        await chrome.storage.local.remove(TAB_SNAPSHOT_STORAGE_KEY);
+        await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
         const rawTabs = [{
           id: 8101,
           url: 'https://snapshot.example/page',
@@ -2112,7 +2113,7 @@ async function main() {
           fromName: 'Teacher',
         });
         const ordinaryTeacherMessageInbox = await getCurrentMessageInbox();
-        const ordinaryTeacherMessageAcks = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const ordinaryTeacherMessageAcks = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         const sensitiveCommandFailure = await handleRemoteControl({
           commandId: 'sensitive-command-error-fixture',
           type: 'https://private.example/student?token=raw-secret',
@@ -2121,7 +2122,7 @@ async function main() {
           studentId: authB.studentId,
           studentSessionId: authB.studentSessionId,
         });
-        const sensitiveCommandFailureAcks = await chrome.storage.local.get(
+        const sensitiveCommandFailureAcks = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         const sensitiveDiagnosticRedaction = {
@@ -2177,13 +2178,13 @@ async function main() {
           wsConnectionGeneration,
           authB,
         );
-        const afterSchoolPilotFrame = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterSchoolPilotFrame = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         await handleWsMessage(
           JSON.stringify(schoolPilotFrames.staleRevisionExactClose),
           wsConnectionGeneration,
           authB,
         );
-        const afterStaleSchoolPilotFrame = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterStaleSchoolPilotFrame = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         const staleSchoolPilotFramePoisonedDedup = recentMsgIds.has(
           schoolPilotFrames.staleRevisionExactClose._msgId,
         );
@@ -2193,7 +2194,7 @@ async function main() {
           wsConnectionGeneration,
           authB,
         );
-        const afterConflictingSchoolPilotFrame = await chrome.storage.local.get(
+        const afterConflictingSchoolPilotFrame = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         const conflictingSchoolPilotFramePoisonedDedup = recentMsgIds.has(
@@ -2208,7 +2209,7 @@ async function main() {
           wsConnectionGeneration,
           authB,
         );
-        const afterPartialSchoolPilotFrame = await chrome.storage.local.get(
+        const afterPartialSchoolPilotFrame = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         const partialSchoolPilotFramePoisonedDedup = recentMsgIds.has(
@@ -2223,7 +2224,7 @@ async function main() {
           wsConnectionGeneration,
           authB,
         );
-        const afterConflictingRevisionSchoolPilotFrame = await chrome.storage.local.get(
+        const afterConflictingRevisionSchoolPilotFrame = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         const conflictingRevisionFramePoisonedDedup = recentMsgIds.has(
@@ -2249,14 +2250,14 @@ async function main() {
           commandId: 'negative-receipt-command',
           accepted: false,
         }), wsConnectionGeneration, authB);
-        const afterNegativeReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterNegativeReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         await handleWsMessage(JSON.stringify({
           type: 'command-ack-receipt',
           ackId,
           commandId: 'negative-receipt-command',
           accepted: true,
         }), wsConnectionGeneration, authB);
-        const afterV3AcceptedOnlyReceipt = await chrome.storage.local.get(
+        const afterV3AcceptedOnlyReceipt = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         await handleWsMessage(JSON.stringify({
@@ -2267,7 +2268,7 @@ async function main() {
           disposition: 'applied',
           retryable: false,
         }), wsConnectionGeneration, authB);
-        const afterWrongReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterWrongReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         await handleWsMessage(JSON.stringify({
           type: 'command-ack-receipt',
           ackId,
@@ -2276,7 +2277,7 @@ async function main() {
           disposition: 'applied',
           retryable: false,
         }), wsConnectionGeneration, authB);
-        const afterPositiveReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterPositiveReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
 
         await sendCommandAck('terminal-receipt-command', 'completed', {
           authContext: authB,
@@ -2294,7 +2295,7 @@ async function main() {
           retryable: true,
           code: 'COMMAND_ACK_TARGET_GONE',
         }), wsConnectionGeneration, authB);
-        const afterRetryableTerminalReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterRetryableTerminalReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         await handleWsMessage(JSON.stringify({
           type: 'command-ack-receipt',
           ackId: terminalAckId,
@@ -2304,7 +2305,7 @@ async function main() {
           retryable: false,
           code: 'COMMAND_ACK_TARGET_GONE',
         }), wsConnectionGeneration, authB);
-        const afterTerminalReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterTerminalReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
 
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 2,
@@ -2325,7 +2326,7 @@ async function main() {
           ackId: legacyReceiptAckId,
           accepted: true,
         }), wsConnectionGeneration, authB);
-        const afterLegacyReceiptMissingCommandId = await chrome.storage.local.get(
+        const afterLegacyReceiptMissingCommandId = await kv.get(
           COMMAND_ACK_OUTBOX_KEY,
         );
         await handleWsMessage(JSON.stringify({
@@ -2334,7 +2335,7 @@ async function main() {
           commandId: 'legacy-receipt-command',
           accepted: true,
         }), wsConnectionGeneration, authB);
-        const afterLegacyReceiptMatched = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterLegacyReceiptMatched = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
           acceptedCapabilities: allSupportedCapabilities,
@@ -2376,7 +2377,7 @@ async function main() {
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         };
         await flushCommandAckOutbox({ forceHttp: true });
-        const afterHttpAckReceipt = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterHttpAckReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         const commandAckRetentionBase = Date.now();
         const commandAckRetentionBinding = monitoringEventAuthBindingForContext(authB);
         await durableLocalKv.set({
@@ -2403,7 +2404,7 @@ async function main() {
         } finally {
           Date.now = originalDateNow;
         }
-        const afterCommandAckRetentionExpiry = await chrome.storage.local.get([
+        const afterCommandAckRetentionExpiry = await kv.get([
           COMMAND_ACK_OUTBOX_KEY,
           COMMAND_ACK_BINDING_KEY,
         ]);
@@ -2431,7 +2432,7 @@ async function main() {
           exactBinding,
         }), wsConnectionGeneration, authB);
         const validFrameReachedDedup = recentMsgIds.has(sharedMessageId);
-        const afterValidBoundFrame = await chrome.storage.local.get(COMMAND_ACK_OUTBOX_KEY);
+        const afterValidBoundFrame = await kv.get(COMMAND_ACK_OUTBOX_KEY);
 
         let releaseOpenTab;
         let openTabStarted;
@@ -2472,11 +2473,11 @@ async function main() {
         let teacherMessageRaceBroadcasts = 0;
         const runTeacherMessageStorageRace = async ({ durable }) => {
           const kind = durable ? 'durable' : 'legacy';
-          await chrome.storage.local.set({
+          await kv.set({
             [MESSAGE_INBOX_STORAGE_KEY]: [],
             [MESSAGE_INBOX_DEDUP_KEY]: [],
           });
-          await chrome.storage.local.remove(MESSAGE_INBOX_BINDING_KEY);
+          await kv.remove(MESSAGE_INBOX_BINDING_KEY);
           if (durable) await discardCommandAckOutbox();
           const authAForMessage = installIdentity(`teacher-message-${kind}-a`);
           // The fixture installs an exact matching FAB teaching session. Do
@@ -2547,7 +2548,7 @@ async function main() {
           releaseStorageWrite();
           const outcome = await pending;
           kv.set = originalKvSet;
-          const stored = await chrome.storage.local.get([
+          const stored = await kv.get([
             MESSAGE_INBOX_STORAGE_KEY,
             MESSAGE_INBOX_BINDING_KEY,
             COMMAND_ACK_OUTBOX_KEY,
@@ -2867,7 +2868,7 @@ async function main() {
         const chatCloseRacePoisonedDedup = recentMsgIds.has(chatCloseMessageId);
 
         const raceStorageKey = '__classpilotAuthContextRaceProbe';
-        await chrome.storage.local.remove(raceStorageKey);
+        await kv.remove(raceStorageKey);
         const raceStartedAt = performance.now();
         let raceTransmissionCount = 0;
         let racePersistenceCount = 0;
@@ -2985,7 +2986,7 @@ async function main() {
           fetchWithBackoff = fetchBeforeRace;
           kv.set = kvSetBeforeRace;
         }
-        const persistedRaceProbe = await chrome.storage.local.get(raceStorageKey);
+        const persistedRaceProbe = await kv.get(raceStorageKey);
         const authContextRace = {
           iterations: raceIterations,
           supersededOperations: raceSupersededOperations,
@@ -3818,7 +3819,7 @@ async function main() {
     assert.equal(contentMessageEpochRace.callbackBeforeClearFinalModalCount, 0);
 
     console.log(
-      `ClassPilot 2.7.2 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
+      `ClassPilot 2.7.3 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
       + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms.`,
     );
   } finally {

@@ -309,6 +309,7 @@ select:disabled {
 
 .classpilot-auth-button:focus-visible,
 .classpilot-auth-retry:focus-visible,
+.classpilot-auth-refresh-names:focus-visible,
 .classpilot-auth-kiosk-button:focus-visible {
   outline: 3px solid var(--navy);
   outline-offset: 3px;
@@ -317,7 +318,6 @@ select:disabled {
 
 .classpilot-auth-roster-note,
 .classpilot-auth-retry-status {
-  grid-column: 1 / -1;
   min-height: 19px;
   color: var(--muted);
   font-size: 13px;
@@ -326,6 +326,49 @@ select:disabled {
 
 .classpilot-auth-roster-note:empty {
   display: none;
+}
+
+.classpilot-auth-roster-controls {
+  display: flex;
+  grid-column: 1 / -1;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.classpilot-auth-roster-controls .classpilot-auth-roster-note {
+  flex: 1 1 auto;
+}
+
+.classpilot-auth-roster-note--warning {
+  padding: 9px 11px;
+  border: 1px solid #f0cc69;
+  border-radius: 9px;
+  background: #fff8dc;
+  color: #775500;
+  font-weight: 650;
+}
+
+.classpilot-auth-refresh-names {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  border: 1px solid #aebdce;
+  border-radius: 9px;
+  background: #fff;
+  color: var(--navy);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.classpilot-auth-refresh-names:hover:not(:disabled) {
+  border-color: var(--navy);
+  background: #fff8dc;
+}
+
+.classpilot-auth-refresh-names:disabled {
+  opacity: .58;
 }
 
 .classpilot-auth-state-card {
@@ -457,6 +500,15 @@ select:disabled {
   .classpilot-auth-field--student,
   .classpilot-auth-field--pin {
     grid-column: 1;
+  }
+
+  .classpilot-auth-roster-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .classpilot-auth-refresh-names {
+    width: 100%;
   }
 
   .classpilot-auth-main h1 {

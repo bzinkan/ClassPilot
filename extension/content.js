@@ -32,6 +32,8 @@ let authGateLatestRevision = -1;
 let authGateRetryTimer = null;
 let authGateRetryFallbackIndex = 0;
 let authGateLiveRosterLoaded = false;
+let authGateRosterSnapshot = null;
+let authGateRosterRefreshTimer = null;
 let authGateCurrentState = null;
 let authGateSecureShadow = null;
 let authGateSecureFrame = null;
@@ -60,6 +62,9 @@ let currentFabAuthorityBinding = null;
 const authGateQuarantinedElements = new Map();
 const authGateDetachedBrowsingContexts = new Map();
 const AUTH_GATE_FRAME_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
+const AUTH_GATE_ROSTER_REFRESH_MIN_MS = 25_000;
+const AUTH_GATE_ROSTER_REFRESH_MAX_MS = 35_000;
+const AUTH_GATE_ROSTER_REFRESH_BACKOFF_MAX_MS = 5 * 60_000;
 
 function withCurrentStudentMessageContext(message, apply, sendResponse) {
   const studentMessageContext = message?.studentMessageContext;
@@ -547,6 +552,11 @@ function authGateRevision(state = {}) {
   return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
 }
 
+function authGateRosterContextGeneration(state = {}) {
+  const generation = Number(state.rosterContextGeneration);
+  return Number.isSafeInteger(generation) && generation >= 0 ? generation : null;
+}
+
 function isAuthGateStateStale(state = {}) {
   const revision = authGateRevision(state);
   return revision !== null && revision < authGateLatestRevision;
@@ -835,9 +845,19 @@ function showAuthGate(state = {}) {
   }
 
   clearAuthGateRetryTimer();
+  const preserveRosterSnapshot = authGatePhase(authGateCurrentState || {}) === 'ready' &&
+    authGatePhase(state) === 'ready' &&
+    (authGateCurrentState?.loginMethod === 'email_id' ? 'email_id' : 'name_pin') ===
+      (state.loginMethod === 'email_id' ? 'email_id' : 'name_pin') &&
+    authGateRosterContextGeneration(authGateCurrentState || {}) ===
+      authGateRosterContextGeneration(state);
   authGateActive = true;
   authGateCurrentState = state;
-  authGateLiveRosterLoaded = false;
+  if (!preserveRosterSnapshot) {
+    authGateLiveRosterLoaded = false;
+    authGateRosterSnapshot = null;
+    clearAuthGateRosterRefreshTimer();
+  }
   document.documentElement.classList.add('classpilot-auth-locked');
   document.body?.classList.add('classpilot-auth-locked');
   const fab = document.getElementById('classpilot-fab-container');
@@ -849,7 +869,7 @@ function showAuthGate(state = {}) {
     : bootstrapGate?.isConnected
       ? bootstrapGate
       : null;
-  authGateRosterRequestGeneration += 1;
+  if (!preserveRosterSnapshot) authGateRosterRequestGeneration += 1;
 
   const gate = existing || document.createElement('div');
   if (!existing) {
@@ -1386,6 +1406,7 @@ window.addEventListener('message', (event) => {
 
 function removeAuthGate() {
   clearAuthGateRetryTimer();
+  clearAuthGateRosterRefreshTimer();
   authGatePendingManagedPolicyFence = 0;
   if (authGateManagedPolicyFenceRetryTimer !== null) {
     clearTimeout(authGateManagedPolicyFenceRetryTimer);
@@ -1395,6 +1416,7 @@ function removeAuthGate() {
   stopAuthGateConnectionWatchdog();
   authGateCurrentState = null;
   authGateLiveRosterLoaded = false;
+  authGateRosterSnapshot = null;
   authGateSecureShadow = null;
   authGateSecureFrame = null;
   authGateSecureFallback = null;
@@ -1665,6 +1687,7 @@ function buildAuthGateMarkup(state) {
       }
       .classpilot-auth-button:focus-visible,
       .classpilot-auth-kiosk-button:focus-visible,
+      .classpilot-auth-refresh-names:focus-visible,
       .classpilot-auth-retry:focus-visible {
         outline: 3px solid #0e2a57 !important;
         outline-offset: 3px !important;
@@ -1716,6 +1739,43 @@ function buildAuthGateMarkup(state) {
       }
       .classpilot-auth-roster-note:empty {
         display: none !important;
+      }
+      .classpilot-auth-roster-controls {
+        grid-column: 1 / -1 !important;
+        display: flex !important;
+        min-width: 0 !important;
+        align-items: center !important;
+        justify-content: space-between !important;
+        gap: 12px !important;
+      }
+      .classpilot-auth-roster-controls .classpilot-auth-roster-note {
+        flex: 1 1 auto !important;
+      }
+      .classpilot-auth-roster-note--warning {
+        border: 1px solid #f0cc69 !important;
+        background: #fff8dc !important;
+        color: #775500 !important;
+        font-weight: 650 !important;
+      }
+      .classpilot-auth-refresh-names {
+        min-height: 36px !important;
+        flex: 0 0 auto !important;
+        padding: 0 12px !important;
+        border: 1px solid #aebdce !important;
+        border-radius: 9px !important;
+        background: #fff !important;
+        color: #0e2a57 !important;
+        cursor: pointer !important;
+        font-size: 13px !important;
+        font-weight: 750 !important;
+      }
+      .classpilot-auth-refresh-names:hover:not(:disabled) {
+        border-color: #0e2a57 !important;
+        background: #fff8dc !important;
+      }
+      .classpilot-auth-refresh-names:disabled {
+        cursor: wait !important;
+        opacity: .58 !important;
       }
       .classpilot-auth-state-card {
         min-height: 104px !important;
@@ -1914,7 +1974,7 @@ function buildAuthGateMarkup(state) {
         .classpilot-auth-field--pin {
           grid-area: pin !important;
         }
-        #classpilot-auth-pin-form .classpilot-auth-roster-note {
+        #classpilot-auth-pin-form .classpilot-auth-roster-controls {
           grid-area: status !important;
         }
         #classpilot-auth-pin-submit {
@@ -1982,6 +2042,13 @@ function buildAuthGateMarkup(state) {
         }
         #classpilot-auth-email-form {
           grid-template-columns: minmax(0, 1fr) !important;
+        }
+        .classpilot-auth-roster-controls {
+          align-items: stretch !important;
+          flex-direction: column !important;
+        }
+        .classpilot-auth-refresh-names {
+          width: 100% !important;
         }
         .classpilot-auth-loading-form {
           display: none !important;
@@ -2101,7 +2168,10 @@ function buildPinLoginMarkup(options = {}) {
   return `
     <form class="classpilot-auth-form" id="classpilot-auth-pin-form"${disabled ? ' aria-disabled="true"' : ''}>
       ${buildGradeChoiceMarkup({ disabled })}
-      <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite">${disabled ? 'Waiting for live roster access…' : ''}</div>
+      <div class="classpilot-auth-roster-controls">
+        <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite">${disabled ? 'Waiting for live roster access…' : ''}</div>
+        ${disabled ? '' : '<button class="classpilot-auth-refresh-names" id="classpilot-auth-roster-refresh" type="button" disabled>Refresh names</button>'}
+      </div>
       <div class="classpilot-auth-field classpilot-auth-field--student">
         <label for="classpilot-auth-student"><span class="classpilot-auth-field-icon">${authIcon('user')}</span><span>Student</span></label>
         <select id="classpilot-auth-student" name="studentId" disabled required>
@@ -2140,6 +2210,81 @@ function clearAuthGateRetryTimer() {
     clearTimeout(authGateRetryTimer);
     authGateRetryTimer = null;
   }
+}
+
+function clearAuthGateRosterRefreshTimer() {
+  if (authGateRosterRefreshTimer !== null) {
+    clearTimeout(authGateRosterRefreshTimer);
+    authGateRosterRefreshTimer = null;
+  }
+}
+
+function nextAuthGateRosterRefreshDelay(refreshAfterMs) {
+  const hintedDelay = Number(refreshAfterMs);
+  if (Number.isFinite(hintedDelay) && hintedDelay > 0) {
+    return Math.min(
+      AUTH_GATE_ROSTER_REFRESH_BACKOFF_MAX_MS,
+      Math.max(5_000, hintedDelay),
+    );
+  }
+  return AUTH_GATE_ROSTER_REFRESH_MIN_MS + Math.floor(
+    Math.random() * (AUTH_GATE_ROSTER_REFRESH_MAX_MS - AUTH_GATE_ROSTER_REFRESH_MIN_MS + 1),
+  );
+}
+
+function scheduleAuthGateRosterRefresh(refreshAfterMs) {
+  clearAuthGateRosterRefreshTimer();
+  const gradeSelect = document.getElementById('classpilot-auth-grade');
+  if (!authGateActive || authGatePhase(authGateCurrentState || {}) !== 'ready' ||
+      authGateCurrentState?.loginMethod === 'email_id' || document.visibilityState === 'hidden' ||
+      !gradeSelect) {
+    return;
+  }
+  authGateRosterRefreshTimer = setTimeout(() => {
+    authGateRosterRefreshTimer = null;
+    refreshAuthGateRosterOrGrades({ background: true });
+  }, nextAuthGateRosterRefreshDelay(refreshAfterMs));
+}
+
+function setAuthGateRosterStatus(message, warning = false) {
+  const status = document.getElementById('classpilot-auth-roster-status');
+  if (!status) return;
+  status.textContent = message || '';
+  status.classList.toggle('classpilot-auth-roster-note--warning', warning);
+}
+
+function hasCurrentAuthGateRosterSnapshot(gradeLevel) {
+  return authGateRosterSnapshot?.gradeLevel === gradeLevel &&
+    Array.isArray(authGateRosterSnapshot.students);
+}
+
+function showCachedAuthGateRosterWarning() {
+  setAuthGateRosterStatus(
+    'Names may be out of date. ClassPilot will try again automatically.',
+    true,
+  );
+}
+
+function restoreAuthGateRosterFocus(control) {
+  if (!control?.isConnected || control.disabled || document.activeElement === control) return;
+  control.focus({ preventScroll: true });
+}
+
+function refreshAuthGateRosterOrGrades(options = {}) {
+  const gradeSelect = document.getElementById('classpilot-auth-grade');
+  if (!gradeSelect) return;
+  if (gradeSelect.value) loadAuthGateRoster(options);
+  else loadAuthGateGradeOptions(options);
+}
+
+function refreshVisibleAuthGateRoster() {
+  const gradeSelect = document.getElementById('classpilot-auth-grade');
+  if (!authGateActive || document.visibilityState === 'hidden' ||
+      authGatePhase(authGateCurrentState || {}) !== 'ready' ||
+      authGateCurrentState?.loginMethod === 'email_id' || !gradeSelect) {
+    return;
+  }
+  refreshAuthGateRosterOrGrades({ forceRefresh: true, background: true });
 }
 
 function fallbackAuthGateRetryDelay() {
@@ -2211,8 +2356,9 @@ function recordAuthGateOutcome(state = {}) {
     globalThis.__classpilotAuthGateBootstrap.recordOutcome(state);
     return;
   }
-  chrome.storage.local.set({
-    authGateTimingV1: {
+  chrome.runtime.sendMessage({
+    type: 'record-auth-gate-timing',
+    timing: {
       loadingPaintMs: null,
       configReadyMs: null,
       outcome: phase,
@@ -2272,9 +2418,16 @@ function attachAuthGateHandlers(state) {
     const gradeSelect = document.getElementById('classpilot-auth-grade');
     const studentSelect = document.getElementById('classpilot-auth-student');
     if (gradeSelect) {
-      gradeSelect.addEventListener('change', () => loadAuthGateRoster());
+      gradeSelect.addEventListener('change', () => {
+        authGateRosterSnapshot = null;
+        clearAuthGateRosterRefreshTimer();
+        loadAuthGateRoster();
+      });
     }
     studentSelect?.addEventListener('change', updatePinAuthSubmitState);
+    document.getElementById('classpilot-auth-roster-refresh')?.addEventListener('click', () => {
+      refreshAuthGateRosterOrGrades({ forceRefresh: true });
+    });
     const pinInput = document.getElementById('classpilot-auth-pin');
     pinInput?.addEventListener('input', () => {
       pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 4);
@@ -2341,27 +2494,50 @@ function attachAuthGateHandlers(state) {
   }
 }
 
-function loadAuthGateGradeOptions() {
+function loadAuthGateGradeOptions(options = {}) {
   const gradeSelect = document.getElementById('classpilot-auth-grade');
   const studentSelect = document.getElementById('classpilot-auth-student');
   const status = document.getElementById('classpilot-auth-roster-status');
   const submit = document.getElementById('classpilot-auth-pin-submit');
+  const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
   if (!gradeSelect || !studentSelect || !status || !submit) return;
+  clearAuthGateRosterRefreshTimer();
   authGateLiveRosterLoaded = false;
+  authGateRosterSnapshot = null;
   const requestGeneration = ++authGateRosterRequestGeneration;
+  const preserveControls = options.background === true || options.forceRefresh === true;
+  const previousGrade = gradeSelect.value;
+  const focusedControl = preserveControls && document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
 
-  status.textContent = 'Loading grades...';
+  setAuthGateRosterStatus(preserveControls ? 'Refreshing grades…' : 'Loading grades...');
   status.setAttribute('aria-busy', 'true');
-  gradeSelect.innerHTML = '<option value="">Loading grades...</option>';
-  gradeSelect.disabled = true;
-  studentSelect.innerHTML = '<option value="">Select a grade first...</option>';
+  if (!preserveControls) {
+    gradeSelect.innerHTML = '<option value="">Loading grades...</option>';
+    gradeSelect.disabled = true;
+    studentSelect.innerHTML = '<option value="">Select a grade first...</option>';
+  }
   studentSelect.disabled = true;
   submit.disabled = true;
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = 'Refreshing…';
+    refreshButton.setAttribute('aria-busy', 'true');
+  }
 
-  chrome.runtime.sendMessage({ type: 'get-login-roster' }, (response) => {
+  chrome.runtime.sendMessage({
+    type: 'get-login-roster',
+    ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+  }, (response) => {
     const runtimeError = chrome.runtime.lastError;
     if (requestGeneration !== authGateRosterRequestGeneration || !status.isConnected) return;
     status.setAttribute('aria-busy', 'false');
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = 'Refresh names';
+      refreshButton.setAttribute('aria-busy', 'false');
+    }
     if (runtimeError || !response?.success) {
       const failurePhase = response?.phase === 'setup_required'
         ? 'setup_required'
@@ -2378,21 +2554,35 @@ function loadAuthGateGradeOptions() {
         });
         return;
       }
-      status.textContent = response?.error || 'Could not load roster grades.';
-      gradeSelect.innerHTML = '<option value="">Grades unavailable</option>';
-      gradeSelect.disabled = true;
+      setAuthGateRosterStatus(response?.error || 'Could not load roster grades.');
+      if (!preserveControls) {
+        gradeSelect.innerHTML = '<option value="">Grades unavailable</option>';
+        gradeSelect.disabled = true;
+      }
+      scheduleAuthGateRosterRefresh(response?.refreshAfterMs);
+      restoreAuthGateRosterFocus(focusedControl);
       return;
     }
 
     const grades = Array.isArray(response.grades) ? response.grades.filter((grade) => grade?.value) : [];
     if (!grades.length) {
-      status.textContent = 'No roster grades are ready for PIN sign-in.';
+      setAuthGateRosterStatus(
+        response.cached === true && response.warning
+          ? 'No roster grades are currently available. Names may be out of date; ClassPilot will try again automatically.'
+          : 'No roster grades are currently available.',
+        response.cached === true && Boolean(response.warning),
+      );
       gradeSelect.innerHTML = '<option value="">No grades available</option>';
       gradeSelect.disabled = true;
+      studentSelect.innerHTML = '<option value="">Select a grade first...</option>';
+      studentSelect.disabled = true;
+      submit.disabled = true;
+      scheduleAuthGateRosterRefresh(response.refreshAfterMs);
+      restoreAuthGateRosterFocus(focusedControl);
       return;
     }
 
-    status.textContent = '';
+    setAuthGateRosterStatus('');
     gradeSelect.innerHTML = '<option value="">Select your grade</option>' +
       grades
         .map((grade) => `<option value="${escapeHtml(grade.value)}">${escapeHtml(grade.label || `Grade ${grade.value}`)}</option>`)
@@ -2404,46 +2594,93 @@ function loadAuthGateGradeOptions() {
       gradeSelect.focus({ preventScroll: true });
     }
 
-    if (grades.length === 1) {
-      gradeSelect.value = grades[0].value;
+    if (previousGrade && grades.some((grade) => String(grade.value) === previousGrade)) {
+      gradeSelect.value = previousGrade;
+    } else if (grades.length === 1) {
+      gradeSelect.value = String(grades[0].value);
+    }
+    restoreAuthGateRosterFocus(focusedControl);
+    if (gradeSelect.value) {
       loadAuthGateRoster();
     }
   });
 }
 
-function loadAuthGateRoster() {
+function loadAuthGateRoster(options = {}) {
   const select = document.getElementById('classpilot-auth-student');
   const status = document.getElementById('classpilot-auth-roster-status');
   const submit = document.getElementById('classpilot-auth-pin-submit');
   const gradeSelect = document.getElementById('classpilot-auth-grade');
+  const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
   const selectedGrade = gradeSelect?.value || '';
   if (!select || !status || !submit) return;
-  authGateLiveRosterLoaded = false;
+  clearAuthGateRosterRefreshTimer();
+  const hasSnapshot = hasCurrentAuthGateRosterSnapshot(selectedGrade);
+  authGateLiveRosterLoaded = hasSnapshot;
   const requestGeneration = ++authGateRosterRequestGeneration;
 
   if (gradeSelect && !selectedGrade) {
-    status.textContent = '';
+    authGateRosterSnapshot = null;
+    setAuthGateRosterStatus('');
     status.setAttribute('aria-busy', 'false');
     select.innerHTML = '<option value="">Select a grade first...</option>';
     select.disabled = true;
     submit.disabled = true;
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = 'Refresh names';
+      refreshButton.setAttribute('aria-busy', 'false');
+    }
+    scheduleAuthGateRosterRefresh();
     return;
   }
 
-  status.textContent = 'Loading roster...';
+  if (refreshButton) {
+    refreshButton.disabled = true;
+    refreshButton.textContent = 'Refreshing…';
+    refreshButton.setAttribute('aria-busy', 'true');
+  }
+  setAuthGateRosterStatus(hasSnapshot ? 'Refreshing names…' : 'Loading roster…');
   status.setAttribute('aria-busy', 'true');
-  select.innerHTML = '<option value="">Loading students...</option>';
-  select.disabled = true;
-  submit.disabled = true;
+  if (!hasSnapshot) {
+    select.innerHTML = '<option value="">Loading students...</option>';
+    select.disabled = true;
+    submit.disabled = true;
+  }
 
-  chrome.runtime.sendMessage({ type: 'get-login-roster', gradeLevel: selectedGrade }, (response) => {
+  chrome.runtime.sendMessage({
+    type: 'get-login-roster',
+    gradeLevel: selectedGrade,
+    ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+  }, (response) => {
     const runtimeError = chrome.runtime.lastError;
     if (requestGeneration !== authGateRosterRequestGeneration ||
         !status.isConnected || !gradeSelect?.isConnected || gradeSelect.value !== selectedGrade) {
       return;
     }
     status.setAttribute('aria-busy', 'false');
+    if (refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = 'Refresh names';
+      refreshButton.setAttribute('aria-busy', 'false');
+    }
     if (runtimeError || !response?.success) {
+      if (response?.phase === 'setup_required') {
+        applyAuthGateState({
+          ...(authGateCurrentState || {}),
+          phase: 'setup_required',
+          authRequired: true,
+          setupRequired: true,
+          retryAt: null,
+        });
+        return;
+      }
+      if (hasCurrentAuthGateRosterSnapshot(selectedGrade)) {
+        showCachedAuthGateRosterWarning();
+        updatePinAuthSubmitState();
+        scheduleAuthGateRosterRefresh(response?.refreshAfterMs);
+        return;
+      }
       const failurePhase = response?.phase === 'setup_required'
         ? 'setup_required'
         : response?.phase === 'unavailable' || runtimeError
@@ -2463,27 +2700,44 @@ function loadAuthGateRoster() {
       select.innerHTML = '<option value="">Roster unavailable</option>';
       select.disabled = true;
       submit.disabled = true;
+      scheduleAuthGateRosterRefresh(response?.refreshAfterMs);
       return;
     }
 
-    const students = response.students || [];
+    const students = Array.isArray(response.students)
+      ? response.students.filter((student) => student && student.id)
+      : [];
+    const previousStudentId = select.value;
+    authGateRosterSnapshot = { gradeLevel: selectedGrade, students };
+    authGateLiveRosterLoaded = true;
     if (!students.length) {
-      status.textContent = 'No students are ready for PIN sign-in in this grade.';
+      if (response.cached === true && response.warning) {
+        setAuthGateRosterStatus(
+          'No students are currently available. Names may be out of date; ClassPilot will try again automatically.',
+          true,
+        );
+      } else {
+        setAuthGateRosterStatus('No students are currently available.');
+      }
       select.innerHTML = '<option value="">No students available</option>';
       select.disabled = true;
       submit.disabled = true;
+      scheduleAuthGateRosterRefresh(response.refreshAfterMs);
       return;
     }
 
-    authGateLiveRosterLoaded = true;
-    status.textContent = '';
     select.innerHTML = '<option value="">Select your name...</option>' +
       students
-        .filter((student) => student && student.id)
-        .map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name || 'Unknown')}${student.hasPin ? '' : ' (PIN missing)'}</option>`)
+        .map((student) => `<option value="${escapeHtml(student.id)}" ${student.hasPin ? '' : 'disabled'}>${escapeHtml(student.name || 'Unknown')}${student.reclaimable === true ? ' — Resume on this Chromebook' : ''}${student.hasPin ? '' : ' (PIN missing)'}</option>`)
         .join('');
     select.disabled = false;
+    if (students.some((student) => String(student.id) === previousStudentId)) {
+      select.value = previousStudentId;
+    }
+    if (response.cached === true && response.warning) showCachedAuthGateRosterWarning();
+    else setAuthGateRosterStatus('');
     updatePinAuthSubmitState();
+    scheduleAuthGateRosterRefresh(response.refreshAfterMs);
   });
 }
 
@@ -3619,23 +3873,19 @@ function readFabStorageForCurrentContext(apply) {
     ) return;
     const expectedContext = contextResponse.studentMessageContext;
     const expectedFabBinding = contextResponse.fabBinding || null;
-    chrome.storage.local.get(FAB_STORAGE_KEYS, (stored) => {
-      if (expectedEpoch !== studentMessageEpoch || chrome.runtime.lastError) return;
-      chrome.runtime.sendMessage({
-        type: 'validate-student-message-context',
-        studentMessageContext: expectedContext,
-      }, (validation) => {
-        if (
-          expectedEpoch !== studentMessageEpoch
-          || chrome.runtime.lastError
-          || validation?.success !== true
-          || validation.current !== true
-          || (validation.fabBinding || null) !== expectedFabBinding
-        ) return;
-        currentStudentMessageContext = { ...expectedContext };
-        currentFabAuthorityBinding = expectedFabBinding;
-        apply(stored || {}, expectedFabBinding);
-      });
+    chrome.runtime.sendMessage({
+      type: 'get-student-session-ui-state',
+      studentMessageContext: expectedContext,
+    }, (stateResponse) => {
+      if (
+        expectedEpoch !== studentMessageEpoch
+        || chrome.runtime.lastError
+        || stateResponse?.success !== true
+        || (stateResponse.fabBinding || null) !== expectedFabBinding
+      ) return;
+      currentStudentMessageContext = { ...expectedContext };
+      currentFabAuthorityBinding = expectedFabBinding;
+      apply(stateResponse.stored || {}, expectedFabBinding);
     });
   });
 }
@@ -4055,13 +4305,11 @@ function updateFabIdentityState(state) {
   const nameEl = document.getElementById('classpilot-fab-identity-name');
   if (!identity || !nameEl) return;
 
-  const applyState = (nextState, config = {}) => {
+  const applyState = (nextState) => {
     const authRequired = nextState?.authRequired === true;
     const name =
       nextState?.studentName ||
-      config.studentName ||
       nextState?.studentEmail ||
-      config.studentEmail ||
       '';
     if (!authRequired && name) {
       nameEl.textContent = name;
@@ -4078,13 +4326,13 @@ function updateFabIdentityState(state) {
   }
 
   const requestGeneration = authGateStateRequestGeneration;
-  chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
+  chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
     if (requestGeneration !== authGateStateRequestGeneration ||
         isAuthGateManagedPolicyFencePending() || chrome.runtime.lastError || !response?.success) {
       identity.style.display = 'none';
       return;
     }
-    applyState(response.state, response.config || {});
+    applyState(response.state);
   });
 }
 
@@ -4591,7 +4839,7 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   ].some((key) => Object.prototype.hasOwnProperty.call(changes, key))) {
     beginAuthGateManagedPolicyFence();
   }
-  if (namespace === 'local') {
+  if (namespace === 'local' || namespace === 'session') {
     const fabStateChanged = FAB_STORAGE_KEYS.some((key) => (
       Object.prototype.hasOwnProperty.call(changes, key)
     ));
@@ -4603,6 +4851,17 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
       (changes.studentToken || changes.studentEmail || changes.studentName || changes.activeStudentId)) {
     updateFabIdentityState();
   }
+});
+
+window.addEventListener('focus', refreshVisibleAuthGateRoster);
+window.addEventListener('pageshow', refreshVisibleAuthGateRoster);
+window.addEventListener('online', refreshVisibleAuthGateRoster);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    clearAuthGateRosterRefreshTimer();
+    return;
+  }
+  refreshVisibleAuthGateRoster();
 });
 
 // Initialize FAB when DOM is ready

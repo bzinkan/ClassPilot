@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.7.2");
+    expect(manifest.version).toBe("2.7.3");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -179,8 +179,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toMatch(
       /function hasStudentAuth\(\)[\s\S]*!studentAuthInvalidating[\s\S]*!studentAuthCommitPending/,
     );
-    expect(serviceWorker).toContain("const durableLocalKv = strictStorageArea(chrome.storage.local, 'local storage')");
-    expect(serviceWorker).toContain("const durableSessionKv = hasSessionStorage()");
+    expect(serviceWorker).toContain("const rawLocalKv = strictStorageArea(chrome.storage.local, 'local storage')");
+    expect(serviceWorker).toContain("const durableLocalKv = routedStudentStorageArea(rawLocalKv, rawSessionKv)");
+    expect(serviceWorker).toContain("const durableSessionKv = rawSessionKv");
     expect(serviceWorker).toContain("await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling })");
     expect(serviceWorker).toMatch(
       /durableLocalKv\.get\(\[AUTH_GATE_REVISION_STORAGE_KEY\]\)[\s\S]*reserveAuthGateRevisionBlock\(stored\[AUTH_GATE_REVISION_STORAGE_KEY\]\)/,
@@ -238,8 +239,22 @@ describe("ClassPilot extension release package guards", () => {
 
     for (const registration of [ensureRegistration, directRegistration]) {
       const beginIndex = registration.indexOf("await beginStudentAuthCommit(");
-      const persistIndex = registration.indexOf("await durableLocalKv.set({", beginIndex);
-      const applyIndex = registration.indexOf("await applyClassroomStateFromAuthResponse(", persistIndex);
+      const persistStartIndex = registration.indexOf(
+        "const durableStatePersisted = durableLocalKv.set({",
+        beginIndex,
+      );
+      const sessionPersistIndex = registration.indexOf(
+        "await setManualAuthState({",
+        persistStartIndex,
+      );
+      const persistCompleteIndex = registration.indexOf(
+        "await Promise.all([markerCleared, durableStatePersisted]);",
+        sessionPersistIndex,
+      );
+      const applyIndex = registration.indexOf(
+        "await applyClassroomStateFromAuthResponse(",
+        persistCompleteIndex,
+      );
       const requireIndex = registration.indexOf("requireApplied: true", applyIndex);
       const contextIndex = registration.indexOf(
         "authContext: committedAuthContext",
@@ -247,8 +262,10 @@ describe("ClassPilot extension release package guards", () => {
       );
       const completeIndex = registration.indexOf("await completeStudentAuthCommit(", contextIndex);
       expect(beginIndex).toBeGreaterThan(-1);
-      expect(persistIndex).toBeGreaterThan(beginIndex);
-      expect(applyIndex).toBeGreaterThan(persistIndex);
+      expect(persistStartIndex).toBeGreaterThan(beginIndex);
+      expect(sessionPersistIndex).toBeGreaterThan(persistStartIndex);
+      expect(persistCompleteIndex).toBeGreaterThan(sessionPersistIndex);
+      expect(applyIndex).toBeGreaterThan(persistCompleteIndex);
       expect(requireIndex).toBeGreaterThan(applyIndex);
       expect(contextIndex).toBeGreaterThan(requireIndex);
       expect(completeIndex).toBeGreaterThan(contextIndex);

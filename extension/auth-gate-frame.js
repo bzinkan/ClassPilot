@@ -21,6 +21,9 @@
   ]);
   const RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000];
   const LOADING_POLL_MS = 500;
+  const ROSTER_REFRESH_MIN_MS = 25_000;
+  const ROSTER_REFRESH_MAX_MS = 35_000;
+  const ROSTER_REFRESH_BACKOFF_MAX_MS = 5 * 60_000;
   const INSTANCE_NONCE = decodeURIComponent(window.location.hash.slice(1));
 
   let currentState = null;
@@ -30,9 +33,11 @@
   let retryTimer = null;
   let loadingPollTimer = null;
   let authCommitPollTimer = null;
+  let rosterRefreshTimer = null;
   let loginConfirmationGeneration = 0;
   let retryFallbackIndex = 0;
   let liveRosterLoaded = false;
+  let rosterSnapshot = null;
   let lastFocusedControlId = '';
   let initialized = false;
   const embeddingOrigin = (() => {
@@ -68,6 +73,11 @@
     return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
   }
 
+  function rosterContextGeneration(state = {}) {
+    const generation = Number(state.rosterContextGeneration);
+    return Number.isSafeInteger(generation) && generation >= 0 ? generation : null;
+  }
+
   function clearTimers() {
     if (retryTimer !== null) {
       clearTimeout(retryTimer);
@@ -80,6 +90,14 @@
     if (authCommitPollTimer !== null) {
       clearTimeout(authCommitPollTimer);
       authCommitPollTimer = null;
+    }
+    clearRosterRefreshTimer();
+  }
+
+  function clearRosterRefreshTimer() {
+    if (rosterRefreshTimer !== null) {
+      clearTimeout(rosterRefreshTimer);
+      rosterRefreshTimer = null;
     }
   }
 
@@ -223,7 +241,10 @@
           <label for="classpilot-auth-grade"><span class="classpilot-auth-field-icon">${icon('graduation')}</span><span>Grade</span></label>
           <select id="classpilot-auth-grade" name="gradeLevel" disabled required><option value="">Loading grades…</option></select>
         </div>
-        <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite"></div>
+        <div class="classpilot-auth-roster-controls">
+          <div class="classpilot-auth-roster-note" id="classpilot-auth-roster-status" aria-live="polite"></div>
+          <button class="classpilot-auth-refresh-names" id="classpilot-auth-roster-refresh" type="button" disabled>Refresh names</button>
+        </div>
         <div class="classpilot-auth-field classpilot-auth-field--student">
           <label for="classpilot-auth-student"><span class="classpilot-auth-field-icon">${icon('user')}</span><span>Student</span></label>
           <select id="classpilot-auth-student" name="studentId" disabled required><option value="">Select a grade first…</option></select>
@@ -258,6 +279,7 @@
     loginConfirmationGeneration += 1;
     rosterRequestGeneration += 1;
     liveRosterLoaded = false;
+    rosterSnapshot = null;
 
     const phase = authGatePhase(state);
     root.dataset.classpilotAuthPhase = phase;
@@ -337,6 +359,7 @@
     const sameReadyForm = nextPhase === 'ready' && currentPhase === 'ready' &&
       (state.loginMethod === 'email_id' ? 'email_id' : 'name_pin') ===
         (currentState?.loginMethod === 'email_id' ? 'email_id' : 'name_pin') &&
+      rosterContextGeneration(state) === rosterContextGeneration(currentState || {}) &&
       safeKioskUrl(state.kioskUrl) === safeKioskUrl(currentState?.kioskUrl);
     if (sameReadyForm) {
       // Keep partially entered values and focus when a duplicate/newer ready
@@ -435,8 +458,15 @@
 
     const pinForm = document.getElementById('classpilot-auth-pin-form');
     if (pinForm) {
-      document.getElementById('classpilot-auth-grade')?.addEventListener('change', loadRoster);
+      document.getElementById('classpilot-auth-grade')?.addEventListener('change', () => {
+        rosterSnapshot = null;
+        clearRosterRefreshTimer();
+        loadRoster();
+      });
       document.getElementById('classpilot-auth-student')?.addEventListener('change', updatePinSubmitState);
+      document.getElementById('classpilot-auth-roster-refresh')?.addEventListener('click', () => {
+        refreshRosterOrGrades({ forceRefresh: true });
+      });
       const pinInput = document.getElementById('classpilot-auth-pin');
       pinInput?.addEventListener('input', () => {
         pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 4);
@@ -482,29 +512,56 @@
     error.style.display = message ? 'block' : 'none';
   }
 
-  function loadGrades() {
+  function loadGrades(options = {}) {
     const gradeSelect = document.getElementById('classpilot-auth-grade');
     const studentSelect = document.getElementById('classpilot-auth-student');
     const status = document.getElementById('classpilot-auth-roster-status');
     const submit = document.getElementById('classpilot-auth-pin-submit');
+    const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
     if (!gradeSelect || !studentSelect || !status || !submit) return;
 
+    clearRosterRefreshTimer();
     liveRosterLoaded = false;
+    rosterSnapshot = null;
     const generation = ++rosterRequestGeneration;
-    status.textContent = 'Loading grades…';
+    const preserveControls = options.background === true || options.forceRefresh === true;
+    const previousGrade = gradeSelect.value;
+    const focusedControl = preserveControls && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setRosterStatus(preserveControls ? 'Refreshing grades…' : 'Loading grades…');
     status.setAttribute('aria-busy', 'true');
-    gradeSelect.replaceChildren(new Option('Loading grades…', ''));
-    gradeSelect.disabled = true;
-    studentSelect.replaceChildren(new Option('Select a grade first…', ''));
+    if (!preserveControls) {
+      gradeSelect.replaceChildren(new Option('Loading grades…', ''));
+      gradeSelect.disabled = true;
+      studentSelect.replaceChildren(new Option('Select a grade first…', ''));
+    }
     studentSelect.disabled = true;
     submit.disabled = true;
+    if (refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing…';
+      refreshButton.setAttribute('aria-busy', 'true');
+    }
 
-    chrome.runtime.sendMessage({ type: 'get-login-roster' }, (response) => {
+    chrome.runtime.sendMessage({
+      type: 'get-login-roster',
+      ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+    }, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (generation !== rosterRequestGeneration || !status.isConnected) return;
       status.setAttribute('aria-busy', 'false');
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = 'Refresh names';
+        refreshButton.setAttribute('aria-busy', 'false');
+      }
       if (runtimeError || !response?.success) {
         handleRosterFailure(response, runtimeError, 'Could not load roster grades.');
+        if (authGatePhase(currentState || {}) === 'ready') {
+          scheduleRosterRefresh(response?.refreshAfterMs);
+        }
+        restoreRosterFocus(focusedControl);
         return;
       }
 
@@ -516,70 +573,194 @@
         gradeSelect.add(new Option(String(grade.label || `Grade ${grade.value}`), String(grade.value)));
       }
       if (!grades.length) {
-        status.textContent = 'No roster grades are ready for PIN sign-in.';
+        setRosterStatus(
+          response.cached === true && response.warning
+            ? 'No roster grades are currently available. Names may be out of date; ClassPilot will try again automatically.'
+            : 'No roster grades are currently available.',
+          response.cached === true && Boolean(response.warning),
+        );
         gradeSelect.replaceChildren(new Option('No grades available', ''));
+        gradeSelect.disabled = true;
+        studentSelect.replaceChildren(new Option('Select a grade first…', ''));
+        studentSelect.disabled = true;
+        submit.disabled = true;
+        scheduleRosterRefresh(response.refreshAfterMs);
+        restoreRosterFocus(focusedControl);
         return;
       }
 
-      status.textContent = '';
+      setRosterStatus('');
       gradeSelect.disabled = false;
-      if (grades.length === 1) {
+      if (previousGrade && grades.some((grade) => String(grade.value) === previousGrade)) {
+        gradeSelect.value = previousGrade;
+      } else if (grades.length === 1) {
         gradeSelect.value = String(grades[0].value);
+      }
+      restoreRosterFocus(focusedControl);
+      if (gradeSelect.value) {
         loadRoster();
       }
     });
   }
 
-  function loadRoster() {
+  function nextRosterRefreshDelay(refreshAfterMs) {
+    const hintedDelay = Number(refreshAfterMs);
+    if (Number.isFinite(hintedDelay) && hintedDelay > 0) {
+      return Math.min(ROSTER_REFRESH_BACKOFF_MAX_MS, Math.max(5_000, hintedDelay));
+    }
+    return ROSTER_REFRESH_MIN_MS + Math.floor(
+      Math.random() * (ROSTER_REFRESH_MAX_MS - ROSTER_REFRESH_MIN_MS + 1),
+    );
+  }
+
+  function scheduleRosterRefresh(refreshAfterMs) {
+    clearRosterRefreshTimer();
+    const gradeSelect = document.getElementById('classpilot-auth-grade');
+    if (!initialized || authGatePhase(currentState || {}) !== 'ready' ||
+        currentState?.loginMethod === 'email_id' || document.visibilityState === 'hidden' ||
+        !gradeSelect) {
+      return;
+    }
+    rosterRefreshTimer = setTimeout(() => {
+      rosterRefreshTimer = null;
+      refreshRosterOrGrades({ background: true });
+    }, nextRosterRefreshDelay(refreshAfterMs));
+  }
+
+  function restoreRosterFocus(control) {
+    if (!control?.isConnected || control.disabled || document.activeElement === control) return;
+    control.focus({ preventScroll: true });
+  }
+
+  function refreshRosterOrGrades(options = {}) {
+    const gradeSelect = document.getElementById('classpilot-auth-grade');
+    if (!gradeSelect) return;
+    if (gradeSelect.value) loadRoster(options);
+    else loadGrades(options);
+  }
+
+  function setRosterStatus(message, warning = false) {
+    const status = document.getElementById('classpilot-auth-roster-status');
+    if (!status) return;
+    status.textContent = message || '';
+    status.classList.toggle('classpilot-auth-roster-note--warning', warning);
+  }
+
+  function hasCurrentRosterSnapshot(gradeLevel) {
+    return rosterSnapshot?.gradeLevel === gradeLevel && Array.isArray(rosterSnapshot.students);
+  }
+
+  function showCachedRosterWarning() {
+    setRosterStatus('Names may be out of date. ClassPilot will try again automatically.', true);
+  }
+
+  function loadRoster(options = {}) {
     const gradeSelect = document.getElementById('classpilot-auth-grade');
     const studentSelect = document.getElementById('classpilot-auth-student');
     const status = document.getElementById('classpilot-auth-roster-status');
     const submit = document.getElementById('classpilot-auth-pin-submit');
+    const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
     const selectedGrade = gradeSelect?.value || '';
     if (!gradeSelect || !studentSelect || !status || !submit) return;
 
-    liveRosterLoaded = false;
+    clearRosterRefreshTimer();
+    const hasSnapshot = hasCurrentRosterSnapshot(selectedGrade);
+    liveRosterLoaded = hasSnapshot;
     const generation = ++rosterRequestGeneration;
-    studentSelect.disabled = true;
-    submit.disabled = true;
     if (!selectedGrade) {
-      status.textContent = '';
+      rosterSnapshot = null;
+      setRosterStatus('');
+      status.setAttribute('aria-busy', 'false');
       studentSelect.replaceChildren(new Option('Select a grade first…', ''));
+      studentSelect.disabled = true;
+      submit.disabled = true;
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = 'Refresh names';
+        refreshButton.setAttribute('aria-busy', 'false');
+      }
+      scheduleRosterRefresh();
       return;
     }
 
-    status.textContent = 'Loading roster…';
+    if (refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Refreshing…';
+      refreshButton.setAttribute('aria-busy', 'true');
+    }
+    setRosterStatus(hasSnapshot ? 'Refreshing names…' : 'Loading roster…');
     status.setAttribute('aria-busy', 'true');
-    studentSelect.replaceChildren(new Option('Loading students…', ''));
-    chrome.runtime.sendMessage({ type: 'get-login-roster', gradeLevel: selectedGrade }, (response) => {
+    if (!hasSnapshot) {
+      studentSelect.replaceChildren(new Option('Loading students…', ''));
+      studentSelect.disabled = true;
+      submit.disabled = true;
+    }
+    chrome.runtime.sendMessage({
+      type: 'get-login-roster',
+      gradeLevel: selectedGrade,
+      ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+    }, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (generation !== rosterRequestGeneration || !status.isConnected || gradeSelect.value !== selectedGrade) return;
       status.setAttribute('aria-busy', 'false');
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        refreshButton.textContent = 'Refresh names';
+        refreshButton.setAttribute('aria-busy', 'false');
+      }
       if (runtimeError || !response?.success) {
+        if (response?.phase === 'setup_required') {
+          handleRosterFailure(response, runtimeError, 'Could not load the classroom roster.');
+          return;
+        }
+        if (hasCurrentRosterSnapshot(selectedGrade)) {
+          showCachedRosterWarning();
+          updatePinSubmitState();
+          scheduleRosterRefresh(response?.refreshAfterMs);
+          return;
+        }
         handleRosterFailure(response, runtimeError, 'Could not load the classroom roster.');
+        scheduleRosterRefresh(response?.refreshAfterMs);
         return;
       }
 
       const students = Array.isArray(response.students)
         ? response.students.filter((student) => student && student.id)
         : [];
+      const previousStudentId = studentSelect.value;
+      rosterSnapshot = { gradeLevel: selectedGrade, students };
+      liveRosterLoaded = true;
       studentSelect.replaceChildren(new Option('Select your name…', ''));
       for (const student of students) {
-        const label = `${student.name || 'Unknown'}${student.hasPin ? '' : ' (PIN missing)'}`;
+        const label = `${student.name || 'Unknown'}${student.reclaimable === true ? ' — Resume on this Chromebook' : ''}${student.hasPin ? '' : ' (PIN missing)'}`;
         const option = new Option(label, String(student.id));
         option.disabled = student.hasPin !== true;
         studentSelect.add(option);
       }
       if (!students.length) {
-        status.textContent = 'No students are ready for PIN sign-in in this grade.';
+        if (response.cached === true && response.warning) {
+          setRosterStatus(
+            'No students are currently available. Names may be out of date; ClassPilot will try again automatically.',
+            true,
+          );
+        } else {
+          setRosterStatus('No students are currently available.');
+        }
         studentSelect.replaceChildren(new Option('No students available', ''));
+        studentSelect.disabled = true;
+        submit.disabled = true;
+        scheduleRosterRefresh(response.refreshAfterMs);
         return;
       }
 
-      liveRosterLoaded = true;
-      status.textContent = '';
       studentSelect.disabled = false;
+      if (students.some((student) => String(student.id) === previousStudentId)) {
+        studentSelect.value = previousStudentId;
+      }
+      if (response.cached === true && response.warning) showCachedRosterWarning();
+      else setRosterStatus('');
       updatePinSubmitState();
+      scheduleRosterRefresh(response.refreshAfterMs);
     });
   }
 
@@ -726,6 +907,16 @@
     target?.focus({ preventScroll: true });
   }
 
+  function refreshVisibleRoster() {
+    const gradeSelect = document.getElementById('classpilot-auth-grade');
+    if (!initialized || document.visibilityState === 'hidden' ||
+        authGatePhase(currentState || {}) !== 'ready' ||
+        currentState?.loginMethod === 'email_id' || !gradeSelect) {
+      return;
+    }
+    refreshRosterOrGrades({ forceRefresh: true, background: true });
+  }
+
   document.addEventListener('focusin', (event) => {
     const target = event.target;
     if (target instanceof HTMLElement && target.id &&
@@ -736,6 +927,17 @@
 
   window.addEventListener('focus', () => {
     requestAnimationFrame(restoreFrameFocus);
+    refreshVisibleRoster();
+  });
+
+  window.addEventListener('pageshow', refreshVisibleRoster);
+  window.addEventListener('online', refreshVisibleRoster);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      clearRosterRefreshTimer();
+      return;
+    }
+    refreshVisibleRoster();
   });
 
   chrome.runtime.onMessage.addListener((message, sender) => {

@@ -10,7 +10,18 @@ const extensionPath = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
   ? resolve(process.env.CLASSPILOT_EXTENSION_PATH)
   : resolve(repoRoot, 'extension');
 const popupSource = await readFile(resolve(extensionPath, 'popup.js'), 'utf8');
+const contentSource = await readFile(resolve(extensionPath, 'content.js'), 'utf8');
+const serviceWorkerSource = await readFile(resolve(extensionPath, 'service-worker.js'), 'utf8');
+assert.doesNotMatch(contentSource, /includeConfig/,
+  'content-facing auth requests must never request internal configuration');
+assert.doesNotMatch(serviceWorkerSource, /response\.config\s*=\s*CONFIG|config:\s*CONFIG/,
+  'runtime replies must never expose the mutable internal configuration object');
 const pendingMessages = [];
+function takePendingMessage(type) {
+  const index = pendingMessages.findIndex((entry) => entry.message?.type === type);
+  assert.notEqual(index, -1, `expected a pending ${type} message`);
+  return pendingMessages.splice(index, 1)[0];
+}
 const rendered = {
   school: '',
   student: '',
@@ -85,32 +96,42 @@ pendingMessages.shift().callback({
 assert.equal(hooks.snapshot().currentConfig, null, 'retired get-config callback must be discarded');
 assert.equal(rendered.student, '', 'retired get-config callback must not paint student A');
 
-hooks.refreshAuthState();
-assert.equal(pendingMessages[0].message.type, 'get-auth-state');
-hooks.bumpEpoch();
-pendingMessages.shift().callback({
-  success: true,
-  state: { authRequired: false, studentName: 'Student A' },
-  config: {
-    schoolId: 'school-a',
-    studentName: 'Student A',
-    studentEmail: 'student-a@example.invalid',
-    classId: 'class-a',
-  },
-});
-assert.equal(hooks.snapshot().currentAuthState, null, 'retired auth-state callback must be discarded');
-assert.equal(rendered.student, '', 'retired auth-state callback must not paint student A');
-
-hooks.refreshAuthState();
-const currentRequest = pendingMessages.shift();
-currentRequest.callback({
-  success: true,
-  state: { authRequired: false, studentName: 'Student B' },
+hooks.refreshPopupConfig();
+const currentConfigRequest = pendingMessages.shift();
+currentConfigRequest.callback({
   config: {
     schoolId: 'school-b',
     studentName: 'Student B',
     studentEmail: 'student-b@example.invalid',
     classId: 'class-b',
+    hasStudentToken: true,
+  },
+});
+assert.equal(hooks.snapshot().currentConfig.studentName, 'Student B');
+assert.equal(rendered.student, 'Student B');
+const retiredAuthRequest = takePendingMessage('get-auth-state');
+assert.equal('includeConfig' in retiredAuthRequest.message, false);
+hooks.bumpEpoch();
+retiredAuthRequest.callback({
+  success: true,
+  state: { authRequired: false, studentName: 'Student A' },
+  config: {
+    studentToken: 'must-not-be-consumed',
+    deviceId: 'must-not-be-consumed',
+  },
+});
+assert.equal(hooks.snapshot().currentAuthState, null, 'retired auth-state callback must be discarded');
+assert.equal(rendered.student, 'Student B', 'retired auth-state callback must not repaint identity');
+
+hooks.refreshAuthState();
+const currentRequest = takePendingMessage('get-auth-state');
+assert.equal('includeConfig' in currentRequest.message, false);
+currentRequest.callback({
+  success: true,
+  state: { authRequired: false, studentName: 'Student B' },
+  config: {
+    studentToken: 'must-not-be-consumed',
+    deviceId: 'must-not-be-consumed',
   },
 });
 assert.equal(hooks.snapshot().currentConfig.studentName, 'Student B');
