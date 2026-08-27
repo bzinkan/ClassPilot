@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.7.1");
+    expect(manifest.version).toBe("2.7.2");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -516,6 +516,10 @@ describe("ClassPilot extension release package guards", () => {
     const persistEnd = serviceWorker.indexOf("function isHttpUrl", persistStart);
     const persistence = serviceWorker.slice(persistStart, persistEnd);
     expect(serviceWorker).toContain("const SCREENSHOT_HEALTH_STORAGE_KEY = 'screenshotHealthV1';");
+    expect(serviceWorker).toContain("lastSuccessfulHeartbeatAt: Number(connectivityHealth.lastSuccessAt || 0)");
+    expect(serviceWorker).toContain("screenshotPolicySource,");
+    expect(serviceWorker).toContain("screenshotPolicyAdoptedAt,");
+    expect(serviceWorker).toContain("lastCaptureAttemptAt: lastScreenshotAttemptAt");
     expect(persistence).toContain("RuntimeCore.normalizeScreenshotHealth");
     expect(persistence).not.toContain("dataUrl");
     expect(persistence).not.toContain("base64");
@@ -638,6 +642,16 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("function requestImmediateObservedScreenshotCapture()");
     expect(serviceWorker).toContain("screenshotPolicyGeneration !== expectedGeneration");
     expect(serviceWorker).toContain("serverTime + boundedLeaseMs - responseReceivedAt");
+    expect(serviceWorker).toMatch(
+      /wsAuthenticatedResponseGuard = \{[\s\S]*protocolPolicyGeneration:[\s\S]*screenshotPolicyGeneration:[\s\S]*requestStartedAt:/,
+    );
+    expect(serviceWorker).toContain(
+      "screenshotRequestGeneration: authenticatedResponseGuard.screenshotPolicyGeneration",
+    );
+    expect(serviceWorker).toContain("responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED'");
+    expect(serviceWorker).toContain("function applyServerScreenshotPolicyDenial(");
+    expect(serviceWorker).toContain("[401, 403, 404].includes(response.status)");
+    expect(serviceWorker).toContain("screenshotPolicyAppliedGeneration = denialGeneration");
     expect(serviceWorker).toContain("function subscribeTabNavigationFence(");
     expect(serviceWorker).toContain("? '/api/classpilot/device/screenshot'");
     expect(serviceWorker).toContain(": '/api/device/screenshot'");

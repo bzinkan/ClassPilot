@@ -32,6 +32,21 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
+### Reliable observation policy reconciliation (2.7.2)
+
+Heartbeat and WebSocket protocol responses now order screenshot authority
+independently. A policy-less WebSocket authentication frame cannot retire an
+older in-flight heartbeat lease. ClassPilot retains only an unexpired lease for
+the exact authenticated school, student, session, device, and server scope;
+missing policy on a cold or changed binding, an expired lease, an explicit
+denial, or malformed authority remains fail-private.
+
+When SchoolPilot requests a capability heartbeat after a screenshot upload,
+the extension coalesces one near-immediate heartbeat without changing its
+normal 10-second cadence. A transient screenshot-store outage keeps only the
+otherwise valid lease and recovers through the existing bounded retry and
+30-second capture cadence.
+
 ### Private kiosk continuity tickets (2.7.1)
 
 On managed (enrolled) Chromebooks, an explicit kiosk launch first makes a
@@ -122,7 +137,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.1.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.2.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
