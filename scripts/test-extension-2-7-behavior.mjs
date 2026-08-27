@@ -892,7 +892,8 @@ async function main() {
         }, authB);
         adoptScreenshotPolicy(undefined, authB);
         const legacyPolicyAllowedBeforeLeaseUpgrade = ambientScreenshotAllowed(authB);
-        const delayedLegacyGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedHeartbeatProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedHeartbeatScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
         const capablePolicyGeneration = reserveProtocolPolicyRequestGeneration();
         const capableMissingPolicyApplied = adoptProtocolAndScreenshotPolicy({
           serverProtocolVersion: 3,
@@ -903,15 +904,174 @@ async function main() {
           responseReceivedAt: Date.now(),
         });
         const capableMissingPolicyAllowed = ambientScreenshotAllowed(authB);
-        const delayedLegacyPolicyApplied = adoptProtocolAndScreenshotPolicy({
-          serverProtocolVersion: 2,
-          acceptedCapabilities: [],
+        const delayedHeartbeatPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
         }, authB, {
-          requestGeneration: delayedLegacyGeneration,
+          requestGeneration: delayedHeartbeatProtocolGeneration,
+          screenshotRequestGeneration: delayedHeartbeatScreenshotGeneration,
           requestStartedAt: Date.now(),
           responseReceivedAt: Date.now(),
         });
-        const delayedLegacyPolicyAllowed = ambientScreenshotAllowed(authB);
+        const delayedHeartbeatPolicyAllowed = ambientScreenshotAllowed(authB);
+
+        const delayedRenewalProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedRenewalScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        const missingPolicyPreserved = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const missingPolicyPreservedAllowed = ambientScreenshotAllowed(authB);
+        const malformedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: { mode: 'lease', observed: true },
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const malformedPolicyAllowed = ambientScreenshotAllowed(authB);
+        const supersededHeartbeatPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: delayedRenewalProtocolGeneration,
+          screenshotRequestGeneration: delayedRenewalScreenshotGeneration,
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const supersededHeartbeatPolicyAllowed = ambientScreenshotAllowed(authB);
+
+        const delayedWsProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedWsScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        const delayedWsRequestStartedAt = Date.now();
+        const newerHeartbeatProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const newerHeartbeatScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        const newerHeartbeatDeniedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: false,
+            expiresInSeconds: 0,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: newerHeartbeatProtocolGeneration,
+          screenshotRequestGeneration: newerHeartbeatScreenshotGeneration,
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const delayedWsAllowedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: delayedWsProtocolGeneration,
+          screenshotRequestGeneration: delayedWsScreenshotGeneration,
+          requestStartedAt: delayedWsRequestStartedAt,
+          responseReceivedAt: Date.now(),
+        });
+        const delayedWsAllowedPolicyAllowed = ambientScreenshotAllowed(authB);
+
+        const delayedDeniedProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedDeniedScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        const delayedMalformedProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedMalformedScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          screenshotRequestGeneration: reserveScreenshotPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const delayedDeniedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: false,
+            expiresInSeconds: 0,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: delayedDeniedProtocolGeneration,
+          screenshotRequestGeneration: delayedDeniedScreenshotGeneration,
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const delayedDeniedPolicyAllowed = ambientScreenshotAllowed(authB);
+        adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          screenshotRequestGeneration: reserveScreenshotPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const delayedMalformedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: { mode: 'lease', observed: true },
+        }, authB, {
+          requestGeneration: delayedMalformedProtocolGeneration,
+          screenshotRequestGeneration: delayedMalformedScreenshotGeneration,
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const delayedMalformedPolicyAllowed = ambientScreenshotAllowed(authB);
+        const explicitDeniedPolicyApplied = adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: false,
+            expiresInSeconds: 0,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        const explicitDeniedPolicyAllowed = ambientScreenshotAllowed(authB);
         adoptProtocolAndScreenshotPolicy({
           serverProtocolVersion: 3,
           acceptedCapabilities: allSupportedCapabilities,
@@ -926,6 +1086,14 @@ async function main() {
           requestStartedAt: Date.now(),
           responseReceivedAt: Date.now(),
         });
+        const omittedPolicyExpiredRetention = canRetainOmittedScreenshotPolicy(
+          authB,
+          Date.now() + 120_000,
+        );
+        const omittedPolicyNewScopeRetention = canRetainOmittedScreenshotPolicy({
+          ...authB,
+          studentSessionId: 'student-session-new-scope',
+        }, Date.now());
         captureAndSendScreenshot = captureBeforeLeaseAdoption;
         progress('capability adoption complete');
 
@@ -1059,6 +1227,240 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
+
+        let releaseStaleUploadDenial;
+        let staleUploadStarted;
+        const staleUploadDenialGate = new Promise((resolveGate) => {
+          releaseStaleUploadDenial = resolveGate;
+        });
+        const staleUploadReady = new Promise((resolveReady) => {
+          staleUploadStarted = resolveReady;
+        });
+        fetchWithBackoff = async () => {
+          staleUploadStarted();
+          await staleUploadDenialGate;
+          return new Response(JSON.stringify({
+            ok: false,
+            code: 'SCREENSHOT_PAUSED_UNOBSERVED',
+            screenshotPolicy: {
+              mode: 'lease',
+              observed: false,
+              expiresInSeconds: 0,
+              serverTime: new Date().toISOString(),
+            },
+          }), {
+            status: 409,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        lastScreenshotAttemptAt = 0;
+        const staleUploadDenialPromise = captureAndSendScreenshot({
+          reason: 'stale-upload-denial-after-newer-allow',
+          queryActiveTab: async () => [{
+            id: 7017,
+            active: true,
+            windowId: 17,
+            url: 'https://observed.example/stale-upload-denial',
+            title: 'Stale upload denial',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,c3RhbGUtdXBsb2FkLWRlbmlhbA==',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        });
+        await staleUploadReady;
+        const captureBeforeStaleUploadPolicyChange = captureAndSendScreenshot;
+        captureAndSendScreenshot = async () => ({ status: 'policy-race-test-double' });
+        adoptScreenshotPolicy({
+          mode: 'lease',
+          observed: false,
+          expiresInSeconds: 0,
+          serverTime: new Date().toISOString(),
+        }, authB);
+        adoptScreenshotPolicy({
+          mode: 'lease',
+          observed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+        }, authB);
+        captureAndSendScreenshot = captureBeforeStaleUploadPolicyChange;
+        const staleUploadNewerAllowWasActive = ambientScreenshotAllowed(authB);
+        releaseStaleUploadDenial();
+        const staleUploadDenialResult = await staleUploadDenialPromise;
+        const staleUploadDenialRevokedNewerAllow = !ambientScreenshotAllowed(authB);
+        const captureBeforeStaleUploadRestore = captureAndSendScreenshot;
+        captureAndSendScreenshot = async () => ({ status: 'restore-test-double' });
+        adoptScreenshotPolicy({
+          mode: 'lease',
+          observed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+        }, authB);
+        captureAndSendScreenshot = captureBeforeStaleUploadRestore;
+
+        const originalScheduleEventHeartbeat = scheduleEventHeartbeat;
+        const screenshotAuthorityHeartbeatReasons = [];
+        scheduleEventHeartbeat = (heartbeatReason) => {
+          screenshotAuthorityHeartbeatReasons.push(heartbeatReason);
+        };
+        fetchWithBackoff = async () => new Response(JSON.stringify({
+          ok: false,
+          code: 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED',
+        }), {
+          status: 409,
+          headers: { 'content-type': 'application/json' },
+        });
+        lastScreenshotAttemptAt = 0;
+        const heartbeatRequiredCaptureResult = await captureAndSendScreenshot({
+          reason: 'heartbeat-required-fixture',
+          queryActiveTab: async () => [{
+            id: 7014,
+            active: true,
+            windowId: 14,
+            url: 'https://observed.example/heartbeat-required',
+            title: 'Heartbeat required',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,aGVhcnRiZWF0LXJlcXVpcmVk',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        });
+        const heartbeatRequiredLeaseRetained = ambientScreenshotAllowed(authB);
+
+        let pausedUnobservedUploadAttempts = 0;
+        fetchWithBackoff = async () => {
+          pausedUnobservedUploadAttempts += 1;
+          return new Response(JSON.stringify({
+            ok: false,
+            code: 'SCREENSHOT_PAUSED_UNOBSERVED',
+            screenshotPolicy: {
+              mode: 'lease',
+              observed: false,
+              expiresInSeconds: 0,
+              serverTime: new Date().toISOString(),
+            },
+          }), {
+            status: 409,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        const pausedUnobservedFixture = {
+          queryActiveTab: async () => [{
+            id: 7016,
+            active: true,
+            windowId: 16,
+            url: 'https://observed.example/paused-unobserved',
+            title: 'Paused unobserved',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,cGF1c2VkLXVub2JzZXJ2ZWQ=',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        };
+        lastScreenshotAttemptAt = 0;
+        const pausedUnobservedCaptureResult = await captureAndSendScreenshot({
+          reason: 'paused-unobserved-fixture',
+          ...pausedUnobservedFixture,
+        });
+        const pausedUnobservedLeaseRevoked = !ambientScreenshotAllowed(authB);
+        lastScreenshotAttemptAt = 0;
+        const captureAfterPausedUnobservedResult = await captureAndSendScreenshot({
+          reason: 'paused-unobserved-second-attempt',
+          ...pausedUnobservedFixture,
+        });
+        const captureBeforeDeniedLeaseRestore = captureAndSendScreenshot;
+        captureAndSendScreenshot = async () => ({ status: 'restore-test-double' });
+        adoptScreenshotPolicy({
+          mode: 'lease',
+          observed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+        }, authB);
+        captureAndSendScreenshot = captureBeforeDeniedLeaseRestore;
+
+        const delayedAuthorizationAllowProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+        const delayedAuthorizationAllowScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
+        const delayedAuthorizationAllowStartedAt = Date.now();
+        let authorizationDeniedUploadAttempts = 0;
+        fetchWithBackoff = async () => {
+          authorizationDeniedUploadAttempts += 1;
+          return new Response(JSON.stringify({
+            ok: false,
+            code: 'STUDENT_SESSION_REPLACED',
+          }), {
+            status: 403,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        lastScreenshotAttemptAt = 0;
+        const authorizationDeniedCaptureResult = await captureAndSendScreenshot({
+          reason: 'authorization-denied-fixture',
+          ...pausedUnobservedFixture,
+        });
+        adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: delayedAuthorizationAllowProtocolGeneration,
+          screenshotRequestGeneration: delayedAuthorizationAllowScreenshotGeneration,
+          requestStartedAt: delayedAuthorizationAllowStartedAt,
+          responseReceivedAt: Date.now(),
+        });
+        const authorizationDeniedLeaseRevoked = !ambientScreenshotAllowed(authB);
+        lastScreenshotAttemptAt = 0;
+        const captureAfterAuthorizationDeniedResult = await captureAndSendScreenshot({
+          reason: 'authorization-denied-second-attempt',
+          ...pausedUnobservedFixture,
+        });
+        const captureBeforeAuthorizationRestore = captureAndSendScreenshot;
+        captureAndSendScreenshot = async () => ({ status: 'restore-test-double' });
+        adoptProtocolAndScreenshotPolicy({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+          screenshotPolicy: {
+            mode: 'lease',
+            observed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+          },
+        }, authB, {
+          requestGeneration: reserveProtocolPolicyRequestGeneration(),
+          screenshotRequestGeneration: reserveScreenshotPolicyRequestGeneration(),
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        });
+        captureAndSendScreenshot = captureBeforeAuthorizationRestore;
+
+        fetchWithBackoff = async () => new Response(JSON.stringify({
+          ok: false,
+          code: 'SCREENSHOT_STORE_UNAVAILABLE',
+        }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+        lastScreenshotAttemptAt = 0;
+        const screenshotServiceUnavailableResult = await captureAndSendScreenshot({
+          reason: 'service-unavailable-fixture',
+          queryActiveTab: async () => [{
+            id: 7015,
+            active: true,
+            windowId: 15,
+            url: 'https://observed.example/service-unavailable',
+            title: 'Service unavailable',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,c2VydmljZS11bmF2YWlsYWJsZQ==',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        });
+        const serviceUnavailableLeaseRetained = ambientScreenshotAllowed(authB);
+        scheduleEventHeartbeat = originalScheduleEventHeartbeat;
 
         let ambientActivationRaceUploads = 0;
         let ambientActivationListener = null;
@@ -2734,8 +3136,25 @@ async function main() {
           legacyPolicyAllowedBeforeLeaseUpgrade,
           capableMissingPolicyApplied,
           capableMissingPolicyAllowed,
-          delayedLegacyPolicyApplied,
-          delayedLegacyPolicyAllowed,
+          delayedHeartbeatPolicyApplied,
+          delayedHeartbeatPolicyAllowed,
+          missingPolicyPreserved,
+          missingPolicyPreservedAllowed,
+          malformedPolicyApplied,
+          malformedPolicyAllowed,
+          supersededHeartbeatPolicyApplied,
+          supersededHeartbeatPolicyAllowed,
+          newerHeartbeatDeniedPolicyApplied,
+          delayedWsAllowedPolicyApplied,
+          delayedWsAllowedPolicyAllowed,
+          delayedDeniedPolicyApplied,
+          delayedDeniedPolicyAllowed,
+          delayedMalformedPolicyApplied,
+          delayedMalformedPolicyAllowed,
+          explicitDeniedPolicyApplied,
+          explicitDeniedPolicyAllowed,
+          omittedPolicyExpiredRetention,
+          omittedPolicyNewScopeRetention,
           leaseImmediateCaptureRequests,
           generationBeforeContinuousRenewal,
           generationAfterContinuousRenewal,
@@ -2753,6 +3172,22 @@ async function main() {
           nullRevisionCommandResult,
           nullRevisionCommandOutbox,
           ambientUpload,
+          staleUploadNewerAllowWasActive,
+          staleUploadDenialResult,
+          staleUploadDenialRevokedNewerAllow,
+          heartbeatRequiredCaptureResult,
+          heartbeatRequiredLeaseRetained,
+          pausedUnobservedCaptureResult,
+          pausedUnobservedLeaseRevoked,
+          captureAfterPausedUnobservedResult,
+          pausedUnobservedUploadAttempts,
+          authorizationDeniedCaptureResult,
+          authorizationDeniedLeaseRevoked,
+          captureAfterAuthorizationDeniedResult,
+          authorizationDeniedUploadAttempts,
+          screenshotAuthorityHeartbeatReasons,
+          screenshotServiceUnavailableResult,
+          serviceUnavailableLeaseRetained,
           ambientActivationRaceResult,
           ambientActivationRaceUploads,
           ambientNavigationRaceResult,
@@ -3007,8 +3442,25 @@ async function main() {
     assert.equal(result.legacyPolicyAllowedBeforeLeaseUpgrade, true);
     assert.equal(result.capableMissingPolicyApplied, true);
     assert.equal(result.capableMissingPolicyAllowed, false);
-    assert.equal(result.delayedLegacyPolicyApplied, false);
-    assert.equal(result.delayedLegacyPolicyAllowed, false);
+    assert.equal(result.delayedHeartbeatPolicyApplied, true);
+    assert.equal(result.delayedHeartbeatPolicyAllowed, true);
+    assert.equal(result.missingPolicyPreserved, true);
+    assert.equal(result.missingPolicyPreservedAllowed, true);
+    assert.equal(result.malformedPolicyApplied, true);
+    assert.equal(result.malformedPolicyAllowed, false);
+    assert.equal(result.supersededHeartbeatPolicyApplied, false);
+    assert.equal(result.supersededHeartbeatPolicyAllowed, false);
+    assert.equal(result.newerHeartbeatDeniedPolicyApplied, true);
+    assert.equal(result.delayedWsAllowedPolicyApplied, false);
+    assert.equal(result.delayedWsAllowedPolicyAllowed, false);
+    assert.equal(result.delayedDeniedPolicyApplied, true);
+    assert.equal(result.delayedDeniedPolicyAllowed, false);
+    assert.equal(result.delayedMalformedPolicyApplied, true);
+    assert.equal(result.delayedMalformedPolicyAllowed, false);
+    assert.equal(result.explicitDeniedPolicyApplied, true);
+    assert.equal(result.explicitDeniedPolicyAllowed, false);
+    assert.equal(result.omittedPolicyExpiredRetention, false);
+    assert.equal(result.omittedPolicyNewScopeRetention, false);
     assert.equal(result.leaseImmediateCaptureRequests >= 3, true);
     assert.equal(
       result.generationAfterContinuousRenewal,
@@ -3071,6 +3523,43 @@ async function main() {
     assert.deepEqual(result.sensitiveCleanupConsole, ['[Auth] Failed cleanup: Error']);
     assert.equal(result.ambientUpload.url.endsWith('/api/classpilot/device/screenshot'), true);
     assert.equal(result.ambientUpload.body.clientProtocolVersion, 3);
+    assert.equal(result.staleUploadNewerAllowWasActive, true);
+    assert.deepEqual(result.staleUploadDenialResult, {
+      status: 'paused_unobserved',
+    });
+    assert.equal(result.staleUploadDenialRevokedNewerAllow, true);
+    assert.deepEqual(result.heartbeatRequiredCaptureResult, {
+      status: 'retrying',
+      reason: 'heartbeat_required',
+    });
+    assert.equal(result.heartbeatRequiredLeaseRetained, true);
+    assert.deepEqual(result.pausedUnobservedCaptureResult, {
+      status: 'paused_unobserved',
+    });
+    assert.equal(result.pausedUnobservedLeaseRevoked, true);
+    assert.deepEqual(result.captureAfterPausedUnobservedResult, {
+      status: 'paused_unobserved',
+    });
+    assert.equal(result.pausedUnobservedUploadAttempts, 1);
+    assert.deepEqual(result.authorizationDeniedCaptureResult, {
+      status: 'paused_unobserved',
+      reason: 'authorization_denied',
+    });
+    assert.equal(result.authorizationDeniedLeaseRevoked, true);
+    assert.deepEqual(result.captureAfterAuthorizationDeniedResult, {
+      status: 'paused_unobserved',
+    });
+    assert.equal(result.authorizationDeniedUploadAttempts, 1);
+    assert.deepEqual(result.screenshotAuthorityHeartbeatReasons, [
+      'screenshot-capability-heartbeat-required',
+      'screenshot-paused-unobserved',
+      'screenshot-authorization-denied',
+    ]);
+    assert.deepEqual(result.screenshotServiceUnavailableResult, {
+      status: 'unavailable',
+      reason: 'service_unavailable',
+    });
+    assert.equal(result.serviceUnavailableLeaseRetained, true);
     assert.deepEqual(result.ambientActivationRaceResult, {
       status: 'unavailable',
       reason: 'active_tab_changed',
@@ -3329,7 +3818,7 @@ async function main() {
     assert.equal(contentMessageEpochRace.callbackBeforeClearFinalModalCount, 0);
 
     console.log(
-      `ClassPilot 2.7.1 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
+      `ClassPilot 2.7.2 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
       + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms.`,
     );
   } finally {

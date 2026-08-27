@@ -625,6 +625,10 @@ let screenshotPolicyGeneration = 0;
 let screenshotImmediateCapturePending = false;
 let protocolPolicyRequestGeneration = 0;
 let protocolPolicyAppliedGeneration = 0;
+let screenshotPolicyRequestGeneration = 0;
+let screenshotPolicyAppliedGeneration = 0;
+let screenshotPolicySource = 'pending';
+let screenshotPolicyAdoptedAt = 0;
 
 // Screenshot health tracking (sent with heartbeat for dashboard diagnostics)
 let lastScreenshotAttemptAt = 0;
@@ -6658,9 +6662,12 @@ function abortActiveAuthContext() {
     scope: null,
     valid: false,
   });
+  screenshotPolicySource = 'pending';
+  screenshotPolicyAdoptedAt = 0;
   screenshotPolicyGeneration += 1;
   screenshotImmediateCapturePending = false;
   protocolPolicyAppliedGeneration = 0;
+  screenshotPolicyAppliedGeneration = 0;
   chrome.alarms?.clear?.('screenshot-observation-lease-expiry');
 }
 
@@ -6824,18 +6831,130 @@ function reserveProtocolPolicyRequestGeneration() {
   return protocolPolicyRequestGeneration;
 }
 
+function reserveScreenshotPolicyRequestGeneration() {
+  screenshotPolicyRequestGeneration += 1;
+  return screenshotPolicyRequestGeneration;
+}
+
+function responseAcceptsScreenshotObservationLease(raw = {}) {
+  const accepted = new Set(
+    Array.isArray(raw?.acceptedCapabilities)
+      ? raw.acceptedCapabilities.map((value) => String(value || '').trim()).filter(Boolean)
+      : [],
+  );
+  return accepted.has('scopedAuthorityChecksV1')
+    && accepted.has('screenshotObservationLeaseV1');
+}
+
+function canRetainOmittedScreenshotPolicy(context, nowValue = Date.now()) {
+  return screenshotPolicyState.scope === screenshotPolicyScope(context)
+    && screenshotPolicyState.mode === 'lease'
+    && screenshotPolicyState.valid === true
+    && Number(screenshotPolicyState.expiresAt || 0) > nowValue;
+}
+
+function screenshotPolicyResponseCanAuthorize(
+  rawPolicy,
+  options,
+  leaseCapabilityAccepted,
+  policyPresent,
+) {
+  if (!leaseCapabilityAccepted && !policyPresent) return true;
+  if (rawPolicy?.mode === 'legacy') return true;
+  const expiresInSeconds = Number(rawPolicy?.expiresInSeconds);
+  const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
+  const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
+    ? Number(options.responseReceivedAt)
+    : Date.now();
+  const requestStartedAt = Number.isFinite(Number(options.requestStartedAt))
+    ? Number(options.requestStartedAt)
+    : responseReceivedAt;
+  const boundedLeaseMs = Number.isFinite(expiresInSeconds)
+    ? Math.min(120, Math.max(0, expiresInSeconds)) * 1000
+    : 0;
+  const roundTripMs = Math.max(0, responseReceivedAt - requestStartedAt);
+  const serverTimeIsCurrent = Number.isFinite(serverTime)
+    && requestStartedAt <= responseReceivedAt
+    && serverTime >= requestStartedAt - 30_000
+    && serverTime <= responseReceivedAt + 30_000;
+  const remainingLeaseMs = serverTimeIsCurrent
+    ? Math.max(0, Math.min(
+      boundedLeaseMs - roundTripMs,
+      serverTime + boundedLeaseMs - responseReceivedAt,
+    ))
+    : 0;
+  return leaseCapabilityAccepted
+    && rawPolicy?.mode === 'lease'
+    && rawPolicy?.observed === true
+    && Number.isFinite(expiresInSeconds)
+    && expiresInSeconds > 0
+    && serverTimeIsCurrent
+    && remainingLeaseMs > 0;
+}
+
 function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
   assertAuthenticatedContextCurrent(context, 'protocol and screenshot policy');
   const requestGeneration = Number(options.requestGeneration);
   const generation = Number.isSafeInteger(requestGeneration) && requestGeneration > 0
     ? requestGeneration
     : reserveProtocolPolicyRequestGeneration();
-  if (generation < protocolPolicyAppliedGeneration) return false;
-  protocolPolicyAppliedGeneration = generation;
-  adoptNegotiatedProtocolState(raw, context);
-  // Capability and screenshot-policy adoption are one authority transition.
-  // In lease mode, an omitted or malformed policy is deliberately private.
-  adoptScreenshotPolicy(raw?.screenshotPolicy, context, options);
+  let protocolApplied = false;
+  if (generation >= protocolPolicyAppliedGeneration) {
+    protocolPolicyAppliedGeneration = generation;
+    adoptNegotiatedProtocolState(raw, context);
+    protocolApplied = true;
+  }
+
+  const policyPresent = Object.prototype.hasOwnProperty.call(raw, 'screenshotPolicy');
+  const leaseCapabilityAccepted = responseAcceptsScreenshotObservationLease(raw);
+  const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
+    ? Number(options.responseReceivedAt)
+    : Date.now();
+  const policyRetentionNow = Math.max(Date.now(), responseReceivedAt);
+
+  if (leaseCapabilityAccepted && !policyPresent) {
+    // A capable WebSocket auth response may race an older in-flight heartbeat.
+    // It carries no screenshot authority, so it must not retire that heartbeat's
+    // independently ordered lease. Retain only an exact-scope, unexpired lease;
+    // cold, legacy, invalid, expired, or new-scope state remains fail-private.
+    if (!canRetainOmittedScreenshotPolicy(context, policyRetentionNow)) {
+      adoptScreenshotPolicy(undefined, context, {
+        ...options,
+        leaseCapabilityAccepted: true,
+        policyPresent: false,
+      });
+    }
+    return protocolApplied;
+  }
+
+  // A response from a superseded protocol generation may still carry an
+  // explicit, independently ordered screenshot policy. Implicit legacy mode,
+  // however, is meaningful only when that response's protocol was adopted.
+  if (!policyPresent && !protocolApplied) return protocolApplied;
+
+  const rawScreenshotGeneration = Number(options.screenshotRequestGeneration);
+  const screenshotGeneration = Number.isSafeInteger(rawScreenshotGeneration)
+    && rawScreenshotGeneration > 0
+    ? rawScreenshotGeneration
+    : reserveScreenshotPolicyRequestGeneration();
+  if (screenshotGeneration < screenshotPolicyAppliedGeneration) {
+    // A stale response may never broaden screenshot authority. Conversely, an
+    // explicit denial or malformed policy is fail-private and revokes a newer
+    // allow for the same exact auth context; a later newer allow can recover.
+    if (screenshotPolicyResponseCanAuthorize(
+      raw?.screenshotPolicy,
+      options,
+      leaseCapabilityAccepted,
+      policyPresent,
+    )) return protocolApplied;
+  } else {
+    screenshotPolicyAppliedGeneration = screenshotGeneration;
+  }
+  adoptScreenshotPolicy(raw?.screenshotPolicy, context, {
+    ...options,
+    leaseCapabilityAccepted,
+    policyPresent,
+  });
   return true;
 }
 
@@ -6906,8 +7025,14 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
   const scope = screenshotPolicyScope(context);
   const priorState = screenshotPolicyState;
   const priorAllowed = ambientScreenshotAllowed(context);
+  const leaseCapabilityAccepted = typeof options.leaseCapabilityAccepted === 'boolean'
+    ? options.leaseCapabilityAccepted
+    : hasNegotiatedCapability('screenshotObservationLeaseV1', context);
+  const policyPresent = typeof options.policyPresent === 'boolean'
+    ? options.policyPresent
+    : rawPolicy !== undefined;
   let next;
-  if (!hasNegotiatedCapability('screenshotObservationLeaseV1', context)) {
+  if (!leaseCapabilityAccepted && !policyPresent) {
     // A server that did not accept the capability remains on the v2 ambient
     // behavior. Capability intersection, never a version comparison, chooses
     // this compatibility path.
@@ -6941,7 +7066,8 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
         serverTime + boundedLeaseMs - responseReceivedAt,
       ))
       : 0;
-    const validShape = rawPolicy?.mode === 'lease'
+    const validShape = leaseCapabilityAccepted
+      && rawPolicy?.mode === 'lease'
       && typeof rawPolicy?.observed === 'boolean'
       && Number.isFinite(expiresInSeconds)
       && expiresInSeconds >= 0
@@ -6961,6 +7087,12 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     });
   }
   screenshotPolicyState = next;
+  screenshotPolicySource = typeof options.policySource === 'string'
+    ? options.policySource.slice(0, 32)
+    : 'unknown';
+  screenshotPolicyAdoptedAt = Number.isFinite(Number(options.responseReceivedAt))
+    ? Number(options.responseReceivedAt)
+    : Date.now();
   const nextAllowed = ambientScreenshotAllowed(context);
   const authorityChanged = priorState.scope !== scope
     || priorState.mode !== next.mode
@@ -6978,6 +7110,18 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     requestImmediateObservedScreenshotCapture();
   }
   return next;
+}
+
+function applyServerScreenshotPolicyDenial(rawPolicy, context, options = {}) {
+  assertAuthenticatedContextCurrent(context, 'server screenshot policy denial');
+  const denialGeneration = reserveScreenshotPolicyRequestGeneration();
+  screenshotPolicyAppliedGeneration = denialGeneration;
+  return adoptScreenshotPolicy(rawPolicy, context, {
+    ...options,
+    policySource: 'upload_denial',
+    leaseCapabilityAccepted: true,
+    policyPresent: true,
+  });
 }
 
 function buildDeviceAuthHeaders(context = null) {
@@ -10689,6 +10833,7 @@ async function sendHeartbeat(reason = 'manual') {
   let heartbeatResponseReceived = false;
   let heartbeatRequestTimedOut = false;
   const protocolPolicyGeneration = reserveProtocolPolicyRequestGeneration();
+  const heartbeatScreenshotPolicyGeneration = reserveScreenshotPolicyRequestGeneration();
 
   try {
     // Get the active tab from the LAST FOCUSED window (the one the user is actually looking at)
@@ -10784,6 +10929,10 @@ async function sendHeartbeat(reason = 'manual') {
       requestFabState: requestFabStateOnHeartbeat(),
       // Screenshot health diagnostics (helps dashboard show why screenshots may be missing)
       screenshotHealth: {
+        lastSuccessfulHeartbeatAt: Number(connectivityHealth.lastSuccessAt || 0),
+        screenshotPolicySource,
+        screenshotPolicyAdoptedAt,
+        lastCaptureAttemptAt: lastScreenshotAttemptAt,
         lastAttemptAt: lastScreenshotAttemptAt,
         lastSuccessAt: lastScreenshotSuccessAt,
         lastErrorAt: lastScreenshotErrorAt,
@@ -10919,8 +11068,10 @@ async function sendHeartbeat(reason = 'manual') {
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:binding-adoption`);
         adoptProtocolAndScreenshotPolicy(data, heartbeatAuthContext, {
           requestGeneration: protocolPolicyGeneration,
+          screenshotRequestGeneration: heartbeatScreenshotPolicyGeneration,
           requestStartedAt: heartbeatRequestStartedAt,
           responseReceivedAt: heartbeatResponseReceivedAt,
+          policySource: 'heartbeat',
         });
         await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile');
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:classroom-state`);
@@ -11418,6 +11569,7 @@ async function captureAndSendScreenshot(options = {}) {
     )
       ? '/api/classpilot/device/screenshot'
       : '/api/device/screenshot';
+    const screenshotUploadStartedAt = Date.now();
     const response = await fetchWithBackoff(`${screenshotAuthContext.serverOrigin}${screenshotUploadPath}`, {
       method: 'POST',
       headers,
@@ -11436,6 +11588,40 @@ async function captureAndSendScreenshot(options = {}) {
       maxAttempts: 2,
     });
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
+    const responseBody = !response.ok && [401, 403, 404, 409].includes(response.status)
+      ? await response.json().catch(() => ({}))
+      : {};
+    const structuredAuthorityDenial = typeof responseBody?.code === 'string'
+      && /(?:AUTH|BINDING|SESSION|UNAUTHORIZED|FORBIDDEN)/.test(responseBody.code);
+    // A server denial for the still-current authentication binding is
+    // authoritative even if a newer heartbeat/WebSocket response changed the
+    // local screenshot-policy generation while this upload was in flight.
+    // Handle it before the generation fence so stale upload responses cannot
+    // be used to keep ambient capture enabled.
+    if (!response.ok && (
+      responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED'
+      || [401, 403, 404].includes(response.status)
+      || structuredAuthorityDenial
+    )) {
+      const responseReceivedAt = Date.now();
+      applyServerScreenshotPolicyDenial(responseBody.screenshotPolicy, screenshotAuthContext, {
+        requestStartedAt: screenshotUploadStartedAt,
+        responseReceivedAt,
+      });
+      const pausedUnobserved = responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED';
+      await recordScreenshotError(
+        pausedUnobserved ? 'paused_unobserved' : 'authorization_denied',
+        responseReceivedAt,
+        screenshotAuthContext,
+      );
+      scheduleEventHeartbeat(
+        pausedUnobserved ? 'screenshot-paused-unobserved' : 'screenshot-authorization-denied',
+      );
+      return {
+        status: 'paused_unobserved',
+        ...(pausedUnobserved ? {} : { reason: 'authorization_denied' }),
+      };
+    }
     assertAmbientScreenshotPolicyCurrent(
       screenshotAuthContext,
       capturePolicyGeneration,
@@ -11443,6 +11629,20 @@ async function captureAndSendScreenshot(options = {}) {
     );
 
     if (!response.ok) {
+      if (responseBody?.code === 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED') {
+        await recordScreenshotError('heartbeat_required', Date.now(), screenshotAuthContext);
+        // Coalesce concurrent capture failures into one near-immediate
+        // heartbeat. The steady-state 10-second cadence remains unchanged.
+        scheduleEventHeartbeat('screenshot-capability-heartbeat-required');
+        return { status: 'retrying', reason: 'heartbeat_required' };
+      }
+      if (response.status === 503) {
+        await recordScreenshotError('upload_service_unavailable', Date.now(), screenshotAuthContext);
+        // A transient store outage is not a screenshot-policy decision. Keep
+        // the still-valid exact-scope lease and let the bounded request retry
+        // plus normal 30-second capture cadence recover naturally.
+        return { status: 'unavailable', reason: 'service_unavailable' };
+      }
       await recordScreenshotError(response.status >= 500
         ? 'upload_server_error'
         : 'upload_client_error', Date.now(), screenshotAuthContext);
@@ -16435,6 +16635,9 @@ async function connectWebSocketNow(requestedAuthContext = null) {
   wsTransportConnected = false;
   wsAuthenticatedGeneration = 0;
   wsConnectionGeneration += 1;
+  const wsProtocolPolicyGeneration = reserveProtocolPolicyRequestGeneration();
+  const wsScreenshotPolicyGeneration = reserveScreenshotPolicyRequestGeneration();
+  const wsAuthRequestStartedAt = Date.now();
   wsTransportIdentity = {
     connectionGeneration: wsConnectionGeneration,
     authContextId: authContext.authContextId,
@@ -16444,6 +16647,9 @@ async function connectWebSocketNow(requestedAuthContext = null) {
     connectionGeneration: wsConnectionGeneration,
     responseGuard: captureAuthenticatedResponseGuard(),
     authContext,
+    protocolPolicyGeneration: wsProtocolPolicyGeneration,
+    screenshotPolicyGeneration: wsScreenshotPolicyGeneration,
+    requestStartedAt: wsAuthRequestStartedAt,
   };
   try {
     assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
@@ -16604,7 +16810,6 @@ async function handleWsMessage(
       // Handle authentication success with settings
       if (message.type === 'auth-success') {
         console.log('WebSocket authenticated successfully');
-        const protocolPolicyGeneration = reserveProtocolPolicyRequestGeneration();
         try {
           if (
             wsAuthenticatedResponseGuard?.authContext?.authContextId !== authContext.authContextId
@@ -16612,15 +16817,21 @@ async function handleWsMessage(
           ) {
             throw authContextSuperseded('WebSocket authentication');
           }
-          const responseGuard = wsAuthenticatedResponseGuard?.connectionGeneration === connectionGeneration
-            ? wsAuthenticatedResponseGuard.responseGuard
+          const authenticatedResponseGuard = wsAuthenticatedResponseGuard?.connectionGeneration === connectionGeneration
+            ? wsAuthenticatedResponseGuard
             : null;
+          if (!authenticatedResponseGuard) {
+            throw authContextSuperseded('WebSocket authentication generation');
+          }
+          const responseGuard = authenticatedResponseGuard.responseGuard;
           await adoptAuthenticatedStudentBinding(message, 'websocket auth', responseGuard);
           assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication');
           adoptProtocolAndScreenshotPolicy(message, authContext, {
-            requestGeneration: protocolPolicyGeneration,
-            requestStartedAt: Date.now(),
+            requestGeneration: authenticatedResponseGuard.protocolPolicyGeneration,
+            screenshotRequestGeneration: authenticatedResponseGuard.screenshotPolicyGeneration,
+            requestStartedAt: authenticatedResponseGuard.requestStartedAt,
             responseReceivedAt: Date.now(),
+            policySource: 'websocket',
           });
         } catch (error) {
           console.warn('[WebSocket] Exact student binding was rejected:', safeDiagnosticError(error));
