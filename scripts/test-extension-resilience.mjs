@@ -216,10 +216,19 @@ async function main() {
     assert.equal(trustedAccessFailure.rejected, true);
     const trustedRecoveryStorage = await worker.evaluate(async ({ fixturePort }) => {
       await trustedLocalStorageAccessPromise;
+      // The worker wake owns recovery-state normalization. Let its one-time
+      // loader claim the production key before installing this deliberately
+      // malformed privacy probe; otherwise Linux can race the probe write with
+      // the expected malformed-state cleanup and produce a false null result.
+      await ensureStudentSessionRecoveryLoaded();
       const marker = 'trusted-recovery-storage-marker';
       await chrome.storage.local.set({
         [STUDENT_SESSION_RECOVERY_STORAGE_KEY]: { marker },
       });
+      // Keep the probe in place while the rest of worker-wake reconciliation
+      // drains so this test still covers the original startup interleaving.
+      await authStateRestorePromise;
+      await studentSessionRecoveryMutationTail;
       const tab = await chrome.tabs.create({
         url: `http://storage-privacy.localhost:${fixturePort}/recovery-storage`,
         active: false,
