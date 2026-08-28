@@ -143,6 +143,39 @@ async function main() {
     serviceWorkerSource.slice(recoveryAlarmBranchStart, recoveryAlarmBranchEnd),
     /flushStudentSessionRecovery\(\{ maxRecords: 1 \}\)/,
   );
+  for (const [label, anchorMarker, startMarker, endMarker] of [
+    [
+      'heartbeat authorization denial',
+      "console.warn('Heartbeat conflict:', response.status);",
+      '} else if (response.status === 401 || response.status === 403) {',
+      '} else if (response.status === 408 || response.status >= 500) {',
+    ],
+    [
+      'screenshot authorization denial',
+      'const responseBody = !response.ok && [401, 402, 403, 404, 409].includes(response.status)',
+      'if (response.status === 401 || response.status === 403) {',
+      'const structuredAuthorityDenial =',
+    ],
+  ]) {
+    const anchorStart = serviceWorkerSource.indexOf(anchorMarker);
+    const branchStart = serviceWorkerSource.indexOf(startMarker, anchorStart + anchorMarker.length);
+    const branchEnd = serviceWorkerSource.indexOf(endMarker, branchStart + startMarker.length);
+    assert.ok(
+      anchorStart >= 0 && branchStart > anchorStart && branchEnd > branchStart,
+      `${label} branch was not found`,
+    );
+    const branchSource = serviceWorkerSource.slice(branchStart, branchEnd);
+    assert.match(
+      branchSource,
+      /serverSessionEnded:\s*false/,
+      `${label} must preserve exact manual-session recovery`,
+    );
+    assert.doesNotMatch(
+      branchSource,
+      /serverSessionEnded:\s*true/,
+      `${label} must not claim that an uncorrelated session already ended`,
+    );
+  }
 
   let context;
   let navigationFixtureServer;
@@ -4380,6 +4413,283 @@ async function main() {
       crossStudentHandoffAfterReleaseFailure.session.activeStudentSessionId,
       'bob-student-session',
     );
+
+    const uncorrelatedAuthorizationDenialRecovery = await worker.evaluate(async () => {
+      await studentAuthMutationTail.catch(() => {});
+      if (studentSessionRecoveryFlushPromise) {
+        await studentSessionRecoveryFlushPromise.catch(() => {});
+      }
+      if (hasStudentAuth()) {
+        const current = captureAuthenticatedContext('authorization denial recovery fixture reset');
+        await clearStudentAuth('authorization_denial_recovery_fixture_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          disconnectWebSocket: false,
+          notifyAuthGateTabs: false,
+          expectedAuthContext: current,
+        });
+      }
+      await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+      resetLoginRosterRuntimeCache();
+
+      const originalFetch = globalThis.fetch;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalSharedSignInConfig = { ...sharedSignInLoginConfig };
+      const originalConfig = { ...CONFIG };
+      const originalTrackingState = trackingState;
+      const originalStudentAuthInvalidating = studentAuthInvalidating;
+      const originalStudentAuthCommitPending = studentAuthCommitPending;
+      const originalStudentAuthCommitPendingGeneration = studentAuthCommitPendingGeneration;
+      const results = [];
+      let activeCase = null;
+      const releaseRequests = new Map();
+      const rosterRecoveryHeaders = new Map();
+      const requestHeader = (headers, name) => {
+        if (headers instanceof Headers) return headers.get(name);
+        const entry = Object.entries(headers || {}).find(
+          ([key]) => key.toLowerCase() === name.toLowerCase(),
+        );
+        return entry?.[1] || null;
+      };
+
+      const resetCase = async () => {
+        await studentAuthMutationTail.catch(() => {});
+        if (studentSessionRecoveryFlushPromise) {
+          await studentSessionRecoveryFlushPromise.catch(() => {});
+        }
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('authorization denial case reset');
+          await clearStudentAuth('authorization_denial_case_reset', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            disconnectWebSocket: false,
+            notifyAuthGateTabs: false,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        screenshotCaptureInFlight = false;
+        screenshotImmediateCapturePending = false;
+        lastScreenshotAttemptAt = 0;
+        apiBackoffUntilMs = 0;
+      };
+
+      globalThis.fetch = async (url) => {
+        if (String(url).endsWith('/api/extension/session-release')) {
+          releaseRequests.set(activeCase, (releaseRequests.get(activeCase) || 0) + 1);
+          return new Response(JSON.stringify({ code: 'SESSION_RELEASE_UNAVAILABLE' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+
+      const runCase = async (source, status) => {
+        await resetCase();
+        activeCase = `${source}-${status}`;
+        const authContextId = generateAuthContextId();
+        const recoveryToken = (source === 'heartbeat' ? 'Q' : 'W').repeat(43);
+        const schoolId = `auth-denial-${source}-${status}`;
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId,
+          schoolSlug: schoolId,
+          enrollmentKey: 'auth-denial-enrollment-key',
+          deviceId: `auth-denial-${source}-device`,
+          studentToken: `auth-denial-${source}-bearer`,
+          activeStudentId: `auth-denial-${source}-student`,
+          activeStudentSessionId: `auth-denial-${source}-session`,
+          authContextId,
+          studentEmail: `${source}@example.edu`,
+          studentName: `${source} fixture`,
+          identitySource: 'manual_pin',
+          manualLoginLastSeenAt: Date.now(),
+          autoRegistrationPaused: false,
+        });
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId,
+        };
+        fastAuthGateEnabled = false;
+        await setManualAuthState({
+          authContextId,
+          studentToken: CONFIG.studentToken,
+          activeStudentId: CONFIG.activeStudentId,
+          activeStudentSessionId: CONFIG.activeStudentSessionId,
+          studentEmail: CONFIG.studentEmail,
+          studentName: CONFIG.studentName,
+          registered: true,
+          identitySource: CONFIG.identitySource,
+          manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt,
+          autoRegistrationPaused: false,
+        });
+        activateAuthenticatedContext(authContextId);
+        const authContext = captureAuthenticatedContext(`${activeCase} fixture`);
+        await armStudentSessionRecovery({
+          serverOrigin: authContext.serverOrigin,
+          schoolId: authContext.schoolId,
+          token: recoveryToken,
+          authContextId,
+        });
+        adoptLicenseState(true, 'active', authContext);
+        trackingState = TRACKING_STATES.ACTIVE;
+        if (source === 'screenshot') {
+          adoptNegotiatedProtocolState({
+            serverProtocolVersion: 3,
+            acceptedCapabilities: [
+              'scopedAuthorityChecksV1',
+              'screenshotTrackingWindowLeaseV1',
+            ],
+          }, authContext);
+          screenshotCaptureInFlight = true;
+          adoptScreenshotPolicy({
+            mode: 'tracking_window_lease',
+            captureAllowed: true,
+            expiresInSeconds: 90,
+            serverTime: new Date().toISOString(),
+            authority: { kind: 'student_session', controlRevision: 1 },
+          }, authContext);
+          screenshotCaptureInFlight = false;
+          screenshotImmediateCapturePending = false;
+        }
+
+        fetchWithBackoff = async (url, requestOptions = {}) => {
+          const requestUrl = String(url);
+          if (requestUrl.includes('/api/extension/login-roster?')) {
+            rosterRecoveryHeaders.set(
+              activeCase,
+              requestHeader(requestOptions.headers, 'Authorization'),
+            );
+            return new Response(JSON.stringify({
+              loginMethod: 'name_pin',
+              students: [{
+                id: `auth-denial-${source}-student`,
+                name: `${source} fixture`,
+                hasPin: true,
+                reclaimable: true,
+              }],
+              grades: [{ value: '5', label: 'Grade 5' }],
+            }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (
+            (source === 'heartbeat' && requestUrl.endsWith('/api/device/heartbeat'))
+            || (source === 'screenshot' && requestUrl.includes('/api/classpilot/device/screenshot'))
+          ) {
+            return new Response(JSON.stringify({ code: 'AUTHORIZATION_DENIED' }), {
+              status,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+
+        let pathResult = null;
+        if (source === 'heartbeat') {
+          await sendHeartbeat(`authorization-denial-${status}`);
+        } else {
+          pathResult = await captureAndSendScreenshot({
+            reason: `authorization-denial-${status}`,
+            queryActiveTab: async () => [{
+              id: 7400 + status,
+              windowId: 74,
+              active: true,
+              url: 'https://fixture.example/authorization-denial',
+              title: 'Authorization denial fixture',
+            }],
+            captureVisibleTab: async () => 'data:image/jpeg;base64,YXV0aC1kZW5pYWw=',
+            subscribeTabActivation: () => () => {},
+            subscribeTabUpdate: () => () => {},
+            subscribeWindowFocus: () => () => {},
+          });
+        }
+
+        await studentAuthMutationTail.catch(() => {});
+        await Promise.resolve();
+        if (studentSessionRecoveryFlushPromise) {
+          await studentSessionRecoveryFlushPromise.catch(() => {});
+        }
+        const pendingRecovery = matchingStudentSessionRecoveryRecord();
+        const persisted = await chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
+        const roster = pendingRecovery
+          ? await fetchLoginRosterNetworkForGate({
+            gradeLevel: '5',
+            recoveryRecord: pendingRecovery,
+          })
+          : null;
+        results.push({
+          source,
+          status,
+          pathResult,
+          hasStudentAuth: hasStudentAuth(),
+          autoRegistrationPaused: CONFIG.autoRegistrationPaused === true,
+          pendingRecovery: pendingRecovery?.state === 'pending',
+          recoveryPersisted: persisted[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.pending?.some(
+            (record) => record.token === recoveryToken,
+          ) === true,
+          releaseRequests: releaseRequests.get(activeCase) || 0,
+          rosterSentRecovery: rosterRecoveryHeaders.get(activeCase)
+            === `ClassPilot-Recovery ${recoveryToken}`,
+          reclaimable: roster?.students?.[0]?.reclaimable === true,
+        });
+      };
+
+      try {
+        for (const source of ['heartbeat', 'screenshot']) {
+          for (const status of [401, 403]) {
+            await runCase(source, status);
+          }
+        }
+        return results;
+      } finally {
+        await resetCase();
+        globalThis.fetch = originalFetch;
+        fetchWithBackoff = originalFetchWithBackoff;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        CONFIG = originalConfig;
+        trackingState = originalTrackingState;
+        studentAuthInvalidating = originalStudentAuthInvalidating;
+        studentAuthCommitPending = originalStudentAuthCommitPending;
+        studentAuthCommitPendingGeneration = originalStudentAuthCommitPendingGeneration;
+      }
+    });
+    assert.equal(uncorrelatedAuthorizationDenialRecovery.length, 4);
+    for (const result of uncorrelatedAuthorizationDenialRecovery) {
+      assert.equal(result.hasStudentAuth, false, JSON.stringify(result));
+      assert.equal(result.autoRegistrationPaused, true, JSON.stringify(result));
+      assert.equal(result.pendingRecovery, true, JSON.stringify(result));
+      assert.equal(result.recoveryPersisted, true, JSON.stringify(result));
+      assert.ok(result.releaseRequests >= 1, JSON.stringify(result));
+      assert.equal(result.rosterSentRecovery, true, JSON.stringify(result));
+      assert.equal(result.reclaimable, true, JSON.stringify(result));
+      if (result.source === 'screenshot') {
+        assert.deepEqual(result.pathResult, {
+          status: 'paused_unobserved',
+          reason: 'authorization_denied',
+        });
+      }
+    }
 
     const malformedRosterValidationModes = await worker.evaluate(async () => {
       const originalFastAuthGateEnabled = fastAuthGateEnabled;
