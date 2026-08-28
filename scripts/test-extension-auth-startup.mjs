@@ -3050,10 +3050,11 @@ async function main() {
     fixture.state.schoolStatusRawBody = null;
     fixture.state.schoolStatusBody = { success: true, schoolActive: true, planStatus: 'active' };
 
-    // A full Chrome restart clears storage.session. Keep exact release
-    // temporarily unavailable so the PIN roster must offer same-Chromebook
-    // reclaim and the subsequent login must present that exact capability.
-    fixture.state.sessionReleaseStatus = 503;
+    // A full Chrome restart clears storage.session. Even when the exact release
+    // endpoint would return its ordinary opaque 204, the newest current-school
+    // capability is reserved for the gate rather than released before roster.
+    const releasesBeforeBrowserRestart = fixture.state.sessionReleaseRequests;
+    fixture.state.sessionReleaseStatus = 204;
     fixture.state.configDelayMs = 0;
     fixture.state.configStatus = 200;
     fixture.state.configBody = {
@@ -3081,6 +3082,11 @@ async function main() {
         (value) => value === `ClassPilot-Recovery ${'R'.repeat(43)}`,
       ),
       'restart roster did not present the exact recovery capability',
+    );
+    assert.equal(
+      fixture.state.sessionReleaseRequests,
+      releasesBeforeBrowserRestart,
+      'browser restart released the newest recovery capability before roster',
     );
     await recoveryFrame.locator('#classpilot-auth-student').selectOption('student-1');
     await recoveryFrame.locator('#classpilot-auth-pin').fill('1234');

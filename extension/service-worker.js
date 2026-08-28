@@ -318,6 +318,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'liveViewIceServersV1',
   'kioskLaunchTicketV1',
   'kioskLaunchTicketV2',
+  'managedDeviceContinuityV1',
   'screenOnlyUnlockV1',
   'durableChatAckV1',
   'commandAckReceiptV1',
@@ -330,6 +331,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'exactTabCloseV2',
   'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
+  'managedDeviceContinuityV1',
 ]);
 
 function extensionProtocolDescriptor() {
@@ -604,6 +606,16 @@ const STUDENT_SESSION_RECOVERY_RETRY_DELAYS_MS = Object.freeze([
   2 * 60 * 1000,
   5 * 60 * 1000,
 ]);
+const STUDENT_SESSION_RECOVERY_INTENT_RESUME = 'resume';
+const STUDENT_SESSION_RECOVERY_INTENT_RELEASE = 'release';
+const MANAGED_DEVICE_CONTINUITY_SESSION_KEY = 'managedDeviceContinuityV1';
+const MANAGED_DEVICE_CONTINUITY_CAPABILITIES = Object.freeze([
+  'scopedAuthorityChecksV1',
+  'kioskLaunchTicketV2',
+  'managedDeviceContinuityV1',
+]);
+const MANAGED_DEVICE_CONTINUITY_MAX_PROOF_TTL_MS = 10 * 60 * 1000;
+const MANAGED_DEVICE_CONTINUITY_EXPIRY_SKEW_MS = 5000;
 const LOGIN_ROSTER_CACHE_MIN_AGE_MS = 5000;
 const LOGIN_ROSTER_REFRESH_MIN_MS = 25 * 1000;
 const LOGIN_ROSTER_REFRESH_MAX_MS = 35 * 1000;
@@ -799,6 +811,11 @@ let studentSessionRecoveryLoaded = false;
 let studentSessionRecoveryMutationTail = Promise.resolve();
 let studentSessionRecoveryFlushPromise = null;
 let studentSessionRecoveryRevision = 0;
+let managedDeviceContinuityState = null;
+let managedDeviceContinuityLoaded = false;
+let managedDeviceContinuityLoadPromise = null;
+let managedDeviceContinuityIssuancePromise = null;
+let managedDeviceContinuityRevision = 0;
 const loginRosterRecoveryGrants = new Map();
 const loginRosterCache = new Map();
 const loginRosterInFlight = new Map();
@@ -1771,6 +1788,12 @@ function normalizeStudentSessionRecoveryRecord(raw, state, nowValue = Date.now()
     record.attemptCount = attemptCount;
     record.nextAttemptAt = Math.min(nextAttemptAt, discardAt);
     record.discardAt = discardAt;
+    // 2.7.4 pending records did not persist intent. Treat them as resumable so
+    // an update cannot repeat the release-before-roster race that hid the
+    // student's name. Every new pending record writes an explicit intent.
+    record.intent = raw.intent === STUDENT_SESSION_RECOVERY_INTENT_RELEASE
+      ? STUDENT_SESSION_RECOVERY_INTENT_RELEASE
+      : STUDENT_SESSION_RECOVERY_INTENT_RESUME;
   }
   return Object.freeze(record);
 }
@@ -1815,9 +1838,69 @@ function studentSessionRecoveryMaterialMatches(left, right) {
       record.schoolId,
       record.token,
       record.authContextId,
+      record.intent || null,
     ])
     .sort((a, b) => String(a[1]).localeCompare(String(b[1])));
   return JSON.stringify(material(left)) === JSON.stringify(material(right));
+}
+
+function resolvedAuthGateSchoolId(binding = authGateConfigBinding()) {
+  if (binding.schoolId) return binding.schoolId;
+  return sharedSignInLoginConfig.phase === 'ready'
+    && sharedSignInLoginConfig.bindingKey === authGateConfigBindingKey(binding)
+    ? normalizeStudentSessionRecoverySchoolId(sharedSignInLoginConfig.schoolId)
+    : null;
+}
+
+function newestCurrentAuthorityRecoveryRecord(
+  state = studentSessionRecoveryState,
+  options = {},
+) {
+  if (hasStudentAuth()) return null;
+  const binding = authGateConfigBinding();
+  const schoolId = resolvedAuthGateSchoolId(binding);
+  if (!binding.serverOrigin || !schoolId) return null;
+  const nowValue = Date.now();
+  return [state?.armed, ...(state?.pending || [])]
+    .filter((record) => Boolean(
+      record
+      && record.serverOrigin === binding.serverOrigin
+      && (!schoolId || record.schoolId === schoolId)
+      && (
+        options.resumeOnly !== true
+        || record.state === 'armed'
+        || record.intent === STUDENT_SESSION_RECOVERY_INTENT_RESUME
+      )
+      && (record.state !== 'pending' || record.discardAt > nowValue)
+    ))
+    .sort((left, right) => (
+      Number(right.createdAt || 0) - Number(left.createdAt || 0)
+      || Number(right.pendingSinceAt || 0) - Number(left.pendingSinceAt || 0)
+    ))[0] || null;
+}
+
+function recoveryGenerationsReservedForGate(state = studentSessionRecoveryState) {
+  if (hasStudentAuth()) return new Set();
+  const binding = authGateConfigBinding();
+  if (!binding.serverOrigin) return new Set();
+  const schoolId = resolvedAuthGateSchoolId(binding);
+  if (schoolId) {
+    const newest = newestCurrentAuthorityRecoveryRecord(state, { resumeOnly: true });
+    return new Set(newest ? [newest.generation] : []);
+  }
+  // A slug-only cold start has not yet learned which tenant id the managed
+  // slug names. Releasing any same-origin capability here could destroy the
+  // exact one the authoritative login-config response is about to select.
+  return new Set([state?.armed, ...(state?.pending || [])]
+    .filter((record) => Boolean(
+      record
+      && record.serverOrigin === binding.serverOrigin
+      && (
+        record.state === 'armed'
+        || record.intent === STUDENT_SESSION_RECOVERY_INTENT_RESUME
+      )
+    ))
+    .map((record) => record.generation));
 }
 
 function installStudentSessionRecoveryState(state) {
@@ -1841,9 +1924,10 @@ async function scheduleStudentSessionRecoveryAlarm() {
     await chrome.alarms.clear(STUDENT_SESSION_RECOVERY_ALARM).catch(() => false);
     return;
   }
+  const reservedGenerations = recoveryGenerationsReservedForGate();
   const nextBoundary = pending.reduce((earliest, record) => Math.min(
     earliest,
-    record.nextAttemptAt,
+    reservedGenerations.has(record.generation) ? record.discardAt : record.nextAttemptAt,
     record.discardAt,
   ), Number.POSITIVE_INFINITY);
   await chrome.alarms.clear(STUDENT_SESSION_RECOVERY_ALARM).catch(() => false);
@@ -1902,7 +1986,11 @@ async function persistStudentSessionRecoveryState(nextState) {
   return studentSessionRecoveryState;
 }
 
-function pendingStudentSessionRecoveryRecord(record, nowValue = Date.now()) {
+function pendingStudentSessionRecoveryRecord(
+  record,
+  nowValue = Date.now(),
+  intent = STUDENT_SESSION_RECOVERY_INTENT_RELEASE,
+) {
   return normalizeStudentSessionRecoveryRecord({
     ...record,
     state: 'pending',
@@ -1910,6 +1998,7 @@ function pendingStudentSessionRecoveryRecord(record, nowValue = Date.now()) {
     attemptCount: 0,
     nextAttemptAt: nowValue,
     discardAt: nowValue + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+    intent,
   }, 'pending', nowValue - 1);
 }
 
@@ -1946,7 +2035,11 @@ async function armStudentSessionRecovery(rawRecord, options = {}) {
 
 async function queuePendingStudentSessionRecoveryCleanup(rawRecord, options = {}) {
   const queuedAt = Date.now();
-  const initialPendingRecord = pendingStudentSessionRecoveryRecord(rawRecord, queuedAt);
+  const initialPendingRecord = pendingStudentSessionRecoveryRecord(
+    rawRecord,
+    queuedAt,
+    STUDENT_SESSION_RECOVERY_INTENT_RELEASE,
+  );
   const retryDelay = Math.max(
     studentSessionRecoveryRetryDelay(1),
     Number(options.retryAfterMs) || 0,
@@ -1973,6 +2066,7 @@ async function queuePendingStudentSessionRecoveryCleanup(rawRecord, options = {}
     const retryRecord = normalizeStudentSessionRecoveryRecord({
       ...sourceRecord,
       state: 'pending',
+      intent: STUDENT_SESSION_RECOVERY_INTENT_RELEASE,
       pendingSinceAt: matchingPending?.pendingSinceAt || queuedAt,
       attemptCount: Math.max(1, Number(matchingPending?.attemptCount) || 0),
       nextAttemptAt: Math.min(
@@ -2005,6 +2099,9 @@ async function queuePendingStudentSessionRecoveryCleanup(rawRecord, options = {}
 async function transitionStudentSessionRecoveryForAuthClear(authContextId, options = {}) {
   const expectedAuthContextId = normalizeStudentSessionRecoveryOpaqueId(authContextId, 'auth_');
   const serverSessionEnded = options.serverSessionEnded === true;
+  const pendingIntent = options.preserveForGate === true
+    ? STUDENT_SESSION_RECOVERY_INTENT_RESUME
+    : STUDENT_SESSION_RECOVERY_INTENT_RELEASE;
   return enqueueStudentSessionRecoveryMutation(async () => {
     const armed = studentSessionRecoveryState.armed;
     const matchingArmed = Boolean(
@@ -2027,9 +2124,23 @@ async function transitionStudentSessionRecoveryForAuthClear(authContextId, optio
         if (filteredPending.length !== pending.length) pending = filteredPending;
       }
     } else if (armed && matchingArmed) {
-      const promoted = pendingStudentSessionRecoveryRecord(armed);
+      const promoted = pendingStudentSessionRecoveryRecord(armed, Date.now(), pendingIntent);
       nextArmed = null;
       if (promoted) pending = [promoted, ...pending];
+    } else if (
+      expectedAuthContextId
+      && pendingIntent === STUDENT_SESSION_RECOVERY_INTENT_RELEASE
+      && matchingPending
+    ) {
+      const normalizedAt = Date.now() - 1;
+      pending = pending.map((record) => (
+        record.authContextId === expectedAuthContextId
+          ? normalizeStudentSessionRecoveryRecord({
+            ...record,
+            intent: STUDENT_SESSION_RECOVERY_INTENT_RELEASE,
+          }, 'pending', normalizedAt)
+          : record
+      )).filter(Boolean);
     }
     if (nextArmed === armed && pending === studentSessionRecoveryState.pending) {
       return {
@@ -2077,13 +2188,20 @@ async function attemptStudentSessionRecoveryRelease(record) {
       signal: controller.signal,
     });
     if (response.ok) return { outcome: 'released', retryAfterMs: 0 };
-    if (
-      response.status === 404 || response.status === 405 || response.status === 408
-      || response.status === 429 || response.status >= 500
-    ) {
-      return { outcome: 'retry', retryAfterMs: parseRetryAfterMs(response) };
+    let responseCode = null;
+    if (response.status === 400) {
+      const data = await response.json().catch(() => ({}));
+      responseCode = /^[A-Z][A-Z0-9_]{0,127}$/.test(String(data?.code || ''))
+        ? String(data.code)
+        : null;
     }
-    return { outcome: 'terminal', retryAfterMs: 0 };
+    if (response.status === 400 && responseCode === 'SESSION_RELEASE_INVALID') {
+      return { outcome: 'terminal', retryAfterMs: 0 };
+    }
+    // Proxies and mixed-version edges can replace the structured SchoolPilot
+    // response with an unstructured 401/403. Only the exact structured 400
+    // above proves that this recovery capability can never become usable.
+    return { outcome: 'retry', retryAfterMs: parseRetryAfterMs(response) };
   } catch {
     return { outcome: 'retry', retryAfterMs: 0 };
   } finally {
@@ -2202,8 +2320,9 @@ async function flushStudentSessionRecovery(options = {}) {
       STUDENT_SESSION_RECOVERY_MAX_PENDING,
       Number(options.maxRecords) || STUDENT_SESSION_RECOVERY_MAX_PENDING,
     ));
+    const reservedGenerations = recoveryGenerationsReservedForGate();
     const eligible = studentSessionRecoveryState.pending.filter(
-      (record) => record.discardAt > nowValue,
+      (record) => record.discardAt > nowValue && !reservedGenerations.has(record.generation),
     );
     const forced = forceGeneration
       ? eligible.find((record) => record.generation === forceGeneration)
@@ -2244,27 +2363,29 @@ async function flushStudentSessionRecovery(options = {}) {
 }
 
 function matchingStudentSessionRecoveryRecord() {
-  const binding = authGateConfigBinding();
-  if (!binding.serverOrigin || !binding.schoolId) return null;
-  const matches = (record) => Boolean(
-    record
-    && record.serverOrigin === binding.serverOrigin
-    && record.schoolId === binding.schoolId
-  );
-  if (matches(studentSessionRecoveryState.armed)) return studentSessionRecoveryState.armed;
-  return studentSessionRecoveryState.pending.find(matches) || null;
+  return newestCurrentAuthorityRecoveryRecord();
 }
 
 async function prepareStudentSessionRecoveryForGate(options = {}) {
   await ensureStudentSessionRecoveryLoaded();
   if (!hasStudentAuth() && studentSessionRecoveryState.armed) {
-    await transitionStudentSessionRecoveryForAuthClear(null, { serverSessionEnded: false });
+    await transitionStudentSessionRecoveryForAuthClear(null, {
+      serverSessionEnded: false,
+      preserveForGate: true,
+    });
   }
-  const matchingRecord = matchingStudentSessionRecoveryRecord();
-  await flushStudentSessionRecovery({
-    maxRecords: 1,
-    forceGeneration: options.forceRelease === true ? matchingRecord?.generation : null,
-  });
+  if (!resolvedAuthGateSchoolId()) {
+    await refreshSharedSignInLoginConfig({
+      force: false,
+      reason: 'recovery_school_resolution',
+      managedConfigAlreadyApplied: true,
+    }).catch(() => {});
+  }
+  // The newest exact school/origin capability is the only safe way to reveal
+  // and atomically replace the still-authoritative same-device session. Keep it
+  // reserved for roster/login even when an ordinary 204 release would make the
+  // name eventually reappear. Cleanup is limited to older or mismatched rows.
+  await flushStudentSessionRecovery({ maxRecords: 1 });
   return matchingStudentSessionRecoveryRecord();
 }
 
@@ -2305,6 +2426,7 @@ async function reconcileStudentSessionRecoveryAtWorkerWake(authStored, options =
     await durableLocalKv.set({ autoRegistrationPaused: true });
     await transitionStudentSessionRecoveryForAuthClear(storedAuthContextId, {
       serverSessionEnded: false,
+      preserveForGate: options.preserveForGate !== false,
     });
   }
   flushStudentSessionRecovery({ maxRecords: 1 }).catch(() => {});
@@ -2347,6 +2469,7 @@ function bindLoginRosterRecoveryGrant(record, students, cacheKey) {
   }
   const grantId = generateLoginRosterRecoveryGrantId();
   loginRosterRecoveryGrants.set(normalizedCacheKey, {
+    authorizationKind: 'recovery',
     grantId,
     cacheKey: normalizedCacheKey,
     recoveryRevision: studentSessionRecoveryRevision,
@@ -2362,6 +2485,59 @@ function bindLoginRosterRecoveryGrant(record, students, cacheKey) {
   return grantId;
 }
 
+function bindLoginRosterDeviceContinuityGrant(record, students, cacheKey) {
+  const normalizedCacheKey = String(cacheKey || '');
+  if (!normalizedCacheKey || !record) {
+    if (normalizedCacheKey) clearLoginRosterRecoveryGrant(normalizedCacheKey);
+    return null;
+  }
+  const selectableStudentIds = new Set(
+    (Array.isArray(students) ? students : [])
+      .filter((student) => student?.hasPin === true && student?.id)
+      .map((student) => String(student.id)),
+  );
+  if (selectableStudentIds.size === 0) {
+    clearLoginRosterRecoveryGrant(normalizedCacheKey);
+    return null;
+  }
+  const existing = loginRosterRecoveryGrants.get(normalizedCacheKey);
+  const existingStudentIds = existing?.studentIds instanceof Set ? [...existing.studentIds] : [];
+  if (
+    existing?.authorizationKind === 'device'
+    && existing.continuityRevision === managedDeviceContinuityRevision
+    && existing.recordGeneration === record.generation
+    && existing.serverOrigin === record.serverOrigin
+    && existing.schoolId === record.schoolId
+    && existing.token === record.proof
+    && existingStudentIds.length === selectableStudentIds.size
+    && existingStudentIds.every((studentId) => selectableStudentIds.has(studentId))
+  ) return existing.grantId;
+
+  const grantId = generateLoginRosterRecoveryGrantId();
+  loginRosterRecoveryGrants.set(normalizedCacheKey, {
+    authorizationKind: 'device',
+    grantId,
+    cacheKey: normalizedCacheKey,
+    continuityRevision: managedDeviceContinuityRevision,
+    recordGeneration: record.generation,
+    recoveryGeneration: record.recoveryGeneration || null,
+    serverOrigin: record.serverOrigin,
+    schoolId: record.schoolId,
+    token: record.proof,
+    studentIds: selectableStudentIds,
+  });
+  while (loginRosterRecoveryGrants.size > 12) {
+    loginRosterRecoveryGrants.delete(loginRosterRecoveryGrants.keys().next().value);
+  }
+  return grantId;
+}
+
+function bindLoginRosterAuthorizationGrant(recoveryRecord, continuityRecord, students, cacheKey) {
+  return recoveryRecord
+    ? bindLoginRosterRecoveryGrant(recoveryRecord, students, cacheKey)
+    : bindLoginRosterDeviceContinuityGrant(continuityRecord, students, cacheKey);
+}
+
 function clearLoginRosterRecoveryGrant(cacheKey) {
   const normalizedCacheKey = String(cacheKey || '');
   return normalizedCacheKey ? loginRosterRecoveryGrants.delete(normalizedCacheKey) : false;
@@ -2372,17 +2548,34 @@ function recoveryGrantForStudentLogin(studentId, grantId) {
   const normalizedGrantId = normalizeStudentSessionRecoveryOpaqueId(grantId, 'roster_');
   if (!normalizedStudentId || !normalizedGrantId) return null;
   const currentBinding = authGateConfigBinding();
+  const currentSchoolId = resolvedAuthGateSchoolId(currentBinding);
   const recoveryRecords = [
     studentSessionRecoveryState.armed,
     ...studentSessionRecoveryState.pending,
   ];
   for (const [cacheKey, grant] of loginRosterRecoveryGrants) {
+    if (grant.authorizationKind === 'device') {
+      const proof = currentManagedDeviceContinuityProof();
+      const current = grant.continuityRevision === managedDeviceContinuityRevision
+        && currentBinding.serverOrigin === grant.serverOrigin
+        && currentSchoolId === grant.schoolId
+        && proof?.generation === grant.recordGeneration
+        && proof?.proof === grant.token;
+      if (!current) {
+        loginRosterRecoveryGrants.delete(cacheKey);
+        continue;
+      }
+      if (grant.grantId === normalizedGrantId && grant.studentIds.has(normalizedStudentId)) {
+        return grant;
+      }
+      continue;
+    }
     const record = recoveryRecords.find(
       (candidate) => candidate?.generation === grant.recordGeneration,
     );
     const current = grant.recoveryRevision === studentSessionRecoveryRevision
       && currentBinding.serverOrigin === grant.serverOrigin
-      && currentBinding.schoolId === grant.schoolId
+      && currentSchoolId === grant.schoolId
       && record?.token === grant.token;
     if (!current) {
       loginRosterRecoveryGrants.delete(cacheKey);
@@ -2397,14 +2590,378 @@ function recoveryGrantForStudentLogin(studentId, grantId) {
 
 function recoveryGrantForEmailStudentLogin() {
   const record = matchingStudentSessionRecoveryRecord();
+  const proof = currentManagedDeviceContinuityProof(record);
+  if (proof) {
+    return {
+      authorizationKind: 'device',
+      continuityRevision: managedDeviceContinuityRevision,
+      recordGeneration: proof.generation,
+      recoveryGeneration: proof.recoveryGeneration || null,
+      serverOrigin: proof.serverOrigin,
+      schoolId: proof.schoolId,
+      token: proof.proof,
+    };
+  }
+  const recoveryGrant = recoveryAuthorizationGrantForRecord(record);
+  if (recoveryGrant) return recoveryGrant;
+  const unboundProof = currentManagedDeviceContinuityProof(null);
+  return unboundProof ? {
+    authorizationKind: 'device',
+    continuityRevision: managedDeviceContinuityRevision,
+    recordGeneration: unboundProof.generation,
+    recoveryGeneration: null,
+    serverOrigin: unboundProof.serverOrigin,
+    schoolId: unboundProof.schoolId,
+    token: unboundProof.proof,
+  } : null;
+}
+
+function recoveryAuthorizationGrantForRecord(record) {
   if (!record) return null;
+  const current = matchingStudentSessionRecoveryRecord();
+  const binding = authGateConfigBinding();
+  const schoolId = resolvedAuthGateSchoolId(binding);
+  if (
+    !current
+    || current.generation !== record.generation
+    || current.token !== record.token
+    || current.serverOrigin !== binding.serverOrigin
+    || current.serverOrigin !== record.serverOrigin
+    || current.schoolId !== schoolId
+    || current.schoolId !== record.schoolId
+  ) return null;
   return {
+    authorizationKind: 'recovery',
     recoveryRevision: studentSessionRecoveryRevision,
-    recordGeneration: record.generation,
-    serverOrigin: record.serverOrigin,
-    schoolId: record.schoolId,
-    token: record.token,
+    recordGeneration: current.generation,
+    serverOrigin: current.serverOrigin,
+    schoolId: current.schoolId,
+    token: current.token,
   };
+}
+
+function loginAuthorizationHeader(grant) {
+  if (!grant?.token) return null;
+  return grant.authorizationKind === 'device'
+    ? `ClassPilot-Device ${grant.token}`
+    : `ClassPilot-Recovery ${grant.token}`;
+}
+
+function normalizeManagedDevicePreflightToken(value) {
+  const credential = String(value || '').trim();
+  return /^cpmp1\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{43}$/.test(credential)
+    ? credential
+    : null;
+}
+
+function normalizeManagedDeviceContinuityProof(value) {
+  const credential = String(value || '').trim();
+  return /^cpmd1\.[A-Za-z0-9_-]{1,512}\.[A-Za-z0-9_-]{43}$/.test(credential)
+    ? credential
+    : null;
+}
+
+function normalizeEffectiveDeviceId(value) {
+  const deviceId = String(value || '').trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(deviceId)
+    ? deviceId
+    : null;
+}
+
+function generateManagedDeviceContinuityGeneration() {
+  const random = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `continuity_${String(random).replace(/[^A-Za-z0-9_-]/g, '')}`;
+}
+
+function captureManagedDeviceContinuityGuard() {
+  const binding = authGateConfigBinding();
+  return Object.freeze({
+    serverOrigin: binding.serverOrigin,
+    schoolId: resolvedAuthGateSchoolId(binding),
+    bindingKey: authGateConfigBindingKey(binding),
+    policyGeneration: managedAuthGatePolicyGeneration,
+    enrollmentKey: String(CONFIG.enrollmentKey || '').trim() || null,
+  });
+}
+
+function managedDeviceContinuityGuardIsCurrent(guard) {
+  const current = captureManagedDeviceContinuityGuard();
+  return Boolean(
+    guard
+    && !hasStudentAuth()
+    && guard.serverOrigin
+    && guard.schoolId
+    && guard.enrollmentKey
+    && guard.serverOrigin === current.serverOrigin
+    && guard.schoolId === current.schoolId
+    && guard.bindingKey === current.bindingKey
+    && guard.policyGeneration === current.policyGeneration
+    && guard.enrollmentKey === current.enrollmentKey
+  );
+}
+
+function normalizeManagedDeviceContinuityRecord(raw, nowValue = Date.now()) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const proof = normalizeManagedDeviceContinuityProof(raw.proof);
+  const generation = normalizeStudentSessionRecoveryOpaqueId(raw.generation, 'continuity_');
+  const serverOrigin = normalizedServerOrigin(raw.serverOrigin);
+  const schoolId = normalizeStudentSessionRecoverySchoolId(raw.schoolId);
+  const bindingKey = String(raw.bindingKey || '');
+  const policyGeneration = Number(raw.policyGeneration);
+  const expiresAt = Number(raw.expiresAt);
+  const hasRecoveryGeneration = raw.recoveryGeneration !== null
+    && raw.recoveryGeneration !== undefined;
+  const recoveryGeneration = !hasRecoveryGeneration
+    ? null
+    : normalizeStudentSessionRecoveryOpaqueId(raw.recoveryGeneration, 'recovery_');
+  if (
+    !proof || !generation || !serverOrigin || !schoolId || !bindingKey
+    || (hasRecoveryGeneration && !recoveryGeneration)
+    || !Number.isSafeInteger(policyGeneration) || policyGeneration < 0
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= nowValue + MANAGED_DEVICE_CONTINUITY_EXPIRY_SKEW_MS
+    || expiresAt > nowValue + MANAGED_DEVICE_CONTINUITY_MAX_PROOF_TTL_MS
+  ) return null;
+  return Object.freeze({
+    generation,
+    proof,
+    serverOrigin,
+    schoolId,
+    bindingKey,
+    policyGeneration,
+    recoveryGeneration,
+    expiresAt,
+  });
+}
+
+function managedDeviceContinuityMaterialMatches(left, right) {
+  return Boolean(
+    left === right
+    || (
+      left && right
+      && left.generation === right.generation
+      && left.proof === right.proof
+      && left.serverOrigin === right.serverOrigin
+      && left.schoolId === right.schoolId
+      && left.bindingKey === right.bindingKey
+      && left.policyGeneration === right.policyGeneration
+      && left.recoveryGeneration === right.recoveryGeneration
+      && left.expiresAt === right.expiresAt
+    )
+  );
+}
+
+function installManagedDeviceContinuityState(record) {
+  if (!managedDeviceContinuityMaterialMatches(managedDeviceContinuityState, record)) {
+    managedDeviceContinuityRevision += 1;
+    resetLoginRosterRuntimeCache();
+  }
+  managedDeviceContinuityState = record || null;
+  managedDeviceContinuityLoaded = true;
+  return managedDeviceContinuityState;
+}
+
+async function clearManagedDeviceContinuityState(expectedGeneration = null) {
+  if (
+    expectedGeneration
+    && managedDeviceContinuityState?.generation
+    && managedDeviceContinuityState.generation !== expectedGeneration
+  ) return false;
+  await durableSessionKv.remove(MANAGED_DEVICE_CONTINUITY_SESSION_KEY).catch(() => {});
+  installManagedDeviceContinuityState(null);
+  return true;
+}
+
+async function ensureManagedDeviceContinuityLoaded() {
+  if (managedDeviceContinuityLoaded) {
+    const normalized = normalizeManagedDeviceContinuityRecord(managedDeviceContinuityState);
+    if (normalized) return installManagedDeviceContinuityState(normalized);
+    await clearManagedDeviceContinuityState();
+    return null;
+  }
+  if (managedDeviceContinuityLoadPromise) return managedDeviceContinuityLoadPromise;
+  const load = (async () => {
+    if (!hasSessionStorage()) {
+      installManagedDeviceContinuityState(null);
+      return null;
+    }
+    const stored = await durableSessionKv.get([MANAGED_DEVICE_CONTINUITY_SESSION_KEY]);
+    const normalized = normalizeManagedDeviceContinuityRecord(
+      stored[MANAGED_DEVICE_CONTINUITY_SESSION_KEY],
+    );
+    installManagedDeviceContinuityState(normalized);
+    if (!normalized && stored[MANAGED_DEVICE_CONTINUITY_SESSION_KEY] !== undefined) {
+      await durableSessionKv.remove(MANAGED_DEVICE_CONTINUITY_SESSION_KEY);
+    }
+    return normalized;
+  })();
+  managedDeviceContinuityLoadPromise = load.finally(() => {
+    managedDeviceContinuityLoadPromise = null;
+  });
+  return managedDeviceContinuityLoadPromise;
+}
+
+function currentManagedDeviceContinuityProof(expectedRecoveryRecord = undefined) {
+  const state = normalizeManagedDeviceContinuityRecord(managedDeviceContinuityState);
+  const guard = captureManagedDeviceContinuityGuard();
+  if (!state || !managedDeviceContinuityGuardIsCurrent(guard)) return null;
+  const currentRecoveryRecord = expectedRecoveryRecord === undefined
+    ? matchingStudentSessionRecoveryRecord()
+    : expectedRecoveryRecord;
+  if (state.recoveryGeneration !== (currentRecoveryRecord?.generation || null)) return null;
+  return state.serverOrigin === guard.serverOrigin
+    && state.schoolId === guard.schoolId
+    && state.bindingKey === guard.bindingKey
+    && state.policyGeneration === guard.policyGeneration
+    ? state
+    : null;
+}
+
+function managedDeviceContinuityContractAccepted(data) {
+  const accepted = new Set(Array.isArray(data?.acceptedCapabilities)
+    ? data.acceptedCapabilities.map((value) => String(value || '').trim())
+    : []);
+  return data?.serverProtocolVersion === CLIENT_PROTOCOL_VERSION
+    && MANAGED_DEVICE_CONTINUITY_CAPABILITIES.every((capability) => accepted.has(capability));
+}
+
+function isManagedDeviceContinuityUnauthorized(response, data) {
+  return response?.status === 401
+    && data?.code === 'CLASSPILOT_MANAGED_DEVICE_CONTINUITY_UNAUTHORIZED';
+}
+
+async function postManagedDeviceContinuityContract(guard, path, body, authorization = null) {
+  if (!managedDeviceContinuityGuardIsCurrent(guard)) return null;
+  const result = await fetchAuthGateRequest(`${guard.serverOrigin}${path}`, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store',
+      'X-ClassPilot-Enrollment-Key': guard.enrollmentKey,
+      'X-School-Id': guard.schoolId,
+      ...(authorization ? { Authorization: authorization } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  return managedDeviceContinuityGuardIsCurrent(guard) ? result : null;
+}
+
+async function requestManagedDeviceContinuityProof(options = {}) {
+  await ensureManagedDeviceContinuityLoaded();
+  if (!resolvedAuthGateSchoolId()) {
+    await refreshSharedSignInLoginConfig({
+      force: false,
+      reason: 'device_continuity_school_resolution',
+      managedConfigAlreadyApplied: true,
+    }).catch(() => {});
+  }
+  const recoveryRecord = options.recoveryRecord || null;
+  const current = currentManagedDeviceContinuityProof(recoveryRecord);
+  if (current) return current;
+  if (managedDeviceContinuityState) await clearManagedDeviceContinuityState();
+  if (!hasSessionStorage()) return null;
+  const readDirectoryDeviceId = typeof options.readDirectoryDeviceId === 'function'
+    ? options.readDirectoryDeviceId
+    : readManagedDirectoryDeviceIdWithRetry;
+  if (managedDeviceContinuityIssuancePromise) {
+    await managedDeviceContinuityIssuancePromise;
+    const coalesced = currentManagedDeviceContinuityProof(recoveryRecord);
+    return coalesced || requestManagedDeviceContinuityProof(options);
+  }
+
+  const guard = captureManagedDeviceContinuityGuard();
+  if (!managedDeviceContinuityGuardIsCurrent(guard)) return null;
+  const recoveryIsCurrent = () => !recoveryRecord
+    || matchingStudentSessionRecoveryRecord()?.generation === recoveryRecord.generation;
+  const run = (async () => {
+    try {
+      // The first request intentionally contains no Chrome directory identifier.
+      // Only an exact SchoolPilot origin that advertises the capability may
+      // cause the enterprise API to be read.
+      const preflight = await postManagedDeviceContinuityContract(
+        guard,
+        '/api/classpilot/extension/device-continuity/preflight',
+        {
+          clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+          capabilities: [...MANAGED_DEVICE_CONTINUITY_CAPABILITIES],
+        },
+      );
+      const preflightToken = normalizeManagedDevicePreflightToken(
+        preflight?.data?.preflightToken,
+      );
+      if (
+        !preflight
+        || !preflight.response.ok
+        || !preflight.jsonValid
+        || !preflightToken
+        || !managedDeviceContinuityContractAccepted(preflight.data)
+        || !recoveryIsCurrent()
+      ) return null;
+
+      const rawDirectoryDeviceId = options.directoryDeviceId === undefined
+        ? await readDirectoryDeviceId()
+        : String(options.directoryDeviceId || '').trim() || null;
+      if (
+        !managedDeviceContinuityGuardIsCurrent(guard)
+        || !recoveryIsCurrent()
+        || !rawDirectoryDeviceId
+        || rawDirectoryDeviceId.length > 512
+      ) return null;
+
+      const issuance = await postManagedDeviceContinuityContract(
+        guard,
+        '/api/classpilot/extension/device-continuity',
+        {
+          directoryDeviceId: rawDirectoryDeviceId,
+          ...(recoveryRecord ? { recoveryToken: recoveryRecord.token } : {}),
+        },
+        `ClassPilot-Preflight ${preflightToken}`,
+      );
+      const continuityProof = normalizeManagedDeviceContinuityProof(
+        issuance?.data?.continuityProof,
+      );
+      const expiresInSeconds = Number(issuance?.data?.expiresInSeconds);
+      if (
+        !issuance
+        || !issuance.response.ok
+        || !issuance.jsonValid
+        || !continuityProof
+        || !Number.isFinite(expiresInSeconds)
+        || expiresInSeconds <= 0
+        || expiresInSeconds > MANAGED_DEVICE_CONTINUITY_MAX_PROOF_TTL_MS / 1000
+        || !managedDeviceContinuityGuardIsCurrent(guard)
+        || !recoveryIsCurrent()
+      ) return null;
+
+      const nowValue = Date.now();
+      const record = normalizeManagedDeviceContinuityRecord({
+        generation: generateManagedDeviceContinuityGeneration(),
+        proof: continuityProof,
+        serverOrigin: guard.serverOrigin,
+        schoolId: guard.schoolId,
+        bindingKey: guard.bindingKey,
+        policyGeneration: guard.policyGeneration,
+        recoveryGeneration: recoveryRecord?.generation || null,
+        expiresAt: nowValue + (expiresInSeconds * 1000),
+      }, nowValue);
+      if (!record) return null;
+      await durableSessionKv.set({ [MANAGED_DEVICE_CONTINUITY_SESSION_KEY]: record });
+      if (!managedDeviceContinuityGuardIsCurrent(guard) || !recoveryIsCurrent()) {
+        await durableSessionKv.remove(MANAGED_DEVICE_CONTINUITY_SESSION_KEY);
+        return null;
+      }
+      installManagedDeviceContinuityState(record);
+      return record;
+    } catch {
+      return null;
+    }
+  })();
+  managedDeviceContinuityIssuancePromise = run.finally(() => {
+    managedDeviceContinuityIssuancePromise = null;
+  });
+  return managedDeviceContinuityIssuancePromise;
 }
 
 function isHttpUrl(url) {
@@ -9932,7 +10489,10 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // authContextId, so it cannot queue or release a newer login.
   const recoveryTransition = await transitionStudentSessionRecoveryForAuthClear(
     signOutAuthority.authContextId,
-    { serverSessionEnded: options.serverSessionEnded === true },
+    {
+      serverSessionEnded: options.serverSessionEnded === true,
+      preserveForGate: options.preserveRecoveryForGate === true,
+    },
   );
 
   // A confirmed student sign-out/profile change ends the student-bound
@@ -10257,7 +10817,7 @@ function normalizeLoginRosterGrades(grades) {
   });
 }
 
-function loginRosterRequestCacheKey(gradeLevel, recoveryRecord) {
+function loginRosterRequestCacheKey(gradeLevel, recoveryRecord, continuityRecord) {
   const binding = authGateConfigBinding();
   return JSON.stringify([
     binding.serverOrigin || '',
@@ -10266,7 +10826,7 @@ function loginRosterRequestCacheKey(gradeLevel, recoveryRecord) {
     managedAuthGatePolicyGeneration,
     sharedSignInConfigGeneration,
     String(gradeLevel || ''),
-    recoveryRecord?.generation || '',
+    recoveryRecord?.generation || continuityRecord?.generation || '',
   ]);
 }
 
@@ -10293,17 +10853,22 @@ function loginRosterBackoffRemainingMs(cacheKey) {
 
 async function fetchLoginRosterForGate(options = {}) {
   await studentAuthMutationTail;
-  const recoveryRecord = await prepareStudentSessionRecoveryForGate({
-    forceRelease: options.forceRecovery === true,
-  });
+  const recoveryRecord = await prepareStudentSessionRecoveryForGate();
+  const continuityRecord = await requestManagedDeviceContinuityProof({ recoveryRecord });
+  const directRecoveryRecord = continuityRecord ? null : recoveryRecord;
   const requestedGradeLevel = String(options.gradeLevel || '').trim();
-  const cacheKey = loginRosterRequestCacheKey(requestedGradeLevel, recoveryRecord);
+  const cacheKey = loginRosterRequestCacheKey(
+    requestedGradeLevel,
+    directRecoveryRecord,
+    continuityRecord,
+  );
   const cached = loginRosterCache.get(cacheKey);
   const backoffRemainingMs = loginRosterBackoffRemainingMs(cacheKey);
   if (backoffRemainingMs > 0) {
     if (cached) {
-      const recoveryGrantId = bindLoginRosterRecoveryGrant(
-        recoveryRecord,
+      const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+        directRecoveryRecord,
+        continuityRecord,
         cached.data.students,
         cacheKey,
       );
@@ -10330,8 +10895,9 @@ async function fetchLoginRosterForGate(options = {}) {
     && cached
     && Date.now() - cached.fetchedAt < LOGIN_ROSTER_CACHE_MIN_AGE_MS
   ) {
-    const recoveryGrantId = bindLoginRosterRecoveryGrant(
-      recoveryRecord,
+    const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+      directRecoveryRecord,
+      continuityRecord,
       cached.data.students,
       cacheKey,
     );
@@ -10346,8 +10912,47 @@ async function fetchLoginRosterForGate(options = {}) {
   const request = fetchLoginRosterNetworkForGate({
     ...options,
     gradeLevel: requestedGradeLevel,
-    recoveryRecord,
-  }).then((result) => {
+    recoveryRecord: directRecoveryRecord,
+    continuityRecord,
+  }).then(async (result) => {
+    if (result?.continuityFallbackRequired === true && continuityRecord) {
+      await clearManagedDeviceContinuityState(continuityRecord.generation);
+      const currentRecovery = matchingStudentSessionRecoveryRecord();
+      const fallbackRecoveryRecord = recoveryRecord
+        && currentRecovery?.generation === recoveryRecord.generation
+        && currentRecovery.token === recoveryRecord.token
+        ? currentRecovery
+        : null;
+      const fallbackResult = await fetchLoginRosterNetworkForGate({
+        ...options,
+        gradeLevel: requestedGradeLevel,
+        recoveryRecord: fallbackRecoveryRecord,
+        continuityRecord: null,
+        continuityFallbackAttempted: true,
+      });
+      if (!fallbackResult?.success) return fallbackResult;
+      const fallbackCacheKey = loginRosterRequestCacheKey(
+        requestedGradeLevel,
+        fallbackRecoveryRecord,
+        null,
+      );
+      const fallbackData = {
+        ...fallbackResult,
+        cached: false,
+        refreshAfterMs: Number(fallbackResult.refreshAfterMs) || loginRosterRefreshAfterMs(),
+      };
+      loginRosterCache.set(fallbackCacheKey, { data: fallbackData, fetchedAt: Date.now() });
+      const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+        fallbackRecoveryRecord,
+        null,
+        fallbackData.students,
+        fallbackCacheKey,
+      );
+      return {
+        ...fallbackData,
+        ...(recoveryGrantId ? { recoveryGrantId } : {}),
+      };
+    }
     if (result?.success) {
       loginRosterBackoffUntil.delete(cacheKey);
       const data = {
@@ -10359,8 +10964,9 @@ async function fetchLoginRosterForGate(options = {}) {
       while (loginRosterCache.size > 12) {
         loginRosterCache.delete(loginRosterCache.keys().next().value);
       }
-      const recoveryGrantId = bindLoginRosterRecoveryGrant(
-        recoveryRecord,
+      const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+        directRecoveryRecord,
+        continuityRecord,
         data.students,
         cacheKey,
       );
@@ -10378,8 +10984,9 @@ async function fetchLoginRosterForGate(options = {}) {
       loginRosterBackoffUntil.delete(cacheKey);
     }
     if (cached && result?.unavailable === true) {
-      const recoveryGrantId = bindLoginRosterRecoveryGrant(
-        recoveryRecord,
+      const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+        directRecoveryRecord,
+        continuityRecord,
         cached.data.students,
         cacheKey,
       );
@@ -10396,8 +11003,9 @@ async function fetchLoginRosterForGate(options = {}) {
   }).catch((error) => {
     const refreshAfterMs = recordLoginRosterBackoff(cacheKey, loginRosterRefreshAfterMs());
     if (cached) {
-      const recoveryGrantId = bindLoginRosterRecoveryGrant(
-        recoveryRecord,
+      const recoveryGrantId = bindLoginRosterAuthorizationGrant(
+        directRecoveryRecord,
+        continuityRecord,
         cached.data.students,
         cacheKey,
       );
@@ -10423,6 +11031,7 @@ async function fetchLoginRosterNetworkForGate(options = {}) {
   const requestConfigGeneration = sharedSignInConfigGeneration;
   const requestPolicyGeneration = managedAuthGatePolicyGeneration;
   const requestRecoveryGeneration = options.recoveryRecord?.generation || null;
+  const requestContinuityGeneration = options.continuityRecord?.generation || null;
   const requestBindingKey = authGateConfigBindingKey();
   const requestIsStale = () => (
     requestAuthMutationGeneration !== studentAuthMutationGeneration
@@ -10432,7 +11041,10 @@ async function fetchLoginRosterNetworkForGate(options = {}) {
     || (requestRecoveryGeneration
       ? ![studentSessionRecoveryState.armed, ...studentSessionRecoveryState.pending]
         .some((record) => record?.generation === requestRecoveryGeneration)
-      : Boolean(matchingStudentSessionRecoveryRecord()))
+      : (!requestContinuityGeneration && Boolean(matchingStudentSessionRecoveryRecord())))
+    || (requestContinuityGeneration
+      ? currentManagedDeviceContinuityProof()?.generation !== requestContinuityGeneration
+      : (!requestRecoveryGeneration && Boolean(currentManagedDeviceContinuityProof())))
     || hasStudentAuth()
   );
   const staleResult = () => ({
@@ -10469,6 +11081,8 @@ async function fetchLoginRosterNetworkForGate(options = {}) {
     'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
     ...(options.recoveryRecord
       ? { Authorization: `ClassPilot-Recovery ${options.recoveryRecord.token}` }
+      : options.continuityRecord
+        ? { Authorization: `ClassPilot-Device ${options.continuityRecord.proof}` }
       : {}),
   };
   let response;
@@ -10515,6 +11129,18 @@ async function fetchLoginRosterNetworkForGate(options = {}) {
     };
   }
   if (requestIsStale()) return staleResult();
+  if (
+    options.continuityRecord
+    && isManagedDeviceContinuityUnauthorized(response, data)
+  ) {
+    await clearManagedDeviceContinuityState(options.continuityRecord.generation);
+    return {
+      success: false,
+      stale: true,
+      phase: getAuthGateState().phase,
+      error: 'Managed device sign-in authority changed; refresh names',
+    };
+  }
   if (response.ok && (!jsonValid || !isValidLoginRosterPayload(data))) {
     return {
       success: false,
@@ -10523,6 +11149,20 @@ async function fetchLoginRosterNetworkForGate(options = {}) {
       phase: 'unavailable',
       refreshAfterMs: loginRosterRefreshAfterMs(),
       error: 'ClassPilot returned an invalid roster response',
+    };
+  }
+  if (
+    response.ok
+    && options.continuityRecord
+    && data.managedDeviceContinuityAccepted !== true
+  ) {
+    // A mixed-version backend may ignore the unfamiliar Authorization scheme
+    // and return an ordinary 200 roster. Never mistake that response for proof
+    // acceptance or cache it as a managed-device snapshot.
+    return {
+      success: false,
+      continuityFallbackRequired: true,
+      error: 'Managed device continuity is not available on this server',
     };
   }
   if (!response.ok) {
@@ -10780,9 +11420,22 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     throw new Error('ClassPilot student sign-in is not configured');
   }
   const isPinLogin = payload.mode === 'pin';
-  const recoveryGrant = isPinLogin
-    ? recoveryGrantForStudentLogin(payload.studentId, payload.recoveryGrantId)
-    : recoveryGrantForEmailStudentLogin();
+  let recoveryGrant;
+  if (isPinLogin) {
+    recoveryGrant = recoveryGrantForStudentLogin(payload.studentId, payload.recoveryGrantId);
+    if (payload.recoveryGrantId && !recoveryGrant) {
+      throw new Error('The student sign-in list changed. Refresh names and try again.');
+    }
+  } else {
+    // Email/ID login has no prior roster request to mint a managed-device
+    // grant. Attempt continuity first even when exact recovery is available,
+    // then fall back to that recovery capability if enterprise proof issuance
+    // is unavailable during rollout.
+    await requestManagedDeviceContinuityProof({
+      recoveryRecord: matchingStudentSessionRecoveryRecord(),
+    });
+    recoveryGrant = recoveryGrantForEmailStudentLogin();
+  }
   const body = {
     deviceId,
     deviceName: null,
@@ -10806,23 +11459,74 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
 
   const loginServerUrl = CONFIG.serverUrl;
   const loginServerOrigin = normalizedServerOrigin(loginServerUrl);
-  const response = await fetchWithBackoff(`${loginServerUrl}/api/extension/student-login`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
-      ...(recoveryGrant
-        ? { Authorization: `ClassPilot-Recovery ${recoveryGrant.token}` }
-        : {}),
-    },
-    body: JSON.stringify(body),
-  }, {
-    context: 'student login',
-    maxAttempts: 1,
-    respectGlobalBackoff: false,
-  });
-  const data = await response.json().catch(() => ({}));
+  let response;
+  let data;
+  let mixedVersionRecoveryRetried = false;
+  while (true) {
+    const loginAuthorization = loginAuthorizationHeader(recoveryGrant);
+    response = await fetchWithBackoff(`${loginServerUrl}/api/extension/student-login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+        ...(loginAuthorization
+          ? { Authorization: loginAuthorization }
+          : {}),
+      },
+      body: JSON.stringify(body),
+    }, {
+      context: 'student login',
+      maxAttempts: 1,
+      respectGlobalBackoff: false,
+    });
+    data = await response.json().catch(() => ({}));
+
+    // During a bounded mixed-version rollout, an older backend can silently
+    // ignore the new ClassPilot-Device credential and report the still-active
+    // random-device session as a conflict. This can affect email/ID directly,
+    // or PIN if the backend rolls back after a proof-aware roster was fetched.
+    // Only that exact conflict, without the backend's proof-acceptance marker,
+    // may retry once with the exact current recovery capability. Wrong PIN,
+    // invalid credentials, and arbitrary errors never receive this retry.
+    const exactRecovery = matchingStudentSessionRecoveryRecord();
+    const canRetryWithExactRecovery = !mixedVersionRecoveryRetried
+      && !response.ok
+      && response.status === 409
+      && data?.code === 'STUDENT_SESSION_ACTIVE'
+      && data?.managedDeviceContinuityAccepted !== true
+      && recoveryGrant?.authorizationKind === 'device'
+      && recoveryGrant.recoveryGeneration
+      && exactRecovery?.generation === recoveryGrant.recoveryGeneration
+      && exactRecovery.serverOrigin === recoveryGrant.serverOrigin
+      && exactRecovery.schoolId === recoveryGrant.schoolId;
+    if (!canRetryWithExactRecovery) break;
+
+    assertAuthMutationCurrent(
+      mutationGeneration,
+      'student login continuity fallback',
+      { allowInvalidating: true },
+    );
+    assertAuthGatePolicyGuardCurrent(policyGuard, 'student login continuity fallback');
+    const cleared = await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+    assertAuthMutationCurrent(
+      mutationGeneration,
+      'student login continuity fallback',
+      { allowInvalidating: true },
+    );
+    assertAuthGatePolicyGuardCurrent(policyGuard, 'student login continuity fallback');
+    if (!cleared) break;
+    const fallbackGrant = recoveryAuthorizationGrantForRecord(exactRecovery);
+    if (!fallbackGrant) break;
+    recoveryGrant = fallbackGrant;
+    mixedVersionRecoveryRetried = true;
+  }
   if (!response.ok) {
+    if (
+      recoveryGrant?.authorizationKind === 'device'
+      && isManagedDeviceContinuityUnauthorized(response, data)
+    ) {
+      await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+    }
     assertAuthMutationCurrent(
       mutationGeneration,
       'student login response',
@@ -10837,11 +11541,14 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   // shape validation, storage write, or UI adoption can reject the response.
   // The bearer remains request-local and is never persisted.
   const authContextId = generateAuthContextId();
+  const responseEffectiveDeviceId = data.effectiveDeviceId === undefined
+    ? null
+    : normalizeEffectiveDeviceId(data.effectiveDeviceId);
   const successfulResponseCleanupAuthority = captureSuccessfulManualLoginCleanupAuthority(
     data,
     {
       authContextId,
-      deviceId,
+      deviceId: responseEffectiveDeviceId || deviceId,
       requestSchoolId: body.schoolId,
       serverOrigin: loginServerOrigin,
     },
@@ -10855,6 +11562,23 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     assertAuthGatePolicyGuardCurrent(policyGuard, 'student login response');
     if (!data.studentToken) {
       throw buildResponseError(response, data, 'Invalid student credentials');
+    }
+    if (
+      recoveryGrant?.authorizationKind === 'device'
+      && data.managedDeviceContinuityAccepted !== true
+    ) {
+      await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+      throw new Error('ClassPilot did not acknowledge managed device continuity');
+    }
+    if (data.effectiveDeviceId !== undefined && !responseEffectiveDeviceId) {
+      if (recoveryGrant?.authorizationKind === 'device') {
+        await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+      }
+      throw new Error('ClassPilot returned an invalid effective device binding');
+    }
+    if (recoveryGrant?.authorizationKind === 'device' && !responseEffectiveDeviceId) {
+      await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+      throw new Error('ClassPilot omitted the managed device binding');
     }
 
   const student = data.student || {};
@@ -10881,6 +11605,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     throw new Error('ClassPilot did not provide secure session recovery');
   }
   const identitySource = isPinLogin ? 'manual_pin' : 'manual_email_id';
+  const effectiveDeviceId = responseEffectiveDeviceId || deviceId;
 
   await beginStudentAuthCommit(mutationGeneration, 'student login commit');
 
@@ -10888,11 +11613,11 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   // storage commit. A reset requested later writes `true` afterward and wins.
   const markerCleared = durableLocalKv.remove(STUDENT_AUTH_INVALIDATING_KEY);
   await durableLocalKv.set({
-    deviceId,
+    deviceId: effectiveDeviceId,
     classId: 'auto',
     config: persistedNonAuthConfig({
       ...CONFIG,
-      deviceId,
+      deviceId: effectiveDeviceId,
       classId: 'auto',
       ...(authenticatedSchoolId ? { schoolId: authenticatedSchoolId } : {}),
     }),
@@ -10907,7 +11632,9 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     createdAt: now,
   };
   await armStudentSessionRecovery(provisionalRecoveryAuthority, {
-    discardGeneration: recoveryGrant?.recordGeneration,
+    discardGeneration: recoveryGrant?.authorizationKind === 'device'
+      ? recoveryGrant.recoveryGeneration
+      : recoveryGrant?.recordGeneration,
   });
   await setManualAuthState({
     authContextId,
@@ -10925,6 +11652,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   await markerCleared;
   assertAuthMutationCurrent(mutationGeneration, 'student login', { allowInvalidating: true });
   assertAuthGatePolicyGuardCurrent(policyGuard, 'student login adoption');
+  CONFIG.deviceId = effectiveDeviceId;
   CONFIG.studentToken = data.studentToken;
   CONFIG.activeStudentId = studentId;
   CONFIG.activeStudentSessionId = studentSessionId;
@@ -10936,6 +11664,9 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   CONFIG.manualLoginLastSeenAt = now;
   CONFIG.autoRegistrationPaused = false;
   studentAuthInvalidating = false;
+  if (recoveryGrant?.authorizationKind === 'device') {
+    await clearManagedDeviceContinuityState(recoveryGrant.recordGeneration);
+  }
   activateAuthenticatedContext(authContextId);
   const committedAuthContext = capturePendingAuthenticatedContext(
     'student login storage adoption',
@@ -11513,6 +12244,7 @@ chrome.runtime.onInstalled.addListener((details = {}) => {
         await clearStudentAuth('extension_update', {
           notifyBackend: true,
           pauseAutoRegistration: true,
+          preserveRecoveryForGate: true,
         });
       }
       flushStudentSessionRecovery({ maxRecords: 1 }).catch(() => {});
@@ -11727,6 +12459,9 @@ const authStateRestorePromise = new Promise((resolve) => {
       || manualAuthTimestampInvalid
       || manualAuthSessionStorageUnavailable
       || managedAuthBindingChanged,
+    preserveForGate: !interruptedAuthClear
+      && !manualAuthTimestampInvalid
+      && !managedAuthBindingChanged,
   });
   if (managedSetupUnavailable) {
     updateSharedSignInLoginConfig({
@@ -12046,6 +12781,9 @@ const authStateRestorePromise = new Promise((resolve) => {
       {
       notifyBackend: false,
       pauseAutoRegistration: recoveryRequiresManualReauthentication,
+      preserveRecoveryForGate: recoveryReason === 'browser-session-ended'
+        || recoveryReason === 'manual-session-storage-unavailable'
+        || recoveryReason === 'interrupted-auth-commit',
       },
     );
     await setConnectivityBadge(connectivityStatus());
@@ -12881,6 +13619,7 @@ async function sendHeartbeat(reason = 'manual') {
           notifyBackend: false,
           serverSessionEnded: false,
           pauseAutoRegistration: true,
+          preserveRecoveryForGate: true,
           expectedAuthContext: heartbeatAuthContext,
         });
         return;
@@ -13494,6 +14233,7 @@ async function captureAndSendScreenshot(options = {}) {
           notifyBackend: false,
           serverSessionEnded: false,
           pauseAutoRegistration: true,
+          preserveRecoveryForGate: true,
           expectedAuthContext: screenshotAuthContext,
         });
       } else {

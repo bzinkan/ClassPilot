@@ -3994,6 +3994,154 @@ async function main() {
     assert.equal(boundedRecoveryAlarmGateCoalescing.pendingRecords, 7);
     assert.equal(boundedRecoveryAlarmGateCoalescing.grantAvailable, true);
 
+    const explicitReleaseIntentSurvivesWorkerRestart = await worker.evaluate(async () => {
+      if (studentSessionRecoveryFlushPromise) {
+        await studentSessionRecoveryFlushPromise.catch(() => {});
+      }
+      const originalFetch = globalThis.fetch;
+      const originalConfig = { ...CONFIG };
+      const authContextId = generateAuthContextId();
+      const token = 'V'.repeat(43);
+      const now = Date.now();
+      const armed = normalizeStudentSessionRecoveryRecord({
+        state: 'armed',
+        generation: generateStudentSessionRecoveryGeneration(),
+        serverOrigin: 'https://school-pilot.net',
+        schoolId: 'explicit-release-school',
+        token,
+        authContextId,
+        createdAt: now,
+      }, 'armed', now);
+      let releaseRequests = 0;
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'explicit-release-school',
+          schoolSlug: 'explicit-release-school',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed,
+          pending: [],
+        });
+        globalThis.fetch = async (url) => {
+          if (!String(url).endsWith('/api/extension/session-release')) {
+            return new Response('{}', { status: 200 });
+          }
+          releaseRequests += 1;
+          return releaseRequests === 1
+            ? new Response(JSON.stringify({ code: 'SESSION_RELEASE_UNAVAILABLE' }), {
+              status: 503,
+              headers: { 'content-type': 'application/json' },
+            })
+            : new Response(null, { status: 204 });
+        };
+
+        await transitionStudentSessionRecoveryForAuthClear(authContextId, {
+          serverSessionEnded: false,
+          preserveForGate: false,
+        });
+        if (studentSessionRecoveryFlushPromise) {
+          await studentSessionRecoveryFlushPromise;
+        }
+        const after503 = studentSessionRecoveryState.pending[0] || null;
+        const durableAfter503 = (await durableLocalKv.get([
+          STUDENT_SESSION_RECOVERY_STORAGE_KEY,
+        ]))[STUDENT_SESSION_RECOVERY_STORAGE_KEY];
+        const exactAuthorityAfter503 = matchingStudentSessionRecoveryRecord();
+        const reservedAfter503 = recoveryGenerationsReservedForGate();
+
+        // Rehydrate from the durable record to model a fresh MV3 worker. The
+        // release intent must remain retry-eligible while its exact token can
+        // still be embedded into a managed-device proof for atomic handoff.
+        studentSessionRecoveryLoaded = false;
+        studentSessionRecoveryLoadPromise = null;
+        studentSessionRecoveryState = emptyStudentSessionRecoveryState();
+        await ensureStudentSessionRecoveryLoaded(durableAfter503);
+        const afterWake = studentSessionRecoveryState.pending[0] || null;
+        await flushStudentSessionRecovery({
+          maxRecords: 1,
+          forceGeneration: afterWake?.generation,
+        });
+
+        return {
+          releaseRequests,
+          after503Intent: after503?.intent || null,
+          after503ExactTokenAvailable: exactAuthorityAfter503?.token === token,
+          after503Reserved: reservedAfter503.has(after503?.generation),
+          afterWakeIntent: afterWake?.intent || null,
+          pendingAfter204: studentSessionRecoveryState.pending.length,
+          exactTokenAfter204: matchingStudentSessionRecoveryRecord()?.token || null,
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+        CONFIG = originalConfig;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+      }
+    });
+    assert.deepEqual(explicitReleaseIntentSurvivesWorkerRestart, {
+      releaseRequests: 2,
+      after503Intent: 'release',
+      after503ExactTokenAvailable: true,
+      after503Reserved: false,
+      afterWakeIntent: 'release',
+      pendingAfter204: 0,
+      exactTokenAfter204: null,
+    });
+
+    const recoveryReleaseResponseClassification = await worker.evaluate(async () => {
+      const originalFetch = globalThis.fetch;
+      const now = Date.now();
+      const record = normalizeStudentSessionRecoveryRecord({
+        state: 'pending',
+        generation: generateStudentSessionRecoveryGeneration(),
+        serverOrigin: 'https://school-pilot.net',
+        schoolId: 'release-classification-school',
+        token: 'Y'.repeat(43),
+        authContextId: generateAuthContextId(),
+        createdAt: now - 1000,
+        pendingSinceAt: now - 1000,
+        attemptCount: 0,
+        nextAttemptAt: now - 1,
+        discardAt: now - 1000 + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+        intent: STUDENT_SESSION_RECOVERY_INTENT_RELEASE,
+      }, 'pending', now - 2000);
+      try {
+        const responseFor = async (response) => {
+          globalThis.fetch = async () => response;
+          return (await attemptStudentSessionRecoveryRelease(record)).outcome;
+        };
+        return {
+          unstructured401: await responseFor(new Response('edge denied', { status: 401 })),
+          unstructured403: await responseFor(new Response('edge denied', { status: 403 })),
+          structuredInvalid: await responseFor(new Response(JSON.stringify({
+            code: 'SESSION_RELEASE_INVALID',
+          }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          })),
+          unstructured400: await responseFor(new Response('bad edge request', { status: 400 })),
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+    assert.deepEqual(recoveryReleaseResponseClassification, {
+      unstructured401: 'retry',
+      unstructured403: 'retry',
+      structuredInvalid: 'terminal',
+      unstructured400: 'retry',
+    });
+
     const interleavedRosterRecoveryGrants = await worker.evaluate(async () => {
       const originalFetchWithBackoff = fetchWithBackoff;
       const now = Date.now();
@@ -4384,7 +4532,7 @@ async function main() {
         CONFIG = originalConfig;
       }
     });
-    assert.equal(crossStudentHandoffAfterReleaseFailure.releaseRequests, 1);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.releaseRequests, 0);
     assert.equal(crossStudentHandoffAfterReleaseFailure.rosterGrantIdIsOpaque, true);
     assert.deepEqual(crossStudentHandoffAfterReleaseFailure.rosterStudents, [{
       id: 'student-alex',
@@ -4680,7 +4828,7 @@ async function main() {
       assert.equal(result.autoRegistrationPaused, true, JSON.stringify(result));
       assert.equal(result.pendingRecovery, true, JSON.stringify(result));
       assert.equal(result.recoveryPersisted, true, JSON.stringify(result));
-      assert.ok(result.releaseRequests >= 1, JSON.stringify(result));
+      assert.equal(result.releaseRequests, 0, JSON.stringify(result));
       assert.equal(result.rosterSentRecovery, true, JSON.stringify(result));
       assert.equal(result.reclaimable, true, JSON.stringify(result));
       if (result.source === 'screenshot') {
@@ -4918,7 +5066,1237 @@ async function main() {
     assert.equal(slugOnlyRecoveryBinding.changedAuthorityPurgedCanonicalSchool, true);
     assert.equal(slugOnlyRecoveryBinding.autoRegistrationPaused, true);
     assert.equal(slugOnlyRecoveryBinding.profileRegisterRequests, 0);
-    assert.ok(slugOnlyRecoveryBinding.releaseRequests >= 1);
+    assert.equal(slugOnlyRecoveryBinding.releaseRequests, 0);
+
+    const managedDeviceContinuityFlow = await worker.evaluate(async () => {
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = sharedSignInLoginConfig;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalManagedSetupUnavailable = managedAuthGateSetupUnavailable;
+      const originalFetchAuthGateRequest = fetchAuthGateRequest;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFetch = globalThis.fetch;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const originalTrackingState = trackingState;
+      const rawDirectoryDeviceId = 'managed-directory-identifier-must-not-leak';
+      const preflightToken = `cpmp1.${'A'.repeat(32)}.${'T'.repeat(43)}`;
+      const continuityProof = `cpmd1.${'B'.repeat(32)}.${'P'.repeat(43)}`;
+      const currentRecoveryToken = 'C'.repeat(43);
+      const otherSchoolRecoveryToken = 'O'.repeat(43);
+      const newRecoveryToken = 'N'.repeat(43);
+      const effectiveDeviceId = '11111111-2222-3333-4444-555555555555';
+      const requestOrder = [];
+      const releasedTokens = [];
+      let preflightBody = null;
+      let issuanceBody = null;
+      let issuanceAuthorization = null;
+      let rosterAuthorization = null;
+      let loginAuthorization = null;
+      let loginRequestDeviceId = null;
+      let directoryReads = 0;
+      try {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('managed continuity fixture reset');
+          await clearStudentAuth('managed_continuity_fixture_reset', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await clearManagedDeviceContinuityState();
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: null,
+          schoolSlug: 'managed-continuity-school',
+          enrollmentKey: 'managed-continuity-enrollment',
+          deviceId: 'device-random-pre-continuity',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        fastAuthGateEnabled = true;
+        managedAuthGateSetupUnavailable = false;
+        trackingState = TRACKING_STATES.OFF;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'loading',
+          schoolId: null,
+          bindingKey: authGateConfigBindingKey(),
+        };
+
+        const now = Date.now();
+        const makePending = (schoolId, token, createdAt) => normalizeStudentSessionRecoveryRecord({
+          state: 'pending',
+          generation: generateStudentSessionRecoveryGeneration(),
+          serverOrigin: 'https://school-pilot.net',
+          schoolId,
+          token,
+          authContextId: generateAuthContextId(),
+          createdAt,
+          pendingSinceAt: createdAt,
+          attemptCount: 0,
+          nextAttemptAt: now - 1,
+          discardAt: createdAt + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+        }, 'pending', now - 10_000);
+        // The wrong-school record is deliberately newer. A slug-only startup
+        // must reserve both until login-config resolves the canonical school.
+        const currentRecovery = makePending(
+          'canonical-continuity-school',
+          currentRecoveryToken,
+          now - 5000,
+        );
+        const otherSchoolRecovery = makePending(
+          'other-school-on-same-origin',
+          otherSchoolRecoveryToken,
+          now - 1000,
+        );
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [otherSchoolRecovery, currentRecovery],
+        });
+        globalThis.fetch = async (_url, init = {}) => {
+          releasedTokens.push(String(init.headers?.Authorization || ''));
+          return new Response(null, { status: 204 });
+        };
+        await flushStudentSessionRecovery({ maxRecords: 8 });
+        const releasesBeforeCanonicalResolution = releasedTokens.length;
+
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: 'canonical-continuity-school',
+          bindingKey: authGateConfigBindingKey(),
+        };
+        await flushStudentSessionRecovery({ maxRecords: 8 });
+        const matchingRecovery = matchingStudentSessionRecoveryRecord();
+
+        fetchAuthGateRequest = async (url, init = {}) => {
+          const requestUrl = String(url);
+          if (requestUrl.endsWith('/device-continuity/preflight')) {
+            requestOrder.push('preflight');
+            preflightBody = JSON.parse(init.body || '{}');
+            return {
+              response: new Response('{}', { status: 200 }),
+              data: {
+                serverProtocolVersion: 3,
+                acceptedCapabilities: [
+                  'scopedAuthorityChecksV1',
+                  'kioskLaunchTicketV2',
+                  'managedDeviceContinuityV1',
+                ],
+                preflightToken,
+                expiresInSeconds: 60,
+              },
+              jsonValid: true,
+            };
+          }
+          if (requestUrl.endsWith('/device-continuity')) {
+            requestOrder.push('issuance');
+            issuanceBody = JSON.parse(init.body || '{}');
+            issuanceAuthorization = init.headers?.Authorization || null;
+            return {
+              response: new Response('{}', { status: 200 }),
+              data: { continuityProof, expiresInSeconds: 600 },
+              jsonValid: true,
+            };
+          }
+          if (requestUrl.includes('/api/extension/login-roster?')) {
+            requestOrder.push('roster');
+            rosterAuthorization = init.headers?.Authorization || null;
+            return {
+              response: new Response('{}', { status: 200 }),
+              data: {
+                managedDeviceContinuityAccepted: true,
+                loginMethod: 'name_pin',
+                grades: [{ value: '5', label: 'Grade 5' }],
+                students: [{
+                  id: 'student-alex',
+                  name: 'Alex Student',
+                  gradeLevel: '5',
+                  hasPin: true,
+                  reclaimable: true,
+                }, {
+                  id: 'student-bob',
+                  name: 'Bob Student',
+                  gradeLevel: '5',
+                  hasPin: true,
+                  reclaimable: false,
+                }],
+              },
+              jsonValid: true,
+            };
+          }
+          throw new Error('unexpected continuity fixture request');
+        };
+
+        const proof = await requestManagedDeviceContinuityProof({
+          recoveryRecord: matchingRecovery,
+          readDirectoryDeviceId: async () => {
+            requestOrder.push('directory');
+            directoryReads += 1;
+            return rawDirectoryDeviceId;
+          },
+        });
+        const storageBeforeLogin = {
+          local: await chrome.storage.local.get(),
+          session: await chrome.storage.session.get(),
+        };
+        const roster = await fetchLoginRosterNetworkForGate({
+          gradeLevel: '5',
+          continuityRecord: proof,
+        });
+        const cacheKey = loginRosterRequestCacheKey('5', null, proof);
+        const grantId = bindLoginRosterDeviceContinuityGrant(
+          proof,
+          roster.students,
+          cacheKey,
+        );
+
+        fetchWithBackoff = async (url, init = {}) => {
+          if (String(url).endsWith('/api/extension/student-login')) {
+            loginAuthorization = init.headers?.Authorization || null;
+            loginRequestDeviceId = JSON.parse(init.body || '{}').deviceId || null;
+            return new Response(JSON.stringify({
+              schoolId: 'canonical-continuity-school',
+              effectiveDeviceId,
+              managedDeviceContinuityAccepted: true,
+              studentToken: 'managed-continuity-student-bearer',
+              studentSessionId: 'managed-continuity-student-session',
+              sessionRecovery: { token: newRecoveryToken },
+              planStatus: 'active',
+              classroomState: null,
+              student: {
+                id: 'student-bob',
+                email: 'bob@example.edu',
+                firstName: 'Bob',
+                lastName: 'Student',
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+        const login = await manualStudentLogin({
+          mode: 'pin',
+          studentId: 'student-bob',
+          pin: '2468',
+          recoveryGrantId: grantId,
+        });
+        await studentAuthMutationTail;
+        await Promise.resolve();
+        const storageAfterLogin = {
+          local: await chrome.storage.local.get(),
+          session: await chrome.storage.session.get(),
+        };
+        const oldRecoveryRemovedAfterLogin = !studentSessionRecoveryState.pending.some(
+          (record) => record.generation === currentRecovery.generation,
+        );
+        const newRecoveryArmedAfterLogin = studentSessionRecoveryState.armed?.token
+          === newRecoveryToken;
+
+        // A denied/malformed preflight is authoritative and must happen before
+        // any enterprise identifier read.
+        const currentAuth = captureAuthenticatedContext('continuity denial setup cleanup');
+        await clearStudentAuth('continuity_denial_setup_cleanup', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: currentAuth,
+        });
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        Object.assign(CONFIG, {
+          schoolId: 'canonical-continuity-school',
+          schoolSlug: 'managed-continuity-school',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          schoolId: 'canonical-continuity-school',
+          bindingKey: authGateConfigBindingKey(),
+        };
+        fetchAuthGateRequest = async () => ({
+          response: new Response('{}', { status: 403 }),
+          data: {},
+          jsonValid: true,
+        });
+        let deniedDirectoryReads = 0;
+        const deniedProof = await requestManagedDeviceContinuityProof({
+          readDirectoryDeviceId: async () => {
+            deniedDirectoryReads += 1;
+            return rawDirectoryDeviceId;
+          },
+        });
+
+        const serializedBeforeLoginLocal = JSON.stringify(storageBeforeLogin.local);
+        const serializedBeforeLoginSession = JSON.stringify(storageBeforeLogin.session);
+        const serializedAfterLoginLocal = JSON.stringify(storageAfterLogin.local);
+        const serializedAfterLoginSession = JSON.stringify(storageAfterLogin.session);
+        return {
+          releasesBeforeCanonicalResolution,
+          releasedOnlyOtherSchool: releasedTokens.length === 1
+            && releasedTokens[0] === `ClassPilot-Recovery ${otherSchoolRecoveryToken}`,
+          currentRecoveryPreserved: matchingRecovery?.token === currentRecoveryToken,
+          requestOrder,
+          preflightIdentifierFree: preflightBody
+            && !Object.prototype.hasOwnProperty.call(preflightBody, 'directoryDeviceId')
+            && !Object.prototype.hasOwnProperty.call(preflightBody, 'recoveryToken'),
+          preflightCapabilities: preflightBody?.capabilities || [],
+          issuanceCarriedExactAuthorities: issuanceBody?.directoryDeviceId === rawDirectoryDeviceId
+            && issuanceBody?.recoveryToken === currentRecoveryToken
+            && issuanceAuthorization === `ClassPilot-Preflight ${preflightToken}`,
+          directoryReads,
+          rosterAuthorization,
+          rosterResponseLeakedCredential: JSON.stringify(roster).includes(continuityProof)
+            || JSON.stringify(roster).includes(rawDirectoryDeviceId),
+          loginSuccess: login.success === true,
+          loginAuthorization,
+          loginRequestDeviceId,
+          adoptedDeviceId: CONFIG.deviceId,
+          persistedDeviceId: storageAfterLogin.local.deviceId,
+          persistedConfigDeviceId: storageAfterLogin.local.config?.deviceId || null,
+          oldRecoveryRemoved: oldRecoveryRemovedAfterLogin,
+          newRecoveryArmed: newRecoveryArmedAfterLogin,
+          proofStoredOnlyInSessionBeforeLogin:
+            !serializedBeforeLoginLocal.includes(continuityProof)
+            && serializedBeforeLoginSession.includes(continuityProof),
+          proofClearedAfterLogin: !serializedAfterLoginLocal.includes(continuityProof)
+            && !serializedAfterLoginSession.includes(continuityProof),
+          rawIdentifierNeverStored: !serializedBeforeLoginLocal.includes(rawDirectoryDeviceId)
+            && !serializedBeforeLoginSession.includes(rawDirectoryDeviceId)
+            && !serializedAfterLoginLocal.includes(rawDirectoryDeviceId)
+            && !serializedAfterLoginSession.includes(rawDirectoryDeviceId),
+          preflightTokenNeverStored: !serializedBeforeLoginLocal.includes(preflightToken)
+            && !serializedBeforeLoginSession.includes(preflightToken),
+          deniedProof: deniedProof === null,
+          deniedDirectoryReads,
+          staleProofRejected: normalizeManagedDeviceContinuityRecord({
+            generation: generateManagedDeviceContinuityGeneration(),
+            proof: continuityProof,
+            serverOrigin: 'https://school-pilot.net',
+            schoolId: 'canonical-continuity-school',
+            bindingKey: authGateConfigBindingKey(),
+            policyGeneration: managedAuthGatePolicyGeneration,
+            recoveryGeneration: null,
+            expiresAt: Date.now() + 1000,
+          }) === null,
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('managed continuity fixture cleanup');
+          await clearStudentAuth('managed_continuity_fixture_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        CONFIG = originalConfig;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        managedAuthGateSetupUnavailable = originalManagedSetupUnavailable;
+        fetchAuthGateRequest = originalFetchAuthGateRequest;
+        fetchWithBackoff = originalFetchWithBackoff;
+        globalThis.fetch = originalFetch;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        trackingState = originalTrackingState;
+      }
+    });
+    assert.equal(managedDeviceContinuityFlow.releasesBeforeCanonicalResolution, 0);
+    assert.equal(managedDeviceContinuityFlow.releasedOnlyOtherSchool, true);
+    assert.equal(managedDeviceContinuityFlow.currentRecoveryPreserved, true);
+    assert.deepEqual(managedDeviceContinuityFlow.requestOrder, [
+      'preflight',
+      'directory',
+      'issuance',
+      'roster',
+    ]);
+    assert.equal(managedDeviceContinuityFlow.preflightIdentifierFree, true);
+    assert.deepEqual(managedDeviceContinuityFlow.preflightCapabilities, [
+      'scopedAuthorityChecksV1',
+      'kioskLaunchTicketV2',
+      'managedDeviceContinuityV1',
+    ]);
+    assert.equal(managedDeviceContinuityFlow.issuanceCarriedExactAuthorities, true);
+    assert.equal(managedDeviceContinuityFlow.directoryReads, 1);
+    assert.equal(
+      managedDeviceContinuityFlow.rosterAuthorization,
+      `ClassPilot-Device cpmd1.${'B'.repeat(32)}.${'P'.repeat(43)}`,
+    );
+    assert.equal(managedDeviceContinuityFlow.rosterResponseLeakedCredential, false);
+    assert.equal(managedDeviceContinuityFlow.loginSuccess, true);
+    assert.equal(
+      managedDeviceContinuityFlow.loginAuthorization,
+      `ClassPilot-Device cpmd1.${'B'.repeat(32)}.${'P'.repeat(43)}`,
+    );
+    assert.equal(managedDeviceContinuityFlow.loginRequestDeviceId, 'device-random-pre-continuity');
+    assert.equal(
+      managedDeviceContinuityFlow.adoptedDeviceId,
+      '11111111-2222-3333-4444-555555555555',
+    );
+    assert.equal(managedDeviceContinuityFlow.persistedDeviceId, managedDeviceContinuityFlow.adoptedDeviceId);
+    assert.equal(
+      managedDeviceContinuityFlow.persistedConfigDeviceId,
+      managedDeviceContinuityFlow.adoptedDeviceId,
+    );
+    assert.equal(managedDeviceContinuityFlow.oldRecoveryRemoved, true);
+    assert.equal(managedDeviceContinuityFlow.newRecoveryArmed, true);
+    assert.equal(managedDeviceContinuityFlow.proofStoredOnlyInSessionBeforeLogin, true);
+    assert.equal(managedDeviceContinuityFlow.proofClearedAfterLogin, true);
+    assert.equal(managedDeviceContinuityFlow.rawIdentifierNeverStored, true);
+    assert.equal(managedDeviceContinuityFlow.preflightTokenNeverStored, true);
+    assert.equal(managedDeviceContinuityFlow.deniedProof, true);
+    assert.equal(managedDeviceContinuityFlow.deniedDirectoryReads, 0);
+    assert.equal(managedDeviceContinuityFlow.staleProofRejected, true);
+
+    const mixedBackendContinuityFallback = await worker.evaluate(async () => {
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = sharedSignInLoginConfig;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalFetchAuthGateRequest = fetchAuthGateRequest;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const now = Date.now();
+      const recovery = normalizeStudentSessionRecoveryRecord({
+        state: 'pending',
+        generation: generateStudentSessionRecoveryGeneration(),
+        serverOrigin: 'https://school-pilot.net',
+        schoolId: 'mixed-backend-school',
+        token: 'M'.repeat(43),
+        authContextId: generateAuthContextId(),
+        createdAt: now - 1000,
+        pendingSinceAt: now - 1000,
+        attemptCount: 0,
+        nextAttemptAt: now + 60_000,
+        discardAt: now - 1000 + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+        intent: STUDENT_SESSION_RECOVERY_INTENT_RESUME,
+      }, 'pending', now - 2000);
+      const proofValue = `cpmd1.${'D'.repeat(32)}.${'S'.repeat(43)}`;
+      const rosterAuthorizations = [];
+      let loginRequests = 0;
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'mixed-backend-school',
+          schoolSlug: 'mixed-backend-school',
+          enrollmentKey: 'mixed-backend-enrollment',
+          deviceId: 'mixed-backend-random-device',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        fastAuthGateEnabled = true;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: 'mixed-backend-school',
+          bindingKey: authGateConfigBindingKey(),
+        };
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [recovery],
+        });
+        const proof = normalizeManagedDeviceContinuityRecord({
+          generation: generateManagedDeviceContinuityGeneration(),
+          proof: proofValue,
+          serverOrigin: 'https://school-pilot.net',
+          schoolId: 'mixed-backend-school',
+          bindingKey: authGateConfigBindingKey(),
+          policyGeneration: managedAuthGatePolicyGeneration,
+          recoveryGeneration: recovery.generation,
+          expiresAt: now + 300_000,
+        }, now);
+        installManagedDeviceContinuityState(proof);
+        await durableSessionKv.set({ [MANAGED_DEVICE_CONTINUITY_SESSION_KEY]: proof });
+        resetLoginRosterRuntimeCache();
+
+        fetchAuthGateRequest = async (url, init = {}) => {
+          if (!String(url).includes('/api/extension/login-roster?')) {
+            throw new Error('mixed backend fixture unexpectedly requested continuity issuance');
+          }
+          rosterAuthorizations.push(init.headers?.Authorization || null);
+          // The first response models an older backend that silently ignores
+          // ClassPilot-Device. The exact-recovery retry is proof-aware rollout
+          // fallback and therefore needs no additive managed marker.
+          return {
+            response: new Response('{}', { status: 200 }),
+            data: {
+              loginMethod: 'name_pin',
+              grades: [],
+              students: [{
+                id: 'mixed-backend-student',
+                name: 'Mixed Backend Student',
+                hasPin: true,
+                reclaimable: rosterAuthorizations.length === 2,
+              }],
+            },
+            jsonValid: true,
+          };
+        };
+        const roster = await fetchLoginRosterForGate({ gradeLevel: '5', forceRefresh: true });
+        const fallbackGrant = recoveryGrantForStudentLogin(
+          'mixed-backend-student',
+          roster.recoveryGrantId,
+        );
+
+        // Model exact release winning after a proof-aware roster but before
+        // the PIN click. Cache invalidation must make the old opaque grant fail
+        // closed rather than sending a random-device login without authority.
+        const proofAfterFallback = normalizeManagedDeviceContinuityRecord({
+          ...proof,
+          generation: generateManagedDeviceContinuityGeneration(),
+        }, now);
+        installManagedDeviceContinuityState(proofAfterFallback);
+        const proofCacheKey = loginRosterRequestCacheKey('5', null, proofAfterFallback);
+        const staleDeviceGrantId = bindLoginRosterDeviceContinuityGrant(
+          proofAfterFallback,
+          [{ id: 'mixed-backend-student', hasPin: true }],
+          proofCacheKey,
+        );
+        await applyStudentSessionRecoveryReleaseOutcome(recovery, {
+          outcome: 'released',
+          retryAfterMs: 0,
+        });
+        fetchWithBackoff = async () => {
+          loginRequests += 1;
+          throw new Error('stale device grant reached login network');
+        };
+        let staleGrantError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'pin',
+            studentId: 'mixed-backend-student',
+            pin: '2468',
+            recoveryGrantId: staleDeviceGrantId,
+          });
+        } catch (error) {
+          staleGrantError = error?.message || null;
+        }
+
+        return {
+          rosterSuccess: roster.success === true,
+          rosterAuthorizations,
+          fallbackGrantKind: fallbackGrant?.authorizationKind || null,
+          proofCleared: currentManagedDeviceContinuityProof() === null,
+          staleGrantError,
+          loginRequests,
+        };
+      } finally {
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        CONFIG = originalConfig;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        fetchAuthGateRequest = originalFetchAuthGateRequest;
+        fetchWithBackoff = originalFetchWithBackoff;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+      }
+    });
+    assert.equal(mixedBackendContinuityFallback.rosterSuccess, true);
+    assert.deepEqual(mixedBackendContinuityFallback.rosterAuthorizations, [
+      `ClassPilot-Device cpmd1.${'D'.repeat(32)}.${'S'.repeat(43)}`,
+      `ClassPilot-Recovery ${'M'.repeat(43)}`,
+    ]);
+    assert.equal(mixedBackendContinuityFallback.fallbackGrantKind, 'recovery');
+    assert.equal(mixedBackendContinuityFallback.proofCleared, true);
+    assert.match(mixedBackendContinuityFallback.staleGrantError || '', /sign-in list changed/i);
+    assert.equal(mixedBackendContinuityFallback.loginRequests, 0);
+
+    const pinManagedContinuityRollback = await worker.evaluate(async () => {
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = sharedSignInLoginConfig;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFetch = globalThis.fetch;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const originalTrackingState = trackingState;
+      const recoveryToken = 'R'.repeat(43);
+      const continuityProof = `cpmd1.${'Q'.repeat(32)}.${'S'.repeat(43)}`;
+      const responseRecoveryToken = 'W'.repeat(43);
+      const authorizations = [];
+      let mode = 'legacy_conflict';
+      const installRecoveryAndProofGrant = async () => {
+        const now = Date.now();
+        const recovery = normalizeStudentSessionRecoveryRecord({
+          state: 'pending',
+          generation: generateStudentSessionRecoveryGeneration(),
+          serverOrigin: 'https://school-pilot.net',
+          schoolId: 'pin-rollback-school',
+          token: recoveryToken,
+          authContextId: generateAuthContextId(),
+          createdAt: now - 1000,
+          pendingSinceAt: now - 1000,
+          attemptCount: 0,
+          nextAttemptAt: now + 60_000,
+          discardAt: now - 1000 + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+          intent: STUDENT_SESSION_RECOVERY_INTENT_RESUME,
+        }, 'pending', now - 2000);
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [recovery],
+        });
+        const proof = normalizeManagedDeviceContinuityRecord({
+          generation: generateManagedDeviceContinuityGeneration(),
+          proof: continuityProof,
+          serverOrigin: 'https://school-pilot.net',
+          schoolId: 'pin-rollback-school',
+          bindingKey: authGateConfigBindingKey(),
+          policyGeneration: managedAuthGatePolicyGeneration,
+          recoveryGeneration: recovery.generation,
+          expiresAt: now + 300_000,
+        }, now);
+        installManagedDeviceContinuityState(proof);
+        await durableSessionKv.set({ [MANAGED_DEVICE_CONTINUITY_SESSION_KEY]: proof });
+        const cacheKey = loginRosterRequestCacheKey('5', null, proof);
+        return bindLoginRosterDeviceContinuityGrant(
+          proof,
+          [{ id: 'pin-rollback-student', hasPin: true, reclaimable: true }],
+          cacheKey,
+        );
+      };
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'pin-rollback-school',
+          schoolSlug: 'pin-rollback-school',
+          enrollmentKey: 'pin-rollback-enrollment',
+          deviceId: 'pin-rollback-random-device',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        trackingState = TRACKING_STATES.OFF;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: 'pin-rollback-school',
+          bindingKey: authGateConfigBindingKey(),
+        };
+        fetchWithBackoff = async (url, init = {}) => {
+          if (!String(url).endsWith('/api/extension/student-login')) {
+            return new Response('{}', { status: 200 });
+          }
+          const authorization = init.headers?.Authorization || null;
+          authorizations.push(authorization);
+          if (
+            mode === 'legacy_conflict'
+            && String(authorization).startsWith('ClassPilot-Device ')
+          ) {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_SESSION_ACTIVE',
+              error: 'Student is already active',
+            }), { status: 409, headers: { 'content-type': 'application/json' } });
+          }
+          if (mode === 'recognized_conflict') {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_SESSION_ACTIVE',
+              error: 'Student is active on another Chromebook',
+              managedDeviceContinuityAccepted: true,
+            }), { status: 409, headers: { 'content-type': 'application/json' } });
+          }
+          if (mode === 'wrong_pin') {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_PIN_INVALID',
+              error: 'Invalid PIN',
+            }), { status: 401, headers: { 'content-type': 'application/json' } });
+          }
+          return new Response(JSON.stringify({
+            schoolId: 'pin-rollback-school',
+            studentToken: 'pin-rollback-bearer',
+            studentSessionId: 'pin-rollback-session',
+            sessionRecovery: { token: responseRecoveryToken },
+            planStatus: 'active',
+            classroomState: null,
+            student: {
+              id: 'pin-rollback-student',
+              email: 'pin-rollback@example.edu',
+              firstName: 'PIN',
+              lastName: 'Student',
+            },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        globalThis.fetch = async () => new Response(null, { status: 204 });
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+
+        const fallbackGrantId = await installRecoveryAndProofGrant();
+        const fallbackStart = authorizations.length;
+        const fallbackLogin = await manualStudentLogin({
+          mode: 'pin',
+          studentId: 'pin-rollback-student',
+          pin: '2468',
+          recoveryGrantId: fallbackGrantId,
+        });
+        const fallbackAuthorizations = authorizations.slice(fallbackStart);
+        const fallbackDeviceId = CONFIG.deviceId;
+        const currentAuth = captureAuthenticatedContext('pin rollback fixture reset');
+        await clearStudentAuth('pin_rollback_fixture_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: currentAuth,
+        });
+        Object.assign(CONFIG, {
+          deviceId: 'pin-rollback-random-device',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        await clearManagedDeviceContinuityState();
+
+        mode = 'recognized_conflict';
+        const recognizedGrantId = await installRecoveryAndProofGrant();
+        const recognizedStart = authorizations.length;
+        let recognizedError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'pin',
+            studentId: 'pin-rollback-student',
+            pin: '2468',
+            recoveryGrantId: recognizedGrantId,
+          });
+        } catch (error) {
+          recognizedError = error?.code || error?.message || null;
+        }
+        const recognizedAuthorizations = authorizations.slice(recognizedStart);
+
+        mode = 'wrong_pin';
+        const wrongPinGrantId = bindLoginRosterDeviceContinuityGrant(
+          currentManagedDeviceContinuityProof(),
+          [{ id: 'pin-rollback-student', hasPin: true, reclaimable: true }],
+          `pin-wrong-${Date.now()}`,
+        );
+        const wrongPinStart = authorizations.length;
+        let wrongPinError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'pin',
+            studentId: 'pin-rollback-student',
+            pin: '0000',
+            recoveryGrantId: wrongPinGrantId,
+          });
+        } catch (error) {
+          wrongPinError = error?.code || error?.message || null;
+        }
+        const wrongPinAuthorizations = authorizations.slice(wrongPinStart);
+
+        return {
+          fallbackSuccess: fallbackLogin.success === true,
+          fallbackAuthorizations,
+          fallbackDeviceId,
+          recognizedError,
+          recognizedAuthorizations,
+          wrongPinError,
+          wrongPinAuthorizations,
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('pin rollback final cleanup');
+          await clearStudentAuth('pin_rollback_final_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        CONFIG = originalConfig;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        fetchWithBackoff = originalFetchWithBackoff;
+        globalThis.fetch = originalFetch;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        trackingState = originalTrackingState;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+      }
+    });
+    assert.equal(pinManagedContinuityRollback.fallbackSuccess, true);
+    assert.match(
+      pinManagedContinuityRollback.fallbackAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+    assert.equal(
+      pinManagedContinuityRollback.fallbackAuthorizations[1],
+      `ClassPilot-Recovery ${'R'.repeat(43)}`,
+    );
+    assert.equal(pinManagedContinuityRollback.fallbackAuthorizations.length, 2);
+    assert.equal(
+      pinManagedContinuityRollback.fallbackDeviceId,
+      'pin-rollback-random-device',
+    );
+    assert.equal(pinManagedContinuityRollback.recognizedError, 'STUDENT_SESSION_ACTIVE');
+    assert.equal(pinManagedContinuityRollback.recognizedAuthorizations.length, 1);
+    assert.match(
+      pinManagedContinuityRollback.recognizedAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+    assert.equal(pinManagedContinuityRollback.wrongPinError, 'STUDENT_PIN_INVALID');
+    assert.equal(pinManagedContinuityRollback.wrongPinAuthorizations.length, 1);
+    assert.match(
+      pinManagedContinuityRollback.wrongPinAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+
+    const emailManagedContinuity = await worker.evaluate(async () => {
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = sharedSignInLoginConfig;
+      const originalFetchAuthGateRequest = fetchAuthGateRequest;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFetch = globalThis.fetch;
+      const originalReadDirectoryDeviceId = readManagedDirectoryDeviceIdWithRetry;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const rawDirectoryDeviceId = 'email-managed-directory-id';
+      const effectiveDeviceId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const oldRecoveryToken = 'E'.repeat(43);
+      const adoptedRecoveryToken = 'F'.repeat(43);
+      const preflightToken = `cpmp1.${'E'.repeat(32)}.${'T'.repeat(43)}`;
+      const continuityProof = `cpmd1.${'F'.repeat(32)}.${'P'.repeat(43)}`;
+      const requestOrder = [];
+      let issuanceBody = null;
+      const loginAuthorizations = [];
+      let loginMode = 'success';
+      let cleanupReleases = 0;
+      const installOldRecovery = async () => {
+        const now = Date.now();
+        const recovery = normalizeStudentSessionRecoveryRecord({
+          state: 'pending',
+          generation: generateStudentSessionRecoveryGeneration(),
+          serverOrigin: 'https://school-pilot.net',
+          schoolId: 'email-continuity-school',
+          token: oldRecoveryToken,
+          authContextId: generateAuthContextId(),
+          createdAt: now - 1000,
+          pendingSinceAt: now - 1000,
+          attemptCount: 0,
+          nextAttemptAt: now + 60_000,
+          discardAt: now - 1000 + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+          intent: STUDENT_SESSION_RECOVERY_INTENT_RESUME,
+        }, 'pending', now - 2000);
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [recovery],
+        });
+        return recovery;
+      };
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'email-continuity-school',
+          schoolSlug: 'email-continuity-school',
+          enrollmentKey: 'email-continuity-enrollment',
+          deviceId: 'email-random-pre-continuity',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        trackingState = TRACKING_STATES.OFF;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'email_id',
+          pinLoginEnabled: false,
+          schoolId: 'email-continuity-school',
+          bindingKey: authGateConfigBindingKey(),
+        };
+        await installOldRecovery();
+        readManagedDirectoryDeviceIdWithRetry = async () => {
+          requestOrder.push('directory');
+          return rawDirectoryDeviceId;
+        };
+        fetchAuthGateRequest = async (url, init = {}) => {
+          if (String(url).endsWith('/device-continuity/preflight')) {
+            requestOrder.push('preflight');
+            return {
+              response: new Response('{}', { status: 200 }),
+              data: {
+                serverProtocolVersion: 3,
+                acceptedCapabilities: [
+                  'scopedAuthorityChecksV1',
+                  'kioskLaunchTicketV2',
+                  'managedDeviceContinuityV1',
+                ],
+                preflightToken,
+                expiresInSeconds: 60,
+              },
+              jsonValid: true,
+            };
+          }
+          if (String(url).endsWith('/device-continuity')) {
+            requestOrder.push('issuance');
+            issuanceBody = JSON.parse(init.body || '{}');
+            return {
+              response: new Response('{}', { status: 201 }),
+              data: { continuityProof, expiresInSeconds: 600 },
+              jsonValid: true,
+            };
+          }
+          throw new Error('unexpected email continuity request');
+        };
+        fetchWithBackoff = async (url, init = {}) => {
+          if (!String(url).endsWith('/api/extension/student-login')) {
+            return new Response('{}', { status: 200 });
+          }
+          requestOrder.push('login');
+          const authorization = init.headers?.Authorization || null;
+          loginAuthorizations.push(authorization);
+          if (
+            loginMode === 'legacy_conflict'
+            && String(authorization).startsWith('ClassPilot-Device ')
+          ) {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_SESSION_ACTIVE',
+              error: 'Student is already active',
+            }), { status: 409, headers: { 'content-type': 'application/json' } });
+          }
+          if (loginMode === 'recognized_conflict') {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_SESSION_ACTIVE',
+              error: 'Student is already active on another Chromebook',
+              managedDeviceContinuityAccepted: true,
+            }), { status: 409, headers: { 'content-type': 'application/json' } });
+          }
+          if (loginMode === 'invalid_credentials') {
+            return new Response(JSON.stringify({
+              code: 'STUDENT_CREDENTIALS_INVALID',
+              error: 'Invalid student credentials',
+            }), { status: 401, headers: { 'content-type': 'application/json' } });
+          }
+          const includesEffectiveDeviceId = loginMode === 'success'
+            || loginMode === 'missing_marker';
+          const includesContinuityMarker = loginMode === 'success'
+            || loginMode === 'missing_effective';
+          return new Response(JSON.stringify({
+            schoolId: 'email-continuity-school',
+            ...(includesEffectiveDeviceId ? { effectiveDeviceId } : {}),
+            ...(includesContinuityMarker ? { managedDeviceContinuityAccepted: true } : {}),
+            studentToken: loginMode === 'missing_effective'
+              ? 'mixed-version-email-bearer'
+              : 'email-continuity-bearer',
+            studentSessionId: loginMode === 'missing_effective'
+              ? 'mixed-version-email-session'
+              : 'email-continuity-session',
+            sessionRecovery: { token: adoptedRecoveryToken },
+            planStatus: 'active',
+            classroomState: null,
+            student: {
+              id: 'email-continuity-student',
+              email: 'student@example.edu',
+              firstName: 'Email',
+              lastName: 'Student',
+            },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
+        globalThis.fetch = async (url) => {
+          if (String(url).endsWith('/api/extension/session-release')) {
+            cleanupReleases += 1;
+            return new Response(null, { status: 204 });
+          }
+          return new Response('{}', { status: 200 });
+        };
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+
+        const login = await manualStudentLogin({
+          mode: 'email_id',
+          studentEmail: 'student@example.edu',
+          studentIdNumber: 'S-2001',
+        });
+        const firstAuthorization = loginAuthorizations[0];
+        const adoptedDeviceId = CONFIG.deviceId;
+        const proofClearedAfterSuccess = currentManagedDeviceContinuityProof() === null;
+        const currentAuth = captureAuthenticatedContext('email continuity fixture reset');
+        await clearStudentAuth('email_continuity_fixture_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: currentAuth,
+        });
+
+        // If a backend rollback ignores ClassPilot-Device and reports the old
+        // random-device session as active, email/ID retries exactly once with
+        // the exact recovery capability. The legacy success keeps the random
+        // binding because that backend does not yet return effectiveDeviceId.
+        Object.assign(CONFIG, {
+          deviceId: 'email-random-pre-continuity',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        await clearManagedDeviceContinuityState();
+        await installOldRecovery();
+        loginMode = 'legacy_conflict';
+        const legacyFallbackStart = loginAuthorizations.length;
+        const legacyFallbackLogin = await manualStudentLogin({
+          mode: 'email_id',
+          studentEmail: 'student@example.edu',
+          studentIdNumber: 'S-2001',
+        });
+        const legacyFallbackAuthorizations = loginAuthorizations.slice(legacyFallbackStart);
+        const legacyFallbackDeviceId = CONFIG.deviceId;
+        const legacyFallbackProofCleared = currentManagedDeviceContinuityProof() === null;
+        const fallbackAuth = captureAuthenticatedContext('email legacy fallback reset');
+        await clearStudentAuth('email_legacy_fallback_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: fallbackAuth,
+        });
+
+        // A proof-aware backend marks a genuine cross-device conflict. That
+        // response must not fall back to raw recovery or issue a second login.
+        Object.assign(CONFIG, {
+          deviceId: 'email-random-pre-continuity',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        await clearManagedDeviceContinuityState();
+        await installOldRecovery();
+        loginMode = 'recognized_conflict';
+        const recognizedConflictStart = loginAuthorizations.length;
+        let recognizedConflictError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'email_id',
+            studentEmail: 'student@example.edu',
+            studentIdNumber: 'S-2001',
+          });
+        } catch (error) {
+          recognizedConflictError = error?.code || error?.message || null;
+        }
+        const recognizedConflictAuthorizations = loginAuthorizations.slice(
+          recognizedConflictStart,
+        );
+
+        // Credential failures are never replayed, even when no continuity
+        // marker is present.
+        await clearManagedDeviceContinuityState();
+        loginMode = 'invalid_credentials';
+        const invalidCredentialsStart = loginAuthorizations.length;
+        let invalidCredentialsError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'email_id',
+            studentEmail: 'student@example.edu',
+            studentIdNumber: 'wrong-id',
+          });
+        } catch (error) {
+          invalidCredentialsError = error?.code || error?.message || null;
+        }
+        const invalidCredentialAuthorizations = loginAuthorizations.slice(
+          invalidCredentialsStart,
+        );
+
+        // A proof-path 2xx must explicitly acknowledge continuity even if it
+        // happens to contain a UUID-shaped effectiveDeviceId. Reject and clean
+        // the committed response session when the additive marker is absent.
+        loginMode = 'missing_marker';
+        const missingMarkerStart = loginAuthorizations.length;
+        let missingMarkerError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'email_id',
+            studentEmail: 'student@example.edu',
+            studentIdNumber: 'S-2001',
+          });
+        } catch (error) {
+          missingMarkerError = error?.message || null;
+        }
+        await studentAuthMutationTail;
+        const missingMarkerAuthorizations = loginAuthorizations.slice(missingMarkerStart);
+        const proofClearedAfterMissingMarker = currentManagedDeviceContinuityProof() === null;
+
+        // A mixed-version 2xx without effectiveDeviceId must clear the proof,
+        // release the response-created exact session, and fail closed.
+        Object.assign(CONFIG, {
+          deviceId: 'email-random-pre-continuity',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+        });
+        studentAuthInvalidating = false;
+        await clearManagedDeviceContinuityState();
+        await installOldRecovery();
+        loginMode = 'missing_effective';
+        let mixedVersionError = null;
+        try {
+          await manualStudentLogin({
+            mode: 'email_id',
+            studentEmail: 'student@example.edu',
+            studentIdNumber: 'S-2001',
+          });
+        } catch (error) {
+          mixedVersionError = error?.message || null;
+        }
+        await studentAuthMutationTail;
+        const storedProofAfterRejection = (await durableSessionKv.get([
+          MANAGED_DEVICE_CONTINUITY_SESSION_KEY,
+        ]))[MANAGED_DEVICE_CONTINUITY_SESSION_KEY];
+
+        return {
+          loginSuccess: login.success === true,
+          requestOrder,
+          issuanceRecoveryToken: issuanceBody?.recoveryToken || null,
+          firstAuthorization,
+          adoptedDeviceId,
+          proofClearedAfterSuccess,
+          legacyFallbackLoginSuccess: legacyFallbackLogin.success === true,
+          legacyFallbackAuthorizations,
+          legacyFallbackDeviceId,
+          legacyFallbackProofCleared,
+          recognizedConflictError,
+          recognizedConflictAuthorizations,
+          invalidCredentialsError,
+          invalidCredentialAuthorizations,
+          missingMarkerError,
+          missingMarkerAuthorizations,
+          proofClearedAfterMissingMarker,
+          mixedVersionError,
+          proofClearedAfterRejection: !storedProofAfterRejection
+            && currentManagedDeviceContinuityProof() === null,
+          cleanupReleases,
+          hasAuthAfterRejection: hasStudentAuth(),
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('email continuity final cleanup');
+          await clearStudentAuth('email_continuity_final_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        CONFIG = originalConfig;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        fetchAuthGateRequest = originalFetchAuthGateRequest;
+        fetchWithBackoff = originalFetchWithBackoff;
+        globalThis.fetch = originalFetch;
+        readManagedDirectoryDeviceIdWithRetry = originalReadDirectoryDeviceId;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+      }
+    });
+    assert.equal(emailManagedContinuity.loginSuccess, true);
+    assert.deepEqual(emailManagedContinuity.requestOrder.slice(0, 4), [
+      'preflight',
+      'directory',
+      'issuance',
+      'login',
+    ]);
+    assert.equal(emailManagedContinuity.issuanceRecoveryToken, 'E'.repeat(43));
+    assert.match(emailManagedContinuity.firstAuthorization || '', /^ClassPilot-Device cpmd1\./);
+    assert.equal(
+      emailManagedContinuity.adoptedDeviceId,
+      'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    );
+    assert.equal(emailManagedContinuity.proofClearedAfterSuccess, true);
+    assert.equal(emailManagedContinuity.legacyFallbackLoginSuccess, true);
+    assert.match(emailManagedContinuity.legacyFallbackAuthorizations[0] || '', /^ClassPilot-Device cpmd1\./);
+    assert.equal(
+      emailManagedContinuity.legacyFallbackAuthorizations[1],
+      `ClassPilot-Recovery ${'E'.repeat(43)}`,
+    );
+    assert.equal(emailManagedContinuity.legacyFallbackAuthorizations.length, 2);
+    assert.equal(
+      emailManagedContinuity.legacyFallbackDeviceId,
+      'email-random-pre-continuity',
+    );
+    assert.equal(emailManagedContinuity.legacyFallbackProofCleared, true);
+    assert.equal(emailManagedContinuity.recognizedConflictError, 'STUDENT_SESSION_ACTIVE');
+    assert.equal(emailManagedContinuity.recognizedConflictAuthorizations.length, 1);
+    assert.match(
+      emailManagedContinuity.recognizedConflictAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+    assert.equal(emailManagedContinuity.invalidCredentialsError, 'STUDENT_CREDENTIALS_INVALID');
+    assert.equal(emailManagedContinuity.invalidCredentialAuthorizations.length, 1);
+    assert.match(
+      emailManagedContinuity.invalidCredentialAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+    assert.match(
+      emailManagedContinuity.missingMarkerError || '',
+      /did not acknowledge managed device continuity/i,
+    );
+    assert.equal(emailManagedContinuity.missingMarkerAuthorizations.length, 1);
+    assert.match(
+      emailManagedContinuity.missingMarkerAuthorizations[0] || '',
+      /^ClassPilot-Device cpmd1\./,
+    );
+    assert.equal(emailManagedContinuity.proofClearedAfterMissingMarker, true);
+    assert.match(emailManagedContinuity.mixedVersionError || '', /omitted the managed device binding/i);
+    assert.equal(emailManagedContinuity.proofClearedAfterRejection, true);
+    assert.equal(emailManagedContinuity.cleanupReleases, 2);
+    assert.equal(emailManagedContinuity.hasAuthAfterRejection, false);
 
     const delayedRegistrationAfterClear = await worker.evaluate(async () => {
       if (chromeProfileRegistrationInFlight) {
