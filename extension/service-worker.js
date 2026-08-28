@@ -12871,13 +12871,15 @@ async function sendHeartbeat(reason = 'manual') {
         return;
       }
       if (isManualIdentitySource()) {
-        // 2.6.8: a server-invalidated manual session (teacher signed the
-        // student out server-side, session replaced) must not leave
-        // auto-registration enabled — that re-signed the student in on the
-        // next worker wake.
+        // A bare HTTP authorization denial proves that this bearer can no
+        // longer be used, but it does not prove that the exact manual session
+        // row has ended. Preserve/promote its recovery capability so the gate
+        // can release or reclaim that same-Chromebook session. Exact
+        // replacement/sign-out messages use their correlated tombstone paths
+        // and are the only paths that discard recovery as already ended.
         await clearStudentAuth('manual-token-invalid', {
           notifyBackend: false,
-          serverSessionEnded: true,
+          serverSessionEnded: false,
           pauseAutoRegistration: true,
           expectedAuthContext: heartbeatAuthContext,
         });
@@ -13485,9 +13487,12 @@ async function captureAndSendScreenshot(options = {}) {
     }
     if (response.status === 401 || response.status === 403) {
       if (isManualIdentitySource()) {
+        // Screenshot authorization is not an exact session tombstone. Keep
+        // recovery durable while retiring the unusable bearer so the same
+        // Chromebook can immediately offer resume/switch at the login gate.
         await clearStudentAuth('manual-token-invalid', {
           notifyBackend: false,
-          serverSessionEnded: true,
+          serverSessionEnded: false,
           pauseAutoRegistration: true,
           expectedAuthContext: screenshotAuthContext,
         });
