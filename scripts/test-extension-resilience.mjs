@@ -94,6 +94,35 @@ async function main() {
     resolve(extensionPath, 'service-worker.js'),
     'utf8',
   );
+  const authGateFrameSource = readFileSync(
+    resolve(extensionPath, 'auth-gate-frame.js'),
+    'utf8',
+  );
+  const legacyAuthGateSource = readFileSync(
+    resolve(extensionPath, 'content.js'),
+    'utf8',
+  );
+  const neutralActiveSessionCopy =
+    'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.';
+  for (const [label, authGateSource] of [
+    ['secure auth frame', authGateFrameSource],
+    ['legacy auth fallback', legacyAuthGateSource],
+  ]) {
+    assert.match(
+      authGateSource,
+      /recoveryGrantId:\s*(?:rosterSnapshot|authGateRosterSnapshot)\.recoveryGrantId/,
+      `${label} does not bind login to its successful roster snapshot`,
+    );
+    assert.ok(
+      authGateSource.includes(neutralActiveSessionCopy),
+      `${label} does not use neutral active-session conflict copy`,
+    );
+    assert.match(
+      authGateSource,
+      /forceRefresh:\s*true,\s*forceRecovery:\s*true,\s*background:\s*true/,
+      `${label} does not request one bounded recovery/roster refresh after a 409`,
+    );
+  }
   const trustedAccessDispatchIndex = serviceWorkerSource.indexOf(
     'const trustedLocalStorageAccessPromise = restrictLocalStorageToTrustedContexts(',
   );
@@ -3915,21 +3944,108 @@ async function main() {
       resetLoginRosterRuntimeCache();
       const gradeAKey = loginRosterRequestCacheKey('Grade A', pendingRecord);
       const gradeBKey = loginRosterRequestCacheKey('Grade B', pendingRecord);
-      bindLoginRosterRecoveryGrant(pendingRecord, [{
-        id: 'grade-a-student',
+      const gradeAGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
         reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }, {
+        id: 'grade-a-no-pin',
+        hasPin: false,
+        reclaimable: false,
       }], gradeAKey);
       bindLoginRosterRecoveryGrant(pendingRecord, [{
         id: 'grade-b-student',
+        hasPin: true,
         reclaimable: false,
       }], gradeBKey);
-      const afterNonReclaimable = recoveryGrantForStudentLogin('grade-a-student');
-      bindLoginRosterRecoveryGrant(pendingRecord, [{
+      const afterNonReclaimable = recoveryGrantForStudentLogin(
+        'grade-a-alex',
+        gradeAGrantId,
+      );
+      const crossStudentGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      const arbitraryStudentGrant = recoveryGrantForStudentLogin(
+        'not-in-the-roster',
+        gradeAGrantId,
+      );
+      const disabledStudentGrant = recoveryGrantForStudentLogin(
+        'grade-a-no-pin',
+        gradeAGrantId,
+      );
+      const missingSnapshotGrant = recoveryGrantForStudentLogin('grade-a-bob');
+      const gradeBGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
         id: 'grade-b-student',
+        hasPin: true,
         reclaimable: true,
       }], gradeBKey);
       clearLoginRosterRecoveryGrant(gradeBKey);
-      const afterGradeBFailure = recoveryGrantForStudentLogin('grade-a-student');
+      const afterGradeBFailure = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }], gradeAKey);
+      const staleRosterSnapshotGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      const schoolBoundGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
+      CONFIG.schoolId = 'different-school';
+      const wrongSchoolGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        schoolBoundGrantId,
+      );
+      CONFIG.schoolId = 'manual-school';
+      const generationBoundGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
+      await armStudentSessionRecovery({
+        serverOrigin: CONFIG.serverUrl,
+        schoolId: CONFIG.schoolId,
+        token: 'J'.repeat(43),
+        authContextId: generateAuthContextId(),
+      });
+      const staleRecoveryGenerationGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        generationBoundGrantId,
+      );
+      await persistStudentSessionRecoveryState({
+        schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+        armed: null,
+        pending: [pendingRecord],
+      });
+      const refreshedGradeAGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
       let sentExactRecovery = false;
       fetchWithBackoff = async (url, requestOptions = {}) => {
         if (String(url).endsWith('/api/extension/student-login')) {
@@ -3949,8 +4065,9 @@ async function main() {
       try {
         await manualStudentLogin({
           mode: 'pin',
-          studentId: 'grade-a-student',
+          studentId: 'grade-a-bob',
           pin: '1234',
+          recoveryGrantId: refreshedGradeAGrantId,
         });
       } catch {
         loginRejected = true;
@@ -3961,15 +4078,252 @@ async function main() {
       }
       return {
         afterNonReclaimable: afterNonReclaimable?.token === recoveryToken,
+        crossStudentGrant: crossStudentGrant?.token === recoveryToken,
+        arbitraryStudentGrant: Boolean(arbitraryStudentGrant),
+        disabledStudentGrant: Boolean(disabledStudentGrant),
+        missingSnapshotGrant: Boolean(missingSnapshotGrant),
+        opaqueGrantId: /^roster_[A-Za-z0-9_-]+$/.test(gradeAGrantId || ''),
+        separateGradeGrant: /^roster_[A-Za-z0-9_-]+$/.test(gradeBGrantId || ''),
         afterGradeBFailure: afterGradeBFailure?.token === recoveryToken,
+        staleRosterSnapshotGrant: Boolean(staleRosterSnapshotGrant),
+        wrongSchoolGrant: Boolean(wrongSchoolGrant),
+        staleRecoveryGenerationGrant: Boolean(staleRecoveryGenerationGrant),
         sentExactRecovery,
         loginRejected,
       };
     });
     assert.equal(interleavedRosterRecoveryGrants.afterNonReclaimable, true);
+    assert.equal(interleavedRosterRecoveryGrants.crossStudentGrant, true);
+    assert.equal(interleavedRosterRecoveryGrants.arbitraryStudentGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.disabledStudentGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.missingSnapshotGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.opaqueGrantId, true);
+    assert.equal(interleavedRosterRecoveryGrants.separateGradeGrant, true);
     assert.equal(interleavedRosterRecoveryGrants.afterGradeBFailure, true);
+    assert.equal(interleavedRosterRecoveryGrants.staleRosterSnapshotGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.wrongSchoolGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.staleRecoveryGenerationGrant, false);
     assert.equal(interleavedRosterRecoveryGrants.sentExactRecovery, true);
     assert.equal(interleavedRosterRecoveryGrants.loginRejected, true);
+
+    const crossStudentHandoffAfterReleaseFailure = await worker.evaluate(async () => {
+      if (hasStudentAuth()) {
+        const current = captureAuthenticatedContext('cross-student handoff fixture reset');
+        await clearStudentAuth('cross_student_handoff_fixture_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: current,
+        });
+      }
+      const originalFetch = globalThis.fetch;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = { ...sharedSignInLoginConfig };
+      const now = Date.now();
+      const oldRecoveryToken = 'K'.repeat(43);
+      const newRecoveryToken = 'L'.repeat(43);
+      const oldRecovery = normalizeStudentSessionRecoveryRecord({
+        state: 'pending',
+        generation: generateStudentSessionRecoveryGeneration(),
+        serverOrigin: 'https://school-pilot.net',
+        schoolId: 'handoff-school',
+        token: oldRecoveryToken,
+        authContextId: generateAuthContextId(),
+        createdAt: now,
+        pendingSinceAt: now,
+        attemptCount: 0,
+        nextAttemptAt: now - 1,
+        discardAt: now + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+      }, 'pending', now - 1);
+      let releaseRequests = 0;
+      let loginRecoveryHeader = null;
+      let loginBody = null;
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'handoff-school',
+          schoolSlug: 'handoff-school',
+          enrollmentKey: 'handoff-enrollment-key',
+          deviceId: 'handoff-device',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        fastAuthGateEnabled = false;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: 'handoff-school',
+        };
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+        resetLoginRosterRuntimeCache();
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [oldRecovery],
+        });
+        globalThis.fetch = async (url) => {
+          if (String(url).endsWith('/api/extension/session-release')) {
+            releaseRequests += 1;
+            return new Response(null, { status: 503 });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        fetchWithBackoff = async (url, requestOptions = {}) => {
+          if (String(url).includes('/api/extension/login-roster?')) {
+            return new Response(JSON.stringify({
+              loginMethod: 'name_pin',
+              students: [{
+                id: 'student-alex',
+                name: 'Alex Student',
+                hasPin: true,
+                reclaimable: true,
+              }, {
+                id: 'student-bob',
+                name: 'Bob Student',
+                hasPin: true,
+                reclaimable: false,
+              }],
+              grades: [{ value: '5', label: 'Grade 5' }],
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          if (String(url).endsWith('/api/extension/student-login')) {
+            loginRecoveryHeader = requestOptions.headers?.Authorization || null;
+            loginBody = JSON.parse(requestOptions.body || '{}');
+            return new Response(JSON.stringify({
+              schoolId: 'handoff-school',
+              studentToken: 'bob-student-bearer',
+              studentSessionId: 'bob-student-session',
+              sessionRecovery: { token: newRecoveryToken },
+              student: {
+                id: 'student-bob',
+                email: 'bob@example.edu',
+                firstName: 'Bob',
+                lastName: 'Student',
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+
+        const roster = await fetchLoginRosterForGate({
+          gradeLevel: '5',
+          forceRefresh: true,
+        });
+        const login = await manualStudentLogin({
+          mode: 'pin',
+          studentId: 'student-bob',
+          pin: '2468',
+          recoveryGrantId: roster.recoveryGrantId,
+        });
+        await studentAuthMutationTail;
+        await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+        const recoveryBeforeDelayedCleanup = studentSessionRecoveryState;
+        const delayedOldCleanupApplied = await applyStudentSessionRecoveryReleaseOutcome(
+          oldRecovery,
+          { outcome: 'released', retryAfterMs: 0 },
+        );
+        const recoveryAfterDelayedCleanup = studentSessionRecoveryState;
+        const [local, session] = await Promise.all([
+          chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY),
+          chrome.storage.session.get([
+            'studentToken',
+            'activeStudentId',
+            'activeStudentSessionId',
+          ]),
+        ]);
+        return {
+          releaseRequests,
+          rosterGrantIdIsOpaque: /^roster_[A-Za-z0-9_-]+$/.test(roster.recoveryGrantId || ''),
+          rosterStudents: roster.students.map((student) => ({
+            id: student.id,
+            reclaimable: student.reclaimable,
+          })),
+          loginSuccess: login.success === true,
+          loginRecoveryHeader,
+          loginBodyStudentId: loginBody?.studentId || null,
+          priorPendingRemoved: !recoveryBeforeDelayedCleanup.pending.some(
+            (record) => record.generation === oldRecovery.generation,
+          ),
+          onlyNewRecoveryArmed: recoveryBeforeDelayedCleanup.pending.length === 0
+            && recoveryBeforeDelayedCleanup.armed?.token === newRecoveryToken,
+          delayedOldCleanupApplied,
+          newRecoverySurvivedDelayedCleanup: recoveryAfterDelayedCleanup.armed?.token
+            === newRecoveryToken,
+          persistedRecoveryToken:
+            local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.armed?.token || null,
+          session,
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('cross-student handoff fixture cleanup');
+          await clearStudentAuth('cross_student_handoff_fixture_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        globalThis.fetch = originalFetch;
+        fetchWithBackoff = originalFetchWithBackoff;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        CONFIG = originalConfig;
+      }
+    });
+    assert.equal(crossStudentHandoffAfterReleaseFailure.releaseRequests, 1);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.rosterGrantIdIsOpaque, true);
+    assert.deepEqual(crossStudentHandoffAfterReleaseFailure.rosterStudents, [{
+      id: 'student-alex',
+      reclaimable: true,
+    }, {
+      id: 'student-bob',
+      reclaimable: false,
+    }]);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.loginSuccess, true);
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.loginRecoveryHeader,
+      `ClassPilot-Recovery ${'K'.repeat(43)}`,
+    );
+    assert.equal(crossStudentHandoffAfterReleaseFailure.loginBodyStudentId, 'student-bob');
+    assert.equal(crossStudentHandoffAfterReleaseFailure.priorPendingRemoved, true);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.onlyNewRecoveryArmed, true);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.delayedOldCleanupApplied, false);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.newRecoverySurvivedDelayedCleanup, true);
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.persistedRecoveryToken,
+      'L'.repeat(43),
+    );
+    assert.equal(crossStudentHandoffAfterReleaseFailure.session.studentToken, 'bob-student-bearer');
+    assert.equal(crossStudentHandoffAfterReleaseFailure.session.activeStudentId, 'student-bob');
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.session.activeStudentSessionId,
+      'bob-student-session',
+    );
 
     const malformedRosterValidationModes = await worker.evaluate(async () => {
       const originalFastAuthGateEnabled = fastAuthGateEnabled;

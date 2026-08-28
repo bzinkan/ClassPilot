@@ -208,12 +208,13 @@ async function main() {
       const pendingBeforeMetadataRetry = studentSessionRecoveryState.pending.find(
         (record) => record.generation === oldRecovery.generation,
       );
-      bindLoginRosterRecoveryGrant(pendingBeforeMetadataRetry, [{
+      const oldRosterGrantId = bindLoginRosterRecoveryGrant(pendingBeforeMetadataRetry, [{
         id: 'student-recovery-old',
+        hasPin: true,
         reclaimable: true,
       }], 'recovery-cache-key');
       const grantBeforeMetadataRetry = Boolean(
-        recoveryGrantForStudentLogin('student-recovery-old'),
+        recoveryGrantForStudentLogin('student-recovery-old', oldRosterGrantId),
       );
       const materialRevisionBeforeRetry = studentSessionRecoveryRevision;
       await applyStudentSessionRecoveryReleaseOutcome(pendingBeforeMetadataRetry, {
@@ -221,7 +222,7 @@ async function main() {
         retryAfterMs: 30_000,
       });
       const grantAfterMetadataRetry = Boolean(
-        recoveryGrantForStudentLogin('student-recovery-old'),
+        recoveryGrantForStudentLogin('student-recovery-old', oldRosterGrantId),
       );
       const materialRevisionAfterRetry = studentSessionRecoveryRevision;
       const newRecovery = await armStudentSessionRecovery({
