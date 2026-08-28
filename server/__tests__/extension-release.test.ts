@@ -593,6 +593,7 @@ describe("ClassPilot extension release package guards", () => {
       "exactBindingAckV2",
       "exactTabCloseV2",
       "studentChatIdempotencyV1",
+      "screenshotTrackingWindowLeaseV1",
       "screenshotObservationLeaseV1",
       "safetyEvidenceCaptureV1",
       "liveViewIceServersV1",
@@ -624,7 +625,8 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("signal: heartbeatRequestController.signal");
     expect(serviceWorker).toContain("const HEARTBEAT_REQUEST_TIMEOUT_MS = 15 * 1000");
     expect(serviceWorker).toContain("heartbeatAuthContext.signal.addEventListener('abort', abortHeartbeatForAuth");
-    expect(serviceWorker).toContain("signal: screenshotAuthContext.signal");
+    expect(serviceWorker).toContain("signal: captureRequestAbortController.signal");
+    expect(serviceWorker).toContain("capturePolicySignal.addEventListener('abort', abortCaptureRequest");
     expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`)");
     expect(serviceWorker).toContain("assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:response-body`)");
   });
@@ -653,11 +655,15 @@ describe("ClassPilot extension release package guards", () => {
   it("fails ambient screenshots private and captures exact safety evidence before close", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(serviceWorker).toContain("function adoptScreenshotPolicy(rawPolicy, context, options = {})");
+    expect(serviceWorker).toContain("hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', context)");
     expect(serviceWorker).toContain("hasNegotiatedCapability('screenshotObservationLeaseV1', context)");
     expect(serviceWorker).toContain("status: 'paused_unobserved'");
-    expect(serviceWorker).toContain("Math.min(120, Math.max(0, expiresInSeconds))");
-    expect(serviceWorker).toContain("function requestImmediateObservedScreenshotCapture()");
+    expect(serviceWorker).toContain("const maximumLeaseSeconds = leaseKind === 'tracking_window' ? 90 : 120");
+    expect(serviceWorker).toContain("function requestImmediateScreenshotCapture()");
     expect(serviceWorker).toContain("screenshotPolicyGeneration !== expectedGeneration");
+    expect(serviceWorker).toContain("screenshotPolicyState.authorityScope || null");
+    expect(serviceWorker).toContain("screenshotAuthority: captureScreenshotAuthority");
+    expect(serviceWorker).toContain("capturedAt,");
     expect(serviceWorker).toContain("serverTime + boundedLeaseMs - responseReceivedAt");
     expect(serviceWorker).toMatch(
       /wsAuthenticatedResponseGuard = \{[\s\S]*protocolPolicyGeneration:[\s\S]*screenshotPolicyGeneration:[\s\S]*requestStartedAt:/,
@@ -667,7 +673,10 @@ describe("ClassPilot extension release package guards", () => {
     );
     expect(serviceWorker).toContain("responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED'");
     expect(serviceWorker).toContain("function applyServerScreenshotPolicyDenial(");
-    expect(serviceWorker).toContain("[401, 403, 404].includes(response.status)");
+    expect(serviceWorker).toContain("response.status === 402");
+    expect(serviceWorker).toContain("isClassPilotNotEntitledResponse(responseBody)");
+    expect(serviceWorker).toContain("await invalidateStudentTokenFromHeartbeat(");
+    expect(serviceWorker).toContain("response.status === 404");
     expect(serviceWorker).toContain("screenshotPolicyAppliedGeneration = denialGeneration");
     expect(serviceWorker).toContain("function subscribeTabNavigationFence(");
     expect(serviceWorker).toContain("? '/api/classpilot/device/screenshot'");
@@ -894,7 +903,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(extensionCompliance).toContain("https://school-pilot.net/privacy");
   });
 
-  it("keeps public IT tutorial privacy claims aligned with 2.7.1 behavior", () => {
+  it("keeps public IT tutorial privacy claims aligned with 2.7.3 behavior", () => {
     const tutorialMarkdown = readRepoFile("ClassPilot_IT_Tutorial.md");
     const tutorialHtml = readRepoFile("client/public/ClassPilot_IT_Tutorial.html");
     const alignedPrivacySurfaces = [
@@ -928,7 +937,8 @@ describe("ClassPilot extension release package guards", () => {
       expect(copy).not.toContain("granted the necessary permissions to the extension");
     }
     for (const copy of [tutorialMarkdown, tutorialHtml]) {
-      expect(copy).toContain("observation-bound thumbnail screenshots");
+      expect(copy).toContain("tracking-window thumbnail screenshots");
+      expect(copy).toContain("gap/student-session pixels");
       expect(copy).toContain("school-scoped opaque ID");
       expect(copy).toContain("temporary encrypted stream");
       expect(copy).toContain("classroom communications");

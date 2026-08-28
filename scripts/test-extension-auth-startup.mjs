@@ -49,6 +49,14 @@ async function startFixtureServer() {
     studentLoginAuthorizations: [],
     sessionReleaseRequests: 0,
     sessionReleaseStatus: 204,
+    schoolStatusRequests: 0,
+    schoolStatusStatus: 200,
+    schoolStatusDelayMs: 0,
+    schoolStatusStallBody: false,
+    schoolStatusRawBody: null,
+    schoolStatusBody: { success: true, schoolActive: true, planStatus: 'active' },
+    heartbeatRequests: 0,
+    extensionSettingsRequests: 0,
     configDelayMs: 5_500,
     configStatus: 200,
     configDisconnect: false,
@@ -150,6 +158,65 @@ async function startFixtureServer() {
         'access-control-allow-origin': '*',
       });
       response.end();
+      return;
+    }
+    if (url.pathname === '/api/school/status') {
+      state.schoolStatusRequests += 1;
+      setTimeout(() => {
+        if (state.schoolStatusStallBody) {
+          response.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+          response.flushHeaders();
+          setTimeout(() => response.destroy(), 10_000).unref?.();
+          return;
+        }
+        if (state.schoolStatusRawBody !== null) {
+          response.writeHead(state.schoolStatusStatus, {
+            'access-control-allow-origin': '*',
+            'content-type': 'application/json; charset=utf-8',
+          });
+          response.end(state.schoolStatusRawBody);
+          return;
+        }
+        json(response, state.schoolStatusStatus, state.schoolStatusBody);
+      }, state.schoolStatusDelayMs);
+      return;
+    }
+    if (url.pathname === '/api/device/heartbeat') {
+      state.heartbeatRequests += 1;
+      json(response, 200, {
+        success: true,
+        studentId: 'student-1',
+        studentSessionId: 'fixture-session',
+        schoolId: 'cold-start-school',
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'screenshotTrackingWindowLeaseV1',
+          'screenshotObservationLeaseV1',
+        ],
+        screenshotPolicy: {
+          mode: 'tracking_window_lease',
+          captureAllowed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+          authority: { kind: 'student_session', controlRevision: 0 },
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/api/extension/settings') {
+      state.extensionSettingsRequests += 1;
+      json(response, 200, {
+        studentId: 'student-1',
+        studentSessionId: 'fixture-session',
+        schoolId: 'cold-start-school',
+        enableTrackingHours: false,
+        afterHoursMode: 'full',
+        trackingStartTime: '00:00',
+        trackingEndTime: '23:59',
+        trackingDays: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+        schoolTimezone: 'America/New_York',
+      });
       return;
     }
     if (url.pathname === '/phishing-observed') {
@@ -2829,6 +2896,24 @@ async function main() {
 
     // Stopping only the MV3 worker preserves storage.session and the exact
     // armed recovery context; this must not be mistaken for a browser restart.
+    const oldExactLicenseLkg = await worker.evaluate(async () => {
+      const authContext = captureAuthenticatedContext('old exact license LKG fixture');
+      const scope = licenseScopeForAuthContext(authContext);
+      const verifiedAt = Date.now() - (365 * 24 * 60 * 60 * 1000);
+      await chrome.storage.local.set({
+        licenseActive: true,
+        planStatus: 'old-exact-lkg',
+      });
+      await chrome.storage.session.set({
+        licenseStateScopeV1: scope,
+        licenseLastVerifiedAtV1: verifiedAt,
+      });
+      return { scope, verifiedAt };
+    });
+    assert.ok(oldExactLicenseLkg.scope);
+    fixture.state.schoolStatusStallBody = true;
+    const heartbeatRequestsBeforeLkgWake = fixture.state.heartbeatRequests;
+    const schoolStatusRequestsBeforeLkgWake = fixture.state.schoolStatusRequests;
     const suspensionPage = await context.newPage();
     await suspensionPage.goto('chrome://version');
     const suspensionStop = await stopExtensionWorker(context, suspensionPage, extensionId);
@@ -2849,6 +2934,121 @@ async function main() {
       recoveryState: 'armed',
     });
     assert.equal(await suspensionPage.locator(GATE_SELECTOR).count(), 0);
+    let lkgWakeState = null;
+    const lkgWakeDeadline = Date.now() + 16_000;
+    while (Date.now() < lkgWakeDeadline) {
+      lkgWakeState = await worker.evaluate(async () => {
+        await authStateRestorePromise;
+        const heartbeatAlarm = await chrome.alarms.get('heartbeat');
+        const screenshotAlarm = await chrome.alarms.get('screenshot-capture');
+        return {
+          licenseActive: currentLicenseIsActive(),
+          licenseRefreshState,
+          licensePlanStatus,
+          trackingState,
+          heartbeatAlarm: Boolean(heartbeatAlarm),
+          screenshotAlarm: Boolean(screenshotAlarm),
+          screenshotPolicyMode: screenshotPolicyState.mode,
+          screenshotCaptureAllowed: ambientScreenshotAllowed(
+            captureAuthenticatedContext('old exact license LKG assertion'),
+          ),
+          schoolSettingsScope,
+          expectedSchoolSettingsScope: schoolPolicyScopeForAuthContext(
+            captureAuthenticatedContext('old exact license LKG settings assertion'),
+          ),
+          schoolSettingsValid: validSchoolSettingsPayload(schoolSettings),
+          offHoursNetworkPaused,
+          apiBackoffRemainingMs: Math.max(0, apiBackoffUntilMs - Date.now()),
+        };
+      });
+      lkgWakeState.extensionSettingsRequests = fixture.state.extensionSettingsRequests;
+      lkgWakeState.heartbeatRequests = fixture.state.heartbeatRequests;
+      if (
+        lkgWakeState.licenseActive
+        && lkgWakeState.trackingState !== 'OFF'
+        && lkgWakeState.heartbeatAlarm
+        && lkgWakeState.screenshotAlarm
+        && lkgWakeState.screenshotCaptureAllowed
+      ) break;
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 100));
+    }
+    fixture.state.schoolStatusStallBody = false;
+    assert.equal(lkgWakeState?.licenseActive, true, JSON.stringify(lkgWakeState));
+    assert.equal(lkgWakeState?.licensePlanStatus, 'old-exact-lkg');
+    assert.notEqual(lkgWakeState?.trackingState, 'OFF', JSON.stringify(lkgWakeState));
+    assert.equal(lkgWakeState?.heartbeatAlarm, true, JSON.stringify(lkgWakeState));
+    assert.equal(lkgWakeState?.screenshotAlarm, true, JSON.stringify(lkgWakeState));
+    assert.equal(lkgWakeState?.screenshotPolicyMode, 'tracking_window_lease');
+    assert.equal(lkgWakeState?.screenshotCaptureAllowed, true);
+    assert.ok(fixture.state.heartbeatRequests > heartbeatRequestsBeforeLkgWake);
+    assert.ok(fixture.state.schoolStatusRequests > schoolStatusRequestsBeforeLkgWake);
+
+    // Repeat the real MV3 termination boundary for every non-authoritative
+    // status outcome. None may erase the exact-session active LKG or delay
+    // tracking startup; each worker must recreate its alarms and obtain a
+    // fresh tracking-window authority from heartbeat independently.
+    for (const statusScenario of [
+      { name: 'malformed', status: 200, rawBody: '{not-json' },
+      { name: '429', status: 429, rawBody: JSON.stringify({ error: 'rate_limited' }) },
+      { name: '500', status: 500, rawBody: JSON.stringify({ error: 'server_error' }) },
+    ]) {
+      fixture.state.schoolStatusStatus = statusScenario.status;
+      fixture.state.schoolStatusRawBody = statusScenario.rawBody;
+      const heartbeatRequestsBeforeScenario = fixture.state.heartbeatRequests;
+      const schoolStatusRequestsBeforeScenario = fixture.state.schoolStatusRequests;
+      await suspensionPage.goto('chrome://version');
+      const scenarioStop = await stopExtensionWorker(context, suspensionPage, extensionId);
+      assert.equal(
+        scenarioStop.stopped,
+        true,
+        `could not suspend the MV3 worker for ${statusScenario.name} license status`,
+      );
+      await suspensionPage.goto(`${fixture.origin}/mv3-license-${statusScenario.name}`, {
+        waitUntil: 'domcontentloaded',
+      });
+      worker = await waitForLiveWorker(context);
+      let scenarioWakeState = null;
+      const scenarioDeadline = Date.now() + 12_000;
+      while (Date.now() < scenarioDeadline) {
+        scenarioWakeState = await worker.evaluate(async () => {
+          await authStateRestorePromise;
+          const heartbeatAlarm = await chrome.alarms.get('heartbeat');
+          const screenshotAlarm = await chrome.alarms.get('screenshot-capture');
+          return {
+            licenseActive: currentLicenseIsActive(),
+            licenseRefreshState,
+            licensePlanStatus,
+            trackingState,
+            heartbeatAlarm: Boolean(heartbeatAlarm),
+            screenshotAlarm: Boolean(screenshotAlarm),
+            screenshotPolicyMode: screenshotPolicyState.mode,
+            screenshotCaptureAllowed: ambientScreenshotAllowed(
+              captureAuthenticatedContext('old exact license LKG scenario assertion'),
+            ),
+          };
+        });
+        if (
+          scenarioWakeState.licenseActive
+          && scenarioWakeState.trackingState !== 'OFF'
+          && scenarioWakeState.heartbeatAlarm
+          && scenarioWakeState.screenshotAlarm
+          && scenarioWakeState.screenshotCaptureAllowed
+        ) break;
+        await new Promise((resolvePoll) => setTimeout(resolvePoll, 100));
+      }
+      assert.equal(scenarioWakeState?.licenseActive, true, JSON.stringify(scenarioWakeState));
+      assert.equal(scenarioWakeState?.licensePlanStatus, 'old-exact-lkg');
+      assert.notEqual(scenarioWakeState?.trackingState, 'OFF', JSON.stringify(scenarioWakeState));
+      assert.equal(scenarioWakeState?.heartbeatAlarm, true, JSON.stringify(scenarioWakeState));
+      assert.equal(scenarioWakeState?.screenshotAlarm, true, JSON.stringify(scenarioWakeState));
+      assert.equal(scenarioWakeState?.screenshotPolicyMode, 'tracking_window_lease');
+      assert.equal(scenarioWakeState?.screenshotCaptureAllowed, true);
+      assert.ok(fixture.state.heartbeatRequests > heartbeatRequestsBeforeScenario);
+      assert.ok(fixture.state.schoolStatusRequests > schoolStatusRequestsBeforeScenario);
+    }
+    fixture.state.schoolStatusStatus = 200;
+    fixture.state.schoolStatusRawBody = null;
+    fixture.state.schoolStatusBody = { success: true, schoolActive: true, planStatus: 'active' };
 
     // A full Chrome restart clears storage.session. Keep exact release
     // temporarily unavailable so the PIN roster must offer same-Chromebook

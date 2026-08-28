@@ -3036,6 +3036,7 @@ async function main() {
       const now = Date.now();
       const originalConfig = { ...CONFIG };
       const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFetch = globalThis.fetch;
       const originalDisableForInactiveLicense = disableForInactiveLicense;
       const originalHeartbeatInFlight = heartbeatInFlight;
       // Keep the normal ten-second periodic heartbeat from consuming this fixture's
@@ -3044,9 +3045,9 @@ async function main() {
       heartbeatInFlight = true;
       const statusDisablePlans = [];
       const statusResponses = [
-        { code: 'CLASSPILOT_NOT_ENTITLED', planStatus: 'canonical-status' },
-        { error: 'school_not_entitled', planStatus: 'legacy-status' },
-        { code: 'SOME_OTHER_FORBIDDEN', planStatus: 'unrelated-status' },
+        { status: 402, body: { planStatus: 'payment-required-status' } },
+        { status: 403, body: { code: 'SOME_OTHER_FORBIDDEN', planStatus: 'forbidden-status' } },
+        { status: 200, body: { schoolActive: false, planStatus: 'school-inactive-status' } },
       ];
       let heartbeatRequestCount = 0;
 
@@ -3059,14 +3060,52 @@ async function main() {
       disableForInactiveLicense = async (planStatus) => {
         statusDisablePlans.push(planStatus);
       };
-      fetchWithBackoff = async () => new Response(JSON.stringify(statusResponses.shift()), {
-        status: 403,
-        headers: { 'content-type': 'application/json' },
-      });
-      await checkLicenseStatus('canonical-entitlement-fixture');
-      await checkLicenseStatus('legacy-entitlement-fixture');
-      await checkLicenseStatus('unrelated-forbidden-fixture');
+      globalThis.fetch = async () => {
+        const next = statusResponses.shift();
+        return new Response(JSON.stringify(next.body), {
+          status: next.status,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      await checkLicenseStatus('payment-required-entitlement-fixture');
+      await checkLicenseStatus('forbidden-entitlement-fixture');
+      await checkLicenseStatus('school-inactive-entitlement-fixture');
       disableForInactiveLicense = originalDisableForInactiveLicense;
+      globalThis.fetch = originalFetch;
+
+      const unknownStatusAuth = captureAuthenticatedContext('unknown license status fixture');
+      adoptLicenseState(true, 'unknown-status-lkg', unknownStatusAuth, {
+        verifiedAt: Date.now() - (365 * 24 * 60 * 60 * 1000),
+      });
+      const apiBackoffBeforeUnknownStatuses = apiBackoffUntilMs;
+      const unknownStatusResponses = [
+        new Response(JSON.stringify({ error: 'rate_limited' }), {
+          status: 429,
+          headers: { 'content-type': 'application/json' },
+        }),
+        new Response(JSON.stringify({ error: 'unavailable' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        }),
+        new Response('{', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ];
+      const unknownStatusStates = [];
+      globalThis.fetch = async () => unknownStatusResponses.shift();
+      for (const statusReason of ['429', '500', 'malformed']) {
+        const outcome = await checkLicenseStatus(`unknown-${statusReason}-fixture`);
+        unknownStatusStates.push({
+          outcome,
+          active: currentLicenseIsActive(),
+          refreshState: licenseRefreshState,
+          planStatus: licensePlanStatus,
+          apiBackoffUntilMs,
+        });
+      }
+      const dedicatedLicenseRetryAlarm = await chrome.alarms.get(LICENSE_STATUS_RETRY_ALARM);
+      globalThis.fetch = originalFetch;
 
       await applyClassroomState({
         schemaVersion: 1,
@@ -3130,6 +3169,7 @@ async function main() {
         await sendHeartbeat('canonical-entitlement-fixture');
       } finally {
         fetchWithBackoff = originalFetchWithBackoff;
+        globalThis.fetch = originalFetch;
         disableForInactiveLicense = originalDisableForInactiveLicense;
         heartbeatInFlight = originalHeartbeatInFlight;
         CONFIG = originalConfig;
@@ -3157,14 +3197,35 @@ async function main() {
         retainedTeacherRuleIds,
         stored,
         statusDisablePlans,
+        unknownStatusStates,
+        apiBackoffBeforeUnknownStatuses,
+        dedicatedLicenseRetryAlarm: Boolean(dedicatedLicenseRetryAlarm),
         heartbeatRequestCount,
         heartbeatPreconditions,
       };
     });
     assert.deepEqual(entitlementCleanup.statusDisablePlans, [
-      'canonical-status',
-      'legacy-status',
+      'payment-required-status',
+      'forbidden-status',
+      'school-inactive-status',
     ]);
+    assert.deepEqual(
+      entitlementCleanup.unknownStatusStates.map(({ outcome, active, refreshState, planStatus }) => ({
+        outcome,
+        active,
+        refreshState,
+        planStatus,
+      })),
+      [
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+      ],
+    );
+    assert.equal(entitlementCleanup.dedicatedLicenseRetryAlarm, true);
+    assert.ok(entitlementCleanup.unknownStatusStates.every((state) => (
+      state.apiBackoffUntilMs === entitlementCleanup.apiBackoffBeforeUnknownStatuses
+    )));
     assert.equal(
       entitlementCleanup.heartbeatRequestCount,
       1,

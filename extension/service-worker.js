@@ -312,6 +312,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'exactBindingAckV2',
   'exactTabCloseV2',
   'studentChatIdempotencyV1',
+  'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
   'safetyEvidenceCaptureV1',
   'liveViewIceServersV1',
@@ -327,6 +328,8 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
+  'screenshotTrackingWindowLeaseV1',
+  'screenshotObservationLeaseV1',
 ]);
 
 function extensionProtocolDescriptor() {
@@ -565,9 +568,14 @@ const HEARTBEAT_IDLE_MINUTES = 0.5;
 const NAVIGATION_DEBOUNCE_MS = 50;      // Reduced from 350ms for near-instant tracking
 const EVENT_HEARTBEAT_COALESCE_MS = 2000;
 const LICENSE_CHECK_INTERVAL_MS = 10 * 60 * 1000;
+const LICENSE_CHECK_ALARM = 'license-check';
+const LICENSE_STATUS_RETRY_ALARM = 'license-status-retry';
+const LICENSE_STATUS_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000, 60000]);
+const LICENSE_STATUS_REQUEST_TIMEOUT_MS = 5000;
 const LICENSE_CONTROL_CLEANUP_ALARM = 'license-control-cleanup';
 const LICENSE_CONTROL_CLEANUP_RETRY_MS = 15 * 1000;
 const LICENSE_STATE_SCOPE_KEY = 'licenseStateScopeV1';
+const LICENSE_LAST_VERIFIED_AT_KEY = 'licenseLastVerifiedAtV1';
 const MANUAL_LOGIN_STALE_MS = 5 * 60 * 1000;
 // Permit only sub-second scheduling/serialization skew. A larger future value
 // usually means the Chromebook clock moved backwards and must not extend a
@@ -666,11 +674,15 @@ let lastConnectivityPersistedState = 'checking';
 let screenshotPolicyState = Object.freeze({
   mode: 'pending',
   observed: false,
+  captureAllowed: false,
   expiresAt: 0,
   scope: null,
+  authority: null,
+  authorityScope: null,
   valid: false,
 });
 let screenshotPolicyGeneration = 0;
+let screenshotPolicyAbortController = new AbortController();
 let screenshotImmediateCapturePending = false;
 let protocolPolicyRequestGeneration = 0;
 let protocolPolicyAppliedGeneration = 0;
@@ -706,6 +718,11 @@ let eventHeartbeatReason = null;
 let licenseActive = false;
 let licenseStateScope = null;
 let licensePlanStatus = null;
+let licenseLastVerifiedAt = 0;
+let licenseRefreshState = 'unknown';
+let licenseStatusRetryAttempt = 0;
+let licenseStatusRequestInFlight = null;
+let licenseStatusRequestScope = null;
 let offHoursNetworkPaused = false;
 let registrationRetryCount = 0;
 const MAX_REGISTRATION_RETRIES = 5;
@@ -1058,6 +1075,9 @@ async function fetchWithBackoff(url, init = {}, options = {}) {
     if (respectGlobalBackoff) {
       await waitForApiBackoff(context);
     }
+    if (typeof options.beforeAttempt === 'function') {
+      await options.beforeAttempt(attempt);
+    }
     if (init.signal?.aborted) {
       throw authContextSuperseded(context);
     }
@@ -1135,6 +1155,7 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'sharedAuthLockOwnerV1',
   'classroomStateStudentBindingV1',
   'licenseStateScopeV1',
+  'licenseLastVerifiedAtV1',
   'monitoringStateScopeV1',
   'messages',
   'messageInboxAuthBindingV1',
@@ -2871,7 +2892,36 @@ function managedPolicyConflictsWithStoredAuth(
 
 function scheduleLicenseCheck() {
   const periodInMinutes = LICENSE_CHECK_INTERVAL_MS / 60000;
-  chrome.alarms.create('license-check', { periodInMinutes });
+  chrome.alarms.get(LICENSE_CHECK_ALARM, (existing) => {
+    if (!existing || Number(existing.periodInMinutes) !== periodInMinutes) {
+      chrome.alarms.create(LICENSE_CHECK_ALARM, { periodInMinutes });
+    }
+  });
+}
+
+function clearLicenseStatusRetry() {
+  licenseStatusRetryAttempt = 0;
+  chrome.alarms.clear(LICENSE_STATUS_RETRY_ALARM);
+}
+
+function scheduleLicenseStatusRetry(authContext) {
+  try {
+    assertAuthenticatedContextCurrent(authContext, 'license retry scheduling');
+  } catch {
+    return;
+  }
+  const retryIndex = Math.min(
+    licenseStatusRetryAttempt,
+    LICENSE_STATUS_RETRY_DELAYS_MS.length - 1,
+  );
+  const delayMs = LICENSE_STATUS_RETRY_DELAYS_MS[retryIndex];
+  licenseStatusRetryAttempt = Math.min(
+    licenseStatusRetryAttempt + 1,
+    LICENSE_STATUS_RETRY_DELAYS_MS.length,
+  );
+  chrome.alarms.create(LICENSE_STATUS_RETRY_ALARM, {
+    when: Date.now() + delayMs,
+  });
 }
 
 async function notifyLicenseState(message, authContext) {
@@ -2923,13 +2973,27 @@ async function disableForInactiveLicense(planStatus, expectedAuthContext = null,
     assertAuthenticatedContextCurrent(authContext, reason);
   };
   assertCurrent('license revocation');
-  const licenseScope = adoptLicenseState(false, planStatus, authContext);
-  await kv.set({
-    licenseActive: false,
-    planStatus: licensePlanStatus,
-    licenseDisabledAt: Date.now(),
-    [LICENSE_STATE_SCOPE_KEY]: licenseScope,
-  });
+  const verifiedAt = Number.isFinite(Number(options.verifiedAt))
+    ? Number(options.verifiedAt)
+    : Date.now();
+  const licenseScope = adoptLicenseState(false, planStatus, authContext, { verifiedAt });
+  advanceScreenshotPolicyAuthority();
+  screenshotImmediateCapturePending = false;
+  clearLicenseStatusRetry();
+  try {
+    await kv.set({
+      licenseActive: false,
+      planStatus: licensePlanStatus,
+      licenseDisabledAt: verifiedAt,
+      [LICENSE_STATE_SCOPE_KEY]: licenseScope,
+      [LICENSE_LAST_VERIFIED_AT_KEY]: verifiedAt,
+    });
+  } catch (error) {
+    // An authoritative denial takes effect in memory even when Chrome storage
+    // is temporarily unavailable. The recurring status check will repair the
+    // durable record after storage recovers.
+    console.warn('[License] Failed to persist inactive status:', safeDiagnosticError(error));
+  }
   assertCurrent('license revocation persistence');
   // Persist and attempt delivery while the authenticated device context is
   // still available. A retryable failure remains in the bounded outbox and
@@ -3002,25 +3066,122 @@ function resetLicenseStateForAuthorityTransition() {
   licenseActive = false;
   licenseStateScope = null;
   licensePlanStatus = null;
+  licenseLastVerifiedAt = 0;
+  licenseRefreshState = 'unknown';
+  licenseStatusRequestInFlight = null;
+  licenseStatusRequestScope = null;
+  clearLicenseStatusRetry();
 }
 
-function adoptLicenseState(active, planStatus, authContext) {
+function adoptLicenseState(active, planStatus, authContext, options = {}) {
   assertAuthenticatedContextCurrent(authContext, 'license state adoption');
   const scope = licenseScopeForAuthContext(authContext);
   if (!scope) throw authContextSuperseded('license state adoption');
   licenseActive = active === true;
   licenseStateScope = scope;
   licensePlanStatus = typeof planStatus === 'string' ? planStatus.slice(0, 80) : null;
+  licenseLastVerifiedAt = Number.isFinite(Number(options.verifiedAt))
+    ? Number(options.verifiedAt)
+    : Date.now();
+  licenseRefreshState = licenseActive ? 'active' : 'denied';
   return scope;
 }
 
-async function checkLicenseStatus(reason = 'manual', options = {}) {
+async function activateLicenseForAuthenticatedResponse(
+  authContext,
+  planStatus = null,
+  options = {},
+) {
+  assertAuthenticatedContextCurrent(authContext, 'license activation');
+  const wasInactive = !currentLicenseIsActive();
+  const verifiedAt = Number.isFinite(Number(options.verifiedAt))
+    ? Number(options.verifiedAt)
+    : Date.now();
+  const licenseScope = adoptLicenseState(true, planStatus, authContext, { verifiedAt });
+  clearLicenseStatusRetry();
+  await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM).catch(() => false);
+  assertAuthenticatedContextCurrent(authContext, 'license activation');
+  try {
+    await kv.set({
+      licenseActive: true,
+      planStatus: licensePlanStatus,
+      [LICENSE_STATE_SCOPE_KEY]: licenseScope,
+      [LICENSE_LAST_VERIFIED_AT_KEY]: verifiedAt,
+    });
+  } catch (error) {
+    // Registration/login/status success is already authoritative for this
+    // exact auth scope. A local persistence failure must not create a tracking
+    // blackout in the current worker.
+    console.warn('[License] Failed to persist active status:', safeDiagnosticError(error));
+  }
+  assertAuthenticatedContextCurrent(authContext, 'license activation persistence');
+  if (wasInactive && options.notify !== false) {
+    await notifyLicenseState(
+      { type: 'CLASSPILOT_LICENSE_ACTIVE', planStatus: licensePlanStatus },
+      authContext,
+    );
+    assertAuthenticatedContextCurrent(authContext, 'license activation notification');
+  }
+  return wasInactive;
+}
+
+function licenseLkgMatchesExactScope(stored, expectedScope) {
+  return Boolean(
+    stored?.licenseActive === true
+    && expectedScope
+    && stored?.[LICENSE_STATE_SCOPE_KEY] === expectedScope
+  );
+}
+
+async function fetchLicenseStatus(authContext) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const onAuthorityAbort = () => controller.abort();
+  authContext.signal.addEventListener('abort', onAuthorityAbort, { once: true });
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, LICENSE_STATUS_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${authContext.serverOrigin}/api/school/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        studentToken: authContext.studentToken || null,
+        studentEmail: authContext.studentEmail || null,
+      }),
+      signal: controller.signal,
+    });
+    let data = null;
+    try {
+      data = await response.json();
+    } catch (error) {
+      // The HTTP status itself is an explicit denial even if its optional body
+      // is empty, malformed, or stalls. All successful responses must provide
+      // a complete strict boolean payload within the same bounded timeout.
+      if (response.status !== 402 && response.status !== 403) throw error;
+    }
+    return { response, data };
+  } catch (error) {
+    if (timedOut && !authContext.signal.aborted) {
+      const timeoutError = new Error('License status request timed out');
+      timeoutError.code = 'LICENSE_STATUS_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    authContext.signal.removeEventListener('abort', onAuthorityAbort);
+  }
+}
+
+async function checkLicenseStatusNow(reason = 'manual', options = {}) {
   let authContext = options.authContext || null;
   if (!authContext) {
     try {
       authContext = captureAuthenticatedContext(`license check:${reason}`);
     } catch (error) {
-      if (isAuthContextCancellation(error)) return;
+      if (isAuthContextCancellation(error)) return 'unknown';
       throw error;
     }
   }
@@ -3045,69 +3206,55 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
   };
   assertCurrent();
   if (!CONFIG.serverUrl) {
-    return;
+    licenseRefreshState = 'unknown';
+    scheduleLicenseStatusRetry(authContext);
+    return 'unknown';
   }
 
   try {
-    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/school/status`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        studentToken: authContext.studentToken || null,
-        studentEmail: authContext.studentEmail || null,
-      }),
-      signal: authContext.signal,
-    }, {
-      context: 'license status',
-      maxAttempts: 2,
-    });
+    // License refresh owns its timeout/retry lane. It deliberately bypasses
+    // the shared API backoff gate so a telemetry 429 cannot pause entitlement
+    // recovery, and a status 429 cannot suppress heartbeats or screenshots.
+    const { response, data } = await fetchLicenseStatus(authContext);
     assertCurrent();
 
     if (response.status === 402 || response.status === 403) {
-      const data = await response.json().catch(() => ({}));
+      await applyForCurrentAuth(() => disableForInactiveLicense(
+        data?.planStatus,
+        authContext,
+        { authMutationHeld: true, verifiedAt: Date.now() },
+      ));
       assertCurrent();
-      if (response.status === 402 || isClassPilotNotEntitledResponse(data)) {
-        await applyForCurrentAuth(() => disableForInactiveLicense(
-          data.planStatus,
-          authContext,
-          { authMutationHeld: true },
-        ));
-        assertCurrent();
-      }
-      return;
+      return 'denied';
     }
 
     if (!response.ok) {
-      return;
+      licenseRefreshState = 'unknown';
+      scheduleLicenseStatusRetry(authContext);
+      return 'unknown';
     }
 
-    const data = await response.json();
-    assertCurrent();
-    if (!data.schoolActive) {
+    if (!data || typeof data !== 'object' || typeof data.schoolActive !== 'boolean') {
+      licenseRefreshState = 'unknown';
+      scheduleLicenseStatusRetry(authContext);
+      return 'unknown';
+    }
+    if (data.schoolActive === false) {
       await applyForCurrentAuth(() => disableForInactiveLicense(
         data.planStatus,
         authContext,
-        { authMutationHeld: true },
+        { authMutationHeld: true, verifiedAt: Date.now() },
       ));
       assertCurrent();
-      return;
+      return 'denied';
     }
 
     const wasInactive = await applyForCurrentAuth(async () => {
       assertCurrent();
-      const inactiveBeforeUpdate = !currentLicenseIsActive();
-      const licenseScope = licenseScopeForAuthContext(authContext);
-      if (!licenseScope) throw authContextSuperseded(`license check:${reason}`);
-      await chrome.alarms.clear(LICENSE_CONTROL_CLEANUP_ALARM);
-      assertCurrent();
-      await kv.set({
-        licenseActive: true,
-        planStatus: typeof data.planStatus === 'string' ? data.planStatus.slice(0, 80) : null,
-        [LICENSE_STATE_SCOPE_KEY]: licenseScope,
+      return activateLicenseForAuthenticatedResponse(authContext, data.planStatus, {
+        verifiedAt: Date.now(),
+        notify: false,
       });
-      assertCurrent();
-      adoptLicenseState(true, data.planStatus, authContext);
-      return inactiveBeforeUpdate;
     });
     assertCurrent();
     if (wasInactive) {
@@ -3120,10 +3267,42 @@ async function checkLicenseStatus(reason = 'manual', options = {}) {
         initializeAdaptiveTracking(`license-active:${reason}`);
       }
     }
+    return 'active';
   } catch (error) {
     if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     console.warn('[License] Status check failed:', safeDiagnosticError(error));
+    licenseRefreshState = 'unknown';
+    scheduleLicenseStatusRetry(authContext);
+    return 'unknown';
   }
+}
+
+async function checkLicenseStatus(reason = 'manual', options = {}) {
+  let authContext = options.authContext || null;
+  if (!authContext) {
+    try {
+      authContext = captureAuthenticatedContext(`license check:${reason}`);
+    } catch (error) {
+      if (isAuthContextCancellation(error)) return 'unknown';
+      throw error;
+    }
+  }
+  const requestScope = licenseScopeForAuthContext(authContext);
+  if (
+    licenseStatusRequestInFlight
+    && requestScope
+    && licenseStatusRequestScope === requestScope
+  ) return licenseStatusRequestInFlight;
+
+  const request = checkLicenseStatusNow(reason, { ...options, authContext });
+  licenseStatusRequestInFlight = request;
+  licenseStatusRequestScope = requestScope;
+  return request.finally(() => {
+    if (licenseStatusRequestInFlight === request) {
+      licenseStatusRequestInFlight = null;
+      licenseStatusRequestScope = null;
+    }
+  });
 }
 
 async function resolveServerUrl() {
@@ -4998,7 +5177,8 @@ function scheduleHeartbeat(periodInMinutes) {
 
 function clearNetworkAlarms() {
   chrome.alarms.clear('settings-refresh');
-  chrome.alarms.clear('license-check');
+  chrome.alarms.clear(LICENSE_CHECK_ALARM);
+  chrome.alarms.clear(LICENSE_STATUS_RETRY_ALARM);
   chrome.alarms.clear('ws-reconnect');
   chrome.alarms.clear(HEALTH_CHECK_ALARM_NAME);
   chrome.alarms.clear(CONNECTIVITY_HEALTH_ALARM_NAME);
@@ -5040,7 +5220,7 @@ async function resumeNetworkAfterOffHours(reason) {
   scheduleHealthCheckAlarm();
   offHoursNetworkPaused = false;
   await refreshSchoolSettings({ force: true });
-  await checkLicenseStatus('resume');
+  checkLicenseStatus('resume').catch(() => {});
   await updateTrackingState('resume');
 }
 
@@ -5360,6 +5540,10 @@ async function transitionTrackingStateNow(nextState, reason, options = {}) {
   ) return false;
   const changedAt = Date.now();
   trackingState = nextState;
+  if (nextState === TRACKING_STATES.OFF) {
+    advanceScreenshotPolicyAuthority();
+    screenshotImmediateCapturePending = false;
+  }
   persistedMonitoringState = { state: nextState, changedAt, reason };
   persistedMonitoringStateScope = expectedScope;
   await kv.set({
@@ -5545,14 +5729,11 @@ async function initializeAdaptiveTracking(reason, options = {}) {
   scheduleHealthCheckAlarm();
 
   assertCurrent();
-  if (options.authMutationGeneration === undefined) {
-    updateTrackingState(reason).catch((error) => {
-      console.warn('[Tracking] State initialization failed:', safeDiagnosticError(error));
-    });
-  } else {
-    await updateTrackingState(reason);
-    assertCurrent();
-  }
+  // Keep the worker alive through the first state transition. A detached
+  // promise can be suspended before it creates the heartbeat/screenshot
+  // alarms, even when an exact-scope active entitlement was restored.
+  await updateTrackingState(reason);
+  assertCurrent();
 }
 
 const MONITORING_EVENT_OUTBOX_KEY = 'monitoringEventOutboxV1';
@@ -6823,6 +7004,7 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
       'planStatus',
       'licenseDisabledAt',
       LICENSE_STATE_SCOPE_KEY,
+      LICENSE_LAST_VERIFIED_AT_KEY,
     ];
     const stored = await durableLocalKv.get(keys);
     assertAuthenticatedContextCurrent(authContext, reason);
@@ -6853,6 +7035,7 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
         'planStatus',
         'licenseDisabledAt',
         LICENSE_STATE_SCOPE_KEY,
+        LICENSE_LAST_VERIFIED_AT_KEY,
       );
     }
     purgePair(
@@ -7710,13 +7893,16 @@ function abortActiveAuthContext() {
   screenshotPolicyState = Object.freeze({
     mode: 'pending',
     observed: false,
+    captureAllowed: false,
     expiresAt: 0,
     scope: null,
+    authority: null,
+    authorityScope: null,
     valid: false,
   });
   screenshotPolicySource = 'pending';
   screenshotPolicyAdoptedAt = 0;
-  screenshotPolicyGeneration += 1;
+  advanceScreenshotPolicyAuthority();
   screenshotImmediateCapturePending = false;
   protocolPolicyAppliedGeneration = 0;
   screenshotPolicyAppliedGeneration = 0;
@@ -7888,60 +8074,62 @@ function reserveScreenshotPolicyRequestGeneration() {
   return screenshotPolicyRequestGeneration;
 }
 
-function responseAcceptsScreenshotObservationLease(raw = {}) {
+function responseScreenshotLeaseKind(raw = {}) {
   const accepted = new Set(
     Array.isArray(raw?.acceptedCapabilities)
       ? raw.acceptedCapabilities.map((value) => String(value || '').trim()).filter(Boolean)
       : [],
   );
-  return accepted.has('scopedAuthorityChecksV1')
-    && accepted.has('screenshotObservationLeaseV1');
+  if (!accepted.has('scopedAuthorityChecksV1')) return null;
+  if (accepted.has('screenshotTrackingWindowLeaseV1')) return 'tracking_window';
+  if (accepted.has('screenshotObservationLeaseV1')) return 'observation';
+  return null;
+}
+
+function advanceScreenshotPolicyAuthority() {
+  try {
+    screenshotPolicyAbortController.abort();
+  } catch {
+    // The generation fence below remains authoritative if abort delivery fails.
+  }
+  screenshotPolicyAbortController = new AbortController();
+  screenshotPolicyGeneration += 1;
+  return screenshotPolicyGeneration;
 }
 
 function canRetainOmittedScreenshotPolicy(context, nowValue = Date.now()) {
   return screenshotPolicyState.scope === screenshotPolicyScope(context)
-    && screenshotPolicyState.mode === 'lease'
+    && ['lease', 'tracking_window_lease'].includes(screenshotPolicyState.mode)
     && screenshotPolicyState.valid === true
     && Number(screenshotPolicyState.expiresAt || 0) > nowValue;
 }
 
-function screenshotPolicyResponseCanAuthorize(
-  rawPolicy,
-  options,
-  leaseCapabilityAccepted,
-  policyPresent,
-) {
-  if (!leaseCapabilityAccepted && !policyPresent) return true;
-  if (rawPolicy?.mode === 'legacy') return true;
-  const expiresInSeconds = Number(rawPolicy?.expiresInSeconds);
-  const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
-  const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
-    ? Number(options.responseReceivedAt)
-    : Date.now();
-  const requestStartedAt = Number.isFinite(Number(options.requestStartedAt))
-    ? Number(options.requestStartedAt)
-    : responseReceivedAt;
-  const boundedLeaseMs = Number.isFinite(expiresInSeconds)
-    ? Math.min(120, Math.max(0, expiresInSeconds)) * 1000
-    : 0;
-  const roundTripMs = Math.max(0, responseReceivedAt - requestStartedAt);
-  const serverTimeIsCurrent = Number.isFinite(serverTime)
-    && requestStartedAt <= responseReceivedAt
-    && serverTime >= requestStartedAt - 30_000
-    && serverTime <= responseReceivedAt + 30_000;
-  const remainingLeaseMs = serverTimeIsCurrent
-    ? Math.max(0, Math.min(
-      boundedLeaseMs - roundTripMs,
-      serverTime + boundedLeaseMs - responseReceivedAt,
-    ))
-    : 0;
-  return leaseCapabilityAccepted
-    && rawPolicy?.mode === 'lease'
-    && rawPolicy?.observed === true
-    && Number.isFinite(expiresInSeconds)
-    && expiresInSeconds > 0
-    && serverTimeIsCurrent
-    && remainingLeaseMs > 0;
+function normalizeScreenshotAuthority(rawAuthority) {
+  if (!rawAuthority || typeof rawAuthority !== 'object' || Array.isArray(rawAuthority)) {
+    return null;
+  }
+  const kind = String(rawAuthority.kind || '').trim();
+  const controlRevision = Number(rawAuthority.controlRevision);
+  if (!Number.isSafeInteger(controlRevision) || controlRevision < 0) return null;
+  if (kind === 'student_session') {
+    if (String(rawAuthority.teachingSessionId || '').trim()) return null;
+    return Object.freeze({ kind, controlRevision });
+  }
+  if (kind === 'teaching_session') {
+    const teachingSessionId = String(rawAuthority.teachingSessionId || '').trim();
+    if (!teachingSessionId || teachingSessionId.length > 256) return null;
+    return Object.freeze({ kind, teachingSessionId, controlRevision });
+  }
+  return null;
+}
+
+function screenshotAuthorityScope(authority) {
+  if (!authority) return null;
+  return JSON.stringify([
+    authority.kind,
+    authority.teachingSessionId || '',
+    authority.controlRevision,
+  ]);
 }
 
 function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
@@ -7958,13 +8146,13 @@ function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
   }
 
   const policyPresent = Object.prototype.hasOwnProperty.call(raw, 'screenshotPolicy');
-  const leaseCapabilityAccepted = responseAcceptsScreenshotObservationLease(raw);
+  const leaseKind = responseScreenshotLeaseKind(raw);
   const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
     ? Number(options.responseReceivedAt)
     : Date.now();
   const policyRetentionNow = Math.max(Date.now(), responseReceivedAt);
 
-  if (leaseCapabilityAccepted && !policyPresent) {
+  if (leaseKind && !policyPresent) {
     // A capable WebSocket auth response may race an older in-flight heartbeat.
     // It carries no screenshot authority, so it must not retire that heartbeat's
     // independently ordered lease. Retain only an exact-scope, unexpired lease;
@@ -7972,7 +8160,7 @@ function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
     if (!canRetainOmittedScreenshotPolicy(context, policyRetentionNow)) {
       adoptScreenshotPolicy(undefined, context, {
         ...options,
-        leaseCapabilityAccepted: true,
+        leaseKind,
         policyPresent: false,
       });
     }
@@ -7990,21 +8178,15 @@ function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
     ? rawScreenshotGeneration
     : reserveScreenshotPolicyRequestGeneration();
   if (screenshotGeneration < screenshotPolicyAppliedGeneration) {
-    // A stale response may never broaden screenshot authority. Conversely, an
-    // explicit denial or malformed policy is fail-private and revokes a newer
-    // allow for the same exact auth context; a later newer allow can recover.
-    if (screenshotPolicyResponseCanAuthorize(
-      raw?.screenshotPolicy,
-      options,
-      leaseCapabilityAccepted,
-      policyPresent,
-    )) return protocolApplied;
+    // Policy responses are independently ordered. A late response for class A
+    // must not broaden or revoke the newer class-B authority.
+    return protocolApplied;
   } else {
     screenshotPolicyAppliedGeneration = screenshotGeneration;
   }
   adoptScreenshotPolicy(raw?.screenshotPolicy, context, {
     ...options,
-    leaseCapabilityAccepted,
+    leaseKind,
     policyPresent,
   });
   return true;
@@ -8028,12 +8210,18 @@ function screenshotPolicyScope(context) {
 
 function ambientScreenshotAllowed(context, nowValue = Date.now()) {
   try {
-    assertAuthenticatedContextCurrent(context, 'screenshot observation lease');
+    assertAuthenticatedContextCurrent(context, 'screenshot tracking-window lease');
   } catch {
     return false;
   }
   if (screenshotPolicyState.scope !== screenshotPolicyScope(context)) return false;
   if (screenshotPolicyState.mode === 'legacy') return screenshotPolicyState.valid === true;
+  if (screenshotPolicyState.mode === 'tracking_window_lease') {
+    return screenshotPolicyState.valid === true
+      && screenshotPolicyState.captureAllowed === true
+      && Boolean(screenshotPolicyState.authorityScope)
+      && Number(screenshotPolicyState.expiresAt || 0) > nowValue;
+  }
   return screenshotPolicyState.mode === 'lease'
     && screenshotPolicyState.valid === true
     && screenshotPolicyState.observed === true
@@ -8052,6 +8240,7 @@ function assertAmbientScreenshotAllowed(context, reason = 'ambient screenshot') 
 function assertAmbientScreenshotPolicyCurrent(
   context,
   expectedGeneration,
+  expectedAuthorityScope,
   reason = 'ambient screenshot',
 ) {
   assertAuthenticatedContextCurrent(context, reason);
@@ -8060,16 +8249,21 @@ function assertAmbientScreenshotPolicyCurrent(
     error.code = 'SCREENSHOT_POLICY_SUPERSEDED';
     throw error;
   }
+  if ((screenshotPolicyState.authorityScope || null) !== (expectedAuthorityScope || null)) {
+    const error = new Error('Screenshot authority changed during capture');
+    error.code = 'SCREENSHOT_POLICY_SUPERSEDED';
+    throw error;
+  }
   assertAmbientScreenshotAllowed(context, reason);
 }
 
-function requestImmediateObservedScreenshotCapture() {
+function requestImmediateScreenshotCapture() {
   if (screenshotCaptureInFlight) {
     screenshotImmediateCapturePending = true;
     return;
   }
   screenshotImmediateCapturePending = false;
-  captureAndSendScreenshot({ reason: 'lease-start' }).catch(() => {});
+  captureAndSendScreenshot({ reason: 'authority-change' }).catch(() => {});
 }
 
 function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
@@ -8077,21 +8271,43 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
   const scope = screenshotPolicyScope(context);
   const priorState = screenshotPolicyState;
   const priorAllowed = ambientScreenshotAllowed(context);
-  const leaseCapabilityAccepted = typeof options.leaseCapabilityAccepted === 'boolean'
-    ? options.leaseCapabilityAccepted
-    : hasNegotiatedCapability('screenshotObservationLeaseV1', context);
+  const leaseKind = typeof options.leaseKind === 'string'
+    ? options.leaseKind
+    : hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', context)
+      ? 'tracking_window'
+      : hasNegotiatedCapability('screenshotObservationLeaseV1', context)
+        ? 'observation'
+        : null;
   const policyPresent = typeof options.policyPresent === 'boolean'
     ? options.policyPresent
     : rawPolicy !== undefined;
   let next;
-  if (!leaseCapabilityAccepted && !policyPresent) {
+  if (!leaseKind && !policyPresent) {
     // A server that did not accept the capability remains on the v2 ambient
     // behavior. Capability intersection, never a version comparison, chooses
     // this compatibility path.
-    next = Object.freeze({ mode: 'legacy', observed: true, expiresAt: 0, scope, valid: true });
+    next = Object.freeze({
+      mode: 'legacy',
+      observed: true,
+      captureAllowed: true,
+      expiresAt: 0,
+      scope,
+      authority: null,
+      authorityScope: null,
+      valid: true,
+    });
   } else if (rawPolicy?.mode === 'legacy') {
     // Explicit server-side rollback for a capable fleet.
-    next = Object.freeze({ mode: 'legacy', observed: true, expiresAt: 0, scope, valid: true });
+    next = Object.freeze({
+      mode: 'legacy',
+      observed: true,
+      captureAllowed: true,
+      expiresAt: 0,
+      scope,
+      authority: null,
+      authorityScope: null,
+      valid: true,
+    });
   } else {
     const expiresInSeconds = Number(rawPolicy?.expiresInSeconds);
     const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
@@ -8101,8 +8317,9 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     const requestStartedAt = Number.isFinite(Number(options.requestStartedAt))
       ? Number(options.requestStartedAt)
       : responseReceivedAt;
+    const maximumLeaseSeconds = leaseKind === 'tracking_window' ? 90 : 120;
     const boundedLeaseMs = Number.isFinite(expiresInSeconds)
-      ? Math.min(120, Math.max(0, expiresInSeconds)) * 1000
+      ? Math.min(maximumLeaseSeconds, Math.max(0, expiresInSeconds)) * 1000
       : 0;
     const roundTripMs = Math.max(0, responseReceivedAt - requestStartedAt);
     const serverTimeIsCurrent = Number.isFinite(serverTime)
@@ -8118,23 +8335,38 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
         serverTime + boundedLeaseMs - responseReceivedAt,
       ))
       : 0;
-    const validShape = leaseCapabilityAccepted
-      && rawPolicy?.mode === 'lease'
-      && typeof rawPolicy?.observed === 'boolean'
+    const trackingAuthority = leaseKind === 'tracking_window'
+      ? normalizeScreenshotAuthority(rawPolicy?.authority)
+      : null;
+    const validShape = Boolean(leaseKind)
+      && (
+        (leaseKind === 'tracking_window'
+          && rawPolicy?.mode === 'tracking_window_lease'
+          && typeof rawPolicy?.captureAllowed === 'boolean'
+          && Boolean(trackingAuthority))
+        || (leaseKind === 'observation'
+          && rawPolicy?.mode === 'lease'
+          && typeof rawPolicy?.observed === 'boolean')
+      )
       && Number.isFinite(expiresInSeconds)
       && expiresInSeconds >= 0
       && serverTimeIsCurrent;
-    const observed = validShape
-      && rawPolicy.observed === true
+    const captureAllowed = validShape
+      && (leaseKind === 'tracking_window'
+        ? rawPolicy.captureAllowed === true
+        : rawPolicy.observed === true)
       && expiresInSeconds > 0
       && remainingLeaseMs > 0;
     next = Object.freeze({
-      mode: 'lease',
-      observed,
-      expiresAt: observed
+      mode: leaseKind === 'tracking_window' ? 'tracking_window_lease' : 'lease',
+      observed: leaseKind === 'observation' ? captureAllowed : false,
+      captureAllowed: leaseKind === 'tracking_window' ? captureAllowed : false,
+      expiresAt: captureAllowed
         ? responseReceivedAt + remainingLeaseMs
         : 0,
       scope,
+      authority: trackingAuthority,
+      authorityScope: screenshotAuthorityScope(trackingAuthority),
       valid: validShape,
     });
   }
@@ -8150,28 +8382,45 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     || priorState.mode !== next.mode
     || priorState.valid !== next.valid
     || priorState.observed !== next.observed
+    || priorState.captureAllowed !== next.captureAllowed
+    || priorState.authorityScope !== next.authorityScope
     || priorAllowed !== nextAllowed;
-  if (authorityChanged) screenshotPolicyGeneration += 1;
+  if (authorityChanged) advanceScreenshotPolicyAuthority();
   if (!nextAllowed) screenshotImmediateCapturePending = false;
   chrome.alarms.clear(SCREENSHOT_LEASE_EXPIRY_ALARM);
-  if (next.mode === 'lease' && nextAllowed) {
+  if (['lease', 'tracking_window_lease'].includes(next.mode) && nextAllowed) {
     chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: next.expiresAt });
   }
   scheduleScreenshotCapture(nextAllowed);
-  if (!priorAllowed && nextAllowed) {
-    requestImmediateObservedScreenshotCapture();
+  if (authorityChanged && nextAllowed) {
+    requestImmediateScreenshotCapture();
   }
   return next;
 }
 
 function applyServerScreenshotPolicyDenial(rawPolicy, context, options = {}) {
   assertAuthenticatedContextCurrent(context, 'server screenshot policy denial');
+  const capturedAuthorityScope = options.capturedAuthorityScope || null;
+  const currentAuthorityScope = screenshotPolicyState.authorityScope || null;
+  const responseAuthority = normalizeScreenshotAuthority(rawPolicy?.authority);
+  const responseAuthorityScope = screenshotAuthorityScope(responseAuthority);
+  if (
+    screenshotPolicyState.mode === 'tracking_window_lease'
+    && capturedAuthorityScope !== currentAuthorityScope
+    && (!responseAuthorityScope || responseAuthorityScope === capturedAuthorityScope)
+  ) {
+    // This upload was fenced to a retired authority. A denial that carries no
+    // replacement policy (or repeats retired A) cannot revoke current B.
+    return screenshotPolicyState;
+  }
   const denialGeneration = reserveScreenshotPolicyRequestGeneration();
   screenshotPolicyAppliedGeneration = denialGeneration;
   return adoptScreenshotPolicy(rawPolicy, context, {
     ...options,
     policySource: 'upload_denial',
-    leaseCapabilityAccepted: true,
+    leaseKind: hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', context)
+      ? 'tracking_window'
+      : 'observation',
     policyPresent: true,
   });
 }
@@ -10642,6 +10891,12 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
   await replayClassroomUiForAuth(committedAuthContext, 'student login UI replay');
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
+  await activateLicenseForAuthenticatedResponse(
+    committedAuthContext,
+    data.planStatus,
+    { notify: false },
+  );
+  assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
   if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
 
   const committedAuthBinding = {
@@ -10662,20 +10917,21 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
       committedAuthBinding,
       'post-login initialization',
     );
-    await checkLicenseStatus('manual-login', {
+    const trackingInitialization = initializeAdaptiveTracking('manual-login', {
+      authMutationGeneration: mutationGeneration,
+      authBinding: committedAuthBinding,
+    });
+    const licenseRefresh = checkLicenseStatus('manual-login', {
       authMutationGeneration: mutationGeneration,
       authBinding: committedAuthBinding,
       deferTrackingInitialization: true,
     });
+    await Promise.all([trackingInitialization, licenseRefresh]);
     assertAuthMutationBindingCurrent(
       mutationGeneration,
       committedAuthBinding,
       'post-login initialization',
     );
-    await initializeAdaptiveTracking('manual-login', {
-      authMutationGeneration: mutationGeneration,
-      authBinding: committedAuthBinding,
-    });
   }).catch((error) => {
     if (error?.code === 'AUTH_MUTATION_SUPERSEDED') {
       console.info('[Auth] Post-login initialization superseded');
@@ -11074,8 +11330,14 @@ async function ensureRegisteredNow() {
             committedAuthContext,
             'student registration UI replay',
           );
+          await activateLicenseForAuthenticatedResponse(
+            committedAuthContext,
+            data.planStatus,
+            { notify: false },
+          );
           if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
         });
+        initializeAdaptiveTracking('registration-success').catch(() => {});
         registrationRetryCount = 0; // Reset on success
       } catch (error) {
         if (studentAuthCommitPendingGeneration === registrationGeneration) {
@@ -11139,7 +11401,7 @@ async function ensureRegisteredNow() {
     
     console.log('[Service Worker] Registration complete');
 
-    await checkLicenseStatus('registration');
+    checkLicenseStatus('registration').catch(() => {});
     await notifyAuthGateStateToTabs();
     
     return stored;
@@ -11435,6 +11697,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     'licenseActive',
     'planStatus',
     LICENSE_STATE_SCOPE_KEY,
+    LICENSE_LAST_VERIFIED_AT_KEY,
     'globalBlockedDomains',
     GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY,
     'teacherBlockListState',
@@ -11705,45 +11968,55 @@ const authStateRestorePromise = new Promise((resolve) => {
   const expectedLicenseScope = workerWakeAuthContext
     ? licenseScopeForAuthContext(workerWakeAuthContext)
     : null;
-  if (
+  if (licenseLkgMatchesExactScope(stored, expectedLicenseScope)) {
+    assertWorkerWakeCurrent();
+    adoptLicenseState(true, stored.planStatus, workerWakeAuthContext, {
+      verifiedAt: Number(stored[LICENSE_LAST_VERIFIED_AT_KEY]),
+    });
+  } else if (
     stored.licenseActive === false
     && expectedLicenseScope
     && stored[LICENSE_STATE_SCOPE_KEY] === expectedLicenseScope
   ) {
     assertWorkerWakeCurrent();
-    await disableForInactiveLicense(stored.planStatus, workerWakeAuthContext);
+    await disableForInactiveLicense(stored.planStatus, workerWakeAuthContext, {
+      verifiedAt: Number(stored[LICENSE_LAST_VERIFIED_AT_KEY]) || Date.now(),
+    });
   } else {
     resetLicenseStateForAuthorityTransition();
     if (
-      stored[LICENSE_STATE_SCOPE_KEY] !== expectedLicenseScope
-      && (
-        stored.licenseActive !== undefined
-        || stored.planStatus !== undefined
-        || stored[LICENSE_STATE_SCOPE_KEY] !== undefined
-      )
+      stored.licenseActive !== undefined
+      || stored.planStatus !== undefined
+      || stored[LICENSE_STATE_SCOPE_KEY] !== undefined
+      || stored[LICENSE_LAST_VERIFIED_AT_KEY] !== undefined
     ) {
       await kv.remove([
         'licenseActive',
         'planStatus',
         'licenseDisabledAt',
         LICENSE_STATE_SCOPE_KEY,
+        LICENSE_LAST_VERIFIED_AT_KEY,
       ]);
       assertWorkerWakeCurrent();
     }
   }
 
   assertWorkerWakeCurrent();
-  await ensureRegistered();
+  // Local exact-scope LKG state is enough to resume tracking. Registration and
+  // entitlement refresh run independently so either network path can stall or
+  // retry without suppressing heartbeat/screenshot startup.
+  ensureRegistered().catch(() => {});
+  checkLicenseStatus('worker-wake').catch(() => {});
   scheduleMonitoringEventFlush(1000);
   requestClassroomStateSync('worker-wake', true);
   await setConnectivityBadge(connectivityStatus());
   await scheduleConnectivityHealthBoundary();
 
-  // Initialize adaptive tracking after state is restored
-  scheduleJitteredStartup('wake', () => {
-    console.log('[Service Worker] Initializing adaptive tracking...');
-    initializeAdaptiveTracking('wake').catch(() => {});
-  });
+  // Hold this wake task through local settings reconciliation and tracking
+  // startup. A bare jitter timer can disappear when MV3 suspends the worker,
+  // recreating a monitoring blackout even though exact-scope LKG is active.
+  console.log('[Service Worker] Initializing adaptive tracking...');
+  await initializeAdaptiveTracking('wake');
 })().catch(err => {
   // Silently handle wake-up errors (network issues, server deploys)
   // The extension will self-heal via alarms and retries
@@ -12226,11 +12499,17 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         committedAuthContext,
         'student auto-registration UI replay',
       );
+      await activateLicenseForAuthenticatedResponse(
+        committedAuthContext,
+        data.planStatus,
+        { notify: false },
+      );
       if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
     });
     
     // Start adaptive tracking after registration
     initializeAdaptiveTracking('student-registered');
+    checkLicenseStatus('student-registered').catch(() => {});
     
     return data;
   } catch (error) {
@@ -12698,7 +12977,7 @@ async function handleLicenseControlCleanupAlarm() {
 
 function handleScreenshotLeaseExpiryAlarm(alarm = {}, nowValue = Date.now()) {
   if (
-    screenshotPolicyState.mode !== 'lease'
+    !['lease', 'tracking_window_lease'].includes(screenshotPolicyState.mode)
     || screenshotPolicyState.valid !== true
   ) return false;
   const expiresAt = Number(screenshotPolicyState.expiresAt || 0);
@@ -12710,11 +12989,12 @@ function handleScreenshotLeaseExpiryAlarm(alarm = {}, nowValue = Date.now()) {
     chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: expiresAt });
     return false;
   }
-  screenshotPolicyGeneration += 1;
+  advanceScreenshotPolicyAuthority();
   screenshotImmediateCapturePending = false;
   screenshotPolicyState = Object.freeze({
     ...screenshotPolicyState,
     observed: false,
+    captureAllowed: false,
     expiresAt: 0,
   });
   scheduleScreenshotCapture(false);
@@ -12749,8 +13029,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     refreshSchoolSettings({ force: false }).then(() => {
       updateTrackingState('settings-refresh');
     }).catch(() => {});
-  } else if (alarm.name === 'license-check') {
+  } else if (alarm.name === LICENSE_CHECK_ALARM) {
     checkLicenseStatus('alarm').catch(() => {});
+  } else if (alarm.name === LICENSE_STATUS_RETRY_ALARM) {
+    checkLicenseStatus('retry-alarm').catch(() => {});
   } else if (alarm.name === LICENSE_CONTROL_CLEANUP_ALARM) {
     handleLicenseControlCleanupAlarm().catch(() => {});
   } else if (alarm.name === SHARED_SIGN_IN_CONFIG_RETRY_ALARM) {
@@ -12893,7 +13175,7 @@ function isSameActiveCaptureTab(candidate, expected) {
 
 async function captureAndSendScreenshot(options = {}) {
   const reason = options.reason || 'scheduled';
-  const minimumGap = reason === 'lease-start'
+  const minimumGap = ['lease-start', 'authority-change'].includes(reason)
     ? 0
     : reason === 'command'
       ? SCREENSHOT_COMMAND_MIN_GAP_MS
@@ -12932,6 +13214,16 @@ async function captureAndSendScreenshot(options = {}) {
     return { status: 'paused_unobserved' };
   }
   const capturePolicyGeneration = screenshotPolicyGeneration;
+  const captureScreenshotAuthority = screenshotPolicyState.authority;
+  const captureAuthorityScope = screenshotPolicyState.authorityScope || null;
+  const capturePolicySignal = screenshotPolicyAbortController.signal;
+  const captureRequestAbortController = new AbortController();
+  const abortCaptureRequest = () => captureRequestAbortController.abort();
+  screenshotAuthContext.signal.addEventListener('abort', abortCaptureRequest, { once: true });
+  capturePolicySignal.addEventListener('abort', abortCaptureRequest, { once: true });
+  if (screenshotAuthContext.signal.aborted || capturePolicySignal.aborted) {
+    abortCaptureRequest();
+  }
   screenshotCaptureInFlight = true;
   let screenshotPhase = 'capture';
   try {
@@ -12939,6 +13231,7 @@ async function captureAndSendScreenshot(options = {}) {
     assertAmbientScreenshotPolicyCurrent(
       screenshotAuthContext,
       capturePolicyGeneration,
+      captureAuthorityScope,
       `screenshot:${reason}:attempt`,
     );
     screenshotAttemptCount++;
@@ -12958,6 +13251,7 @@ async function captureAndSendScreenshot(options = {}) {
     assertAmbientScreenshotPolicyCurrent(
       screenshotAuthContext,
       capturePolicyGeneration,
+      captureAuthorityScope,
       `screenshot:${reason}:active-tab`,
     );
     if (!tab || !tab.windowId) {
@@ -12990,12 +13284,14 @@ async function captureAndSendScreenshot(options = {}) {
       options.subscribeWindowFocus,
     );
     let dataUrl;
+    let capturedAt;
     try {
       const [beforeCaptureTab] = await queryActiveTab({ active: true, lastFocusedWindow: true });
       assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:pre-capture-tab`);
       assertAmbientScreenshotPolicyCurrent(
         screenshotAuthContext,
         capturePolicyGeneration,
+        captureAuthorityScope,
         `screenshot:${reason}:pre-capture-tab`,
       );
       if (activationChanged || !isSameActiveCaptureTab(beforeCaptureTab, tab)) {
@@ -13008,10 +13304,14 @@ async function captureAndSendScreenshot(options = {}) {
         format: 'jpeg',
         quality: 50  // Lower quality for smaller file size (~30-50KB)
       });
+      // Fix the pixel acquisition time immediately. Retries reuse this value;
+      // upload time must never relabel old pixels as a newer authority sample.
+      capturedAt = new Date().toISOString();
       assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
       assertAmbientScreenshotPolicyCurrent(
         screenshotAuthContext,
         capturePolicyGeneration,
+        captureAuthorityScope,
         `screenshot:${reason}:captured-pixels`,
       );
       const [afterCaptureTab] = await queryActiveTab({ active: true, lastFocusedWindow: true });
@@ -13019,6 +13319,7 @@ async function captureAndSendScreenshot(options = {}) {
       assertAmbientScreenshotPolicyCurrent(
         screenshotAuthContext,
         capturePolicyGeneration,
+        captureAuthorityScope,
         `screenshot:${reason}:post-capture-tab`,
       );
       if (activationChanged || !isSameActiveCaptureTab(afterCaptureTab, tab)) {
@@ -13044,11 +13345,16 @@ async function captureAndSendScreenshot(options = {}) {
     assertAmbientScreenshotPolicyCurrent(
       screenshotAuthContext,
       capturePolicyGeneration,
+      captureAuthorityScope,
       `screenshot:${reason}:upload`,
     );
-    const screenshotUploadPath = hasNegotiatedCapability(
-      'screenshotObservationLeaseV1',
+    const trackingWindowLeaseNegotiated = hasNegotiatedCapability(
+      'screenshotTrackingWindowLeaseV1',
       screenshotAuthContext,
+    );
+    const screenshotUploadPath = (
+      trackingWindowLeaseNegotiated
+      || hasNegotiatedCapability('screenshotObservationLeaseV1', screenshotAuthContext)
     )
       ? '/api/classpilot/device/screenshot'
       : '/api/device/screenshot';
@@ -13058,38 +13364,71 @@ async function captureAndSendScreenshot(options = {}) {
       headers,
       body: JSON.stringify({
         ...extensionProtocolDescriptor(),
-        deviceId: screenshotAuthContext.deviceId,
         screenshot: dataUrl,  // base64 data URL
-        timestamp: Date.now(),
+        capturedAt,
+        timestamp: Date.parse(capturedAt),
+        ...(trackingWindowLeaseNegotiated
+          ? { screenshotAuthority: captureScreenshotAuthority }
+          : { deviceId: screenshotAuthContext.deviceId }),
         tabTitle: tab.title || '',
         tabUrl: tab.url || '',
         tabFavicon: tab.favIconUrl || '',
       }),
-      signal: screenshotAuthContext.signal,
+      signal: captureRequestAbortController.signal,
     }, {
       context: 'screenshot upload',
       maxAttempts: 2,
+      beforeAttempt: () => assertAmbientScreenshotPolicyCurrent(
+        screenshotAuthContext,
+        capturePolicyGeneration,
+        captureAuthorityScope,
+        `screenshot:${reason}:upload-attempt`,
+      ),
     });
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
-    const responseBody = !response.ok && [401, 403, 404, 409].includes(response.status)
+    const responseBody = !response.ok && [401, 402, 403, 404, 409].includes(response.status)
       ? await response.json().catch(() => ({}))
       : {};
+    if (response.status === 402 || (
+      response.status === 403
+      && isClassPilotNotEntitledResponse(responseBody)
+    )) {
+      await disableForInactiveLicense(responseBody.planStatus, screenshotAuthContext);
+      return { status: 'paused_unobserved', reason: 'license_denied' };
+    }
+    if (response.status === 401 || response.status === 403) {
+      if (isManualIdentitySource()) {
+        await clearStudentAuth('manual-token-invalid', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: screenshotAuthContext,
+        });
+      } else {
+        await invalidateStudentTokenFromHeartbeat(
+          screenshotAuthContext,
+          `screenshot:${reason}`,
+        );
+      }
+      return { status: 'paused_unobserved', reason: 'authorization_denied' };
+    }
     const structuredAuthorityDenial = typeof responseBody?.code === 'string'
       && /(?:AUTH|BINDING|SESSION|UNAUTHORIZED|FORBIDDEN)/.test(responseBody.code);
-    // A server denial for the still-current authentication binding is
-    // authoritative even if a newer heartbeat/WebSocket response changed the
-    // local screenshot-policy generation while this upload was in flight.
-    // Handle it before the generation fence so stale upload responses cannot
-    // be used to keep ambient capture enabled.
+    const heartbeatRequired = responseBody?.code === 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED';
+    // Denials are applied against the immutable capture authority. A late A
+    // response may install an explicit current-B policy returned by the
+    // server, but an unscoped or A-scoped denial cannot revoke B.
     if (!response.ok && (
       responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED'
-      || [401, 403, 404].includes(response.status)
+      || response.status === 404
+      || (response.status === 409 && !heartbeatRequired)
       || structuredAuthorityDenial
     )) {
       const responseReceivedAt = Date.now();
       applyServerScreenshotPolicyDenial(responseBody.screenshotPolicy, screenshotAuthContext, {
         requestStartedAt: screenshotUploadStartedAt,
         responseReceivedAt,
+        capturedAuthorityScope: captureAuthorityScope,
       });
       const pausedUnobserved = responseBody?.code === 'SCREENSHOT_PAUSED_UNOBSERVED';
       await recordScreenshotError(
@@ -13108,11 +13447,12 @@ async function captureAndSendScreenshot(options = {}) {
     assertAmbientScreenshotPolicyCurrent(
       screenshotAuthContext,
       capturePolicyGeneration,
+      captureAuthorityScope,
       `screenshot:${reason}:upload-response`,
     );
 
     if (!response.ok) {
-      if (responseBody?.code === 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED') {
+      if (heartbeatRequired) {
         await recordScreenshotError('heartbeat_required', Date.now(), screenshotAuthContext);
         // Coalesce concurrent capture failures into one near-immediate
         // heartbeat. The steady-state 10-second cadence remains unchanged.
@@ -13136,12 +13476,20 @@ async function captureAndSendScreenshot(options = {}) {
       console.log('[Screenshot] Uploaded successfully');
     }
   } catch (error) {
+    if (
+      capturePolicySignal.aborted
+      || screenshotPolicyGeneration !== capturePolicyGeneration
+      || (screenshotPolicyState.authorityScope || null) !== captureAuthorityScope
+    ) {
+      console.info('[Screenshot] Discarded capture after screenshot authority changed');
+      return { status: 'paused_unobserved' };
+    }
     if (isAuthContextCancellation(error)) {
       console.info(`[Screenshot] Discarded ${reason} capture for a retired authentication context`);
       return;
     }
     if (error?.code === 'SCREENSHOT_PAUSED_UNOBSERVED') {
-      console.info('[Screenshot] Capture paused because no current observation lease is active');
+      console.info('[Screenshot] Capture paused because no current screenshot lease is active');
       return { status: 'paused_unobserved' };
     }
     if (error?.code === 'SCREENSHOT_POLICY_SUPERSEDED') {
@@ -13155,12 +13503,14 @@ async function captureAndSendScreenshot(options = {}) {
     );
     console.warn('[Screenshot] Capture error:', safeDiagnosticError(error));
   } finally {
+    screenshotAuthContext.signal.removeEventListener('abort', abortCaptureRequest);
+    capturePolicySignal.removeEventListener('abort', abortCaptureRequest);
     screenshotCaptureInFlight = false;
     if (screenshotImmediateCapturePending) {
       screenshotImmediateCapturePending = false;
       Promise.resolve().then(() => captureAndSendScreenshot({
         ...options,
-        reason: 'lease-start',
+        reason: 'authority-change',
       })).catch(() => {});
     }
   }
@@ -13953,6 +14303,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
     rawState?.revision ?? rawState?.studentControlRevision,
   );
   const tabMutationJournal = createClassroomTabMutationJournal();
+  const previousControlRevision = currentStudentControlRevision();
   const assertCurrent = (reason = 'classroom state') => {
     if (authContext) assertAuthenticatedContextCurrent(authContext, reason);
   };
@@ -14010,6 +14361,8 @@ async function applyClassroomStateNow(rawState, options = {}) {
   }
 
   const expiry = RuntimeCore.classroomStateExpiry(normalized, Date.now());
+  const screenshotAuthorityChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
+    || currentStudentControlRevision() !== previousControlRevision;
   if (expiry.expired) {
     assertCurrent();
     currentClassroomState = normalized;
@@ -14020,6 +14373,9 @@ async function applyClassroomStateNow(rawState, options = {}) {
       tabMutationJournal,
     });
     assertCurrent();
+    if (screenshotAuthorityChanged) {
+      scheduleEventHeartbeat('screenshot-authority-changed');
+    }
     return { outcome: 'expired', appliedRevision: normalized.revision };
   }
 
@@ -14074,6 +14430,9 @@ async function applyClassroomStateNow(rawState, options = {}) {
     ).catch(() => {});
     const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
       || normalized.supervisionContextId !== previousState?.supervisionContextId;
+    if (screenshotAuthorityChanged) {
+      scheduleEventHeartbeat('screenshot-authority-changed');
+    }
     if (
       activeLiveViewNegotiationId
       && (

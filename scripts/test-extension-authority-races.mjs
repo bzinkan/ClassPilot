@@ -555,12 +555,184 @@ async function main() {
       });
       fetchWithBackoff = originalFetchWithBackoff;
 
+      // An auth-context cancellation can happen before screenshot authority
+      // locals are snapshotted. That early exit must not reference the later
+      // policy `const`s (which would turn the expected cancellation into a
+      // temporal-dead-zone ReferenceError).
+      const originalCaptureAuthenticatedContext = captureAuthenticatedContext;
+      let earlyScreenshotAuthCancellationHandled = false;
+      try {
+        captureAuthenticatedContext = (reason) => {
+          if (String(reason) === 'screenshot:auth-context-unavailable') {
+            throw authContextSuperseded('screenshot auth-context fixture');
+          }
+          return originalCaptureAuthenticatedContext(reason);
+        };
+        const earlyCancellationResult = await captureAndSendScreenshot({
+          reason: 'auth-context-unavailable',
+        });
+        earlyScreenshotAuthCancellationHandled = earlyCancellationResult === undefined;
+      } finally {
+        captureAuthenticatedContext = originalCaptureAuthenticatedContext;
+      }
+
+      // Tracking-window authority changes are capture boundaries even within
+      // one immutable auth context. Every gap/class transition requests an
+      // immediate image; a same-authority renewal does not. A late A denial
+      // cannot revoke B, and adopting B actively aborts A's upload signal.
+      const trackingWindowAuth = installIdentity('tracking-window');
+      adoptLicenseState(true, 'active', trackingWindowAuth);
+      trackingState = TRACKING_STATES.ACTIVE;
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'screenshotTrackingWindowLeaseV1',
+          'screenshotObservationLeaseV1',
+        ],
+      }, trackingWindowAuth);
+      const trackingPolicy = (authority, captureAllowed = true) => ({
+        mode: 'tracking_window_lease',
+        captureAllowed,
+        expiresInSeconds: captureAllowed ? 90 : 0,
+        serverTime: new Date().toISOString(),
+        authority,
+      });
+      const captureBeforeTrackingTransitions = captureAndSendScreenshot;
+      const trackingImmediateReasons = [];
+      captureAndSendScreenshot = async ({ reason } = {}) => {
+        trackingImmediateReasons.push(reason);
+        return { status: 'tracking-transition-test-double' };
+      };
+      const gapAuthority = { kind: 'student_session', controlRevision: 70 };
+      const classAAuthority = {
+        kind: 'teaching_session',
+        teachingSessionId: 'tracking-class-a',
+        controlRevision: 71,
+      };
+      const classBAuthority = {
+        kind: 'teaching_session',
+        teachingSessionId: 'tracking-class-b',
+        controlRevision: 72,
+      };
+      adoptScreenshotPolicy(trackingPolicy(gapAuthority), trackingWindowAuth);
+      const generationAfterGapAuthority = screenshotPolicyGeneration;
+      adoptScreenshotPolicy(trackingPolicy(classAAuthority), trackingWindowAuth);
+      const generationAfterClassAAuthority = screenshotPolicyGeneration;
+      const classAAuthorityScope = screenshotPolicyState.authorityScope;
+      adoptScreenshotPolicy(trackingPolicy(classBAuthority), trackingWindowAuth);
+      const generationAfterClassBAuthority = screenshotPolicyGeneration;
+      const classBAuthorityScope = screenshotPolicyState.authorityScope;
+      adoptScreenshotPolicy(trackingPolicy(classBAuthority), trackingWindowAuth);
+      const generationAfterClassBRenewal = screenshotPolicyGeneration;
+      const trackingImmediateCountAfterRenewal = trackingImmediateReasons.length;
+      captureAndSendScreenshot = captureBeforeTrackingTransitions;
+
+      applyServerScreenshotPolicyDenial(
+        trackingPolicy(classAAuthority, false),
+        trackingWindowAuth,
+        {
+          capturedAuthorityScope: classAAuthorityScope,
+          requestStartedAt: Date.now(),
+          responseReceivedAt: Date.now(),
+        },
+      );
+      const lateClassADenialPreservedClassB = ambientScreenshotAllowed(trackingWindowAuth)
+        && screenshotPolicyState.authorityScope === classBAuthorityScope;
+
+      const uploadClassAAuthority = {
+        kind: 'teaching_session',
+        teachingSessionId: 'tracking-upload-a',
+        controlRevision: 73,
+      };
+      const uploadClassBAuthority = {
+        kind: 'teaching_session',
+        teachingSessionId: 'tracking-upload-b',
+        controlRevision: 74,
+      };
+      screenshotCaptureInFlight = true;
+      adoptScreenshotPolicy(trackingPolicy(uploadClassAAuthority), trackingWindowAuth);
+      screenshotCaptureInFlight = false;
+      screenshotImmediateCapturePending = false;
+      const originalFetch = globalThis.fetch;
+      let resolveTrackingUploadStarted;
+      const trackingUploadStarted = new Promise((resolve) => {
+        resolveTrackingUploadStarted = resolve;
+      });
+      let classAUploadSignal = null;
+      globalThis.fetch = async (url, init = {}) => {
+        if (!String(url).includes('/screenshot')) return originalFetch(url, init);
+        classAUploadSignal = init.signal;
+        resolveTrackingUploadStarted();
+        return new Promise((resolve, reject) => {
+          init.signal.addEventListener('abort', () => {
+            const error = new Error('tracking authority superseded');
+            error.name = 'AbortError';
+            reject(error);
+          }, { once: true });
+        });
+      };
+      lastScreenshotAttemptAt = 0;
+      const screenshotErrorBeforeClassAUpload = lastScreenshotError;
+      const classAUploadPromise = captureAndSendScreenshot({
+        reason: 'tracking-authority-upload-abort',
+        queryActiveTab: async () => [{
+          id: 4190,
+          windowId: 41,
+          active: true,
+          url: 'https://tracking-a.example/',
+          title: 'Tracking A',
+        }],
+        captureVisibleTab: async () => 'data:image/jpeg;base64,dHJhY2tpbmctYQ==',
+        subscribeTabActivation: () => () => {},
+        subscribeTabUpdate: () => () => {},
+        subscribeWindowFocus: () => () => {},
+      });
+      await trackingUploadStarted;
+      adoptScreenshotPolicy(trackingPolicy(uploadClassBAuthority), trackingWindowAuth);
+      screenshotImmediateCapturePending = false;
+      const classAUploadResult = await classAUploadPromise;
+      const classAUploadSignalAborted = classAUploadSignal?.aborted === true;
+      const classAUploadDidNotRecordError = lastScreenshotError === screenshotErrorBeforeClassAUpload;
+      globalThis.fetch = originalFetch;
+
+      let trackingWindowUpload = null;
+      fetchWithBackoff = async (url, init = {}) => {
+        trackingWindowUpload = {
+          url: String(url),
+          body: JSON.parse(String(init.body || '{}')),
+        };
+        return new Response('{}', { status: 200 });
+      };
+      lastScreenshotAttemptAt = 0;
+      await captureAndSendScreenshot({
+        reason: 'tracking-window-upload-envelope',
+        queryActiveTab: async () => [{
+          id: 4191,
+          windowId: 41,
+          active: true,
+          url: 'https://tracking-b.example/',
+          title: 'Tracking B',
+        }],
+        captureVisibleTab: async () => 'data:image/jpeg;base64,dHJhY2tpbmctYg==',
+        subscribeTabActivation: () => () => {},
+        subscribeTabUpdate: () => () => {},
+        subscribeWindowFocus: () => () => {},
+      });
+      fetchWithBackoff = originalFetchWithBackoff;
+      observedByTeacher = false;
+      scheduleScreenshotCapture(true);
+      const noDashboardScreenshotAlarm = await chrome.alarms.get(SCREENSHOT_ALARM_NAME);
+      const noDashboardFiveMinuteCaptureSlots = noDashboardScreenshotAlarm
+        ? Math.floor(5 / Number(noDashboardScreenshotAlarm.periodInMinutes || 0))
+        : 0;
+
       // A queued expiry event for A (or an earlier renewal) cannot pause B's
       // newer, still-valid exact lease.
       const leaseAuthA = installIdentity('lease-alarm-a');
       adoptNegotiatedProtocolState({
         serverProtocolVersion: 3,
-        acceptedCapabilities: ['screenshotObservationLeaseV1'],
+        acceptedCapabilities: ['scopedAuthorityChecksV1', 'screenshotObservationLeaseV1'],
       }, leaseAuthA);
       screenshotCaptureInFlight = true;
       const leaseAlarmStartedAt = Date.now();
@@ -577,7 +749,7 @@ async function main() {
       const leaseAuthB = installIdentity('lease-alarm-b');
       adoptNegotiatedProtocolState({
         serverProtocolVersion: 3,
-        acceptedCapabilities: ['screenshotObservationLeaseV1'],
+        acceptedCapabilities: ['scopedAuthorityChecksV1', 'screenshotObservationLeaseV1'],
       }, leaseAuthB);
       const renewedAt = Date.now();
       adoptScreenshotPolicy({
@@ -2233,6 +2405,23 @@ async function main() {
         lockClearStorageAfter,
         screenshotResult,
         screenshotUploads,
+        earlyScreenshotAuthCancellationHandled,
+        trackingImmediateReasons,
+        generationAfterGapAuthority,
+        generationAfterClassAAuthority,
+        generationAfterClassBAuthority,
+        generationAfterClassBRenewal,
+        trackingImmediateCountAfterRenewal,
+        lateClassADenialPreservedClassB,
+        classAUploadResult,
+        classAUploadSignalAborted,
+        classAUploadDidNotRecordError,
+        trackingWindowUpload,
+        uploadClassBAuthority,
+        noDashboardScreenshotAlarm: noDashboardScreenshotAlarm && {
+          periodInMinutes: noDashboardScreenshotAlarm.periodInMinutes,
+        },
+        noDashboardFiveMinuteCaptureSlots,
         staleLeaseAlarmExpiredCurrent,
         currentLeaseBeforeStaleAlarm,
         currentLeaseAfterStaleAlarm,
@@ -2498,6 +2687,36 @@ async function main() {
     );
     assert.deepEqual(result.screenshotResult, { status: 'unavailable', reason: 'active_tab_changed' });
     assert.equal(result.screenshotUploads, 0);
+    assert.equal(result.earlyScreenshotAuthCancellationHandled, true);
+    assert.deepEqual(result.trackingImmediateReasons, [
+      'authority-change',
+      'authority-change',
+      'authority-change',
+    ]);
+    assert.ok(result.generationAfterClassAAuthority > result.generationAfterGapAuthority);
+    assert.ok(result.generationAfterClassBAuthority > result.generationAfterClassAAuthority);
+    assert.equal(
+      result.generationAfterClassBRenewal,
+      result.generationAfterClassBAuthority,
+    );
+    assert.equal(result.trackingImmediateCountAfterRenewal, 3);
+    assert.equal(result.lateClassADenialPreservedClassB, true);
+    assert.deepEqual(result.classAUploadResult, { status: 'paused_unobserved' });
+    assert.equal(result.classAUploadSignalAborted, true);
+    assert.equal(result.classAUploadDidNotRecordError, true);
+    assert.ok(result.trackingWindowUpload.url.endsWith('/api/classpilot/device/screenshot'));
+    assert.deepEqual(
+      result.trackingWindowUpload.body.screenshotAuthority,
+      result.uploadClassBAuthority,
+    );
+    assert.equal(result.trackingWindowUpload.body.deviceId, undefined);
+    assert.equal(typeof result.trackingWindowUpload.body.capturedAt, 'string');
+    assert.equal(
+      result.trackingWindowUpload.body.timestamp,
+      Date.parse(result.trackingWindowUpload.body.capturedAt),
+    );
+    assert.deepEqual(result.noDashboardScreenshotAlarm, { periodInMinutes: 0.5 });
+    assert.equal(result.noDashboardFiveMinuteCaptureSlots, 10);
     assert.equal(result.staleLeaseAlarmExpiredCurrent, false);
     assert.equal(result.currentLeaseAfterStaleAlarm.scope, result.currentLeaseBeforeStaleAlarm.scope);
     assert.equal(result.currentLeaseAfterStaleAlarm.observed, true);
