@@ -153,7 +153,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.4.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.5.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store
