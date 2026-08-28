@@ -32,6 +32,22 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 3. Confirm the popup shows the correct student and school-server connection.
    Class assignment is resolved by SchoolPilot; students never enter a class ID.
 
+### Recoverable shared-device student sessions (2.7.3)
+
+Manual student credentials and exact student-bound runtime state now live only
+in Chrome's browser-session storage. A one-use server recovery capability is
+kept separately without the student's name, bearer token, or device/session
+identifiers. After Chrome restarts or the extension updates, the old exact
+session is released in the background and the student signs in with their PIN
+again; when that release is temporarily offline, the same Chromebook can still
+offer the exact student as reclaimable. Ordinary tab closure and MV3 worker
+suspension continue to preserve the active browser session.
+
+Release retries use bounded alarms, and delayed cleanup from an older login
+cannot end or erase a replacement session. Login-roster refreshes are
+coalesced and short-lived in memory, with explicit refresh support and no
+persisted roster names.
+
 ### Reliable observation policy reconciliation (2.7.2)
 
 Heartbeat and WebSocket protocol responses now order screenshot authority
@@ -137,7 +153,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.2.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.3.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store

@@ -174,6 +174,281 @@ async function preparePinForm(frame) {
   );
 }
 
+async function installRosterUiHarness(frame) {
+  const installed = await frame.evaluate(() => {
+    const originalSendMessage = chrome.runtime.sendMessage;
+    const originalSetTimeout = window.setTimeout.bind(window);
+    const originalClearTimeout = window.clearTimeout.bind(window);
+    const harness = {
+      originalSendMessage,
+      originalSetTimeout,
+      originalClearTimeout,
+      queuedResponses: [],
+      requests: [],
+      refreshTimers: new Map(),
+      nextRefreshTimerId: -1,
+      enqueue(response) {
+        this.queuedResponses.push(response);
+      },
+      runLatestRefreshTimer() {
+        const entries = Array.from(this.refreshTimers.entries());
+        const latest = entries.at(-1);
+        if (!latest) return null;
+        const [timerId, timer] = latest;
+        this.refreshTimers.delete(timerId);
+        timer.callback(...timer.args);
+        return timer.delay;
+      },
+      restore() {
+        chrome.runtime.sendMessage = this.originalSendMessage;
+        window.setTimeout = this.originalSetTimeout;
+        window.clearTimeout = this.originalClearTimeout;
+        this.refreshTimers.clear();
+        delete globalThis.__classpilotRosterUiHarness;
+      },
+    };
+    window.setTimeout = function(callback, delay, ...args) {
+      if (Number(delay) >= 25_000 && Number(delay) <= 5 * 60_000) {
+        const timerId = harness.nextRefreshTimerId--;
+        harness.refreshTimers.set(timerId, { callback, delay: Number(delay), args });
+        return timerId;
+      }
+      return originalSetTimeout(callback, delay, ...args);
+    };
+    window.clearTimeout = function(timerId) {
+      if (harness.refreshTimers.delete(timerId)) return;
+      originalClearTimeout(timerId);
+    };
+    chrome.runtime.sendMessage = function(message, ...args) {
+      const callback = args.find((value) => typeof value === 'function');
+      if (message?.type === 'get-login-roster' && callback) {
+        harness.requests.push({ ...message });
+        const response = harness.queuedResponses.shift() || {
+          success: false,
+          error: 'No roster UI fixture response was queued.',
+        };
+        queueMicrotask(() => callback(response));
+        return undefined;
+      }
+      return originalSendMessage.call(chrome.runtime, message, ...args);
+    };
+    globalThis.__classpilotRosterUiHarness = harness;
+    return chrome.runtime.sendMessage !== originalSendMessage;
+  });
+  assert.equal(installed, true, 'could not install secure-frame roster UI harness');
+}
+
+async function enqueueRosterUiResponse(frame, response) {
+  await frame.evaluate((nextResponse) => {
+    globalThis.__classpilotRosterUiHarness.enqueue(nextResponse);
+  }, response);
+}
+
+async function exerciseRosterRefreshUi(frame) {
+  await enqueueRosterUiResponse(frame, {
+    success: true,
+    students: [{
+      id: 'student-1',
+      name: 'Jordan Student',
+      hasPin: true,
+      reclaimable: true,
+    }],
+  });
+  await frame.evaluate(() => {
+    const grade = document.getElementById('classpilot-auth-grade');
+    grade.replaceChildren(new Option('Grade 5', '5'));
+    grade.disabled = false;
+    grade.value = '5';
+    grade.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-student')?.options[1]?.textContent ===
+      'Jordan Student — Resume on this Chromebook'
+  ));
+  assert.equal(
+    await frame.locator('#classpilot-auth-roster-refresh').isEnabled(),
+    true,
+    'Refresh names should enable after the first selected-grade snapshot',
+  );
+
+  await frame.evaluate(() => {
+    const student = document.getElementById('classpilot-auth-student');
+    const pin = document.getElementById('classpilot-auth-pin');
+    student.value = 'student-1';
+    student.dispatchEvent(new Event('change', { bubbles: true }));
+    pin.value = '1234';
+    pin.dispatchEvent(new Event('input', { bubbles: true }));
+    pin.focus();
+  });
+  await enqueueRosterUiResponse(frame, {
+    success: false,
+    error: 'temporary fixture failure',
+    refreshAfterMs: 30_000,
+  });
+  await frame.evaluate(() => window.dispatchEvent(new Event('online')));
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-roster-status')?.classList.contains(
+      'classpilot-auth-roster-note--warning',
+    )
+  ));
+  assert.deepEqual(await frame.evaluate(() => ({
+    selectedStudent: document.getElementById('classpilot-auth-student')?.value,
+    pin: document.getElementById('classpilot-auth-pin')?.value,
+    focus: document.activeElement?.id,
+    submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
+    request: globalThis.__classpilotRosterUiHarness.requests.at(-1),
+  })), {
+    selectedStudent: 'student-1',
+    pin: '1234',
+    focus: 'classpilot-auth-pin',
+    submitDisabled: false,
+    request: {
+      type: 'get-login-roster',
+      gradeLevel: '5',
+      forceRefresh: true,
+    },
+  }, 'transient refresh failure should retain the same-context roster and credentials');
+
+  await enqueueRosterUiResponse(frame, {
+    success: true,
+    cached: true,
+    warning: 'fixture cache warning',
+    students: [{
+      id: 'student-1',
+      name: 'Jordan Student',
+      hasPin: true,
+      reclaimable: true,
+    }],
+  });
+  await frame.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow')));
+  await frame.waitForFunction(() => (
+    globalThis.__classpilotRosterUiHarness.requests.length >= 3 &&
+    document.getElementById('classpilot-auth-roster-status')?.classList.contains(
+      'classpilot-auth-roster-note--warning',
+    )
+  ));
+  assert.deepEqual(await frame.evaluate(() => ({
+    selectedStudent: document.getElementById('classpilot-auth-student')?.value,
+    pin: document.getElementById('classpilot-auth-pin')?.value,
+    focus: document.activeElement?.id,
+  })), {
+    selectedStudent: 'student-1',
+    pin: '1234',
+    focus: 'classpilot-auth-pin',
+  }, 'a cached success should retain selection, PIN, and focus with an amber warning');
+
+  await enqueueRosterUiResponse(frame, { success: true, students: [] });
+  await frame.locator('#classpilot-auth-roster-refresh').click();
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-roster-status')?.textContent ===
+      'No students are currently available.'
+  ));
+  assert.equal(
+    await frame.locator('#classpilot-auth-student').isDisabled(),
+    true,
+    'a successful empty roster should disable student selection',
+  );
+  assert.equal(
+    await frame.locator('#classpilot-auth-roster-refresh').isEnabled(),
+    true,
+    'a successful empty roster must remain refreshable',
+  );
+
+  await frame.evaluate(() => {
+    const grade = document.getElementById('classpilot-auth-grade');
+    const pin = document.getElementById('classpilot-auth-pin');
+    grade.value = '';
+    grade.dispatchEvent(new Event('change', { bubbles: true }));
+    pin.value = '2468';
+    pin.dispatchEvent(new Event('input', { bubbles: true }));
+    pin.focus();
+  });
+  await enqueueRosterUiResponse(frame, { success: true, grades: [] });
+  await frame.evaluate(() => document.getElementById('classpilot-auth-roster-refresh')?.click());
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-roster-status')?.textContent ===
+      'No roster grades are currently available.'
+  ));
+  const emptyGradeSnapshot = await frame.evaluate(() => ({
+    gradeDisabled: document.getElementById('classpilot-auth-grade')?.disabled,
+    studentDisabled: document.getElementById('classpilot-auth-student')?.disabled,
+    refreshDisabled: document.getElementById('classpilot-auth-roster-refresh')?.disabled,
+    pin: document.getElementById('classpilot-auth-pin')?.value,
+    focus: document.activeElement?.id,
+    request: globalThis.__classpilotRosterUiHarness.requests.at(-1),
+    refreshDelays: Array.from(
+      globalThis.__classpilotRosterUiHarness.refreshTimers.values(),
+      (timer) => timer.delay,
+    ),
+  }));
+  assert.deepEqual(emptyGradeSnapshot.request, {
+    type: 'get-login-roster',
+    forceRefresh: true,
+  }, 'Refresh names should reload grades when no grade is selected');
+  assert.equal(emptyGradeSnapshot.gradeDisabled, true);
+  assert.equal(emptyGradeSnapshot.studentDisabled, true);
+  assert.equal(emptyGradeSnapshot.refreshDisabled, false, 'an empty grade list must remain refreshable');
+  assert.equal(emptyGradeSnapshot.pin, '2468', 'an empty grade refresh cleared PIN input');
+  assert.equal(emptyGradeSnapshot.focus, 'classpilot-auth-pin', 'an empty grade refresh moved focus');
+  assert.equal(emptyGradeSnapshot.refreshDelays.length, 1, 'an empty grade list did not schedule recovery');
+  assert.ok(
+    emptyGradeSnapshot.refreshDelays[0] >= 25_000 && emptyGradeSnapshot.refreshDelays[0] <= 35_000,
+    `empty grade recovery delay was outside 25–35 seconds: ${emptyGradeSnapshot.refreshDelays[0]}`,
+  );
+
+  const availableGrades = {
+    success: true,
+    grades: [
+      { value: '4', label: 'Grade 4' },
+      { value: '5', label: 'Grade 5' },
+    ],
+  };
+  await enqueueRosterUiResponse(frame, availableGrades);
+  const automaticDelay = await frame.evaluate(() => (
+    globalThis.__classpilotRosterUiHarness.runLatestRefreshTimer()
+  ));
+  assert.ok(automaticDelay >= 25_000 && automaticDelay <= 35_000);
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-grade')?.options.length === 3 &&
+    document.getElementById('classpilot-auth-grade')?.disabled === false
+  ));
+  assert.deepEqual(
+    await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.requests.at(-1)),
+    { type: 'get-login-roster' },
+    'the empty-grade timer should refresh the grade list without inventing a grade target',
+  );
+
+  for (const eventName of ['online', 'pageshow', 'focus', 'visibilitychange']) {
+    const requestCount = await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.requests.length);
+    await enqueueRosterUiResponse(frame, availableGrades);
+    await frame.evaluate((name) => {
+      if (name === 'visibilitychange') document.dispatchEvent(new Event(name));
+      else if (name === 'pageshow') window.dispatchEvent(new PageTransitionEvent(name));
+      else window.dispatchEvent(new Event(name));
+    }, eventName);
+    await frame.waitForFunction((minimum) => (
+      globalThis.__classpilotRosterUiHarness.requests.length > minimum
+    ), requestCount);
+    assert.deepEqual(
+      await frame.evaluate(() => ({
+        request: globalThis.__classpilotRosterUiHarness.requests.at(-1),
+        grade: document.getElementById('classpilot-auth-grade')?.value,
+        pin: document.getElementById('classpilot-auth-pin')?.value,
+        focus: document.activeElement?.id,
+      })),
+      {
+        request: { type: 'get-login-roster', forceRefresh: true },
+        grade: '',
+        pin: '2468',
+        focus: 'classpilot-auth-pin',
+      },
+      `${eventName} should refresh grades without clearing context, PIN, or focus`,
+    );
+  }
+
+  await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.restore());
+}
+
 async function setAuthViewport(page, frame, viewport, expectedSideVisible = null) {
   await page.setViewportSize(viewport);
   await frame.waitForFunction(({ width, height, sideVisible }) => {
@@ -357,7 +632,19 @@ async function main() {
       await capture(page, label);
     }
 
-    authFrame = await showGate(worker, tabId, page, { setupRequired: false, loginMethod: 'name_pin' });
+    await installRosterUiHarness(authFrame);
+    await enqueueRosterUiResponse(authFrame, {
+      success: true,
+      grades: [
+        { value: '4', label: 'Grade 4' },
+        { value: '5', label: 'Grade 5' },
+      ],
+    });
+    authFrame = await showGate(worker, tabId, page, {
+      setupRequired: false,
+      loginMethod: 'name_pin',
+      rosterContextGeneration: 1,
+    });
     await preparePinForm(authFrame);
 
     for (const viewport of [
@@ -415,6 +702,24 @@ async function main() {
     await page.locator('#page-control').focus();
     await page.waitForTimeout(50);
     assert.equal(await authFrame.evaluate(() => document.activeElement?.id), 'classpilot-auth-grade');
+
+    await exerciseRosterRefreshUi(authFrame);
+
+    authFrame = await showGate(worker, tabId, page, {
+      setupRequired: false,
+      loginMethod: 'name_pin',
+      rosterContextGeneration: 2,
+    });
+    assert.equal(
+      await authFrame.locator('#classpilot-auth-pin').inputValue(),
+      '',
+      'an authority-context change must purge the previous PIN',
+    );
+    assert.equal(
+      await authFrame.locator('#classpilot-auth-student option', { hasText: 'Jordan Student' }).count(),
+      0,
+      'an authority-context change must purge cached roster names',
+    );
 
     await setAuthViewport(page, authFrame, { width: 800, height: 320 }, false);
     const shortBeforeScroll = await layoutSnapshot(authFrame);

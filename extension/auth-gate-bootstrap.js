@@ -449,7 +449,7 @@
       coldWorker: false,
       timestamp: Date.now(),
     };
-    chrome.storage.local.set({ authGateTimingV1: diagnostic }, () => {
+    chrome.runtime.sendMessage({ type: 'record-auth-gate-timing', timing: diagnostic }, () => {
       void chrome.runtime.lastError;
     });
   }
@@ -479,8 +479,9 @@
     )) {
       recordedAuthGateOutcome = candidate;
     }
-    chrome.storage.local.set({
-      authGateTimingV1: recordedAuthGateOutcome,
+    chrome.runtime.sendMessage({
+      type: 'record-auth-gate-timing',
+      timing: recordedAuthGateOutcome,
     }, () => {
       void chrome.runtime.lastError;
     });

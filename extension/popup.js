@@ -83,7 +83,7 @@ function showMainView(config) {
   if (config.studentEmail) {
     document.getElementById('detected-student-name').textContent = config.studentName || 'Auto-detected Student';
     document.getElementById('detected-student-email').textContent = config.studentEmail;
-  } else if (config.studentToken && config.studentName) {
+  } else if (config.hasStudentToken && config.studentName) {
     document.getElementById('detected-student-name').textContent = config.studentName;
     document.getElementById('detected-student-email').textContent = 'ClassPilot shared sign-in';
   } else {
@@ -103,7 +103,7 @@ function showMainView(config) {
 
 function refreshAuthState() {
   const requestEpoch = popupStudentActionEpoch;
-  chrome.runtime.sendMessage({ type: 'get-auth-state', includeConfig: true }, (response) => {
+  chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
     if (
       requestEpoch !== popupStudentActionEpoch
       || chrome.runtime.lastError
@@ -112,10 +112,6 @@ function refreshAuthState() {
       return;
     }
     currentAuthState = response.state;
-    if (response.config) {
-      currentConfig = response.config;
-      showMainView(currentConfig);
-    }
     updateAuthUI();
   });
 }
