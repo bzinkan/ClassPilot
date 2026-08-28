@@ -59,7 +59,7 @@ export default function LandingPage() {
     },
     {
       title: 'Privacy-First Design',
-      desc: 'Monitoring only during school hours. Automatic privacy mode respects student time outside class.',
+      desc: 'School-configured tracking windows and hard-off privacy boundaries, with optional disclosed after-hours modes.',
       icon: (
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
           <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>

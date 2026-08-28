@@ -174,7 +174,7 @@ export default function HelpCenter() {
         },
         {
           question: 'Is monitoring active outside school hours?',
-          answer: 'Heartbeat monitoring and screenshot capture run only during the school\'s configured monitoring hours. Outside that window the extension pauses those activities; previously retained school records remain subject to the school\'s configured retention policy.',
+          answer: 'Heartbeat monitoring and screenshot capture follow the school\'s configured tracking policy. They pause whenever that policy is hard-off; a school-authorized limited or full after-hours mode can continue the corresponding processing. Previously retained records remain subject to the school\'s retention policy.',
         },
         {
           question: 'How long is student data retained?',
@@ -208,7 +208,7 @@ export default function HelpCenter() {
         },
         {
           question: 'I can\'t see student screenshots',
-          answer: 'Ambient thumbnails appear only while an authorized teacher or administrator is actively observing the relevant class or student scope during monitoring hours. Check the session, observation state, extension connection, and school configuration; managed deployments do not depend on a student screen-picker action.',
+          answer: 'Tracking-window thumbnails are captured about every 30 seconds while school-managed monitoring is active under a short-lived exact authority lease; capture does not depend on whether the teacher dashboard tab or tile is visible. SchoolPilot retains class-bound thumbnails and discards gap/student-session pixels. Check the session, tracking policy, extension connection, and school configuration; managed deployments do not depend on a student screen-picker action.',
         },
         {
           question: 'Google Classroom sync isn\'t working',

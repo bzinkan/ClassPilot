@@ -704,7 +704,7 @@ function generatePDFContent(): string {
     <ul>
       <li>ClassPilot only monitors during configured school hours</li>
       <li>Students see a green indicator when monitoring is active</li>
-      <li>Heartbeat monitoring and screenshot capture pause outside configured monitoring hours</li>
+      <li>Heartbeat monitoring and screenshot capture pause whenever the school's configured tracking policy is hard-off; limited or full after-hours modes can continue the corresponding processing</li>
       <li>Retention follows the school's configured policy and agreement</li>
     </ul>
   </div>

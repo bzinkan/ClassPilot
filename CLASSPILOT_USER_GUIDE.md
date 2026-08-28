@@ -29,7 +29,7 @@ ClassPilot is a comprehensive classroom monitoring system designed for education
 - 🎥 **Live Screen Viewing** - Watch student screens via WebRTC with advanced controls
 - 🎯 **Per-Student Targeting** - Apply controls to specific students or entire class
 - 🔒 **Remote Classroom Control** - Lock screens, manage tabs, apply domain restrictions
-- 📸 **Authorized Visual Support** - Show observation-bound thumbnails, exact safety captures, and temporary Live View streams
+- 📸 **Authorized Visual Support** - Show class-bound tracking-window thumbnails, exact safety captures, and temporary Live View streams
 - 📱 **Shared Device Support** - Multiple students per Chromebook
 - 🔐 **Privacy-First Design** - Transparent monitoring with school-controlled authorization and accurate disclosure
 - 📈 **Website Duration Tracking** - Track time spent on websites
@@ -457,7 +457,8 @@ ClassPilot is built with privacy as a core principle:
 
 ✅ **Purpose-Limited Data Processing**
 - Processes school-issued identifiers, active-tab URLs/titles, heartbeat state, and classroom communications needed for the service
-- May process observation-bound thumbnails and an exact-bound safety screenshot under the configured school policy
+- May process tracking-window thumbnails about every 30 seconds while school-managed monitoring is active, independent of dashboard visibility; SchoolPilot retains class-bound images and discards gap/student-session pixels
+- May process an exact-bound safety screenshot under the configured school policy
 - Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles
 - The school setting controls heartbeat history and related report detail; ambient thumbnails, safety evidence, communications, account/audit records, and local teacher downloads follow separate policies
 
@@ -514,7 +515,7 @@ Access via **Settings → Data Retention**
 - Camera or microphone content
 - Downloaded files
 
-Authorized observation thumbnails, exact-tab safety screenshots, and temporary
+Authorized class-bound tracking-window thumbnails, exact-tab safety screenshots, and temporary
 Live View can show the website content visibly rendered on the shared tab or
 screen. That visible content can include a message, email, or file if it is open
 at the time. Live View streams are not recorded by the extension or SchoolPilot
@@ -1002,7 +1003,7 @@ ClassPilot is designed to support compliance with:
 ✅ Identifying technology issues
 
 **Prohibited Use:**
-❌ Monitoring outside school hours (unless consented)
+❌ Monitoring outside the school's disclosed and configured tracking policy
 ❌ Sharing student data with unauthorized parties
 ❌ Using data for non-educational purposes
 ❌ Accessing personal student information
