@@ -2391,6 +2391,354 @@ async function main() {
       const broadcastOfferCleaned = !teacherBroadcastActive && teacherBroadcastSessionId === null;
       wsSend = originalWsSend;
 
+      // Exercise the complete same-Chromebook privacy boundary, rather than
+      // testing screenshot fencing and roster-bound recovery in isolation.
+      // Alex's pixels have already been acquired when the shared-device clear
+      // begins. The real manual PIN-login path must commit Bob with the exact
+      // roster grant, abort Alex's request, and send only a newly captured Bob
+      // image under Bob's immutable bearer/session and class authority.
+      let manualHandoffScreenshot;
+      const handoffOriginalFetch = globalThis.fetch;
+      const handoffOriginalFetchWithBackoff = fetchWithBackoff;
+      const handoffOriginalFastAuthGateEnabled = fastAuthGateEnabled;
+      const handoffOriginalCheckLicenseStatus = checkLicenseStatus;
+      const handoffOriginalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const handoffOriginalSharedSignInConfig = { ...sharedSignInLoginConfig };
+      const handoffOriginalConfig = { ...CONFIG };
+      const handoffOriginalTrackingState = trackingState;
+      let resolveAlexUploadStarted;
+      const alexUploadStarted = new Promise((resolve) => {
+        resolveAlexUploadStarted = resolve;
+      });
+      let alexUploadRequest = null;
+      let alexUploadAborted = false;
+      let loginRecoveryHeader = null;
+      let loginBody = null;
+      const acceptedPostHandoffUploads = [];
+      const requestHeader = (headers, name) => {
+        if (headers instanceof Headers) return headers.get(name);
+        const entry = Object.entries(headers || {}).find(
+          ([key]) => key.toLowerCase() === name.toLowerCase(),
+        );
+        return entry?.[1] || null;
+      };
+      try {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('manual handoff screenshot fixture reset');
+          await clearStudentAuth('manual_handoff_screenshot_fixture_reset', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            disconnectWebSocket: false,
+            notifyAuthGateTabs: false,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+
+        const alexAuthContextId = generateAuthContextId();
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'handoff-screenshot-school',
+          schoolSlug: 'handoff-screenshot-school',
+          enrollmentKey: 'handoff-screenshot-enrollment-key',
+          deviceId: 'handoff-screenshot-device',
+          studentToken: 'alex-handoff-bearer',
+          activeStudentId: 'student-alex',
+          activeStudentSessionId: 'alex-handoff-session',
+          authContextId: alexAuthContextId,
+          studentEmail: 'alex@example.edu',
+          studentName: 'Alex Student',
+          identitySource: 'manual_pin',
+          manualLoginLastSeenAt: Date.now(),
+          autoRegistrationPaused: false,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        fastAuthGateEnabled = false;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: CONFIG.schoolId,
+        };
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+        await setManualAuthState({
+          authContextId: alexAuthContextId,
+          studentToken: CONFIG.studentToken,
+          activeStudentId: CONFIG.activeStudentId,
+          activeStudentSessionId: CONFIG.activeStudentSessionId,
+          studentEmail: CONFIG.studentEmail,
+          studentName: CONFIG.studentName,
+          registered: true,
+          identitySource: CONFIG.identitySource,
+          manualLoginLastSeenAt: CONFIG.manualLoginLastSeenAt,
+          autoRegistrationPaused: false,
+        });
+        activateAuthenticatedContext(alexAuthContextId);
+        const alexAuth = captureAuthenticatedContext('Alex screenshot handoff');
+        await armStudentSessionRecovery({
+          serverOrigin: alexAuth.serverOrigin,
+          schoolId: alexAuth.schoolId,
+          token: 'M'.repeat(43),
+          authContextId: alexAuth.authContextId,
+        });
+        adoptLicenseState(true, 'active', alexAuth);
+        trackingState = TRACKING_STATES.ACTIVE;
+        adoptNegotiatedProtocolState({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: [
+            'scopedAuthorityChecksV1',
+            'screenshotTrackingWindowLeaseV1',
+            'screenshotObservationLeaseV1',
+          ],
+        }, alexAuth);
+        const alexClassAuthority = {
+          kind: 'teaching_session',
+          teachingSessionId: 'handoff-class-alex',
+          controlRevision: 901,
+        };
+        screenshotCaptureInFlight = true;
+        adoptScreenshotPolicy({
+          mode: 'tracking_window_lease',
+          captureAllowed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+          authority: alexClassAuthority,
+        }, alexAuth);
+        screenshotCaptureInFlight = false;
+        screenshotImmediateCapturePending = false;
+
+        globalThis.fetch = async (url) => {
+          if (String(url).endsWith('/api/extension/session-release')) {
+            // Preserve Alex's exact recovery record so the roster can issue a
+            // one-shot grant for the same-device Bob handoff.
+            return new Response('{}', {
+              status: 503,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        fetchWithBackoff = async (url, init = {}) => {
+          const requestUrl = String(url);
+          if (requestUrl.includes('/api/classpilot/device/screenshot')) {
+            const request = {
+              authorization: requestHeader(init.headers, 'Authorization'),
+              body: JSON.parse(String(init.body || '{}')),
+              binding: {
+                studentId: CONFIG.activeStudentId,
+                studentSessionId: CONFIG.activeStudentSessionId,
+              },
+            };
+            if (request.authorization === 'Bearer alex-handoff-bearer') {
+              alexUploadRequest = request;
+              resolveAlexUploadStarted();
+              return new Promise((resolve, reject) => {
+                const rejectAborted = () => {
+                  alexUploadAborted = true;
+                  const error = new Error('Alex screenshot authority retired');
+                  error.name = 'AbortError';
+                  reject(error);
+                };
+                if (init.signal?.aborted) {
+                  rejectAborted();
+                  return;
+                }
+                init.signal?.addEventListener('abort', rejectAborted, { once: true });
+              });
+            }
+            acceptedPostHandoffUploads.push(request);
+            return new Response('{}', {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (requestUrl.includes('/api/extension/login-roster?')) {
+            return new Response(JSON.stringify({
+              loginMethod: 'name_pin',
+              students: [{
+                id: 'student-alex',
+                name: 'Alex Student',
+                hasPin: true,
+                reclaimable: true,
+              }, {
+                id: 'student-bob',
+                name: 'Bob Student',
+                hasPin: true,
+                reclaimable: false,
+              }],
+              grades: [{ value: '5', label: 'Grade 5' }],
+            }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (requestUrl.endsWith('/api/extension/student-login')) {
+            loginRecoveryHeader = requestHeader(init.headers, 'Authorization');
+            loginBody = JSON.parse(String(init.body || '{}'));
+            return new Response(JSON.stringify({
+              schoolId: 'handoff-screenshot-school',
+              studentToken: 'bob-handoff-bearer',
+              studentSessionId: 'bob-handoff-session',
+              sessionRecovery: { token: 'N'.repeat(43) },
+              student: {
+                id: 'student-bob',
+                email: 'bob@example.edu',
+                firstName: 'Bob',
+                lastName: 'Student',
+              },
+            }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+
+        lastScreenshotAttemptAt = 0;
+        const alexCapturePromise = captureAndSendScreenshot({
+          reason: 'manual-handoff-alex-in-flight',
+          queryActiveTab: async () => [{
+            id: 4901,
+            windowId: 49,
+            active: true,
+            url: 'https://alex-handoff.example/private',
+            title: 'Alex private pixels',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,YWxleC1wcml2YXRl',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+          subscribeWindowFocus: () => () => {},
+        });
+        await boundedWait(alexUploadStarted, 'Alex screenshot upload');
+        const clearAlexPromise = clearStudentAuth('shared_device_student_handoff', {
+          notifyBackend: false,
+          pauseAutoRegistration: true,
+          disconnectWebSocket: false,
+          notifyAuthGateTabs: false,
+          expectedAuthContext: alexAuth,
+        });
+        await boundedWait(clearAlexPromise, 'Alex local handoff clear');
+        const alexCaptureResult = await boundedWait(
+          alexCapturePromise,
+          'retired Alex screenshot cancellation',
+        );
+
+        const roster = await fetchLoginRosterForGate({
+          gradeLevel: '5',
+          forceRefresh: true,
+        });
+        const login = await manualStudentLogin({
+          mode: 'pin',
+          studentId: 'student-bob',
+          pin: '2468',
+          recoveryGrantId: roster.recoveryGrantId,
+        });
+        await studentAuthMutationTail;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const bobAuth = captureAuthenticatedContext('Bob screenshot handoff');
+        adoptLicenseState(true, 'active', bobAuth);
+        trackingState = TRACKING_STATES.ACTIVE;
+        adoptNegotiatedProtocolState({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: [
+            'scopedAuthorityChecksV1',
+            'screenshotTrackingWindowLeaseV1',
+            'screenshotObservationLeaseV1',
+          ],
+        }, bobAuth);
+        const bobClassAuthority = {
+          kind: 'teaching_session',
+          teachingSessionId: 'handoff-class-bob',
+          controlRevision: 902,
+        };
+        screenshotCaptureInFlight = true;
+        adoptScreenshotPolicy({
+          mode: 'tracking_window_lease',
+          captureAllowed: true,
+          expiresInSeconds: 90,
+          serverTime: new Date().toISOString(),
+          authority: bobClassAuthority,
+        }, bobAuth);
+        screenshotCaptureInFlight = false;
+        screenshotImmediateCapturePending = false;
+        const alexCapturedAtMs = Date.parse(alexUploadRequest?.body?.capturedAt || '');
+        while (Date.now() <= alexCapturedAtMs) {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+        }
+        lastScreenshotAttemptAt = 0;
+        const bobCaptureResult = await captureAndSendScreenshot({
+          reason: 'manual-handoff-bob-first-capture',
+          queryActiveTab: async () => [{
+            id: 4902,
+            windowId: 49,
+            active: true,
+            url: 'https://bob-handoff.example/current',
+            title: 'Bob current pixels',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,Ym9iLWN1cnJlbnQ=',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+          subscribeWindowFocus: () => () => {},
+        });
+
+        manualHandoffScreenshot = {
+          alex: {
+            authAborted: alexAuth.signal.aborted,
+            uploadAborted: alexUploadAborted,
+            captureResult: alexCaptureResult,
+            request: alexUploadRequest,
+          },
+          rosterGrantId: roster.recoveryGrantId || null,
+          loginSuccess: login.success === true,
+          loginRecoveryHeader,
+          loginBodyStudentId: loginBody?.studentId || null,
+          bob: {
+            auth: {
+              studentId: bobAuth.studentId,
+              studentSessionId: bobAuth.studentSessionId,
+            },
+            classAuthority: bobClassAuthority,
+            captureResult: bobCaptureResult,
+          },
+          acceptedPostHandoffUploads,
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('manual handoff screenshot fixture cleanup');
+          await clearStudentAuth('manual_handoff_screenshot_fixture_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            disconnectWebSocket: false,
+            notifyAuthGateTabs: false,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        globalThis.fetch = handoffOriginalFetch;
+        fetchWithBackoff = handoffOriginalFetchWithBackoff;
+        fastAuthGateEnabled = handoffOriginalFastAuthGateEnabled;
+        checkLicenseStatus = handoffOriginalCheckLicenseStatus;
+        initializeAdaptiveTracking = handoffOriginalInitializeAdaptiveTracking;
+        sharedSignInLoginConfig = handoffOriginalSharedSignInConfig;
+        CONFIG = handoffOriginalConfig;
+        trackingState = handoffOriginalTrackingState;
+      }
+
       return {
         recoveryRace,
         signOutElapsedMs,
@@ -2518,6 +2866,7 @@ async function main() {
         broadcastOfferCleaned,
         teacherBroadcastActive,
         teacherBroadcastSessionId,
+        manualHandoffScreenshot,
       };
     });
 
@@ -2715,6 +3064,53 @@ async function main() {
     assert.equal(
       result.trackingWindowUpload.body.timestamp,
       Date.parse(result.trackingWindowUpload.body.capturedAt),
+    );
+    const handoffScreenshot = result.manualHandoffScreenshot;
+    assert.match(handoffScreenshot.rosterGrantId, /^roster_[A-Za-z0-9_-]+$/);
+    assert.equal(handoffScreenshot.loginSuccess, true);
+    assert.equal(
+      handoffScreenshot.loginRecoveryHeader,
+      `ClassPilot-Recovery ${'M'.repeat(43)}`,
+    );
+    assert.equal(handoffScreenshot.loginBodyStudentId, 'student-bob');
+    assert.equal(handoffScreenshot.alex.authAborted, true);
+    assert.equal(handoffScreenshot.alex.uploadAborted, true);
+    assert.deepEqual(handoffScreenshot.alex.captureResult, { status: 'paused_unobserved' });
+    assert.equal(handoffScreenshot.alex.request.authorization, 'Bearer alex-handoff-bearer');
+    assert.deepEqual(handoffScreenshot.alex.request.binding, {
+      studentId: 'student-alex',
+      studentSessionId: 'alex-handoff-session',
+    });
+    assert.deepEqual(handoffScreenshot.alex.request.body.screenshotAuthority, {
+      kind: 'teaching_session',
+      teachingSessionId: 'handoff-class-alex',
+      controlRevision: 901,
+    });
+    assert.equal(handoffScreenshot.acceptedPostHandoffUploads.length, 1);
+    const [firstAcceptedHandoffUpload] = handoffScreenshot.acceptedPostHandoffUploads;
+    assert.equal(firstAcceptedHandoffUpload.authorization, 'Bearer bob-handoff-bearer');
+    assert.deepEqual(firstAcceptedHandoffUpload.binding, {
+      studentId: 'student-bob',
+      studentSessionId: 'bob-handoff-session',
+    });
+    assert.deepEqual(handoffScreenshot.bob.auth, firstAcceptedHandoffUpload.binding);
+    assert.deepEqual(
+      firstAcceptedHandoffUpload.body.screenshotAuthority,
+      handoffScreenshot.bob.classAuthority,
+    );
+    assert.equal(firstAcceptedHandoffUpload.body.deviceId, undefined);
+    assert.equal(
+      firstAcceptedHandoffUpload.body.timestamp,
+      Date.parse(firstAcceptedHandoffUpload.body.capturedAt),
+    );
+    assert.ok(
+      Date.parse(firstAcceptedHandoffUpload.body.capturedAt)
+        > Date.parse(handoffScreenshot.alex.request.body.capturedAt),
+      'Bob must upload pixels captured after Alex authority was retired',
+    );
+    assert.notEqual(
+      firstAcceptedHandoffUpload.body.screenshot,
+      handoffScreenshot.alex.request.body.screenshot,
     );
     assert.deepEqual(result.noDashboardScreenshotAlarm, { periodInMinutes: 0.5 });
     assert.equal(result.noDashboardFiveMinuteCaptureSlots, 10);
