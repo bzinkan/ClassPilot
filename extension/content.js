@@ -2439,6 +2439,9 @@ function attachAuthGateHandlers(state) {
         mode: 'pin',
         studentId: document.getElementById('classpilot-auth-student')?.value || '',
         pin: pinInput?.value || '',
+        ...(authGateRosterSnapshot?.recoveryGrantId
+          ? { recoveryGrantId: authGateRosterSnapshot.recoveryGrantId }
+          : {}),
       }, event.submitter);
     });
     loadAuthGateGradeOptions();
@@ -2529,6 +2532,7 @@ function loadAuthGateGradeOptions(options = {}) {
   chrome.runtime.sendMessage({
     type: 'get-login-roster',
     ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+    ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
   }, (response) => {
     const runtimeError = chrome.runtime.lastError;
     if (requestGeneration !== authGateRosterRequestGeneration || !status.isConnected) return;
@@ -2652,6 +2656,7 @@ function loadAuthGateRoster(options = {}) {
     type: 'get-login-roster',
     gradeLevel: selectedGrade,
     ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+    ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
   }, (response) => {
     const runtimeError = chrome.runtime.lastError;
     if (requestGeneration !== authGateRosterRequestGeneration ||
@@ -2708,7 +2713,13 @@ function loadAuthGateRoster(options = {}) {
       ? response.students.filter((student) => student && student.id)
       : [];
     const previousStudentId = select.value;
-    authGateRosterSnapshot = { gradeLevel: selectedGrade, students };
+    authGateRosterSnapshot = {
+      gradeLevel: selectedGrade,
+      students,
+      recoveryGrantId: typeof response.recoveryGrantId === 'string'
+        ? response.recoveryGrantId
+        : null,
+    };
     authGateLiveRosterLoaded = true;
     if (!students.length) {
       if (response.cached === true && response.warning) {
@@ -2754,10 +2765,31 @@ function submitAuthGateLogin(payload, submitButton) {
   chrome.runtime.sendMessage({ type: 'manual-student-login', payload }, (response) => {
     if (requestGeneration !== authGateStateRequestGeneration) return;
     if (chrome.runtime.lastError || !response?.success) {
-      setAuthGateError(response?.error || 'Invalid student credentials');
       if (submit) {
         submit.textContent = 'Sign In';
         submit.setAttribute('aria-busy', 'false');
+      }
+      const activeSessionConflict = response?.status === 409
+        || response?.code === 'STUDENT_SESSION_ACTIVE';
+      if (activeSessionConflict) {
+        setAuthGateError('This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.');
+        const pinInput = document.getElementById('classpilot-auth-pin');
+        if (pinInput) pinInput.value = '';
+        if (payload.mode === 'pin') {
+          updatePinAuthSubmitState();
+          refreshAuthGateRosterOrGrades({
+            forceRefresh: true,
+            forceRecovery: true,
+            background: true,
+          });
+        } else if (submit) {
+          submit.disabled = false;
+        }
+        pinInput?.focus({ preventScroll: true });
+        return;
+      }
+      setAuthGateError(response?.error || 'Invalid student credentials');
+      if (submit) {
         if (payload.mode === 'pin') {
           updatePinAuthSubmitState();
         } else {

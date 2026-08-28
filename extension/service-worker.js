@@ -1728,6 +1728,12 @@ function generateStudentSessionRecoveryGeneration() {
   return `recovery_${String(random).replace(/[^A-Za-z0-9_-]/g, '')}`;
 }
 
+function generateLoginRosterRecoveryGrantId() {
+  const random = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
+  return `roster_${String(random).replace(/[^A-Za-z0-9_-]/g, '')}`;
+}
+
 function normalizeStudentSessionRecoveryRecord(raw, state, nowValue = Date.now()) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const token = normalizeStudentSessionRecoveryToken(raw.token);
@@ -2188,13 +2194,26 @@ async function flushStudentSessionRecovery(options = {}) {
   const run = (async () => {
     await ensureStudentSessionRecoveryLoaded();
     const nowValue = Date.now();
+    const forceGeneration = normalizeStudentSessionRecoveryOpaqueId(
+      options.forceGeneration,
+      'recovery_',
+    );
     const maxRecords = Math.max(1, Math.min(
       STUDENT_SESSION_RECOVERY_MAX_PENDING,
       Number(options.maxRecords) || STUDENT_SESSION_RECOVERY_MAX_PENDING,
     ));
-    const due = studentSessionRecoveryState.pending
-      .filter((record) => record.discardAt > nowValue && record.nextAttemptAt <= nowValue)
-      .slice(0, maxRecords);
+    const eligible = studentSessionRecoveryState.pending.filter(
+      (record) => record.discardAt > nowValue,
+    );
+    const forced = forceGeneration
+      ? eligible.find((record) => record.generation === forceGeneration)
+      : null;
+    const due = [
+      ...(forced ? [forced] : []),
+      ...eligible.filter((record) => (
+        record.generation !== forceGeneration && record.nextAttemptAt <= nowValue
+      )),
+    ].slice(0, maxRecords);
     for (const record of due) {
       const outcome = await attemptStudentSessionRecoveryRelease(record);
       await applyStudentSessionRecoveryReleaseOutcome(record, outcome);
@@ -2236,12 +2255,16 @@ function matchingStudentSessionRecoveryRecord() {
   return studentSessionRecoveryState.pending.find(matches) || null;
 }
 
-async function prepareStudentSessionRecoveryForGate() {
+async function prepareStudentSessionRecoveryForGate(options = {}) {
   await ensureStudentSessionRecoveryLoaded();
   if (!hasStudentAuth() && studentSessionRecoveryState.armed) {
     await transitionStudentSessionRecoveryForAuthClear(null, { serverSessionEnded: false });
   }
-  await flushStudentSessionRecovery({ maxRecords: 1 });
+  const matchingRecord = matchingStudentSessionRecoveryRecord();
+  await flushStudentSessionRecovery({
+    maxRecords: 1,
+    forceGeneration: options.forceRelease === true ? matchingRecord?.generation : null,
+  });
   return matchingStudentSessionRecoveryRecord();
 }
 
@@ -2291,29 +2314,52 @@ function bindLoginRosterRecoveryGrant(record, students, cacheKey) {
   const normalizedCacheKey = String(cacheKey || '');
   if (!normalizedCacheKey || !record) {
     if (normalizedCacheKey) clearLoginRosterRecoveryGrant(normalizedCacheKey);
-    return;
+    return null;
   }
-  const reclaimableStudentIds = new Set(
-    students
-      .filter((student) => student?.reclaimable === true && student?.id)
+  const rosterStudents = Array.isArray(students) ? students : [];
+  const hasReclaimableStudent = rosterStudents.some(
+    (student) => student?.reclaimable === true && student?.id,
+  );
+  const selectableStudentIds = new Set(
+    rosterStudents
+      .filter((student) => student?.hasPin === true && student?.id)
       .map((student) => String(student.id)),
   );
-  if (reclaimableStudentIds.size === 0) {
+  if (!hasReclaimableStudent || selectableStudentIds.size === 0) {
     clearLoginRosterRecoveryGrant(normalizedCacheKey);
-    return;
+    return null;
   }
+  const existing = loginRosterRecoveryGrants.get(normalizedCacheKey);
+  const existingStudentIds = existing?.studentIds instanceof Set
+    ? [...existing.studentIds]
+    : [];
+  if (
+    existing
+    && existing.recoveryRevision === studentSessionRecoveryRevision
+    && existing.recordGeneration === record.generation
+    && existing.serverOrigin === record.serverOrigin
+    && existing.schoolId === record.schoolId
+    && existing.token === record.token
+    && existingStudentIds.length === selectableStudentIds.size
+    && existingStudentIds.every((studentId) => selectableStudentIds.has(studentId))
+  ) {
+    return existing.grantId;
+  }
+  const grantId = generateLoginRosterRecoveryGrantId();
   loginRosterRecoveryGrants.set(normalizedCacheKey, {
+    grantId,
     cacheKey: normalizedCacheKey,
     recoveryRevision: studentSessionRecoveryRevision,
     recordGeneration: record.generation,
     serverOrigin: record.serverOrigin,
     schoolId: record.schoolId,
     token: record.token,
-    studentIds: reclaimableStudentIds,
+    studentIds: selectableStudentIds,
   });
   while (loginRosterRecoveryGrants.size > 12) {
     loginRosterRecoveryGrants.delete(loginRosterRecoveryGrants.keys().next().value);
   }
+  return grantId;
 }
 
 function clearLoginRosterRecoveryGrant(cacheKey) {
@@ -2321,9 +2367,10 @@ function clearLoginRosterRecoveryGrant(cacheKey) {
   return normalizedCacheKey ? loginRosterRecoveryGrants.delete(normalizedCacheKey) : false;
 }
 
-function recoveryGrantForStudentLogin(studentId) {
+function recoveryGrantForStudentLogin(studentId, grantId) {
   const normalizedStudentId = String(studentId || '').trim();
-  if (!normalizedStudentId) return null;
+  const normalizedGrantId = normalizeStudentSessionRecoveryOpaqueId(grantId, 'roster_');
+  if (!normalizedStudentId || !normalizedGrantId) return null;
   const currentBinding = authGateConfigBinding();
   const recoveryRecords = [
     studentSessionRecoveryState.armed,
@@ -2341,7 +2388,9 @@ function recoveryGrantForStudentLogin(studentId) {
       loginRosterRecoveryGrants.delete(cacheKey);
       continue;
     }
-    if (grant.studentIds.has(normalizedStudentId)) return grant;
+    if (grant.grantId === normalizedGrantId && grant.studentIds.has(normalizedStudentId)) {
+      return grant;
+    }
   }
   return null;
 }
@@ -3604,6 +3653,8 @@ async function parseJsonResponse(response) {
 function buildResponseError(response, data = {}, fallbackMessage = 'Request failed') {
   const error = new Error(data.error || data.message || fallbackMessage);
   error.status = response?.status;
+  const code = String(data.code || data.errorCode || '').trim();
+  if (/^[A-Z][A-Z0-9_]{0,127}$/.test(code)) error.code = code;
   if (response?.status === 429) {
     error.retryAfterMs = parseRetryAfterMs(response) || API_RETRY_BASE_DELAY_MS;
   }
@@ -10242,16 +10293,23 @@ function loginRosterBackoffRemainingMs(cacheKey) {
 
 async function fetchLoginRosterForGate(options = {}) {
   await studentAuthMutationTail;
-  const recoveryRecord = await prepareStudentSessionRecoveryForGate();
+  const recoveryRecord = await prepareStudentSessionRecoveryForGate({
+    forceRelease: options.forceRecovery === true,
+  });
   const requestedGradeLevel = String(options.gradeLevel || '').trim();
   const cacheKey = loginRosterRequestCacheKey(requestedGradeLevel, recoveryRecord);
   const cached = loginRosterCache.get(cacheKey);
   const backoffRemainingMs = loginRosterBackoffRemainingMs(cacheKey);
   if (backoffRemainingMs > 0) {
     if (cached) {
-      bindLoginRosterRecoveryGrant(recoveryRecord, cached.data.students, cacheKey);
+      const recoveryGrantId = bindLoginRosterRecoveryGrant(
+        recoveryRecord,
+        cached.data.students,
+        cacheKey,
+      );
       return {
         ...cached.data,
+        ...(recoveryGrantId ? { recoveryGrantId } : {}),
         cached: true,
         warning: true,
         refreshAfterMs: backoffRemainingMs,
@@ -10267,9 +10325,21 @@ async function fetchLoginRosterForGate(options = {}) {
       error: 'ClassPilot is temporarily unavailable',
     };
   }
-  if (cached && Date.now() - cached.fetchedAt < LOGIN_ROSTER_CACHE_MIN_AGE_MS) {
-    bindLoginRosterRecoveryGrant(recoveryRecord, cached.data.students, cacheKey);
-    return { ...cached.data, cached: true };
+  if (
+    options.forceRefresh !== true
+    && cached
+    && Date.now() - cached.fetchedAt < LOGIN_ROSTER_CACHE_MIN_AGE_MS
+  ) {
+    const recoveryGrantId = bindLoginRosterRecoveryGrant(
+      recoveryRecord,
+      cached.data.students,
+      cacheKey,
+    );
+    return {
+      ...cached.data,
+      ...(recoveryGrantId ? { recoveryGrantId } : {}),
+      cached: true,
+    };
   }
   const existing = loginRosterInFlight.get(cacheKey);
   if (existing) return existing;
@@ -10289,8 +10359,15 @@ async function fetchLoginRosterForGate(options = {}) {
       while (loginRosterCache.size > 12) {
         loginRosterCache.delete(loginRosterCache.keys().next().value);
       }
-      bindLoginRosterRecoveryGrant(recoveryRecord, data.students, cacheKey);
-      return data;
+      const recoveryGrantId = bindLoginRosterRecoveryGrant(
+        recoveryRecord,
+        data.students,
+        cacheKey,
+      );
+      return {
+        ...data,
+        ...(recoveryGrantId ? { recoveryGrantId } : {}),
+      };
     }
     if (result?.unavailable === true) {
       result.refreshAfterMs = recordLoginRosterBackoff(
@@ -10301,9 +10378,14 @@ async function fetchLoginRosterForGate(options = {}) {
       loginRosterBackoffUntil.delete(cacheKey);
     }
     if (cached && result?.unavailable === true) {
-      bindLoginRosterRecoveryGrant(recoveryRecord, cached.data.students, cacheKey);
+      const recoveryGrantId = bindLoginRosterRecoveryGrant(
+        recoveryRecord,
+        cached.data.students,
+        cacheKey,
+      );
       return {
         ...cached.data,
+        ...(recoveryGrantId ? { recoveryGrantId } : {}),
         cached: true,
         warning: true,
         refreshAfterMs: Number(result.refreshAfterMs) || loginRosterRefreshAfterMs(),
@@ -10314,9 +10396,14 @@ async function fetchLoginRosterForGate(options = {}) {
   }).catch((error) => {
     const refreshAfterMs = recordLoginRosterBackoff(cacheKey, loginRosterRefreshAfterMs());
     if (cached) {
-      bindLoginRosterRecoveryGrant(recoveryRecord, cached.data.students, cacheKey);
+      const recoveryGrantId = bindLoginRosterRecoveryGrant(
+        recoveryRecord,
+        cached.data.students,
+        cacheKey,
+      );
       return {
         ...cached.data,
+        ...(recoveryGrantId ? { recoveryGrantId } : {}),
         cached: true,
         warning: true,
         refreshAfterMs,
@@ -10694,7 +10781,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   }
   const isPinLogin = payload.mode === 'pin';
   const recoveryGrant = isPinLogin
-    ? recoveryGrantForStudentLogin(payload.studentId)
+    ? recoveryGrantForStudentLogin(payload.studentId, payload.recoveryGrantId)
     : recoveryGrantForEmailStudentLogin();
   const body = {
     deviceId,
@@ -19613,6 +19700,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return fetchLoginRosterForGate({
           gradeLevel: message.gradeLevel,
           forceRefresh: message.forceRefresh === true,
+          forceRecovery: message.forceRecovery === true,
         });
       })
       .then((data) => sendResponse(data))
@@ -19623,7 +19711,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'manual-student-login') {
     manualStudentLogin(message.payload || {})
       .then((data) => sendResponse(data))
-      .catch((error) => sendResponse({ success: false, error: error.message || 'Invalid student credentials' }));
+      .catch((error) => {
+        const failure = {
+          success: false,
+          error: error.message || 'Invalid student credentials',
+        };
+        if (Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599) {
+          failure.status = error.status;
+        }
+        if (/^[A-Z][A-Z0-9_]{0,127}$/.test(String(error?.code || ''))) {
+          failure.code = error.code;
+        }
+        sendResponse(failure);
+      });
     return true;
   }
 
