@@ -899,12 +899,35 @@ async function main() {
     const protocolResilience = await worker.evaluate(async ({ fixturePort }) => {
       const originalConfig = { ...CONFIG };
       const originalTrackingState = trackingState;
+      const originalStudentAuthInvalidating = studentAuthInvalidating;
+      // Quiesce real startup/transport maintenance before installing the
+      // synthetic protocol identity. Otherwise a delayed registration,
+      // heartbeat, or socket callback can legitimately retire authority
+      // halfway through this long multi-command fixture.
+      studentAuthInvalidating = true;
+      advanceStudentAuthMutationGeneration();
+      scheduleHeartbeat(null);
+      await chrome.alarms.clear('heartbeat');
+      const pendingRegistration = chromeProfileRegistrationInFlight;
+      if (pendingRegistration) await pendingRegistration.catch(() => {});
+      const heartbeatDrainDeadline = Date.now() + 5_000;
+      while (heartbeatInFlight && Date.now() < heartbeatDrainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (heartbeatInFlight) {
+        throw new Error('Background heartbeat did not drain before protocol resilience fixture');
+      }
+      await studentAuthMutationTail.catch(() => {});
+      // Keep alarm/event callbacks out of the synthetic identity until the
+      // fixture restores the real worker state below.
+      heartbeatInFlight = true;
       CONFIG.deviceId = 'protocol-device';
       CONFIG.activeStudentId = 'protocol-student';
       CONFIG.activeStudentSessionId = 'protocol-student-session';
       CONFIG.studentToken = 'protocol-token';
       CONFIG.schoolId = 'protocol-school';
       CONFIG.identitySource = 'integration_test';
+      CONFIG.autoRegistrationPaused = true;
       studentAuthInvalidating = false;
       studentAuthCommitPending = false;
       advanceStudentAuthMutationGeneration();
@@ -1026,6 +1049,14 @@ async function main() {
       const exactSnapshot = await buildOpaqueTabSnapshot(await chrome.tabs.query({}));
       const firstEntry = exactSnapshot.localEntries.find((entry) => entry.tabId === first.id);
       const secondEntry = exactSnapshot.localEntries.find((entry) => entry.tabId === second.id);
+      // Background transport teardown is intentionally allowed to retire
+      // negotiated protocol state. Re-establish the fixture's capability at
+      // the command boundary so this assertion measures exact-tab authority,
+      // not nondeterministic WebSocket maintenance from another test phase.
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: ['exactTabCloseV1'],
+      }, captureAuthenticatedContext('exact-tab resilience command fixture'));
       const exactResult = await executeRemoteControlCommand({
         type: 'close-tab',
         data: {
@@ -1271,7 +1302,11 @@ async function main() {
       await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
       await new Promise((resolve) => setTimeout(resolve, 1_600));
       currentClassroomState = classroomStateBeforeFabTests;
+      studentAuthInvalidating = true;
+      advanceStudentAuthMutationGeneration();
+      heartbeatInFlight = false;
       CONFIG = originalConfig;
+      studentAuthInvalidating = originalStudentAuthInvalidating;
       if (
         CONFIG.deviceId
         && CONFIG.activeStudentId
@@ -2160,6 +2195,23 @@ async function main() {
         headers: { 'content-type': 'application/json' },
       }));
       await delayedStudentAHeartbeat;
+
+      // The retired response must enqueue a reconciliation for the current
+      // identity. Assert that production scheduling decision directly, then
+      // dispatch the queued work without depending on headless Chrome's
+      // service-worker timer throttling. CI may suspend the worker long enough
+      // for the two-second coalescing timer to exceed this fixture's bound even
+      // though the correct reconciliation was queued.
+      const queuedReconciliationReason = eventHeartbeatReason;
+      if (!eventHeartbeatTimer || queuedReconciliationReason !== 'identity-changed-reconcile') {
+        throw new Error('Retired heartbeat did not queue Student B reconciliation');
+      }
+      clearTimeout(eventHeartbeatTimer);
+      eventHeartbeatTimer = null;
+      eventHeartbeatReason = null;
+      const studentBReconciliation = safeSendHeartbeat(
+        'integration-identity-changed-reconcile',
+      );
       await waitFor(secondHeartbeatStarted, 'Student B reconciliation heartbeat');
 
       const beforeStudentBResponse = {
@@ -2173,11 +2225,13 @@ async function main() {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const heartbeatDeadline = Date.now() + reconciliationTimeoutMs;
-      while (heartbeatInFlight && Date.now() < heartbeatDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      const studentBReconciliationCompleted = await waitFor(
+        studentBReconciliation,
+        'Student B reconciliation heartbeat completion',
+      );
+      if (studentBReconciliationCompleted !== true || heartbeatInFlight) {
+        throw new Error('Student B reconciliation heartbeat did not finish');
       }
-      if (heartbeatInFlight) throw new Error('Student B reconciliation heartbeat did not finish');
       globalThis.fetch = originalFetch;
 
       // A direct pending-message retry carrying A's captured binding is also
@@ -2216,11 +2270,13 @@ async function main() {
         studentBConnectivity,
         studentBManualLastSeenAt,
         classroomRevisionBeforeStaleResponse,
+        queuedReconciliationReason,
         heartbeatFetchCount,
       };
     });
     assert.deepEqual(switchedInbox.queuedStaleWrite.addedMessageIds, []);
     assert.deepEqual(switchedInbox.staleHeartbeat.addedMessageIds, []);
+    assert.equal(switchedInbox.queuedReconciliationReason, 'identity-changed-reconcile');
     assert.equal(switchedInbox.heartbeatFetchCount, 2);
     assert.equal(
       switchedInbox.beforeStudentBResponse.classroomRevision,
