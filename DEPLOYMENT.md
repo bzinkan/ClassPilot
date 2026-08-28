@@ -7,9 +7,9 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> For 2.7.4, upload only `dist/ClassPilot-v2.7.4.zip` produced from the clean,
+> For 2.7.5, upload only `dist/ClassPilot-v2.7.5.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.7.4.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.7.5.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
 
 The material below is retained solely to explain the retired prototype and is
@@ -112,9 +112,9 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.7.4 release artifact
+### 2.3 Build the canonical 2.7.5 release artifact
 
-Start from a clean, tagged, reviewed 2.7.4 commit at this repository's root.
+Start from a clean, tagged, reviewed 2.7.5 commit at this repository's root.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -124,7 +124,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.4.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.5.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -144,7 +144,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.7.4.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.7.5.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -339,7 +339,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.7.4.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.7.5.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Upload that exact archive to the Chrome Web Store while production OUs remain
    pinned; validate the managed test OU before controlled unpinning.
