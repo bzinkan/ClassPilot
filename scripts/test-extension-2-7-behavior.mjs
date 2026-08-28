@@ -1387,9 +1387,9 @@ async function main() {
           authorizationDeniedUploadAttempts += 1;
           return new Response(JSON.stringify({
             ok: false,
-            code: 'STUDENT_SESSION_REPLACED',
+            code: 'SCREENSHOT_AUTHORITY_NOT_FOUND',
           }), {
-            status: 403,
+            status: 404,
             headers: { 'content-type': 'application/json' },
           });
         };
@@ -1461,6 +1461,42 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         });
         const serviceUnavailableLeaseRetained = ambientScreenshotAllowed(authB);
+
+        const originalDisableForScreenshotLicense = disableForInactiveLicense;
+        const screenshotLicenseDenials = [];
+        disableForInactiveLicense = async (planStatus, authContext) => {
+          assertAuthenticatedContextCurrent(authContext, 'screenshot 402 fixture');
+          screenshotLicenseDenials.push({
+            planStatus,
+            scope: licenseScopeForAuthContext(authContext),
+          });
+        };
+        fetchWithBackoff = async () => new Response(JSON.stringify({
+          ok: false,
+          planStatus: 'screenshot-payment-required',
+        }), {
+          status: 402,
+          headers: { 'content-type': 'application/json' },
+        });
+        lastScreenshotAttemptAt = 0;
+        const screenshotLicenseExpectedScope = licenseScopeForAuthContext(
+          captureAuthenticatedContext('screenshot 402 expected scope'),
+        );
+        const screenshotLicenseDeniedResult = await captureAndSendScreenshot({
+          reason: 'screenshot-license-denied-fixture',
+          queryActiveTab: async () => [{
+            id: 7018,
+            active: true,
+            windowId: 18,
+            url: 'https://observed.example/license-denied',
+            title: 'License denied',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,bGljZW5zZS1kZW5pZWQ=',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        });
+        disableForInactiveLicense = originalDisableForScreenshotLicense;
         scheduleEventHeartbeat = originalScheduleEventHeartbeat;
 
         let ambientActivationRaceUploads = 0;
@@ -3189,6 +3225,9 @@ async function main() {
           screenshotAuthorityHeartbeatReasons,
           screenshotServiceUnavailableResult,
           serviceUnavailableLeaseRetained,
+          screenshotLicenseDeniedResult,
+          screenshotLicenseDenials,
+          screenshotLicenseExpectedScope,
           ambientActivationRaceResult,
           ambientActivationRaceUploads,
           ambientNavigationRaceResult,
@@ -3454,10 +3493,10 @@ async function main() {
     assert.equal(result.newerHeartbeatDeniedPolicyApplied, true);
     assert.equal(result.delayedWsAllowedPolicyApplied, false);
     assert.equal(result.delayedWsAllowedPolicyAllowed, false);
-    assert.equal(result.delayedDeniedPolicyApplied, true);
-    assert.equal(result.delayedDeniedPolicyAllowed, false);
-    assert.equal(result.delayedMalformedPolicyApplied, true);
-    assert.equal(result.delayedMalformedPolicyAllowed, false);
+    assert.equal(result.delayedDeniedPolicyApplied, false);
+    assert.equal(result.delayedDeniedPolicyAllowed, true);
+    assert.equal(result.delayedMalformedPolicyApplied, false);
+    assert.equal(result.delayedMalformedPolicyAllowed, true);
     assert.equal(result.explicitDeniedPolicyApplied, true);
     assert.equal(result.explicitDeniedPolicyAllowed, false);
     assert.equal(result.omittedPolicyExpiredRetention, false);
@@ -3561,6 +3600,14 @@ async function main() {
       reason: 'service_unavailable',
     });
     assert.equal(result.serviceUnavailableLeaseRetained, true);
+    assert.deepEqual(result.screenshotLicenseDeniedResult, {
+      status: 'paused_unobserved',
+      reason: 'license_denied',
+    });
+    assert.deepEqual(result.screenshotLicenseDenials, [{
+      planStatus: 'screenshot-payment-required',
+      scope: result.screenshotLicenseExpectedScope,
+    }]);
     assert.deepEqual(result.ambientActivationRaceResult, {
       status: 'unavailable',
       reason: 'active_tab_changed',

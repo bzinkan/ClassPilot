@@ -227,7 +227,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 **Privacy Features:**
 - Tab state is bounded and identity-bound; the extension may persist a limited local snapshot so exact tab references survive worker restarts
 - Student-facing indicators show when school-managed monitoring is active
-- Ambient screenshot thumbnails require a short-lived authorized observation lease; exact safety captures require a separate exact-bound request
+- Tracking-window thumbnails run about every 30 seconds while school-managed monitoring is active under a short-lived exact authority lease, independent of teacher dashboard visibility. SchoolPilot retains class-bound images and discards gap/student-session pixels; exact safety captures require a separate exact-bound request
 - Live View is an authorized, temporary encrypted stream and is not recorded by the extension or SchoolPilot servers; the teacher dashboard can explicitly save a local recording or still image, which the school must govern
 - The school setting governs heartbeat history and related session-report detail; ambient thumbnails, safety evidence, communications, account/audit records, and teacher-downloaded files follow their separate documented or contractual policies
 
@@ -275,7 +275,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 **Data Minimization:**
 - Processes school-issued student/session identifiers, a device identifier, active-tab URL/title/timestamps, heartbeat state, and classroom communications needed for the service
-- May process observation-bound thumbnail screenshots and one exact-bound safety screenshot; Live View media is temporary and is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local copy from the dashboard
+- May process tracking-window thumbnail screenshots while monitoring is active; SchoolPilot retains only class-bound thumbnails and discards gap/student-session pixels. It may also process one exact-bound safety screenshot; Live View media is temporary and is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local copy from the dashboard
 - An authorized managed-kiosk launch may send the Chrome directory device ID to SchoolPilot after capability preflight; it is immediately converted to a school-scoped opaque ID and is not stored or logged raw
 - Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles
 

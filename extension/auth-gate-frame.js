@@ -478,6 +478,9 @@
           mode: 'pin',
           studentId: document.getElementById('classpilot-auth-student')?.value || '',
           pin: pinInput?.value || '',
+          ...(rosterSnapshot?.recoveryGrantId
+            ? { recoveryGrantId: rosterSnapshot.recoveryGrantId }
+            : {}),
         }, event.submitter);
       });
       loadGrades();
@@ -547,6 +550,7 @@
     chrome.runtime.sendMessage({
       type: 'get-login-roster',
       ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+      ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
     }, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (generation !== rosterRequestGeneration || !status.isConnected) return;
@@ -699,6 +703,7 @@
       type: 'get-login-roster',
       gradeLevel: selectedGrade,
       ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
+      ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
     }, (response) => {
       const runtimeError = chrome.runtime.lastError;
       if (generation !== rosterRequestGeneration || !status.isConnected || gradeSelect.value !== selectedGrade) return;
@@ -728,7 +733,13 @@
         ? response.students.filter((student) => student && student.id)
         : [];
       const previousStudentId = studentSelect.value;
-      rosterSnapshot = { gradeLevel: selectedGrade, students };
+      rosterSnapshot = {
+        gradeLevel: selectedGrade,
+        students,
+        recoveryGrantId: typeof response.recoveryGrantId === 'string'
+          ? response.recoveryGrantId
+          : null,
+      };
       liveRosterLoaded = true;
       studentSelect.replaceChildren(new Option('Select your name…', ''));
       for (const student of students) {
@@ -816,10 +827,31 @@
           clearTimeout(authCommitPollTimer);
           authCommitPollTimer = null;
         }
-        setError(response?.error || 'Invalid student credentials');
         if (submit) {
           submit.textContent = 'Sign In';
           submit.setAttribute('aria-busy', 'false');
+        }
+        const activeSessionConflict = response?.status === 409
+          || response?.code === 'STUDENT_SESSION_ACTIVE';
+        if (activeSessionConflict) {
+          setError('This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.');
+          const pinInput = document.getElementById('classpilot-auth-pin');
+          if (pinInput) pinInput.value = '';
+          if (payload.mode === 'pin') {
+            updatePinSubmitState();
+            refreshRosterOrGrades({
+              forceRefresh: true,
+              forceRecovery: true,
+              background: true,
+            });
+          } else if (submit) {
+            submit.disabled = false;
+          }
+          pinInput?.focus({ preventScroll: true });
+          return;
+        }
+        setError(response?.error || 'Invalid student credentials');
+        if (submit) {
           if (payload.mode === 'pin') updatePinSubmitState();
           else submit.disabled = false;
         }

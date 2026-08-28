@@ -648,7 +648,7 @@ function showPrivacyInfo() {
 ✓ Active Tab URL - The web address you're visiting
 ✓ Timestamps - When you visited each page
 ✓ Favicon - The small icon from the website
-✓ Observation-bound screen thumbnails - Images of the active visible tab while an authorized teacher or administrator is observing
+✓ Tracking-window screen thumbnails - Images of the active visible tab about every 30 seconds while school-managed monitoring is active in an authorized tracking window
 ✓ Safety evidence - A single exact-tab image may be requested immediately before a safety tab closure
 ✓ Messages you choose to send through ClassPilot chat
 
@@ -661,7 +661,9 @@ function showPrivacyInfo() {
 Automatic Monitoring:
 - Tab titles and URLs are automatically collected and sent to your teacher
 - This happens every 10 seconds while you browse
-- Screen thumbnails are captured about every 30 seconds only while the exact student session is actively observed (or during an explicitly selected legacy rollout mode)
+- Screen-thumbnail capture does not depend on whether a teacher's dashboard tab or student tile is visible
+- Each thumbnail is bound to the current student or class authority; SchoolPilot discards gap/student-session pixels and retains only class-bound thumbnails
+- Capture stops when school tracking policy is hard-off, after sign-out/session expiry or explicit license denial, or when the short tracking-window lease ends (older observation-lease behavior remains during mixed-version rollout)
 - Activity time comes from heartbeats; screenshots do not determine monitored or off-task time
 - This is required by your school policy for classroom management
 

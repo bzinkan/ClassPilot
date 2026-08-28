@@ -94,6 +94,35 @@ async function main() {
     resolve(extensionPath, 'service-worker.js'),
     'utf8',
   );
+  const authGateFrameSource = readFileSync(
+    resolve(extensionPath, 'auth-gate-frame.js'),
+    'utf8',
+  );
+  const legacyAuthGateSource = readFileSync(
+    resolve(extensionPath, 'content.js'),
+    'utf8',
+  );
+  const neutralActiveSessionCopy =
+    'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.';
+  for (const [label, authGateSource] of [
+    ['secure auth frame', authGateFrameSource],
+    ['legacy auth fallback', legacyAuthGateSource],
+  ]) {
+    assert.match(
+      authGateSource,
+      /recoveryGrantId:\s*(?:rosterSnapshot|authGateRosterSnapshot)\.recoveryGrantId/,
+      `${label} does not bind login to its successful roster snapshot`,
+    );
+    assert.ok(
+      authGateSource.includes(neutralActiveSessionCopy),
+      `${label} does not use neutral active-session conflict copy`,
+    );
+    assert.match(
+      authGateSource,
+      /forceRefresh:\s*true,\s*forceRecovery:\s*true,\s*background:\s*true/,
+      `${label} does not request one bounded recovery/roster refresh after a 409`,
+    );
+  }
   const trustedAccessDispatchIndex = serviceWorkerSource.indexOf(
     'const trustedLocalStorageAccessPromise = restrictLocalStorageToTrustedContexts(',
   );
@@ -870,12 +899,35 @@ async function main() {
     const protocolResilience = await worker.evaluate(async ({ fixturePort }) => {
       const originalConfig = { ...CONFIG };
       const originalTrackingState = trackingState;
+      const originalStudentAuthInvalidating = studentAuthInvalidating;
+      // Quiesce real startup/transport maintenance before installing the
+      // synthetic protocol identity. Otherwise a delayed registration,
+      // heartbeat, or socket callback can legitimately retire authority
+      // halfway through this long multi-command fixture.
+      studentAuthInvalidating = true;
+      advanceStudentAuthMutationGeneration();
+      scheduleHeartbeat(null);
+      await chrome.alarms.clear('heartbeat');
+      const pendingRegistration = chromeProfileRegistrationInFlight;
+      if (pendingRegistration) await pendingRegistration.catch(() => {});
+      const heartbeatDrainDeadline = Date.now() + 5_000;
+      while (heartbeatInFlight && Date.now() < heartbeatDrainDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (heartbeatInFlight) {
+        throw new Error('Background heartbeat did not drain before protocol resilience fixture');
+      }
+      await studentAuthMutationTail.catch(() => {});
+      // Keep alarm/event callbacks out of the synthetic identity until the
+      // fixture restores the real worker state below.
+      heartbeatInFlight = true;
       CONFIG.deviceId = 'protocol-device';
       CONFIG.activeStudentId = 'protocol-student';
       CONFIG.activeStudentSessionId = 'protocol-student-session';
       CONFIG.studentToken = 'protocol-token';
       CONFIG.schoolId = 'protocol-school';
       CONFIG.identitySource = 'integration_test';
+      CONFIG.autoRegistrationPaused = true;
       studentAuthInvalidating = false;
       studentAuthCommitPending = false;
       advanceStudentAuthMutationGeneration();
@@ -997,6 +1049,14 @@ async function main() {
       const exactSnapshot = await buildOpaqueTabSnapshot(await chrome.tabs.query({}));
       const firstEntry = exactSnapshot.localEntries.find((entry) => entry.tabId === first.id);
       const secondEntry = exactSnapshot.localEntries.find((entry) => entry.tabId === second.id);
+      // Background transport teardown is intentionally allowed to retire
+      // negotiated protocol state. Re-establish the fixture's capability at
+      // the command boundary so this assertion measures exact-tab authority,
+      // not nondeterministic WebSocket maintenance from another test phase.
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: ['exactTabCloseV1'],
+      }, captureAuthenticatedContext('exact-tab resilience command fixture'));
       const exactResult = await executeRemoteControlCommand({
         type: 'close-tab',
         data: {
@@ -1242,7 +1302,11 @@ async function main() {
       await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
       await new Promise((resolve) => setTimeout(resolve, 1_600));
       currentClassroomState = classroomStateBeforeFabTests;
+      studentAuthInvalidating = true;
+      advanceStudentAuthMutationGeneration();
+      heartbeatInFlight = false;
       CONFIG = originalConfig;
+      studentAuthInvalidating = originalStudentAuthInvalidating;
       if (
         CONFIG.deviceId
         && CONFIG.activeStudentId
@@ -2131,6 +2195,23 @@ async function main() {
         headers: { 'content-type': 'application/json' },
       }));
       await delayedStudentAHeartbeat;
+
+      // The retired response must enqueue a reconciliation for the current
+      // identity. Assert that production scheduling decision directly, then
+      // dispatch the queued work without depending on headless Chrome's
+      // service-worker timer throttling. CI may suspend the worker long enough
+      // for the two-second coalescing timer to exceed this fixture's bound even
+      // though the correct reconciliation was queued.
+      const queuedReconciliationReason = eventHeartbeatReason;
+      if (!eventHeartbeatTimer || queuedReconciliationReason !== 'identity-changed-reconcile') {
+        throw new Error('Retired heartbeat did not queue Student B reconciliation');
+      }
+      clearTimeout(eventHeartbeatTimer);
+      eventHeartbeatTimer = null;
+      eventHeartbeatReason = null;
+      const studentBReconciliation = safeSendHeartbeat(
+        'integration-identity-changed-reconcile',
+      );
       await waitFor(secondHeartbeatStarted, 'Student B reconciliation heartbeat');
 
       const beforeStudentBResponse = {
@@ -2144,11 +2225,13 @@ async function main() {
         status: 200,
         headers: { 'content-type': 'application/json' },
       }));
-      const heartbeatDeadline = Date.now() + reconciliationTimeoutMs;
-      while (heartbeatInFlight && Date.now() < heartbeatDeadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+      const studentBReconciliationCompleted = await waitFor(
+        studentBReconciliation,
+        'Student B reconciliation heartbeat completion',
+      );
+      if (studentBReconciliationCompleted !== true || heartbeatInFlight) {
+        throw new Error('Student B reconciliation heartbeat did not finish');
       }
-      if (heartbeatInFlight) throw new Error('Student B reconciliation heartbeat did not finish');
       globalThis.fetch = originalFetch;
 
       // A direct pending-message retry carrying A's captured binding is also
@@ -2187,11 +2270,13 @@ async function main() {
         studentBConnectivity,
         studentBManualLastSeenAt,
         classroomRevisionBeforeStaleResponse,
+        queuedReconciliationReason,
         heartbeatFetchCount,
       };
     });
     assert.deepEqual(switchedInbox.queuedStaleWrite.addedMessageIds, []);
     assert.deepEqual(switchedInbox.staleHeartbeat.addedMessageIds, []);
+    assert.equal(switchedInbox.queuedReconciliationReason, 'identity-changed-reconcile');
     assert.equal(switchedInbox.heartbeatFetchCount, 2);
     assert.equal(
       switchedInbox.beforeStudentBResponse.classroomRevision,
@@ -3036,6 +3121,7 @@ async function main() {
       const now = Date.now();
       const originalConfig = { ...CONFIG };
       const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFetch = globalThis.fetch;
       const originalDisableForInactiveLicense = disableForInactiveLicense;
       const originalHeartbeatInFlight = heartbeatInFlight;
       // Keep the normal ten-second periodic heartbeat from consuming this fixture's
@@ -3044,9 +3130,9 @@ async function main() {
       heartbeatInFlight = true;
       const statusDisablePlans = [];
       const statusResponses = [
-        { code: 'CLASSPILOT_NOT_ENTITLED', planStatus: 'canonical-status' },
-        { error: 'school_not_entitled', planStatus: 'legacy-status' },
-        { code: 'SOME_OTHER_FORBIDDEN', planStatus: 'unrelated-status' },
+        { status: 402, body: { planStatus: 'payment-required-status' } },
+        { status: 403, body: { code: 'SOME_OTHER_FORBIDDEN', planStatus: 'forbidden-status' } },
+        { status: 200, body: { schoolActive: false, planStatus: 'school-inactive-status' } },
       ];
       let heartbeatRequestCount = 0;
 
@@ -3059,14 +3145,52 @@ async function main() {
       disableForInactiveLicense = async (planStatus) => {
         statusDisablePlans.push(planStatus);
       };
-      fetchWithBackoff = async () => new Response(JSON.stringify(statusResponses.shift()), {
-        status: 403,
-        headers: { 'content-type': 'application/json' },
-      });
-      await checkLicenseStatus('canonical-entitlement-fixture');
-      await checkLicenseStatus('legacy-entitlement-fixture');
-      await checkLicenseStatus('unrelated-forbidden-fixture');
+      globalThis.fetch = async () => {
+        const next = statusResponses.shift();
+        return new Response(JSON.stringify(next.body), {
+          status: next.status,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      await checkLicenseStatus('payment-required-entitlement-fixture');
+      await checkLicenseStatus('forbidden-entitlement-fixture');
+      await checkLicenseStatus('school-inactive-entitlement-fixture');
       disableForInactiveLicense = originalDisableForInactiveLicense;
+      globalThis.fetch = originalFetch;
+
+      const unknownStatusAuth = captureAuthenticatedContext('unknown license status fixture');
+      adoptLicenseState(true, 'unknown-status-lkg', unknownStatusAuth, {
+        verifiedAt: Date.now() - (365 * 24 * 60 * 60 * 1000),
+      });
+      const apiBackoffBeforeUnknownStatuses = apiBackoffUntilMs;
+      const unknownStatusResponses = [
+        new Response(JSON.stringify({ error: 'rate_limited' }), {
+          status: 429,
+          headers: { 'content-type': 'application/json' },
+        }),
+        new Response(JSON.stringify({ error: 'unavailable' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        }),
+        new Response('{', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ];
+      const unknownStatusStates = [];
+      globalThis.fetch = async () => unknownStatusResponses.shift();
+      for (const statusReason of ['429', '500', 'malformed']) {
+        const outcome = await checkLicenseStatus(`unknown-${statusReason}-fixture`);
+        unknownStatusStates.push({
+          outcome,
+          active: currentLicenseIsActive(),
+          refreshState: licenseRefreshState,
+          planStatus: licensePlanStatus,
+          apiBackoffUntilMs,
+        });
+      }
+      const dedicatedLicenseRetryAlarm = await chrome.alarms.get(LICENSE_STATUS_RETRY_ALARM);
+      globalThis.fetch = originalFetch;
 
       await applyClassroomState({
         schemaVersion: 1,
@@ -3130,6 +3254,7 @@ async function main() {
         await sendHeartbeat('canonical-entitlement-fixture');
       } finally {
         fetchWithBackoff = originalFetchWithBackoff;
+        globalThis.fetch = originalFetch;
         disableForInactiveLicense = originalDisableForInactiveLicense;
         heartbeatInFlight = originalHeartbeatInFlight;
         CONFIG = originalConfig;
@@ -3157,14 +3282,35 @@ async function main() {
         retainedTeacherRuleIds,
         stored,
         statusDisablePlans,
+        unknownStatusStates,
+        apiBackoffBeforeUnknownStatuses,
+        dedicatedLicenseRetryAlarm: Boolean(dedicatedLicenseRetryAlarm),
         heartbeatRequestCount,
         heartbeatPreconditions,
       };
     });
     assert.deepEqual(entitlementCleanup.statusDisablePlans, [
-      'canonical-status',
-      'legacy-status',
+      'payment-required-status',
+      'forbidden-status',
+      'school-inactive-status',
     ]);
+    assert.deepEqual(
+      entitlementCleanup.unknownStatusStates.map(({ outcome, active, refreshState, planStatus }) => ({
+        outcome,
+        active,
+        refreshState,
+        planStatus,
+      })),
+      [
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+        { outcome: 'unknown', active: true, refreshState: 'unknown', planStatus: 'unknown-status-lkg' },
+      ],
+    );
+    assert.equal(entitlementCleanup.dedicatedLicenseRetryAlarm, true);
+    assert.ok(entitlementCleanup.unknownStatusStates.every((state) => (
+      state.apiBackoffUntilMs === entitlementCleanup.apiBackoffBeforeUnknownStatuses
+    )));
     assert.equal(
       entitlementCleanup.heartbeatRequestCount,
       1,
@@ -3854,21 +4000,108 @@ async function main() {
       resetLoginRosterRuntimeCache();
       const gradeAKey = loginRosterRequestCacheKey('Grade A', pendingRecord);
       const gradeBKey = loginRosterRequestCacheKey('Grade B', pendingRecord);
-      bindLoginRosterRecoveryGrant(pendingRecord, [{
-        id: 'grade-a-student',
+      const gradeAGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
         reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }, {
+        id: 'grade-a-no-pin',
+        hasPin: false,
+        reclaimable: false,
       }], gradeAKey);
       bindLoginRosterRecoveryGrant(pendingRecord, [{
         id: 'grade-b-student',
+        hasPin: true,
         reclaimable: false,
       }], gradeBKey);
-      const afterNonReclaimable = recoveryGrantForStudentLogin('grade-a-student');
-      bindLoginRosterRecoveryGrant(pendingRecord, [{
+      const afterNonReclaimable = recoveryGrantForStudentLogin(
+        'grade-a-alex',
+        gradeAGrantId,
+      );
+      const crossStudentGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      const arbitraryStudentGrant = recoveryGrantForStudentLogin(
+        'not-in-the-roster',
+        gradeAGrantId,
+      );
+      const disabledStudentGrant = recoveryGrantForStudentLogin(
+        'grade-a-no-pin',
+        gradeAGrantId,
+      );
+      const missingSnapshotGrant = recoveryGrantForStudentLogin('grade-a-bob');
+      const gradeBGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
         id: 'grade-b-student',
+        hasPin: true,
         reclaimable: true,
       }], gradeBKey);
       clearLoginRosterRecoveryGrant(gradeBKey);
-      const afterGradeBFailure = recoveryGrantForStudentLogin('grade-a-student');
+      const afterGradeBFailure = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }], gradeAKey);
+      const staleRosterSnapshotGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        gradeAGrantId,
+      );
+      const schoolBoundGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
+      CONFIG.schoolId = 'different-school';
+      const wrongSchoolGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        schoolBoundGrantId,
+      );
+      CONFIG.schoolId = 'manual-school';
+      const generationBoundGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
+      await armStudentSessionRecovery({
+        serverOrigin: CONFIG.serverUrl,
+        schoolId: CONFIG.schoolId,
+        token: 'J'.repeat(43),
+        authContextId: generateAuthContextId(),
+      });
+      const staleRecoveryGenerationGrant = recoveryGrantForStudentLogin(
+        'grade-a-bob',
+        generationBoundGrantId,
+      );
+      await persistStudentSessionRecoveryState({
+        schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+        armed: null,
+        pending: [pendingRecord],
+      });
+      const refreshedGradeAGrantId = bindLoginRosterRecoveryGrant(pendingRecord, [{
+        id: 'grade-a-alex',
+        hasPin: true,
+        reclaimable: true,
+      }, {
+        id: 'grade-a-bob',
+        hasPin: true,
+        reclaimable: false,
+      }], gradeAKey);
       let sentExactRecovery = false;
       fetchWithBackoff = async (url, requestOptions = {}) => {
         if (String(url).endsWith('/api/extension/student-login')) {
@@ -3888,8 +4121,9 @@ async function main() {
       try {
         await manualStudentLogin({
           mode: 'pin',
-          studentId: 'grade-a-student',
+          studentId: 'grade-a-bob',
           pin: '1234',
+          recoveryGrantId: refreshedGradeAGrantId,
         });
       } catch {
         loginRejected = true;
@@ -3900,15 +4134,252 @@ async function main() {
       }
       return {
         afterNonReclaimable: afterNonReclaimable?.token === recoveryToken,
+        crossStudentGrant: crossStudentGrant?.token === recoveryToken,
+        arbitraryStudentGrant: Boolean(arbitraryStudentGrant),
+        disabledStudentGrant: Boolean(disabledStudentGrant),
+        missingSnapshotGrant: Boolean(missingSnapshotGrant),
+        opaqueGrantId: /^roster_[A-Za-z0-9_-]+$/.test(gradeAGrantId || ''),
+        separateGradeGrant: /^roster_[A-Za-z0-9_-]+$/.test(gradeBGrantId || ''),
         afterGradeBFailure: afterGradeBFailure?.token === recoveryToken,
+        staleRosterSnapshotGrant: Boolean(staleRosterSnapshotGrant),
+        wrongSchoolGrant: Boolean(wrongSchoolGrant),
+        staleRecoveryGenerationGrant: Boolean(staleRecoveryGenerationGrant),
         sentExactRecovery,
         loginRejected,
       };
     });
     assert.equal(interleavedRosterRecoveryGrants.afterNonReclaimable, true);
+    assert.equal(interleavedRosterRecoveryGrants.crossStudentGrant, true);
+    assert.equal(interleavedRosterRecoveryGrants.arbitraryStudentGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.disabledStudentGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.missingSnapshotGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.opaqueGrantId, true);
+    assert.equal(interleavedRosterRecoveryGrants.separateGradeGrant, true);
     assert.equal(interleavedRosterRecoveryGrants.afterGradeBFailure, true);
+    assert.equal(interleavedRosterRecoveryGrants.staleRosterSnapshotGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.wrongSchoolGrant, false);
+    assert.equal(interleavedRosterRecoveryGrants.staleRecoveryGenerationGrant, false);
     assert.equal(interleavedRosterRecoveryGrants.sentExactRecovery, true);
     assert.equal(interleavedRosterRecoveryGrants.loginRejected, true);
+
+    const crossStudentHandoffAfterReleaseFailure = await worker.evaluate(async () => {
+      if (hasStudentAuth()) {
+        const current = captureAuthenticatedContext('cross-student handoff fixture reset');
+        await clearStudentAuth('cross_student_handoff_fixture_reset', {
+          notifyBackend: false,
+          serverSessionEnded: true,
+          pauseAutoRegistration: true,
+          expectedAuthContext: current,
+        });
+      }
+      const originalFetch = globalThis.fetch;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = { ...sharedSignInLoginConfig };
+      const now = Date.now();
+      const oldRecoveryToken = 'K'.repeat(43);
+      const newRecoveryToken = 'L'.repeat(43);
+      const oldRecovery = normalizeStudentSessionRecoveryRecord({
+        state: 'pending',
+        generation: generateStudentSessionRecoveryGeneration(),
+        serverOrigin: 'https://school-pilot.net',
+        schoolId: 'handoff-school',
+        token: oldRecoveryToken,
+        authContextId: generateAuthContextId(),
+        createdAt: now,
+        pendingSinceAt: now,
+        attemptCount: 0,
+        nextAttemptAt: now - 1,
+        discardAt: now + STUDENT_SESSION_RECOVERY_PENDING_TTL_MS,
+      }, 'pending', now - 1);
+      let releaseRequests = 0;
+      let loginRecoveryHeader = null;
+      let loginBody = null;
+      try {
+        Object.assign(CONFIG, {
+          serverUrl: 'https://school-pilot.net',
+          schoolId: 'handoff-school',
+          schoolSlug: 'handoff-school',
+          enrollmentKey: 'handoff-enrollment-key',
+          deviceId: 'handoff-device',
+          studentToken: null,
+          activeStudentId: null,
+          activeStudentSessionId: null,
+          authContextId: null,
+          identitySource: null,
+          autoRegistrationPaused: true,
+        });
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        fastAuthGateEnabled = false;
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: 'handoff-school',
+        };
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+        resetLoginRosterRuntimeCache();
+        await persistStudentSessionRecoveryState({
+          schemaVersion: STUDENT_SESSION_RECOVERY_SCHEMA_VERSION,
+          armed: null,
+          pending: [oldRecovery],
+        });
+        globalThis.fetch = async (url) => {
+          if (String(url).endsWith('/api/extension/session-release')) {
+            releaseRequests += 1;
+            return new Response(null, { status: 503 });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        fetchWithBackoff = async (url, requestOptions = {}) => {
+          if (String(url).includes('/api/extension/login-roster?')) {
+            return new Response(JSON.stringify({
+              loginMethod: 'name_pin',
+              students: [{
+                id: 'student-alex',
+                name: 'Alex Student',
+                hasPin: true,
+                reclaimable: true,
+              }, {
+                id: 'student-bob',
+                name: 'Bob Student',
+                hasPin: true,
+                reclaimable: false,
+              }],
+              grades: [{ value: '5', label: 'Grade 5' }],
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          if (String(url).endsWith('/api/extension/student-login')) {
+            loginRecoveryHeader = requestOptions.headers?.Authorization || null;
+            loginBody = JSON.parse(requestOptions.body || '{}');
+            return new Response(JSON.stringify({
+              schoolId: 'handoff-school',
+              studentToken: 'bob-student-bearer',
+              studentSessionId: 'bob-student-session',
+              sessionRecovery: { token: newRecoveryToken },
+              student: {
+                id: 'student-bob',
+                email: 'bob@example.edu',
+                firstName: 'Bob',
+                lastName: 'Student',
+              },
+            }), { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+
+        const roster = await fetchLoginRosterForGate({
+          gradeLevel: '5',
+          forceRefresh: true,
+        });
+        const login = await manualStudentLogin({
+          mode: 'pin',
+          studentId: 'student-bob',
+          pin: '2468',
+          recoveryGrantId: roster.recoveryGrantId,
+        });
+        await studentAuthMutationTail;
+        await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+        const recoveryBeforeDelayedCleanup = studentSessionRecoveryState;
+        const delayedOldCleanupApplied = await applyStudentSessionRecoveryReleaseOutcome(
+          oldRecovery,
+          { outcome: 'released', retryAfterMs: 0 },
+        );
+        const recoveryAfterDelayedCleanup = studentSessionRecoveryState;
+        const [local, session] = await Promise.all([
+          chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY),
+          chrome.storage.session.get([
+            'studentToken',
+            'activeStudentId',
+            'activeStudentSessionId',
+          ]),
+        ]);
+        return {
+          releaseRequests,
+          rosterGrantIdIsOpaque: /^roster_[A-Za-z0-9_-]+$/.test(roster.recoveryGrantId || ''),
+          rosterStudents: roster.students.map((student) => ({
+            id: student.id,
+            reclaimable: student.reclaimable,
+          })),
+          loginSuccess: login.success === true,
+          loginRecoveryHeader,
+          loginBodyStudentId: loginBody?.studentId || null,
+          priorPendingRemoved: !recoveryBeforeDelayedCleanup.pending.some(
+            (record) => record.generation === oldRecovery.generation,
+          ),
+          onlyNewRecoveryArmed: recoveryBeforeDelayedCleanup.pending.length === 0
+            && recoveryBeforeDelayedCleanup.armed?.token === newRecoveryToken,
+          delayedOldCleanupApplied,
+          newRecoverySurvivedDelayedCleanup: recoveryAfterDelayedCleanup.armed?.token
+            === newRecoveryToken,
+          persistedRecoveryToken:
+            local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.armed?.token || null,
+          session,
+        };
+      } finally {
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext('cross-student handoff fixture cleanup');
+          await clearStudentAuth('cross_student_handoff_fixture_cleanup', {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        resetLoginRosterRuntimeCache();
+        globalThis.fetch = originalFetch;
+        fetchWithBackoff = originalFetchWithBackoff;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        CONFIG = originalConfig;
+      }
+    });
+    assert.equal(crossStudentHandoffAfterReleaseFailure.releaseRequests, 1);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.rosterGrantIdIsOpaque, true);
+    assert.deepEqual(crossStudentHandoffAfterReleaseFailure.rosterStudents, [{
+      id: 'student-alex',
+      reclaimable: true,
+    }, {
+      id: 'student-bob',
+      reclaimable: false,
+    }]);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.loginSuccess, true);
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.loginRecoveryHeader,
+      `ClassPilot-Recovery ${'K'.repeat(43)}`,
+    );
+    assert.equal(crossStudentHandoffAfterReleaseFailure.loginBodyStudentId, 'student-bob');
+    assert.equal(crossStudentHandoffAfterReleaseFailure.priorPendingRemoved, true);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.onlyNewRecoveryArmed, true);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.delayedOldCleanupApplied, false);
+    assert.equal(crossStudentHandoffAfterReleaseFailure.newRecoverySurvivedDelayedCleanup, true);
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.persistedRecoveryToken,
+      'L'.repeat(43),
+    );
+    assert.equal(crossStudentHandoffAfterReleaseFailure.session.studentToken, 'bob-student-bearer');
+    assert.equal(crossStudentHandoffAfterReleaseFailure.session.activeStudentId, 'student-bob');
+    assert.equal(
+      crossStudentHandoffAfterReleaseFailure.session.activeStudentSessionId,
+      'bob-student-session',
+    );
 
     const malformedRosterValidationModes = await worker.evaluate(async () => {
       const originalFastAuthGateEnabled = fastAuthGateEnabled;

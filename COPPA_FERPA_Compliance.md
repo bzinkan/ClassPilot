@@ -209,8 +209,8 @@ ClassPilot collects only the data necessary to provide the contracted classroom 
 ### 5.3 Managed Monitoring Boundaries
 
 - The Chrome Extension only sends data when the student is actively using a school-managed Chromebook.
-- Browsing activity is only collected during configured school tracking hours (e.g., 7:00 AM – 4:00 PM in the school's local timezone).
-- Schools configure tracking hours per their policies. Heartbeat browsing telemetry and screenshot capture pause outside those hours; previously retained school records remain governed by the configured retention policy.
+- Browsing activity follows the school's configured tracking policy, which can be hard-off, limited, or full outside the primary school-hours window.
+- Heartbeat browsing telemetry and screenshot capture pause whenever that policy is hard-off; previously retained school records remain governed by the configured retention policy.
 - The extension does not operate on personal devices.
 
 ---
@@ -344,7 +344,7 @@ ClassPilot uses a multi-tenant architecture where each school is a separate logi
 | Data Category | Default Retention | Configurable | Notes |
 |---|---|---|---|
 | Student browsing activity (heartbeats) | 30 days | Yes — school admin configurable | Automatic cleanup job runs on schedule |
-| Ambient screen thumbnails | 60–120 seconds | No | Short-lived operational dashboard cache; not a recording archive |
+| Class-bound tracking-window thumbnails | 60–120 seconds | No | Short-lived operational dashboard cache; student-session/gap pixels are discarded on receipt and are not retained |
 | Exact safety/evidence image content | 30 days | Deployment policy | Content is purged on the evidence-content schedule; bounded review metadata may remain |
 | Activity history and session-report detail | 30 days | Yes — 1 through 365 whole days | Heartbeats, derived detail, and recipient identity are purged or redacted by the scheduled retention job |
 | Student account data | Active contract plus verified post-contract handling | N/A | Termination disables access; permanent-destruction scope and timing follow the executed agreement and verified operator process |
@@ -575,10 +575,10 @@ ClassPilot is designed to comply with state-level student privacy statutes inclu
 **A:** ClassPilot is intended for Google Admin-managed Chrome profiles and fails closed without valid school configuration and authentication. Monitoring is not authorized for unmanaged profiles or personal browsing contexts.
 
 ### Q: Does ClassPilot record student screens?
-**A:** ClassPilot captures observation-bound screenshot thumbnails of the active visible browser tab. These thumbnails are used for live classroom dashboard visibility and are not a long-term video archive. Live View uses WebRTC and is not recorded by the extension or SchoolPilot servers; an authorized teacher can explicitly save a local recording or still image from the dashboard, and the school controls that downloaded copy.
+**A:** While school-managed monitoring is active under a short-lived tracking-window lease, ClassPilot captures screenshot thumbnails of the active visible browser tab about every 30 seconds, independent of whether a teacher's dashboard tab or student tile is visible. SchoolPilot retains class-bound thumbnails in a short operational cache and discards gap/student-session pixels on receipt; this is not a long-term video archive. Capture stops when school tracking policy is hard-off, the session ends or changes, the lease ends, or the license is explicitly denied. Live View uses WebRTC and is not recorded by the extension or SchoolPilot servers; an authorized teacher can explicitly save a local recording or still image from the dashboard, and the school controls that downloaded copy.
 
 ### Q: Can teachers see student activity outside school hours?
-**A:** No. Schools configure tracking hours (e.g., 7:00 AM – 4:00 PM). The extension does not transmit browsing data outside these configured hours. Schools set their tracking window based on their local timezone, which is auto-detected from the school's zip code.
+**A:** Schools configure the tracking window and after-hours mode in their local timezone. The extension stops transmitting monitoring data whenever school tracking policy is hard-off; a school-authorized limited or full after-hours mode can continue the corresponding processing and must be covered by the school's notices and policy.
 
 ### Q: How long is browsing data retained?
 **A:** By default, browsing activity (heartbeat data) is retained for 30 days and then automatically purged. School administrators can adjust the retention period. Bounded identity-bound tab snapshots may persist locally in the extension for reliability and appear in transient server state; they are cleared or replaced on authority changes and follow documented server retention controls.
@@ -593,7 +593,7 @@ ClassPilot is designed to comply with state-level student privacy statutes inclu
 **A:** Contract termination disables service access. Export availability and the scope and timing of permanent destruction follow the school's executed agreement and a verified operator process. Contact privacy@classpilot.net for confirmation; a soft-deleted account is not treated as proof of permanent destruction.
 
 ### Q: Can ClassPilot see the contents of student Google Docs, emails, or files?
-**A:** ClassPilot does not directly read Google Docs, email, or file contents through Google APIs and does not collect keystrokes or typed passwords. When an authorized observation thumbnail or exact safety screenshot is captured, it can contain whatever is visibly rendered in the active browser tab. Temporary Live View can likewise display the visible tab or screen; it is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local recording or still image governed by school policy.
+**A:** ClassPilot does not directly read Google Docs, email, or file contents through Google APIs and does not collect keystrokes or typed passwords. When an authorized tracking-window thumbnail or exact safety screenshot is captured, it can contain whatever is visibly rendered in the active browser tab. Temporary Live View can likewise display the visible tab or screen; it is not recorded by the extension or SchoolPilot servers, although an authorized teacher can explicitly save a local recording or still image governed by school policy.
 
 ### Q: Does ClassPilot use cookies to track students across the web?
 **A:** No. ClassPilot does not use cookies on student devices. The Chrome Extension uses a server-issued JWT token scoped to the school's domain for authentication purposes only.

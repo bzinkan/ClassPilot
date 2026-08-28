@@ -184,11 +184,16 @@ async function installRosterUiHarness(frame) {
       originalSetTimeout,
       originalClearTimeout,
       queuedResponses: [],
+      queuedLoginResponses: [],
       requests: [],
+      loginRequests: [],
       refreshTimers: new Map(),
       nextRefreshTimerId: -1,
       enqueue(response) {
         this.queuedResponses.push(response);
+      },
+      enqueueLogin(response) {
+        this.queuedLoginResponses.push(response);
       },
       runLatestRefreshTimer() {
         const entries = Array.from(this.refreshTimers.entries());
@@ -221,6 +226,15 @@ async function installRosterUiHarness(frame) {
     };
     chrome.runtime.sendMessage = function(message, ...args) {
       const callback = args.find((value) => typeof value === 'function');
+      if (message?.type === 'manual-student-login' && callback) {
+        harness.loginRequests.push(structuredClone(message));
+        const response = harness.queuedLoginResponses.shift() || {
+          success: false,
+          error: 'No login UI fixture response was queued.',
+        };
+        queueMicrotask(() => callback(response));
+        return undefined;
+      }
       if (message?.type === 'get-login-roster' && callback) {
         harness.requests.push({ ...message });
         const response = harness.queuedResponses.shift() || {
@@ -241,6 +255,12 @@ async function installRosterUiHarness(frame) {
 async function enqueueRosterUiResponse(frame, response) {
   await frame.evaluate((nextResponse) => {
     globalThis.__classpilotRosterUiHarness.enqueue(nextResponse);
+  }, response);
+}
+
+async function enqueueLoginUiResponse(frame, response) {
+  await frame.evaluate((nextResponse) => {
+    globalThis.__classpilotRosterUiHarness.enqueueLogin(nextResponse);
   }, response);
 }
 
@@ -446,7 +466,201 @@ async function exerciseRosterRefreshUi(frame) {
     );
   }
 
+  const crossStudentRoster = {
+    success: true,
+    recoveryGrantId: 'roster_fixture_cross_student',
+    students: [{
+      id: 'student-alex',
+      name: 'Alex Student',
+      hasPin: true,
+      reclaimable: true,
+    }, {
+      id: 'student-bob',
+      name: 'Bob Student',
+      hasPin: true,
+      reclaimable: false,
+    }],
+  };
+  await enqueueRosterUiResponse(frame, crossStudentRoster);
+  await frame.evaluate(() => {
+    const grade = document.getElementById('classpilot-auth-grade');
+    grade.value = '5';
+    grade.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await frame.waitForFunction(() => (
+    document.getElementById('classpilot-auth-student')?.options.length === 3
+  ));
+  assert.deepEqual(await frame.evaluate(() => ({
+    selectedStudent: document.getElementById('classpilot-auth-student')?.value,
+    optionLabels: Array.from(
+      document.getElementById('classpilot-auth-student')?.options || [],
+      (option) => option.textContent,
+    ),
+  })), {
+    selectedStudent: '',
+    optionLabels: [
+      'Select your name…',
+      'Alex Student — Resume on this Chromebook',
+      'Bob Student',
+    ],
+  }, 'the recovery choice must remain optional while other students stay selectable');
+
+  await frame.evaluate(() => {
+    const student = document.getElementById('classpilot-auth-student');
+    const pin = document.getElementById('classpilot-auth-pin');
+    student.value = 'student-bob';
+    student.dispatchEvent(new Event('change', { bubbles: true }));
+    pin.value = '2468';
+    pin.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await enqueueLoginUiResponse(frame, {
+    success: false,
+    status: 409,
+    code: 'STUDENT_SESSION_ACTIVE',
+    error: 'server detail must not replace neutral conflict copy',
+  });
+  await enqueueRosterUiResponse(frame, crossStudentRoster);
+  await frame.locator('#classpilot-auth-pin-submit').click();
+  const neutralConflictCopy =
+    'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.';
+  await frame.waitForFunction((expectedCopy) => (
+    document.getElementById('classpilot-auth-error')?.textContent === expectedCopy
+    && globalThis.__classpilotRosterUiHarness.requests.at(-1)?.forceRecovery === true
+  ), neutralConflictCopy);
+  const conflictSnapshot = await frame.evaluate(() => ({
+    error: document.getElementById('classpilot-auth-error')?.textContent,
+    pin: document.getElementById('classpilot-auth-pin')?.value,
+    selectedStudent: document.getElementById('classpilot-auth-student')?.value,
+    loginRequest: globalThis.__classpilotRosterUiHarness.loginRequests.at(-1),
+    rosterRequest: globalThis.__classpilotRosterUiHarness.requests.at(-1),
+    gatePresent: Boolean(document.getElementById('classpilot-auth-gate')),
+  }));
+  assert.equal(conflictSnapshot.error, neutralConflictCopy);
+  assert.equal(conflictSnapshot.pin, '', '409 must clear the PIN before allowing another attempt');
+  assert.equal(conflictSnapshot.selectedStudent, 'student-bob');
+  assert.equal(conflictSnapshot.gatePresent, true, '409 must keep the authentication gate closed');
+  assert.deepEqual(conflictSnapshot.loginRequest, {
+    type: 'manual-student-login',
+    payload: {
+      mode: 'pin',
+      studentId: 'student-bob',
+      pin: '2468',
+      recoveryGrantId: 'roster_fixture_cross_student',
+    },
+  });
+  assert.deepEqual(conflictSnapshot.rosterRequest, {
+    type: 'get-login-roster',
+    gradeLevel: '5',
+    forceRefresh: true,
+    forceRecovery: true,
+  });
+
   await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.restore());
+}
+
+async function exerciseLegacyConflictUi(worker, tabId) {
+  const result = await worker.evaluate(async (targetTabId) => {
+    const injection = await chrome.scripting.executeScript({
+      target: { tabId: targetTabId },
+      world: 'ISOLATED',
+      func: async () => {
+        if (typeof submitAuthGateLogin !== 'function') {
+          return { available: false };
+        }
+        const fixture = document.createElement('div');
+        fixture.id = 'classpilot-legacy-conflict-fixture';
+        fixture.innerHTML = `
+          <div id="classpilot-auth-gate"></div>
+          <div id="classpilot-auth-error"></div>
+          <div id="classpilot-auth-roster-status"></div>
+          <select id="classpilot-auth-grade"><option value="5">Grade 5</option></select>
+          <select id="classpilot-auth-student"><option value="student-bob">Bob Student</option></select>
+          <input id="classpilot-auth-pin" value="2468">
+          <button id="classpilot-auth-pin-submit">Sign In</button>
+          <button id="classpilot-auth-roster-refresh">Refresh names</button>
+        `;
+        document.documentElement.appendChild(fixture);
+        const originalSendMessage = chrome.runtime.sendMessage;
+        const messages = [];
+        authGateLiveRosterLoaded = true;
+        authGateRosterSnapshot = {
+          gradeLevel: '5',
+          recoveryGrantId: 'roster_legacy_cross_student',
+          students: [{
+            id: 'student-bob',
+            name: 'Bob Student',
+            hasPin: true,
+            reclaimable: false,
+          }],
+        };
+        chrome.runtime.sendMessage = (message, callback) => {
+          messages.push(structuredClone(message));
+          if (message?.type === 'manual-student-login') {
+            queueMicrotask(() => callback?.({
+              success: false,
+              status: 409,
+              code: 'STUDENT_SESSION_ACTIVE',
+            }));
+          } else if (message?.type === 'get-login-roster') {
+            queueMicrotask(() => callback?.({
+              success: true,
+              recoveryGrantId: 'roster_legacy_cross_student',
+              students: [{
+                id: 'student-bob',
+                name: 'Bob Student',
+                hasPin: true,
+                reclaimable: false,
+              }],
+            }));
+          }
+          return undefined;
+        };
+        try {
+          submitAuthGateLogin({
+            mode: 'pin',
+            studentId: 'student-bob',
+            pin: '2468',
+            recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
+          }, document.getElementById('classpilot-auth-pin-submit'));
+          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+          return {
+            available: true,
+            error: document.getElementById('classpilot-auth-error')?.textContent,
+            pin: document.getElementById('classpilot-auth-pin')?.value,
+            gatePresent: Boolean(document.getElementById('classpilot-auth-gate')),
+            messages,
+          };
+        } finally {
+          chrome.runtime.sendMessage = originalSendMessage;
+          fixture.remove();
+        }
+      },
+    });
+    return injection?.[0]?.result || { available: false };
+  }, tabId);
+  assert.equal(result.available, true, 'legacy authentication fallback functions were unavailable');
+  assert.equal(
+    result.error,
+    'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.',
+  );
+  assert.equal(result.pin, '');
+  assert.equal(result.gatePresent, true);
+  assert.deepEqual(result.messages[0], {
+    type: 'manual-student-login',
+    payload: {
+      mode: 'pin',
+      studentId: 'student-bob',
+      pin: '2468',
+      recoveryGrantId: 'roster_legacy_cross_student',
+    },
+  });
+  assert.deepEqual(result.messages[1], {
+    type: 'get-login-roster',
+    gradeLevel: '5',
+    forceRefresh: true,
+    forceRecovery: true,
+  });
 }
 
 async function setAuthViewport(page, frame, viewport, expectedSideVisible = null) {
@@ -583,6 +797,7 @@ async function main() {
     await page.goto(fixture.url, { waitUntil: 'networkidle' });
     await page.waitForSelector('#classpilot-auth-gate', { state: 'attached' });
     const tabId = await waitForTabId(worker, page.url());
+    await exerciseLegacyConflictUi(worker, tabId);
 
     let authFrame = await showGate(worker, tabId, page, {
       phase: 'loading',

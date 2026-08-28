@@ -182,7 +182,7 @@ export default function PrivacyPage() {
               ClassPilot is designed with student privacy in mind:
             </p>
             <ul className="list-disc pl-6 text-slate-700 space-y-2">
-              <li>Monitoring occurs only during designated school hours</li>
+              <li>Monitoring follows the school's configured tracking window and after-hours mode, and stops whenever that policy is hard-off</li>
               <li>Students receive clear visual indicators when monitoring is active</li>
               <li>Teachers can only monitor students in their assigned classes</li>
               <li>Personal devices are not monitored outside of school-managed contexts</li>

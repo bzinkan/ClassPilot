@@ -8,7 +8,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 - **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Observation-Bound Screen Thumbnails**: Captures bounded active-tab screenshots only while an authorized teacher or administrator is actively observing, plus an exact-bound safety capture when requested
+- **Tracking-Window Screen Thumbnails**: Captures bounded active-tab screenshots about every 30 seconds while school-managed monitoring is active in an authorized tracking window, independent of teacher dashboard tab visibility, plus an exact-bound safety capture when requested
 - **Visible Indicators**: Shows in-page and popup indicators when school-managed monitoring is active
 - **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
@@ -236,7 +236,7 @@ git rm --cached extension/config.js
 - Timestamps of activity
 - Website favicon URL
 - Heartbeat, connection, and device health state
-- Observation-bound JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab
+- Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only teaching-session-bound thumbnails and discards student-session/gap pixels on receipt
 - An exact-bound screenshot immediately before a requested safety tab closure, when capture succeeds within the bounded window
 
 ### What's NOT Monitored
@@ -249,8 +249,10 @@ git rm --cached extension/config.js
 ### Automatic Monitoring
 - **Tab titles and URLs are collected automatically** - No student action required
 - Heartbeat sends data every 10 seconds
-- In negotiated observation-lease mode, ambient screen thumbnails are captured about every 30 seconds only while an authorized teacher or administrator is actively observing the exact student session
-- A server-selected legacy screenshot mode remains available only as an explicit staged-rollout fallback
+- In negotiated tracking-window mode, active-tab thumbnails are captured about every 30 seconds while school-managed monitoring is active inside the server-authorized tracking window, whether or not a teacher currently has the dashboard tab visible
+- Every upload is bound to the exact current student or teaching session and control revision. SchoolPilot discards gap/student-session pixels on receipt and retains only class-bound thumbnails
+- Capture stops when school tracking policy is hard-off, after sign-out/session expiry or an authentication/explicit license denial, or when the short-lived tracking-window lease expires or is revoked
+- The older observation-lease capability remains available for mixed-version rollout; a server-selected legacy screenshot mode remains an explicit fallback
 - Teacher sees current tab and URL history in real-time
 - Complies with school district monitoring policies for managed Chromebooks
 
