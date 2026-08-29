@@ -185,8 +185,8 @@ describe("ClassPilot classroom runtime core", () => {
       updates: [{ tabId: 2, url: "https://lock.example/assignment?step=1" }],
       removeTabIds: [3, 4],
       createUrl: null,
-      activateTabId: null,
-      focusFallbackUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://lock.example/assignment?step=1",
     });
   });
 
@@ -258,6 +258,103 @@ describe("ClassPilot classroom runtime core", () => {
     });
   });
 
+  it("uses the last-focused-window foreground instead of another window's active flag", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://lock.example/assignment",
+          domain: "lock.example",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, windowId: 10, active: true, url: "chrome://dino/" },
+      { id: 2, windowId: 20, active: true, url: "https://lock.example/work-in-progress" },
+      { id: 3, windowId: 20, active: false, url: "https://outside.example/" },
+    ], { foregroundTabId: 1 });
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [3],
+      createUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://lock.example/assignment",
+    });
+  });
+
+  it("navigates and focuses a background web tab when the foreground is protected", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://lock.example/assignment",
+          domain: "lock.example",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, windowId: 10, active: true, url: "chrome://settings/" },
+      { id: 2, windowId: 20, active: true, url: "https://outside.example/" },
+    ], { foregroundTabId: 1 });
+
+    expect(plan).toEqual({
+      updates: [{ tabId: 2, url: "https://lock.example/assignment" }],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://lock.example/assignment",
+    });
+  });
+
+  it("composes Waypoint with the tab limit while preserving the foreground page", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com", domain: "ixl.com" },
+      },
+    });
+    const tabs = [
+      { id: 1, active: false, url: "https://ixl.com/first" },
+      { id: 2, active: false, url: "https://app.ixl.com/second" },
+      { id: 3, active: true, url: "https://ixl.com/current" },
+    ];
+
+    expect(core.planClassroomTabReconciliation(normalized, tabs, {
+      foregroundTabId: 3,
+      maxTabs: 3,
+    }).removeTabIds).toEqual([]);
+    expect(core.planClassroomTabReconciliation(normalized, tabs, {
+      foregroundTabId: 3,
+      maxTabs: 2,
+    })).toEqual({
+      updates: [],
+      removeTabIds: [1],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("keeps one compliant web target when protected tabs make the limit unattainable", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com", domain: "ixl.com" },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "chrome://settings/" },
+      { id: 2, active: false, url: "https://app.ixl.com/math" },
+    ], { foregroundTabId: 1, maxTabs: 1 });
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://ixl.com/",
+    });
+  });
+
   it("still navigates the active tab when no tab is on the locked domain", () => {
     const normalized = state(6, {
       restrictions: {
@@ -277,8 +374,8 @@ describe("ClassPilot classroom runtime core", () => {
       updates: [{ tabId: 2, url: "https://lock.example/assignment" }],
       removeTabIds: [1],
       createUrl: null,
-      activateTabId: null,
-      focusFallbackUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://lock.example/assignment",
     });
   });
 
@@ -299,8 +396,8 @@ describe("ClassPilot classroom runtime core", () => {
       updates: [{ tabId: 3, url: "https://allowed.example" }],
       removeTabIds: [4],
       createUrl: null,
-      activateTabId: null,
-      focusFallbackUrl: null,
+      activateTabId: 3,
+      focusFallbackUrl: "https://allowed.example",
     });
   });
 
@@ -332,6 +429,80 @@ describe("ClassPilot classroom runtime core", () => {
       activateTabId: null,
       focusFallbackUrl: null,
     });
+  });
+
+  it("focuses an allowed Flight Path tab when the last-focused window is protected", () => {
+    const normalized = state(7, {
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["allowed.example"] },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, windowId: 10, active: true, url: "chrome://dino/" },
+      { id: 2, windowId: 20, active: true, url: "https://app.allowed.example/lesson/4" },
+      { id: 3, windowId: 20, active: false, url: "https://outside.example/" },
+    ], { foregroundTabId: 1 });
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [3],
+      createUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://allowed.example",
+    });
+  });
+
+  it("prefers rejecting a newly-created excess tab without sacrificing the sole target", () => {
+    const normalized = state(8, {
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com", domain: "ixl.com" },
+      },
+    });
+    const existingAndNew = [
+      { id: 1, active: true, url: "chrome://settings/" },
+      { id: 2, active: false, url: "https://ixl.com/existing" },
+      { id: 3, active: true, url: "https://app.ixl.com/new" },
+    ];
+    expect(core.planTabLimitRemovals(normalized, existingAndNew, {
+      maxTabs: 1,
+      foregroundTabId: 2,
+      preferRemoveTabId: 3,
+    })).toEqual([3]);
+
+    expect(core.planTabLimitRemovals(normalized, [
+      { id: 1, active: true, url: "chrome://settings/" },
+      { id: 3, active: true, url: "https://app.ixl.com/new" },
+    ], {
+      maxTabs: 1,
+      foregroundTabId: 3,
+      preferRemoveTabId: 3,
+    })).toEqual([]);
+
+    expect(core.planTabLimitRemovals(normalized, [
+      { id: 1, active: true, url: "chrome://settings/" },
+      { id: 2, active: false, url: "https://outside.example/transient" },
+      { id: 3, active: true, url: "https://app.ixl.com/new" },
+    ], {
+      maxTabs: 1,
+      foregroundTabId: 3,
+      preserveTabId: 3,
+      preferRemoveTabId: 3,
+    })).toEqual([2]);
+  });
+
+  it("preserves an allowed Flight Path tab during standalone school-limit enforcement", () => {
+    const normalized = state(8, {
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["allowed.example"] },
+      },
+    });
+    expect(core.planTabLimitRemovals(normalized, [
+      { id: 1, active: true, url: "https://outside.example/" },
+      { id: 2, active: false, url: "https://app.allowed.example/lesson" },
+    ], {
+      maxTabs: 1,
+      foregroundTabId: 1,
+    })).toEqual([1]);
   });
 
   it("matches hosts within a domain without accepting lookalike suffixes", () => {

@@ -1525,6 +1525,16 @@ async function main() {
         } while (Date.now() < deadline);
         return tabs;
       };
+      const drainTabPolicyMutations = async () => {
+        // Tab creation/navigation events can enqueue auth work which then
+        // enqueues classroom work. Drain in lock order more than once so a
+        // fallback tab's own onCreated event is included before assertions.
+        for (let pass = 0; pass < 3; pass += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          await studentAuthMutationTail;
+          await classroomStateApplicationTail;
+        }
+      };
 
       await chrome.tabs.create({ url: 'chrome://version/', active: false });
       await chrome.tabs.create({ url: urls.outsideOne, active: true });
@@ -1543,7 +1553,7 @@ async function main() {
           },
         },
       });
-      const afterLock = await waitForTabState((tabs) => {
+      let afterLock = await waitForTabState((tabs) => {
         const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
         // Lenient on-domain lock: tabs already on the locked domain are kept,
         // never navigated. When the navigation listener redirects an
@@ -1555,6 +1565,8 @@ async function main() {
           new URL(url).hostname === 'lock.localhost'
         );
       });
+      await drainTabPolicyMutations();
+      afterLock = await chrome.tabs.query({});
 
       await applyClassroomState({
         schemaVersion: 1,
@@ -1577,7 +1589,7 @@ async function main() {
           flightPath: { active: true, allowedDomains: ['flight.localhost'] },
         },
       });
-      const afterFlightPath = await waitForTabState((tabs) => {
+      let afterFlightPath = await waitForTabState((tabs) => {
         const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
         // The retained disallowed tab is redirected to the allowed domain's
         // canonical HTTPS origin. This local fixture only serves HTTP, so
@@ -1588,6 +1600,8 @@ async function main() {
           new URL(url).hostname === 'flight.localhost'
         );
       });
+      await drainTabPolicyMutations();
+      afterFlightPath = await chrome.tabs.query({});
       const summary = (tabs) => ({
         internal: tabs
           .map(effectiveUrl)
@@ -1602,7 +1616,10 @@ async function main() {
       };
     }, { now: Date.now(), urls: reconciliationUrls });
     assert.ok(existingTabReconciliation.afterLock.internal.length >= 1);
-    assert.ok(existingTabReconciliation.afterLock.web.length >= 1);
+    assert.ok(
+      existingTabReconciliation.afterLock.web.length >= 1,
+      `lock reconciliation result: ${JSON.stringify(existingTabReconciliation.afterLock)}`,
+    );
     assert.ok(existingTabReconciliation.afterLock.web.every((url) =>
       new URL(url).hostname === 'lock.localhost'
     ));
