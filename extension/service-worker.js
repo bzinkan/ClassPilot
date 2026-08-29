@@ -324,6 +324,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'commandAckReceiptV1',
   'classroomOverlayRestoreV1',
   'liveViewNegotiationV1',
+  'domainPreservingRestrictionsV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'authBoundTelemetryV1',
@@ -14834,21 +14835,6 @@ function scheduleClassroomStateExpiryRetry() {
   });
 }
 
-async function enforceCurrentTabLimit(assertCurrent = () => {}, tabMutationJournal = null) {
-  assertCurrent('classroom tab-limit query');
-  if (!currentMaxTabs || currentMaxTabs < 1) return;
-  const tabs = await chrome.tabs.query({});
-  assertCurrent('classroom tab-limit query');
-  const closeable = tabs.filter((tab) => tab.id && !tab.url?.startsWith('chrome://'));
-  const excess = Math.max(0, tabs.length - currentMaxTabs);
-  for (const tab of closeable.slice(0, excess)) {
-    assertCurrent('classroom tab-limit removal');
-    rememberClassroomTabRemoval(tabMutationJournal, tab);
-    await chrome.tabs.remove(tab.id).catch(() => {});
-    assertCurrent('classroom tab-limit removal');
-  }
-}
-
 async function setRuntimeFromClassroomState(state, options = {}) {
   const authContext = options.authContext || null;
   const authorityEnvelope = options.authorityEnvelope || state;
@@ -15022,8 +15008,6 @@ async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
       options.tabMutationJournal,
     );
     assertCurrent('classroom tab reconciliation');
-    await enforceCurrentTabLimit(assertCurrent, options.tabMutationJournal);
-    assertCurrent('classroom tab reconciliation');
     await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
     assertCurrent('classroom tab reconciliation');
     return true;
@@ -15040,12 +15024,28 @@ async function reconcileExistingTabsForClassroomState(
   assertCurrent = () => {},
   authContext = null,
   tabMutationJournal = null,
+  browserApi = {},
 ) {
+  const queryTabs = browserApi.queryTabs || ((query) => chrome.tabs.query(query));
+  const updateTab = browserApi.updateTab || ((tabId, properties) => chrome.tabs.update(tabId, properties));
+  const getTab = browserApi.getTab || ((tabId) => chrome.tabs.get(tabId));
+  const removeTab = browserApi.removeTab || ((tabId) => chrome.tabs.remove(tabId));
+  const createTab = browserApi.createTab || ((properties) => chrome.tabs.create(properties));
+  const focusWindow = browserApi.focusWindow || ((windowId) => (
+    chrome.windows?.update ? chrome.windows.update(windowId, { focused: true }) : Promise.resolve()
+  ));
+  const refreshTabs = browserApi.refreshTabs || refreshTabCache;
   assertCurrent('classroom tab query');
-  const tabs = await chrome.tabs.query({});
+  const tabs = await queryTabs({});
   assertCurrent('classroom tab query');
-  const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs);
-  let updateSucceeded = plan.updates.length === 0;
+  const foregroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
+  assertCurrent('classroom foreground tab query');
+  const foregroundTab = foregroundTabs.find((tab) => Number.isInteger(tab?.id)) || null;
+  const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
+    foregroundTabId: foregroundTab?.id,
+    maxTabs: currentMaxTabs,
+  });
+  const failedUpdateIds = new Set();
   for (const update of plan.updates) {
     try {
       assertCurrent('classroom tab update');
@@ -15053,11 +15053,11 @@ async function reconcileExistingTabsForClassroomState(
         tabMutationJournal,
         tabs.find((tab) => tab.id === update.tabId),
       );
-      await chrome.tabs.update(update.tabId, { url: update.url });
+      await updateTab(update.tabId, { url: update.url });
       assertCurrent('classroom tab update');
-      updateSucceeded = true;
     } catch (error) {
       if (isAuthContextCancellation(error)) throw error;
+      failedUpdateIds.add(update.tabId);
       // A tab may disappear between query and update. A replacement below
       // prevents that race from leaving the student without the lock target.
       console.warn('[Classroom State] Retained tab disappeared during reconciliation:', safeDiagnosticError(error));
@@ -15070,7 +15070,7 @@ async function reconcileExistingTabsForClassroomState(
         tabMutationJournal,
         tabs.find((tab) => tab.id === tabId),
       );
-      await chrome.tabs.remove(tabId);
+      await removeTab(tabId);
       assertCurrent('classroom tab removal');
     } catch (error) {
       if (isAuthContextCancellation(error)) throw error;
@@ -15078,32 +15078,62 @@ async function reconcileExistingTabsForClassroomState(
       console.info('[Classroom State] Exact retained tab already closed during reconciliation');
     }
   }
+  let fallbackUrl = plan.createUrl;
   if (Number.isInteger(plan.activateTabId)) {
-    try {
-      assertCurrent('classroom tab activation');
-      // Focus-only change: deliberately NOT journaled — authority-handover
-      // scrubbing closes journaled updated tabs, which would kill the
-      // student's compliant tab.
-      await chrome.tabs.update(plan.activateTabId, { active: true });
-      assertCurrent('classroom tab activation');
-    } catch (error) {
-      if (isAuthContextCancellation(error)) throw error;
-      if (plan.focusFallbackUrl) {
-        assertCurrent('classroom tab creation');
-        const createdTab = await chrome.tabs.create({ url: plan.focusFallbackUrl, active: true });
-        if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
-        assertCurrent('classroom tab creation');
+    if (failedUpdateIds.has(plan.activateTabId)) {
+      fallbackUrl = fallbackUrl || plan.focusFallbackUrl;
+    } else {
+      try {
+        assertCurrent('classroom tab activation');
+        // Focus-only change: deliberately NOT journaled — authority-handover
+        // scrubbing closes journaled updated tabs, which would kill the
+        // student's compliant tab.
+        const activatedTab = await updateTab(plan.activateTabId, { active: true });
+        assertCurrent('classroom tab activation');
+        const targetTab = Number.isInteger(activatedTab?.windowId)
+          ? activatedTab
+          : await getTab(plan.activateTabId);
+        assertCurrent('classroom window focus');
+        if (Number.isInteger(targetTab?.windowId)) {
+          await focusWindow(targetTab.windowId);
+          assertCurrent('classroom window focus');
+        }
+        const verified = await queryTabs({ active: true, lastFocusedWindow: true });
+        assertCurrent('classroom foreground verification');
+        if (!verified.some((tab) => tab.id === plan.activateTabId)) {
+          throw new Error('Classroom target did not become the foreground tab');
+        }
+      } catch (error) {
+        if (isAuthContextCancellation(error)) throw error;
+        fallbackUrl = fallbackUrl || plan.focusFallbackUrl;
+        console.warn('[Classroom State] Foreground target disappeared during reconciliation:', safeDiagnosticError(error));
       }
     }
   }
-  const fallbackUrl = plan.createUrl || (!updateSucceeded ? plan.updates[0]?.url : null);
+  const foregroundUpdateFailure = plan.updates.find((update) => (
+    failedUpdateIds.has(update.tabId)
+    && (update.tabId === foregroundTab?.id || update.tabId === plan.activateTabId
+      || state?.restrictions?.screenLock?.active)
+  ));
+  fallbackUrl = fallbackUrl || foregroundUpdateFailure?.url || null;
   if (fallbackUrl) {
     assertCurrent('classroom tab creation');
-    const createdTab = await chrome.tabs.create({ url: fallbackUrl, active: true });
+    const createdTab = await createTab({ url: fallbackUrl, active: true });
     if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
     assertCurrent('classroom tab creation');
+    if (Number.isInteger(createdTab?.windowId)) {
+      await focusWindow(createdTab.windowId);
+      assertCurrent('classroom fallback window focus');
+    }
+    if (Number.isInteger(createdTab?.id)) {
+      const verified = await queryTabs({ active: true, lastFocusedWindow: true });
+      assertCurrent('classroom fallback foreground verification');
+      if (!verified.some((tab) => tab.id === createdTab.id)) {
+        throw new Error('Classroom fallback did not become the foreground tab');
+      }
+    }
   }
-  await refreshTabCache(authContext);
+  await refreshTabs(authContext);
   assertCurrent('classroom tab cache refresh');
 }
 
@@ -16679,10 +16709,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         // Handle "CURRENT_URL" special marker - lock to current active tab
         let urlToLock = command.data.url;
         if (urlToLock === "CURRENT_URL") {
-          const allTabs = await chrome.tabs.query({});
+          const foregroundTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
           assertCommandExecutionCurrent('lock-screen active tab');
-          const activeTab = allTabs.find(t => t.active) || allTabs[0];
-          if (activeTab && activeTab.url) {
+          const activeTab = foregroundTabs.find((tab) => isHttpUrl(tab?.url));
+          if (activeTab?.url) {
             urlToLock = activeTab.url;
             console.log('[Lock Screen] Using current active tab');
           } else {
@@ -16719,28 +16749,15 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await updateBlockingRules([lockedDomain]);
         assertCommandExecutionCurrent('lock-screen rules');
         
-        // Close all other tabs - keep only the current tab
-        const allTabs = await chrome.tabs.query({});
+        await reconcileClassroomStateTabsBestEffort({
+          restrictions: classroomRestrictionsFromRuntime(),
+        }, {
+          authContext: commandAuthContext,
+          assertCurrent: assertCommandExecutionCurrent,
+          runtimeOwner: executionContext.runtimeOwner,
+          tabMutationJournal: commandTabJournal,
+        });
         assertCommandExecutionCurrent('lock-screen tab reconciliation');
-        const activeTab = allTabs.find(t => t.active) || allTabs[0];
-        
-        if (activeTab) {
-          // Close all other tabs, keeping any tab already on the locked domain
-          for (const tab of allTabs) {
-            if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')
-              && !isOnSameDomain(tab.url || '', lockedDomain)) {
-              try {
-                await removeCommandTab(
-                  tab.id,
-                  tab,
-                  'lock-screen tab reconciliation',
-                );
-              } catch (error) {
-                console.warn('Could not close an excess tab:', safeDiagnosticError(error));
-              }
-            }
-          }
-        }
         
         // Show notification with domain
         await notifyCommandUi({
@@ -16847,42 +16864,18 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await updateBlockingRules(allowedDomains);
         assertCommandExecutionCurrent('flight-path rules');
         
-        // Close all tabs except one and navigate to the first allowed domain
+        // Use the same foreground-aware reconciliation as revisioned state so
+        // an allowed page in another window is preserved and focused.
         if (allowedDomains.length > 0) {
-          const allTabs = await chrome.tabs.query({});
+          await reconcileClassroomStateTabsBestEffort({
+            restrictions: classroomRestrictionsFromRuntime(),
+          }, {
+            authContext: commandAuthContext,
+            assertCurrent: assertCommandExecutionCurrent,
+            runtimeOwner: executionContext.runtimeOwner,
+            tabMutationJournal: commandTabJournal,
+          });
           assertCommandExecutionCurrent('flight-path tabs');
-          const activeTab = allTabs.find(t => t.active) || allTabs[0];
-          
-          // Navigate the first tab to the first allowed domain (prepend https:// if needed)
-          const firstDomain = allowedDomains[0];
-          const firstUrl = firstDomain.startsWith('http') ? firstDomain : `https://${firstDomain}`;
-          
-          const onAllowedDomain = (tab) =>
-            allowedDomains.some((domain) => isOnSameDomain(tab?.url || '', domain));
-
-          if (activeTab) {
-            // Navigate the active tab only when it is not already on an
-            // allowed domain — on-task students keep their exact page.
-            if (!onAllowedDomain(activeTab)) {
-              await updateCommandTab(
-                activeTab.id,
-                { url: firstUrl },
-                activeTab,
-                'flight-path navigation',
-              );
-            }
-
-            // Close other tabs unless they are already on an allowed domain
-            for (const tab of allTabs) {
-              if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')
-                && !onAllowedDomain(tab)) {
-                await removeCommandTab(tab.id, tab, 'flight-path tab close');
-              }
-            }
-          } else {
-            // No tabs exist, create one
-            await createCommandTab({ url: firstUrl, active: true }, 'flight-path tab create');
-          }
           
           await notifyCommandUi({
             title: 'Flight Path Applied',
@@ -17012,20 +17005,15 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           currentMaxTabs = effectiveTabLimit();
         }
         
-        // Close excess tabs if over limit
-        if (currentMaxTabs) {
-          const tabs = await chrome.tabs.query({});
-          assertCommandExecutionCurrent('tab-limit query');
-          if (tabs.length > currentMaxTabs) {
-            // Close oldest tabs first (keep most recent)
-            const tabsToClose = tabs.slice(0, tabs.length - currentMaxTabs);
-            for (const tab of tabsToClose) {
-              if (!tab.url.startsWith('chrome://')) {
-                await removeCommandTab(tab.id, tab, 'tab-limit close');
-              }
-            }
-          }
-        }
+        await reconcileClassroomStateTabsBestEffort({
+          restrictions: classroomRestrictionsFromRuntime(),
+        }, {
+          authContext: commandAuthContext,
+          assertCurrent: assertCommandExecutionCurrent,
+          runtimeOwner: executionContext.runtimeOwner,
+          tabMutationJournal: commandTabJournal,
+        });
+        assertCommandExecutionCurrent('tab-limit enforcement');
         
         result.currentMaxTabs = currentMaxTabs;
         console.log('Tab limit set to:', currentMaxTabs);
@@ -18063,7 +18051,20 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
       return { applied: true, limit: appliedLimit, closed: 0 };
     }
 
-    const targets = tabs.slice(0, tabs.length - appliedLimit).map((tab) => Object.freeze({
+    const foregroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit foreground query');
+    assertCurrentStudentBinding(message, 'WebSocket tab-limit foreground query', { authContext });
+    const foregroundTab = Array.isArray(foregroundTabs)
+      ? foregroundTabs.find((tab) => Number.isInteger(tab?.id) && tab.active === true)
+      : null;
+    const removalIds = RuntimeCore.planTabLimitRemovals({
+      restrictions: classroomRestrictionsFromRuntime(),
+    }, tabs, {
+      maxTabs: appliedLimit,
+      foregroundTabId: foregroundTab?.id,
+    });
+    const byId = new Map(tabs.map((tab) => [tab?.id, tab]));
+    const targets = removalIds.map((tabId) => byId.get(tabId)).filter(Boolean).map((tab) => Object.freeze({
       id: tab?.id,
       windowId: tab?.windowId,
       url: String(tab?.url || ''),
@@ -18254,7 +18255,10 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 });
 
 // Enforce tab limit and screen lock
-async function handleCreatedTabForPolicy(tab) {
+async function handleCreatedTabForPolicy(tab, options = {}) {
+  const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
+  const queryTabs = options.queryTabs || ((query) => chrome.tabs.query(query));
+  const reconcileTabs = options.reconcileTabs || reconcileClassroomStateTabsBestEffort;
   let eventAuthContext;
   try {
     eventAuthContext = captureAuthenticatedContext('tab created policy event');
@@ -18268,15 +18272,21 @@ async function handleCreatedTabForPolicy(tab) {
       assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy event');
       enforceAuthGateForTab(tab).catch(() => {});
       if (!Number.isInteger(tab?.id)) return;
+      // onCreated delivery can trail a classroom-state reconciliation that
+      // already navigated this tab. Re-read it so a stale event URL cannot
+      // remove the newly compliant Waypoint target.
+      const policyTab = await getTab(tab.id).catch(() => tab);
 
       const policy = {
         attentionModeActive,
         screenLocked,
         lockedDomain,
+        allowedDomains: [...allowedDomains],
         currentMaxTabs,
       };
       let policySource = null;
       let notification = null;
+      let reconcileExcessTabs = false;
       if (policy.attentionModeActive) {
         policySource = 'attention_mode';
       } else if (policy.screenLocked && policy.lockedDomain) {
@@ -18284,7 +18294,7 @@ async function handleCreatedTabForPolicy(tab) {
         // domain (e.g. a middle-clicked link) is allowed; DNR and the
         // navigation listener keep it fenced afterward. Anything else —
         // chrome://newtab, about:blank, off-domain — is removed.
-        const createdUrl = tab.pendingUrl || tab.url || '';
+        const createdUrl = policyTab.pendingUrl || policyTab.url || '';
         const onLockedDomain = /^https?:\/\//i.test(createdUrl)
           && isOnSameDomain(createdUrl, policy.lockedDomain);
         if (!onLockedDomain) {
@@ -18295,26 +18305,70 @@ async function handleCreatedTabForPolicy(tab) {
             priority: 2,
           };
         }
-      } else if (policy.currentMaxTabs) {
-        const tabs = await chrome.tabs.query({});
+      }
+      if (!policySource && policy.currentMaxTabs) {
+        const tabs = await queryTabs({});
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created limit query');
         if (tabs.length > policy.currentMaxTabs) {
-          policySource = 'tab_limit';
-          notification = {
-            title: 'Tab Limit Reached',
-            message: `You can only have ${policy.currentMaxTabs} tabs open at a time.`,
-            priority: 1,
-          };
+          const otherTabs = tabs.filter((candidate) => candidate.id !== policyTab.id);
+          const existingCompliant = policy.screenLocked && policy.lockedDomain
+            ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
+              && isOnSameDomain(candidate.pendingUrl || candidate.url || '', policy.lockedDomain))
+            : policy.allowedDomains.length > 0
+              ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
+                && policy.allowedDomains.some((domain) => (
+                  isOnSameDomain(candidate.pendingUrl || candidate.url || '', domain)
+                )))
+              : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
+                candidate.pendingUrl || candidate.url || ''
+              ));
+          const foregroundTab = otherTabs.find((candidate) => candidate.active === true) || null;
+          const removalIds = RuntimeCore.planTabLimitRemovals({
+            restrictions: classroomRestrictionsFromRuntime(),
+          }, tabs, {
+            maxTabs: policy.currentMaxTabs,
+            foregroundTabId: foregroundTab?.id,
+            preserveTabId: existingCompliant?.id ?? policyTab.id,
+            preferRemoveTabId: policyTab.id,
+          });
+          if (removalIds.includes(policyTab.id)) {
+            policySource = 'tab_limit';
+            notification = {
+              title: 'Tab Limit Reached',
+              message: `You can only have ${policy.currentMaxTabs} tabs open at a time.`,
+              priority: 1,
+            };
+          } else if (removalIds.length > 0) {
+            // The new tab can be the sole compliant Waypoint target while an
+            // older disallowed tab is the removable excess. Run the unified
+            // authenticated reconciliation instead of leaving that excess
+            // tab alive or sacrificing the compliant target.
+            reconcileExcessTabs = true;
+          }
         }
+      }
+
+      if (reconcileExcessTabs) {
+        const assertCurrent = (reason = 'tab created limit reconciliation') => {
+          assertAuthenticatedContextCurrent(eventAuthContext, reason);
+        };
+        await reconcileTabs({
+          restrictions: classroomRestrictionsFromRuntime(),
+        }, {
+          authContext: eventAuthContext,
+          assertCurrent,
+        });
+        assertCurrent('tab created limit reconciliation');
+        return;
       }
 
       if (policySource) {
         await recordNavigationBlockedForAuth(
           eventAuthContext,
-          tab.pendingUrl || tab.url || '',
+          policyTab.pendingUrl || policyTab.url || '',
           policySource,
         );
-        await removeTabForAuth(tab.id, eventAuthContext, 'tab created policy removal');
+        await removeTabForAuth(policyTab.id, eventAuthContext, 'tab created policy removal');
         if (notification) {
           await notifyNavigationBlockedForAuth(
             eventAuthContext,

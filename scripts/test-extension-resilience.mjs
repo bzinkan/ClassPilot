@@ -1602,7 +1602,10 @@ async function main() {
       };
     }, { now: Date.now(), urls: reconciliationUrls });
     assert.ok(existingTabReconciliation.afterLock.internal.length >= 1);
-    assert.ok(existingTabReconciliation.afterLock.web.length >= 1);
+    assert.ok(
+      existingTabReconciliation.afterLock.web.length >= 1,
+      `lock reconciliation result: ${JSON.stringify(existingTabReconciliation.afterLock)}`,
+    );
     assert.ok(existingTabReconciliation.afterLock.web.every((url) =>
       new URL(url).hostname === 'lock.localhost'
     ));

@@ -287,6 +287,79 @@ async function main() {
       scheduleHeartbeat(null);
       await chrome.alarms.clear(STUDENT_CHAT_FLUSH_ALARM);
 
+      const runForegroundReconciliationFixture = async ({ failTargetWindow }) => {
+        const previousMaxTabs = currentMaxTabs;
+        currentMaxTabs = null;
+        const tabs = [
+          { id: 9101, windowId: 91, active: true, url: 'chrome://dino/' },
+          { id: 9201, windowId: 92, active: true, url: 'https://lock.example/in-progress' },
+        ];
+        let foregroundTabId = 9101;
+        let fallbackCreates = 0;
+        let targetFocusFailures = 0;
+        const focusedWindowIds = [];
+        try {
+          await reconcileExistingTabsForClassroomState({
+            restrictions: {
+              screenLock: {
+                active: true,
+                url: 'https://lock.example/landing',
+                domain: 'lock.example',
+              },
+            },
+          }, () => {}, null, null, {
+            queryTabs: async (query) => query?.lastFocusedWindow
+              ? tabs.filter((tab) => tab.id === foregroundTabId)
+              : tabs.map((tab) => ({ ...tab })),
+            updateTab: async (tabId, properties) => {
+              const target = tabs.find((tab) => tab.id === tabId);
+              if (!target) throw new Error('target tab disappeared');
+              Object.assign(target, properties);
+              return { ...target };
+            },
+            getTab: async (tabId) => {
+              const target = tabs.find((tab) => tab.id === tabId);
+              if (!target) throw new Error('target tab disappeared');
+              return { ...target };
+            },
+            removeTab: async (tabId) => {
+              const index = tabs.findIndex((tab) => tab.id === tabId);
+              if (index >= 0) tabs.splice(index, 1);
+            },
+            createTab: async ({ url, active }) => {
+              fallbackCreates += 1;
+              const created = { id: 9300 + fallbackCreates, windowId: 93, active, url };
+              tabs.push(created);
+              return { ...created };
+            },
+            focusWindow: async (windowId) => {
+              focusedWindowIds.push(windowId);
+              if (failTargetWindow && windowId === 92 && targetFocusFailures === 0) {
+                targetFocusFailures += 1;
+                tabs.splice(tabs.findIndex((tab) => tab.id === 9201), 1);
+                throw new Error('target window disappeared');
+              }
+              const target = tabs.find((tab) => tab.windowId === windowId && tab.active);
+              if (!target) throw new Error('focused window has no active tab');
+              foregroundTabId = target.id;
+            },
+            refreshTabs: async () => {},
+          });
+          return {
+            fallbackCreates,
+            foregroundTabId,
+            focusedWindowIds,
+            targetFocusFailures,
+          };
+        } finally {
+          currentMaxTabs = previousMaxTabs;
+        }
+      };
+      const foregroundReconciliation = {
+        focused: await runForegroundReconciliationFixture({ failTargetWindow: false }),
+        disappeared: await runForegroundReconciliationFixture({ failTargetWindow: true }),
+      };
+
       const installIdentity = (suffix) => {
         advanceStudentAuthMutationGeneration();
         CONFIG.serverUrl = 'https://school-pilot.net';
@@ -330,6 +403,50 @@ async function main() {
           serverProtocolVersion: 3,
           acceptedCapabilities: ['studentChatIdempotencyV1'],
         }, authA);
+        const createdTabPolicyBackup = classroomRuntimeBackup();
+        const createdTabPolicySchoolMaxTabs = schoolMaxTabs;
+        const createdTabReconciliationCalls = [];
+        try {
+          screenLocked = true;
+          lockedUrl = 'https://ixl.com/landing';
+          lockedDomain = 'ixl.com';
+          allowedDomains = [];
+          teacherMaxTabs = 1;
+          schoolMaxTabs = null;
+          currentMaxTabs = effectiveTabLimit();
+          const createdTabFixture = {
+            id: 9503,
+            windowId: 95,
+            active: true,
+            url: 'https://app.ixl.com/new',
+          };
+          const createdTabFixtureTabs = [
+            { id: 9501, windowId: 95, active: false, url: 'chrome://settings/' },
+            { id: 9502, windowId: 95, active: false, url: 'https://outside.example/transient' },
+            createdTabFixture,
+          ];
+          await handleCreatedTabForPolicy(createdTabFixture, {
+            getTab: async () => ({ ...createdTabFixture }),
+            queryTabs: async () => createdTabFixtureTabs.map((tab) => ({ ...tab })),
+            reconcileTabs: async (reconciliationState, reconciliationOptions) => {
+              reconciliationOptions.assertCurrent('created-tab fixture reconciliation');
+              createdTabReconciliationCalls.push({
+                authContextId: reconciliationOptions.authContext?.authContextId || null,
+                lockedDomain: reconciliationState.restrictions?.screenLock?.domain || null,
+                tabLimit: reconciliationState.restrictions?.tabLimit ?? null,
+              });
+              return true;
+            },
+          });
+        } finally {
+          restoreClassroomRuntimeBackup(createdTabPolicyBackup);
+          schoolMaxTabs = createdTabPolicySchoolMaxTabs;
+          currentMaxTabs = effectiveTabLimit();
+        }
+        const createdTabLimitReconciliation = {
+          expectedAuthContextId: authA.authContextId,
+          calls: createdTabReconciliationCalls,
+        };
         fetchWithBackoff = async (url, init = {}) => {
           transmissions.push({
             url: String(url),
@@ -3343,6 +3460,8 @@ async function main() {
           kioskOverBoundAttempt,
           kioskExpiredAttempt,
           directoryProbeCalls,
+          foregroundReconciliation,
+          createdTabLimitReconciliation,
         };
       } finally {
         fetchWithBackoff = originalFetchWithBackoff;
@@ -3368,6 +3487,23 @@ async function main() {
     });
 
     assert.equal(result.firstSend.success, true);
+    assert.deepEqual(result.foregroundReconciliation.focused, {
+      fallbackCreates: 0,
+      foregroundTabId: 9201,
+      focusedWindowIds: [92],
+      targetFocusFailures: 0,
+    });
+    assert.deepEqual(result.foregroundReconciliation.disappeared, {
+      fallbackCreates: 1,
+      foregroundTabId: 9301,
+      focusedWindowIds: [92, 93],
+      targetFocusFailures: 1,
+    });
+    assert.deepEqual(result.createdTabLimitReconciliation.calls, [{
+      authContextId: result.createdTabLimitReconciliation.expectedAuthContextId,
+      lockedDomain: 'ixl.com',
+      tabLimit: 1,
+    }]);
     assert.equal(result.firstSend.queued, true);
     assert.equal(result.afterResponseLoss.studentChatOutboxV1.length, 1);
     assert.equal(result.afterResponseLoss.studentChatOutboxV1[0].clientMessageId,
@@ -3866,7 +4002,7 @@ async function main() {
     assert.equal(contentMessageEpochRace.callbackBeforeClearFinalModalCount, 0);
 
     console.log(
-      `ClassPilot 2.7.3 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
+      `ClassPilot 2.7 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
       + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms.`,
     );
   } finally {

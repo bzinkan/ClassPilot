@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.7.6");
+    expect(manifest.version).toBe("2.7.7");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -428,6 +428,34 @@ describe("ClassPilot extension release package guards", () => {
     expect(runtimeCore).toContain("isProtectedInternalTab");
   });
 
+  it("composes tab limits with domain-preserving foreground reconciliation", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
+    expect(runtimeCore).toContain("function planTabLimitRemovals");
+    expect(runtimeCore).toContain("additionalTabCount: plan.createUrl ? 1 : 0");
+    expect(serviceWorker).toContain("maxTabs: currentMaxTabs");
+    expect(serviceWorker).toContain("RuntimeCore.planTabLimitRemovals");
+    expect(serviceWorker).toContain("if (!policySource && policy.currentMaxTabs)");
+    expect(serviceWorker).toContain("preserveTabId: existingCompliant?.id ?? policyTab.id");
+    expect(serviceWorker).toContain("else if (removalIds.length > 0)");
+    expect(serviceWorker).toContain("reconcileExcessTabs = true");
+    expect(serviceWorker).toContain("authContext: eventAuthContext");
+    expect(serviceWorker).toContain("const limits = [teacherMaxTabs, schoolMaxTabs]");
+    expect(serviceWorker).toContain("return limits.length ? Math.min(...limits) : null");
+  });
+
+  it("focuses and verifies the selected window with one fallback creation path", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const reconcileStart = serviceWorker.indexOf("async function reconcileExistingTabsForClassroomState");
+    const reconcileEnd = serviceWorker.indexOf("async function resolveCurrentUrlMarker", reconcileStart);
+    const reconcileBody = serviceWorker.slice(reconcileStart, reconcileEnd);
+    expect(reconcileBody).toContain("{ active: true, lastFocusedWindow: true }");
+    expect(reconcileBody).toContain("await focusWindow(targetTab.windowId)");
+    expect(reconcileBody).toContain("Classroom target did not become the foreground tab");
+    expect(reconcileBody).toContain("Classroom fallback did not become the foreground tab");
+    expect(reconcileBody.match(/await createTab\(/g)).toHaveLength(1);
+  });
+
   it("uses prior-day attribution for overnight tracking windows", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
@@ -604,6 +632,7 @@ describe("ClassPilot extension release package guards", () => {
       "commandAckReceiptV1",
       "classroomOverlayRestoreV1",
       "liveViewNegotiationV1",
+      "domainPreservingRestrictionsV1",
     ]) {
       expect(serviceWorker).toContain(`'${capability}'`);
     }

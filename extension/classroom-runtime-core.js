@@ -643,11 +643,110 @@
     return `https://${domain}`;
   }
 
-  function planClassroomTabReconciliation(state, tabsValue) {
+  function preferredRestrictionTabId(state, tabs, foregroundTabId) {
+    const restrictions = state?.restrictions ?? emptyRestrictions();
+    const foreground = tabs.find((tab) => tab.id === foregroundTabId);
+
+    if (restrictions.screenLock?.active) {
+      const lockedDomain = normalizeDomain(
+        restrictions.screenLock.domain || restrictions.screenLock.url
+      );
+      const compliant = tabs.filter((tab) =>
+        isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
+      if (foreground && compliant.some((tab) => tab.id === foreground.id)) return foreground.id;
+      if (compliant[0]) return compliant[0].id;
+      if (foreground && !isProtectedInternalTab(foreground)) return foreground.id;
+      return tabs.find((tab) => !isProtectedInternalTab(tab))?.id ?? null;
+    }
+
+    if (restrictions.flightPath?.active) {
+      const allowedDomains = normalizeDomainList(
+        restrictions.flightPath.allowedDomains,
+        'Flight Path domains'
+      );
+      const isAllowed = (tab) => isHttpTab(tab) && allowedDomains.some((allowed) =>
+        isHostWithinDomain(normalizeDomain(tabUrl(tab)), allowed));
+      if (foreground && isAllowed(foreground)) return foreground.id;
+      const allowed = tabs.find(isAllowed);
+      if (allowed) return allowed.id;
+      if (foreground && isHttpTab(foreground)) return foreground.id;
+      return tabs.find(isHttpTab)?.id ?? null;
+    }
+
+    if (foreground && !isProtectedInternalTab(foreground)) return foreground.id;
+    for (let index = tabs.length - 1; index >= 0; index -= 1) {
+      if (!isProtectedInternalTab(tabs[index])) return tabs[index].id;
+    }
+    return null;
+  }
+
+  function planTabLimitRemovals(state, tabsValue, options = {}) {
+    const maxTabs = Number(options.maxTabs);
+    if (!Number.isSafeInteger(maxTabs) || maxTabs < 1) return [];
+    const tabs = Array.isArray(tabsValue)
+      ? tabsValue.filter((tab) => Number.isSafeInteger(tab?.id))
+      : [];
+    const additionalTabCount = Number.isSafeInteger(options.additionalTabCount)
+      && options.additionalTabCount > 0
+      ? options.additionalTabCount
+      : 0;
+    const excess = Math.max(0, tabs.length + additionalTabCount - maxTabs);
+    if (excess === 0) return [];
+
+    const foregroundTabId = Number.isSafeInteger(options.foregroundTabId)
+      ? options.foregroundTabId
+      : tabs.find((tab) => tab.active)?.id;
+    const requestedPreserveTabId = Number.isSafeInteger(options.preserveTabId)
+      ? options.preserveTabId
+      : null;
+    const preserveTabId = tabs.some((tab) => tab.id === requestedPreserveTabId)
+      ? requestedPreserveTabId
+      : preferredRestrictionTabId(state, tabs, foregroundTabId);
+    const preferRemoveTabId = Number.isSafeInteger(options.preferRemoveTabId)
+      ? options.preferRemoveTabId
+      : null;
+    const closeable = tabs.filter((tab) =>
+      tab.id !== preserveTabId && !isProtectedInternalTab(tab));
+    if (preferRemoveTabId !== null) {
+      closeable.sort((left, right) => {
+        if (left.id === preferRemoveTabId) return -1;
+        if (right.id === preferRemoveTabId) return 1;
+        return 0;
+      });
+    }
+    return closeable.slice(0, excess).map((tab) => tab.id);
+  }
+
+  function appendTabLimitRemovals(plan, state, tabs, options, preserveTabId = null) {
+    const alreadyRemoved = new Set(plan.removeTabIds);
+    const remainingTabs = tabs.filter((tab) => !alreadyRemoved.has(tab.id));
+    const limitRemovals = planTabLimitRemovals(state, remainingTabs, {
+      maxTabs: options.maxTabs,
+      foregroundTabId: options.foregroundTabId,
+      preserveTabId,
+      additionalTabCount: plan.createUrl ? 1 : 0,
+    });
+    for (const tabId of limitRemovals) {
+      if (!alreadyRemoved.has(tabId)) {
+        alreadyRemoved.add(tabId);
+        plan.removeTabIds.push(tabId);
+      }
+    }
+    if (limitRemovals.length > 0) {
+      const removedByLimit = new Set(limitRemovals);
+      plan.updates = plan.updates.filter((update) => !removedByLimit.has(update.tabId));
+    }
+    return plan;
+  }
+
+  function planClassroomTabReconciliation(state, tabsValue, options = {}) {
     const restrictions = state?.restrictions ?? emptyRestrictions();
     const tabs = Array.isArray(tabsValue)
       ? tabsValue.filter((tab) => Number.isSafeInteger(tab?.id))
       : [];
+    const foregroundTabId = Number.isSafeInteger(options.foregroundTabId)
+      ? options.foregroundTabId
+      : tabs.find((tab) => tab.active)?.id;
     const plan = {
       updates: [],
       removeTabIds: [],
@@ -668,29 +767,41 @@
       const controllable = tabs.filter((tab) => !isProtectedInternalTab(tab));
       const compliant = controllable.filter((tab) =>
         isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
+      let preservedTabId = null;
       if (compliant.length > 0) {
         // A tab already on the locked domain must never be navigated or
         // reloaded; the lock only removes off-domain tabs around it.
         const compliantIds = new Set(compliant.map((tab) => tab.id));
+        const foregroundCompliant = compliant.find((tab) => tab.id === foregroundTabId);
+        const retained = foregroundCompliant || compliant[0];
+        preservedTabId = retained.id;
         plan.removeTabIds.push(...controllable
           .filter((tab) => !compliantIds.has(tab.id))
           .map((tab) => tab.id));
-        if (!compliant.some((tab) => tab.active)) {
-          plan.activateTabId = compliant[0].id;
+        if (!foregroundCompliant) {
+          plan.activateTabId = retained.id;
           plan.focusFallbackUrl = targetUrl;
         }
       } else {
-        const retained = controllable.find((tab) => tab.active) || controllable[0];
+        const retained = controllable.find((tab) => tab.id === foregroundTabId) || controllable[0];
         if (retained) {
+          preservedTabId = retained.id;
           plan.updates.push({ tabId: retained.id, url: targetUrl });
           plan.removeTabIds.push(...controllable
             .filter((tab) => tab.id !== retained.id)
             .map((tab) => tab.id));
+          // Even an already-foreground tab is re-activated and verified after
+          // navigation so a concurrent close cannot leave no compliant page.
+          plan.activateTabId = retained.id;
+          plan.focusFallbackUrl = targetUrl;
         } else {
           plan.createUrl = targetUrl;
         }
       }
-      return plan;
+      return appendTabLimitRemovals(plan, state, tabs, {
+        ...options,
+        foregroundTabId,
+      }, preservedTabId);
     }
 
     if (restrictions.flightPath?.active) {
@@ -701,21 +812,55 @@
       if (allowedDomains.length === 0) throw new Error('active Flight Path requires at least one domain');
       const firstUrl = `https://${allowedDomains[0]}`;
       const httpTabs = tabs.filter(isHttpTab);
+      const allowed = httpTabs.filter((tab) => {
+        const domain = normalizeDomain(tabUrl(tab));
+        return domain && allowedDomains.some((allowedDomain) =>
+          isHostWithinDomain(domain, allowedDomain));
+      });
       const disallowed = httpTabs.filter((tab) => {
         const domain = normalizeDomain(tabUrl(tab));
         return !domain || !allowedDomains.some((allowed) => isHostWithinDomain(domain, allowed));
       });
-      const retained = disallowed.find((tab) => tab.active) || disallowed[0];
-      if (retained) {
-        plan.updates.push({ tabId: retained.id, url: firstUrl });
+      const foregroundAllowed = allowed.find((tab) => tab.id === foregroundTabId);
+      const foregroundDisallowed = disallowed.find((tab) => tab.id === foregroundTabId);
+      let preservedTabId = null;
+      if (foregroundAllowed) {
+        preservedTabId = foregroundAllowed.id;
+        if (disallowed[0]) {
+          plan.updates.push({ tabId: disallowed[0].id, url: firstUrl });
+          plan.removeTabIds.push(...disallowed.slice(1).map((tab) => tab.id));
+        }
+      } else if (foregroundDisallowed) {
+        preservedTabId = foregroundDisallowed.id;
+        plan.updates.push({ tabId: foregroundDisallowed.id, url: firstUrl });
         plan.removeTabIds.push(...disallowed
-          .filter((tab) => tab.id !== retained.id)
+          .filter((tab) => tab.id !== foregroundDisallowed.id)
           .map((tab) => tab.id));
+        plan.activateTabId = foregroundDisallowed.id;
+        plan.focusFallbackUrl = firstUrl;
+      } else if (allowed[0]) {
+        preservedTabId = allowed[0].id;
+        plan.removeTabIds.push(...disallowed.map((tab) => tab.id));
+        plan.activateTabId = allowed[0].id;
+        plan.focusFallbackUrl = firstUrl;
+      } else if (disallowed[0]) {
+        preservedTabId = disallowed[0].id;
+        plan.updates.push({ tabId: disallowed[0].id, url: firstUrl });
+        plan.removeTabIds.push(...disallowed.slice(1).map((tab) => tab.id));
+        plan.activateTabId = disallowed[0].id;
+        plan.focusFallbackUrl = firstUrl;
       } else if (httpTabs.length === 0) {
         plan.createUrl = firstUrl;
       }
+      return appendTabLimitRemovals(plan, state, tabs, {
+        ...options,
+        foregroundTabId,
+      }, preservedTabId);
     }
-    return plan;
+    return appendTabLimitRemovals(plan, state, tabs, {
+      ...options,
+      foregroundTabId,
+    });
   }
 
   function sanitizeNavigation(urlValue, titleValue) {
@@ -946,6 +1091,7 @@
     isRuleInRange,
     buildDnrRules,
     isWithinTrackingWindow,
+    planTabLimitRemovals,
     planClassroomTabReconciliation,
     sanitizeNavigation,
     sanitizeEventMetadata,
