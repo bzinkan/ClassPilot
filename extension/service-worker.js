@@ -14555,6 +14555,7 @@ const AUTHORITY_BOUND_TAB_COMMAND_TYPES = new Set([
   'open-tab',
   'close-tab',
   'close-tabs',
+  'limit-tabs',
 ]);
 let currentClassroomState = null;
 let lastClassroomStateSyncRequestAt = 0;
@@ -18254,6 +18255,116 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   }
 });
 
+async function createdTabPolicyDecision(policyTab, queryTabs) {
+  const policy = {
+    attentionModeActive,
+    screenLocked,
+    lockedDomain,
+    allowedDomains: [...allowedDomains],
+    currentMaxTabs,
+  };
+  let policySource = null;
+  let notification = null;
+  let reconcileExcessTabs = false;
+  let removalTarget = null;
+  let evaluatedMaxTabs = null;
+  if (policy.attentionModeActive) {
+    policySource = 'attention_mode';
+  } else if (policy.screenLocked && policy.lockedDomain) {
+    // Lenient on-domain lock: a new tab already destined for the locked
+    // domain (e.g. a middle-clicked link) is allowed; DNR and the
+    // navigation listener keep it fenced afterward. Anything else —
+    // chrome://newtab, about:blank, off-domain — is removed.
+    const createdUrl = policyTab.pendingUrl || policyTab.url || '';
+    const onLockedDomain = /^https?:\/\//i.test(createdUrl)
+      && isOnSameDomain(createdUrl, policy.lockedDomain);
+    if (!onLockedDomain) {
+      policySource = 'screen_lock';
+      notification = {
+        title: 'Waypoint Set',
+        message: `A waypoint is active at ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
+        priority: 2,
+      };
+    }
+  }
+  if (!policySource && policy.currentMaxTabs) {
+    const tabs = await queryTabs({});
+    // School settings can arrive independently of browser tab enumeration.
+    // Use the effective limit at the completed inventory boundary, not the
+    // value captured before the asynchronous query.
+    const inventoryMaxTabs = currentMaxTabs;
+    evaluatedMaxTabs = inventoryMaxTabs;
+    if (inventoryMaxTabs && tabs.length > inventoryMaxTabs) {
+      const otherTabs = tabs.filter((candidate) => candidate.id !== policyTab.id);
+      const existingCompliant = policy.screenLocked && policy.lockedDomain
+        ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
+          && isOnSameDomain(candidate.pendingUrl || candidate.url || '', policy.lockedDomain))
+        : policy.allowedDomains.length > 0
+          ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
+            && policy.allowedDomains.some((domain) => (
+              isOnSameDomain(candidate.pendingUrl || candidate.url || '', domain)
+            )))
+          : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
+            candidate.pendingUrl || candidate.url || ''
+          ));
+      const foregroundTab = otherTabs.find((candidate) => candidate.active === true) || null;
+      const removalIds = RuntimeCore.planTabLimitRemovals({
+        restrictions: classroomRestrictionsFromRuntime(),
+      }, tabs, {
+        maxTabs: inventoryMaxTabs,
+        foregroundTabId: foregroundTab?.id,
+        preserveTabId: existingCompliant?.id ?? policyTab.id,
+        preferRemoveTabId: policyTab.id,
+      });
+      if (removalIds.includes(policyTab.id)) {
+        policySource = 'tab_limit';
+        const selectedTarget = tabs.find((candidate) => candidate.id === policyTab.id) || policyTab;
+        removalTarget = Object.freeze({
+          id: selectedTarget.id,
+          windowId: selectedTarget.windowId,
+          url: String(selectedTarget.url || ''),
+          pendingUrl: String(selectedTarget.pendingUrl || ''),
+        });
+        notification = {
+          title: 'Tab Limit Reached',
+          message: `You can only have ${inventoryMaxTabs} tabs open at a time.`,
+          priority: 1,
+        };
+      } else if (removalIds.length > 0) {
+        // The new tab can be the sole compliant Waypoint target while an
+        // older disallowed tab is the removable excess. Run the unified
+        // authenticated reconciliation instead of leaving that excess
+        // tab alive or sacrificing the compliant target.
+        reconcileExcessTabs = true;
+      }
+    }
+  }
+  return {
+    policySource,
+    notification,
+    reconcileExcessTabs,
+    removalTarget,
+    evaluatedMaxTabs,
+  };
+}
+
+function createdTabRemovalDecisionStillApplies(decision, currentTab) {
+  if (!decision?.policySource || !Number.isInteger(currentTab?.id)) return false;
+  if (decision.policySource === 'attention_mode') return attentionModeActive;
+  if (decision.policySource === 'screen_lock') {
+    if (!screenLocked || !lockedDomain) return false;
+    const currentUrl = currentTab.pendingUrl || currentTab.url || '';
+    return !/^https?:\/\//i.test(currentUrl) || !isOnSameDomain(currentUrl, lockedDomain);
+  }
+  if (decision.policySource === 'tab_limit') {
+    return Number.isSafeInteger(currentMaxTabs)
+      && currentMaxTabs > 0
+      && currentMaxTabs === decision.evaluatedMaxTabs
+      && tabLimitTargetMatches(decision.removalTarget, currentTab);
+  }
+  return false;
+}
+
 // Enforce tab limit and screen lock
 async function handleCreatedTabForPolicy(tab, options = {}) {
   const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
@@ -18272,114 +18383,109 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
       assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy event');
       enforceAuthGateForTab(tab).catch(() => {});
       if (!Number.isInteger(tab?.id)) return;
-      // onCreated delivery can trail a classroom-state reconciliation that
-      // already navigated this tab. Re-read it so a stale event URL cannot
-      // remove the newly compliant Waypoint target.
-      const policyTab = await getTab(tab.id).catch(() => tab);
+      const policyAction = await enqueueClassroomStateOperation(async () => {
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created classroom policy event');
+        // onCreated delivery can trail a classroom-state reconciliation that
+        // already navigated this tab. Re-read it only after earlier classroom
+        // operations finish so a stale event URL cannot remove the newly
+        // compliant Waypoint target.
+        const policyTab = await getTab(tab.id).catch(() => null);
+        if (!policyTab) return null;
+        let decision = await createdTabPolicyDecision(policyTab, queryTabs);
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy decision');
 
-      const policy = {
-        attentionModeActive,
-        screenLocked,
-        lockedDomain,
-        allowedDomains: [...allowedDomains],
-        currentMaxTabs,
-      };
-      let policySource = null;
-      let notification = null;
-      let reconcileExcessTabs = false;
-      if (policy.attentionModeActive) {
-        policySource = 'attention_mode';
-      } else if (policy.screenLocked && policy.lockedDomain) {
-        // Lenient on-domain lock: a new tab already destined for the locked
-        // domain (e.g. a middle-clicked link) is allowed; DNR and the
-        // navigation listener keep it fenced afterward. Anything else —
-        // chrome://newtab, about:blank, off-domain — is removed.
-        const createdUrl = policyTab.pendingUrl || policyTab.url || '';
-        const onLockedDomain = /^https?:\/\//i.test(createdUrl)
-          && isOnSameDomain(createdUrl, policy.lockedDomain);
-        if (!onLockedDomain) {
-          policySource = 'screen_lock';
-          notification = {
-            title: 'Waypoint Set',
-            message: `A waypoint is active at ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
-            priority: 2,
+        if (decision.reconcileExcessTabs) {
+          const assertCurrent = (reason = 'tab created limit reconciliation') => {
+            assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-        }
-      }
-      if (!policySource && policy.currentMaxTabs) {
-        const tabs = await queryTabs({});
-        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created limit query');
-        if (tabs.length > policy.currentMaxTabs) {
-          const otherTabs = tabs.filter((candidate) => candidate.id !== policyTab.id);
-          const existingCompliant = policy.screenLocked && policy.lockedDomain
-            ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-              && isOnSameDomain(candidate.pendingUrl || candidate.url || '', policy.lockedDomain))
-            : policy.allowedDomains.length > 0
-              ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-                && policy.allowedDomains.some((domain) => (
-                  isOnSameDomain(candidate.pendingUrl || candidate.url || '', domain)
-                )))
-              : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
-                candidate.pendingUrl || candidate.url || ''
-              ));
-          const foregroundTab = otherTabs.find((candidate) => candidate.active === true) || null;
-          const removalIds = RuntimeCore.planTabLimitRemovals({
+          await reconcileTabs({
             restrictions: classroomRestrictionsFromRuntime(),
-          }, tabs, {
-            maxTabs: policy.currentMaxTabs,
-            foregroundTabId: foregroundTab?.id,
-            preserveTabId: existingCompliant?.id ?? policyTab.id,
-            preferRemoveTabId: policyTab.id,
+          }, {
+            authContext: eventAuthContext,
+            assertCurrent,
           });
-          if (removalIds.includes(policyTab.id)) {
-            policySource = 'tab_limit';
-            notification = {
-              title: 'Tab Limit Reached',
-              message: `You can only have ${policy.currentMaxTabs} tabs open at a time.`,
-              priority: 1,
-            };
-          } else if (removalIds.length > 0) {
-            // The new tab can be the sole compliant Waypoint target while an
-            // older disallowed tab is the removable excess. Run the unified
-            // authenticated reconciliation instead of leaving that excess
-            // tab alive or sacrificing the compliant target.
-            reconcileExcessTabs = true;
-          }
+          assertCurrent('tab created limit reconciliation');
+          return null;
         }
-      }
 
-      if (reconcileExcessTabs) {
-        const assertCurrent = (reason = 'tab created limit reconciliation') => {
-          assertAuthenticatedContextCurrent(eventAuthContext, reason);
+        if (!decision.policySource) return { refreshTabs: true };
+
+        // Browser navigation is independent of both mutation queues. Re-read
+        // and recompute immediately before the destructive point so a tab the
+        // browser repurposed after onCreated is never removed from a stale
+        // policy snapshot.
+        const currentTab = await getTab(policyTab.id).catch(() => null);
+        if (!currentTab) return;
+        const currentDecision = await createdTabPolicyDecision(currentTab, queryTabs);
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy revalidation');
+        if (currentDecision.reconcileExcessTabs) {
+          const assertCurrent = (reason = 'tab created revalidated reconciliation') => {
+            assertAuthenticatedContextCurrent(eventAuthContext, reason);
+          };
+          await reconcileTabs({
+            restrictions: classroomRestrictionsFromRuntime(),
+          }, {
+            authContext: eventAuthContext,
+            assertCurrent,
+          });
+          assertCurrent('tab created revalidated reconciliation');
+          return null;
+        }
+        if (!currentDecision.policySource) {
+          return { refreshTabs: true };
+        }
+        const removalTab = await getTab(policyTab.id).catch(() => null);
+        if (!removalTab) return null;
+        // A preserved compliant tab may close, the browser may repurpose the
+        // target, or the effective limit may change after the prior decision.
+        // Re-plan every source from the third live tab read and final inventory;
+        // remove only if the latest policy still selects this exact target.
+        const finalDecision = await createdTabPolicyDecision(removalTab, queryTabs);
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created final policy revalidation');
+        if (finalDecision.reconcileExcessTabs) {
+          const assertCurrent = (reason = 'tab created final policy reconciliation') => {
+            assertAuthenticatedContextCurrent(eventAuthContext, reason);
+          };
+          await reconcileTabs({
+            restrictions: classroomRestrictionsFromRuntime(),
+          }, {
+            authContext: eventAuthContext,
+            assertCurrent,
+          });
+          assertCurrent('tab created final policy reconciliation');
+          return null;
+        }
+        if (!finalDecision.policySource
+          || !createdTabRemovalDecisionStillApplies(finalDecision, removalTab)) {
+          return { refreshTabs: true };
+        }
+        decision = finalDecision;
+        await removeTabForAuth(removalTab.id, eventAuthContext, 'tab created policy removal');
+        return {
+          blockedUrl: removalTab.pendingUrl || removalTab.url || '',
+          notification: decision.notification,
+          policySource: decision.policySource,
         };
-        await reconcileTabs({
-          restrictions: classroomRestrictionsFromRuntime(),
-        }, {
-          authContext: eventAuthContext,
-          assertCurrent,
-        });
-        assertCurrent('tab created limit reconciliation');
-        return;
-      }
+      });
 
-      if (policySource) {
-        await recordNavigationBlockedForAuth(
-          eventAuthContext,
-          policyTab.pendingUrl || policyTab.url || '',
-          policySource,
-        );
-        await removeTabForAuth(policyTab.id, eventAuthContext, 'tab created policy removal');
-        if (notification) {
-          await notifyNavigationBlockedForAuth(
-            eventAuthContext,
-            notification,
-            policySource,
-          );
-        }
+      if (policyAction?.refreshTabs) {
+        await refreshTabCache(eventAuthContext);
+        assertAuthenticatedContextCurrent(eventAuthContext, 'tab created cache refresh');
         return;
       }
-      await refreshTabCache(eventAuthContext);
-      assertAuthenticatedContextCurrent(eventAuthContext, 'tab created cache refresh');
+      if (!policyAction?.policySource) return;
+      await recordNavigationBlockedForAuth(
+        eventAuthContext,
+        policyAction.blockedUrl,
+        policyAction.policySource,
+      );
+      if (policyAction.notification) {
+        await notifyNavigationBlockedForAuth(
+          eventAuthContext,
+          policyAction.notification,
+          policyAction.policySource,
+        );
+      }
     });
   } catch (error) {
     if (isAuthContextCancellation(error)) return;

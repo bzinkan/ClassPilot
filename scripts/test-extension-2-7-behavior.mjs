@@ -406,6 +406,7 @@ async function main() {
         const createdTabPolicyBackup = classroomRuntimeBackup();
         const createdTabPolicySchoolMaxTabs = schoolMaxTabs;
         const createdTabReconciliationCalls = [];
+        let createdTabPolicyRace = null;
         try {
           screenLocked = true;
           lockedUrl = 'https://ixl.com/landing';
@@ -438,6 +439,344 @@ async function main() {
               return true;
             },
           });
+
+          // A delayed onCreated event must serialize behind the classroom
+          // reconciliation that can repurpose its tab as the sole Waypoint
+          // target. Browser navigation can still occur outside both queues, so
+          // exercise the final live-tab revalidation repeatedly as well.
+          teacherMaxTabs = null;
+          currentMaxTabs = effectiveTabLimit();
+          const originalRecordNavigationBlockedForAuth = recordNavigationBlockedForAuth;
+          const originalRemoveTabForAuth = removeTabForAuth;
+          const originalNotifyNavigationBlockedForAuth = notifyNavigationBlockedForAuth;
+          const originalEnforceAuthGateForTab = enforceAuthGateForTab;
+          const originalRaceRefreshTabCache = refreshTabCache;
+          const raceRemovals = [];
+          const raceRecordSources = [];
+          let raceRecordCalls = 0;
+          try {
+            recordNavigationBlockedForAuth = async (_authContext, _url, source) => {
+              raceRecordCalls += 1;
+              raceRecordSources.push(source);
+            };
+            removeTabForAuth = async (tabId, authContext) => {
+              assertAuthenticatedContextCurrent(authContext, 'created-tab race removal');
+              raceRemovals.push(tabId);
+            };
+            notifyNavigationBlockedForAuth = async () => {};
+            refreshTabCache = async (authContext) => {
+              assertAuthenticatedContextCurrent(authContext, 'created-tab race cache refresh');
+              return true;
+            };
+
+            await studentAuthMutationTail;
+            let releaseClassroomBlock;
+            let classroomBlockStarted;
+            const classroomBlockReady = new Promise((resolve) => {
+              classroomBlockStarted = resolve;
+            });
+            const classroomBlockGate = new Promise((resolve) => {
+              releaseClassroomBlock = resolve;
+            });
+            let serializedLiveTab = {
+              id: 9510,
+              windowId: 95,
+              active: true,
+              url: 'https://outside.example/before-reconciliation',
+            };
+            let serializedGetCalls = 0;
+            const classroomBlock = enqueueClassroomStateOperation(async () => {
+              classroomBlockStarted();
+              await classroomBlockGate;
+              serializedLiveTab = {
+                ...serializedLiveTab,
+                url: 'https://ixl.com/landing',
+              };
+            });
+            await classroomBlockReady;
+            let handlerReachedAuthQueue;
+            const handlerAuthQueueReady = new Promise((resolve) => {
+              handlerReachedAuthQueue = resolve;
+            });
+            enforceAuthGateForTab = async () => {
+              handlerReachedAuthQueue();
+            };
+            const serializedHandler = handleCreatedTabForPolicy({
+              id: serializedLiveTab.id,
+              windowId: serializedLiveTab.windowId,
+              active: true,
+              url: 'https://outside.example/stale-created-event',
+            }, {
+              getTab: async () => {
+                serializedGetCalls += 1;
+                return { ...serializedLiveTab };
+              },
+              queryTabs: async () => [{ ...serializedLiveTab }],
+            });
+            await handlerAuthQueueReady;
+            const readsWhileClassroomBlocked = serializedGetCalls;
+            releaseClassroomBlock();
+            await Promise.all([classroomBlock, serializedHandler]);
+
+            enforceAuthGateForTab = async () => {};
+            const revalidationIterations = 100;
+            const revalidationReadCounts = [];
+            for (let iteration = 0; iteration < revalidationIterations; iteration += 1) {
+              const createdId = 9600 + iteration;
+              let liveReadCount = 0;
+              await handleCreatedTabForPolicy({
+                id: createdId,
+                windowId: 96,
+                active: true,
+                url: `https://outside.example/race-${iteration}`,
+              }, {
+                getTab: async () => {
+                  liveReadCount += 1;
+                  if (liveReadCount <= 2) {
+                    return {
+                      id: createdId,
+                      windowId: 96,
+                      active: true,
+                      url: `https://outside.example/race-${iteration}`,
+                    };
+                  }
+                  return iteration % 2 === 0
+                    ? {
+                        id: createdId,
+                        windowId: 96,
+                        active: true,
+                        url: 'https://ixl.com/landing',
+                      }
+                    : {
+                        id: createdId,
+                        windowId: 96,
+                        active: true,
+                        url: `https://outside.example/race-${iteration}`,
+                        pendingUrl: 'https://app.ixl.com/assignment',
+                      };
+                },
+                queryTabs: async () => [],
+              });
+              revalidationReadCounts.push(liveReadCount);
+            }
+            const raceRecordCallsBeforeControl = raceRecordCalls;
+            const stableControlId = 9799;
+            let stableControlReadCount = 0;
+            await handleCreatedTabForPolicy({
+              id: stableControlId,
+              windowId: 97,
+              active: true,
+              url: 'https://outside.example/stable-control',
+            }, {
+              getTab: async () => {
+                stableControlReadCount += 1;
+                return {
+                  id: stableControlId,
+                  windowId: 97,
+                  active: true,
+                  url: 'https://outside.example/stable-control',
+                };
+              },
+              queryTabs: async () => [],
+            });
+            teacherMaxTabs = 1;
+            currentMaxTabs = effectiveTabLimit();
+            const sourceTransitionId = 9801;
+            const sourceTransitionAllowedTab = {
+              id: 9800,
+              windowId: 98,
+              active: false,
+              url: 'https://ixl.com/existing',
+            };
+            const sourceTransitionCompliantTab = {
+              id: sourceTransitionId,
+              windowId: 98,
+              active: true,
+              url: 'https://app.ixl.com/new',
+            };
+            let sourceTransitionReadCount = 0;
+            await handleCreatedTabForPolicy({
+              ...sourceTransitionCompliantTab,
+              url: 'https://outside.example/source-transition',
+            }, {
+              getTab: async () => {
+                sourceTransitionReadCount += 1;
+                return sourceTransitionReadCount <= 2
+                  ? {
+                      ...sourceTransitionCompliantTab,
+                      url: 'https://outside.example/source-transition',
+                    }
+                  : { ...sourceTransitionCompliantTab };
+              },
+              queryTabs: async () => [
+                { ...sourceTransitionAllowedTab },
+                { ...sourceTransitionCompliantTab },
+              ],
+            });
+            const runFinalInventoryCase = async ({ id, mode }) => {
+              teacherMaxTabs = 1;
+              currentMaxTabs = effectiveTabLimit();
+              const existing = {
+                id: id - 1,
+                windowId: 99,
+                active: false,
+                url: 'https://ixl.com/existing-final-inventory',
+              };
+              const created = {
+                id,
+                windowId: 99,
+                active: true,
+                url: 'https://app.ixl.com/final-inventory',
+              };
+              let readCount = 0;
+              let inventoryCount = 0;
+              const removalStart = raceRemovals.length;
+              const recordStart = raceRecordSources.length;
+              await handleCreatedTabForPolicy(created, {
+                getTab: async () => {
+                  readCount += 1;
+                  return { ...created };
+                },
+                queryTabs: async () => {
+                  inventoryCount += 1;
+                  if (inventoryCount === 3 && mode === 'limit-raised') {
+                    teacherMaxTabs = 2;
+                    currentMaxTabs = effectiveTabLimit();
+                  }
+                  if (inventoryCount === 3 && mode === 'preserved-disappeared') {
+                    return [
+                      { id: id - 2, windowId: 99, active: false, url: 'chrome://version/' },
+                      { ...created },
+                    ];
+                  }
+                  return [{ ...existing }, { ...created }];
+                },
+              });
+              return {
+                readCount,
+                inventoryCount,
+                removals: raceRemovals.slice(removalStart),
+                recordSources: raceRecordSources.slice(recordStart),
+              };
+            };
+            const finalInventoryCases = {
+              preservedDisappeared: await runFinalInventoryCase({
+                id: 9811,
+                mode: 'preserved-disappeared',
+              }),
+              limitRaised: await runFinalInventoryCase({
+                id: 9821,
+                mode: 'limit-raised',
+              }),
+              stableOverLimit: await runFinalInventoryCase({
+                id: 9831,
+                mode: 'stable',
+              }),
+            };
+            const raceExecuteRemoteControlCommand = executeRemoteControlCommand;
+            const raceRemoveTabForAuth = removeTabForAuth;
+            const raceRecordNavigationBlockedForAuth = recordNavigationBlockedForAuth;
+            let schoolPolicyLimitSerialization;
+            try {
+              teacherMaxTabs = 1;
+              schoolMaxTabs = null;
+              currentMaxTabs = effectiveTabLimit();
+              let liveTabs = [
+                { id: 9840, windowId: 98, active: false, url: 'https://ixl.com/preserved' },
+                { id: 9841, windowId: 98, active: true, url: 'https://app.ixl.com/new' },
+              ];
+              const createdRemovalIds = [];
+              const schoolCrossRemovalIds = [];
+              let releaseCreatedRemoval;
+              let createdRemovalStarted;
+              const createdRemovalReady = new Promise((resolve) => {
+                createdRemovalStarted = resolve;
+              });
+              const createdRemovalGate = new Promise((resolve) => {
+                releaseCreatedRemoval = resolve;
+              });
+              removeTabForAuth = async (tabId, authContext) => {
+                assertAuthenticatedContextCurrent(authContext, 'school limit serialization removal');
+                createdRemovalStarted();
+                await createdRemovalGate;
+                createdRemovalIds.push(tabId);
+                liveTabs = liveTabs.filter((candidate) => candidate.id !== tabId);
+              };
+              recordNavigationBlockedForAuth = async () => {};
+              let schoolCommandEntered;
+              const schoolCommandEntry = new Promise((resolve) => {
+                schoolCommandEntered = resolve;
+              });
+              executeRemoteControlCommand = async () => {
+                schoolCommandEntered();
+                if (liveTabs.length > 1) {
+                  schoolCrossRemovalIds.push(9840);
+                  liveTabs = liveTabs.filter((candidate) => candidate.id !== 9840);
+                }
+                return { currentMaxTabs: 1 };
+              };
+
+              const createdPolicyPromise = handleCreatedTabForPolicy({ ...liveTabs[1] }, {
+                getTab: async (tabId) => {
+                  const current = liveTabs.find((candidate) => candidate.id === tabId);
+                  if (!current) throw new Error('fixture tab disappeared');
+                  return { ...current };
+                },
+                queryTabs: async () => liveTabs.map((candidate) => ({ ...candidate })),
+              });
+              await createdRemovalReady;
+              const schoolPolicyPromise = handleRemoteControl({
+                type: 'limit-tabs',
+                data: { maxTabs: 1 },
+              }, {
+                studentId: authA.studentId,
+                studentSessionId: authA.studentSessionId,
+                authority: {
+                  kind: 'school_policy',
+                  source: 'school_settings',
+                  schoolId: CONFIG.schoolId,
+                },
+              });
+              const schoolEnteredWhileCreatedHeld = await Promise.race([
+                schoolCommandEntry.then(() => true),
+                new Promise((resolve) => setTimeout(() => resolve(false), 25)),
+              ]);
+              releaseCreatedRemoval();
+              await Promise.all([createdPolicyPromise, schoolPolicyPromise]);
+              schoolPolicyLimitSerialization = {
+                schoolEnteredWhileCreatedHeld,
+                createdRemovalIds,
+                schoolCrossRemovalIds,
+                finalTabIds: liveTabs.map((candidate) => candidate.id),
+              };
+            } finally {
+              executeRemoteControlCommand = raceExecuteRemoteControlCommand;
+              removeTabForAuth = raceRemoveTabForAuth;
+              recordNavigationBlockedForAuth = raceRecordNavigationBlockedForAuth;
+            }
+            createdTabPolicyRace = {
+              readsWhileClassroomBlocked,
+              serializedGetCalls,
+              raceRecordCallsBeforeControl,
+              raceRecordCalls,
+              raceRecordSources,
+              raceRemovals,
+              revalidationIterations,
+              revalidationReadCounts,
+              stableControlId,
+              stableControlReadCount,
+              sourceTransitionId,
+              sourceTransitionReadCount,
+              finalInventoryCases,
+              schoolPolicyLimitSerialization,
+            };
+          } finally {
+            recordNavigationBlockedForAuth = originalRecordNavigationBlockedForAuth;
+            removeTabForAuth = originalRemoveTabForAuth;
+            notifyNavigationBlockedForAuth = originalNotifyNavigationBlockedForAuth;
+            enforceAuthGateForTab = originalEnforceAuthGateForTab;
+            refreshTabCache = originalRaceRefreshTabCache;
+          }
         } finally {
           restoreClassroomRuntimeBackup(createdTabPolicyBackup);
           schoolMaxTabs = createdTabPolicySchoolMaxTabs;
@@ -3462,6 +3801,7 @@ async function main() {
           directoryProbeCalls,
           foregroundReconciliation,
           createdTabLimitReconciliation,
+          createdTabPolicyRace,
         };
       } finally {
         fetchWithBackoff = originalFetchWithBackoff;
@@ -3504,6 +3844,50 @@ async function main() {
       lockedDomain: 'ixl.com',
       tabLimit: 1,
     }]);
+    assert.equal(result.createdTabPolicyRace.readsWhileClassroomBlocked, 0);
+    assert.equal(result.createdTabPolicyRace.serializedGetCalls, 1);
+    assert.equal(result.createdTabPolicyRace.raceRecordCallsBeforeControl, 0);
+    assert.equal(result.createdTabPolicyRace.revalidationIterations, 100);
+    assert.ok(result.createdTabPolicyRace.revalidationReadCounts.every((count) => count === 3));
+    assert.equal(result.createdTabPolicyRace.stableControlReadCount, 3);
+    assert.equal(result.createdTabPolicyRace.sourceTransitionReadCount, 3);
+    assert.deepEqual(result.createdTabPolicyRace.finalInventoryCases, {
+      preservedDisappeared: {
+        readCount: 3,
+        inventoryCount: 3,
+        removals: [],
+        recordSources: [],
+      },
+      limitRaised: {
+        readCount: 3,
+        inventoryCount: 3,
+        removals: [],
+        recordSources: [],
+      },
+      stableOverLimit: {
+        readCount: 3,
+        inventoryCount: 3,
+        removals: [9831],
+        recordSources: ['tab_limit'],
+      },
+    });
+    assert.equal(result.createdTabPolicyRace.raceRecordCalls, 3);
+    assert.deepEqual(result.createdTabPolicyRace.raceRecordSources, [
+      'screen_lock',
+      'tab_limit',
+      'tab_limit',
+    ]);
+    assert.deepEqual(result.createdTabPolicyRace.raceRemovals, [
+      result.createdTabPolicyRace.stableControlId,
+      result.createdTabPolicyRace.sourceTransitionId,
+      9831,
+    ]);
+    assert.deepEqual(result.createdTabPolicyRace.schoolPolicyLimitSerialization, {
+      schoolEnteredWhileCreatedHeld: false,
+      createdRemovalIds: [9841],
+      schoolCrossRemovalIds: [],
+      finalTabIds: [9840],
+    });
     assert.equal(result.firstSend.queued, true);
     assert.equal(result.afterResponseLoss.studentChatOutboxV1.length, 1);
     assert.equal(result.afterResponseLoss.studentChatOutboxV1[0].clientMessageId,

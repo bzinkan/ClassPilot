@@ -440,6 +440,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("else if (removalIds.length > 0)");
     expect(serviceWorker).toContain("reconcileExcessTabs = true");
     expect(serviceWorker).toContain("authContext: eventAuthContext");
+    const tabCommandTypesStart = serviceWorker.indexOf("const AUTHORITY_BOUND_TAB_COMMAND_TYPES");
+    const tabCommandTypesEnd = serviceWorker.indexOf("]);", tabCommandTypesStart);
+    expect(serviceWorker.slice(tabCommandTypesStart, tabCommandTypesEnd)).toContain("'limit-tabs'");
     expect(serviceWorker).toContain("const limits = [teacherMaxTabs, schoolMaxTabs]");
     expect(serviceWorker).toContain("return limits.length ? Math.min(...limits) : null");
   });

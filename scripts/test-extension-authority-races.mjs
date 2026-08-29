@@ -2328,10 +2328,15 @@ async function main() {
         await createdNotificationGate;
         return originalNotifyNavigationBlockedForAuth(authContext, notification, source);
       };
-      const createdPromise = handleCreatedTabForPolicy({
+      const createdPolicyTab = {
         id: 4502,
+        windowId: 45,
+        active: true,
         url: 'https://created-tab-a.example/private',
         title: 'Created A',
+      };
+      const createdPromise = handleCreatedTabForPolicy(createdPolicyTab, {
+        getTab: async () => ({ ...createdPolicyTab }),
       });
       await createdNotificationReady;
       advanceStudentAuthMutationGeneration();
