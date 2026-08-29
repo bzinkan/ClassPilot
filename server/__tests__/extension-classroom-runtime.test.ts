@@ -185,6 +185,100 @@ describe("ClassPilot classroom runtime core", () => {
       updates: [{ tabId: 2, url: "https://lock.example/assignment?step=1" }],
       removeTabIds: [3, 4],
       createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("never navigates a tab that is already on the locked domain", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://lock.example/assignment?step=1",
+          domain: "lock.example",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "https://www.lock.example/deep/page?q=5" },
+      { id: 2, active: false, url: "https://outside.example/" },
+      { id: 3, active: false, url: "https://lock.example/other" },
+    ]);
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [2],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("treats subdomains of the locked domain as compliant", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com", domain: "ixl.com" },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "https://app.ixl.com/math/grade-5" },
+    ]);
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("focuses an existing locked-domain tab instead of navigating the active tab", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://lock.example/assignment",
+          domain: "lock.example",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "https://outside.example/video" },
+      { id: 2, active: false, url: "https://lock.example/work-in-progress" },
+    ]);
+
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [1],
+      createUrl: null,
+      activateTabId: 2,
+      focusFallbackUrl: "https://lock.example/assignment",
+    });
+  });
+
+  it("still navigates the active tab when no tab is on the locked domain", () => {
+    const normalized = state(6, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://lock.example/assignment",
+          domain: "lock.example",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: false, url: "https://evillock.example/phish" },
+      { id: 2, active: true, url: "https://outside.example/" },
+    ]);
+
+    expect(plan).toEqual({
+      updates: [{ tabId: 2, url: "https://lock.example/assignment" }],
+      removeTabIds: [1],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
     });
   });
 
@@ -205,7 +299,52 @@ describe("ClassPilot classroom runtime core", () => {
       updates: [{ tabId: 3, url: "https://allowed.example" }],
       removeTabIds: [4],
       createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
     });
+  });
+
+  it("treats subdomains of Flight Path domains as allowed", () => {
+    const normalized = state(7, {
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["allowed.example"] },
+      },
+    });
+    const untouched = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "https://app.allowed.example/lesson/4" },
+    ]);
+    expect(untouched).toEqual({
+      updates: [],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+
+    const mixed = core.planClassroomTabReconciliation(normalized, [
+      { id: 1, active: true, url: "https://app.allowed.example/lesson/4" },
+      { id: 2, active: false, url: "https://notallowed.example/" },
+    ]);
+    expect(mixed).toEqual({
+      updates: [{ tabId: 2, url: "https://allowed.example" }],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("matches hosts within a domain without accepting lookalike suffixes", () => {
+    expect(core.isHostWithinDomain("ixl.com", "ixl.com")).toBe(true);
+    expect(core.isHostWithinDomain("app.ixl.com", "ixl.com")).toBe(true);
+    expect(core.isHostWithinDomain("es.app.ixl.com", "ixl.com")).toBe(true);
+    expect(core.isHostWithinDomain("IXL.com.", "ixl.com")).toBe(true);
+    expect(core.isHostWithinDomain("evilixl.com", "ixl.com")).toBe(false);
+    expect(core.isHostWithinDomain("ixl.com", "app.ixl.com")).toBe(false);
+    expect(core.isHostWithinDomain("ixl.com.evil.example", "ixl.com")).toBe(false);
+    expect(core.isHostWithinDomain("", "ixl.com")).toBe(false);
+    expect(core.isHostWithinDomain(null, "ixl.com")).toBe(false);
+    expect(core.isHostWithinDomain("ixl.com", null)).toBe(false);
   });
 
   it("treats corrupted snapshots as invalid", () => {
