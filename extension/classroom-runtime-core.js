@@ -301,6 +301,14 @@
     }
   }
 
+  function isHostWithinDomain(hostValue, domainValue) {
+    if (typeof hostValue !== 'string' || typeof domainValue !== 'string') return false;
+    const host = hostValue.trim().toLowerCase().replace(/\.$/, '');
+    const domain = domainValue.trim().toLowerCase().replace(/\.$/, '');
+    if (!host || !domain) return false;
+    return host === domain || host.endsWith(`.${domain}`);
+  }
+
   function normalizeDomainList(values, label = 'domain list') {
     if (values === null || values === undefined) return [];
     if (!Array.isArray(values)) throw new Error(`${label} must be an array`);
@@ -640,7 +648,13 @@
     const tabs = Array.isArray(tabsValue)
       ? tabsValue.filter((tab) => Number.isSafeInteger(tab?.id))
       : [];
-    const plan = { updates: [], removeTabIds: [], createUrl: null };
+    const plan = {
+      updates: [],
+      removeTabIds: [],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    };
 
     if (restrictions.screenLock?.active) {
       const targetUrl = safeRestrictionTarget(
@@ -648,15 +662,33 @@
         restrictions.screenLock.domain
       );
       if (!targetUrl) throw new Error('screen lock requires a safe navigation target');
+      const lockedDomain = normalizeDomain(
+        restrictions.screenLock.domain || restrictions.screenLock.url
+      );
       const controllable = tabs.filter((tab) => !isProtectedInternalTab(tab));
-      const retained = controllable.find((tab) => tab.active) || controllable[0];
-      if (retained) {
-        plan.updates.push({ tabId: retained.id, url: targetUrl });
+      const compliant = controllable.filter((tab) =>
+        isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
+      if (compliant.length > 0) {
+        // A tab already on the locked domain must never be navigated or
+        // reloaded; the lock only removes off-domain tabs around it.
+        const compliantIds = new Set(compliant.map((tab) => tab.id));
         plan.removeTabIds.push(...controllable
-          .filter((tab) => tab.id !== retained.id)
+          .filter((tab) => !compliantIds.has(tab.id))
           .map((tab) => tab.id));
+        if (!compliant.some((tab) => tab.active)) {
+          plan.activateTabId = compliant[0].id;
+          plan.focusFallbackUrl = targetUrl;
+        }
       } else {
-        plan.createUrl = targetUrl;
+        const retained = controllable.find((tab) => tab.active) || controllable[0];
+        if (retained) {
+          plan.updates.push({ tabId: retained.id, url: targetUrl });
+          plan.removeTabIds.push(...controllable
+            .filter((tab) => tab.id !== retained.id)
+            .map((tab) => tab.id));
+        } else {
+          plan.createUrl = targetUrl;
+        }
       }
       return plan;
     }
@@ -671,7 +703,7 @@
       const httpTabs = tabs.filter(isHttpTab);
       const disallowed = httpTabs.filter((tab) => {
         const domain = normalizeDomain(tabUrl(tab));
-        return !domain || !allowedDomains.includes(domain);
+        return !domain || !allowedDomains.some((allowed) => isHostWithinDomain(domain, allowed));
       });
       const retained = disallowed.find((tab) => tab.active) || disallowed[0];
       if (retained) {
@@ -905,6 +937,7 @@
     commandDeliveryPolicy,
     commandDeliveryState,
     normalizeDomain,
+    isHostWithinDomain,
     normalizeDomainList,
     normalizeTemporaryAllows,
     normalizeClassroomState,

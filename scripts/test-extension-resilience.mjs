@@ -1545,7 +1545,15 @@ async function main() {
       });
       const afterLock = await waitForTabState((tabs) => {
         const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
-        return webUrls.length === 1 && webUrls[0] === urls.lock;
+        // Lenient on-domain lock: tabs already on the locked domain are kept,
+        // never navigated. When the navigation listener redirects an
+        // off-domain tab to the lock target before reconciliation queries
+        // tabs, that tab becomes compliant and survives too — so the
+        // deterministic invariant is that every remaining web tab is on the
+        // locked domain, not that exactly one remains.
+        return webUrls.length >= 1 && webUrls.every((url) =>
+          new URL(url).hostname === 'lock.localhost'
+        );
       });
 
       await applyClassroomState({
@@ -1594,7 +1602,11 @@ async function main() {
       };
     }, { now: Date.now(), urls: reconciliationUrls });
     assert.ok(existingTabReconciliation.afterLock.internal.length >= 1);
-    assert.deepEqual(existingTabReconciliation.afterLock.web, [reconciliationUrls.lock]);
+    assert.ok(existingTabReconciliation.afterLock.web.length >= 1);
+    assert.ok(existingTabReconciliation.afterLock.web.every((url) =>
+      new URL(url).hostname === 'lock.localhost'
+    ));
+    assert.ok(existingTabReconciliation.afterLock.web.includes(reconciliationUrls.lock));
     assert.ok(existingTabReconciliation.afterFlightPath.internal.length >= 1);
     assert.ok(existingTabReconciliation.afterFlightPath.web.length >= 1);
     assert.ok(existingTabReconciliation.afterFlightPath.web.every((url) =>

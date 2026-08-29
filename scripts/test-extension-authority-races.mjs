@@ -3271,7 +3271,7 @@ async function main() {
       },
       {
         authContextId: result.createdTabAuthContextId,
-        title: 'Screen Locked',
+        title: 'Waypoint Set',
         source: 'screen_lock',
       },
     ]);

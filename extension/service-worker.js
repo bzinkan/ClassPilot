@@ -15078,6 +15078,24 @@ async function reconcileExistingTabsForClassroomState(
       console.info('[Classroom State] Exact retained tab already closed during reconciliation');
     }
   }
+  if (Number.isInteger(plan.activateTabId)) {
+    try {
+      assertCurrent('classroom tab activation');
+      // Focus-only change: deliberately NOT journaled — authority-handover
+      // scrubbing closes journaled updated tabs, which would kill the
+      // student's compliant tab.
+      await chrome.tabs.update(plan.activateTabId, { active: true });
+      assertCurrent('classroom tab activation');
+    } catch (error) {
+      if (isAuthContextCancellation(error)) throw error;
+      if (plan.focusFallbackUrl) {
+        assertCurrent('classroom tab creation');
+        const createdTab = await chrome.tabs.create({ url: plan.focusFallbackUrl, active: true });
+        if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
+        assertCurrent('classroom tab creation');
+      }
+    }
+  }
   const fallbackUrl = plan.createUrl || (!updateSucceeded ? plan.updates[0]?.url : null);
   if (fallbackUrl) {
     assertCurrent('classroom tab creation');
@@ -15962,15 +15980,12 @@ function extractDomain(url) {
   }
 }
 
-// Helper function to check if URL is on the same domain (exact match only)
+// Helper function to check if URL is on the same domain. Subdomain-aware:
+// "app.ixl.com" counts as within "ixl.com", matching the DNR rules and the
+// dashboard's off-task badge so enforcement layers agree.
 function isOnSameDomain(url, domain) {
   if (!url || !domain) return false;
-  const urlDomain = extractDomain(url);
-  if (!urlDomain) return false;
-
-  // Use exact domain matching for precise control
-  // e.g., "classroom.google.com" only matches "classroom.google.com"
-  return urlDomain === domain;
+  return RuntimeCore.isHostWithinDomain(extractDomain(url), domain);
 }
 
 const AUTHORITY_BOUND_COMMAND_TYPES = new Set([
@@ -16710,9 +16725,10 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const activeTab = allTabs.find(t => t.active) || allTabs[0];
         
         if (activeTab) {
-          // Close all other tabs
+          // Close all other tabs, keeping any tab already on the locked domain
           for (const tab of allTabs) {
-            if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')) {
+            if (tab.id !== activeTab.id && tab.id && !tab.url?.startsWith('chrome://')
+              && !isOnSameDomain(tab.url || '', lockedDomain)) {
               try {
                 await removeCommandTab(
                   tab.id,
@@ -16728,8 +16744,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Show notification with domain
         await notifyCommandUi({
-          title: 'Screen Locked',
-          message: `Your teacher has locked your screen to the current domain: ${lockedDomain}. You cannot open new tabs or navigate to other websites.`,
+          title: 'Waypoint Set',
+          message: `Your teacher set a waypoint at ${lockedDomain}. You can only browse ${lockedDomain} right now.`,
           priority: 2,
         });
         
@@ -16841,18 +16857,25 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           const firstDomain = allowedDomains[0];
           const firstUrl = firstDomain.startsWith('http') ? firstDomain : `https://${firstDomain}`;
           
+          const onAllowedDomain = (tab) =>
+            allowedDomains.some((domain) => isOnSameDomain(tab?.url || '', domain));
+
           if (activeTab) {
-            // Update the active tab to the first domain
-            await updateCommandTab(
-              activeTab.id,
-              { url: firstUrl },
-              activeTab,
-              'flight-path navigation',
-            );
-            
-            // Close all other tabs
+            // Navigate the active tab only when it is not already on an
+            // allowed domain — on-task students keep their exact page.
+            if (!onAllowedDomain(activeTab)) {
+              await updateCommandTab(
+                activeTab.id,
+                { url: firstUrl },
+                activeTab,
+                'flight-path navigation',
+              );
+            }
+
+            // Close other tabs unless they are already on an allowed domain
             for (const tab of allTabs) {
-              if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')) {
+              if (tab.id !== activeTab.id && !tab.url?.startsWith('chrome://')
+                && !onAllowedDomain(tab)) {
                 await removeCommandTab(tab.id, tab, 'flight-path tab close');
               }
             }
@@ -18257,12 +18280,21 @@ async function handleCreatedTabForPolicy(tab) {
       if (policy.attentionModeActive) {
         policySource = 'attention_mode';
       } else if (policy.screenLocked && policy.lockedDomain) {
-        policySource = 'screen_lock';
-        notification = {
-          title: 'Screen Locked',
-          message: `Your screen is locked to ${policy.lockedDomain}. You cannot open new tabs.`,
-          priority: 2,
-        };
+        // Lenient on-domain lock: a new tab already destined for the locked
+        // domain (e.g. a middle-clicked link) is allowed; DNR and the
+        // navigation listener keep it fenced afterward. Anything else —
+        // chrome://newtab, about:blank, off-domain — is removed.
+        const createdUrl = tab.pendingUrl || tab.url || '';
+        const onLockedDomain = /^https?:\/\//i.test(createdUrl)
+          && isOnSameDomain(createdUrl, policy.lockedDomain);
+        if (!onLockedDomain) {
+          policySource = 'screen_lock';
+          notification = {
+            title: 'Waypoint Set',
+            message: `A waypoint is active at ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
+            priority: 2,
+          };
+        }
       } else if (policy.currentMaxTabs) {
         const tabs = await chrome.tabs.query({});
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created limit query');
