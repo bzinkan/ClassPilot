@@ -16744,8 +16744,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Show notification with domain
         await notifyCommandUi({
-          title: 'Screen Locked',
-          message: `Your teacher has locked your screen to the current domain: ${lockedDomain}. You cannot open new tabs or navigate to other websites.`,
+          title: 'Waypoint Set',
+          message: `Your teacher set a waypoint at ${lockedDomain}. You can only browse ${lockedDomain} right now.`,
           priority: 2,
         });
         
@@ -18290,8 +18290,8 @@ async function handleCreatedTabForPolicy(tab) {
         if (!onLockedDomain) {
           policySource = 'screen_lock';
           notification = {
-            title: 'Screen Locked',
-            message: `Your screen is locked to ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
+            title: 'Waypoint Set',
+            message: `A waypoint is active at ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
             priority: 2,
           };
         }
