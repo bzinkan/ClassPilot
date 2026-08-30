@@ -151,6 +151,35 @@ async function main() {
       assert.match(call, /config\s*:\s*persistedNonAuthConfig\(CONFIG\)/);
     }
   }
+  const authClearCalls = extractCallArguments(workerSource, 'clearStudentAuth');
+  const explicitSignOutCall = authClearCalls.find((call) => (
+    call.includes("'explicit_sign_out'")
+  ));
+  assert.ok(explicitSignOutCall, 'student sign-out must clear the exact authenticated context');
+  assert.match(
+    explicitSignOutCall,
+    /awaitBackendSignOut\s*:\s*true/,
+    'student sign-out must wait for the bounded exact bearer cleanup',
+  );
+  assert.match(
+    explicitSignOutCall,
+    /preserveRecoveryForGate\s*:\s*true/,
+    'student sign-out must preserve Resume authority until server cleanup is confirmed',
+  );
+  const extensionUpdateCall = authClearCalls.find((call) => (
+    call.includes("'extension_update'")
+  ));
+  assert.ok(extensionUpdateCall, 'extension updates must clear the exact authenticated context');
+  assert.match(
+    extensionUpdateCall,
+    /awaitBackendSignOut\s*:\s*true/,
+    'extension updates must not strand the pre-update student session',
+  );
+  assert.match(
+    extensionUpdateCall,
+    /preserveRecoveryForGate\s*:\s*true/,
+    'extension updates must retain recovery authority until cleanup is confirmed',
+  );
   let context;
   try {
     context = await chromium.launchPersistentContext(profilePath, {
@@ -180,12 +209,17 @@ async function main() {
       // never promote or release B's newer armed record.
       const originalRecoveryFetch = globalThis.fetch;
       const legacyUpgradeSignOutRequests = [];
+      let releaseLegacyUpgradeSignOut;
+      const legacyUpgradeSignOutGate = new Promise((resolve) => {
+        releaseLegacyUpgradeSignOut = resolve;
+      });
       globalThis.fetch = async (url, init = {}) => {
         if (String(url).endsWith('/api/extension/session-release')) {
           return new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
         }
         if (String(url).endsWith('/api/extension/sign-out')) {
           legacyUpgradeSignOutRequests.push({ url: String(url), init });
+          await legacyUpgradeSignOutGate;
           return new Response(null, { status: 204 });
         }
         return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
@@ -258,7 +292,8 @@ async function main() {
         identitySource: 'manual_pin',
         registered: true,
       });
-      const legacyUpgradeRestore = await getStoredAuthState([
+      let legacyUpgradeRestoreSettled = false;
+      const legacyUpgradeRestorePromise = getStoredAuthState([
         'config',
         'deviceId',
         'authContextId',
@@ -269,12 +304,31 @@ async function main() {
         'studentEmail',
         'identitySource',
         'registered',
-      ]);
+      ]).then((value) => {
+        legacyUpgradeRestoreSettled = true;
+        return value;
+      });
       await boundedWait((async () => {
         while (legacyUpgradeSignOutRequests.length === 0) {
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
       })(), 'legacy upgrade sign-out');
+      const legacyUpgradeLocalStorageDuringSignOut = await chrome.storage.local.get([
+        'authContextId',
+        'studentToken',
+        'activeStudentId',
+        'activeStudentSessionId',
+        'studentName',
+        'studentEmail',
+        'identitySource',
+        'registered',
+      ]);
+      const legacyUpgradeRestoreSettledBeforeSignOut = legacyUpgradeRestoreSettled;
+      releaseLegacyUpgradeSignOut();
+      const legacyUpgradeRestore = await boundedWait(
+        legacyUpgradeRestorePromise,
+        'legacy upgrade restore barrier',
+      );
       const legacyUpgradeLocalStorage = await chrome.storage.local.get([
         'authContextId',
         'studentToken',
@@ -331,6 +385,8 @@ async function main() {
         armedAfterDelayedOldClearGeneration: armedAfterDelayedOldClear?.generation || null,
         persistedArmedKeys,
         legacyUpgradeRestore,
+        legacyUpgradeRestoreSettledBeforeSignOut,
+        legacyUpgradeLocalStorageDuringSignOut,
         legacyUpgradeLocalStorage,
         legacyUpgradeSessionStorage,
         legacyUpgradeSignOutRequest: legacyUpgradeSignOutRequests[0] ? {
@@ -416,6 +472,133 @@ async function main() {
       flushMonitoringEventOutbox = originalFlushMonitoringEventOutbox;
       flushCommandAckOutbox = originalFlushCommandAckOutbox;
       flushChatAckOutbox = originalFlushChatAckOutbox;
+
+      // A first deliberate sign-out must not open the roster ahead of the
+      // exact bearer-bound server commit. This is the cold-device fallback
+      // before managed-device continuity has ever been established. Recovery
+      // cleanup may fail independently; the confirmed bearer sign-out still
+      // makes the student immediately roster-visible.
+      let firstSignOutAuth = installIdentity('first-explicit-signout');
+      CONFIG.identitySource = 'manual_pin';
+      CONFIG.manualLoginLastSeenAt = Date.now();
+      activateAuthenticatedContext(generateAuthContextId());
+      firstSignOutAuth = captureAuthenticatedContext('first explicit sign-out');
+      await armStudentSessionRecovery({
+        serverOrigin: firstSignOutAuth.serverOrigin,
+        schoolId: firstSignOutAuth.schoolId,
+        token: 'F'.repeat(43),
+        authContextId: firstSignOutAuth.authContextId,
+      });
+      const firstSignOutOriginalFetch = globalThis.fetch;
+      let firstSignOutReleaseRequests = 0;
+      let firstSignOutBearerRequests = 0;
+      let releaseFirstSignOutRequest;
+      let markFirstSignOutRequestStarted;
+      const firstSignOutRequestStarted = new Promise((resolve) => {
+        markFirstSignOutRequestStarted = resolve;
+      });
+      const firstSignOutRequestGate = new Promise((resolve) => {
+        releaseFirstSignOutRequest = resolve;
+      });
+      globalThis.fetch = async (url) => {
+        if (String(url).endsWith('/api/extension/session-release')) {
+          firstSignOutReleaseRequests += 1;
+          return new Response(JSON.stringify({ code: 'SESSION_RELEASE_UNAVAILABLE' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      fetchWithBackoff = async (url, init, options) => {
+        if (String(url).endsWith('/api/extension/sign-out')) {
+          firstSignOutBearerRequests += 1;
+          markFirstSignOutRequestStarted();
+          await firstSignOutRequestGate;
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return originalFetchWithBackoff(url, init, options);
+      };
+      let firstSignOutSettled = false;
+      const firstSignOutPromise = clearStudentAuth('explicit_sign_out', {
+        notifyBackend: true,
+        awaitBackendSignOut: true,
+        preserveRecoveryForGate: true,
+        pauseAutoRegistration: true,
+        expectedAuthContext: firstSignOutAuth,
+      }).then(() => {
+        firstSignOutSettled = true;
+      });
+      await boundedWait(firstSignOutRequestStarted, 'first explicit sign-out request');
+      await Promise.resolve();
+      const firstSignOutSettledBeforeCommit = firstSignOutSettled;
+      releaseFirstSignOutRequest();
+      await boundedWait(firstSignOutPromise, 'first explicit sign-out completion');
+      if (studentSessionRecoveryFlushPromise) {
+        await boundedWait(studentSessionRecoveryFlushPromise, 'first explicit recovery cleanup');
+      }
+      const firstSignOutRecoveryAfterCommit = studentSessionRecoveryStateHasRecords();
+      globalThis.fetch = firstSignOutOriginalFetch;
+      fetchWithBackoff = originalFetchWithBackoff;
+
+      // If the bounded exact sign-out cannot be confirmed, the local logout
+      // still completes but its one-time recovery authority must remain
+      // reserved for the gate. That gives the same Chromebook an immediate
+      // PIN-protected Resume path instead of waiting for the server lease.
+      let failedFirstSignOutAuth = installIdentity('failed-first-explicit-signout');
+      CONFIG.identitySource = 'manual_pin';
+      CONFIG.manualLoginLastSeenAt = Date.now();
+      activateAuthenticatedContext(generateAuthContextId());
+      failedFirstSignOutAuth = captureAuthenticatedContext('failed first explicit sign-out');
+      const failedFirstSignOutToken = 'Q'.repeat(43);
+      await armStudentSessionRecovery({
+        serverOrigin: failedFirstSignOutAuth.serverOrigin,
+        schoolId: failedFirstSignOutAuth.schoolId,
+        token: failedFirstSignOutToken,
+        authContextId: failedFirstSignOutAuth.authContextId,
+      });
+      let failedFirstSignOutBearerRequests = 0;
+      fetchWithBackoff = async (url, init, options) => {
+        if (String(url).endsWith('/api/extension/sign-out')) {
+          failedFirstSignOutBearerRequests += 1;
+          return new Response(JSON.stringify({ error: 'temporarily unavailable' }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return originalFetchWithBackoff(url, init, options);
+      };
+      await clearStudentAuth('explicit_sign_out', {
+        notifyBackend: true,
+        awaitBackendSignOut: true,
+        preserveRecoveryForGate: true,
+        pauseAutoRegistration: true,
+        expectedAuthContext: failedFirstSignOutAuth,
+      });
+      const failedFirstSignOutRecovery = matchingStudentSessionRecoveryRecord();
+      const failedFirstSignOutGrantId = bindLoginRosterRecoveryGrant(
+        failedFirstSignOutRecovery,
+        [{ id: 'student-failed-first-signout', hasPin: true, reclaimable: true }],
+        'failed-first-signout-cache-key',
+      );
+      const failedFirstSignOutGrant = recoveryGrantForStudentLogin(
+        'student-failed-first-signout',
+        failedFirstSignOutGrantId,
+      );
+      const failedFirstSignOutResumeAvailable = Boolean(
+        failedFirstSignOutRecovery?.token === failedFirstSignOutToken
+        && failedFirstSignOutRecovery?.intent === STUDENT_SESSION_RECOVERY_INTENT_RESUME
+        && failedFirstSignOutGrant?.token === failedFirstSignOutToken
+      );
+      fetchWithBackoff = originalFetchWithBackoff;
+      await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+      resetLoginRosterRuntimeCache();
 
       // A shared-device lock timeout is owned by the exact manual-auth
       // context that scheduled it. A delayed idle callback from A cannot sign
@@ -2749,6 +2932,12 @@ async function main() {
         signOutElapsedMs,
         signOutStorage,
         retiringOutboxNetworkCalls,
+        firstSignOutSettledBeforeCommit,
+        firstSignOutReleaseRequests,
+        firstSignOutBearerRequests,
+        firstSignOutRecoveryAfterCommit,
+        failedFirstSignOutBearerRequests,
+        failedFirstSignOutResumeAvailable,
         lockTimeoutOutcome,
         lockTimeoutAuthB,
         lockTimeoutAtB,
@@ -3004,6 +3193,8 @@ async function main() {
     assert.equal(result.recoveryRace.legacyUpgradeRestore.activeStudentId, undefined);
     assert.equal(result.recoveryRace.legacyUpgradeRestore.activeStudentSessionId, undefined);
     assert.deepEqual(result.recoveryRace.legacyUpgradeLocalStorage, {});
+    assert.equal(result.recoveryRace.legacyUpgradeRestoreSettledBeforeSignOut, false);
+    assert.deepEqual(result.recoveryRace.legacyUpgradeLocalStorageDuringSignOut, {});
     assert.deepEqual(result.recoveryRace.legacyUpgradeSessionStorage, {});
     assert.equal(
       result.recoveryRace.legacyUpgradeSignOutRequest.url,
@@ -3026,6 +3217,12 @@ async function main() {
     assert.equal(result.signOutStorage.studentToken, undefined);
     assert.equal(result.signOutStorage.activeStudentId, undefined);
     assert.equal(result.signOutStorage.activeStudentSessionId, undefined);
+    assert.equal(result.firstSignOutSettledBeforeCommit, false);
+    assert.equal(result.firstSignOutReleaseRequests, 0);
+    assert.equal(result.firstSignOutBearerRequests, 1);
+    assert.equal(result.firstSignOutRecoveryAfterCommit, false);
+    assert.equal(result.failedFirstSignOutBearerRequests, 1);
+    assert.equal(result.failedFirstSignOutResumeAvailable, true);
     assert.equal(result.lockTimeoutOutcome, 'AUTH_CONTEXT_SUPERSEDED');
     assert.equal(result.lockTimeoutStorageAfter.studentToken, 'token-lock-timeout-b');
     assert.equal(result.lockTimeoutStorageAfter.sharedAuthLockedSinceAt, result.lockTimeoutAtB);
