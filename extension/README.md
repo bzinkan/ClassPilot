@@ -48,6 +48,13 @@ cannot end or erase a replacement session. Login-roster refreshes are
 coalesced and short-lived in memory, with explicit refresh support and no
 persisted roster names.
 
+Starting in 2.7.8, a deliberate sign-out from a recovery-capable manual shared
+session—and the extension-update boundary for that session—waits for one
+bounded, exact bearer-bound server cleanup before the login roster opens. If
+that cleanup cannot be confirmed, the same Chromebook retains its exact
+PIN-protected Resume capability instead of hiding the student until the
+five-minute abandoned-session lease expires.
+
 ### Reliable observation policy reconciliation (2.7.2)
 
 Heartbeat and WebSocket protocol responses now order screenshot authority
@@ -153,7 +160,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.7.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.8.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store

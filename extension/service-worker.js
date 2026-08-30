@@ -822,6 +822,7 @@ const loginRosterCache = new Map();
 const loginRosterInFlight = new Map();
 const loginRosterBackoffUntil = new Map();
 let legacyStudentAuthCleanupAuthority = null;
+let legacyStudentAuthCleanupPromise = null;
 
 function bumpAuthGateStateRevision() {
   // The reserved block is intentionally far larger than a worker can consume
@@ -1256,7 +1257,13 @@ function routedStudentStorageArea(localArea, sessionArea) {
         });
       }
       if (staleKeys.length > 0) await localArea.remove(staleKeys);
-      if (capturedLegacyCleanup) dispatchLegacyStudentAuthCleanup();
+      // Start one best-effort cleanup when a late legacy record is found, but
+      // do not make unrelated routed storage reads retry or wait on network
+      // recovery. The auth restore and login-roster gates below own the
+      // correlated retry barrier.
+      if (capturedLegacyCleanup) {
+        dispatchLegacyStudentAuthCleanup().catch(() => {});
+      }
       return merged;
     },
     async set(obj) {
@@ -1610,11 +1617,30 @@ function captureLegacyStudentAuthCleanupAuthority(local = {}) {
 }
 
 function dispatchLegacyStudentAuthCleanup() {
+  if (legacyStudentAuthCleanupPromise) return legacyStudentAuthCleanupPromise;
   const authority = legacyStudentAuthCleanupAuthority;
-  legacyStudentAuthCleanupAuthority = null;
-  if (!authority) return false;
-  notifyBackendOfStudentSignOut(authority, 'legacy_local_auth_upgrade').catch(() => {});
-  return true;
+  if (!authority) return Promise.resolve(true);
+
+  // Pre-2.7.3 builds could leave a reusable bearer in storage.local without a
+  // durable recovery capability. The local copy is purged before this runs,
+  // but the captured memory-only authority must remain alive until the exact
+  // server session end is confirmed. Otherwise an extension-update worker can
+  // terminate after opening the gate and strand the student for the complete
+  // five-minute manual-session lease.
+  const run = notifyBackendOfStudentSignOut(authority, 'legacy_local_auth_upgrade')
+    .then((confirmed) => {
+      if (confirmed && legacyStudentAuthCleanupAuthority === authority) {
+        legacyStudentAuthCleanupAuthority = null;
+      }
+      return confirmed;
+    })
+    .finally(() => {
+      if (legacyStudentAuthCleanupPromise === run) {
+        legacyStudentAuthCleanupPromise = null;
+      }
+    });
+  legacyStudentAuthCleanupPromise = run;
+  return run;
 }
 
 async function getStoredAuthState(keys) {
@@ -1668,7 +1694,13 @@ async function getStoredAuthState(keys) {
   if (legacyLocalAuthKeys.length > 0) {
     await rawLocalKv.remove(legacyLocalAuthKeys);
   }
-  if (capturedLegacyCleanup) dispatchLegacyStudentAuthCleanup();
+  if (
+    capturedLegacyCleanup
+    || legacyStudentAuthCleanupAuthority
+    || legacyStudentAuthCleanupPromise
+  ) {
+    await dispatchLegacyStudentAuthCleanup();
+  }
   return merged;
 }
 
@@ -10555,10 +10587,34 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
     autoRegistrationPaused: nextAutoRegistrationPaused,
   });
   // Local invalidation is durable before the optional server notification.
-  // A server or network stall is bounded so it can never hold the auth
-  // mutation queue—and therefore the next login—indefinitely.
-  if (options.notifyBackend && tokenToEnd && !recoveryTransition.handledExactRecovery) {
-    notifyBackendOfStudentSignOut(signOutAuthority, reason).catch(() => {});
+  // Most lifecycle clears stay fire-and-forget so old network work cannot
+  // hold the auth queue. A deliberate student sign-out is different: the
+  // gate must not fetch its first roster until the exact server session has
+  // ended, otherwise a cold Chromebook can hide that student for the full
+  // five-minute lease before managed-device continuity has been established.
+  // The request itself is bounded by SIGN_OUT_REQUEST_TIMEOUT_MS.
+  const shouldNotifyBackend = options.notifyBackend
+    && tokenToEnd
+    && (
+      options.awaitBackendSignOut === true
+      || !recoveryTransition.handledExactRecovery
+    );
+  if (shouldNotifyBackend) {
+    const backendSignOut = notifyBackendOfStudentSignOut(signOutAuthority, reason);
+    if (options.awaitBackendSignOut === true) {
+      const backendSignOutConfirmed = await backendSignOut;
+      if (backendSignOutConfirmed && recoveryTransition.handledExactRecovery) {
+        // The exact bearer endpoint commits before it replies. Remove the now
+        // obsolete local recovery capability so a later cleanup cannot race a
+        // replacement login or present a stale Resume grant.
+        await transitionStudentSessionRecoveryForAuthClear(
+          signOutAuthority.authContextId,
+          { serverSessionEnded: true },
+        );
+      }
+    } else {
+      backendSignOut.catch(() => {});
+    }
   }
   studentAuthCommitPending = false;
   studentAuthCommitPendingGeneration = 0;
@@ -10854,6 +10910,17 @@ function loginRosterBackoffRemainingMs(cacheKey) {
 
 async function fetchLoginRosterForGate(options = {}) {
   await studentAuthMutationTail;
+  const legacySessionEnded = await dispatchLegacyStudentAuthCleanup();
+  if (!legacySessionEnded) {
+    return {
+      success: false,
+      setupRequired: false,
+      unavailable: true,
+      phase: 'unavailable',
+      refreshAfterMs: 5000,
+      error: 'ClassPilot is finishing the previous student sign-out. Try again in a moment.',
+    };
+  }
   const recoveryRecord = await prepareStudentSessionRecoveryForGate();
   const continuityRecord = await requestManagedDeviceContinuityProof({ recoveryRecord });
   const directRecoveryRecord = continuityRecord ? null : recoveryRecord;
@@ -12244,6 +12311,7 @@ chrome.runtime.onInstalled.addListener((details = {}) => {
       if (details.reason === 'update' && isManualIdentitySource() && hasStudentAuth()) {
         await clearStudentAuth('extension_update', {
           notifyBackend: true,
+          awaitBackendSignOut: true,
           pauseAutoRegistration: true,
           preserveRecoveryForGate: true,
         });
@@ -20679,6 +20747,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     clearStudentAuth('explicit_sign_out', {
       notifyBackend: true,
+      awaitBackendSignOut: true,
+      preserveRecoveryForGate: true,
       pauseAutoRegistration: true,
       expectedAuthContext: signOutRequest.authContext,
     })
