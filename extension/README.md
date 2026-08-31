@@ -55,6 +55,20 @@ that cleanup cannot be confirmed, the same Chromebook retains its exact
 PIN-protected Resume capability instead of hiding the student until the
 five-minute abandoned-session lease expires.
 
+### Immediate sign-in-gate recovery (2.7.9)
+
+While a trusted ClassPilot sign-in gate is visibly ready, the extension sends
+a short-lived, exact-authority presence pulse about every 10 seconds. The
+service worker alone attaches the recovery or managed-device credential; the
+page receives no token or device/session identifier. SchoolPilot can therefore
+offer the prior student immediately on the same Chromebook and, after the
+student enters the correct PIN, safely move that manual session to another
+Chromebook. An actively heartbeating student remains hidden elsewhere.
+
+The optional hall-pass control is separated from the student credential form
+and shown as a quiet **Kiosk mode** action in the bottom-left of the sign-in
+panel, reducing accidental launches on shared Chromebooks.
+
 ### Reliable observation policy reconciliation (2.7.2)
 
 Heartbeat and WebSocket protocol responses now order screenshot authority
@@ -160,7 +174,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.8.zip`. `dist/classpilot-extension.zip` is only the
+`dist/ClassPilot-v2.7.9.zip`. `dist/classpilot-extension.zip` is only the
 compatibility copy produced by the same script.
 
 ### Publish Through Chrome Web Store

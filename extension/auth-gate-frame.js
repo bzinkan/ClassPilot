@@ -125,7 +125,7 @@
 
   function shell(title, subtitle, body, options = {}) {
     return `
-      <section class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${options.busy ? 'aria-busy="true"' : ''} tabindex="-1">
+      <section class="classpilot-auth-panel${options.kiosk ? ' classpilot-auth-panel--has-kiosk' : ''}" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${options.busy ? 'aria-busy="true"' : ''} tabindex="-1">
         <aside class="classpilot-auth-side" aria-hidden="true">
           <div>
             <div class="classpilot-auth-brand">
@@ -148,6 +148,7 @@
             <div class="classpilot-auth-footnote">${icon('shield')}<span>Shared Chromebook sign-in</span></div>
           </div>
         </div>
+        ${options.kiosk ? kioskMarkup() : ''}
       </section>
     `;
   }
@@ -258,10 +259,8 @@
     `;
   }
 
-  function kioskMarkup(state = {}) {
-    return safeKioskUrl(state.kioskUrl)
-      ? `<button class="classpilot-auth-kiosk-button" id="classpilot-auth-kiosk-launch" type="button">${icon('badge')} Use as PassPilot hall-pass kiosk</button>`
-      : '';
+  function kioskMarkup() {
+    return `<button class="classpilot-auth-kiosk-button" id="classpilot-auth-kiosk-launch" type="button">Kiosk mode</button>`;
   }
 
   function safeKioskUrl(value) {
@@ -338,7 +337,8 @@
     root.innerHTML = shell(
       'Sign in to this Chromebook',
       subtitle,
-      `${form}${kioskMarkup(state)}`,
+      form,
+      { kiosk: Boolean(safeKioskUrl(state.kioskUrl)) },
     );
     retryFallbackIndex = 0;
     attachReadyHandlers(currentState);
@@ -848,6 +848,19 @@
             submit.disabled = false;
           }
           pinInput?.focus({ preventScroll: true });
+          return;
+        }
+        if (response?.status === 503 || response?.code === 'STUDENT_SESSION_TRANSFER_UNAVAILABLE') {
+          setError('ClassPilot sign-in is temporarily unavailable. Your selection was kept; please try again.');
+          if (submit) {
+            if (payload.mode === 'pin') updatePinSubmitState();
+            else submit.disabled = false;
+          }
+          const retryField = document.getElementById(
+            payload.mode === 'pin' ? 'classpilot-auth-pin' : 'classpilot-auth-email',
+          );
+          retryField?.focus({ preventScroll: true });
+          retryField?.select?.();
           return;
         }
         setError(response?.error || 'Invalid student credentials');

@@ -87,6 +87,10 @@ select:disabled {
   color: #fff;
 }
 
+.classpilot-auth-panel--has-kiosk .classpilot-auth-side {
+  padding-bottom: 94px;
+}
+
 .classpilot-auth-brand {
   display: flex;
   align-items: center;
@@ -109,8 +113,7 @@ select:disabled {
 .classpilot-auth-logo svg,
 .classpilot-auth-field-icon svg,
 .classpilot-auth-safe-note svg,
-.classpilot-auth-state-icon svg,
-.classpilot-auth-kiosk-button svg {
+.classpilot-auth-state-icon svg {
   width: 22px;
   height: 22px;
   fill: none;
@@ -431,16 +434,28 @@ select:disabled {
 }
 
 .classpilot-auth-kiosk-button {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  margin-top: 14px;
+  position: absolute;
+  z-index: 3;
+  bottom: 28px;
+  left: 28px;
+  min-width: 120px;
+  min-height: 44px;
+  padding: 0 16px;
   border: 1px solid #aebdce;
-  background: #fff;
-  color: var(--navy);
-  font-size: 14px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .08);
+  color: #e6edf7;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.classpilot-auth-kiosk-button:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, .72);
+  background: rgba(255, 255, 255, .16);
+}
+
+.classpilot-auth-kiosk-button:disabled {
+  opacity: .58;
 }
 
 .classpilot-auth-footnote {
@@ -490,6 +505,23 @@ select:disabled {
     overflow: auto;
     padding: 28px 22px;
   }
+
+  .classpilot-auth-panel--has-kiosk .classpilot-auth-main {
+    padding-bottom: 84px;
+  }
+
+  .classpilot-auth-kiosk-button {
+    bottom: 18px;
+    left: 22px;
+    border-color: #aebdce;
+    background: #fff;
+    color: var(--navy);
+  }
+
+  .classpilot-auth-kiosk-button:hover:not(:disabled) {
+    border-color: var(--navy);
+    background: #fff8dc;
+  }
 }
 
 @media (max-width: 520px) {
@@ -529,6 +561,10 @@ select:disabled {
 
   .classpilot-auth-side {
     padding: 22px;
+  }
+
+  .classpilot-auth-panel--has-kiosk .classpilot-auth-side {
+    padding-bottom: 84px;
   }
 
   .classpilot-auth-promise {

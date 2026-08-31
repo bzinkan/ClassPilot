@@ -555,6 +555,40 @@ async function exerciseRosterRefreshUi(frame) {
     forceRecovery: true,
   });
 
+  await frame.evaluate(() => {
+    const student = document.getElementById('classpilot-auth-student');
+    const pin = document.getElementById('classpilot-auth-pin');
+    student.value = 'student-bob';
+    student.dispatchEvent(new Event('change', { bubbles: true }));
+    pin.value = '1357';
+    pin.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const rosterRequestCountBefore503 = await frame.evaluate(() => (
+    globalThis.__classpilotRosterUiHarness.requests.length
+  ));
+  await enqueueLoginUiResponse(frame, {
+    success: false,
+    status: 503,
+    code: 'STUDENT_SESSION_TRANSFER_UNAVAILABLE',
+  });
+  await frame.locator('#classpilot-auth-pin-submit').click();
+  const unavailableCopy =
+    'ClassPilot sign-in is temporarily unavailable. Your selection was kept; please try again.';
+  await frame.waitForFunction((expectedCopy) => (
+    document.getElementById('classpilot-auth-error')?.textContent === expectedCopy
+  ), unavailableCopy);
+  assert.deepEqual(await frame.evaluate(() => ({
+    selectedStudent: document.getElementById('classpilot-auth-student')?.value,
+    pin: document.getElementById('classpilot-auth-pin')?.value,
+    submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
+    rosterRequests: globalThis.__classpilotRosterUiHarness.requests.length,
+  })), {
+    selectedStudent: 'student-bob',
+    pin: '1357',
+    submitDisabled: false,
+    rosterRequests: rosterRequestCountBefore503,
+  }, 'a retryable transfer outage must keep the exact selection and PIN without a roster mutation');
+
   await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.restore());
 }
 
@@ -567,6 +601,22 @@ async function exerciseLegacyConflictUi(worker, tabId) {
         if (typeof submitAuthGateLogin !== 'function') {
           return { available: false };
         }
+        const kioskTemplate = document.createElement('template');
+        kioskTemplate.innerHTML = buildAuthGateMarkup({
+          phase: 'ready',
+          authRequired: true,
+          loginMethod: 'name_pin',
+          kioskUrl: 'https://school-pilot.net/passpilot/kiosk/simple?launch=gate',
+        });
+        const legacyKioskButton = kioskTemplate.content.querySelector(
+          '#classpilot-auth-kiosk-launch',
+        );
+        const legacyKiosk = {
+          text: legacyKioskButton?.textContent,
+          iconCount: legacyKioskButton?.querySelectorAll('svg').length,
+          insideForm: Boolean(legacyKioskButton?.closest('form')),
+          panelClass: legacyKioskButton?.closest('.classpilot-auth-panel')?.className,
+        };
         const fixture = document.createElement('div');
         fixture.id = 'classpilot-legacy-conflict-fixture';
         fixture.innerHTML = `
@@ -582,6 +632,7 @@ async function exerciseLegacyConflictUi(worker, tabId) {
         document.documentElement.appendChild(fixture);
         const originalSendMessage = chrome.runtime.sendMessage;
         const messages = [];
+        let loginFailure = 'conflict';
         authGateLiveRosterLoaded = true;
         authGateRosterSnapshot = {
           gradeLevel: '5',
@@ -596,10 +647,14 @@ async function exerciseLegacyConflictUi(worker, tabId) {
         chrome.runtime.sendMessage = (message, callback) => {
           messages.push(structuredClone(message));
           if (message?.type === 'manual-student-login') {
-            queueMicrotask(() => callback?.({
+            queueMicrotask(() => callback?.(loginFailure === 'conflict' ? {
               success: false,
               status: 409,
               code: 'STUDENT_SESSION_ACTIVE',
+            } : {
+              success: false,
+              status: 503,
+              code: 'STUDENT_SESSION_TRANSFER_UNAVAILABLE',
             }));
           } else if (message?.type === 'get-login-roster') {
             queueMicrotask(() => callback?.({
@@ -624,10 +679,37 @@ async function exerciseLegacyConflictUi(worker, tabId) {
           }, document.getElementById('classpilot-auth-pin-submit'));
           await new Promise((resolveTick) => setTimeout(resolveTick, 0));
           await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-          return {
-            available: true,
+          const conflict = {
             error: document.getElementById('classpilot-auth-error')?.textContent,
             pin: document.getElementById('classpilot-auth-pin')?.value,
+          };
+          loginFailure = 'unavailable';
+          document.getElementById('classpilot-auth-student').value = 'student-bob';
+          document.getElementById('classpilot-auth-student').dispatchEvent(
+            new Event('change', { bubbles: true }),
+          );
+          document.getElementById('classpilot-auth-pin').value = '1357';
+          document.getElementById('classpilot-auth-pin').dispatchEvent(
+            new Event('input', { bubbles: true }),
+          );
+          submitAuthGateLogin({
+            mode: 'pin',
+            studentId: 'student-bob',
+            pin: '1357',
+            recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
+          }, document.getElementById('classpilot-auth-pin-submit'));
+          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+          return {
+            available: true,
+            legacyKiosk,
+            conflict,
+            unavailable: {
+              error: document.getElementById('classpilot-auth-error')?.textContent,
+              pin: document.getElementById('classpilot-auth-pin')?.value,
+              student: document.getElementById('classpilot-auth-student')?.value,
+              submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
+            },
             gatePresent: Boolean(document.getElementById('classpilot-auth-gate')),
             messages,
           };
@@ -640,11 +722,23 @@ async function exerciseLegacyConflictUi(worker, tabId) {
     return injection?.[0]?.result || { available: false };
   }, tabId);
   assert.equal(result.available, true, 'legacy authentication fallback functions were unavailable');
+  assert.deepEqual(result.legacyKiosk, {
+    text: 'Kiosk mode',
+    iconCount: 0,
+    insideForm: false,
+    panelClass: 'classpilot-auth-panel classpilot-auth-panel--has-kiosk',
+  });
   assert.equal(
-    result.error,
+    result.conflict.error,
     'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.',
   );
-  assert.equal(result.pin, '');
+  assert.equal(result.conflict.pin, '');
+  assert.deepEqual(result.unavailable, {
+    error: 'ClassPilot sign-in is temporarily unavailable. Your selection was kept; please try again.',
+    pin: '1357',
+    student: 'student-bob',
+    submitDisabled: false,
+  });
   assert.equal(result.gatePresent, true);
   assert.deepEqual(result.messages[0], {
     type: 'manual-student-login',
@@ -660,6 +754,15 @@ async function exerciseLegacyConflictUi(worker, tabId) {
     gradeLevel: '5',
     forceRefresh: true,
     forceRecovery: true,
+  });
+  assert.deepEqual(result.messages[2], {
+    type: 'manual-student-login',
+    payload: {
+      mode: 'pin',
+      studentId: 'student-bob',
+      pin: '1357',
+      recoveryGrantId: 'roster_legacy_cross_student',
+    },
   });
 }
 
@@ -970,10 +1073,32 @@ async function main() {
       kioskUrl: 'https://school-pilot.net/passpilot/kiosk',
     });
     await preparePinForm(authFrame);
-    assertInsideViewport(await layoutSnapshot(authFrame), 'kiosk-1024x600');
-    const kioskRect = await authFrame.locator('#classpilot-auth-kiosk-launch').boundingBox();
-    await capture(page, 'kiosk-1024x600');
-    assert.ok(kioskRect && kioskRect.y + kioskRect.height <= 600, `kiosk action is clipped at Chromebook height: ${JSON.stringify(kioskRect)}`);
+    assert.equal(await authFrame.locator('#classpilot-auth-kiosk-launch').textContent(), 'Kiosk mode');
+    assert.equal(await authFrame.locator('#classpilot-auth-kiosk-launch svg').count(), 0);
+    assert.equal(await authFrame.locator('#classpilot-auth-pin-form #classpilot-auth-kiosk-launch').count(), 0);
+    for (const viewport of [
+      { width: 1366, height: 768, sideVisible: true },
+      { width: 1366, height: 600, sideVisible: true },
+      { width: 1024, height: 600, sideVisible: true },
+      { width: 800, height: 600, sideVisible: false },
+    ]) {
+      await setAuthViewport(page, authFrame, viewport, viewport.sideVisible);
+      const label = `kiosk-${viewport.width}x${viewport.height}`;
+      const snapshot = await layoutSnapshot(authFrame);
+      assertInsideViewport(snapshot, label);
+      assertRectInside(snapshot.kiosk, snapshot.panel, `${label} kiosk`);
+      assert.ok(snapshot.kiosk.height >= 44, `${label}: kiosk target is under 44px`);
+      assert.ok(
+        snapshot.kiosk.left <= snapshot.panel.left + 40,
+        `${label}: kiosk control is not anchored in the bottom-left: ${JSON.stringify(snapshot.kiosk)}`,
+      );
+      assert.ok(
+        snapshot.kiosk.bottom >= snapshot.panel.bottom - 40,
+        `${label}: kiosk control is not anchored near the panel bottom: ${JSON.stringify(snapshot.kiosk)}`,
+      );
+      assertNoOverlap(snapshot.kiosk, snapshot.submit, `${label} kiosk/sign-in`);
+      await capture(page, label);
+    }
 
     authFrame = await showGate(worker, tabId, page, { setupRequired: true, loginMethod: 'name_pin' });
     await authFrame.waitForSelector('.classpilot-auth-roster-note');
