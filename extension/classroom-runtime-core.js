@@ -826,20 +826,30 @@
     const restrictionSsoPassThrough = options.restrictionSsoPassThrough === true
       && state?.deliveryContext?.lateSignInRestrictionSso === true;
     const ssoTabs = restrictionSsoPassThrough ? tabs.filter(isRestrictionSsoTab) : [];
-    const foregroundSso = ssoTabs.find((tab) => tab.id === foregroundTabId) || null;
-    // `active` is window-local, so a stale last-focused-window query can leave
-    // more than one plausible active authentication tab. If the caller has an
-    // authoritative foreground SSO observation, retain that exact tab. When
-    // it does not, fail safely by retaining every active SSO candidate (or the
-    // sole SSO tab) until a later reconciliation can identify the foreground.
-    const authoritativeForegroundSso = options.restrictionSsoForegroundAuthoritative === true
-      ? foregroundSso
-      : null;
-    const preservedSsoTabIds = authoritativeForegroundSso
-      ? [authoritativeForegroundSso.id]
-      : ssoTabs.length === 1
+    // `active` is window-local, so a Clever opener and Google popup can both
+    // be active in separate windows and both can be required to complete one
+    // OAuth flow. An event-time hint is additive: it guarantees preservation
+    // of that exact SSO tab but never makes the other active SSO candidates
+    // disposable.
+    const requestedSsoPreserveIds = Array.isArray(options.preserveRestrictionSsoTabIds)
+      ? options.preserveRestrictionSsoTabIds
+      : [];
+    const activeSsoTabIds = ssoTabs
+      .filter((tab) => tab.active === true)
+      .map((tab) => tab.id);
+    const validatedRequestedSsoPreserveIds = requestedSsoPreserveIds.filter((tabId) => (
+      Number.isSafeInteger(tabId) && ssoTabs.some((tab) => tab.id === tabId)
+    ));
+    const focusProtectedSsoTabIds = [...new Set([
+      ...activeSsoTabIds,
+      ...validatedRequestedSsoPreserveIds,
+    ])];
+    const preservedSsoTabIds = [...new Set([
+      ...(ssoTabs.length === 1
         ? [ssoTabs[0].id]
-        : ssoTabs.filter((tab) => tab.active === true).map((tab) => tab.id);
+        : activeSsoTabIds),
+      ...validatedRequestedSsoPreserveIds,
+    ])];
     const visitedSsoHosts = normalizeDomainList(
       Array.isArray(options.visitedSsoHosts) ? options.visitedSsoHosts : [],
       'visited restriction SSO hosts'
@@ -848,11 +858,16 @@
       && state?.deliveryContext?.lateSignInRestrictionSso === true
       && visitedSsoHosts.length === 0;
 
-    // An active authentication page is intentionally not destination-
+    // An in-progress authentication flow is intentionally not destination-
     // compliant, but reconciliation must not navigate it or steal focus while
-    // a student is signing in. DNR and navigation listeners keep it confined
+    // a student is signing in. The last-focused query can lag on an unrelated
+    // window, so any active or explicitly hinted SSO candidate enters this
+    // no-focus branch. A sole inactive SSO tab remains protected from removal
+    // but cannot suppress a required cold Clever landing. DNR and navigation
+    // listeners keep those tabs confined
     // to the two exact pass-through domain families.
-    if (foregroundSso && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
+    if (focusProtectedSsoTabIds.length > 0
+      && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
       const destinationTabs = tabs.filter((tab) => {
         if (!isHttpTab(tab) || isRestrictionSsoTab(tab)) return false;
         const host = normalizeDomain(tabUrl(tab));
@@ -894,7 +909,7 @@
         state,
         tabs,
         { ...options, foregroundTabId },
-        preservedDestinationId ?? foregroundSso.id,
+        preservedDestinationId ?? preservedSsoTabIds[0],
         [...preservedSsoTabIds, preservedDestinationId],
       );
     }

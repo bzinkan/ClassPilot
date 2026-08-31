@@ -716,32 +716,105 @@ describe("ClassPilot classroom runtime core", () => {
       visitedSsoHosts: ["clever.com"],
     }).removeTabIds).toEqual([]);
 
-    const authoritativePopup = core.planClassroomTabReconciliation(deferred, tabs, {
+    const hintedPopup = core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 3,
-      restrictionSsoForegroundAuthoritative: true,
+      preserveRestrictionSsoTabIds: [3],
       maxTabs: 2,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
-    expect(authoritativePopup.removeTabIds).toEqual([2]);
-    expect(authoritativePopup.activateTabId).toBeNull();
+    expect(hintedPopup.removeTabIds).toEqual([]);
+    expect(hintedPopup.activateTabId).toBeNull();
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 3,
-      restrictionSsoForegroundAuthoritative: true,
+      preserveRestrictionSsoTabIds: [3],
       maxTabs: 1,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
-    }).removeTabIds).toEqual([2]);
+    }).removeTabIds).toEqual([]);
 
-    // A last-focused query can also lag on the older Clever window. Without
-    // the event-time authority bit, that queried SSO tab is only one of the
-    // active candidates and must not cause the Google popup to be removed.
+    // A last-focused query can also lag on the older Clever window. That
+    // queried SSO tab is only one of the active candidates and must not cause
+    // the Google popup to be removed.
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 2,
       maxTabs: 2,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     }).removeTabIds).toEqual([]);
+
+    const staleUnrelatedForeground = core.planClassroomTabReconciliation(deferred, [
+      ...tabs,
+      { id: 4, windowId: 40, active: true, url: "https://outside.example/unrelated" },
+    ], {
+      foregroundTabId: 4,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(staleUnrelatedForeground.removeTabIds).toEqual([4]);
+    expect(staleUnrelatedForeground.updates).toEqual([]);
+    expect(staleUnrelatedForeground.activateTabId).toBeNull();
+    expect(staleUnrelatedForeground.focusFallbackUrl).toBeNull();
+
+    const deferredFlightPath = state(18, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["khanacademy.org"] },
+      },
+    });
+    const staleFlightPathForeground = core.planClassroomTabReconciliation(
+      deferredFlightPath,
+      [
+        { id: 1, windowId: 10, active: true, url: "https://khanacademy.org/math" },
+        ...tabs.slice(1),
+        { id: 4, windowId: 40, active: true, url: "https://outside.example/unrelated" },
+      ],
+      {
+        foregroundTabId: 4,
+        maxTabs: 2,
+        restrictionSsoPassThrough: true,
+        visitedSsoHosts: ["accounts.google.com"],
+      },
+    );
+    expect(staleFlightPathForeground.removeTabIds).toEqual([4]);
+    expect(staleFlightPathForeground.updates).toEqual([]);
+    expect(staleFlightPathForeground.activateTabId).toBeNull();
+    expect(staleFlightPathForeground.focusFallbackUrl).toBeNull();
+
+    const coldWithInactiveStaleSso = core.planClassroomTabReconciliation(deferred, [
+      { id: 1, windowId: 10, active: true, url: "https://outside.example/unrelated" },
+      { id: 2, windowId: 20, active: false, url: "https://clever.com/login" },
+    ], {
+      foregroundTabId: 1,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    });
+    expect(coldWithInactiveStaleSso.updates).toEqual([
+      { tabId: 1, url: "https://clever.com/" },
+    ]);
+    expect(coldWithInactiveStaleSso.activateTabId).toBe(1);
+    expect(coldWithInactiveStaleSso.removeTabIds).toEqual([]);
+
+    const coldFlightPathWithInactiveStaleSso = core.planClassroomTabReconciliation(
+      deferredFlightPath,
+      [
+        { id: 1, windowId: 10, active: true, url: "https://outside.example/unrelated" },
+        { id: 2, windowId: 20, active: false, url: "https://clever.com/login" },
+      ],
+      {
+        foregroundTabId: 1,
+        maxTabs: 1,
+        restrictionSsoPassThrough: true,
+        visitedSsoHosts: [],
+      },
+    );
+    expect(coldFlightPathWithInactiveStaleSso.updates).toEqual([
+      { tabId: 1, url: "https://clever.com/" },
+    ]);
+    expect(coldFlightPathWithInactiveStaleSso.activateTabId).toBe(1);
+    expect(coldFlightPathWithInactiveStaleSso.removeTabIds).toEqual([]);
   });
 
   it("treats corrupted snapshots as invalid", () => {
