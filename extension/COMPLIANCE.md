@@ -98,6 +98,28 @@ after reading it. The raw directory id is not placed in URLs, stored by the
 extension, or logged. Kiosk PIN or signed-token authentication remains
 required; the ticket supplies continuity only.
 
+## Deferred Restrictions And Authentication Pass-Through
+
+Version 2.7.9 can receive a SchoolPilot-marked Waypoint or Flight Path that was
+authored while the student was signed out. The extension accepts that marker
+only for the exact authenticated school, student, session, device, server
+origin, and control revision after both sides negotiated the capability.
+Unmarked classroom restrictions continue to use the ordinary live-delivery
+behavior, and stale or cross-session marked state is discarded.
+
+For an accepted deferred restriction, ClassPilot permits main-frame navigation
+only within the exact `clever.com` and `accounts.google.com` domain families
+while the student completes authentication. This does not override attention
+mode, school policy, or explicit teacher blocks, and lookalike domains are not
+accepted. ClassPilot does not read, record, or transmit passwords entered on
+those pages.
+
+Trusted local extension storage may contain a binding-scoped set of visited SSO
+host names (not full URLs or query strings) and a SHA-256 scope digest. The
+scope record contains no raw student, session, school, device, token, or server
+identifier and is cleared on sign-out or any binding, server, or managed-policy
+transition. The feature adds no Chrome permission and no managed-policy key.
+
 ## Chrome Web Store Privacy Disclosure Copy
 
 ClassPilot processes school-issued identifiers, active-tab activity, tab
@@ -115,6 +137,12 @@ An explicit authorized managed-kiosk launch may send the raw Chrome directory
 device id to SchoolPilot only after the capability preflight described above.
 SchoolPilot immediately converts it to a school-scoped opaque id; the raw value
 is never stored, logged, or placed in a URL.
+
+For a capability-gated deferred Waypoint or Flight Path, ClassPilot may allow
+navigation through the exact Clever and Google Accounts domain families while
+the student authenticates. The extension stores only visited host names and an
+opaque local binding digest for this flow; it does not store SSO credentials or
+full SSO URLs in that record.
 
 ## Retention
 
@@ -143,6 +171,7 @@ Before each Chrome Web Store upload:
 - Confirm the Chrome Web Store listing and school notices disclose tab/URL
   heartbeat monitoring, tracking-window thumbnails and the server-side discard
   of student-session/gap pixels, exact safety capture,
-  managed-device kiosk continuity, and TURN-relayed Live View.
+  managed-device kiosk continuity, deferred Clever/Google Accounts navigation,
+  and TURN-relayed Live View.
 - Use the hosted SchoolPilot privacy policy URL in Chrome Web Store:
   `https://school-pilot.net/privacy`.

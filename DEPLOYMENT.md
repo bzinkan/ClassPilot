@@ -11,10 +11,18 @@
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
 > `dist/ClassPilot-v2.7.9.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
+> Any provisional 2.7.9 archive built before the late-sign-in Waypoint and
+> Clever/Google SSO work landed is obsolete and must not be submitted.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
 > test again after review, and publish only when the school-wide auto-update is
 > ready to begin.
+>
+> The paired SchoolPilot deployment must land first with both
+> `studentAuthGatePresenceV1` and `lateSignInRestrictionSsoV1` disabled. Keep
+> both capabilities off throughout Chrome Web Store review and mixed-version
+> fleet saturation. Enable them separately for the exact school only after all
+> recently active Chromebooks report 2.7.9 and the matching raw capabilities.
 
 The material below is retained solely to explain the retired prototype and is
 not an operator runbook.
@@ -119,6 +127,9 @@ Recommended design:
 ### 2.3 Build the canonical 2.7.9 release artifact
 
 Start from a clean, tagged, reviewed 2.7.9 commit at this repository's root.
+The reviewed source must contain the auth-gate presence foundation, Kiosk mode
+presentation, exact-bound deferred-restriction marker, and Clever/Google SSO
+pass-through together; a narrower pre-amendment archive is not releasable.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash

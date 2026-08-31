@@ -86,6 +86,9 @@ async function main() {
   assert.match(workerSource, /Unowned legacy classroom state was not adopted/);
   assert.doesNotMatch(workerSource, /legacy_migration|Migrated legacy classroom restrictions/);
   assert.match(workerSource, /'studentAuthGatePresenceV1'/);
+  assert.match(workerSource, /'lateSignInRestrictionSsoV1'/);
+  assert.match(workerSource, /deliveryContext\?\.lateSignInRestrictionSso === true/);
+  assert.match(workerSource, /RESTRICTION_SSO_VISIT_STORAGE_KEY/);
   assert.match(workerSource, /\/api\/extension\/session-gate-presence/);
   assert.match(workerSource, /STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES/);
   const scopedStorageBlock = workerSource.match(
@@ -3303,10 +3306,332 @@ async function main() {
       body: {
         schoolId: 'school-gate-presence',
         clientProtocolVersion: 3,
-        capabilities: ['scopedAuthorityChecksV1', 'studentAuthGatePresenceV1'],
+        capabilities: [
+          'scopedAuthorityChecksV1',
+          'studentAuthGatePresenceV1',
+          'lateSignInRestrictionSsoV1',
+        ],
       },
     });
     assert.equal(gatePresenceFixture.remainingCurrentSources, false);
+
+    const restrictionSsoFixture = await worker.evaluate(async () => {
+      await clearRestrictionSsoVisitState();
+      const originalRestrictionRuntime = {
+        screenLocked,
+        lockedDomain,
+        lockedUrl,
+        allowedDomains: [...allowedDomains],
+        attentionModeActive,
+        teacherBlockedDomains: [...teacherBlockedDomains],
+        currentMaxTabs,
+      };
+      advanceStudentAuthMutationGeneration();
+      CONFIG.serverUrl = 'https://school-pilot.net';
+      CONFIG.schoolId = 'school-restriction-sso';
+      CONFIG.deviceId = 'device-restriction-sso';
+      CONFIG.activeStudentId = 'student-restriction-sso';
+      CONFIG.activeStudentSessionId = 'session-restriction-sso-a';
+      CONFIG.studentToken = 'token-restriction-sso-a';
+      CONFIG.identitySource = 'chrome_profile';
+      CONFIG.manualLoginLastSeenAt = null;
+      CONFIG.authContextId = generateAuthContextId();
+      studentAuthInvalidating = false;
+      studentAuthCommitPending = false;
+      activateAuthenticatedContext(CONFIG.authContextId);
+      const firstContext = captureAuthenticatedContext('restriction SSO fixture A');
+      observeStudentControlRevision(41, firstContext, 'restriction SSO fixture revision');
+      const markedState = {
+        deliveryContext: { lateSignInRestrictionSso: true },
+      };
+      const exactBinding = {
+        bindingVersion: 2,
+        schoolId: firstContext.schoolId,
+        deviceId: firstContext.deviceId,
+        studentId: firstContext.studentId,
+        studentSessionId: firstContext.studentSessionId,
+        controlRevision: 41,
+      };
+      const ordinaryMarkerAbsentResult = await validateRestrictionSsoDeliveryContext(
+        { restrictions: {} },
+        {},
+        firstContext,
+      );
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: ['scopedAuthorityChecksV1'],
+      }, firstContext);
+      const unnegotiatedOutcome = await validateRestrictionSsoDeliveryContext(
+        markedState,
+        { binding: exactBinding },
+        firstContext,
+      ).then(() => 'accepted', (error) => error?.code || error?.name);
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'lateSignInRestrictionSsoV1',
+        ],
+      }, firstContext);
+      const mismatchedOutcome = await validateRestrictionSsoDeliveryContext(
+        markedState,
+        { binding: { ...exactBinding, deviceId: 'retired-device' } },
+        firstContext,
+      ).then(() => 'accepted', (error) => error?.code || error?.name);
+      const acceptedBindingDigest = await validateRestrictionSsoDeliveryContext(
+        markedState,
+        { binding: exactBinding },
+        firstContext,
+      );
+      const sameBindingPersistedDigest = await validateRestrictionSsoDeliveryContext(
+        {
+          deliveryContext: {
+            lateSignInRestrictionSso: true,
+            bindingDigest: acceptedBindingDigest,
+          },
+        },
+        {},
+        firstContext,
+        { trustedPersistedRestrictionSso: true },
+      );
+      await rawLocalKv.set({
+        [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+          schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+          scopeDigest: acceptedBindingDigest,
+          visitedHosts: ['clever.com'],
+        },
+        [CLASSROOM_STATE_STORAGE_KEY]: {
+          ...markedState,
+          deliveryContext: {
+            ...markedState.deliveryContext,
+            bindingDigest: acceptedBindingDigest,
+          },
+        },
+        [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: Date.now() + 60_000,
+      });
+      await kv.set({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: firstContext.studentId });
+      const stalePersistedOutcome = await validateRestrictionSsoDeliveryContext(
+        {
+          deliveryContext: {
+            lateSignInRestrictionSso: true,
+            bindingDigest: '0'.repeat(64),
+          },
+        },
+        {},
+        firstContext,
+        { trustedPersistedRestrictionSso: true },
+      ).then(() => 'accepted', (error) => error?.code || error?.name);
+      const staleStorageAfter = await getStoredAuthState([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+        CLASSROOM_STATE_STORAGE_KEY,
+        CLASSROOM_STATE_STUDENT_BINDING_KEY,
+        CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+      ]);
+      const staleExpiryAlarm = await chrome.alarms.get(CLASSROOM_STATE_EXPIRY_ALARM);
+      currentClassroomState = {
+        deliveryContext: { lateSignInRestrictionSso: true },
+        restrictions: {
+          screenLock: { active: true, url: 'https://ixl.com/math', domain: 'ixl.com' },
+          flightPath: { active: false, allowedDomains: [] },
+        },
+      };
+      restrictionSsoPassThroughActive = true;
+      screenLocked = true;
+      lockedDomain = 'ixl.com';
+      lockedUrl = 'https://ixl.com/math';
+      allowedDomains = [];
+      attentionModeActive = false;
+      teacherBlockedDomains = [];
+      currentMaxTabs = null;
+      const exactCreatedDecision = await createdTabPolicyDecision({
+        id: 7701,
+        active: true,
+        url: 'https://district.clever.com/login',
+      }, async () => []);
+      const lookalikeCreatedDecision = await createdTabPolicyDecision({
+        id: 7702,
+        active: true,
+        url: 'https://clever.com.evil.example/login',
+      }, async () => []);
+      const ssoRaceRemovalStillApplies = createdTabRemovalDecisionStillApplies(
+        { policySource: 'screen_lock' },
+        {
+          id: 7703,
+          active: true,
+          url: 'https://accounts.google.com/o/oauth2/auth',
+        },
+      );
+      await ensureRestrictionSsoVisitStateForContext(firstContext);
+      const accepted = await observeRestrictionSsoHostForAuth(
+        'https://district.clever.com/oauth/start',
+        firstContext,
+      );
+      const rejectedLookalike = await observeRestrictionSsoHostForAuth(
+        'https://clever.com.evil.example/login',
+        firstContext,
+      );
+      const firstStored = (await chrome.storage.local.get(
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+      ))[RESTRICTION_SSO_VISIT_STORAGE_KEY];
+      const serializedFirstStored = JSON.stringify(firstStored);
+
+      // Hold an old binding's local write across the authority-retirement
+      // boundary. The serialized clear must run afterward, so a completed
+      // stale write cannot resurrect the retired visit ledger.
+      const originalVisitSet = rawLocalKv.set;
+      let releaseDelayedVisit;
+      let noteDelayedVisitStarted;
+      const delayedVisitStarted = new Promise((resolve) => {
+        noteDelayedVisitStarted = resolve;
+      });
+      const delayedVisitRelease = new Promise((resolve) => {
+        releaseDelayedVisit = resolve;
+      });
+      rawLocalKv.set = async (values) => {
+        if (Object.prototype.hasOwnProperty.call(values || {}, RESTRICTION_SSO_VISIT_STORAGE_KEY)) {
+          noteDelayedVisitStarted();
+          await delayedVisitRelease;
+        }
+        return originalVisitSet(values);
+      };
+      const delayedOldBindingVisit = observeRestrictionSsoHostForAuth(
+        'https://accounts.google.com/o/oauth2/auth',
+        firstContext,
+      );
+      await delayedVisitStarted;
+      advanceStudentAuthMutationGeneration();
+      const retirementClear = clearRestrictionSsoVisitState();
+      releaseDelayedVisit();
+      const delayedOldBindingOutcome = await delayedOldBindingVisit.then(
+        () => 'accepted',
+        (error) => error?.code || error?.name,
+      );
+      await retirementClear;
+      rawLocalKv.set = originalVisitSet;
+      const retiredWriteStorage = await rawLocalKv.get([RESTRICTION_SSO_VISIT_STORAGE_KEY]);
+
+      advanceStudentAuthMutationGeneration();
+      CONFIG.activeStudentSessionId = 'session-restriction-sso-b';
+      CONFIG.studentToken = 'token-restriction-sso-b';
+      CONFIG.authContextId = generateAuthContextId();
+      activateAuthenticatedContext(CONFIG.authContextId);
+      const secondContext = captureAuthenticatedContext('restriction SSO fixture B');
+      await ensureRestrictionSsoVisitStateForContext(secondContext);
+      const secondStored = (await chrome.storage.local.get(
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+      ))[RESTRICTION_SSO_VISIT_STORAGE_KEY];
+      const secondVisitedHosts = [...visitedRestrictionSsoHosts];
+      await clearRestrictionSsoVisitState();
+      currentClassroomState = null;
+      restrictionSsoPassThroughActive = false;
+      screenLocked = originalRestrictionRuntime.screenLocked;
+      lockedDomain = originalRestrictionRuntime.lockedDomain;
+      lockedUrl = originalRestrictionRuntime.lockedUrl;
+      allowedDomains = originalRestrictionRuntime.allowedDomains;
+      attentionModeActive = originalRestrictionRuntime.attentionModeActive;
+      teacherBlockedDomains = originalRestrictionRuntime.teacherBlockedDomains;
+      currentMaxTabs = originalRestrictionRuntime.currentMaxTabs;
+      negotiatedProtocolState = null;
+      resetStudentControlRevisionAuthority();
+      const secondAuthContext = captureAuthenticatedContext('restriction SSO origin cleanup');
+      await clearStudentAuth('restriction_sso_origin_cleanup_fixture', {
+        notifyBackend: false,
+        serverSessionEnded: true,
+        pauseAutoRegistration: true,
+        disconnectWebSocket: false,
+        notifyAuthGateTabs: false,
+        expectedAuthContext: secondAuthContext,
+      });
+      await rawLocalKv.set({
+        [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+          schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+          scopeDigest: 'a'.repeat(64),
+          visitedHosts: ['accounts.google.com'],
+        },
+      });
+      const originTransitionResponse = await updateServerOriginForSignedOutProfile(
+        'https://alternate.school-pilot.net',
+      );
+      const originTransitionStorage = await rawLocalKv.get([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+        'config',
+      ]);
+      return {
+        ordinaryMarkerAbsentResult,
+        unnegotiatedOutcome,
+        mismatchedOutcome,
+        acceptedBindingDigestLength: String(acceptedBindingDigest || '').length,
+        sameBindingPersistedDigestMatches: sameBindingPersistedDigest === acceptedBindingDigest,
+        stalePersistedOutcome,
+        staleVisitStorageCleared:
+          staleStorageAfter[RESTRICTION_SSO_VISIT_STORAGE_KEY] === undefined,
+        staleClassroomStorageCleared:
+          staleStorageAfter[CLASSROOM_STATE_STORAGE_KEY] === undefined
+          && staleStorageAfter[CLASSROOM_STATE_STUDENT_BINDING_KEY] === undefined,
+        staleFailSafeRetained: Number(staleStorageAfter[CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY])
+          > Date.now(),
+        staleFailSafeAlarmRetained: Number(staleExpiryAlarm?.scheduledTime) > Date.now(),
+        exactCreatedPolicySource: exactCreatedDecision.policySource,
+        lookalikeCreatedPolicySource: lookalikeCreatedDecision.policySource,
+        ssoRaceRemovalStillApplies,
+        accepted,
+        rejectedLookalike,
+        firstVisitedHosts: firstStored?.visitedHosts || [],
+        firstStoredKeys: Object.keys(firstStored || {}).sort(),
+        firstScopeDigestLength: String(firstStored?.scopeDigest || '').length,
+        storedFullUrl: serializedFirstStored.includes('https://'),
+        leakedPrivateBinding: [
+          'school-restriction-sso',
+          'device-restriction-sso',
+          'student-restriction-sso',
+          'session-restriction-sso-a',
+          'token-restriction-sso-a',
+        ].some((value) => serializedFirstStored.includes(value)),
+        delayedOldBindingOutcome,
+        retiredWriteCleared:
+          retiredWriteStorage[RESTRICTION_SSO_VISIT_STORAGE_KEY] === undefined,
+        secondStored,
+        secondVisitedHosts,
+        originTransitionSuccess: originTransitionResponse?.success === true,
+        originTransitionVisitStorageCleared:
+          originTransitionStorage[RESTRICTION_SSO_VISIT_STORAGE_KEY] === undefined,
+        originTransitionServerUrl: originTransitionStorage.config?.serverUrl,
+      };
+    });
+    assert.equal(restrictionSsoFixture.ordinaryMarkerAbsentResult, null);
+    assert.equal(restrictionSsoFixture.unnegotiatedOutcome, 'LATE_SIGNIN_SSO_NOT_NEGOTIATED');
+    assert.equal(restrictionSsoFixture.mismatchedOutcome, 'STUDENT_BINDING_MISMATCH');
+    assert.equal(restrictionSsoFixture.acceptedBindingDigestLength, 64);
+    assert.equal(restrictionSsoFixture.sameBindingPersistedDigestMatches, true);
+    assert.equal(restrictionSsoFixture.stalePersistedOutcome, 'RESTRICTION_SSO_STALE_STORAGE');
+    assert.equal(restrictionSsoFixture.staleVisitStorageCleared, true);
+    assert.equal(restrictionSsoFixture.staleClassroomStorageCleared, true);
+    assert.equal(restrictionSsoFixture.staleFailSafeRetained, true);
+    assert.equal(restrictionSsoFixture.staleFailSafeAlarmRetained, true);
+    assert.equal(restrictionSsoFixture.exactCreatedPolicySource, null);
+    assert.equal(restrictionSsoFixture.lookalikeCreatedPolicySource, 'screen_lock');
+    assert.equal(restrictionSsoFixture.ssoRaceRemovalStillApplies, false);
+    assert.equal(restrictionSsoFixture.accepted, true);
+    assert.equal(restrictionSsoFixture.rejectedLookalike, false);
+    assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['district.clever.com']);
+    assert.deepEqual(restrictionSsoFixture.firstStoredKeys, [
+      'schemaVersion',
+      'scopeDigest',
+      'visitedHosts',
+    ]);
+    assert.equal(restrictionSsoFixture.firstScopeDigestLength, 64);
+    assert.equal(restrictionSsoFixture.storedFullUrl, false);
+    assert.equal(restrictionSsoFixture.leakedPrivateBinding, false);
+    assert.equal(restrictionSsoFixture.delayedOldBindingOutcome, 'AUTH_CONTEXT_SUPERSEDED');
+    assert.equal(restrictionSsoFixture.retiredWriteCleared, true);
+    assert.equal(restrictionSsoFixture.secondStored, undefined);
+    assert.deepEqual(restrictionSsoFixture.secondVisitedHosts, []);
+    assert.equal(restrictionSsoFixture.originTransitionSuccess, true);
+    assert.equal(restrictionSsoFixture.originTransitionVisitStorageCleared, true);
+    assert.equal(
+      restrictionSsoFixture.originTransitionServerUrl,
+      'https://alternate.school-pilot.net',
+    );
 
     assert.equal(result.recoveryRace.grantBeforeMetadataRetry, true);
     assert.equal(result.recoveryRace.grantAfterMetadataRetry, true);

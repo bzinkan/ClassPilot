@@ -3689,7 +3689,15 @@ async function main() {
         schoolSlug: 'cold-start-school',
         enrollmentKey: 'fixture-enrollment-key',
       };
-      await chrome.storage.local.set({ config, deviceId: auth.deviceId });
+      await chrome.storage.local.set({
+        config,
+        deviceId: auth.deviceId,
+        restrictionSsoVisitStateV1: {
+          schemaVersion: 1,
+          scopeDigest: 'b'.repeat(64),
+          visitedHosts: ['clever.com'],
+        },
+      });
       await chrome.storage.local.remove([
         'studentAuthInvalidatingV1',
         'studentAuthCommitPendingV1',
@@ -3756,6 +3764,7 @@ async function main() {
             'studentToken',
             'activeStudentId',
             'activeStudentSessionId',
+            RESTRICTION_SSO_VISIT_STORAGE_KEY,
             STUDENT_AUTH_INVALIDATING_KEY,
             MANAGED_AUTH_GATE_BINDING_KEY,
           ]);
@@ -3819,6 +3828,11 @@ async function main() {
     assert.equal(Boolean(managedChangeBoundary.boundary?.studentToken), false);
     assert.equal(Boolean(managedChangeBoundary.boundary?.activeStudentId), false);
     assert.equal(Boolean(managedChangeBoundary.boundary?.activeStudentSessionId), false);
+    assert.equal(
+      managedChangeBoundary.boundary?.restrictionSsoVisitStateV1,
+      undefined,
+      'managed authority transition retained the old SSO visit ledger',
+    );
     assert.equal(managedChangeBoundary.boundary?.config?.schoolId, 'cold-start-school');
     assert.equal(managedChangeBoundary.boundary?.config?.enrollmentKey, 'fixture-enrollment-key');
     assert.equal(managedChangeBoundary.boundary?.managedAuthGateBindingV1?.schoolId, 'cold-start-school');
