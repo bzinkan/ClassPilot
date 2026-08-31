@@ -65,6 +65,74 @@ const AUTH_GATE_FRAME_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
 const AUTH_GATE_ROSTER_REFRESH_MIN_MS = 25_000;
 const AUTH_GATE_ROSTER_REFRESH_MAX_MS = 35_000;
 const AUTH_GATE_ROSTER_REFRESH_BACKOFF_MAX_MS = 5 * 60_000;
+const AUTH_GATE_PRESENCE_PULSE_MS = 10_000;
+const authGatePresenceInstanceId = (() => {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+})();
+let authGatePresencePulseTimer = null;
+let authGatePresenceSignalActive = false;
+let authGatePresenceLastSignaledRosterContextGeneration = null;
+
+function authGatePresenceSignalIsEligible() {
+  const generation = authGateRosterContextGeneration(authGateCurrentState || {});
+  return Boolean(
+    authGateActive
+    && authGateTrustedRoot?.isConnected
+    && authGateSecureFrame?.isConnected
+    && authGateSecureFrameReady
+    && authGateSecureFrameTrusted
+    && authGateTrustedPhase === 'ready'
+    && authGatePhase(authGateCurrentState || {}) === 'ready'
+    && authGateCurrentState?.authRequired !== false
+    && !isAuthGateManagedPolicyFencePending()
+    && document.visibilityState === 'visible'
+    && generation !== null
+  );
+}
+
+function dispatchAuthGatePresenceSignal(present) {
+  const generation = present === true
+    ? authGateRosterContextGeneration(authGateCurrentState || {})
+    : authGatePresenceLastSignaledRosterContextGeneration;
+  if (generation === null) return;
+  if (present === true) authGatePresenceLastSignaledRosterContextGeneration = generation;
+  chrome.runtime.sendMessage({
+    type: 'student-auth-gate-presence',
+    present: present === true,
+    instanceId: authGatePresenceInstanceId,
+    rosterContextGeneration: generation,
+  }, () => {
+    void chrome.runtime.lastError;
+  });
+  if (present !== true) authGatePresenceLastSignaledRosterContextGeneration = null;
+}
+
+function stopAuthGatePresenceSignal() {
+  if (authGatePresencePulseTimer !== null) {
+    clearTimeout(authGatePresencePulseTimer);
+    authGatePresencePulseTimer = null;
+  }
+  if (authGatePresenceSignalActive) {
+    authGatePresenceSignalActive = false;
+    dispatchAuthGatePresenceSignal(false);
+  }
+}
+
+function reconcileAuthGatePresenceSignal() {
+  if (!authGatePresenceSignalIsEligible()) {
+    stopAuthGatePresenceSignal();
+    return;
+  }
+  authGatePresenceSignalActive = true;
+  dispatchAuthGatePresenceSignal(true);
+  if (authGatePresencePulseTimer !== null) clearTimeout(authGatePresencePulseTimer);
+  authGatePresencePulseTimer = setTimeout(() => {
+    authGatePresencePulseTimer = null;
+    reconcileAuthGatePresenceSignal();
+  }, AUTH_GATE_PRESENCE_PULSE_MS);
+}
 
 function withCurrentStudentMessageContext(message, apply, sendResponse) {
   const studentMessageContext = message?.studentMessageContext;
@@ -893,6 +961,7 @@ function showAuthGate(state = {}) {
   installAuthGateBlockers();
   ensureSecureAuthGateFrame(gate);
   installAuthGateConnectionWatchdog();
+  reconcileAuthGatePresenceSignal();
 }
 
 function quarantineAuthGatePageChildren() {
@@ -1318,6 +1387,7 @@ function markSecureAuthGateFrameUntrusted() {
     });
     globalThis.__classpilotAuthGateBootstrap?.setSecureFrameFocusTarget?.(null);
   }
+  reconcileAuthGatePresenceSignal();
 }
 
 function beginSecureAuthGateFrameVerification() {
@@ -1379,6 +1449,7 @@ function applyTrustedAuthGateFramePhase(phase) {
   });
   globalThis.__classpilotAuthGateBootstrap?.setSecureFrameFocusTarget?.(authGateSecureFrame);
   authGateSecureFrame?.focus({ preventScroll: true });
+  reconcileAuthGatePresenceSignal();
 }
 
 window.addEventListener('message', (event) => {
@@ -1405,6 +1476,7 @@ window.addEventListener('message', (event) => {
 }, true);
 
 function removeAuthGate() {
+  stopAuthGatePresenceSignal();
   clearAuthGateRetryTimer();
   clearAuthGateRosterRefreshTimer();
   authGatePendingManagedPolicyFence = 0;
@@ -1528,6 +1600,9 @@ function buildAuthGateMarkup(state) {
         display: flex !important;
         flex-direction: column !important;
         justify-content: space-between !important;
+      }
+      .classpilot-auth-panel--has-kiosk .classpilot-auth-side {
+        padding-bottom: 94px !important;
       }
       .classpilot-auth-small-logo {
         flex: 0 0 auto !important;
@@ -1694,29 +1769,24 @@ function buildAuthGateMarkup(state) {
         box-shadow: 0 0 0 6px rgba(245, 184, 31, 0.34) !important;
       }
       .classpilot-auth-kiosk-button {
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        gap: 8px !important;
-        width: 100% !important;
+        position: absolute !important;
+        z-index: 3 !important;
+        bottom: 28px !important;
+        left: 28px !important;
+        min-width: 120px !important;
         min-height: 44px !important;
-        margin-top: 20px !important;
+        padding: 0 16px !important;
         border: 1px solid #d8dee8 !important;
-        border-radius: 12px !important;
-        background: transparent !important;
-        color: #0e2a57 !important;
-        font-weight: 600 !important;
-        font-size: 15px !important;
+        border-radius: 10px !important;
+        background: rgba(255, 255, 255, 0.08) !important;
+        color: #e6edf7 !important;
+        font-weight: 750 !important;
+        font-size: 13px !important;
         cursor: pointer !important;
       }
-      .classpilot-auth-kiosk-button:hover {
-        border-color: #0e2a57 !important;
-        background: #fdf2c8 !important;
-      }
-      .classpilot-auth-kiosk-button svg {
-        width: 18px !important;
-        height: 18px !important;
-        stroke: #0e2a57 !important;
+      .classpilot-auth-kiosk-button:hover:not(:disabled) {
+        border-color: rgba(255, 255, 255, 0.72) !important;
+        background: rgba(255, 255, 255, 0.16) !important;
       }
       .classpilot-auth-error {
         display: none;
@@ -1886,6 +1956,9 @@ function buildAuthGateMarkup(state) {
         .classpilot-auth-side {
           padding: 22px !important;
         }
+        .classpilot-auth-panel--has-kiosk .classpilot-auth-side {
+          padding-bottom: 84px !important;
+        }
         .classpilot-auth-promise {
           margin-top: 28px !important;
         }
@@ -1994,9 +2067,6 @@ function buildAuthGateMarkup(state) {
           min-height: 0 !important;
           padding: 10px 12px !important;
         }
-        .classpilot-auth-kiosk-button {
-          margin-top: 12px !important;
-        }
         .classpilot-auth-footnote {
           margin-top: 16px !important;
           font-size: 13px !important;
@@ -2009,6 +2079,20 @@ function buildAuthGateMarkup(state) {
         }
         .classpilot-auth-side {
           display: none !important;
+        }
+        .classpilot-auth-panel--has-kiosk .classpilot-auth-main {
+          padding-bottom: 84px !important;
+        }
+        .classpilot-auth-kiosk-button {
+          bottom: 18px !important;
+          left: 22px !important;
+          border-color: #aebdce !important;
+          background: #fff !important;
+          color: #0e2a57 !important;
+        }
+        .classpilot-auth-kiosk-button:hover:not(:disabled) {
+          border-color: #0e2a57 !important;
+          background: #fdf2c8 !important;
         }
       }
       @media (max-height: 820px) and (min-width: 901px) {
@@ -2027,6 +2111,13 @@ function buildAuthGateMarkup(state) {
         }
         .classpilot-auth-main {
           padding: 20px !important;
+        }
+        .classpilot-auth-panel--has-kiosk .classpilot-auth-main {
+          padding-bottom: 80px !important;
+        }
+        .classpilot-auth-kiosk-button {
+          bottom: 16px !important;
+          left: 20px !important;
         }
         .classpilot-auth-main h1 {
           font-size: 30px !important;
@@ -2055,7 +2146,7 @@ function buildAuthGateMarkup(state) {
         }
       }
     </style>
-    <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${phase === 'loading' ? 'aria-busy="true"' : ''} tabindex="-1">
+    <div class="classpilot-auth-panel${phase === 'ready' && state.kioskUrl ? ' classpilot-auth-panel--has-kiosk' : ''}" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${phase === 'loading' ? 'aria-busy="true"' : ''} tabindex="-1">
       <div class="classpilot-auth-side" aria-hidden="true">
         <div>
           <div class="classpilot-auth-promise">
@@ -2076,10 +2167,10 @@ function buildAuthGateMarkup(state) {
           <div class="classpilot-auth-divider"></div>
           <div class="classpilot-auth-error" id="classpilot-auth-error" role="alert" aria-live="assertive"></div>
           ${phaseMarkup}
-          ${phase === 'ready' && state.kioskUrl ? buildKioskLaunchMarkup() : ''}
           <div class="classpilot-auth-footnote"><span>${authIcon('shield')}</span><span>Shared Chromebook sign-in</span></div>
         </div>
       </div>
+      ${phase === 'ready' && state.kioskUrl ? buildKioskLaunchMarkup() : ''}
     </div>
   `;
 }
@@ -2139,9 +2230,7 @@ function buildSetupRequiredMarkup() {
 // is usable (state.kioskUrl non-null); the kiosk page itself is PIN-gated.
 function buildKioskLaunchMarkup() {
   return `
-    <button class="classpilot-auth-kiosk-button" id="classpilot-auth-kiosk-launch" type="button">
-      ${authIcon('badge')} Use as PassPilot hall-pass kiosk
-    </button>
+    <button class="classpilot-auth-kiosk-button" id="classpilot-auth-kiosk-launch" type="button">Kiosk mode</button>
   `;
 }
 
@@ -2786,6 +2875,19 @@ function submitAuthGateLogin(payload, submitButton) {
           submit.disabled = false;
         }
         pinInput?.focus({ preventScroll: true });
+        return;
+      }
+      if (response?.status === 503 || response?.code === 'STUDENT_SESSION_TRANSFER_UNAVAILABLE') {
+        setAuthGateError('ClassPilot sign-in is temporarily unavailable. Your selection was kept; please try again.');
+        if (submit) {
+          if (payload.mode === 'pin') updatePinAuthSubmitState();
+          else submit.disabled = false;
+        }
+        const retryField = document.getElementById(
+          payload.mode === 'pin' ? 'classpilot-auth-pin' : 'classpilot-auth-email',
+        );
+        retryField?.focus({ preventScroll: true });
+        retryField?.select?.();
         return;
       }
       setAuthGateError(response?.error || 'Invalid student credentials');
@@ -4885,15 +4987,27 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   }
 });
 
-window.addEventListener('focus', refreshVisibleAuthGateRoster);
-window.addEventListener('pageshow', refreshVisibleAuthGateRoster);
-window.addEventListener('online', refreshVisibleAuthGateRoster);
+window.addEventListener('focus', () => {
+  refreshVisibleAuthGateRoster();
+  reconcileAuthGatePresenceSignal();
+});
+window.addEventListener('pageshow', () => {
+  refreshVisibleAuthGateRoster();
+  reconcileAuthGatePresenceSignal();
+});
+window.addEventListener('online', () => {
+  refreshVisibleAuthGateRoster();
+  reconcileAuthGatePresenceSignal();
+});
+window.addEventListener('pagehide', stopAuthGatePresenceSignal);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     clearAuthGateRosterRefreshTimer();
+    stopAuthGatePresenceSignal();
     return;
   }
   refreshVisibleAuthGateRoster();
+  reconcileAuthGatePresenceSignal();
 });
 
 // Initialize FAB when DOM is ready

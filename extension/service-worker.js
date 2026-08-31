@@ -311,6 +311,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
+  'studentAuthGatePresenceV1',
   'studentChatIdempotencyV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
@@ -330,6 +331,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
+  'studentAuthGatePresenceV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
   'managedDeviceContinuityV1',
@@ -594,6 +596,12 @@ const SHARED_SIGN_IN_CONFIG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SHARED_SIGN_IN_CONFIG_RETRY_ALARM = 'shared-sign-in-config-retry';
 const SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000]);
 const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
+const STUDENT_AUTH_GATE_PRESENCE_REQUEST_TIMEOUT_MS = 5000;
+const STUDENT_AUTH_GATE_PRESENCE_SOURCE_TTL_MS = 30 * 1000;
+const STUDENT_AUTH_GATE_PRESENCE_MIN_PUBLISH_MS = 8 * 1000;
+const STUDENT_AUTH_GATE_PRESENCE_RETRY_MS = 10 * 1000;
+const STUDENT_AUTH_GATE_PRESENCE_UNAVAILABLE_RETRY_MS = 30 * 1000;
+const STUDENT_AUTH_GATE_PRESENCE_UNNEGOTIATED_RETRY_MS = 60 * 1000;
 const SIGN_OUT_REQUEST_TIMEOUT_MS = 2000;
 const STUDENT_SESSION_RECOVERY_STORAGE_KEY = 'studentSessionRecoveryV1';
 const STUDENT_SESSION_RECOVERY_ALARM = 'student-session-recovery';
@@ -614,6 +622,10 @@ const MANAGED_DEVICE_CONTINUITY_CAPABILITIES = Object.freeze([
   'scopedAuthorityChecksV1',
   'kioskLaunchTicketV2',
   'managedDeviceContinuityV1',
+]);
+const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object.freeze([
+  'scopedAuthorityChecksV1',
+  'studentAuthGatePresenceV1',
 ]);
 const MANAGED_DEVICE_CONTINUITY_MAX_PROOF_TTL_MS = 10 * 60 * 1000;
 const MANAGED_DEVICE_CONTINUITY_EXPIRY_SKEW_MS = 5000;
@@ -821,6 +833,12 @@ const loginRosterRecoveryGrants = new Map();
 const loginRosterCache = new Map();
 const loginRosterInFlight = new Map();
 const loginRosterBackoffUntil = new Map();
+const studentAuthGatePresenceSources = new Map();
+let studentAuthGatePresencePublishInFlight = null;
+let studentAuthGatePresenceAbortController = null;
+let studentAuthGatePresenceLastDispatchAt = 0;
+let studentAuthGatePresenceRetryAt = 0;
+let studentAuthGatePresenceRetryContext = null;
 let legacyStudentAuthCleanupAuthority = null;
 let legacyStudentAuthCleanupPromise = null;
 
@@ -2678,6 +2696,245 @@ function loginAuthorizationHeader(grant) {
   return grant.authorizationKind === 'device'
     ? `ClassPilot-Device ${grant.token}`
     : `ClassPilot-Recovery ${grant.token}`;
+}
+
+function trustedStudentAuthGatePresenceSource(sender, message) {
+  if (
+    sender?.id !== chrome.runtime.id
+    || !Number.isInteger(sender.tab?.id)
+    || sender.frameId !== 0
+    || !/^[a-f0-9]{32}$/.test(String(message?.instanceId || ''))
+  ) return null;
+  const generation = Number(message?.rosterContextGeneration);
+  if (!Number.isSafeInteger(generation) || generation < 0) return null;
+  try {
+    const sourceUrl = new URL(String(sender.url || sender.tab.url || ''));
+    if (sourceUrl.protocol !== 'http:' && sourceUrl.protocol !== 'https:') return null;
+  } catch {
+    return null;
+  }
+  return Object.freeze({
+    key: `${sender.tab.id}:${message.instanceId}`,
+    rosterContextGeneration: generation,
+  });
+}
+
+function pruneStudentAuthGatePresenceSources(nowValue = Date.now()) {
+  for (const [key, source] of studentAuthGatePresenceSources) {
+    if (nowValue - source.lastSeenAt >= STUDENT_AUTH_GATE_PRESENCE_SOURCE_TTL_MS) {
+      studentAuthGatePresenceSources.delete(key);
+    }
+  }
+}
+
+function hasCurrentStudentAuthGatePresenceSource(nowValue = Date.now()) {
+  pruneStudentAuthGatePresenceSources(nowValue);
+  return [...studentAuthGatePresenceSources.values()].some((source) => (
+    source.rosterContextGeneration === authGateRosterContextGeneration
+    && nowValue - source.lastSeenAt < STUDENT_AUTH_GATE_PRESENCE_SOURCE_TTL_MS
+  ));
+}
+
+function abortStudentAuthGatePresencePublishIfIdle() {
+  if (hasCurrentStudentAuthGatePresenceSource()) return;
+  studentAuthGatePresenceAbortController?.abort();
+}
+
+function captureStudentAuthGatePresenceGuard(grant) {
+  return Object.freeze({
+    authorizationKind: grant.authorizationKind,
+    authMutationGeneration: studentAuthMutationGeneration,
+    configGeneration: sharedSignInConfigGeneration,
+    policyGeneration: managedAuthGatePolicyGeneration,
+    rosterContextGeneration: authGateRosterContextGeneration,
+    bindingKey: authGateConfigBindingKey(),
+    recordGeneration: grant.recordGeneration,
+    serverOrigin: grant.serverOrigin,
+    schoolId: grant.schoolId,
+    token: grant.token,
+  });
+}
+
+function studentAuthGatePresenceGuardIsCurrent(guard) {
+  if (
+    !guard
+    || hasStudentAuth()
+    || !hasCurrentStudentAuthGatePresenceSource()
+    || guard.authMutationGeneration !== studentAuthMutationGeneration
+    || guard.configGeneration !== sharedSignInConfigGeneration
+    || guard.policyGeneration !== managedAuthGatePolicyGeneration
+    || guard.rosterContextGeneration !== authGateRosterContextGeneration
+    || guard.bindingKey !== authGateConfigBindingKey()
+    || guard.serverOrigin !== authGateConfigBinding().serverOrigin
+    || guard.schoolId !== resolvedAuthGateSchoolId()
+  ) return false;
+  if (guard.authorizationKind === 'device') {
+    const continuity = currentManagedDeviceContinuityProof();
+    return continuity?.generation === guard.recordGeneration
+      && continuity.proof === guard.token
+      && continuity.serverOrigin === guard.serverOrigin
+      && continuity.schoolId === guard.schoolId;
+  }
+  const recovery = matchingStudentSessionRecoveryRecord();
+  return recovery?.generation === guard.recordGeneration
+    && recovery.token === guard.token
+    && recovery.serverOrigin === guard.serverOrigin
+    && recovery.schoolId === guard.schoolId;
+}
+
+async function resolveStudentAuthGatePresenceGrant() {
+  if (
+    hasStudentAuth()
+    || !hasCurrentStudentAuthGatePresenceSource()
+    || !hasManagedSchoolSetup()
+    || sharedSignInLoginConfig.phase !== 'ready'
+  ) return null;
+  const recoveryRecord = await prepareStudentSessionRecoveryForGate();
+  if (!hasCurrentStudentAuthGatePresenceSource() || hasStudentAuth()) return null;
+  const recoveryGrant = recoveryAuthorizationGrantForRecord(recoveryRecord);
+  if (recoveryGrant) return recoveryGrant;
+  const continuityRecord = await requestManagedDeviceContinuityProof({ recoveryRecord });
+  if (!hasCurrentStudentAuthGatePresenceSource() || hasStudentAuth()) return null;
+  if (continuityRecord) {
+    return Object.freeze({
+      authorizationKind: 'device',
+      recordGeneration: continuityRecord.generation,
+      serverOrigin: continuityRecord.serverOrigin,
+      schoolId: continuityRecord.schoolId,
+      token: continuityRecord.proof,
+    });
+  }
+  return null;
+}
+
+function studentAuthGatePresenceRetryDelay(response) {
+  if (!response) return STUDENT_AUTH_GATE_PRESENCE_RETRY_MS;
+  if (response.status === 426) return STUDENT_AUTH_GATE_PRESENCE_UNNEGOTIATED_RETRY_MS;
+  if (response.status === 429) {
+    return Math.max(
+      STUDENT_AUTH_GATE_PRESENCE_UNAVAILABLE_RETRY_MS,
+      Number(parseRetryAfterMs(response)) || 0,
+    );
+  }
+  if (response.status >= 500) return STUDENT_AUTH_GATE_PRESENCE_UNAVAILABLE_RETRY_MS;
+  return STUDENT_AUTH_GATE_PRESENCE_RETRY_MS;
+}
+
+async function publishStudentAuthGatePresence() {
+  if (studentAuthGatePresencePublishInFlight) return studentAuthGatePresencePublishInFlight;
+  const nowValue = Date.now();
+  if (!hasCurrentStudentAuthGatePresenceSource(nowValue)) return null;
+  const retryContext = `${authGateConfigBindingKey()}:${authGateRosterContextGeneration}`;
+  if (retryContext !== studentAuthGatePresenceRetryContext) {
+    studentAuthGatePresenceRetryContext = retryContext;
+    studentAuthGatePresenceRetryAt = 0;
+    studentAuthGatePresenceLastDispatchAt = 0;
+  }
+  if (
+    nowValue < studentAuthGatePresenceRetryAt
+    || nowValue - studentAuthGatePresenceLastDispatchAt
+      < STUDENT_AUTH_GATE_PRESENCE_MIN_PUBLISH_MS
+  ) return null;
+
+  const run = (async () => {
+    await authStateRestorePromise;
+    await awaitManagedAuthGatePolicyStable();
+    await studentAuthMutationTail;
+    const grant = await resolveStudentAuthGatePresenceGrant();
+    if (!grant) return null;
+    const guard = captureStudentAuthGatePresenceGuard(grant);
+    if (!studentAuthGatePresenceGuardIsCurrent(guard)) return null;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(
+      () => controller.abort(),
+      STUDENT_AUTH_GATE_PRESENCE_REQUEST_TIMEOUT_MS,
+    );
+    studentAuthGatePresenceAbortController = controller;
+    studentAuthGatePresenceLastDispatchAt = Date.now();
+    let response = null;
+    try {
+      response = await fetch(`${guard.serverOrigin}/api/extension/session-gate-presence`, {
+        method: 'POST',
+        cache: 'no-store',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey,
+          Authorization: loginAuthorizationHeader(guard),
+        },
+        body: JSON.stringify({
+          schoolId: guard.schoolId,
+          clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
+          capabilities: [...STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES],
+        }),
+        signal: controller.signal,
+      });
+      if (!studentAuthGatePresenceGuardIsCurrent(guard)) return null;
+      if (response.ok) {
+        studentAuthGatePresenceRetryAt = 0;
+        return true;
+      }
+      if (guard.authorizationKind === 'device' && response.status === 401) {
+        await clearManagedDeviceContinuityState(guard.recordGeneration);
+      }
+      studentAuthGatePresenceRetryAt = Date.now()
+        + studentAuthGatePresenceRetryDelay(response);
+      return false;
+    } catch {
+      if (!controller.signal.aborted || hasCurrentStudentAuthGatePresenceSource()) {
+        studentAuthGatePresenceRetryAt = Date.now()
+          + STUDENT_AUTH_GATE_PRESENCE_RETRY_MS;
+      }
+      return false;
+    } finally {
+      clearTimeout(timeoutId);
+      if (studentAuthGatePresenceAbortController === controller) {
+        studentAuthGatePresenceAbortController = null;
+      }
+    }
+  })();
+  studentAuthGatePresencePublishInFlight = run.finally(() => {
+    if (studentAuthGatePresencePublishInFlight === trackedRun) {
+      studentAuthGatePresencePublishInFlight = null;
+    }
+  });
+  const trackedRun = studentAuthGatePresencePublishInFlight;
+  return trackedRun;
+}
+
+function noteStudentAuthGatePresence(message, sender) {
+  const source = trustedStudentAuthGatePresenceSource(sender, message);
+  if (!source) return false;
+  if (message.present !== true) {
+    studentAuthGatePresenceSources.delete(source.key);
+    abortStudentAuthGatePresencePublishIfIdle();
+    return true;
+  }
+  const previousSource = studentAuthGatePresenceSources.get(source.key);
+  if (
+    previousSource
+    && previousSource.rosterContextGeneration !== source.rosterContextGeneration
+  ) {
+    studentAuthGatePresenceAbortController?.abort();
+  }
+  studentAuthGatePresenceSources.set(source.key, {
+    rosterContextGeneration: source.rosterContextGeneration,
+    lastSeenAt: Date.now(),
+  });
+  while (studentAuthGatePresenceSources.size > 64) {
+    studentAuthGatePresenceSources.delete(studentAuthGatePresenceSources.keys().next().value);
+  }
+  publishStudentAuthGatePresence().catch(() => {});
+  return true;
+}
+
+function removeStudentAuthGatePresenceSourcesForTab(tabId) {
+  const prefix = `${tabId}:`;
+  for (const key of studentAuthGatePresenceSources.keys()) {
+    if (key.startsWith(prefix)) studentAuthGatePresenceSources.delete(key);
+  }
+  abortStudentAuthGatePresencePublishIfIdle();
 }
 
 function normalizeManagedDevicePreflightToken(value) {
@@ -17362,6 +17619,7 @@ async function ensureContentScriptInjected(tabId) {
 // Clean up injectedTabs when tabs are closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   injectedTabs.delete(tabId);
+  removeStudentAuthGatePresenceSourcesForTab(tabId);
 });
 
 // Unbound delivery is reserved for identity-clearing messages whose only side
@@ -20319,6 +20577,11 @@ async function getStudentSessionUiState(message = {}) {
 
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'student-auth-gate-presence') {
+    sendResponse({ success: noteStudentAuthGatePresence(message, sender) });
+    return true;
+  }
+
   if (message.type === 'record-auth-gate-timing') {
     if (!Number.isInteger(sender.tab?.id)) {
       sendResponse({ success: false });

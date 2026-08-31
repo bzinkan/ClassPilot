@@ -85,6 +85,9 @@ async function main() {
   const workerSource = readFileSync(resolve(extensionPath, 'service-worker.js'), 'utf8');
   assert.match(workerSource, /Unowned legacy classroom state was not adopted/);
   assert.doesNotMatch(workerSource, /legacy_migration|Migrated legacy classroom restrictions/);
+  assert.match(workerSource, /'studentAuthGatePresenceV1'/);
+  assert.match(workerSource, /\/api\/extension\/session-gate-presence/);
+  assert.match(workerSource, /STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES/);
   const scopedStorageBlock = workerSource.match(
     /const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set\(\[([\s\S]*?)\]\);/,
   )?.[1] || '';
@@ -3168,6 +3171,142 @@ async function main() {
         'student session UI bridge leaked private authentication context',
       );
     }
+
+    const gatePresenceFixture = await worker.evaluate(async () => {
+      const originalFetch = globalThis.fetch;
+      const requests = [];
+      try {
+        advanceStudentAuthMutationGeneration();
+        CONFIG.serverUrl = 'https://school-pilot.net';
+        CONFIG.schoolId = 'school-gate-presence';
+        CONFIG.schoolSlug = null;
+        CONFIG.enrollmentKey = 'enrollment-gate-presence';
+        CONFIG.deviceId = 'device-gate-presence';
+        CONFIG.studentToken = null;
+        CONFIG.activeStudentId = null;
+        CONFIG.activeStudentSessionId = null;
+        CONFIG.identitySource = null;
+        CONFIG.manualLoginLastSeenAt = 0;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        managedAuthGateSetupUnavailable = false;
+        authGateRosterContextGeneration += 1;
+        sharedSignInLoginConfig = {
+          phase: 'ready',
+          fetchedAt: Date.now(),
+          retryAt: null,
+          setupRequired: false,
+          sharedSignInEnabled: true,
+          loginMethod: 'name_pin',
+          pinLoginEnabled: true,
+          schoolId: CONFIG.schoolId,
+          passpilotKioskAvailable: false,
+          bindingKey: authGateConfigBindingKey(),
+        };
+        await enqueueStudentSessionRecoveryMutation(() => persistStudentSessionRecoveryState(
+          emptyStudentSessionRecoveryState(),
+        ));
+        await clearManagedDeviceContinuityState();
+        await armStudentSessionRecovery({
+          serverOrigin: CONFIG.serverUrl,
+          schoolId: CONFIG.schoolId,
+          token: 'P'.repeat(43),
+          authContextId: 'auth_gate_presence',
+        });
+        globalThis.fetch = async (url, init = {}) => {
+          if (String(url).endsWith('/api/classpilot/extension/device-continuity/preflight')) {
+            return new Response(JSON.stringify({
+              code: 'CLASSPILOT_PROTOCOL_UPGRADE_REQUIRED',
+            }), { status: 426, headers: { 'content-type': 'application/json' } });
+          }
+          if (String(url).endsWith('/api/extension/session-gate-presence')) {
+            requests.push({
+              url: String(url),
+              authorization: init.headers?.Authorization,
+              enrollmentKey: init.headers?.['X-ClassPilot-Enrollment-Key'],
+              body: JSON.parse(String(init.body || '{}')),
+            });
+            return new Response(null, { status: 204 });
+          }
+          return new Response('{}', { status: 404, headers: { 'content-type': 'application/json' } });
+        };
+        studentAuthGatePresenceSources.clear();
+        studentAuthGatePresenceLastDispatchAt = 0;
+        studentAuthGatePresenceRetryAt = 0;
+        const sender = {
+          id: chrome.runtime.id,
+          tab: { id: 8701, url: 'https://example.edu/student-work' },
+          frameId: 0,
+          url: 'https://example.edu/student-work',
+        };
+        const firstAccepted = noteStudentAuthGatePresence({
+          present: true,
+          instanceId: 'a'.repeat(32),
+          rosterContextGeneration: authGateRosterContextGeneration,
+        }, sender);
+        const secondAccepted = noteStudentAuthGatePresence({
+          present: true,
+          instanceId: 'b'.repeat(32),
+          rosterContextGeneration: authGateRosterContextGeneration,
+        }, { ...sender, tab: { ...sender.tab, id: 8702 } });
+        await studentAuthGatePresencePublishInFlight;
+        const coalescedRequestCount = requests.length;
+
+        authGateRosterContextGeneration += 1;
+        studentAuthGatePresenceLastDispatchAt = 0;
+        studentAuthGatePresenceRetryAt = 0;
+        await publishStudentAuthGatePresence();
+        const staleGenerationRequestCount = requests.length;
+
+        const nextGenerationAccepted = noteStudentAuthGatePresence({
+          present: true,
+          instanceId: 'c'.repeat(32),
+          rosterContextGeneration: authGateRosterContextGeneration,
+        }, { ...sender, tab: { ...sender.tab, id: 8703 } });
+        studentAuthGatePresenceLastDispatchAt = 0;
+        await publishStudentAuthGatePresence();
+        if (studentAuthGatePresencePublishInFlight) {
+          await studentAuthGatePresencePublishInFlight;
+        }
+        const currentGenerationRequestCount = requests.length;
+        noteStudentAuthGatePresence({
+          present: false,
+          instanceId: 'c'.repeat(32),
+          rosterContextGeneration: authGateRosterContextGeneration,
+        }, { ...sender, tab: { ...sender.tab, id: 8703 } });
+        return {
+          firstAccepted,
+          secondAccepted,
+          nextGenerationAccepted,
+          coalescedRequestCount,
+          staleGenerationRequestCount,
+          currentGenerationRequestCount,
+          firstRequest: requests[0],
+          remainingCurrentSources: hasCurrentStudentAuthGatePresenceSource(),
+        };
+      } finally {
+        studentAuthGatePresenceAbortController?.abort();
+        studentAuthGatePresenceSources.clear();
+        globalThis.fetch = originalFetch;
+      }
+    });
+    assert.equal(gatePresenceFixture.firstAccepted, true);
+    assert.equal(gatePresenceFixture.secondAccepted, true);
+    assert.equal(gatePresenceFixture.nextGenerationAccepted, true);
+    assert.equal(gatePresenceFixture.coalescedRequestCount, 1);
+    assert.equal(gatePresenceFixture.staleGenerationRequestCount, 1);
+    assert.equal(gatePresenceFixture.currentGenerationRequestCount, 2);
+    assert.deepEqual(gatePresenceFixture.firstRequest, {
+      url: 'https://school-pilot.net/api/extension/session-gate-presence',
+      authorization: `ClassPilot-Recovery ${'P'.repeat(43)}`,
+      enrollmentKey: 'enrollment-gate-presence',
+      body: {
+        schoolId: 'school-gate-presence',
+        clientProtocolVersion: 3,
+        capabilities: ['scopedAuthorityChecksV1', 'studentAuthGatePresenceV1'],
+      },
+    });
+    assert.equal(gatePresenceFixture.remainingCurrentSources, false);
 
     assert.equal(result.recoveryRace.grantBeforeMetadataRetry, true);
     assert.equal(result.recoveryRace.grantAfterMetadataRetry, true);
