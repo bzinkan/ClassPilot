@@ -3529,9 +3529,9 @@ async function main() {
       );
 
       // Ordinary WebSocket tab-limit enforcement has no event-time foreground
-      // hint. A stale last-focused query must therefore preserve every active
-      // exact-SSO candidate instead of guessing which authentication window
-      // is safe to close, even when that temporarily exceeds the limit.
+      // hint. Only a fresh last-focused exact-SSO tab is protected; window-
+      // local active tabs in dormant SSO windows must remain removable so the
+      // numeric limit recovers once the destination is foreground.
       const staleWebSocketRemoved = [];
       const staleWebSocketResults = [];
       for (const scenario of [
@@ -3559,9 +3559,9 @@ async function main() {
       }
 
       // Exercise the complete onCreated -> generic reconciliation handoff.
-      // The onCreated hint additively preserves the exact Google popup while
-      // the generic last-focused query intentionally remains stale. Clever's
-      // active opener must survive too; only an unrelated fourth tab may go.
+      // The onCreated hint preserves the exact Google popup while the generic
+      // last-focused query intentionally remains stale. The unrelated fourth
+      // tab and dormant Clever opener may be removed to recover the limit.
       const staleReconcileRemoved = [];
       const staleReconcileHints = [];
       const staleReconcileMarkedStates = [];
@@ -3619,15 +3619,18 @@ async function main() {
         staleReconcileRemovedByLimit.push({ limit, removed: removedForLimit });
       }
 
-      // Generic worker-restart reconciliation has no onCreated hint. Even if
-      // Chrome stale-reports an unrelated window as foreground, the active
-      // Clever opener and Google popup must suppress all activation/focus.
+      // Generic worker-restart reconciliation has no onCreated hint. Active
+      // tabs in background SSO windows cannot suppress activation/focus of the
+      // destination, and excess dormant flows must become removable once the
+      // last-focused noncompliant window is repaired.
+      visitedRestrictionSsoHosts = new Set(['clever.com']);
       const genericRestartRemovedByLimit = [];
       const genericRestartUpdates = [];
       const genericRestartFocusedWindows = [];
       for (const limit of [1, 2]) {
         currentMaxTabs = limit;
         const removedForLimit = [];
+        let restartForegroundTab = multiWindowInventoryWithExcess[3];
         await reconcileExistingTabsForClassroomState(
           currentClassroomState,
           () => {},
@@ -3636,15 +3639,17 @@ async function main() {
           {
             queryTabs: async (query) => (
               query?.lastFocusedWindow
-                ? [multiWindowInventoryWithExcess[3]]
+                ? [restartForegroundTab]
                 : multiWindowInventoryWithExcess
             ),
             updateTab: async (tabId, properties) => {
               genericRestartUpdates.push({ tabId, properties });
-              return {
+              const updated = {
                 ...multiWindowInventoryWithExcess.find((tab) => tab.id === tabId),
                 ...properties,
               };
+              if (properties?.active === true) restartForegroundTab = updated;
+              return updated;
             },
             getTab: async (tabId) => (
               multiWindowInventoryWithExcess.find((tab) => tab.id === tabId)
@@ -3657,6 +3662,56 @@ async function main() {
         );
         genericRestartRemovedByLimit.push({ limit, removed: removedForLimit });
       }
+
+      // Chrome exposes one `active` tab in every window. A dormant Clever tab
+      // in a background window must not prevent a foreground chrome://settings
+      // page from receiving a newly created, activated, and focused Waypoint.
+      const protectedForegroundInventory = [{
+        id: 7851,
+        windowId: 85,
+        active: true,
+        url: 'chrome://settings/',
+      }, {
+        id: 7852,
+        windowId: 86,
+        active: true,
+        url: 'https://district.clever.com/login',
+      }];
+      const protectedForegroundCreates = [];
+      const protectedForegroundFocuses = [];
+      let protectedForegroundTab = protectedForegroundInventory[0];
+      currentMaxTabs = null;
+      await reconcileExistingTabsForClassroomState(
+        currentClassroomState,
+        () => {},
+        firstContext,
+        null,
+        {
+          queryTabs: async (query) => (
+            query?.lastFocusedWindow
+              ? [protectedForegroundTab]
+              : protectedForegroundInventory
+          ),
+          updateTab: async () => { throw new Error('unexpected protected-tab update'); },
+          getTab: async (tabId) => (
+            protectedForegroundInventory.find((tab) => tab.id === tabId) || null
+          ),
+          removeTab: async () => {},
+          createTab: async (properties) => {
+            protectedForegroundCreates.push({ ...properties });
+            protectedForegroundTab = {
+              id: 7853,
+              windowId: 85,
+              ...properties,
+            };
+            return protectedForegroundTab;
+          },
+          focusWindow: async (windowId) => {
+            protectedForegroundFocuses.push(windowId);
+          },
+          refreshTabs: async () => {},
+        },
+      );
 
       // A destination-tab navigation can fail after Chrome has already made an
       // OAuth popup foreground. The one fallback remains useful, but it must be
@@ -3756,6 +3811,62 @@ async function main() {
       transientVisitRestoredAfterRestart = visitedRestrictionSsoHosts.has(
         'accounts.google.com',
       );
+      await clearRestrictionSsoVisitState();
+      await ensureRestrictionSsoVisitStateForContext(firstContext);
+
+      // More than the runtime domain-list ceiling of unique exact subdomains
+      // must collapse to the two allowlisted root families. This proves both
+      // the navigation writer and restart restore remain bounded, privacy-
+      // minimal, and warm enough to route directly to the restriction target.
+      let floodAcceptedCount = 0;
+      for (let index = 0; index < 1005; index += 1) {
+        const host = index % 2 === 0
+          ? `tenant-${index}.clever.com`
+          : `tenant-${index}.accounts.google.com`;
+        if (await observeRestrictionSsoHostForAuth(`https://${host}/oauth/start`, firstContext)) {
+          floodAcceptedCount += 1;
+        }
+      }
+      const floodStored = (await rawLocalKv.get([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+      ]))[RESTRICTION_SSO_VISIT_STORAGE_KEY];
+      const floodVisitedBeforeRestart = [...visitedRestrictionSsoHosts].sort();
+      const serializedFloodStored = JSON.stringify(floodStored);
+      const legacyFloodVisitedHosts = Array.from({ length: 1005 }, (_, index) => (
+        index % 2 === 0
+          ? `tenant-${index}.clever.com`
+          : `tenant-${index}.accounts.google.com`
+      ));
+      await rawLocalKv.set({
+        [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+          schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+          scopeDigest: floodStored.scopeDigest,
+          visitedHosts: legacyFloodVisitedHosts,
+        },
+      });
+      restrictionSsoVisitScopeDigest = null;
+      visitedRestrictionSsoHosts = new Set();
+      await ensureRestrictionSsoVisitStateForContext(firstContext);
+      const floodVisitedAfterRestart = [...visitedRestrictionSsoHosts].sort();
+      const floodStoredAfterRestart = (await rawLocalKv.get([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+      ]))[RESTRICTION_SSO_VISIT_STORAGE_KEY];
+      const serializedFloodStoredAfterRestart = JSON.stringify(floodStoredAfterRestart);
+      const floodWarmPlan = RuntimeCore.planClassroomTabReconciliation(
+        currentClassroomState,
+        [{
+          id: 7991,
+          windowId: 79,
+          active: true,
+          url: 'https://outside.example/before-warm-waypoint',
+        }],
+        {
+          foregroundTabId: 7991,
+          restrictionSsoPassThrough: true,
+          visitedSsoHosts: [...visitedRestrictionSsoHosts],
+        },
+      );
+      const floodWarmTarget = floodWarmPlan.updates[0]?.url || floodWarmPlan.createUrl;
       await clearRestrictionSsoVisitState();
       await ensureRestrictionSsoVisitStateForContext(firstContext);
 
@@ -3952,6 +4063,8 @@ async function main() {
         genericRestartRemovedByLimit,
         genericRestartUpdates,
         genericRestartFocusedWindows,
+        protectedForegroundCreates,
+        protectedForegroundFocuses,
         failedBackgroundWaypointCreates,
         failedBackgroundWaypointFocuses,
         transientVisitFailure,
@@ -3959,6 +4072,15 @@ async function main() {
         transientVisitAbsentAfterFailure,
         transientVisitRetryAccepted,
         transientVisitRestoredAfterRestart,
+        floodAcceptedCount,
+        floodVisitedBeforeRestart,
+        floodVisitedAfterRestart,
+        floodStoredKeys: Object.keys(floodStored || {}).sort(),
+        floodStoredContainsExactSubdomain: serializedFloodStored.includes('tenant-'),
+        floodStoredAfterRestartHosts: floodStoredAfterRestart?.visitedHosts || [],
+        floodStoredAfterRestartContainsExactSubdomain:
+          serializedFloodStoredAfterRestart.includes('tenant-'),
+        floodWarmTarget,
         accepted,
         rejectedLookalike,
         firstVisitedHosts: firstStored?.visitedHosts || [],
@@ -3998,7 +4120,7 @@ async function main() {
     assert.equal(restrictionSsoFixture.lookalikeCreatedPolicySource, 'screen_lock');
     assert.equal(restrictionSsoFixture.ssoRaceRemovalStillApplies, false);
     assert.equal(restrictionSsoFixture.foregroundSsoPolicySource, null);
-    assert.equal(restrictionSsoFixture.foregroundSsoReconcilesBackgroundExcess, false);
+    assert.equal(restrictionSsoFixture.foregroundSsoReconcilesBackgroundExcess, true);
     assert.deepEqual(restrictionSsoFixture.multiWindowQueries, [
       {},
       { active: true, lastFocusedWindow: true },
@@ -4006,35 +4128,56 @@ async function main() {
     assert.equal(restrictionSsoFixture.staleForegroundSsoPolicySource, null);
     assert.equal(
       restrictionSsoFixture.staleForegroundSsoReconcilesBackgroundExcess,
-      false,
+      true,
     );
     assert.deepEqual(restrictionSsoFixture.staleMultiWindowQueries, [
       {},
       { active: true, lastFocusedWindow: true },
     ]);
     assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedPolicySource, null);
-    assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedReconciles, false);
-    assert.deepEqual(restrictionSsoFixture.staleWebSocketRemoved, []);
-    assert.deepEqual(restrictionSsoFixture.staleWebSocketResults, [
-      { staleForegroundTabId: 7801, applied: true, limit: 1, closed: 0 },
-      { staleForegroundTabId: 7801, applied: true, limit: 2, closed: 0 },
-      { staleForegroundTabId: 7802, applied: true, limit: 2, closed: 0 },
+    assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedReconciles, true);
+    assert.deepEqual(restrictionSsoFixture.staleWebSocketRemoved, [
+      7802,
+      7803,
+      7802,
+      7803,
     ]);
-    assert.deepEqual(restrictionSsoFixture.staleReconcileRemoved, [7804, 7804]);
+    assert.deepEqual(restrictionSsoFixture.staleWebSocketResults, [
+      { staleForegroundTabId: 7801, applied: true, limit: 1, closed: 2 },
+      { staleForegroundTabId: 7801, applied: true, limit: 2, closed: 1 },
+      { staleForegroundTabId: 7802, applied: true, limit: 2, closed: 1 },
+    ]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileRemoved, [
+      7804,
+      7802,
+      7804,
+      7802,
+    ]);
     assert.deepEqual(restrictionSsoFixture.staleReconcileRemovedByLimit, [
-      { limit: 1, removed: [7804] },
-      { limit: 2, removed: [7804] },
+      { limit: 1, removed: [7804, 7802] },
+      { limit: 2, removed: [7804, 7802] },
     ]);
     assert.deepEqual(restrictionSsoFixture.staleReconcileHints, [7803, 7803]);
     assert.deepEqual(restrictionSsoFixture.staleReconcileMarkedStates, [true, true]);
     assert.deepEqual(restrictionSsoFixture.staleReconcileUpdates, []);
     assert.deepEqual(restrictionSsoFixture.staleReconcileFocusedWindows, []);
     assert.deepEqual(restrictionSsoFixture.genericRestartRemovedByLimit, [
-      { limit: 1, removed: [7804] },
-      { limit: 2, removed: [7804] },
+      { limit: 1, removed: [7804, 7802, 7803] },
+      { limit: 2, removed: [7804, 7802] },
     ]);
-    assert.deepEqual(restrictionSsoFixture.genericRestartUpdates, []);
-    assert.deepEqual(restrictionSsoFixture.genericRestartFocusedWindows, []);
+    assert.deepEqual(restrictionSsoFixture.genericRestartUpdates, [{
+      tabId: 7801,
+      properties: { active: true },
+    }, {
+      tabId: 7801,
+      properties: { active: true },
+    }]);
+    assert.deepEqual(restrictionSsoFixture.genericRestartFocusedWindows, [76, 76]);
+    assert.deepEqual(restrictionSsoFixture.protectedForegroundCreates, [{
+      url: 'https://ixl.com/math',
+      active: true,
+    }]);
+    assert.deepEqual(restrictionSsoFixture.protectedForegroundFocuses, [85]);
     assert.deepEqual(restrictionSsoFixture.failedBackgroundWaypointCreates, [{
       url: 'https://ixl.com/math',
       active: false,
@@ -4048,9 +4191,33 @@ async function main() {
     assert.equal(restrictionSsoFixture.transientVisitAbsentAfterFailure, true);
     assert.equal(restrictionSsoFixture.transientVisitRetryAccepted, true);
     assert.equal(restrictionSsoFixture.transientVisitRestoredAfterRestart, true);
+    assert.equal(restrictionSsoFixture.floodAcceptedCount, 2);
+    assert.deepEqual(restrictionSsoFixture.floodVisitedBeforeRestart, [
+      'accounts.google.com',
+      'clever.com',
+    ]);
+    assert.deepEqual(restrictionSsoFixture.floodVisitedAfterRestart, [
+      'accounts.google.com',
+      'clever.com',
+    ]);
+    assert.deepEqual(restrictionSsoFixture.floodStoredKeys, [
+      'schemaVersion',
+      'scopeDigest',
+      'visitedHosts',
+    ]);
+    assert.equal(restrictionSsoFixture.floodStoredContainsExactSubdomain, false);
+    assert.deepEqual(restrictionSsoFixture.floodStoredAfterRestartHosts, [
+      'accounts.google.com',
+      'clever.com',
+    ]);
+    assert.equal(
+      restrictionSsoFixture.floodStoredAfterRestartContainsExactSubdomain,
+      false,
+    );
+    assert.equal(restrictionSsoFixture.floodWarmTarget, 'https://ixl.com/math');
     assert.equal(restrictionSsoFixture.accepted, true);
     assert.equal(restrictionSsoFixture.rejectedLookalike, false);
-    assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['district.clever.com']);
+    assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['clever.com']);
     assert.deepEqual(restrictionSsoFixture.firstStoredKeys, [
       'schemaVersion',
       'scopeDigest',

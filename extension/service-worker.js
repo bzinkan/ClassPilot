@@ -9164,9 +9164,13 @@ function restrictionSsoPassThroughForState(state = currentClassroomState) {
 function normalizedRestrictionSsoHost(urlValue) {
   const host = RuntimeCore.normalizeDomain(urlValue);
   if (!host) return null;
-  return RuntimeCore.RESTRICTION_SSO_DOMAINS.some((domain) => (
+  // Record only the matched allowlisted family, never the arbitrary exact
+  // subdomain. This is privacy-minimal and strictly bounds the durable ledger
+  // to the two supported roots, so unique tenant/login subdomains cannot grow
+  // the set past reconciliation's domain-list limit.
+  return RuntimeCore.RESTRICTION_SSO_DOMAINS.find((domain) => (
     RuntimeCore.isHostWithinDomain(host, domain)
-  )) ? host : null;
+  )) || null;
 }
 
 async function restrictionSsoBindingDigest(context) {
@@ -9208,12 +9212,29 @@ async function ensureRestrictionSsoVisitStateForContextNow(context) {
   const hosts = valid
     ? record.visitedHosts.map(normalizedRestrictionSsoHost).filter(Boolean)
     : [];
-  restrictionSsoVisitScopeDigest = scopeDigest;
-  visitedRestrictionSsoHosts = new Set(hosts);
+  const canonicalHosts = [...new Set(hosts)].sort();
+  const requiresCanonicalRewrite = valid
+    && JSON.stringify(record.visitedHosts) !== JSON.stringify(canonicalHosts);
+  if (requiresCanonicalRewrite) {
+    // Provisional builds recorded exact tenant/login subdomains. Rewrite them
+    // during restore so the durable privacy/size invariant is complete even
+    // when no later navigation adds a new root family. Publish the in-memory
+    // scope only after this write succeeds so a transient failure is retryable.
+    await rawLocalKv.set({
+      [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+        schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+        scopeDigest,
+        visitedHosts: canonicalHosts,
+      },
+    });
+    assertAuthenticatedContextCurrent(context, 'restriction SSO visit canonicalization');
+  }
   if (!valid && record) {
     await rawLocalKv.remove(RESTRICTION_SSO_VISIT_STORAGE_KEY);
     assertAuthenticatedContextCurrent(context, 'restriction SSO visit cleanup');
   }
+  restrictionSsoVisitScopeDigest = scopeDigest;
+  visitedRestrictionSsoHosts = new Set(canonicalHosts);
   return visitedRestrictionSsoHosts;
 }
 
@@ -15615,14 +15636,6 @@ async function reconcileExistingTabsForClassroomState(
   // asynchronously updated last-focused-window query. The hint is accepted
   // only for a fresh tab in this inventory and only for a marked restriction.
   const foregroundTab = hintedForegroundSso || queriedForegroundTab;
-  const activeRestrictionSsoTabIds = restrictionSsoPassThroughForState(state)
-    ? tabs.filter((tab) => tab.active === true && RuntimeCore.isRestrictionSsoTab(tab))
-      .map((tab) => tab.id)
-    : [];
-  const focusProtectedRestrictionSsoTabIds = [...new Set([
-    ...activeRestrictionSsoTabIds,
-    ...(hintedForegroundSso ? [hintedForegroundSso.id] : []),
-  ])];
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
     foregroundTabId: foregroundTab?.id,
     preserveRestrictionSsoTabIds: hintedForegroundSso ? [hintedForegroundSso.id] : [],
@@ -15706,20 +15719,22 @@ async function reconcileExistingTabsForClassroomState(
     // allowed fallback into a focus steal while Clever/Google authentication
     // is active. Re-read the protected candidates at the destructive boundary
     // so a completed/closed SSO flow does not unnecessarily suppress normal
-    // foreground enforcement. An onCreated hint remains authoritative for this
-    // reconciliation because Chrome can temporarily stale-report its `active`
-    // bit while moving an OAuth popup between windows.
+    // foreground enforcement. Do not use `tab.active` from the all-window
+    // inventory here: Chrome has one active tab in every background window. A
+    // fresh last-focused exact-SSO tab or the validated onCreated hint is the
+    // only evidence that creating an active destination would steal focus.
     let preserveRestrictionSsoFocus = false;
-    for (const tabId of focusProtectedRestrictionSsoTabIds) {
-      const candidate = await getTab(tabId).catch(() => null);
+    if (hintedForegroundSso) {
+      const candidate = await getTab(hintedForegroundSso.id).catch(() => null);
       assertCurrent('classroom fallback SSO focus verification');
-      if (
-        RuntimeCore.isRestrictionSsoTab(candidate)
-        && (candidate.active === true || candidate.id === hintedForegroundSso?.id)
-      ) {
-        preserveRestrictionSsoFocus = true;
-        break;
-      }
+      preserveRestrictionSsoFocus = RuntimeCore.isRestrictionSsoTab(candidate);
+    }
+    if (!preserveRestrictionSsoFocus && restrictionSsoPassThroughForState(state)) {
+      const freshForegroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
+      assertCurrent('classroom fallback foreground SSO verification');
+      preserveRestrictionSsoFocus = freshForegroundTabs.some((tab) => (
+        Number.isInteger(tab?.id) && RuntimeCore.isRestrictionSsoTab(tab)
+      ));
     }
     assertCurrent('classroom tab creation');
     const createdTab = await createTab({
@@ -18741,7 +18756,9 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
     const foregroundTab = Array.isArray(foregroundTabs)
       ? foregroundTabs.find((tab) => Number.isInteger(tab?.id) && tab.active === true)
       : null;
-    const preserveTabIds = restrictionSsoTabLimitPreserveIds(tabs);
+    const preserveTabIds = restrictionSsoTabLimitPreserveIds(tabs, {
+      foregroundTabId: foregroundTab?.id,
+    });
     const removalIds = RuntimeCore.planTabLimitRemovals({
       restrictions: classroomRestrictionsFromRuntime(),
     }, tabs, {
@@ -18976,14 +18993,25 @@ function restrictionSsoTabLimitPreserveIds(tabs, options = {}) {
   const requestedPreserveIds = Array.isArray(options.preserveSsoTabIds)
     ? options.preserveSsoTabIds
     : [];
-  const preservedSsoTabs = ssoTabs.length === 1
-    ? ssoTabs
-    : ssoTabs.filter((tab) => (
-        tab.active === true || requestedPreserveIds.includes(tab.id)
-      ));
+  const foregroundSsoTab = ssoTabs.find((tab) => tab.id === options.foregroundTabId) || null;
+  const explicitSsoTabIds = [...new Set([
+    foregroundSsoTab?.id,
+    ...requestedPreserveIds.filter((tabId) => (
+      Number.isInteger(tabId) && ssoTabs.some((tab) => tab.id === tabId)
+    )),
+  ].filter(Number.isInteger))];
+  // Chrome marks one tab active in every window. Preserve only a fresh
+  // last-focused/onCreated SSO flow, plus a bounded exception for one sole SSO
+  // tab. Multiple dormant background SSO tabs must become removable so the
+  // configured numeric limit recovers after focus returns to the destination.
+  const preservedSsoTabIds = explicitSsoTabIds.length > 0
+    ? explicitSsoTabIds
+    : ssoTabs.length === 1
+      ? [ssoTabs[0].id]
+      : [];
   return [...new Set([
     destination?.id,
-    ...preservedSsoTabs.map((tab) => tab.id),
+    ...preservedSsoTabIds,
   ].filter(Number.isInteger))];
 }
 
@@ -19080,9 +19108,12 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
         : foregroundTab?.id ?? (policyTab.active ? policyTab.id : null);
       const preserveTabIds = restrictionSsoTabLimitPreserveIds(
         tabs,
-        { preserveSsoTabIds: createdRestrictionSsoTabId !== null
-          ? [createdRestrictionSsoTabId]
-          : [] },
+        {
+          foregroundTabId: foregroundTab?.id,
+          preserveSsoTabIds: createdRestrictionSsoTabId !== null
+            ? [createdRestrictionSsoTabId]
+            : [],
+        },
       );
       const removalIds = RuntimeCore.planTabLimitRemovals({
         restrictions: classroomRestrictionsFromRuntime(),

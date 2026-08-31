@@ -3333,7 +3333,7 @@ async function main() {
     assert.equal(restrictionSsoRestartSeed.outcome, 'applied');
     assert.equal(restrictionSsoRestartSeed.bindingDigest.length, 64);
     assert.deepEqual(restrictionSsoRestartSeed.storedVisit?.visitedHosts, [
-      'district.clever.com',
+      'clever.com',
     ]);
     assert.equal(
       restrictionSsoRestartSeed.storedVisit?.scopeDigest,
@@ -3440,7 +3440,7 @@ async function main() {
       };
     }, restrictionSsoDestination);
     assert.equal(restrictionSsoWorkerRestore.passThroughActive, true);
-    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, ['district.clever.com']);
+    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, ['clever.com']);
     assert.equal(
       restrictionSsoWorkerRestore.storedVisit?.scopeDigest,
       restrictionSsoWorkerRestore.marker?.bindingDigest,

@@ -689,7 +689,49 @@ describe("ClassPilot classroom runtime core", () => {
     });
   });
 
-  it("conservatively preserves active SSO candidates when the foreground query is stale", () => {
+  it("does not treat a background window's active SSO tab as foreground", () => {
+    const deferred = state(17, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const backgroundSso = {
+      id: 2,
+      windowId: 20,
+      active: true,
+      url: "https://district.clever.com/login",
+    };
+
+    const protectedForeground = core.planClassroomTabReconciliation(deferred, [
+      { id: 1, windowId: 10, active: true, url: "chrome://settings/" },
+      backgroundSso,
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(protectedForeground.createUrl).toBe("https://ixl.com/math/5");
+    expect(protectedForeground.activateTabId).toBeNull();
+    expect(protectedForeground.removeTabIds).toEqual([]);
+
+    const noncompliantForeground = core.planClassroomTabReconciliation(deferred, [
+      { id: 3, windowId: 10, active: true, url: "https://outside.example/" },
+      backgroundSso,
+    ], {
+      foregroundTabId: 3,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(noncompliantForeground.updates).toEqual([{
+      tabId: 3,
+      url: "https://ixl.com/math/5",
+    }]);
+    expect(noncompliantForeground.activateTabId).toBe(3);
+    expect(noncompliantForeground.focusFallbackUrl).toBe("https://ixl.com/math/5");
+  });
+
+  it("bounds dormant SSO preservation without letting it suppress foreground focus", () => {
     const deferred = state(17, {
       deliveryContext: { lateSignInRestrictionSso: true },
       restrictions: {
@@ -708,13 +750,13 @@ describe("ClassPilot classroom runtime core", () => {
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
-    expect(ambiguous.removeTabIds).toEqual([]);
+    expect(ambiguous.removeTabIds).toEqual([2]);
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 1,
       maxTabs: 1,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
-    }).removeTabIds).toEqual([]);
+    }).removeTabIds).toEqual([2, 3]);
 
     const hintedPopup = core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 3,
@@ -723,7 +765,7 @@ describe("ClassPilot classroom runtime core", () => {
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
-    expect(hintedPopup.removeTabIds).toEqual([]);
+    expect(hintedPopup.removeTabIds).toEqual([2]);
     expect(hintedPopup.activateTabId).toBeNull();
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 3,
@@ -731,17 +773,17 @@ describe("ClassPilot classroom runtime core", () => {
       maxTabs: 1,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
-    }).removeTabIds).toEqual([]);
+    }).removeTabIds).toEqual([2]);
 
-    // A last-focused query can also lag on the older Clever window. That
-    // queried SSO tab is only one of the active candidates and must not cause
-    // the Google popup to be removed.
+    // A fresh last-focused Clever tab protects that one authentication flow,
+    // but the dormant Google tab in another window remains removable so the
+    // configured numeric limit can recover.
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 2,
       maxTabs: 2,
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
-    }).removeTabIds).toEqual([]);
+    }).removeTabIds).toEqual([3]);
 
     const staleUnrelatedForeground = core.planClassroomTabReconciliation(deferred, [
       ...tabs,
@@ -752,10 +794,10 @@ describe("ClassPilot classroom runtime core", () => {
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
-    expect(staleUnrelatedForeground.removeTabIds).toEqual([4]);
+    expect(staleUnrelatedForeground.removeTabIds).toEqual([4, 2]);
     expect(staleUnrelatedForeground.updates).toEqual([]);
-    expect(staleUnrelatedForeground.activateTabId).toBeNull();
-    expect(staleUnrelatedForeground.focusFallbackUrl).toBeNull();
+    expect(staleUnrelatedForeground.activateTabId).toBe(1);
+    expect(staleUnrelatedForeground.focusFallbackUrl).toBe("https://ixl.com/math/5");
 
     const deferredFlightPath = state(18, {
       deliveryContext: { lateSignInRestrictionSso: true },
@@ -777,10 +819,13 @@ describe("ClassPilot classroom runtime core", () => {
         visitedSsoHosts: ["accounts.google.com"],
       },
     );
-    expect(staleFlightPathForeground.removeTabIds).toEqual([4]);
-    expect(staleFlightPathForeground.updates).toEqual([]);
-    expect(staleFlightPathForeground.activateTabId).toBeNull();
-    expect(staleFlightPathForeground.focusFallbackUrl).toBeNull();
+    expect(staleFlightPathForeground.removeTabIds).toEqual([1, 2]);
+    expect(staleFlightPathForeground.updates).toEqual([{
+      tabId: 4,
+      url: "https://khanacademy.org",
+    }]);
+    expect(staleFlightPathForeground.activateTabId).toBe(4);
+    expect(staleFlightPathForeground.focusFallbackUrl).toBe("https://khanacademy.org");
 
     const coldWithInactiveStaleSso = core.planClassroomTabReconciliation(deferred, [
       { id: 1, windowId: 10, active: true, url: "https://outside.example/unrelated" },
