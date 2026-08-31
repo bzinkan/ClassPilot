@@ -689,6 +689,61 @@ describe("ClassPilot classroom runtime core", () => {
     });
   });
 
+  it("conservatively preserves active SSO candidates when the foreground query is stale", () => {
+    const deferred = state(17, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const tabs = [
+      { id: 1, windowId: 10, active: true, url: "https://app.ixl.com/math/5" },
+      { id: 2, windowId: 20, active: true, url: "https://district.clever.com/login" },
+      { id: 3, windowId: 30, active: true, url: "https://accounts.google.com/o/oauth2/auth" },
+    ];
+
+    const ambiguous = core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 1,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(ambiguous.removeTabIds).toEqual([]);
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 1,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([]);
+
+    const authoritativePopup = core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 3,
+      restrictionSsoForegroundAuthoritative: true,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(authoritativePopup.removeTabIds).toEqual([2]);
+    expect(authoritativePopup.activateTabId).toBeNull();
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 3,
+      restrictionSsoForegroundAuthoritative: true,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([2]);
+
+    // A last-focused query can also lag on the older Clever window. Without
+    // the event-time authority bit, that queried SSO tab is only one of the
+    // active candidates and must not cause the Google popup to be removed.
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 2,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([]);
+  });
+
   it("treats corrupted snapshots as invalid", () => {
     expect(() => core.normalizeClassroomState(null, NOW)).toThrow("must be an object");
     expect(() => core.normalizeClassroomState({

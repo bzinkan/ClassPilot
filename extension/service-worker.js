@@ -15358,6 +15358,15 @@ function classroomRestrictionsFromRuntime() {
   };
 }
 
+function classroomStateFromRuntimeForReconciliation() {
+  return {
+    ...(restrictionSsoPassThroughActive
+      ? { deliveryContext: { lateSignInRestrictionSso: true } }
+      : {}),
+    restrictions: classroomRestrictionsFromRuntime(),
+  };
+}
+
 function scheduleClassroomStateExpiry(state = currentClassroomState) {
   chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
   if (!state) return;
@@ -15551,6 +15560,9 @@ async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
       assertCurrent,
       options.authContext,
       options.tabMutationJournal,
+      {
+        foregroundRestrictionSsoTabId: options.foregroundRestrictionSsoTabId,
+      },
     );
     assertCurrent('classroom tab reconciliation');
     await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
@@ -15585,9 +15597,22 @@ async function reconcileExistingTabsForClassroomState(
   assertCurrent('classroom tab query');
   const foregroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
   assertCurrent('classroom foreground tab query');
-  const foregroundTab = foregroundTabs.find((tab) => Number.isInteger(tab?.id)) || null;
+  const queriedForegroundTab = foregroundTabs.find((tab) => Number.isInteger(tab?.id)) || null;
+  const hintedForegroundSso = restrictionSsoPassThroughForState(state)
+    && Number.isInteger(browserApi.foregroundRestrictionSsoTabId)
+    ? tabs.find((tab) => (
+        tab.id === browserApi.foregroundRestrictionSsoTabId
+        && tab.active === true
+        && RuntimeCore.isRestrictionSsoTab(tab)
+      )) || null
+    : null;
+  // An active exact-SSO onCreated observation is stronger than Chrome's
+  // asynchronously updated last-focused-window query. The hint is accepted
+  // only for a fresh tab in this inventory and only for a marked restriction.
+  const foregroundTab = hintedForegroundSso || queriedForegroundTab;
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
     foregroundTabId: foregroundTab?.id,
+    restrictionSsoForegroundAuthoritative: Boolean(hintedForegroundSso),
     maxTabs: currentMaxTabs,
     restrictionSsoPassThrough: restrictionSsoPassThroughForState(state),
     visitedSsoHosts: [...visitedRestrictionSsoHosts],
@@ -18909,13 +18934,32 @@ function restrictionDestinationTab(tab) {
   return allowedDomains.some((domain) => isOnSameDomain(url, domain));
 }
 
-function restrictionSsoTabLimitPreserveIds(tabs, foregroundTabId = null) {
+function restrictionSsoTabLimitPreserveIds(tabs, foregroundTabId = null, options = {}) {
   if (!restrictionSsoPassThroughActive) return [];
   const destination = tabs.find(restrictionDestinationTab) || null;
   const ssoTabs = tabs.filter(RuntimeCore.isRestrictionSsoTab);
-  const activeSso = ssoTabs.find((tab) => tab.id === foregroundTabId)
-    || (ssoTabs.length === 1 ? ssoTabs[0] : null);
-  return [...new Set([destination?.id, activeSso?.id].filter(Number.isInteger))];
+  const foregroundSso = ssoTabs.find((tab) => tab.id === foregroundTabId) || null;
+  const authoritativeForegroundSso = options.foregroundSsoAuthoritative === true
+    ? foregroundSso
+    : null;
+  const preservedSsoTabs = authoritativeForegroundSso
+    ? [authoritativeForegroundSso]
+    : ssoTabs.length === 1
+      ? ssoTabs
+      : ssoTabs.filter((tab) => tab.active === true);
+  return [...new Set([
+    destination?.id,
+    ...preservedSsoTabs.map((tab) => tab.id),
+  ].filter(Number.isInteger))];
+}
+
+function activeCreatedRestrictionSsoTabId(tab) {
+  return restrictionSsoPassThroughActive
+    && tab?.active === true
+    && RuntimeCore.isRestrictionSsoTab(tab)
+    && Number.isInteger(tab.id)
+    ? tab.id
+    : null;
 }
 
 async function createdTabPolicyDecision(policyTab, queryTabs) {
@@ -18986,11 +19030,18 @@ async function createdTabPolicyDecision(policyTab, queryTabs) {
           || foregroundTabs.find((candidate) => Number.isInteger(candidate?.id))
           || null
         : otherTabs.find((candidate) => candidate.active === true) || null;
-      const foregroundTabId = foregroundTab?.id
-        ?? (policyTab.active ? policyTab.id : null);
+      const createdRestrictionSsoTabId = activeCreatedRestrictionSsoTabId(policyTab);
+      // onCreated carries a stronger observation for the tab being evaluated
+      // than a separately scheduled last-focused-window query. Chrome can
+      // briefly return the previously focused window while an OAuth popup is
+      // becoming active; never sacrifice that exact new SSO tab to the limit.
+      const foregroundTabId = createdRestrictionSsoTabId !== null
+        ? createdRestrictionSsoTabId
+        : foregroundTab?.id ?? (policyTab.active ? policyTab.id : null);
       const preserveTabIds = restrictionSsoTabLimitPreserveIds(
         tabs,
         foregroundTabId,
+        { foregroundSsoAuthoritative: createdRestrictionSsoTabId !== null },
       );
       const removalIds = RuntimeCore.planTabLimitRemovals({
         restrictions: classroomRestrictionsFromRuntime(),
@@ -19084,11 +19135,10 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
           const assertCurrent = (reason = 'tab created limit reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: activeCreatedRestrictionSsoTabId(policyTab),
           });
           assertCurrent('tab created limit reconciliation');
           return null;
@@ -19108,11 +19158,10 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
           const assertCurrent = (reason = 'tab created revalidated reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: activeCreatedRestrictionSsoTabId(currentTab),
           });
           assertCurrent('tab created revalidated reconciliation');
           return null;
@@ -19132,11 +19181,10 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
           const assertCurrent = (reason = 'tab created final policy reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: activeCreatedRestrictionSsoTabId(removalTab),
           });
           assertCurrent('tab created final policy reconciliation');
           return null;

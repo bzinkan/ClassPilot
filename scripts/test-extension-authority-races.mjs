@@ -3324,6 +3324,8 @@ async function main() {
         allowedDomains: [...allowedDomains],
         attentionModeActive,
         teacherBlockedDomains: [...teacherBlockedDomains],
+        schoolMaxTabs,
+        teacherMaxTabs,
         currentMaxTabs,
       };
       advanceStudentAuthMutationGeneration();
@@ -3442,6 +3444,8 @@ async function main() {
       allowedDomains = [];
       attentionModeActive = false;
       teacherBlockedDomains = [];
+      schoolMaxTabs = null;
+      teacherMaxTabs = null;
       currentMaxTabs = null;
       const exactCreatedDecision = await createdTabPolicyDecision({
         id: 7701,
@@ -3491,6 +3495,95 @@ async function main() {
           return query?.lastFocusedWindow ? [foregroundSsoPopup] : multiWindowInventory;
         },
       );
+      const staleMultiWindowQueries = [];
+      const staleForegroundSsoTabLimitDecision = await createdTabPolicyDecision(
+        foregroundSsoPopup,
+        async (query) => {
+          staleMultiWindowQueries.push({ ...(query || {}) });
+          // Chrome may briefly report the formerly focused destination window
+          // even though onCreated already marked the Google popup active.
+          return query?.lastFocusedWindow ? [multiWindowInventory[0]] : multiWindowInventory;
+        },
+      );
+
+      // Ordinary WebSocket tab-limit enforcement has no event-time foreground
+      // hint. A stale last-focused query must therefore preserve every active
+      // exact-SSO candidate instead of guessing which authentication window
+      // is safe to close, even when that temporarily exceeds the limit.
+      const staleWebSocketRemoved = [];
+      const staleWebSocketResults = [];
+      for (const scenario of [
+        { maxTabsPerStudent: 1, staleForegroundTab: multiWindowInventory[0] },
+        { maxTabsPerStudent: 2, staleForegroundTab: multiWindowInventory[0] },
+        { maxTabsPerStudent: 2, staleForegroundTab: multiWindowInventory[1] },
+      ]) {
+        const result = await applyWebSocketTabLimitSetting({
+          type: 'auth-success',
+          studentId: firstContext.studentId,
+          studentSessionId: firstContext.studentSessionId,
+          settings: { maxTabsPerStudent: scenario.maxTabsPerStudent },
+        }, firstContext, {
+          queryTabs: async (query) => (
+            query?.lastFocusedWindow ? [scenario.staleForegroundTab] : multiWindowInventory
+          ),
+          getTab: async (tabId) => multiWindowInventory.find((tab) => tab.id === tabId),
+          removeTab: async (tabId) => { staleWebSocketRemoved.push(tabId); },
+          notify: async () => {},
+        });
+        staleWebSocketResults.push({
+          staleForegroundTabId: scenario.staleForegroundTab.id,
+          ...result,
+        });
+      }
+
+      // Exercise the complete onCreated -> generic reconciliation handoff.
+      // The onCreated active flag is authoritative for this exact SSO popup;
+      // the generic last-focused query intentionally remains stale.
+      const staleReconcileRemoved = [];
+      const staleReconcileHints = [];
+      const staleReconcileMarkedStates = [];
+      const staleReconcileRemovedByLimit = [];
+      for (const limit of [1, 2]) {
+        currentMaxTabs = limit;
+        const removedForLimit = [];
+        await handleCreatedTabForPolicy(foregroundSsoPopup, {
+          getTab: async () => ({ ...foregroundSsoPopup }),
+          queryTabs: async (query) => (
+            query?.lastFocusedWindow ? [multiWindowInventory[0]] : multiWindowInventory
+          ),
+          reconcileTabs: async (state, options) => {
+            staleReconcileHints.push(options.foregroundRestrictionSsoTabId);
+            staleReconcileMarkedStates.push(
+              state?.deliveryContext?.lateSignInRestrictionSso === true,
+            );
+            return reconcileExistingTabsForClassroomState(
+              state,
+              options.assertCurrent,
+              options.authContext,
+              null,
+              {
+                foregroundRestrictionSsoTabId: options.foregroundRestrictionSsoTabId,
+                queryTabs: async (query) => (
+                  query?.lastFocusedWindow ? [multiWindowInventory[0]] : multiWindowInventory
+                ),
+                updateTab: async (tabId, properties) => ({
+                  ...multiWindowInventory.find((tab) => tab.id === tabId),
+                  ...properties,
+                }),
+                getTab: async (tabId) => multiWindowInventory.find((tab) => tab.id === tabId),
+                removeTab: async (tabId) => {
+                  staleReconcileRemoved.push(tabId);
+                  removedForLimit.push(tabId);
+                },
+                createTab: async () => { throw new Error('unexpected SSO reconciliation tab creation'); },
+                focusWindow: async () => {},
+                refreshTabs: async () => {},
+              },
+            );
+          },
+        });
+        staleReconcileRemovedByLimit.push({ limit, removed: removedForLimit });
+      }
       currentMaxTabs = null;
       await ensureRestrictionSsoVisitStateForContext(firstContext);
       const accepted = await observeRestrictionSsoHostForAuth(
@@ -3561,6 +3654,8 @@ async function main() {
       allowedDomains = originalRestrictionRuntime.allowedDomains;
       attentionModeActive = originalRestrictionRuntime.attentionModeActive;
       teacherBlockedDomains = originalRestrictionRuntime.teacherBlockedDomains;
+      schoolMaxTabs = originalRestrictionRuntime.schoolMaxTabs;
+      teacherMaxTabs = originalRestrictionRuntime.teacherMaxTabs;
       currentMaxTabs = originalRestrictionRuntime.currentMaxTabs;
       negotiatedProtocolState = null;
       resetStudentControlRevisionAuthority();
@@ -3664,6 +3759,17 @@ async function main() {
         foregroundSsoReconcilesBackgroundExcess:
           foregroundSsoTabLimitDecision.reconcileExcessTabs,
         multiWindowQueries,
+        staleForegroundSsoPolicySource:
+          staleForegroundSsoTabLimitDecision.policySource,
+        staleForegroundSsoReconcilesBackgroundExcess:
+          staleForegroundSsoTabLimitDecision.reconcileExcessTabs,
+        staleMultiWindowQueries,
+        staleWebSocketRemoved,
+        staleWebSocketResults,
+        staleReconcileRemoved,
+        staleReconcileRemovedByLimit,
+        staleReconcileHints,
+        staleReconcileMarkedStates,
         accepted,
         rejectedLookalike,
         firstVisitedHosts: firstStored?.visitedHosts || [],
@@ -3708,6 +3814,28 @@ async function main() {
       {},
       { active: true, lastFocusedWindow: true },
     ]);
+    assert.equal(restrictionSsoFixture.staleForegroundSsoPolicySource, null);
+    assert.equal(
+      restrictionSsoFixture.staleForegroundSsoReconcilesBackgroundExcess,
+      true,
+    );
+    assert.deepEqual(restrictionSsoFixture.staleMultiWindowQueries, [
+      {},
+      { active: true, lastFocusedWindow: true },
+    ]);
+    assert.deepEqual(restrictionSsoFixture.staleWebSocketRemoved, []);
+    assert.deepEqual(restrictionSsoFixture.staleWebSocketResults, [
+      { staleForegroundTabId: 7801, applied: true, limit: 1, closed: 0 },
+      { staleForegroundTabId: 7801, applied: true, limit: 2, closed: 0 },
+      { staleForegroundTabId: 7802, applied: true, limit: 2, closed: 0 },
+    ]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileRemoved, [7802, 7802]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileRemovedByLimit, [
+      { limit: 1, removed: [7802] },
+      { limit: 2, removed: [7802] },
+    ]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileHints, [7803, 7803]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileMarkedStates, [true, true]);
     assert.equal(restrictionSsoFixture.accepted, true);
     assert.equal(restrictionSsoFixture.rejectedLookalike, false);
     assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['district.clever.com']);

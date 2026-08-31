@@ -827,6 +827,19 @@
       && state?.deliveryContext?.lateSignInRestrictionSso === true;
     const ssoTabs = restrictionSsoPassThrough ? tabs.filter(isRestrictionSsoTab) : [];
     const foregroundSso = ssoTabs.find((tab) => tab.id === foregroundTabId) || null;
+    // `active` is window-local, so a stale last-focused-window query can leave
+    // more than one plausible active authentication tab. If the caller has an
+    // authoritative foreground SSO observation, retain that exact tab. When
+    // it does not, fail safely by retaining every active SSO candidate (or the
+    // sole SSO tab) until a later reconciliation can identify the foreground.
+    const authoritativeForegroundSso = options.restrictionSsoForegroundAuthoritative === true
+      ? foregroundSso
+      : null;
+    const preservedSsoTabIds = authoritativeForegroundSso
+      ? [authoritativeForegroundSso.id]
+      : ssoTabs.length === 1
+        ? [ssoTabs[0].id]
+        : ssoTabs.filter((tab) => tab.active === true).map((tab) => tab.id);
     const visitedSsoHosts = normalizeDomainList(
       Array.isArray(options.visitedSsoHosts) ? options.visitedSsoHosts : [],
       'visited restriction SSO hosts'
@@ -882,7 +895,7 @@
         tabs,
         { ...options, foregroundTabId },
         preservedDestinationId ?? foregroundSso.id,
-        [foregroundSso.id, preservedDestinationId],
+        [...preservedSsoTabIds, preservedDestinationId],
       );
     }
 
@@ -938,7 +951,7 @@
       return appendTabLimitRemovals(plan, state, tabs, {
         ...options,
         foregroundTabId,
-      }, preservedTabId, ssoTabs.length === 1 ? [ssoTabs[0].id] : []);
+      }, preservedTabId, preservedSsoTabIds);
     }
 
     if (restrictions.flightPath?.active) {
@@ -996,7 +1009,7 @@
       return appendTabLimitRemovals(plan, state, tabs, {
         ...options,
         foregroundTabId,
-      }, preservedTabId, ssoTabs.length === 1 ? [ssoTabs[0].id] : []);
+      }, preservedTabId, preservedSsoTabIds);
     }
     return appendTabLimitRemovals(plan, state, tabs, {
       ...options,
