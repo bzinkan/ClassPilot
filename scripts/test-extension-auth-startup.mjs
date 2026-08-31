@@ -3669,50 +3669,171 @@ async function main() {
     await requestLiveRefresh(worker);
     const genuineCrashFrame = await waitForAuthFramePhase(corruptPage, 'ready', 7_000);
     await genuineCrashFrame.waitForSelector('#classpilot-auth-email-form');
-    const genuineCrashFenceInstalled = await worker.evaluate(() => {
+    const genuineCrashFenceId = `genuine-crash-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    worker = await waitForLiveWorker(context);
+    const genuineCrashFenceInstalled = await worker.evaluate((fenceId) => {
+      if (globalThis.__classpilotGenuineCrashFence) {
+        return {
+          installed: false,
+          existingFenceId: globalThis.__classpilotGenuineCrashFence.id || null,
+        };
+      }
       const originalApply = applyClassroomStateFromAuthResponse;
       let releaseFence;
       const fence = new Promise((resolveFence) => { releaseFence = resolveFence; });
-      globalThis.__classpilotGenuineCrashFence = { entered: false, release: releaseFence };
+      globalThis.__classpilotGenuineCrashFence = {
+        id: fenceId,
+        entered: false,
+        enteredAt: null,
+        applyReason: null,
+        release: releaseFence,
+      };
       applyClassroomStateFromAuthResponse = async (...args) => {
         globalThis.__classpilotGenuineCrashFence.entered = true;
+        globalThis.__classpilotGenuineCrashFence.enteredAt = Date.now();
+        globalThis.__classpilotGenuineCrashFence.applyReason = args[1] || null;
         await fence;
         applyClassroomStateFromAuthResponse = originalApply;
         return originalApply(...args);
       };
-      return true;
+      return { installed: true, fenceId };
+    }, genuineCrashFenceId);
+    assert.deepEqual(genuineCrashFenceInstalled, {
+      installed: true,
+      fenceId: genuineCrashFenceId,
     });
-    assert.equal(genuineCrashFenceInstalled, true);
-    await genuineCrashFrame.locator('#classpilot-auth-email').fill('jordan@example.edu');
-    await genuineCrashFrame.locator('#classpilot-auth-student-id').fill('S-1001');
-    await genuineCrashFrame.locator('#classpilot-auth-email-submit').click();
-    let genuineCrashState = null;
-    const genuineCrashDeadline = Date.now() + 7_000;
-    while (Date.now() < genuineCrashDeadline) {
-      genuineCrashState = await worker.evaluate(async () => {
-        const persisted = await getStoredAuthState([
-          'deviceId',
-          'studentToken',
-          'activeStudentId',
-          'activeStudentSessionId',
-          'studentAuthCommitPendingV1',
-        ]);
-        return {
-          entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
-          marker: persisted.studentAuthCommitPendingV1 === true,
-          exactBinding: Boolean(
-            persisted.deviceId && persisted.studentToken
-            && persisted.activeStudentId && persisted.activeStudentSessionId
-          ),
-          revision: getAuthGateState().revision,
-        };
-      });
-      if (genuineCrashState.entered && genuineCrashState.marker && genuineCrashState.exactBinding) break;
+    const genuineCrashFenceVerified = await worker.evaluate((fenceId) => ({
+      matches: globalThis.__classpilotGenuineCrashFence?.id === fenceId,
+      entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
+    }), genuineCrashFenceId);
+    assert.deepEqual(genuineCrashFenceVerified, { matches: true, entered: false });
+
+    const genuineCrashRequestBaseline = fixture.state.studentLoginRequests.length;
+    // The frame can legitimately repaint when a late auth-state pulse arrives.
+    // Set both fields and submit in one frame task so no repaint can clear one
+    // credential between separate Playwright fill/click operations.
+    const genuineCrashSubmission = await genuineCrashFrame.evaluate((credentials) => {
+      const email = document.getElementById('classpilot-auth-email');
+      const studentId = document.getElementById('classpilot-auth-student-id');
+      const form = document.getElementById('classpilot-auth-email-form');
+      const submit = document.getElementById('classpilot-auth-email-submit');
+      if (!email || !studentId || !form || !submit) {
+        return { submitted: false, reason: 'email form was replaced before atomic submit' };
+      }
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      if (typeof valueSetter !== 'function') {
+        return { submitted: false, reason: 'native input setter unavailable' };
+      }
+      for (const [input, value] of [
+        [email, credentials.studentEmail],
+        [studentId, credentials.studentIdNumber],
+      ]) {
+        valueSetter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      form.requestSubmit(submit);
+      return {
+        submitted: true,
+        phase: document.getElementById('classpilot-auth-gate')
+          ?.dataset.classpilotAuthPhase || null,
+      };
+    }, {
+      studentEmail: 'jordan@example.edu',
+      studentIdNumber: 'S-1001',
+    });
+    assert.equal(
+      genuineCrashSubmission.submitted,
+      true,
+      `could not atomically submit the genuine crash login: ${JSON.stringify(genuineCrashSubmission)}`,
+    );
+
+    const genuineCrashRequestDeadline = Date.now() + 15_000;
+    while (
+      fixture.state.studentLoginRequests.length === genuineCrashRequestBaseline
+      && Date.now() < genuineCrashRequestDeadline
+    ) {
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
     }
-    assert.equal(genuineCrashState?.entered, true);
-    assert.equal(genuineCrashState?.marker, true);
-    assert.equal(genuineCrashState?.exactBinding, true);
+    const genuineCrashRequestDelta =
+      fixture.state.studentLoginRequests.length - genuineCrashRequestBaseline;
+    if (genuineCrashRequestDelta !== 1) {
+      const requestDiagnostic = {
+        requestDelta: genuineCrashRequestDelta,
+        submission: genuineCrashSubmission,
+        framePhase: await genuineCrashFrame.locator('#classpilot-auth-gate')
+          .getAttribute('data-classpilot-auth-phase').catch(() => null),
+        frameError: await genuineCrashFrame.locator('#classpilot-auth-error')
+          .textContent().catch(() => null),
+        fence: await worker.evaluate((fenceId) => ({
+          present: Boolean(globalThis.__classpilotGenuineCrashFence),
+          matches: globalThis.__classpilotGenuineCrashFence?.id === fenceId,
+          entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
+          phase: getAuthGateState().phase,
+        }), genuineCrashFenceId).catch((error) => ({
+          evaluationError: error?.message || String(error),
+        })),
+      };
+      throw new Error(
+        `genuine interrupted-commit login request barrier failed: ${JSON.stringify(requestDiagnostic)}`,
+      );
+    }
+
+    let genuineCrashState = null;
+    let genuineCrashEvaluationError = null;
+    const genuineCrashDeadline = Date.now() + 15_000;
+    while (Date.now() < genuineCrashDeadline) {
+      try {
+        genuineCrashState = await worker.evaluate(async (fenceId) => {
+          const persisted = await getStoredAuthState([
+            'deviceId',
+            'studentToken',
+            'activeStudentId',
+            'activeStudentSessionId',
+            'studentAuthCommitPendingV1',
+          ]);
+          const fence = globalThis.__classpilotGenuineCrashFence;
+          return {
+            fenceMatches: fence?.id === fenceId,
+            entered: fence?.entered === true,
+            enteredAt: fence?.enteredAt || null,
+            applyReason: fence?.applyReason || null,
+            marker: persisted.studentAuthCommitPendingV1 === true,
+            exactBinding: Boolean(
+              persisted.deviceId && persisted.studentToken
+              && persisted.activeStudentId && persisted.activeStudentSessionId
+            ),
+            revision: getAuthGateState().revision,
+            phase: getAuthGateState().phase,
+          };
+        }, genuineCrashFenceId);
+      } catch (error) {
+        genuineCrashEvaluationError = error?.message || String(error);
+        break;
+      }
+      if (
+        genuineCrashState.fenceMatches
+        && genuineCrashState.entered
+        && genuineCrashState.marker
+        && genuineCrashState.exactBinding
+      ) break;
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+    }
+    assert.ok(
+      genuineCrashState?.fenceMatches
+      && genuineCrashState?.entered
+      && genuineCrashState?.marker
+      && genuineCrashState?.exactBinding,
+      `genuine interrupted-commit fence did not become authoritative: ${JSON.stringify({
+        requestDelta: genuineCrashRequestDelta,
+        submission: genuineCrashSubmission,
+        evaluationError: genuineCrashEvaluationError,
+        state: genuineCrashState,
+      })}`,
+    );
 
     await corruptPage.goto('chrome://version');
     const genuineCrashStop = await stopExtensionWorker(context, corruptPage, extensionId);
