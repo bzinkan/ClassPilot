@@ -3610,6 +3610,12 @@ function managedAuthGatePolicyDescriptor(managedConfig = {}) {
     || normalizeManagedString(managedConfig.classpilotSchoolSlug);
   const enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey)
     || normalizeManagedString(managedConfig.classpilotEnrollmentKey);
+  const managedFastAuthGateEnabled = Object.prototype.hasOwnProperty.call(
+    managedConfig,
+    'fastAuthGateEnabled',
+  )
+    ? extractManagedValue(managedConfig.fastAuthGateEnabled) !== false
+    : true;
   return {
     schemaVersion: 1,
     serverOrigin,
@@ -3620,6 +3626,7 @@ function managedAuthGatePolicyDescriptor(managedConfig = {}) {
     schoolSlug,
     schoolSlugManaged: Boolean(schoolSlug),
     enrollmentKeyManaged: Boolean(enrollmentKey),
+    fastAuthGateEnabled: managedFastAuthGateEnabled,
     hasManagedSetup: Boolean(
       (schoolId || schoolSlug)
       && enrollmentKey
@@ -3654,7 +3661,25 @@ function persistedManagedAuthGateDescriptor(descriptor) {
     schoolSlug: descriptor.schoolSlug,
     schoolSlugManaged: descriptor.schoolSlugManaged,
     enrollmentKeyManaged: descriptor.enrollmentKeyManaged,
+    fastAuthGateEnabled: descriptor.fastAuthGateEnabled,
   };
+}
+
+function managedAuthGatePolicyDescriptorsMatch(prior, current) {
+  if (!prior || prior.schemaVersion !== 1 || !current || current.schemaVersion !== 1) {
+    return false;
+  }
+  return [
+    'serverOrigin',
+    'serverManaged',
+    'serverValid',
+    'schoolId',
+    'schoolIdManaged',
+    'schoolSlug',
+    'schoolSlugManaged',
+    'enrollmentKeyManaged',
+    'fastAuthGateEnabled',
+  ].every((key) => prior[key] === current[key]);
 }
 
 function canonicalSchoolIdForUnchangedSlugPolicy(
@@ -3706,6 +3731,10 @@ function applyAuthoritativeManagedAuthGateSnapshot(
   const priorBindingKey = authGateConfigBindingKey();
   applyManagedSchoolConfig(managedConfig);
   if (policyIsAuthoritative) {
+    // A complete authoritative snapshot owns the kill-switch too. Removing
+    // the managed key restores its documented default instead of inheriting
+    // the last in-memory value from a prior policy.
+    fastAuthGateEnabled = descriptor.fastAuthGateEnabled;
     CONFIG.schoolId = descriptor.schoolId || preservedCanonicalSchoolId;
     CONFIG.schoolSlug = descriptor.schoolSlug;
     CONFIG.enrollmentKey = descriptor.enrollmentKey;
@@ -9651,6 +9680,7 @@ async function runManagedAuthGatePolicyRevalidation() {
       { allowUnmanagedFallback: false },
     );
     const descriptor = managedAuthGatePolicyDescriptor(managedConfig);
+    const nextPersistedDescriptor = persistedManagedAuthGateDescriptor(descriptor);
     const preservedCanonicalSchoolId = canonicalSchoolIdForUnchangedSlugPolicy(
       descriptor,
       stored[MANAGED_AUTH_GATE_BINDING_KEY],
@@ -9665,6 +9695,11 @@ async function runManagedAuthGatePolicyRevalidation() {
     });
     const authorityChanged = priorBindingKey !== nextBindingKey
       || priorEnrollmentKey !== descriptor.enrollmentKey;
+    const managedPolicyChanged = authorityChanged
+      || !managedAuthGatePolicyDescriptorsMatch(
+        stored[MANAGED_AUTH_GATE_BINDING_KEY],
+        nextPersistedDescriptor,
+      );
     const manualTimestampInvalid = isManualIdentitySource(
       stored.identitySource || CONFIG.identitySource,
     ) && !isManualLoginTimestampFresh(
@@ -9707,10 +9742,12 @@ async function runManagedAuthGatePolicyRevalidation() {
       );
     }
 
-    if (authorityChanged) {
+    if (managedPolicyChanged) {
       // A signed-out profile can still contain a crash-surviving SSO visit
-      // ledger. Managed authority changes clear it even when there is no
-      // bearer material that would otherwise enter clearStudentAuth().
+      // ledger. Every effective managed-policy transition clears it even when
+      // there is no bearer material that would otherwise enter
+      // clearStudentAuth(). This includes a fast-auth kill-switch change that
+      // leaves the school/server authority tuple unchanged.
       await clearRestrictionSsoVisitState();
       assertManagedPolicyRevalidationCurrent(
         policyGeneration,
@@ -10466,6 +10503,12 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       });
       authorityAuthClearPromise.catch(() => {});
     }
+    // The visit ledger is scoped to both the immutable student binding and
+    // the managed policy under which that binding was used. Serialize a clear
+    // for every managed-policy storage transition, including a
+    // fastAuthGateEnabled-only change that deliberately keeps bearer auth.
+    const restrictionSsoPolicyClearPromise = clearRestrictionSsoVisitState();
+    restrictionSsoPolicyClearPromise.catch(() => {});
 
     // A changed server value is untrusted until the complete managed snapshot
     // proves it is a valid URL. Never retain the previous managed endpoint
@@ -10518,6 +10561,7 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       readManagedConfig({ failClosed: true }),
       storedPolicyAtChange,
       authorityAuthClearPromise,
+      restrictionSsoPolicyClearPromise,
     ]).then(async ([currentManagedConfig, persisted]) => {
       if (policyGeneration !== managedAuthGatePolicyGeneration) {
         throw authMutationSuperseded('managed policy reread');
@@ -12839,6 +12883,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     || isExplicitUnmanagedDevelopmentServer(fastResolvedServerUrl))
     && !authStored[MANAGED_AUTH_GATE_BINDING_KEY];
   let managedAuthBindingChanged = false;
+  let managedPolicyChanged = false;
   let managedSetupUnavailable = false;
   let workerWakeRestrictionSsoCleanup = Promise.resolve();
   const applyWorkerWakeManagedPolicy = ({ config, error }, notifyAfter = false) => {
@@ -12849,6 +12894,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       { allowUnmanagedFallback, managedReadFailed: Boolean(error) },
     );
     if (error) {
+      managedPolicyChanged = true;
       managedSetupUnavailable = true;
       managedAuthGateSetupUnavailable = true;
       authoritativeManagedSchoolPolicyScope = null;
@@ -12876,8 +12922,23 @@ const authStateRestorePromise = new Promise((resolve) => {
       );
       managedSetupUnavailable = appliedPolicy.policyIsAuthoritative
         && !appliedPolicy.descriptor.hasManagedSetup;
+      managedPolicyChanged = appliedPolicy.policyIsAuthoritative
+        && !managedAuthGatePolicyDescriptorsMatch(
+          authStored[MANAGED_AUTH_GATE_BINDING_KEY],
+          appliedPolicy.persistedDescriptor,
+        );
+      if (
+        appliedPolicy.policyIsAuthoritative
+        && normalizeManagedString(authStored.config?.enrollmentKey)
+          !== appliedPolicy.descriptor.enrollmentKey
+      ) {
+        // The persisted descriptor records only whether the secret is
+        // managed. Compare its already-persisted config value in memory so an
+        // enrollment-key rotation while signed out also retires the ledger.
+        managedPolicyChanged = true;
+      }
     }
-    if (managedAuthBindingChanged) {
+    if (managedPolicyChanged) {
       workerWakeRestrictionSsoCleanup = workerWakeRestrictionSsoCleanup
         .then(() => clearRestrictionSsoVisitState());
     }
@@ -18912,16 +18973,30 @@ async function createdTabPolicyDecision(policyTab, queryTabs) {
           : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
             candidate.pendingUrl || candidate.url || ''
           ));
-      const foregroundTab = otherTabs.find((candidate) => candidate.active === true) || null;
+      // `active` is window-local. With multiple windows, selecting the first
+      // active inventory entry can misidentify a background window and allow
+      // tab-limit planning to remove the foreground authentication popup.
+      // Query Chrome's last-focused window whenever SSO pass-through is live;
+      // keep the historical single-query path for ordinary restrictions.
+      const foregroundTabs = policy.restrictionSsoPassThroughActive
+        ? await queryTabs({ active: true, lastFocusedWindow: true })
+        : [];
+      const foregroundTab = policy.restrictionSsoPassThroughActive
+        ? foregroundTabs.find((candidate) => candidate.active === true)
+          || foregroundTabs.find((candidate) => Number.isInteger(candidate?.id))
+          || null
+        : otherTabs.find((candidate) => candidate.active === true) || null;
+      const foregroundTabId = foregroundTab?.id
+        ?? (policyTab.active ? policyTab.id : null);
       const preserveTabIds = restrictionSsoTabLimitPreserveIds(
         tabs,
-        foregroundTab?.id ?? (policyTab.active ? policyTab.id : null),
+        foregroundTabId,
       );
       const removalIds = RuntimeCore.planTabLimitRemovals({
         restrictions: classroomRestrictionsFromRuntime(),
       }, tabs, {
         maxTabs: inventoryMaxTabs,
-        foregroundTabId: foregroundTab?.id,
+        foregroundTabId,
         preserveTabId: existingCompliant?.id ?? policyTab.id,
         preserveTabIds,
         preferRemoveTabId: policyTab.id,

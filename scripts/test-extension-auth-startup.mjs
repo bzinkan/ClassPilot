@@ -3248,6 +3248,239 @@ async function main() {
       'authenticated cold navigation did not complete within the startup SLA'
     );
 
+    // Persist a visited authentication host under the exact authenticated
+    // binding, stop the MV3 worker, and prove the cold successor restores the
+    // ledger instead of replaying the cold Clever landing. The same restored
+    // runtime must keep both DNR and imperative navigation handling aligned.
+    const restrictionSsoDestination = `${fixture.origin}/restriction-sso-destination`;
+    const restrictionSsoRestartSeed = await worker.evaluate(async (destinationUrl) => {
+      const authContext = captureAuthenticatedContext('restriction SSO restart seed');
+      const controlRevision = Math.max(
+        Number(currentStudentControlRevision() || 0) + 1,
+        91,
+      );
+      observeStudentControlRevision(
+        controlRevision,
+        authContext,
+        'restriction SSO restart seed',
+      );
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'lateSignInRestrictionSsoV1',
+        ],
+      }, authContext);
+      const state = {
+        schemaVersion: 1,
+        revision: controlRevision,
+        receivedAt: Date.now(),
+        hardExpiresAt: Date.now() + 5 * 60_000,
+        deliveryContext: { lateSignInRestrictionSso: true },
+        restrictions: {
+          screenLock: {
+            active: true,
+            url: destinationUrl,
+            domain: new URL(destinationUrl).hostname,
+          },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: 3,
+          temporaryAllows: [],
+        },
+      };
+      const exactBinding = {
+        bindingVersion: 2,
+        schoolId: authContext.schoolId,
+        deviceId: authContext.deviceId,
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+        controlRevision,
+      };
+      const bindingDigest = await validateRestrictionSsoDeliveryContext(
+        state,
+        { exactBinding },
+        authContext,
+      );
+      const priorState = currentClassroomState;
+      currentClassroomState = state;
+      try {
+        await observeRestrictionSsoHostForAuth(
+          'https://district.clever.com/oauth/start',
+          authContext,
+        );
+      } finally {
+        currentClassroomState = priorState;
+      }
+      const result = await applyClassroomState(state, {
+        force: true,
+        reason: 'restriction_sso_restart_seed',
+        authContext,
+        authorityEnvelope: { exactBinding },
+      });
+      const stored = await rawLocalKv.get([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+        CLASSROOM_STATE_STORAGE_KEY,
+      ]);
+      return {
+        outcome: result.outcome,
+        bindingDigest,
+        storedVisit: stored[RESTRICTION_SSO_VISIT_STORAGE_KEY],
+        storedMarker: stored[CLASSROOM_STATE_STORAGE_KEY]?.deliveryContext,
+      };
+    }, restrictionSsoDestination);
+    assert.equal(restrictionSsoRestartSeed.outcome, 'applied');
+    assert.equal(restrictionSsoRestartSeed.bindingDigest.length, 64);
+    assert.deepEqual(restrictionSsoRestartSeed.storedVisit?.visitedHosts, [
+      'district.clever.com',
+    ]);
+    assert.equal(
+      restrictionSsoRestartSeed.storedVisit?.scopeDigest,
+      restrictionSsoRestartSeed.bindingDigest,
+    );
+    assert.deepEqual(restrictionSsoRestartSeed.storedMarker, {
+      lateSignInRestrictionSso: true,
+      bindingDigest: restrictionSsoRestartSeed.bindingDigest,
+    });
+
+    await authenticatedPage.goto('chrome://version');
+    const restrictionSsoWorkerStop = await stopExtensionWorker(
+      context,
+      authenticatedPage,
+      extensionId,
+    );
+    assert.equal(
+      restrictionSsoWorkerStop.stopped,
+      true,
+      'could not stop the MV3 worker before restriction SSO restore',
+    );
+    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    const restrictionSsoWorkerRestore = await worker.evaluate(async (destinationUrl) => {
+      await authStateRestorePromise;
+      await classroomStateRestorePromise;
+      await dynamicRuleCompositionTail;
+      const stored = await rawLocalKv.get([RESTRICTION_SSO_VISIT_STORAGE_KEY]);
+      const tabs = await chrome.tabs.query({});
+      const rules = await chrome.declarativeNetRequest.getDynamicRules();
+      const restrictionSsoRules = rules
+        .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'))
+        .map((rule) => ({
+          action: rule.action?.type || null,
+          priority: rule.priority,
+          domains: rule.condition?.requestDomains || [],
+        }))
+        .sort((left, right) => left.domains.join(',').localeCompare(right.domains.join(',')));
+      const warmPlan = RuntimeCore.planClassroomTabReconciliation(
+        currentClassroomState,
+        [{ id: 99101, active: true, url: 'https://off-task.example/' }],
+        {
+          foregroundTabId: 99101,
+          maxTabs: currentMaxTabs,
+          restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+          visitedSsoHosts: [...visitedRestrictionSsoHosts],
+        },
+      );
+
+      const originalRecordNavigationBlockedForAuth = recordNavigationBlockedForAuth;
+      const originalNotifyNavigationBlockedForAuth = notifyNavigationBlockedForAuth;
+      const originalGoBackOrBlankForAuth = goBackOrBlankForAuth;
+      const originalUpdateTabForAuth = updateTabForAuth;
+      let navigationEffects = [];
+      recordNavigationBlockedForAuth = async (_context, _url, policySource) => {
+        navigationEffects.push(`record:${policySource}`);
+      };
+      notifyNavigationBlockedForAuth = async (_context, _notification, policySource) => {
+        navigationEffects.push(`notify:${policySource}`);
+      };
+      goBackOrBlankForAuth = async () => {
+        navigationEffects.push('back');
+      };
+      updateTabForAuth = async (_tabId, update) => {
+        navigationEffects.push(`update:${update?.url || ''}`);
+      };
+      let exactNavigationEffects;
+      let lookalikeNavigationEffects;
+      try {
+        await handleBeforeNavigateForPolicy({
+          frameId: 0,
+          tabId: 99102,
+          url: 'https://accounts.google.com/o/oauth2/v2/auth',
+        });
+        exactNavigationEffects = [...navigationEffects];
+        navigationEffects = [];
+        await handleBeforeNavigateForPolicy({
+          frameId: 0,
+          tabId: 99103,
+          url: 'https://accounts.google.com.evil.example/oauth',
+        });
+        lookalikeNavigationEffects = [...navigationEffects];
+      } finally {
+        recordNavigationBlockedForAuth = originalRecordNavigationBlockedForAuth;
+        notifyNavigationBlockedForAuth = originalNotifyNavigationBlockedForAuth;
+        goBackOrBlankForAuth = originalGoBackOrBlankForAuth;
+        updateTabForAuth = originalUpdateTabForAuth;
+      }
+
+      return {
+        passThroughActive: restrictionSsoPassThroughActive,
+        marker: currentClassroomState?.deliveryContext || null,
+        visitedHosts: [...visitedRestrictionSsoHosts].sort(),
+        storedVisit: stored[RESTRICTION_SSO_VISIT_STORAGE_KEY],
+        destinationTabs: tabs.filter((tab) => tab.url === destinationUrl).length,
+        cleverTabs: tabs.filter((tab) => RuntimeCore.isRestrictionSsoTab(tab)
+          && RuntimeCore.normalizeDomain(tab.url) === 'clever.com').length,
+        restrictionSsoRules,
+        warmPlan,
+        exactNavigationEffects,
+        lookalikeNavigationEffects,
+      };
+    }, restrictionSsoDestination);
+    assert.equal(restrictionSsoWorkerRestore.passThroughActive, true);
+    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, ['district.clever.com']);
+    assert.equal(
+      restrictionSsoWorkerRestore.storedVisit?.scopeDigest,
+      restrictionSsoWorkerRestore.marker?.bindingDigest,
+    );
+    assert.ok(
+      restrictionSsoWorkerRestore.destinationTabs >= 1,
+      'warm worker restore did not land directly on the restriction destination',
+    );
+    assert.equal(
+      restrictionSsoWorkerRestore.cleverTabs,
+      0,
+      'warm worker restore replayed the cold Clever landing',
+    );
+    assert.deepEqual(restrictionSsoWorkerRestore.restrictionSsoRules, [
+      { action: 'allow', priority: 600, domains: ['accounts.google.com'] },
+      { action: 'allow', priority: 600, domains: ['clever.com'] },
+    ]);
+    assert.deepEqual(restrictionSsoWorkerRestore.warmPlan.updates, [{
+      tabId: 99101,
+      url: restrictionSsoDestination,
+    }]);
+    assert.deepEqual(restrictionSsoWorkerRestore.exactNavigationEffects, []);
+    assert.ok(
+      restrictionSsoWorkerRestore.lookalikeNavigationEffects.includes('record:screen_lock'),
+      'lookalike navigation bypassed the restored Waypoint policy',
+    );
+    assert.ok(
+      restrictionSsoWorkerRestore.lookalikeNavigationEffects.some((effect) => (
+        effect.startsWith('update:')
+      )),
+      'lookalike navigation was not redirected to the restored destination',
+    );
+    await authenticatedPage.goto(`${fixture.origin}/authenticated-after-sso-worker-restart`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await authenticatedPage.waitForSelector(GATE_SELECTOR, {
+      state: 'detached',
+      timeout: 12_000,
+    });
+
     const authenticatedTabId = await tabIdFor(worker, authenticatedPage);
     const staleRollbackDelivery = await worker.evaluate(async ({ tabId, revision }) => {
       try {
@@ -3714,7 +3947,11 @@ async function main() {
     worker = await waitForLiveWorker(context);
     await corruptPage.waitForSelector(GATE_SELECTOR, {
       state: 'detached',
-      timeout: LOADING_LIMIT_MS,
+      // This is a full authenticated worker restart after a crash-boundary
+      // fixture, not the 2s document-start paint SLA measured above. Give the
+      // service-worker restore and content-script delivery their own bounded
+      // integration timeout so suite load cannot create rerun-only success.
+      timeout: 12_000,
     });
     assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 0, 'managed onChanged crash auth did not restore');
 

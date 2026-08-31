@@ -3461,6 +3461,37 @@ async function main() {
           url: 'https://accounts.google.com/o/oauth2/auth',
         },
       );
+      currentMaxTabs = 2;
+      const foregroundSsoPopup = {
+        id: 7803,
+        windowId: 78,
+        active: true,
+        url: 'https://accounts.google.com/o/oauth2/v2/auth',
+      };
+      const multiWindowInventory = [
+        {
+          id: 7801,
+          windowId: 76,
+          active: true,
+          url: 'https://ixl.com/math',
+        },
+        {
+          id: 7802,
+          windowId: 77,
+          active: true,
+          url: 'https://district.clever.com/login',
+        },
+        foregroundSsoPopup,
+      ];
+      const multiWindowQueries = [];
+      const foregroundSsoTabLimitDecision = await createdTabPolicyDecision(
+        foregroundSsoPopup,
+        async (query) => {
+          multiWindowQueries.push({ ...(query || {}) });
+          return query?.lastFocusedWindow ? [foregroundSsoPopup] : multiWindowInventory;
+        },
+      );
+      currentMaxTabs = null;
       await ensureRestrictionSsoVisitStateForContext(firstContext);
       const accepted = await observeRestrictionSsoHostForAuth(
         'https://district.clever.com/oauth/start',
@@ -3556,6 +3587,61 @@ async function main() {
         RESTRICTION_SSO_VISIT_STORAGE_KEY,
         'config',
       ]);
+      const originalManagedRead = readManagedConfig;
+      const originalManagedNotify = notifyAuthGateStateToTabs;
+      const originalLegacyRefresh = refreshSharedSignInLoginConfigLegacy;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const priorManagedPolicyStorage = await rawLocalKv.get([
+        MANAGED_AUTH_GATE_BINDING_KEY,
+      ]);
+      await rawLocalKv.set({
+        [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+          schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+          scopeDigest: 'c'.repeat(64),
+          visitedHosts: ['accounts.google.com'],
+        },
+      });
+      let fastPolicyTransition;
+      try {
+        readManagedConfig = async () => ({
+          fastAuthGateEnabled: false,
+          serverUrl: CONFIG.serverUrl,
+          schoolId: CONFIG.schoolId,
+          schoolSlug: CONFIG.schoolSlug,
+          enrollmentKey: CONFIG.enrollmentKey,
+        });
+        notifyAuthGateStateToTabs = async () => {};
+        refreshSharedSignInLoginConfigLegacy = async () => ({ success: true });
+        const transition = handleManagedAuthGateStorageChange({
+          fastAuthGateEnabled: {
+            oldValue: true,
+            newValue: false,
+          },
+        }, 'managed');
+        await transition.policyRestorePromise;
+        const afterTransition = await rawLocalKv.get([
+          RESTRICTION_SSO_VISIT_STORAGE_KEY,
+        ]);
+        fastPolicyTransition = {
+          visitStorageCleared:
+            afterTransition[RESTRICTION_SSO_VISIT_STORAGE_KEY] === undefined,
+          authRemainedSignedOut: !hasStudentAuth(),
+          fastAuthGateEnabled,
+        };
+      } finally {
+        readManagedConfig = originalManagedRead;
+        notifyAuthGateStateToTabs = originalManagedNotify;
+        refreshSharedSignInLoginConfigLegacy = originalLegacyRefresh;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        if (priorManagedPolicyStorage[MANAGED_AUTH_GATE_BINDING_KEY]) {
+          await rawLocalKv.set({
+            [MANAGED_AUTH_GATE_BINDING_KEY]:
+              priorManagedPolicyStorage[MANAGED_AUTH_GATE_BINDING_KEY],
+          });
+        } else {
+          await rawLocalKv.remove(MANAGED_AUTH_GATE_BINDING_KEY);
+        }
+      }
       return {
         ordinaryMarkerAbsentResult,
         unnegotiatedOutcome,
@@ -3574,6 +3660,10 @@ async function main() {
         exactCreatedPolicySource: exactCreatedDecision.policySource,
         lookalikeCreatedPolicySource: lookalikeCreatedDecision.policySource,
         ssoRaceRemovalStillApplies,
+        foregroundSsoPolicySource: foregroundSsoTabLimitDecision.policySource,
+        foregroundSsoReconcilesBackgroundExcess:
+          foregroundSsoTabLimitDecision.reconcileExcessTabs,
+        multiWindowQueries,
         accepted,
         rejectedLookalike,
         firstVisitedHosts: firstStored?.visitedHosts || [],
@@ -3596,6 +3686,7 @@ async function main() {
         originTransitionVisitStorageCleared:
           originTransitionStorage[RESTRICTION_SSO_VISIT_STORAGE_KEY] === undefined,
         originTransitionServerUrl: originTransitionStorage.config?.serverUrl,
+        fastPolicyTransition,
       };
     });
     assert.equal(restrictionSsoFixture.ordinaryMarkerAbsentResult, null);
@@ -3611,6 +3702,12 @@ async function main() {
     assert.equal(restrictionSsoFixture.exactCreatedPolicySource, null);
     assert.equal(restrictionSsoFixture.lookalikeCreatedPolicySource, 'screen_lock');
     assert.equal(restrictionSsoFixture.ssoRaceRemovalStillApplies, false);
+    assert.equal(restrictionSsoFixture.foregroundSsoPolicySource, null);
+    assert.equal(restrictionSsoFixture.foregroundSsoReconcilesBackgroundExcess, true);
+    assert.deepEqual(restrictionSsoFixture.multiWindowQueries, [
+      {},
+      { active: true, lastFocusedWindow: true },
+    ]);
     assert.equal(restrictionSsoFixture.accepted, true);
     assert.equal(restrictionSsoFixture.rejectedLookalike, false);
     assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['district.clever.com']);
@@ -3632,6 +3729,11 @@ async function main() {
       restrictionSsoFixture.originTransitionServerUrl,
       'https://alternate.school-pilot.net',
     );
+    assert.deepEqual(restrictionSsoFixture.fastPolicyTransition, {
+      visitStorageCleared: true,
+      authRemainedSignedOut: true,
+      fastAuthGateEnabled: false,
+    });
 
     assert.equal(result.recoveryRace.grantBeforeMetadataRetry, true);
     assert.equal(result.recoveryRace.grantAfterMetadataRetry, true);
