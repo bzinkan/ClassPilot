@@ -25,7 +25,16 @@
     school: Object.freeze([1000, 2000]),
     teacher: Object.freeze([2000, 3000]),
     temporary: Object.freeze([3000, 4000]),
+    // Two allow rules plus up to 1,000 exact teacher-block overrides. Keep
+    // enough room for every normalized teacher-domain entry without allowing
+    // the override IDs to escape the range cleared atomically by the worker.
+    restrictionSso: Object.freeze([4000, 6000]),
   });
+  const RESTRICTION_SSO_DOMAINS = Object.freeze([
+    'clever.com',
+    'accounts.google.com',
+  ]);
+  const RESTRICTION_SSO_COLD_START_URL = 'https://clever.com/';
 
   const MONITORING_EVENT_TYPES = new Set([
     'tab_changed',
@@ -480,6 +489,9 @@
       rawState.restrictions ?? rawState.desiredRestrictions ?? rawState.desiredState ?? rawState,
       nowMs
     );
+    const rawDeliveryContext = rawState.deliveryContext && typeof rawState.deliveryContext === 'object'
+      ? rawState.deliveryContext
+      : {};
 
     return {
       schemaVersion: CLASSROOM_STATE_SCHEMA_VERSION,
@@ -490,6 +502,9 @@
       scheduledEndAt,
       hardExpiresAt,
       restrictions,
+      ...(rawDeliveryContext.lateSignInRestrictionSso === true ? {
+        deliveryContext: { lateSignInRestrictionSso: true },
+      } : {}),
     };
   }
 
@@ -524,7 +539,8 @@
     const nowMs = timestampMs(nowValue) ?? Date.now();
     const ranges = new Set(rangeNames);
     const rules = [];
-    const classroom = input?.classroomState?.restrictions ?? emptyRestrictions();
+    const classroomState = input?.classroomState;
+    const classroom = classroomState?.restrictions ?? emptyRestrictions();
     const globalDomains = normalizeDomainList(input?.globalBlockedDomains, 'school block list');
 
     if (ranges.has('classroom')) {
@@ -608,6 +624,46 @@
       }
     }
 
+    if (ranges.has('restrictionSso')) {
+      const restrictionSsoActive = input?.restrictionSsoPassThrough === true
+        && classroomState?.deliveryContext?.lateSignInRestrictionSso === true
+        && !classroom.attentionMode?.active
+        && (classroom.screenLock?.active || classroom.flightPath?.active);
+      if (restrictionSsoActive) {
+        for (const [index, domain] of RESTRICTION_SSO_DOMAINS.entries()) {
+          rules.push({
+            id: DNR_RANGES.restrictionSso[0] + index,
+            // This allow must outrank both the Waypoint block (500) and the
+            // Flight Path block (1). School policy remains authoritative at
+            // 1000 and attention mode at 2000.
+            priority: 600,
+            action: { type: 'allow' },
+            condition: { resourceTypes: ['main_frame'], requestDomains: [domain] },
+          });
+        }
+        const teacherDomains = classroom.blockList?.active
+          ? normalizeDomainList(classroom.blockList.blockedDomains, 'teacher block list')
+          : [];
+        const blockedSsoDomains = teacherDomains.filter((teacherDomain) => (
+          RESTRICTION_SSO_DOMAINS.some((ssoDomain) => (
+            isHostWithinDomain(ssoDomain, teacherDomain)
+            || isHostWithinDomain(teacherDomain, ssoDomain)
+          ))
+        ));
+        for (const [index, domain] of blockedSsoDomains.entries()) {
+          rules.push({
+            id: DNR_RANGES.restrictionSso[0] + 500 + index,
+            // A teacher block explicitly covering an authentication host wins
+            // over pass-through without changing historical Waypoint-target
+            // precedence for unrelated domains.
+            priority: 700,
+            action: { type: 'block' },
+            condition: { resourceTypes: ['main_frame'], requestDomains: [domain] },
+          });
+        }
+      }
+    }
+
     return rules;
   }
 
@@ -625,6 +681,14 @@
 
   function isProtectedInternalTab(tab) {
     return /^(chrome|chrome-extension|devtools):\/\//i.test(tabUrl(tab));
+  }
+
+  function isRestrictionSsoTab(tab) {
+    if (!isHttpTab(tab)) return false;
+    const host = normalizeDomain(tabUrl(tab));
+    return Boolean(host && RESTRICTION_SSO_DOMAINS.some((domain) => (
+      isHostWithinDomain(host, domain)
+    )));
   }
 
   function safeRestrictionTarget(rawUrl, rawDomain) {
@@ -702,11 +766,15 @@
     const preserveTabId = tabs.some((tab) => tab.id === requestedPreserveTabId)
       ? requestedPreserveTabId
       : preferredRestrictionTabId(state, tabs, foregroundTabId);
+    const preserveTabIds = new Set([
+      preserveTabId,
+      ...(Array.isArray(options.preserveTabIds) ? options.preserveTabIds : []),
+    ].filter((tabId) => Number.isSafeInteger(tabId) && tabs.some((tab) => tab.id === tabId)));
     const preferRemoveTabId = Number.isSafeInteger(options.preferRemoveTabId)
       ? options.preferRemoveTabId
       : null;
     const closeable = tabs.filter((tab) =>
-      tab.id !== preserveTabId && !isProtectedInternalTab(tab));
+      !preserveTabIds.has(tab.id) && !isProtectedInternalTab(tab));
     if (preferRemoveTabId !== null) {
       closeable.sort((left, right) => {
         if (left.id === preferRemoveTabId) return -1;
@@ -717,13 +785,14 @@
     return closeable.slice(0, excess).map((tab) => tab.id);
   }
 
-  function appendTabLimitRemovals(plan, state, tabs, options, preserveTabId = null) {
+  function appendTabLimitRemovals(plan, state, tabs, options, preserveTabId = null, preserveTabIds = []) {
     const alreadyRemoved = new Set(plan.removeTabIds);
     const remainingTabs = tabs.filter((tab) => !alreadyRemoved.has(tab.id));
     const limitRemovals = planTabLimitRemovals(state, remainingTabs, {
       maxTabs: options.maxTabs,
       foregroundTabId: options.foregroundTabId,
       preserveTabId,
+      preserveTabIds,
       additionalTabCount: plan.createUrl ? 1 : 0,
     });
     for (const tabId of limitRemovals) {
@@ -754,18 +823,116 @@
       activateTabId: null,
       focusFallbackUrl: null,
     };
+    const restrictionSsoPassThrough = options.restrictionSsoPassThrough === true
+      && state?.deliveryContext?.lateSignInRestrictionSso === true;
+    const ssoTabs = restrictionSsoPassThrough ? tabs.filter(isRestrictionSsoTab) : [];
+    // `active` is window-local: every background Chrome window has an active
+    // tab, so that bit alone cannot prove an SSO flow is foreground. The
+    // caller's fresh last-focused tab and a validated onCreated hint are the
+    // only signals allowed to suppress destination activation/focus. Other
+    // window-local active SSO tabs are handled by the bounded tab-limit grace
+    // below without blocking restriction enforcement in the foreground.
+    const requestedSsoPreserveIds = Array.isArray(options.preserveRestrictionSsoTabIds)
+      ? options.preserveRestrictionSsoTabIds
+      : [];
+    const foregroundSsoTabId = ssoTabs.find((tab) => tab.id === foregroundTabId)?.id ?? null;
+    const validatedRequestedSsoPreserveIds = requestedSsoPreserveIds.filter((tabId) => (
+      Number.isSafeInteger(tabId) && ssoTabs.some((tab) => tab.id === tabId)
+    ));
+    const focusProtectedSsoTabIds = [...new Set([
+      ...(foregroundSsoTabId === null ? [] : [foregroundSsoTabId]),
+      ...validatedRequestedSsoPreserveIds,
+    ])];
+    // Preserve only the exact foreground/hinted authentication flow. When no
+    // such flow is known, one sole SSO tab gets a bounded grace exception;
+    // multiple window-local `active` SSO tabs are dormant candidates and the
+    // numeric tab limit is allowed to recover by closing the excess.
+    const preservedSsoTabIds = focusProtectedSsoTabIds.length > 0
+      ? focusProtectedSsoTabIds
+      : ssoTabs.length === 1
+        ? [ssoTabs[0].id]
+        : [];
+    const visitedSsoHosts = normalizeDomainList(
+      Array.isArray(options.visitedSsoHosts) ? options.visitedSsoHosts : [],
+      'visited restriction SSO hosts'
+    ).filter((host) => RESTRICTION_SSO_DOMAINS.some((domain) => isHostWithinDomain(host, domain)));
+    const coldSsoStart = restrictionSsoPassThrough
+      && state?.deliveryContext?.lateSignInRestrictionSso === true
+      && visitedSsoHosts.length === 0;
+
+    // An in-progress authentication flow is intentionally not destination-
+    // compliant, but reconciliation must not navigate it or steal focus while
+    // a student is signing in. A fresh last-focused exact-SSO tab or an
+    // explicitly validated onCreated candidate enters this no-focus branch.
+    // Window-local `active` candidates do not suppress a required destination
+    // or cold Clever landing; only the bounded preservation rule above can
+    // spare them from the numeric limit. DNR and navigation listeners keep
+    // those tabs confined to the two exact pass-through domain families.
+    if (focusProtectedSsoTabIds.length > 0
+      && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
+      const destinationTabs = tabs.filter((tab) => {
+        if (!isHttpTab(tab) || isRestrictionSsoTab(tab)) return false;
+        const host = normalizeDomain(tabUrl(tab));
+        if (restrictions.screenLock?.active) {
+          const domain = normalizeDomain(
+            restrictions.screenLock.domain || restrictions.screenLock.url
+          );
+          return Boolean(host && isHostWithinDomain(host, domain));
+        }
+        return restrictions.flightPath?.active && restrictions.flightPath.allowedDomains.some((domain) => (
+          host && isHostWithinDomain(host, normalizeDomain(domain))
+        ));
+      });
+      const destinationUrl = restrictions.screenLock?.active
+        ? safeRestrictionTarget(
+            restrictions.screenLock.url,
+            restrictions.screenLock.domain,
+          )
+        : `https://${normalizeDomainList(
+            restrictions.flightPath.allowedDomains,
+            'Flight Path domains',
+          )[0]}`;
+      const nonDestinationTabs = tabs.filter((tab) => (
+        !isProtectedInternalTab(tab)
+        && !isRestrictionSsoTab(tab)
+        && !destinationTabs.some((destination) => destination.id === tab.id)
+        && (restrictions.screenLock?.active || isHttpTab(tab))
+      ));
+      let preservedDestinationId = destinationTabs[0]?.id ?? null;
+      if (preservedDestinationId) {
+        plan.removeTabIds.push(...nonDestinationTabs.map((tab) => tab.id));
+      } else if (nonDestinationTabs[0] && destinationUrl) {
+        preservedDestinationId = nonDestinationTabs[0].id;
+        plan.updates.push({ tabId: preservedDestinationId, url: destinationUrl });
+        plan.removeTabIds.push(...nonDestinationTabs.slice(1).map((tab) => tab.id));
+      }
+      return appendTabLimitRemovals(
+        plan,
+        state,
+        tabs,
+        { ...options, foregroundTabId },
+        preservedDestinationId ?? preservedSsoTabIds[0],
+        [...preservedSsoTabIds, preservedDestinationId],
+      );
+    }
 
     if (restrictions.screenLock?.active) {
-      const targetUrl = safeRestrictionTarget(
+      const destinationUrl = safeRestrictionTarget(
         restrictions.screenLock.url,
         restrictions.screenLock.domain
       );
+      const targetUrl = coldSsoStart ? RESTRICTION_SSO_COLD_START_URL : destinationUrl;
       if (!targetUrl) throw new Error('screen lock requires a safe navigation target');
       const lockedDomain = normalizeDomain(
         restrictions.screenLock.domain || restrictions.screenLock.url
       );
-      const controllable = tabs.filter((tab) => !isProtectedInternalTab(tab));
-      const compliant = controllable.filter((tab) =>
+      const controllable = tabs.filter((tab) => (
+        !isProtectedInternalTab(tab) && !(restrictionSsoPassThrough && isRestrictionSsoTab(tab))
+      ));
+      // A cold deferred restriction starts authentication even when an old
+      // destination tab happens to remain open from before sign-in. Only a
+      // binding-scoped recorded SSO visit turns a later reconciliation warm.
+      const compliant = coldSsoStart ? [] : controllable.filter((tab) =>
         isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
       let preservedTabId = null;
       if (compliant.length > 0) {
@@ -801,7 +968,7 @@
       return appendTabLimitRemovals(plan, state, tabs, {
         ...options,
         foregroundTabId,
-      }, preservedTabId);
+      }, preservedTabId, preservedSsoTabIds);
     }
 
     if (restrictions.flightPath?.active) {
@@ -810,9 +977,13 @@
         'Flight Path domains'
       );
       if (allowedDomains.length === 0) throw new Error('active Flight Path requires at least one domain');
-      const firstUrl = `https://${allowedDomains[0]}`;
-      const httpTabs = tabs.filter(isHttpTab);
-      const allowed = httpTabs.filter((tab) => {
+      const firstUrl = coldSsoStart
+        ? RESTRICTION_SSO_COLD_START_URL
+        : `https://${allowedDomains[0]}`;
+      const httpTabs = tabs.filter((tab) => (
+        isHttpTab(tab) && !(restrictionSsoPassThrough && isRestrictionSsoTab(tab))
+      ));
+      const allowed = coldSsoStart ? [] : httpTabs.filter((tab) => {
         const domain = normalizeDomain(tabUrl(tab));
         return domain && allowedDomains.some((allowedDomain) =>
           isHostWithinDomain(domain, allowedDomain));
@@ -855,7 +1026,7 @@
       return appendTabLimitRemovals(plan, state, tabs, {
         ...options,
         foregroundTabId,
-      }, preservedTabId);
+      }, preservedTabId, preservedSsoTabIds);
     }
     return appendTabLimitRemovals(plan, state, tabs, {
       ...options,
@@ -1060,6 +1231,8 @@
     CLASSROOM_STATE_SCHEMA_VERSION,
     CLASSROOM_STATE_MAX_LIFETIME_MS,
     DNR_RANGES,
+    RESTRICTION_SSO_DOMAINS,
+    RESTRICTION_SSO_COLD_START_URL,
     MAX_RULE_ENTRIES,
     MAX_EVENT_OUTBOX_ENTRIES,
     MAX_EVENT_OUTBOX_BYTES,
@@ -1083,6 +1256,7 @@
     commandDeliveryState,
     normalizeDomain,
     isHostWithinDomain,
+    isRestrictionSsoTab,
     normalizeDomainList,
     normalizeTemporaryAllows,
     normalizeClassroomState,

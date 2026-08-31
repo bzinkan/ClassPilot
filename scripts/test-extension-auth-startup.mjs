@@ -3248,6 +3248,239 @@ async function main() {
       'authenticated cold navigation did not complete within the startup SLA'
     );
 
+    // Persist a visited authentication host under the exact authenticated
+    // binding, stop the MV3 worker, and prove the cold successor restores the
+    // ledger instead of replaying the cold Clever landing. The same restored
+    // runtime must keep both DNR and imperative navigation handling aligned.
+    const restrictionSsoDestination = `${fixture.origin}/restriction-sso-destination`;
+    const restrictionSsoRestartSeed = await worker.evaluate(async (destinationUrl) => {
+      const authContext = captureAuthenticatedContext('restriction SSO restart seed');
+      const controlRevision = Math.max(
+        Number(currentStudentControlRevision() || 0) + 1,
+        91,
+      );
+      observeStudentControlRevision(
+        controlRevision,
+        authContext,
+        'restriction SSO restart seed',
+      );
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'lateSignInRestrictionSsoV1',
+        ],
+      }, authContext);
+      const state = {
+        schemaVersion: 1,
+        revision: controlRevision,
+        receivedAt: Date.now(),
+        hardExpiresAt: Date.now() + 5 * 60_000,
+        deliveryContext: { lateSignInRestrictionSso: true },
+        restrictions: {
+          screenLock: {
+            active: true,
+            url: destinationUrl,
+            domain: new URL(destinationUrl).hostname,
+          },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: 3,
+          temporaryAllows: [],
+        },
+      };
+      const exactBinding = {
+        bindingVersion: 2,
+        schoolId: authContext.schoolId,
+        deviceId: authContext.deviceId,
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+        controlRevision,
+      };
+      const bindingDigest = await validateRestrictionSsoDeliveryContext(
+        state,
+        { exactBinding },
+        authContext,
+      );
+      const priorState = currentClassroomState;
+      currentClassroomState = state;
+      try {
+        await observeRestrictionSsoHostForAuth(
+          'https://district.clever.com/oauth/start',
+          authContext,
+        );
+      } finally {
+        currentClassroomState = priorState;
+      }
+      const result = await applyClassroomState(state, {
+        force: true,
+        reason: 'restriction_sso_restart_seed',
+        authContext,
+        authorityEnvelope: { exactBinding },
+      });
+      const stored = await rawLocalKv.get([
+        RESTRICTION_SSO_VISIT_STORAGE_KEY,
+        CLASSROOM_STATE_STORAGE_KEY,
+      ]);
+      return {
+        outcome: result.outcome,
+        bindingDigest,
+        storedVisit: stored[RESTRICTION_SSO_VISIT_STORAGE_KEY],
+        storedMarker: stored[CLASSROOM_STATE_STORAGE_KEY]?.deliveryContext,
+      };
+    }, restrictionSsoDestination);
+    assert.equal(restrictionSsoRestartSeed.outcome, 'applied');
+    assert.equal(restrictionSsoRestartSeed.bindingDigest.length, 64);
+    assert.deepEqual(restrictionSsoRestartSeed.storedVisit?.visitedHosts, [
+      'clever.com',
+    ]);
+    assert.equal(
+      restrictionSsoRestartSeed.storedVisit?.scopeDigest,
+      restrictionSsoRestartSeed.bindingDigest,
+    );
+    assert.deepEqual(restrictionSsoRestartSeed.storedMarker, {
+      lateSignInRestrictionSso: true,
+      bindingDigest: restrictionSsoRestartSeed.bindingDigest,
+    });
+
+    await authenticatedPage.goto('chrome://version');
+    const restrictionSsoWorkerStop = await stopExtensionWorker(
+      context,
+      authenticatedPage,
+      extensionId,
+    );
+    assert.equal(
+      restrictionSsoWorkerStop.stopped,
+      true,
+      'could not stop the MV3 worker before restriction SSO restore',
+    );
+    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    const restrictionSsoWorkerRestore = await worker.evaluate(async (destinationUrl) => {
+      await authStateRestorePromise;
+      await classroomStateRestorePromise;
+      await dynamicRuleCompositionTail;
+      const stored = await rawLocalKv.get([RESTRICTION_SSO_VISIT_STORAGE_KEY]);
+      const tabs = await chrome.tabs.query({});
+      const rules = await chrome.declarativeNetRequest.getDynamicRules();
+      const restrictionSsoRules = rules
+        .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'))
+        .map((rule) => ({
+          action: rule.action?.type || null,
+          priority: rule.priority,
+          domains: rule.condition?.requestDomains || [],
+        }))
+        .sort((left, right) => left.domains.join(',').localeCompare(right.domains.join(',')));
+      const warmPlan = RuntimeCore.planClassroomTabReconciliation(
+        currentClassroomState,
+        [{ id: 99101, active: true, url: 'https://off-task.example/' }],
+        {
+          foregroundTabId: 99101,
+          maxTabs: currentMaxTabs,
+          restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+          visitedSsoHosts: [...visitedRestrictionSsoHosts],
+        },
+      );
+
+      const originalRecordNavigationBlockedForAuth = recordNavigationBlockedForAuth;
+      const originalNotifyNavigationBlockedForAuth = notifyNavigationBlockedForAuth;
+      const originalGoBackOrBlankForAuth = goBackOrBlankForAuth;
+      const originalUpdateTabForAuth = updateTabForAuth;
+      let navigationEffects = [];
+      recordNavigationBlockedForAuth = async (_context, _url, policySource) => {
+        navigationEffects.push(`record:${policySource}`);
+      };
+      notifyNavigationBlockedForAuth = async (_context, _notification, policySource) => {
+        navigationEffects.push(`notify:${policySource}`);
+      };
+      goBackOrBlankForAuth = async () => {
+        navigationEffects.push('back');
+      };
+      updateTabForAuth = async (_tabId, update) => {
+        navigationEffects.push(`update:${update?.url || ''}`);
+      };
+      let exactNavigationEffects;
+      let lookalikeNavigationEffects;
+      try {
+        await handleBeforeNavigateForPolicy({
+          frameId: 0,
+          tabId: 99102,
+          url: 'https://accounts.google.com/o/oauth2/v2/auth',
+        });
+        exactNavigationEffects = [...navigationEffects];
+        navigationEffects = [];
+        await handleBeforeNavigateForPolicy({
+          frameId: 0,
+          tabId: 99103,
+          url: 'https://accounts.google.com.evil.example/oauth',
+        });
+        lookalikeNavigationEffects = [...navigationEffects];
+      } finally {
+        recordNavigationBlockedForAuth = originalRecordNavigationBlockedForAuth;
+        notifyNavigationBlockedForAuth = originalNotifyNavigationBlockedForAuth;
+        goBackOrBlankForAuth = originalGoBackOrBlankForAuth;
+        updateTabForAuth = originalUpdateTabForAuth;
+      }
+
+      return {
+        passThroughActive: restrictionSsoPassThroughActive,
+        marker: currentClassroomState?.deliveryContext || null,
+        visitedHosts: [...visitedRestrictionSsoHosts].sort(),
+        storedVisit: stored[RESTRICTION_SSO_VISIT_STORAGE_KEY],
+        destinationTabs: tabs.filter((tab) => tab.url === destinationUrl).length,
+        cleverTabs: tabs.filter((tab) => RuntimeCore.isRestrictionSsoTab(tab)
+          && RuntimeCore.normalizeDomain(tab.url) === 'clever.com').length,
+        restrictionSsoRules,
+        warmPlan,
+        exactNavigationEffects,
+        lookalikeNavigationEffects,
+      };
+    }, restrictionSsoDestination);
+    assert.equal(restrictionSsoWorkerRestore.passThroughActive, true);
+    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, ['clever.com']);
+    assert.equal(
+      restrictionSsoWorkerRestore.storedVisit?.scopeDigest,
+      restrictionSsoWorkerRestore.marker?.bindingDigest,
+    );
+    assert.ok(
+      restrictionSsoWorkerRestore.destinationTabs >= 1,
+      'warm worker restore did not land directly on the restriction destination',
+    );
+    assert.equal(
+      restrictionSsoWorkerRestore.cleverTabs,
+      0,
+      'warm worker restore replayed the cold Clever landing',
+    );
+    assert.deepEqual(restrictionSsoWorkerRestore.restrictionSsoRules, [
+      { action: 'allow', priority: 600, domains: ['accounts.google.com'] },
+      { action: 'allow', priority: 600, domains: ['clever.com'] },
+    ]);
+    assert.deepEqual(restrictionSsoWorkerRestore.warmPlan.updates, [{
+      tabId: 99101,
+      url: restrictionSsoDestination,
+    }]);
+    assert.deepEqual(restrictionSsoWorkerRestore.exactNavigationEffects, []);
+    assert.ok(
+      restrictionSsoWorkerRestore.lookalikeNavigationEffects.includes('record:screen_lock'),
+      'lookalike navigation bypassed the restored Waypoint policy',
+    );
+    assert.ok(
+      restrictionSsoWorkerRestore.lookalikeNavigationEffects.some((effect) => (
+        effect.startsWith('update:')
+      )),
+      'lookalike navigation was not redirected to the restored destination',
+    );
+    await authenticatedPage.goto(`${fixture.origin}/authenticated-after-sso-worker-restart`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await authenticatedPage.waitForSelector(GATE_SELECTOR, {
+      state: 'detached',
+      timeout: 12_000,
+    });
+
     const authenticatedTabId = await tabIdFor(worker, authenticatedPage);
     const staleRollbackDelivery = await worker.evaluate(async ({ tabId, revision }) => {
       try {
@@ -3436,50 +3669,171 @@ async function main() {
     await requestLiveRefresh(worker);
     const genuineCrashFrame = await waitForAuthFramePhase(corruptPage, 'ready', 7_000);
     await genuineCrashFrame.waitForSelector('#classpilot-auth-email-form');
-    const genuineCrashFenceInstalled = await worker.evaluate(() => {
+    const genuineCrashFenceId = `genuine-crash-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    worker = await waitForLiveWorker(context);
+    const genuineCrashFenceInstalled = await worker.evaluate((fenceId) => {
+      if (globalThis.__classpilotGenuineCrashFence) {
+        return {
+          installed: false,
+          existingFenceId: globalThis.__classpilotGenuineCrashFence.id || null,
+        };
+      }
       const originalApply = applyClassroomStateFromAuthResponse;
       let releaseFence;
       const fence = new Promise((resolveFence) => { releaseFence = resolveFence; });
-      globalThis.__classpilotGenuineCrashFence = { entered: false, release: releaseFence };
+      globalThis.__classpilotGenuineCrashFence = {
+        id: fenceId,
+        entered: false,
+        enteredAt: null,
+        applyReason: null,
+        release: releaseFence,
+      };
       applyClassroomStateFromAuthResponse = async (...args) => {
         globalThis.__classpilotGenuineCrashFence.entered = true;
+        globalThis.__classpilotGenuineCrashFence.enteredAt = Date.now();
+        globalThis.__classpilotGenuineCrashFence.applyReason = args[1] || null;
         await fence;
         applyClassroomStateFromAuthResponse = originalApply;
         return originalApply(...args);
       };
-      return true;
+      return { installed: true, fenceId };
+    }, genuineCrashFenceId);
+    assert.deepEqual(genuineCrashFenceInstalled, {
+      installed: true,
+      fenceId: genuineCrashFenceId,
     });
-    assert.equal(genuineCrashFenceInstalled, true);
-    await genuineCrashFrame.locator('#classpilot-auth-email').fill('jordan@example.edu');
-    await genuineCrashFrame.locator('#classpilot-auth-student-id').fill('S-1001');
-    await genuineCrashFrame.locator('#classpilot-auth-email-submit').click();
-    let genuineCrashState = null;
-    const genuineCrashDeadline = Date.now() + 7_000;
-    while (Date.now() < genuineCrashDeadline) {
-      genuineCrashState = await worker.evaluate(async () => {
-        const persisted = await getStoredAuthState([
-          'deviceId',
-          'studentToken',
-          'activeStudentId',
-          'activeStudentSessionId',
-          'studentAuthCommitPendingV1',
-        ]);
-        return {
-          entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
-          marker: persisted.studentAuthCommitPendingV1 === true,
-          exactBinding: Boolean(
-            persisted.deviceId && persisted.studentToken
-            && persisted.activeStudentId && persisted.activeStudentSessionId
-          ),
-          revision: getAuthGateState().revision,
-        };
-      });
-      if (genuineCrashState.entered && genuineCrashState.marker && genuineCrashState.exactBinding) break;
+    const genuineCrashFenceVerified = await worker.evaluate((fenceId) => ({
+      matches: globalThis.__classpilotGenuineCrashFence?.id === fenceId,
+      entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
+    }), genuineCrashFenceId);
+    assert.deepEqual(genuineCrashFenceVerified, { matches: true, entered: false });
+
+    const genuineCrashRequestBaseline = fixture.state.studentLoginRequests.length;
+    // The frame can legitimately repaint when a late auth-state pulse arrives.
+    // Set both fields and submit in one frame task so no repaint can clear one
+    // credential between separate Playwright fill/click operations.
+    const genuineCrashSubmission = await genuineCrashFrame.evaluate((credentials) => {
+      const email = document.getElementById('classpilot-auth-email');
+      const studentId = document.getElementById('classpilot-auth-student-id');
+      const form = document.getElementById('classpilot-auth-email-form');
+      const submit = document.getElementById('classpilot-auth-email-submit');
+      if (!email || !studentId || !form || !submit) {
+        return { submitted: false, reason: 'email form was replaced before atomic submit' };
+      }
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set;
+      if (typeof valueSetter !== 'function') {
+        return { submitted: false, reason: 'native input setter unavailable' };
+      }
+      for (const [input, value] of [
+        [email, credentials.studentEmail],
+        [studentId, credentials.studentIdNumber],
+      ]) {
+        valueSetter.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      form.requestSubmit(submit);
+      return {
+        submitted: true,
+        phase: document.getElementById('classpilot-auth-gate')
+          ?.dataset.classpilotAuthPhase || null,
+      };
+    }, {
+      studentEmail: 'jordan@example.edu',
+      studentIdNumber: 'S-1001',
+    });
+    assert.equal(
+      genuineCrashSubmission.submitted,
+      true,
+      `could not atomically submit the genuine crash login: ${JSON.stringify(genuineCrashSubmission)}`,
+    );
+
+    const genuineCrashRequestDeadline = Date.now() + 15_000;
+    while (
+      fixture.state.studentLoginRequests.length === genuineCrashRequestBaseline
+      && Date.now() < genuineCrashRequestDeadline
+    ) {
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
     }
-    assert.equal(genuineCrashState?.entered, true);
-    assert.equal(genuineCrashState?.marker, true);
-    assert.equal(genuineCrashState?.exactBinding, true);
+    const genuineCrashRequestDelta =
+      fixture.state.studentLoginRequests.length - genuineCrashRequestBaseline;
+    if (genuineCrashRequestDelta !== 1) {
+      const requestDiagnostic = {
+        requestDelta: genuineCrashRequestDelta,
+        submission: genuineCrashSubmission,
+        framePhase: await genuineCrashFrame.locator('#classpilot-auth-gate')
+          .getAttribute('data-classpilot-auth-phase').catch(() => null),
+        frameError: await genuineCrashFrame.locator('#classpilot-auth-error')
+          .textContent().catch(() => null),
+        fence: await worker.evaluate((fenceId) => ({
+          present: Boolean(globalThis.__classpilotGenuineCrashFence),
+          matches: globalThis.__classpilotGenuineCrashFence?.id === fenceId,
+          entered: globalThis.__classpilotGenuineCrashFence?.entered === true,
+          phase: getAuthGateState().phase,
+        }), genuineCrashFenceId).catch((error) => ({
+          evaluationError: error?.message || String(error),
+        })),
+      };
+      throw new Error(
+        `genuine interrupted-commit login request barrier failed: ${JSON.stringify(requestDiagnostic)}`,
+      );
+    }
+
+    let genuineCrashState = null;
+    let genuineCrashEvaluationError = null;
+    const genuineCrashDeadline = Date.now() + 15_000;
+    while (Date.now() < genuineCrashDeadline) {
+      try {
+        genuineCrashState = await worker.evaluate(async (fenceId) => {
+          const persisted = await getStoredAuthState([
+            'deviceId',
+            'studentToken',
+            'activeStudentId',
+            'activeStudentSessionId',
+            'studentAuthCommitPendingV1',
+          ]);
+          const fence = globalThis.__classpilotGenuineCrashFence;
+          return {
+            fenceMatches: fence?.id === fenceId,
+            entered: fence?.entered === true,
+            enteredAt: fence?.enteredAt || null,
+            applyReason: fence?.applyReason || null,
+            marker: persisted.studentAuthCommitPendingV1 === true,
+            exactBinding: Boolean(
+              persisted.deviceId && persisted.studentToken
+              && persisted.activeStudentId && persisted.activeStudentSessionId
+            ),
+            revision: getAuthGateState().revision,
+            phase: getAuthGateState().phase,
+          };
+        }, genuineCrashFenceId);
+      } catch (error) {
+        genuineCrashEvaluationError = error?.message || String(error);
+        break;
+      }
+      if (
+        genuineCrashState.fenceMatches
+        && genuineCrashState.entered
+        && genuineCrashState.marker
+        && genuineCrashState.exactBinding
+      ) break;
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+    }
+    assert.ok(
+      genuineCrashState?.fenceMatches
+      && genuineCrashState?.entered
+      && genuineCrashState?.marker
+      && genuineCrashState?.exactBinding,
+      `genuine interrupted-commit fence did not become authoritative: ${JSON.stringify({
+        requestDelta: genuineCrashRequestDelta,
+        submission: genuineCrashSubmission,
+        evaluationError: genuineCrashEvaluationError,
+        state: genuineCrashState,
+      })}`,
+    );
 
     await corruptPage.goto('chrome://version');
     const genuineCrashStop = await stopExtensionWorker(context, corruptPage, extensionId);
@@ -3689,7 +4043,15 @@ async function main() {
         schoolSlug: 'cold-start-school',
         enrollmentKey: 'fixture-enrollment-key',
       };
-      await chrome.storage.local.set({ config, deviceId: auth.deviceId });
+      await chrome.storage.local.set({
+        config,
+        deviceId: auth.deviceId,
+        restrictionSsoVisitStateV1: {
+          schemaVersion: 1,
+          scopeDigest: 'b'.repeat(64),
+          visitedHosts: ['clever.com'],
+        },
+      });
       await chrome.storage.local.remove([
         'studentAuthInvalidatingV1',
         'studentAuthCommitPendingV1',
@@ -3706,7 +4068,11 @@ async function main() {
     worker = await waitForLiveWorker(context);
     await corruptPage.waitForSelector(GATE_SELECTOR, {
       state: 'detached',
-      timeout: LOADING_LIMIT_MS,
+      // This is a full authenticated worker restart after a crash-boundary
+      // fixture, not the 2s document-start paint SLA measured above. Give the
+      // service-worker restore and content-script delivery their own bounded
+      // integration timeout so suite load cannot create rerun-only success.
+      timeout: 12_000,
     });
     assert.equal(await corruptPage.locator(GATE_SELECTOR).count(), 0, 'managed onChanged crash auth did not restore');
 
@@ -3756,6 +4122,7 @@ async function main() {
             'studentToken',
             'activeStudentId',
             'activeStudentSessionId',
+            RESTRICTION_SSO_VISIT_STORAGE_KEY,
             STUDENT_AUTH_INVALIDATING_KEY,
             MANAGED_AUTH_GATE_BINDING_KEY,
           ]);
@@ -3819,6 +4186,11 @@ async function main() {
     assert.equal(Boolean(managedChangeBoundary.boundary?.studentToken), false);
     assert.equal(Boolean(managedChangeBoundary.boundary?.activeStudentId), false);
     assert.equal(Boolean(managedChangeBoundary.boundary?.activeStudentSessionId), false);
+    assert.equal(
+      managedChangeBoundary.boundary?.restrictionSsoVisitStateV1,
+      undefined,
+      'managed authority transition retained the old SSO visit ledger',
+    );
     assert.equal(managedChangeBoundary.boundary?.config?.schoolId, 'cold-start-school');
     assert.equal(managedChangeBoundary.boundary?.config?.enrollmentKey, 'fixture-enrollment-key');
     assert.equal(managedChangeBoundary.boundary?.managedAuthGateBindingV1?.schoolId, 'cold-start-school');

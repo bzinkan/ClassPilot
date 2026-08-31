@@ -70,6 +70,7 @@ const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
   'COMMAND_AUTHORITY_MISSING',
   'COMMAND_FAILED',
   'SAFETY_EVIDENCE_TIMEOUT',
+  'RESTRICTION_SSO_STALE_STORAGE',
   'SCREENSHOT_PAUSED_UNOBSERVED',
   'STALE_TAB_SNAPSHOT',
   'STUDENT_BINDING_MISMATCH',
@@ -312,6 +313,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'exactBindingAckV2',
   'exactTabCloseV2',
   'studentAuthGatePresenceV1',
+  'lateSignInRestrictionSsoV1',
   'studentChatIdempotencyV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
@@ -332,6 +334,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'exactBindingAckV2',
   'exactTabCloseV2',
   'studentAuthGatePresenceV1',
+  'lateSignInRestrictionSsoV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotObservationLeaseV1',
   'managedDeviceContinuityV1',
@@ -626,7 +629,10 @@ const MANAGED_DEVICE_CONTINUITY_CAPABILITIES = Object.freeze([
 const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object.freeze([
   'scopedAuthorityChecksV1',
   'studentAuthGatePresenceV1',
+  'lateSignInRestrictionSsoV1',
 ]);
+const RESTRICTION_SSO_VISIT_STORAGE_KEY = 'restrictionSsoVisitStateV1';
+const RESTRICTION_SSO_VISIT_SCHEMA_VERSION = 1;
 const MANAGED_DEVICE_CONTINUITY_MAX_PROOF_TTL_MS = 10 * 60 * 1000;
 const MANAGED_DEVICE_CONTINUITY_EXPIRY_SKEW_MS = 5000;
 const LOGIN_ROSTER_CACHE_MIN_AGE_MS = 5000;
@@ -3604,6 +3610,12 @@ function managedAuthGatePolicyDescriptor(managedConfig = {}) {
     || normalizeManagedString(managedConfig.classpilotSchoolSlug);
   const enrollmentKey = normalizeManagedString(managedConfig.enrollmentKey)
     || normalizeManagedString(managedConfig.classpilotEnrollmentKey);
+  const managedFastAuthGateEnabled = Object.prototype.hasOwnProperty.call(
+    managedConfig,
+    'fastAuthGateEnabled',
+  )
+    ? extractManagedValue(managedConfig.fastAuthGateEnabled) !== false
+    : true;
   return {
     schemaVersion: 1,
     serverOrigin,
@@ -3614,6 +3626,7 @@ function managedAuthGatePolicyDescriptor(managedConfig = {}) {
     schoolSlug,
     schoolSlugManaged: Boolean(schoolSlug),
     enrollmentKeyManaged: Boolean(enrollmentKey),
+    fastAuthGateEnabled: managedFastAuthGateEnabled,
     hasManagedSetup: Boolean(
       (schoolId || schoolSlug)
       && enrollmentKey
@@ -3648,7 +3661,25 @@ function persistedManagedAuthGateDescriptor(descriptor) {
     schoolSlug: descriptor.schoolSlug,
     schoolSlugManaged: descriptor.schoolSlugManaged,
     enrollmentKeyManaged: descriptor.enrollmentKeyManaged,
+    fastAuthGateEnabled: descriptor.fastAuthGateEnabled,
   };
+}
+
+function managedAuthGatePolicyDescriptorsMatch(prior, current) {
+  if (!prior || prior.schemaVersion !== 1 || !current || current.schemaVersion !== 1) {
+    return false;
+  }
+  return [
+    'serverOrigin',
+    'serverManaged',
+    'serverValid',
+    'schoolId',
+    'schoolIdManaged',
+    'schoolSlug',
+    'schoolSlugManaged',
+    'enrollmentKeyManaged',
+    'fastAuthGateEnabled',
+  ].every((key) => prior[key] === current[key]);
 }
 
 function canonicalSchoolIdForUnchangedSlugPolicy(
@@ -3700,6 +3731,10 @@ function applyAuthoritativeManagedAuthGateSnapshot(
   const priorBindingKey = authGateConfigBindingKey();
   applyManagedSchoolConfig(managedConfig);
   if (policyIsAuthoritative) {
+    // A complete authoritative snapshot owns the kill-switch too. Removing
+    // the managed key restores its documented default instead of inheriting
+    // the last in-memory value from a prior policy.
+    fastAuthGateEnabled = descriptor.fastAuthGateEnabled;
     CONFIG.schoolId = descriptor.schoolId || preservedCanonicalSchoolId;
     CONFIG.schoolSlug = descriptor.schoolSlug;
     CONFIG.enrollmentKey = descriptor.enrollmentKey;
@@ -8057,6 +8092,9 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
     await Promise.all([...new Set(alarmsToClear)].map((name) => (
       Promise.resolve(chrome.alarms.clear(name)).catch(() => false)
     )));
+    await ensureRestrictionSsoVisitStateForContext(authContext).catch(async () => {
+      await clearRestrictionSsoVisitState().catch(() => {});
+    });
     assertAuthenticatedContextCurrent(authContext, reason);
     return {
       purgedKeys: [...new Set([...Object.keys(updates), ...removals])],
@@ -9102,6 +9140,146 @@ function hasNegotiatedCapability(name, context = null) {
     && negotiatedProtocolState.acceptedCapabilities.includes(name);
 }
 
+let restrictionSsoVisitScopeDigest = null;
+let visitedRestrictionSsoHosts = new Set();
+let restrictionSsoVisitMutation = Promise.resolve();
+
+function enqueueRestrictionSsoVisitMutation(operation) {
+  const run = () => operation();
+  const next = restrictionSsoVisitMutation.then(run, run);
+  // A rejected old-authority writer must not poison cleanup or a later
+  // binding's first visit. Keep the caller-visible rejection while allowing
+  // the serialized ledger to advance.
+  restrictionSsoVisitMutation = next.catch(() => undefined);
+  return next;
+}
+
+function restrictionSsoPassThroughForState(state = currentClassroomState) {
+  return Boolean(
+    state?.deliveryContext?.lateSignInRestrictionSso === true
+    && (state?.restrictions?.screenLock?.active || state?.restrictions?.flightPath?.active)
+  );
+}
+
+function normalizedRestrictionSsoHost(urlValue) {
+  const host = RuntimeCore.normalizeDomain(urlValue);
+  if (!host) return null;
+  // Record only the matched allowlisted family, never the arbitrary exact
+  // subdomain. This is privacy-minimal and strictly bounds the durable ledger
+  // to the two supported roots, so unique tenant/login subdomains cannot grow
+  // the set past reconciliation's domain-list limit.
+  return RuntimeCore.RESTRICTION_SSO_DOMAINS.find((domain) => (
+    RuntimeCore.isHostWithinDomain(host, domain)
+  )) || null;
+}
+
+async function restrictionSsoBindingDigest(context) {
+  assertAuthenticatedContextCurrent(context, 'restriction SSO binding');
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof TextEncoder !== 'function') {
+    const error = new Error('Secure restriction SSO storage binding is unavailable');
+    error.code = 'RESTRICTION_SSO_BINDING_UNAVAILABLE';
+    throw error;
+  }
+  const source = JSON.stringify([
+    'restriction-sso-v1',
+    context.serverOrigin,
+    context.schoolId || '',
+    context.studentId,
+    context.studentSessionId,
+    context.deviceId,
+    context.authContextId,
+  ]);
+  const digest = await subtle.digest('SHA-256', new TextEncoder().encode(source));
+  assertAuthenticatedContextCurrent(context, 'restriction SSO binding');
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function ensureRestrictionSsoVisitStateForContextNow(context) {
+  assertAuthenticatedContextCurrent(context, 'restriction SSO visit restore');
+  const scopeDigest = await restrictionSsoBindingDigest(context);
+  if (restrictionSsoVisitScopeDigest === scopeDigest) {
+    return visitedRestrictionSsoHosts;
+  }
+  const stored = await rawLocalKv.get([RESTRICTION_SSO_VISIT_STORAGE_KEY]);
+  assertAuthenticatedContextCurrent(context, 'restriction SSO visit restore');
+  const record = stored[RESTRICTION_SSO_VISIT_STORAGE_KEY];
+  const valid = record?.schemaVersion === RESTRICTION_SSO_VISIT_SCHEMA_VERSION
+    && record.scopeDigest === scopeDigest
+    && Array.isArray(record.visitedHosts);
+  const hosts = valid
+    ? record.visitedHosts.map(normalizedRestrictionSsoHost).filter(Boolean)
+    : [];
+  const canonicalHosts = [...new Set(hosts)].sort();
+  const requiresCanonicalRewrite = valid
+    && JSON.stringify(record.visitedHosts) !== JSON.stringify(canonicalHosts);
+  if (requiresCanonicalRewrite) {
+    // Provisional builds recorded exact tenant/login subdomains. Rewrite them
+    // during restore so the durable privacy/size invariant is complete even
+    // when no later navigation adds a new root family. Publish the in-memory
+    // scope only after this write succeeds so a transient failure is retryable.
+    await rawLocalKv.set({
+      [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+        schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+        scopeDigest,
+        visitedHosts: canonicalHosts,
+      },
+    });
+    assertAuthenticatedContextCurrent(context, 'restriction SSO visit canonicalization');
+  }
+  if (!valid && record) {
+    await rawLocalKv.remove(RESTRICTION_SSO_VISIT_STORAGE_KEY);
+    assertAuthenticatedContextCurrent(context, 'restriction SSO visit cleanup');
+  }
+  restrictionSsoVisitScopeDigest = scopeDigest;
+  visitedRestrictionSsoHosts = new Set(canonicalHosts);
+  return visitedRestrictionSsoHosts;
+}
+
+function ensureRestrictionSsoVisitStateForContext(context) {
+  return enqueueRestrictionSsoVisitMutation(() => (
+    ensureRestrictionSsoVisitStateForContextNow(context)
+  ));
+}
+
+function observeRestrictionSsoHostForAuth(urlValue, context) {
+  return enqueueRestrictionSsoVisitMutation(async () => {
+    assertAuthenticatedContextCurrent(context, 'restriction SSO navigation');
+    if (!restrictionSsoPassThroughForState()) return false;
+    const host = normalizedRestrictionSsoHost(urlValue);
+    if (!host) return false;
+    await ensureRestrictionSsoVisitStateForContextNow(context);
+    assertAuthenticatedContextCurrent(context, 'restriction SSO navigation');
+    if (visitedRestrictionSsoHosts.has(host)) return false;
+    // Do not publish the visit to the in-memory ledger until the durable write
+    // succeeds. A transient storage failure must leave the host retryable; if
+    // memory advanced first, the next navigation would be treated as a no-op
+    // and a worker restart would forget that the SSO hop ever happened.
+    const nextVisitedHosts = new Set(visitedRestrictionSsoHosts);
+    nextVisitedHosts.add(host);
+    await rawLocalKv.set({
+      [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
+        schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
+        scopeDigest: restrictionSsoVisitScopeDigest,
+        visitedHosts: [...nextVisitedHosts].sort(),
+      },
+    });
+    assertAuthenticatedContextCurrent(context, 'restriction SSO navigation persistence');
+    visitedRestrictionSsoHosts = nextVisitedHosts;
+    return true;
+  });
+}
+
+function clearRestrictionSsoVisitState() {
+  return enqueueRestrictionSsoVisitMutation(async () => {
+    restrictionSsoVisitScopeDigest = null;
+    visitedRestrictionSsoHosts = new Set();
+    await rawLocalKv.remove(RESTRICTION_SSO_VISIT_STORAGE_KEY);
+  });
+}
+
 function screenshotPolicyScope(context) {
   return authContextProtocolScope(context);
 }
@@ -9529,6 +9707,7 @@ async function runManagedAuthGatePolicyRevalidation() {
       { allowUnmanagedFallback: false },
     );
     const descriptor = managedAuthGatePolicyDescriptor(managedConfig);
+    const nextPersistedDescriptor = persistedManagedAuthGateDescriptor(descriptor);
     const preservedCanonicalSchoolId = canonicalSchoolIdForUnchangedSlugPolicy(
       descriptor,
       stored[MANAGED_AUTH_GATE_BINDING_KEY],
@@ -9543,6 +9722,11 @@ async function runManagedAuthGatePolicyRevalidation() {
     });
     const authorityChanged = priorBindingKey !== nextBindingKey
       || priorEnrollmentKey !== descriptor.enrollmentKey;
+    const managedPolicyChanged = authorityChanged
+      || !managedAuthGatePolicyDescriptorsMatch(
+        stored[MANAGED_AUTH_GATE_BINDING_KEY],
+        nextPersistedDescriptor,
+      );
     const manualTimestampInvalid = isManualIdentitySource(
       stored.identitySource || CONFIG.identitySource,
     ) && !isManualLoginTimestampFresh(
@@ -9582,6 +9766,20 @@ async function runManagedAuthGatePolicyRevalidation() {
         policyGeneration,
         policyBarrier,
         'managed policy direct auth cleanup',
+      );
+    }
+
+    if (managedPolicyChanged) {
+      // A signed-out profile can still contain a crash-surviving SSO visit
+      // ledger. Every effective managed-policy transition clears it even when
+      // there is no bearer material that would otherwise enter
+      // clearStudentAuth(). This includes a fast-auth kill-switch change that
+      // leaves the school/server authority tuple unchanged.
+      await clearRestrictionSsoVisitState();
+      assertManagedPolicyRevalidationCurrent(
+        policyGeneration,
+        policyBarrier,
+        'managed policy restriction SSO cleanup',
       );
     }
 
@@ -10332,6 +10530,12 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       });
       authorityAuthClearPromise.catch(() => {});
     }
+    // The visit ledger is scoped to both the immutable student binding and
+    // the managed policy under which that binding was used. Serialize a clear
+    // for every managed-policy storage transition, including a
+    // fastAuthGateEnabled-only change that deliberately keeps bearer auth.
+    const restrictionSsoPolicyClearPromise = clearRestrictionSsoVisitState();
+    restrictionSsoPolicyClearPromise.catch(() => {});
 
     // A changed server value is untrusted until the complete managed snapshot
     // proves it is a valid URL. Never retain the previous managed endpoint
@@ -10384,6 +10588,7 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       readManagedConfig({ failClosed: true }),
       storedPolicyAtChange,
       authorityAuthClearPromise,
+      restrictionSsoPolicyClearPromise,
     ]).then(async ([currentManagedConfig, persisted]) => {
       if (policyGeneration !== managedAuthGatePolicyGeneration) {
         throw authMutationSuperseded('managed policy reread');
@@ -10807,6 +11012,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // school, session, device, or server transition. Do not attempt an old
   // message under a later credential.
   await discardStudentChatOutbox().catch(() => {});
+  await clearRestrictionSsoVisitState().catch(() => {});
   await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
   await kv.remove(PENDING_CHECK_IN_KEY);
   await chrome.alarms.clear(PENDING_CHECK_IN_EXPIRY_ALARM);
@@ -12001,6 +12207,7 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
     committedAuthContext,
     'student login storage adoption',
   );
+  adoptNegotiatedProtocolState(data, committedAuthContext);
   assertAuthMutationCurrent(mutationGeneration, 'student login');
   assertAuthGatePolicyGuardCurrentAfterCanonicalSchoolAdoption(
     policyGuard,
@@ -12450,6 +12657,7 @@ async function ensureRegisteredNow() {
             committedAuthContext,
             'student registration storage adoption',
           );
+          adoptNegotiatedProtocolState(data, committedAuthContext);
           assertAuthMutationCurrent(registrationGeneration, 'student registration');
           await reconcileMessageInboxIdentity('student-registration', {
             authContext: committedAuthContext,
@@ -12702,7 +12910,9 @@ const authStateRestorePromise = new Promise((resolve) => {
     || isExplicitUnmanagedDevelopmentServer(fastResolvedServerUrl))
     && !authStored[MANAGED_AUTH_GATE_BINDING_KEY];
   let managedAuthBindingChanged = false;
+  let managedPolicyChanged = false;
   let managedSetupUnavailable = false;
+  let workerWakeRestrictionSsoCleanup = Promise.resolve();
   const applyWorkerWakeManagedPolicy = ({ config, error }, notifyAfter = false) => {
     managedAuthBindingChanged = managedPolicyConflictsWithStoredAuth(
       authStored,
@@ -12711,6 +12921,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       { allowUnmanagedFallback, managedReadFailed: Boolean(error) },
     );
     if (error) {
+      managedPolicyChanged = true;
       managedSetupUnavailable = true;
       managedAuthGateSetupUnavailable = true;
       authoritativeManagedSchoolPolicyScope = null;
@@ -12738,6 +12949,25 @@ const authStateRestorePromise = new Promise((resolve) => {
       );
       managedSetupUnavailable = appliedPolicy.policyIsAuthoritative
         && !appliedPolicy.descriptor.hasManagedSetup;
+      managedPolicyChanged = appliedPolicy.policyIsAuthoritative
+        && !managedAuthGatePolicyDescriptorsMatch(
+          authStored[MANAGED_AUTH_GATE_BINDING_KEY],
+          appliedPolicy.persistedDescriptor,
+        );
+      if (
+        appliedPolicy.policyIsAuthoritative
+        && normalizeManagedString(authStored.config?.enrollmentKey)
+          !== appliedPolicy.descriptor.enrollmentKey
+      ) {
+        // The persisted descriptor records only whether the secret is
+        // managed. Compare its already-persisted config value in memory so an
+        // enrollment-key rotation while signed out also retires the ledger.
+        managedPolicyChanged = true;
+      }
+    }
+    if (managedPolicyChanged) {
+      workerWakeRestrictionSsoCleanup = workerWakeRestrictionSsoCleanup
+        .then(() => clearRestrictionSsoVisitState());
     }
     if (managedAuthBindingChanged && hasStudentAuth()) {
       // The locally restored token belongs to the previous managed authority.
@@ -12751,7 +12981,11 @@ const authStateRestorePromise = new Promise((resolve) => {
       }).catch(() => {});
       workerWakeRestoreGeneration = studentAuthMutationGeneration;
     }
-    if (notifyAfter) notifyAuthGateStateToTabs({ triggerRefresh: false }).catch(() => {});
+    if (notifyAfter) {
+      workerWakeRestrictionSsoCleanup
+        .then(() => notifyAuthGateStateToTabs({ triggerRefresh: false }))
+        .catch(() => {});
+    }
     return config;
   };
   if (allowUnmanagedFallback) {
@@ -12778,6 +13012,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       await awaitManagedAuthGatePolicyStable().catch(() => {});
     }
   }
+  await workerWakeRestrictionSsoCleanup;
   restoreSharedSignInPresentationCache(authStored[SHARED_SIGN_IN_CONFIG_CACHE_KEY]);
   await reconcileStudentSessionRecoveryAtWorkerWake(authStored, {
     authRestoreBlocked: interruptedAuthClear
@@ -13024,6 +13259,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], {
         force: true,
         reason: 'worker_wake',
+        trustedPersistedRestrictionSso: true,
         authContext: restoreAuthContext,
         authorityEnvelope: {
           studentId: restoreAuthContext.studentId,
@@ -13217,6 +13453,9 @@ let dynamicRuleCompositionTail = Promise.resolve();
 
 function runtimeClassroomStateForRules() {
   return {
+    ...(restrictionSsoPassThroughActive ? {
+      deliveryContext: { lateSignInRestrictionSso: true },
+    } : {}),
     restrictions: {
       screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain },
       flightPath: { active: allowedDomains.length > 0, allowedDomains },
@@ -13236,6 +13475,7 @@ function composeDynamicRules(rangeNames, options = {}) {
     // lists therefore leave the previous complete ruleset intact.
     const addRules = RuntimeCore.buildDnrRules({
       classroomState: runtimeClassroomStateForRules(),
+      restrictionSsoPassThrough: restrictionSsoPassThroughActive,
       globalBlockedDomains: Object.prototype.hasOwnProperty.call(options, 'globalBlockedDomains')
         ? options.globalBlockedDomains
         : globalBlockedDomains,
@@ -13253,15 +13493,15 @@ function composeDynamicRules(rangeNames, options = {}) {
 
 async function updateBlockingRules(requestedAllowedDomains) {
   RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'classroom allowed domains');
-  await composeDynamicRules(['classroom']);
+  await composeDynamicRules(['classroom', 'restrictionSso']);
 }
 
 async function clearBlockingRules() {
-  await composeDynamicRules(['classroom']);
+  await composeDynamicRules(['classroom', 'restrictionSso']);
 }
 
 async function clearClassroomBlockingRule() {
-  await composeDynamicRules(['classroom']);
+  await composeDynamicRules(['classroom', 'restrictionSso']);
 }
 
 function updateGlobalBlacklistRules(blockedDomains, options = {}) {
@@ -13324,7 +13564,7 @@ async function updateTeacherBlockListRules(blockedDomains) {
   const normalized = RuntimeCore.normalizeDomainList(blockedDomains, 'teacher block list');
   teacherBlockedDomains = normalized;
   try {
-    await composeDynamicRules(['teacher']);
+    await composeDynamicRules(['teacher', 'restrictionSso']);
   } catch (error) {
     teacherBlockedDomains = previous;
     throw error;
@@ -13335,7 +13575,7 @@ async function clearTeacherBlockListRules() {
   const previous = teacherBlockedDomains;
   teacherBlockedDomains = [];
   try {
-    await composeDynamicRules(['teacher']);
+    await composeDynamicRules(['teacher', 'restrictionSso']);
   } catch (error) {
     teacherBlockedDomains = previous;
     throw error;
@@ -13355,7 +13595,7 @@ async function updateTemporaryAllowRules(temporaryAllows) {
 }
 
 async function composeAllManagedDynamicRules() {
-  const ranges = ['classroom', 'teacher', 'temporary'];
+  const ranges = ['classroom', 'teacher', 'temporary', 'restrictionSso'];
   // A malformed local school-policy snapshot must not turn an unrelated
   // classroom-state restore into authority to delete DNR rules that survived
   // the worker restart. Only an explicitly validated policy may replace them.
@@ -13626,6 +13866,7 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         committedAuthContext,
         'student auto-registration storage adoption',
       );
+      adoptNegotiatedProtocolState(data, committedAuthContext);
       assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
       resetSharedSignInLoginConfigCache({ clearPersisted: true });
       await reconcileMessageInboxIdentity('student-registration', {
@@ -14855,6 +15096,7 @@ let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
 let attentionModeActive = false; // When true, blocks navigation and new tabs
+let restrictionSsoPassThroughActive = false;
 let teacherBroadcastActive = false;
 let teacherBroadcastSessionId = null;
 const CLASSROOM_STATE_STORAGE_KEY = 'classroomControlStateV1';
@@ -15034,6 +15276,7 @@ function classroomRuntimeBackup() {
     activeBlockListName,
     temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
     attentionModeActive,
+    restrictionSsoPassThroughActive,
   };
 }
 
@@ -15049,6 +15292,7 @@ function restoreClassroomRuntimeBackup(backup) {
   activeBlockListName = backup.activeBlockListName;
   temporaryAllowedDomains = backup.temporaryAllowedDomains;
   attentionModeActive = backup.attentionModeActive;
+  restrictionSsoPassThroughActive = backup.restrictionSsoPassThroughActive;
 }
 
 function classroomRestrictionTypes(state = currentClassroomState) {
@@ -15141,6 +15385,15 @@ function classroomRestrictionsFromRuntime() {
   };
 }
 
+function classroomStateFromRuntimeForReconciliation() {
+  return {
+    ...(restrictionSsoPassThroughActive
+      ? { deliveryContext: { lateSignInRestrictionSso: true } }
+      : {}),
+    restrictions: classroomRestrictionsFromRuntime(),
+  };
+}
+
 function scheduleClassroomStateExpiry(state = currentClassroomState) {
   chrome.alarms.clear(CLASSROOM_STATE_EXPIRY_ALARM);
   if (!state) return;
@@ -15185,6 +15438,7 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
   temporaryAllowedDomains = restrictions.temporaryAllows.map((item) => ({ ...item }));
   attentionModeActive = restrictions.attentionMode.active;
+  restrictionSsoPassThroughActive = restrictionSsoPassThroughForState(state);
   teacherMaxTabs = restrictions.tabLimit;
   currentMaxTabs = effectiveTabLimit();
 
@@ -15242,8 +15496,9 @@ async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  restrictionSsoPassThroughActive = false;
   currentClassroomState = null;
-  await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+  await composeDynamicRules(['classroom', 'teacher', 'temporary', 'restrictionSso']);
   await kv.remove([
     'lockScreenState',
     'flightPathState',
@@ -15332,6 +15587,9 @@ async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
       assertCurrent,
       options.authContext,
       options.tabMutationJournal,
+      {
+        foregroundRestrictionSsoTabId: options.foregroundRestrictionSsoTabId,
+      },
     );
     assertCurrent('classroom tab reconciliation');
     await chrome.alarms.clear(CLASSROOM_STATE_RECONCILE_ALARM);
@@ -15366,10 +15624,24 @@ async function reconcileExistingTabsForClassroomState(
   assertCurrent('classroom tab query');
   const foregroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
   assertCurrent('classroom foreground tab query');
-  const foregroundTab = foregroundTabs.find((tab) => Number.isInteger(tab?.id)) || null;
+  const queriedForegroundTab = foregroundTabs.find((tab) => Number.isInteger(tab?.id)) || null;
+  const hintedForegroundSso = restrictionSsoPassThroughForState(state)
+    && Number.isInteger(browserApi.foregroundRestrictionSsoTabId)
+    ? tabs.find((tab) => (
+        tab.id === browserApi.foregroundRestrictionSsoTabId
+        && RuntimeCore.isRestrictionSsoTab(tab)
+      )) || null
+    : null;
+  // An active exact-SSO onCreated observation is stronger than Chrome's
+  // asynchronously updated last-focused-window query. The hint is accepted
+  // only for a fresh tab in this inventory and only for a marked restriction.
+  const foregroundTab = hintedForegroundSso || queriedForegroundTab;
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
     foregroundTabId: foregroundTab?.id,
+    preserveRestrictionSsoTabIds: hintedForegroundSso ? [hintedForegroundSso.id] : [],
     maxTabs: currentMaxTabs,
+    restrictionSsoPassThrough: restrictionSsoPassThroughForState(state),
+    visitedSsoHosts: [...visitedRestrictionSsoHosts],
   });
   const failedUpdateIds = new Set();
   for (const update of plan.updates) {
@@ -15443,15 +15715,39 @@ async function reconcileExistingTabsForClassroomState(
   ));
   fallbackUrl = fallbackUrl || foregroundUpdateFailure?.url || null;
   if (fallbackUrl) {
+    // A failed update of a background destination tab must not turn the one
+    // allowed fallback into a focus steal while Clever/Google authentication
+    // is active. Re-read the protected candidates at the destructive boundary
+    // so a completed/closed SSO flow does not unnecessarily suppress normal
+    // foreground enforcement. Do not use `tab.active` from the all-window
+    // inventory here: Chrome has one active tab in every background window. A
+    // fresh last-focused exact-SSO tab or the validated onCreated hint is the
+    // only evidence that creating an active destination would steal focus.
+    let preserveRestrictionSsoFocus = false;
+    if (hintedForegroundSso) {
+      const candidate = await getTab(hintedForegroundSso.id).catch(() => null);
+      assertCurrent('classroom fallback SSO focus verification');
+      preserveRestrictionSsoFocus = RuntimeCore.isRestrictionSsoTab(candidate);
+    }
+    if (!preserveRestrictionSsoFocus && restrictionSsoPassThroughForState(state)) {
+      const freshForegroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
+      assertCurrent('classroom fallback foreground SSO verification');
+      preserveRestrictionSsoFocus = freshForegroundTabs.some((tab) => (
+        Number.isInteger(tab?.id) && RuntimeCore.isRestrictionSsoTab(tab)
+      ));
+    }
     assertCurrent('classroom tab creation');
-    const createdTab = await createTab({ url: fallbackUrl, active: true });
+    const createdTab = await createTab({
+      url: fallbackUrl,
+      active: !preserveRestrictionSsoFocus,
+    });
     if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
     assertCurrent('classroom tab creation');
-    if (Number.isInteger(createdTab?.windowId)) {
+    if (!preserveRestrictionSsoFocus && Number.isInteger(createdTab?.windowId)) {
       await focusWindow(createdTab.windowId);
       assertCurrent('classroom fallback window focus');
     }
-    if (Number.isInteger(createdTab?.id)) {
+    if (!preserveRestrictionSsoFocus && Number.isInteger(createdTab?.id)) {
       const verified = await queryTabs({ active: true, lastFocusedWindow: true });
       assertCurrent('classroom fallback foreground verification');
       if (!verified.some((tab) => tab.id === createdTab.id)) {
@@ -15478,6 +15774,66 @@ async function resolveCurrentUrlMarker(rawState, assertCurrent = () => {}) {
   screenLock.domain = extractDomain(activeTab.url);
   screenLock.lockedDomain = screenLock.domain;
   return cloned;
+}
+
+async function validateRestrictionSsoDeliveryContext(
+  prepared,
+  authorityEnvelope,
+  authContext,
+  options = {},
+) {
+  if (prepared?.deliveryContext?.lateSignInRestrictionSso !== true) return null;
+  const trustedPersistedMarker = options.trustedPersistedRestrictionSso === true;
+  if (!authContext) {
+    throw new Error('Late-sign-in SSO delivery requires authenticated authority');
+  }
+  if (!trustedPersistedMarker) {
+    const markerBinding = assertCurrentStudentBinding(
+      authorityEnvelope,
+      'late-sign-in SSO delivery',
+      { authContext },
+    );
+    assertBindingMatchesAuthContext(
+      markerBinding,
+      authContext,
+      'late-sign-in SSO delivery',
+      { requireFullAuthority: true },
+    );
+    if (!hasNegotiatedCapability('lateSignInRestrictionSsoV1', authContext)) {
+      const error = new Error('Late-sign-in SSO delivery was not negotiated');
+      error.code = 'LATE_SIGNIN_SSO_NOT_NEGOTIATED';
+      throw error;
+    }
+  }
+  await ensureRestrictionSsoVisitStateForContext(authContext);
+  assertAuthenticatedContextCurrent(authContext, 'late-sign-in SSO delivery');
+  if (
+    trustedPersistedMarker
+    && prepared.deliveryContext.bindingDigest !== restrictionSsoVisitScopeDigest
+  ) {
+    // DNR survives an MV3 restart, so keep the independent fail-safe deadline
+    // while making the stale marker and its visit ledger impossible to adopt
+    // on a later wake. The server snapshot request repairs the retained rules.
+    await clearRestrictionSsoVisitState();
+    await kv.remove([
+      CLASSROOM_STATE_STORAGE_KEY,
+      CLASSROOM_STATE_STUDENT_BINDING_KEY,
+    ]);
+    assertAuthenticatedContextCurrent(authContext, 'late-sign-in SSO stale storage cleanup');
+    const retainedDeadline = await kv.get([CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]);
+    assertAuthenticatedContextCurrent(authContext, 'late-sign-in SSO stale deadline restore');
+    const failSafeExpiryAt = Number(retainedDeadline[CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]);
+    if (Number.isFinite(failSafeExpiryAt) && failSafeExpiryAt > 0) {
+      await chrome.alarms.create(CLASSROOM_STATE_EXPIRY_ALARM, {
+        when: Math.max(Date.now(), failSafeExpiryAt),
+      });
+      assertAuthenticatedContextCurrent(authContext, 'late-sign-in SSO stale deadline alarm');
+    }
+    const error = new Error('Stored late-sign-in SSO delivery belongs to a retired binding');
+    error.code = 'RESTRICTION_SSO_STALE_STORAGE';
+    throw error;
+  }
+  return restrictionSsoVisitScopeDigest;
 }
 
 async function applyClassroomStateNow(rawState, options = {}) {
@@ -15518,7 +15874,17 @@ async function applyClassroomStateNow(rawState, options = {}) {
     assertCurrent();
     const prepared = await resolveCurrentUrlMarker(rawState, assertCurrent);
     assertCurrent();
+    const restrictionSsoBinding = await validateRestrictionSsoDeliveryContext(
+      prepared,
+      authorityEnvelope,
+      authContext,
+      options,
+    );
+    assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (normalized?.deliveryContext?.lateSignInRestrictionSso === true) {
+      normalized.deliveryContext.bindingDigest = restrictionSsoBinding;
+    }
     if (authContext && exactStudentBinding(authorityEnvelope).bindingVersion === 2) {
       observeExactStudentControlRevision(
         authorityEnvelope,
@@ -15880,7 +16246,8 @@ async function checkClassroomStateExpiryNow(options = {}) {
     activeBlockListName = null;
     temporaryAllowedDomains = [];
     attentionModeActive = false;
-    await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+    restrictionSsoPassThroughActive = false;
+    await composeDynamicRules(['classroom', 'teacher', 'temporary', 'restrictionSso']);
     assertCurrent();
     if (authContext) {
       await broadcastToAllTabsForAuth(
@@ -16279,10 +16646,11 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  restrictionSsoPassThroughActive = false;
   seenPollIds.clear();
 
   const clearedRevision = currentClassroomState?.revision ?? 0;
-  await composeDynamicRules(['classroom', 'teacher', 'temporary']);
+  await composeDynamicRules(['classroom', 'teacher', 'temporary', 'restrictionSso']);
   currentClassroomState = null;
   await chrome.storage.local.remove([
     'lockScreenState',
@@ -17055,6 +17423,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           throw new Error('Could not determine locked domain');
         }
         screenLocked = true;
+        restrictionSsoPassThroughActive = false;
         
         // Persist lock-screen state to survive service worker restarts
         await chrome.storage.local.set({
@@ -17108,6 +17477,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         if (!screenOnly) {
           allowedDomains = []; // Legacy full unlock clears all lock state
           activeFlightPathName = null;
+          restrictionSsoPassThroughActive = false;
         }
         
         // Screen-only unlock deliberately preserves an independently applied
@@ -17171,6 +17541,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         screenLocked = false;
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
         lockedDomain = null; // Clear single domain when applying Flight Path
+        restrictionSsoPassThroughActive = false;
         
         // Persist Flight Path state to survive service worker restarts
         await chrome.storage.local.set({
@@ -17220,6 +17591,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
       case 'remove-flight-path':
         allowedDomains = []; // Clear all flight path domains
         activeFlightPathName = null; // Clear Flight Path name
+        if (!screenLocked) restrictionSsoPassThroughActive = false;
         
         // Clear persisted Flight Path state
         await chrome.storage.local.remove('flightPathState');
@@ -17352,7 +17724,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         // Update attention mode state (blocks navigation and new tabs when active)
         attentionModeActive = attentionActive;
-        await composeDynamicRules(['classroom']);
+        await composeDynamicRules(['classroom', 'restrictionSso']);
         assertCommandExecutionCurrent('attention-mode rules');
 
         // Fire-and-forget - don't await to avoid any delay
@@ -18384,11 +18756,15 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
     const foregroundTab = Array.isArray(foregroundTabs)
       ? foregroundTabs.find((tab) => Number.isInteger(tab?.id) && tab.active === true)
       : null;
+    const preserveTabIds = restrictionSsoTabLimitPreserveIds(tabs, {
+      foregroundTabId: foregroundTab?.id,
+    });
     const removalIds = RuntimeCore.planTabLimitRemovals({
       restrictions: classroomRestrictionsFromRuntime(),
     }, tabs, {
       maxTabs: appliedLimit,
       foregroundTabId: foregroundTab?.id,
+      preserveTabIds,
     });
     const byId = new Map(tabs.map((tab) => [tab?.id, tab]));
     const targets = removalIds.map((tabId) => byId.get(tabId)).filter(Boolean).map((tab) => Object.freeze({
@@ -18462,6 +18838,7 @@ async function handleBeforeNavigateForPolicy(details) {
         temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
         teacherBlockedDomains: [...teacherBlockedDomains],
         allowedDomains: [...allowedDomains],
+        restrictionSsoPassThroughActive,
       };
       let policySource = null;
       let notification = null;
@@ -18477,6 +18854,21 @@ async function handleBeforeNavigateForPolicy(details) {
         notification = {
           title: 'Website Blocked',
           message: `Access to ${targetDomain} is blocked by your school.`,
+          priority: 2,
+        };
+      } else if (
+        policy.restrictionSsoPassThroughActive
+        && normalizedRestrictionSsoHost(details.url)
+      ) {
+        const teacherBlocked = policy.teacherBlockedDomains.some((domain) => {
+          const normalized = domain.replace(/^www\./, '');
+          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
+        });
+        if (!teacherBlocked) return;
+        policySource = 'teacher';
+        notification = {
+          title: 'Website Blocked',
+          message: `Access to ${targetDomain} is blocked by your teacher.`,
           priority: 2,
         };
       } else if (policy.screenLocked) {
@@ -18563,6 +18955,12 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   try {
     await classroomStateRestorePromise;
     assertAuthenticatedContextCurrent(eventAuthContext, 'navigation committed event');
+    await observeRestrictionSsoHostForAuth(details.url, eventAuthContext).catch((error) => {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Restriction SSO] Visit persistence deferred:', safeDiagnosticError(error));
+      }
+    });
+    assertAuthenticatedContextCurrent(eventAuthContext, 'navigation committed event');
     if (isHttpUrl(details.url)) {
       enforceAuthGateForTab(details.tabId).catch(() => {});
     }
@@ -18581,13 +18979,59 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   }
 });
 
-async function createdTabPolicyDecision(policyTab, queryTabs) {
+function restrictionDestinationTab(tab) {
+  const url = tab?.pendingUrl || tab?.url || '';
+  if (!/^https?:\/\//i.test(url) || RuntimeCore.isRestrictionSsoTab(tab)) return false;
+  if (screenLocked && lockedDomain) return isOnSameDomain(url, lockedDomain);
+  return allowedDomains.some((domain) => isOnSameDomain(url, domain));
+}
+
+function restrictionSsoTabLimitPreserveIds(tabs, options = {}) {
+  if (!restrictionSsoPassThroughActive) return [];
+  const destination = tabs.find(restrictionDestinationTab) || null;
+  const ssoTabs = tabs.filter(RuntimeCore.isRestrictionSsoTab);
+  const requestedPreserveIds = Array.isArray(options.preserveSsoTabIds)
+    ? options.preserveSsoTabIds
+    : [];
+  const foregroundSsoTab = ssoTabs.find((tab) => tab.id === options.foregroundTabId) || null;
+  const explicitSsoTabIds = [...new Set([
+    foregroundSsoTab?.id,
+    ...requestedPreserveIds.filter((tabId) => (
+      Number.isInteger(tabId) && ssoTabs.some((tab) => tab.id === tabId)
+    )),
+  ].filter(Number.isInteger))];
+  // Chrome marks one tab active in every window. Preserve only a fresh
+  // last-focused/onCreated SSO flow, plus a bounded exception for one sole SSO
+  // tab. Multiple dormant background SSO tabs must become removable so the
+  // configured numeric limit recovers after focus returns to the destination.
+  const preservedSsoTabIds = explicitSsoTabIds.length > 0
+    ? explicitSsoTabIds
+    : ssoTabs.length === 1
+      ? [ssoTabs[0].id]
+      : [];
+  return [...new Set([
+    destination?.id,
+    ...preservedSsoTabIds,
+  ].filter(Number.isInteger))];
+}
+
+function activeCreatedRestrictionSsoTabId(tab) {
+  return restrictionSsoPassThroughActive
+    && tab?.active === true
+    && RuntimeCore.isRestrictionSsoTab(tab)
+    && Number.isInteger(tab.id)
+    ? tab.id
+    : null;
+}
+
+async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   const policy = {
     attentionModeActive,
     screenLocked,
     lockedDomain,
     allowedDomains: [...allowedDomains],
     currentMaxTabs,
+    restrictionSsoPassThroughActive,
   };
   let policySource = null;
   let notification = null;
@@ -18604,7 +19048,9 @@ async function createdTabPolicyDecision(policyTab, queryTabs) {
     const createdUrl = policyTab.pendingUrl || policyTab.url || '';
     const onLockedDomain = /^https?:\/\//i.test(createdUrl)
       && isOnSameDomain(createdUrl, policy.lockedDomain);
-    if (!onLockedDomain) {
+    const onRestrictionSso = policy.restrictionSsoPassThroughActive
+      && Boolean(normalizedRestrictionSsoHost(createdUrl));
+    if (!onLockedDomain && !onRestrictionSso) {
       policySource = 'screen_lock';
       notification = {
         title: 'Waypoint Set',
@@ -18633,13 +19079,49 @@ async function createdTabPolicyDecision(policyTab, queryTabs) {
           : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
             candidate.pendingUrl || candidate.url || ''
           ));
-      const foregroundTab = otherTabs.find((candidate) => candidate.active === true) || null;
+      // `active` is window-local. With multiple windows, selecting the first
+      // active inventory entry can misidentify a background window and allow
+      // tab-limit planning to remove the foreground authentication popup.
+      // Query Chrome's last-focused window whenever SSO pass-through is live;
+      // keep the historical single-query path for ordinary restrictions.
+      const foregroundTabs = policy.restrictionSsoPassThroughActive
+        ? await queryTabs({ active: true, lastFocusedWindow: true })
+        : [];
+      const foregroundTab = policy.restrictionSsoPassThroughActive
+        ? foregroundTabs.find((candidate) => candidate.active === true)
+          || foregroundTabs.find((candidate) => Number.isInteger(candidate?.id))
+          || null
+        : otherTabs.find((candidate) => candidate.active === true) || null;
+      const eventRestrictionSsoTabId = Number.isInteger(options.createdRestrictionSsoTabId)
+        && options.createdRestrictionSsoTabId === policyTab.id
+        && RuntimeCore.isRestrictionSsoTab(policyTab)
+        ? options.createdRestrictionSsoTabId
+        : null;
+      const createdRestrictionSsoTabId = eventRestrictionSsoTabId
+        ?? activeCreatedRestrictionSsoTabId(policyTab);
+      // onCreated carries a stronger observation for the tab being evaluated
+      // than a separately scheduled last-focused-window query. Chrome can
+      // briefly return the previously focused window while an OAuth popup is
+      // becoming active; never sacrifice that exact new SSO tab to the limit.
+      const foregroundTabId = createdRestrictionSsoTabId !== null
+        ? createdRestrictionSsoTabId
+        : foregroundTab?.id ?? (policyTab.active ? policyTab.id : null);
+      const preserveTabIds = restrictionSsoTabLimitPreserveIds(
+        tabs,
+        {
+          foregroundTabId: foregroundTab?.id,
+          preserveSsoTabIds: createdRestrictionSsoTabId !== null
+            ? [createdRestrictionSsoTabId]
+            : [],
+        },
+      );
       const removalIds = RuntimeCore.planTabLimitRemovals({
         restrictions: classroomRestrictionsFromRuntime(),
       }, tabs, {
         maxTabs: inventoryMaxTabs,
-        foregroundTabId: foregroundTab?.id,
+        foregroundTabId,
         preserveTabId: existingCompliant?.id ?? policyTab.id,
+        preserveTabIds,
         preferRemoveTabId: policyTab.id,
       });
       if (removalIds.includes(policyTab.id)) {
@@ -18680,6 +19162,7 @@ function createdTabRemovalDecisionStillApplies(decision, currentTab) {
   if (decision.policySource === 'screen_lock') {
     if (!screenLocked || !lockedDomain) return false;
     const currentUrl = currentTab.pendingUrl || currentTab.url || '';
+    if (restrictionSsoPassThroughActive && normalizedRestrictionSsoHost(currentUrl)) return false;
     return !/^https?:\/\//i.test(currentUrl) || !isOnSameDomain(currentUrl, lockedDomain);
   }
   if (decision.policySource === 'tab_limit') {
@@ -18705,6 +19188,14 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
   }
   try {
     await classroomStateRestorePromise;
+    // onCreated can initially expose an empty/about:blank URL for an active
+    // OAuth popup. Retain the event-time active id as a candidate; every use
+    // below revalidates the fresh tab id and exact SSO URL before preserving it.
+    const eventRestrictionSsoTabId = restrictionSsoPassThroughActive
+      && tab?.active === true
+      && Number.isInteger(tab.id)
+      ? tab.id
+      : null;
     await enqueueStudentAuthMutation(async () => {
       assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy event');
       enforceAuthGateForTab(tab).catch(() => {});
@@ -18717,18 +19208,19 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         // compliant Waypoint target.
         const policyTab = await getTab(tab.id).catch(() => null);
         if (!policyTab) return null;
-        let decision = await createdTabPolicyDecision(policyTab, queryTabs);
+        let decision = await createdTabPolicyDecision(policyTab, queryTabs, {
+          createdRestrictionSsoTabId: eventRestrictionSsoTabId,
+        });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy decision');
 
         if (decision.reconcileExcessTabs) {
           const assertCurrent = (reason = 'tab created limit reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: eventRestrictionSsoTabId,
           });
           assertCurrent('tab created limit reconciliation');
           return null;
@@ -18742,17 +19234,18 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         // policy snapshot.
         const currentTab = await getTab(policyTab.id).catch(() => null);
         if (!currentTab) return;
-        const currentDecision = await createdTabPolicyDecision(currentTab, queryTabs);
+        const currentDecision = await createdTabPolicyDecision(currentTab, queryTabs, {
+          createdRestrictionSsoTabId: eventRestrictionSsoTabId,
+        });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy revalidation');
         if (currentDecision.reconcileExcessTabs) {
           const assertCurrent = (reason = 'tab created revalidated reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: eventRestrictionSsoTabId,
           });
           assertCurrent('tab created revalidated reconciliation');
           return null;
@@ -18766,17 +19259,18 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         // target, or the effective limit may change after the prior decision.
         // Re-plan every source from the third live tab read and final inventory;
         // remove only if the latest policy still selects this exact target.
-        const finalDecision = await createdTabPolicyDecision(removalTab, queryTabs);
+        const finalDecision = await createdTabPolicyDecision(removalTab, queryTabs, {
+          createdRestrictionSsoTabId: eventRestrictionSsoTabId,
+        });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created final policy revalidation');
         if (finalDecision.reconcileExcessTabs) {
           const assertCurrent = (reason = 'tab created final policy reconciliation') => {
             assertAuthenticatedContextCurrent(eventAuthContext, reason);
           };
-          await reconcileTabs({
-            restrictions: classroomRestrictionsFromRuntime(),
-          }, {
+          await reconcileTabs(classroomStateFromRuntimeForReconciliation(), {
             authContext: eventAuthContext,
             assertCurrent,
+            foregroundRestrictionSsoTabId: eventRestrictionSsoTabId,
           });
           assertCurrent('tab created final policy reconciliation');
           return null;
@@ -20093,7 +20587,11 @@ async function handleWsMessage(
         const authStateEnvelope = Object.prototype.hasOwnProperty.call(message, 'classroomState')
           ? message
           : message.settings && Object.prototype.hasOwnProperty.call(message.settings, 'classroomState')
-            ? { classroomState: message.settings.classroomState }
+            // Preserve the authenticated frame's exact binding and negotiated
+            // protocol envelope when SchoolPilot nests the snapshot in
+            // settings. A marker copied into a state-only object would lose
+            // the school/device/session fence and correctly fail closed.
+            ? { ...message, classroomState: message.settings.classroomState }
             : null;
         if (authStateEnvelope) {
           await applyClassroomStateFromAuthResponse(authStateEnvelope, 'websocket_auth').catch((error) => {
@@ -20467,11 +20965,17 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   } catch {
     return;
   }
-  // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
-  if (trackingState === TRACKING_STATES.OFF) return;
   try {
     const tab = await chrome.tabs.get(activeInfo.tabId);
     assertAuthenticatedContextCurrent(navigationAuthContext, 'tab activation');
+    await observeRestrictionSsoHostForAuth(tab.url, navigationAuthContext).catch((error) => {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Restriction SSO] Activation persistence deferred:', safeDiagnosticError(error));
+      }
+    });
+    assertAuthenticatedContextCurrent(navigationAuthContext, 'tab activation');
+    // Allow both ACTIVE and IDLE states (user switching tabs means they're present)
+    if (trackingState === TRACKING_STATES.OFF) return;
     queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
     // Send immediate heartbeat to update teacher dashboard quickly
     scheduleEventHeartbeat('tab-activated');
@@ -20495,6 +20999,14 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     }
     if (!navigationAuthContext) return;
     assertAuthenticatedContextCurrent(navigationAuthContext, 'tab update');
+    if (changeInfo.url) {
+      await observeRestrictionSsoHostForAuth(changeInfo.url, navigationAuthContext).catch((error) => {
+        if (!isAuthContextCancellation(error)) {
+          console.warn('[Restriction SSO] Tab visit persistence deferred:', safeDiagnosticError(error));
+        }
+      });
+      assertAuthenticatedContextCurrent(navigationAuthContext, 'tab update');
+    }
     // Allow both ACTIVE and IDLE states
     if (trackingState === TRACKING_STATES.OFF) return;
     if (!tab.active || !(changeInfo.url || changeInfo.title)) return;
@@ -20576,6 +21088,36 @@ async function getStudentSessionUiState(message = {}) {
 }
 
 // Listen for messages from popup
+async function updateServerOriginForSignedOutProfile(rawServerUrl) {
+  const newServerUrl = normalizedServerOrigin(rawServerUrl);
+  if (!newServerUrl) {
+    const error = new Error('Invalid server URL');
+    error.code = 'INVALID_SERVER_URL';
+    throw error;
+  }
+  return enqueueStudentAuthMutation(async () => {
+    const currentServerUrl = normalizedServerOrigin(CONFIG.serverUrl);
+    const originChanged = currentServerUrl !== newServerUrl;
+    if (originChanged && hasStudentAuth()) {
+      const error = new Error('Sign out before changing the ClassPilot server');
+      error.code = 'AUTH_CONTEXT_SERVER_CHANGE_REQUIRES_SIGN_OUT';
+      throw error;
+    }
+    if (originChanged) await clearRestrictionSsoVisitState();
+    CONFIG.serverUrl = newServerUrl;
+    // The cached login-config (incl. kiosk schoolId/availability) came from the
+    // old server — drop it so kiosk URLs never mix origins and configs.
+    resetSharedSignInLoginConfigCache();
+    await rawLocalKv.set({ config: persistedNonAuthConfig(CONFIG) });
+    console.log('[Config] Server origin updated');
+    // Refresh school settings and tracking state with the new server URL.
+    refreshSchoolSettings({ force: true }).then(() => {
+      updateTrackingState('server-url-update');
+    }).catch(() => {});
+    return { success: true };
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'student-auth-gate-presence') {
     sendResponse({ success: noteStudentAuthGatePresence(message, sender) });
@@ -21209,32 +21751,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'update-server-url') {
-    const newServerUrl = normalizedServerOrigin(message.serverUrl);
-    const currentServerUrl = normalizedServerOrigin(CONFIG.serverUrl);
-    if (newServerUrl) {
-      if (currentServerUrl && currentServerUrl !== newServerUrl && hasStudentAuth()) {
-        sendResponse({
-          success: false,
-          error: 'Sign out before changing the ClassPilot server',
-          errorCode: 'AUTH_CONTEXT_SERVER_CHANGE_REQUIRES_SIGN_OUT',
-        });
-        return true;
-      }
-      CONFIG.serverUrl = newServerUrl;
-      // The cached login-config (incl. kiosk schoolId/availability) came from
-      // the old server — drop it so kiosk URLs never mix origins and configs.
-      resetSharedSignInLoginConfigCache();
-      chrome.storage.local.set({ config: persistedNonAuthConfig(CONFIG) }, () => {
-        console.log('[Config] Server origin updated');
-        // Refresh school settings and tracking state with new server URL
-        refreshSchoolSettings({ force: true }).then(() => {
-          updateTrackingState('server-url-update');
-        }).catch(() => {});
-        sendResponse({ success: true });
-      });
-    } else {
-      sendResponse({ success: false, error: 'Invalid server URL' });
-    }
+    updateServerOriginForSignedOutProfile(message.serverUrl)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        success: false,
+        error: error?.message || 'Could not update the ClassPilot server',
+        errorCode: error?.code,
+      }));
     return true;
   }
   

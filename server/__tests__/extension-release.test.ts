@@ -623,6 +623,8 @@ describe("ClassPilot extension release package guards", () => {
       "authBoundTelemetryV1",
       "exactBindingAckV2",
       "exactTabCloseV2",
+      "studentAuthGatePresenceV1",
+      "lateSignInRestrictionSsoV1",
       "studentChatIdempotencyV1",
       "screenshotTrackingWindowLeaseV1",
       "screenshotObservationLeaseV1",
@@ -639,10 +641,38 @@ describe("ClassPilot extension release package guards", () => {
     ]) {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
+    expect(serviceWorker).toMatch(
+      /const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object\.freeze\(\[\s*'scopedAuthorityChecksV1',\s*'studentAuthGatePresenceV1',\s*'lateSignInRestrictionSsoV1',\s*\]\);/,
+    );
     expect(serviceWorker).toContain("clientProtocolVersion: CLIENT_PROTOCOL_VERSION");
     expect(serviceWorker).toContain("const CLIENT_PROTOCOL_VERSION = 3");
     expect(serviceWorker).toContain("...extensionProtocolDescriptor()");
     expect(serviceWorker).toContain("message.type === 'fab-state-sync'");
+  });
+
+  it("keeps late-sign-in SSO delivery exact-bound, negotiated, and locally scoped", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
+    expect(serviceWorker).toContain("function validateRestrictionSsoDeliveryContext(");
+    expect(serviceWorker).toContain("function enqueueRestrictionSsoVisitMutation(operation)");
+    expect(serviceWorker).toContain("prepared?.deliveryContext?.lateSignInRestrictionSso !== true");
+    expect(serviceWorker).toContain("hasNegotiatedCapability('lateSignInRestrictionSsoV1', authContext)");
+    expect(serviceWorker).toContain("{ requireFullAuthority: true }");
+    expect(serviceWorker).toContain("trustedPersistedRestrictionSso: true");
+    expect(serviceWorker).toContain("prepared.deliveryContext.bindingDigest !== restrictionSsoVisitScopeDigest");
+    expect(serviceWorker).toContain("error.code = 'RESTRICTION_SSO_STALE_STORAGE'");
+    expect(serviceWorker).toContain("CLASSROOM_STATE_STUDENT_BINDING_KEY,");
+    expect(serviceWorker).toContain("await clearRestrictionSsoVisitState().catch(() => {})");
+    expect(serviceWorker).toContain("'managed policy restriction SSO cleanup'");
+    expect(serviceWorker).toContain("async function updateServerOriginForSignedOutProfile(");
+    expect(serviceWorker).toContain("if (originChanged) await clearRestrictionSsoVisitState()");
+    expect(serviceWorker).toContain("{ ...message, classroomState: message.settings.classroomState }");
+    expect(serviceWorker).toContain("await subtle.digest('SHA-256'");
+    expect(serviceWorker).not.toContain("scopeDigest: authContextProtocolScope");
+    expect(runtimeCore).toContain("'clever.com'");
+    expect(runtimeCore).toContain("'accounts.google.com'");
+    expect(runtimeCore).toContain("const RESTRICTION_SSO_COLD_START_URL = 'https://clever.com/'");
+    expect(runtimeCore).toContain("restrictionSso: Object.freeze([4000, 6000])");
   });
 
   it("fences authenticated work to one immutable context and treats replacement as cancellation", () => {

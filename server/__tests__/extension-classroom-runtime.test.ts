@@ -518,6 +518,350 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isHostWithinDomain("ixl.com", null)).toBe(false);
   });
 
+  it("normalizes only the explicit capability-gated late-sign-in delivery marker", () => {
+    const ordinary = state(9, {
+      deliveryContext: { lateSignInRestrictionSso: false, ignored: true },
+    });
+    expect(ordinary.deliveryContext).toBeUndefined();
+
+    const deferred = state(10, {
+      deliveryContext: { lateSignInRestrictionSso: true, ignored: true },
+    });
+    expect(deferred.deliveryContext).toEqual({ lateSignInRestrictionSso: true });
+  });
+
+  it("allows exact Clever and Google authentication families without accepting lookalikes", () => {
+    expect(core.isRestrictionSsoTab({ url: "https://clever.com/login" })).toBe(true);
+    expect(core.isRestrictionSsoTab({ url: "https://district.clever.com/oauth" })).toBe(true);
+    expect(core.isRestrictionSsoTab({ url: "https://accounts.google.com/o/oauth2/auth" })).toBe(true);
+    expect(core.isRestrictionSsoTab({ url: "https://evilclever.com/" })).toBe(false);
+    expect(core.isRestrictionSsoTab({ url: "https://clever.com.evil.example/" })).toBe(false);
+    expect(core.isRestrictionSsoTab({ url: "https://accounts.google.com.evil.example/" })).toBe(false);
+  });
+
+  it("composes SSO pass-through below attention, school, and explicit teacher blocks", () => {
+    const deferred = state(11, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math", domain: "ixl.com" },
+        blockList: { active: true, blockedDomains: ["clever.com"] },
+      },
+    });
+    const rules = core.buildDnrRules({
+      classroomState: deferred,
+      restrictionSsoPassThrough: true,
+      globalBlockedDomains: ["accounts.google.com"],
+    }, ["classroom", "school", "teacher", "restrictionSso"], NOW);
+    const cleverAllow = rules.find((rule: any) => rule.id === 4000);
+    const googleAllow = rules.find((rule: any) => rule.id === 4001);
+    const teacherSsoBlock = rules.find((rule: any) => rule.id === 4500);
+    expect(cleverAllow.action.type).toBe("allow");
+    expect(googleAllow.action.type).toBe("allow");
+    expect(cleverAllow.priority).toBeGreaterThan(
+      rules.find((rule: any) => rule.id === 1).priority
+    );
+    expect(teacherSsoBlock.action.type).toBe("block");
+    expect(teacherSsoBlock.priority).toBeGreaterThan(cleverAllow.priority);
+    expect(rules.find((rule: any) => rule.id === 1000).priority)
+      .toBeGreaterThan(googleAllow.priority);
+
+    deferred.restrictions.attentionMode.active = true;
+    const attentionRules = core.buildDnrRules({
+      classroomState: deferred,
+      restrictionSsoPassThrough: true,
+    }, ["classroom", "restrictionSso"], NOW);
+    expect(attentionRules.map((rule: any) => rule.id)).toEqual([1]);
+
+    const ordinaryRules = core.buildDnrRules({
+      classroomState: state(12, {
+        restrictions: {
+          screenLock: { active: true, url: "https://ixl.com/math", domain: "ixl.com" },
+        },
+      }),
+      restrictionSsoPassThrough: true,
+    }, ["classroom", "restrictionSso"], NOW);
+    expect(ordinaryRules.some((rule: any) => rule.id >= 4000)).toBe(false);
+  });
+
+  it("keeps ordinary Waypoint and Flight Path landing behavior when the marker is absent", () => {
+    const waypoint = state(12, {
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    expect(core.planClassroomTabReconciliation(waypoint, [
+      { id: 1, active: true, url: "https://outside.example/" },
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    }).updates).toEqual([{ tabId: 1, url: "https://ixl.com/math/5" }]);
+    expect(core.planClassroomTabReconciliation(waypoint, [
+      { id: 1, active: true, url: "https://clever.com/login" },
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).updates).toEqual([{ tabId: 1, url: "https://ixl.com/math/5" }]);
+
+    const flightPath = state(13, {
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["khanacademy.org"] },
+      },
+    });
+    expect(core.planClassroomTabReconciliation(flightPath, [
+      { id: 1, active: true, url: "https://outside.example/" },
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    }).updates).toEqual([{ tabId: 1, url: "https://khanacademy.org" }]);
+  });
+
+  it("lands a cold deferred restriction on Clever and a warm one on its destination", () => {
+    const deferredWaypoint = state(14, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const tabs = [{ id: 1, active: true, url: "https://outside.example/" }];
+    const cold = core.planClassroomTabReconciliation(deferredWaypoint, tabs, {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    });
+    expect(cold.updates).toEqual([{ tabId: 1, url: "https://clever.com/" }]);
+    expect(cold.activateTabId).toBe(1);
+
+    const coldWithOldDestination = core.planClassroomTabReconciliation(deferredWaypoint, [
+      { id: 1, active: true, url: "https://app.ixl.com/math/5" },
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    });
+    expect(coldWithOldDestination.updates).toEqual([{ tabId: 1, url: "https://clever.com/" }]);
+
+    const warm = core.planClassroomTabReconciliation(deferredWaypoint, tabs, {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["district.clever.com"],
+    });
+    expect(warm.updates).toEqual([{ tabId: 1, url: "https://ixl.com/math/5" }]);
+
+    const deferredFlightPath = state(15, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["khanacademy.org"] },
+      },
+    });
+    expect(core.planClassroomTabReconciliation(deferredFlightPath, tabs, {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    }).updates).toEqual([{ tabId: 1, url: "https://clever.com/" }]);
+  });
+
+  it("does not focus away from active SSO and preserves it with the last destination tab", () => {
+    const deferred = state(16, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(deferred, [
+      { id: 1, active: true, url: "https://accounts.google.com/o/oauth2/auth" },
+      { id: 2, active: false, url: "https://app.ixl.com/math/5" },
+      { id: 3, active: false, url: "https://outside.example/" },
+    ], {
+      foregroundTabId: 1,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(plan).toEqual({
+      updates: [],
+      removeTabIds: [3],
+      createUrl: null,
+      activateTabId: null,
+      focusFallbackUrl: null,
+    });
+  });
+
+  it("does not treat a background window's active SSO tab as foreground", () => {
+    const deferred = state(17, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const backgroundSso = {
+      id: 2,
+      windowId: 20,
+      active: true,
+      url: "https://district.clever.com/login",
+    };
+
+    const protectedForeground = core.planClassroomTabReconciliation(deferred, [
+      { id: 1, windowId: 10, active: true, url: "chrome://settings/" },
+      backgroundSso,
+    ], {
+      foregroundTabId: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(protectedForeground.createUrl).toBe("https://ixl.com/math/5");
+    expect(protectedForeground.activateTabId).toBeNull();
+    expect(protectedForeground.removeTabIds).toEqual([]);
+
+    const noncompliantForeground = core.planClassroomTabReconciliation(deferred, [
+      { id: 3, windowId: 10, active: true, url: "https://outside.example/" },
+      backgroundSso,
+    ], {
+      foregroundTabId: 3,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(noncompliantForeground.updates).toEqual([{
+      tabId: 3,
+      url: "https://ixl.com/math/5",
+    }]);
+    expect(noncompliantForeground.activateTabId).toBe(3);
+    expect(noncompliantForeground.focusFallbackUrl).toBe("https://ixl.com/math/5");
+  });
+
+  it("bounds dormant SSO preservation without letting it suppress foreground focus", () => {
+    const deferred = state(17, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math/5", domain: "ixl.com" },
+      },
+    });
+    const tabs = [
+      { id: 1, windowId: 10, active: true, url: "https://app.ixl.com/math/5" },
+      { id: 2, windowId: 20, active: true, url: "https://district.clever.com/login" },
+      { id: 3, windowId: 30, active: true, url: "https://accounts.google.com/o/oauth2/auth" },
+    ];
+
+    const ambiguous = core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 1,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(ambiguous.removeTabIds).toEqual([2]);
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 1,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([2, 3]);
+
+    const hintedPopup = core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 3,
+      preserveRestrictionSsoTabIds: [3],
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(hintedPopup.removeTabIds).toEqual([2]);
+    expect(hintedPopup.activateTabId).toBeNull();
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 3,
+      preserveRestrictionSsoTabIds: [3],
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([2]);
+
+    // A fresh last-focused Clever tab protects that one authentication flow,
+    // but the dormant Google tab in another window remains removable so the
+    // configured numeric limit can recover.
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 2,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    }).removeTabIds).toEqual([3]);
+
+    const staleUnrelatedForeground = core.planClassroomTabReconciliation(deferred, [
+      ...tabs,
+      { id: 4, windowId: 40, active: true, url: "https://outside.example/unrelated" },
+    ], {
+      foregroundTabId: 4,
+      maxTabs: 2,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: ["clever.com"],
+    });
+    expect(staleUnrelatedForeground.removeTabIds).toEqual([4, 2]);
+    expect(staleUnrelatedForeground.updates).toEqual([]);
+    expect(staleUnrelatedForeground.activateTabId).toBe(1);
+    expect(staleUnrelatedForeground.focusFallbackUrl).toBe("https://ixl.com/math/5");
+
+    const deferredFlightPath = state(18, {
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["khanacademy.org"] },
+      },
+    });
+    const staleFlightPathForeground = core.planClassroomTabReconciliation(
+      deferredFlightPath,
+      [
+        { id: 1, windowId: 10, active: true, url: "https://khanacademy.org/math" },
+        ...tabs.slice(1),
+        { id: 4, windowId: 40, active: true, url: "https://outside.example/unrelated" },
+      ],
+      {
+        foregroundTabId: 4,
+        maxTabs: 2,
+        restrictionSsoPassThrough: true,
+        visitedSsoHosts: ["accounts.google.com"],
+      },
+    );
+    expect(staleFlightPathForeground.removeTabIds).toEqual([1, 2]);
+    expect(staleFlightPathForeground.updates).toEqual([{
+      tabId: 4,
+      url: "https://khanacademy.org",
+    }]);
+    expect(staleFlightPathForeground.activateTabId).toBe(4);
+    expect(staleFlightPathForeground.focusFallbackUrl).toBe("https://khanacademy.org");
+
+    const coldWithInactiveStaleSso = core.planClassroomTabReconciliation(deferred, [
+      { id: 1, windowId: 10, active: true, url: "https://outside.example/unrelated" },
+      { id: 2, windowId: 20, active: false, url: "https://clever.com/login" },
+    ], {
+      foregroundTabId: 1,
+      maxTabs: 1,
+      restrictionSsoPassThrough: true,
+      visitedSsoHosts: [],
+    });
+    expect(coldWithInactiveStaleSso.updates).toEqual([
+      { tabId: 1, url: "https://clever.com/" },
+    ]);
+    expect(coldWithInactiveStaleSso.activateTabId).toBe(1);
+    expect(coldWithInactiveStaleSso.removeTabIds).toEqual([]);
+
+    const coldFlightPathWithInactiveStaleSso = core.planClassroomTabReconciliation(
+      deferredFlightPath,
+      [
+        { id: 1, windowId: 10, active: true, url: "https://outside.example/unrelated" },
+        { id: 2, windowId: 20, active: false, url: "https://clever.com/login" },
+      ],
+      {
+        foregroundTabId: 1,
+        maxTabs: 1,
+        restrictionSsoPassThrough: true,
+        visitedSsoHosts: [],
+      },
+    );
+    expect(coldFlightPathWithInactiveStaleSso.updates).toEqual([
+      { tabId: 1, url: "https://clever.com/" },
+    ]);
+    expect(coldFlightPathWithInactiveStaleSso.activateTabId).toBe(1);
+    expect(coldFlightPathWithInactiveStaleSso.removeTabIds).toEqual([]);
+  });
+
   it("treats corrupted snapshots as invalid", () => {
     expect(() => core.normalizeClassroomState(null, NOW)).toThrow("must be an object");
     expect(() => core.normalizeClassroomState({

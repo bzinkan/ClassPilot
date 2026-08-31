@@ -69,6 +69,34 @@ The optional hall-pass control is separated from the student credential form
 and shown as a quiet **Kiosk mode** action in the bottom-left of the sign-in
 panel, reducing accidental launches on shared Chromebooks.
 
+### Late-sign-in Waypoint and SSO handoff (2.7.9)
+
+SchoolPilot can attach an explicit `lateSignInRestrictionSso` delivery marker
+to a deferred Waypoint or Flight Path only after the exact student, session,
+school, device, server, control revision, and negotiated
+`lateSignInRestrictionSsoV1` capability have been verified. Marker-free live
+restrictions retain their existing behavior. A marked frame with missing,
+retired, or mismatched authority is rejected before it can change tabs, rules,
+or local restriction state.
+
+For an accepted marked restriction, a cold session starts at
+`https://clever.com/`. During that authentication flow, only `clever.com` and
+its subdomains plus the exact `accounts.google.com` family can pass through the
+Waypoint or Flight Path fence. Lookalike suffixes are rejected. Attention mode,
+the school block list, and an explicit teacher block remain authoritative over
+this pass-through. An active authentication tab is not counted as a compliant
+destination and is not navigated or pulled out of focus mid-login.
+
+The extension keeps only the visited authentication host names and a SHA-256
+digest scoped to the immutable local binding in trusted extension storage. It
+does not store SSO URLs, query strings, credentials, or the raw student,
+session, school, or device tuple in that record. The record is cleared on
+sign-out or any student, session, school, device, server-origin, managed-policy,
+or authentication-context transition. After a valid host has been visited,
+later reconciliation for the same binding goes directly to the intended
+Waypoint or Flight Path destination. This behavior adds no Chrome permission
+and no managed-policy schema field.
+
 ### Reliable observation policy reconciliation (2.7.2)
 
 Heartbeat and WebSocket protocol responses now order screenshot authority
@@ -173,9 +201,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the currently prepared release, the upload artifact is
-`dist/ClassPilot-v2.7.9.zip`. `dist/classpilot-extension.zip` is only the
-compatibility copy produced by the same script.
+For the final 2.7.9 release, the canonical artifact name will be
+`dist/ClassPilot-v2.7.9.zip` after clean-tag packaging. Any archive built before
+the late-sign-in SSO work landed is obsolete and must not be uploaded.
+`dist/classpilot-extension.zip` is only the compatibility copy produced by the
+same script.
 
 ### Publish Through Chrome Web Store
 
