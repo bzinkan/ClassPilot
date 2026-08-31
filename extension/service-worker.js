@@ -9232,15 +9232,21 @@ function observeRestrictionSsoHostForAuth(urlValue, context) {
     await ensureRestrictionSsoVisitStateForContextNow(context);
     assertAuthenticatedContextCurrent(context, 'restriction SSO navigation');
     if (visitedRestrictionSsoHosts.has(host)) return false;
-    visitedRestrictionSsoHosts.add(host);
+    // Do not publish the visit to the in-memory ledger until the durable write
+    // succeeds. A transient storage failure must leave the host retryable; if
+    // memory advanced first, the next navigation would be treated as a no-op
+    // and a worker restart would forget that the SSO hop ever happened.
+    const nextVisitedHosts = new Set(visitedRestrictionSsoHosts);
+    nextVisitedHosts.add(host);
     await rawLocalKv.set({
       [RESTRICTION_SSO_VISIT_STORAGE_KEY]: {
         schemaVersion: RESTRICTION_SSO_VISIT_SCHEMA_VERSION,
         scopeDigest: restrictionSsoVisitScopeDigest,
-        visitedHosts: [...visitedRestrictionSsoHosts].sort(),
+        visitedHosts: [...nextVisitedHosts].sort(),
       },
     });
     assertAuthenticatedContextCurrent(context, 'restriction SSO navigation persistence');
+    visitedRestrictionSsoHosts = nextVisitedHosts;
     return true;
   });
 }
@@ -15609,6 +15615,14 @@ async function reconcileExistingTabsForClassroomState(
   // asynchronously updated last-focused-window query. The hint is accepted
   // only for a fresh tab in this inventory and only for a marked restriction.
   const foregroundTab = hintedForegroundSso || queriedForegroundTab;
+  const activeRestrictionSsoTabIds = restrictionSsoPassThroughForState(state)
+    ? tabs.filter((tab) => tab.active === true && RuntimeCore.isRestrictionSsoTab(tab))
+      .map((tab) => tab.id)
+    : [];
+  const focusProtectedRestrictionSsoTabIds = [...new Set([
+    ...activeRestrictionSsoTabIds,
+    ...(hintedForegroundSso ? [hintedForegroundSso.id] : []),
+  ])];
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
     foregroundTabId: foregroundTab?.id,
     preserveRestrictionSsoTabIds: hintedForegroundSso ? [hintedForegroundSso.id] : [],
@@ -15688,15 +15702,37 @@ async function reconcileExistingTabsForClassroomState(
   ));
   fallbackUrl = fallbackUrl || foregroundUpdateFailure?.url || null;
   if (fallbackUrl) {
+    // A failed update of a background destination tab must not turn the one
+    // allowed fallback into a focus steal while Clever/Google authentication
+    // is active. Re-read the protected candidates at the destructive boundary
+    // so a completed/closed SSO flow does not unnecessarily suppress normal
+    // foreground enforcement. An onCreated hint remains authoritative for this
+    // reconciliation because Chrome can temporarily stale-report its `active`
+    // bit while moving an OAuth popup between windows.
+    let preserveRestrictionSsoFocus = false;
+    for (const tabId of focusProtectedRestrictionSsoTabIds) {
+      const candidate = await getTab(tabId).catch(() => null);
+      assertCurrent('classroom fallback SSO focus verification');
+      if (
+        RuntimeCore.isRestrictionSsoTab(candidate)
+        && (candidate.active === true || candidate.id === hintedForegroundSso?.id)
+      ) {
+        preserveRestrictionSsoFocus = true;
+        break;
+      }
+    }
     assertCurrent('classroom tab creation');
-    const createdTab = await createTab({ url: fallbackUrl, active: true });
+    const createdTab = await createTab({
+      url: fallbackUrl,
+      active: !preserveRestrictionSsoFocus,
+    });
     if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
     assertCurrent('classroom tab creation');
-    if (Number.isInteger(createdTab?.windowId)) {
+    if (!preserveRestrictionSsoFocus && Number.isInteger(createdTab?.windowId)) {
       await focusWindow(createdTab.windowId);
       assertCurrent('classroom fallback window focus');
     }
-    if (Number.isInteger(createdTab?.id)) {
+    if (!preserveRestrictionSsoFocus && Number.isInteger(createdTab?.id)) {
       const verified = await queryTabs({ active: true, lastFocusedWindow: true });
       assertCurrent('classroom fallback foreground verification');
       if (!verified.some((tab) => tab.id === createdTab.id)) {

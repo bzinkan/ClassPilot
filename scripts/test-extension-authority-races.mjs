@@ -3657,8 +3657,108 @@ async function main() {
         );
         genericRestartRemovedByLimit.push({ limit, removed: removedForLimit });
       }
+
+      // A destination-tab navigation can fail after Chrome has already made an
+      // OAuth popup foreground. The one fallback remains useful, but it must be
+      // created in the background and must not focus its window over the active
+      // exact-SSO flow.
+      const failedBackgroundWaypointInventory = [{
+        id: 7901,
+        windowId: 79,
+        active: true,
+        url: 'https://accounts.google.com/o/oauth2/v2/auth',
+      }, {
+        id: 7902,
+        windowId: 78,
+        active: false,
+        url: 'https://outside.example/before-waypoint',
+      }];
+      const failedBackgroundWaypointCreates = [];
+      const failedBackgroundWaypointFocuses = [];
+      currentMaxTabs = null;
+      await reconcileExistingTabsForClassroomState(
+        currentClassroomState,
+        () => {},
+        firstContext,
+        null,
+        {
+          queryTabs: async (query) => (
+            query?.lastFocusedWindow
+              ? [failedBackgroundWaypointInventory[0]]
+              : failedBackgroundWaypointInventory
+          ),
+          updateTab: async (tabId, properties) => {
+            if (tabId === 7902 && properties?.url) {
+              throw new Error('fixture background Waypoint tab disappeared');
+            }
+            return {
+              ...failedBackgroundWaypointInventory.find((tab) => tab.id === tabId),
+              ...properties,
+            };
+          },
+          getTab: async (tabId) => (
+            failedBackgroundWaypointInventory.find((tab) => tab.id === tabId) || null
+          ),
+          removeTab: async () => {},
+          createTab: async (properties) => {
+            failedBackgroundWaypointCreates.push({ ...properties });
+            return { id: 7903, windowId: 78, ...properties };
+          },
+          focusWindow: async (windowId) => {
+            failedBackgroundWaypointFocuses.push(windowId);
+          },
+          refreshTabs: async () => {},
+        },
+      );
+
       currentMaxTabs = null;
       await ensureRestrictionSsoVisitStateForContext(firstContext);
+
+      // A failed local write must not poison the in-memory ledger. Retry the
+      // same exact host, then clear only the in-memory copy to model a worker
+      // restart and prove the successfully retried host restores durably.
+      const originalTransientVisitSet = rawLocalKv.set;
+      let transientVisitSetAttempts = 0;
+      let transientVisitFailure;
+      let transientVisitRetryAccepted;
+      let transientVisitAbsentAfterFailure;
+      let transientVisitRestoredAfterRestart;
+      try {
+        rawLocalKv.set = async (values) => {
+          if (
+            Object.prototype.hasOwnProperty.call(
+              values || {},
+              RESTRICTION_SSO_VISIT_STORAGE_KEY,
+            )
+            && transientVisitSetAttempts++ === 0
+          ) {
+            throw new Error('fixture transient restriction SSO storage failure');
+          }
+          return originalTransientVisitSet(values);
+        };
+        transientVisitFailure = await observeRestrictionSsoHostForAuth(
+          'https://accounts.google.com/o/oauth2/auth',
+          firstContext,
+        ).then(() => null, (error) => error?.message || error?.name || 'unknown');
+        transientVisitAbsentAfterFailure = !visitedRestrictionSsoHosts.has(
+          'accounts.google.com',
+        );
+        transientVisitRetryAccepted = await observeRestrictionSsoHostForAuth(
+          'https://accounts.google.com/o/oauth2/auth',
+          firstContext,
+        );
+      } finally {
+        rawLocalKv.set = originalTransientVisitSet;
+      }
+      restrictionSsoVisitScopeDigest = null;
+      visitedRestrictionSsoHosts = new Set();
+      await ensureRestrictionSsoVisitStateForContext(firstContext);
+      transientVisitRestoredAfterRestart = visitedRestrictionSsoHosts.has(
+        'accounts.google.com',
+      );
+      await clearRestrictionSsoVisitState();
+      await ensureRestrictionSsoVisitStateForContext(firstContext);
+
       const accepted = await observeRestrictionSsoHostForAuth(
         'https://district.clever.com/oauth/start',
         firstContext,
@@ -3852,6 +3952,13 @@ async function main() {
         genericRestartRemovedByLimit,
         genericRestartUpdates,
         genericRestartFocusedWindows,
+        failedBackgroundWaypointCreates,
+        failedBackgroundWaypointFocuses,
+        transientVisitFailure,
+        transientVisitSetAttempts,
+        transientVisitAbsentAfterFailure,
+        transientVisitRetryAccepted,
+        transientVisitRestoredAfterRestart,
         accepted,
         rejectedLookalike,
         firstVisitedHosts: firstStored?.visitedHosts || [],
@@ -3928,6 +4035,19 @@ async function main() {
     ]);
     assert.deepEqual(restrictionSsoFixture.genericRestartUpdates, []);
     assert.deepEqual(restrictionSsoFixture.genericRestartFocusedWindows, []);
+    assert.deepEqual(restrictionSsoFixture.failedBackgroundWaypointCreates, [{
+      url: 'https://ixl.com/math',
+      active: false,
+    }]);
+    assert.deepEqual(restrictionSsoFixture.failedBackgroundWaypointFocuses, []);
+    assert.equal(
+      restrictionSsoFixture.transientVisitFailure,
+      'fixture transient restriction SSO storage failure',
+    );
+    assert.equal(restrictionSsoFixture.transientVisitSetAttempts, 2);
+    assert.equal(restrictionSsoFixture.transientVisitAbsentAfterFailure, true);
+    assert.equal(restrictionSsoFixture.transientVisitRetryAccepted, true);
+    assert.equal(restrictionSsoFixture.transientVisitRestoredAfterRestart, true);
     assert.equal(restrictionSsoFixture.accepted, true);
     assert.equal(restrictionSsoFixture.rejectedLookalike, false);
     assert.deepEqual(restrictionSsoFixture.firstVisitedHosts, ['district.clever.com']);

@@ -5117,6 +5117,7 @@ async function main() {
       const originalCheckLicenseStatus = checkLicenseStatus;
       const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
       const originalTrackingState = trackingState;
+      const originalNoteStudentAuthGatePresence = noteStudentAuthGatePresence;
       const rawDirectoryDeviceId = 'managed-directory-identifier-must-not-leak';
       const preflightToken = `cpmp1.${'A'.repeat(32)}.${'T'.repeat(43)}`;
       const continuityProof = `cpmd1.${'B'.repeat(32)}.${'P'.repeat(43)}`;
@@ -5134,6 +5135,16 @@ async function main() {
       let loginRequestDeviceId = null;
       let directoryReads = 0;
       try {
+        // The real content-script gate pulses every ten seconds. Fence those
+        // unrelated presence publishes before replacing the continuity fetch
+        // seam, otherwise a pulse can issue a second preflight into this
+        // fixture and make the exact request-order assertion timing-dependent.
+        noteStudentAuthGatePresence = () => true;
+        studentAuthGatePresenceSources.clear();
+        studentAuthGatePresenceAbortController?.abort();
+        if (studentAuthGatePresencePublishInFlight) {
+          await studentAuthGatePresencePublishInFlight.catch(() => {});
+        }
         if (hasStudentAuth()) {
           const current = captureAuthenticatedContext('managed continuity fixture reset');
           await clearStudentAuth('managed_continuity_fixture_reset', {
@@ -5461,6 +5472,9 @@ async function main() {
         checkLicenseStatus = originalCheckLicenseStatus;
         initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
         trackingState = originalTrackingState;
+        studentAuthGatePresenceAbortController?.abort();
+        studentAuthGatePresenceSources.clear();
+        noteStudentAuthGatePresence = originalNoteStudentAuthGatePresence;
       }
     });
     assert.equal(managedDeviceContinuityFlow.releasesBeforeCanonicalResolution, 0);
