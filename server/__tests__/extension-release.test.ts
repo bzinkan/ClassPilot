@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.7.9");
+    expect(manifest.version).toBe("2.8.0");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -627,6 +627,7 @@ describe("ClassPilot extension release package guards", () => {
       "lateSignInRestrictionSsoV1",
       "studentChatIdempotencyV1",
       "screenshotTrackingWindowLeaseV1",
+      "screenshotActiveObservationCadenceV1",
       "screenshotObservationLeaseV1",
       "safetyEvidenceCaptureV1",
       "liveViewIceServersV1",
@@ -807,6 +808,23 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("type: 'WS_STATUS'");
     expect(serviceWorker).toContain("wsAuthenticatedGeneration !== wsConnectionGeneration");
     expect(serviceWorker).toContain("SCREENSHOT_COMMAND_MIN_GAP_MS");
+    expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5 * 1000");
+    expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS = 4500");
+    expect(serviceWorker).toContain(
+      "const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS",
+    );
+    expect(serviceWorker).toContain("maxAttempts: rapidCapture ? 1 : 2");
+    expect(serviceWorker).toContain("type: 'SCREENSHOT_CADENCE_START'");
+    expect(serviceWorker).toContain("message.type === 'SCREENSHOT_CADENCE_TICK'");
+    expect(serviceWorker).toContain("captureAndSendScreenshot({ reason: 'active-view-tick' })");
+    expect(serviceWorker).toContain("rawPolicy?.captureCadence");
+    expect(serviceWorker).toContain("scheduleEventHeartbeat('screenshot-policy-refresh')");
+    expect(serviceWorker).toContain("scheduleActiveViewNavigationCapture('tab-activated')");
+    expect(serviceWorker).toContain("scheduleActiveViewNavigationCapture('url-changed')");
+    expect(offscreen).toContain("SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5000");
+    expect(offscreen).toContain("latestScreenshotCadenceIssuedAt");
+    expect(offscreen).toContain("SCREENSHOT_CADENCE_EXPIRED");
+    expect(offscreen).not.toContain("localStorage.setItem('screenshot");
     expect(serviceWorker).not.toContain("} else if (screenshotScheduled) {\n        // Capture immediately on first heartbeat");
     expect(offscreen).toContain("proxyConnectionGeneration");
     expect(offscreen).toContain("authenticated: proxyAuthenticated");
@@ -963,6 +981,20 @@ describe("ClassPilot extension release package guards", () => {
     expect(compliance).not.toContain("default: 24 hours");
     expect(compliance).toContain("default 30 days");
     expect(extensionCompliance).toContain("https://school-pilot.net/privacy");
+    for (const source of [
+      extensionCompliance,
+      readRepoFile("extension/README.md"),
+      readRepoFile("COPPA_FERPA_Compliance.md"),
+      readRepoFile("CLASSPILOT_USER_GUIDE.md"),
+      readRepoFile("ClassPilot_IT_Tutorial.md"),
+      readRepoFile("client/public/ClassPilot_IT_Tutorial.html"),
+      readRepoFile("client/src/pages/help.tsx"),
+      readRepoFile("extension/popup.js"),
+    ]) {
+      expect(source).toMatch(/about\s+every\s+(?:5|five) seconds/i);
+      expect(source).toMatch(/about\s+every\s+30 seconds/i);
+      expect(source).toMatch(/exact class view\s+visible/i);
+    }
   });
 
   it("keeps public IT tutorial privacy claims aligned with 2.7.3 behavior", () => {

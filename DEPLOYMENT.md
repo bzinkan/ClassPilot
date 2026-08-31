@@ -7,22 +7,23 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> For 2.7.9, upload only `dist/ClassPilot-v2.7.9.zip` produced from the clean,
+> For 2.8.0, upload only `dist/ClassPilot-v2.8.0.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.7.9.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.8.0.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Any provisional 2.7.9 archive built before the late-sign-in Waypoint and
-> Clever/Google SSO work landed is obsolete and must not be submitted.
+> Any provisional 2.8.0 archive built before the active-class screenshot
+> cadence work landed is obsolete and must not be submitted.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
 > test again after review, and publish only when the school-wide auto-update is
 > ready to begin.
 >
-> The paired SchoolPilot deployment must land first with both
-> `studentAuthGatePresenceV1` and `lateSignInRestrictionSsoV1` disabled. Keep
-> both capabilities off throughout Chrome Web Store review and mixed-version
-> fleet saturation. Enable them separately for the exact school only after all
-> recently active Chromebooks report 2.7.9 and the matching raw capabilities.
+> The paired SchoolPilot deployment must land first with support for
+> `screenshotActiveObservationCadenceV1`, while that capability remains
+> disabled. Keep the five-second cadence off throughout Chrome Web Store review
+> and mixed-version fleet saturation. Enable it for a controlled school only
+> after recently active Chromebooks report 2.8.0 and the matching raw
+> capability; unaccepted or absent cadence authority stays at 30 seconds.
 
 The material below is retained solely to explain the retired prototype and is
 not an operator runbook.
@@ -124,12 +125,13 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.7.9 release artifact
+### 2.3 Build the canonical 2.8.0 release artifact
 
-Start from a clean, tagged, reviewed 2.7.9 commit at this repository's root.
+Start from a clean, tagged, reviewed 2.8.0 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, exact-bound deferred-restriction marker, and Clever/Google SSO
-pass-through together; a narrower pre-amendment archive is not releasable.
+pass-through together, plus the exact-authority active-class screenshot cadence;
+a narrower pre-amendment archive is not releasable.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -139,7 +141,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.7.9.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.0.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -159,7 +161,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.7.9.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.8.0.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -226,7 +228,24 @@ This prevents students from needing to configure the server manually (future enh
    - Active tab URL shows
    - Status is "Online" (green dot)
 
-### 4.3 Test Screen Sharing
+### 4.3 Test Active-Class Screenshot Cadence
+
+1. Keep `screenshotActiveObservationCadenceV1` disabled until the controlled
+   Chromebook has updated to 2.8.0 and reports the raw capability.
+2. Open the exact class view as an authorized teacher or administrator, enable
+   the capability only for the controlled school, and confirm a fresh preview
+   arrives about every five seconds without overlapping uploads.
+3. Switch away from that class view and confirm the short-lived rapid grant is
+   revoked or expires locally and capture returns to the 30-second background
+   cadence. Switching students, sessions, classes, or authentication contexts
+   must never reuse the prior rapid schedule or pixels.
+4. Exercise a `429` and screenshot-store `503`. Each rapid capture may make only
+   one upload attempt; `429` must enter the existing backoff and neither failure
+   may create a queued retry burst.
+5. Roll back by disabling the capability. Version 2.8.0 must continue the
+   existing 30-second tracking-window cadence without an extension rollback.
+
+### 4.4 Test Screen Sharing
 
 1. From an authorized teacher dashboard, request Live View for the exact test
    student and active teaching session.
@@ -261,9 +280,11 @@ Before deploying, inform students and parents about the monitoring:
 > - Timestamps of web activity
 > - Website icons (favicons)
 > - Bounded open-tab state needed for authorized classroom controls
-> - Tracking-window active-tab thumbnails about every 30 seconds while
->   school-managed monitoring is active, independent of dashboard visibility;
->   SchoolPilot retains class-bound images and discards gap/student-session pixels
+> - Tracking-window active-tab thumbnails about every 5 seconds only while an
+>   authorized teacher or administrator has the exact class view visible, and
+>   about every 30 seconds otherwise while school-managed monitoring remains
+>   active; SchoolPilot retains class-bound images and discards
+>   gap/student-session pixels
 > - One exact-tab safety image when an authorized safety action requests it
 > - Classroom communications that a student or teacher chooses to send
 > - Website content visibly rendered in an authorized thumbnail, safety image,
@@ -354,7 +375,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.7.9.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.8.0.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.

@@ -1222,6 +1222,7 @@ async function main() {
           'exactTabCloseV2',
           'studentChatIdempotencyV1',
           'screenshotObservationLeaseV1',
+          'screenshotActiveObservationCadenceV1',
           'safetyEvidenceCaptureV1',
           'liveViewIceServersV1',
           'kioskLaunchTicketV2',
@@ -1551,6 +1552,75 @@ async function main() {
           ...authB,
           studentSessionId: 'student-session-new-scope',
         }, Date.now());
+        const cadenceNow = Date.now();
+        const cadencePolicyBase = {
+          mode: 'tracking_window_lease',
+          valid: true,
+          captureAllowed: true,
+          expiresAt: cadenceNow + 90_000,
+          authority: {
+            kind: 'teaching_session',
+            teachingSessionId: 'teaching-session-b',
+            controlRevision: 42,
+          },
+        };
+        const activeViewCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: 5,
+            expiresInSeconds: 90,
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, cadencePolicyBase);
+        const invalidIntervalCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: 4,
+            expiresInSeconds: 90,
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, cadencePolicyBase);
+        const wrongAuthorityCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: 5,
+            expiresInSeconds: 90,
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, {
+          ...cadencePolicyBase,
+          authority: { kind: 'student_session', controlRevision: 42 },
+        });
+        adoptNegotiatedProtocolState({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities.filter(
+            (capability) => capability !== 'screenshotActiveObservationCadenceV1',
+          ),
+        }, authB);
+        const unnegotiatedCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: 5,
+            expiresInSeconds: 90,
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, cadencePolicyBase);
+        adoptNegotiatedProtocolState({
+          serverProtocolVersion: 3,
+          acceptedCapabilities: allSupportedCapabilities,
+        }, authB);
         captureAndSendScreenshot = captureBeforeLeaseAdoption;
         progress('capability adoption complete');
 
@@ -1918,6 +1988,99 @@ async function main() {
         });
         const serviceUnavailableLeaseRetained = ambientScreenshotAllowed(authB);
 
+        const rapidCaptureFixture = {
+          queryActiveTab: async () => [{
+            id: 7017,
+            active: true,
+            windowId: 17,
+            url: 'https://observed.example/rapid-cadence',
+            title: 'Rapid cadence',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => 'data:image/jpeg;base64,cmFwaWQtY2FkZW5jZQ==',
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        };
+        const rapidCadenceUploadOptions = [];
+        fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
+          rapidCadenceUploadOptions.push({ maxAttempts: retryOptions.maxAttempts });
+          return new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        };
+        const rapidClockBase = originalDateNow();
+        let rapidClockNow = rapidClockBase;
+        Date.now = () => rapidClockNow;
+        lastScreenshotAttemptAt = 0;
+        try {
+          await captureAndSendScreenshot({
+            reason: 'active-view-navigation',
+            ...rapidCaptureFixture,
+          });
+          rapidClockNow = rapidClockBase + 1_000;
+          await captureAndSendScreenshot({
+            reason: 'active-view-tick',
+            ...rapidCaptureFixture,
+          });
+          rapidClockNow = rapidClockBase + 4_500;
+          await captureAndSendScreenshot({
+            reason: 'active-view-tick',
+            ...rapidCaptureFixture,
+          });
+        } finally {
+          Date.now = originalDateNow;
+        }
+        const rapidCadenceCombinedUploadCount = rapidCadenceUploadOptions.length;
+        const rapidCadenceMinGaps = {
+          navigation: screenshotCaptureMinimumGap('active-view-navigation'),
+          tick: screenshotCaptureMinimumGap('active-view-tick'),
+        };
+
+        const fetchBeforeRapidFailureCases = globalThis.fetch;
+        const fetchWithBackoffBeforeRapidFailureCases = fetchWithBackoff;
+        let rapid503FetchAttempts = 0;
+        let rapid429FetchAttempts = 0;
+        try {
+          fetchWithBackoff = originalFetchWithBackoff;
+          globalThis.fetch = async () => {
+            rapid503FetchAttempts += 1;
+            return new Response(JSON.stringify({
+              ok: false,
+              code: 'SCREENSHOT_STORE_UNAVAILABLE',
+            }), {
+              status: 503,
+              headers: { 'content-type': 'application/json' },
+            });
+          };
+          lastScreenshotAttemptAt = 0;
+          await captureAndSendScreenshot({
+            reason: 'active-view-tick',
+            ...rapidCaptureFixture,
+          });
+
+          globalThis.fetch = async () => {
+            rapid429FetchAttempts += 1;
+            return new Response('{}', {
+              status: 429,
+              headers: {
+                'content-type': 'application/json',
+                'retry-after': '60',
+              },
+            });
+          };
+          lastScreenshotAttemptAt = 0;
+          apiBackoffUntilMs = 0;
+          await captureAndSendScreenshot({
+            reason: 'active-view-navigation',
+            ...rapidCaptureFixture,
+          });
+        } finally {
+          apiBackoffUntilMs = 0;
+          globalThis.fetch = fetchBeforeRapidFailureCases;
+          fetchWithBackoff = fetchWithBackoffBeforeRapidFailureCases;
+        }
+
         const originalDisableForScreenshotLicense = disableForInactiveLicense;
         const screenshotLicenseDenials = [];
         disableForInactiveLicense = async (planStatus, authContext) => {
@@ -1952,6 +2115,29 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
+        const priorScreenshotRefreshClassroomState = currentClassroomState;
+        currentClassroomState = {
+          ...(currentClassroomState || {}),
+          teachingSessionId: 'teaching-session-b',
+          supervisionContextId: null,
+        };
+        await handleWsMessage(JSON.stringify({
+          type: 'screenshot-policy-refresh',
+          _msgId: 'screenshot-policy-refresh-current',
+          reason: 'observation_changed',
+          studentId: authB.studentId,
+          studentSessionId: authB.studentSessionId,
+          teachingSessionId: 'teaching-session-b',
+        }), wsConnectionGeneration, authB);
+        await handleWsMessage(JSON.stringify({
+          type: 'screenshot-policy-refresh',
+          _msgId: 'screenshot-policy-refresh-stale-session',
+          reason: 'observation_changed',
+          studentId: authB.studentId,
+          studentSessionId: authB.studentSessionId,
+          teachingSessionId: 'teaching-session-a',
+        }), wsConnectionGeneration, authB);
+        currentClassroomState = priorScreenshotRefreshClassroomState;
         disableForInactiveLicense = originalDisableForScreenshotLicense;
         scheduleEventHeartbeat = originalScheduleEventHeartbeat;
 
@@ -3648,6 +3834,10 @@ async function main() {
           explicitDeniedPolicyAllowed,
           omittedPolicyExpiredRetention,
           omittedPolicyNewScopeRetention,
+          activeViewCadence,
+          invalidIntervalCadence,
+          wrongAuthorityCadence,
+          unnegotiatedCadence,
           leaseImmediateCaptureRequests,
           generationBeforeContinuousRenewal,
           generationAfterContinuousRenewal,
@@ -3681,6 +3871,11 @@ async function main() {
           screenshotAuthorityHeartbeatReasons,
           screenshotServiceUnavailableResult,
           serviceUnavailableLeaseRetained,
+          rapidCadenceCombinedUploadCount,
+          rapidCadenceUploadOptions,
+          rapidCadenceMinGaps,
+          rapid503FetchAttempts,
+          rapid429FetchAttempts,
           screenshotLicenseDeniedResult,
           screenshotLicenseDenials,
           screenshotLicenseExpectedScope,
@@ -4021,6 +4216,24 @@ async function main() {
     assert.equal(result.explicitDeniedPolicyAllowed, false);
     assert.equal(result.omittedPolicyExpiredRetention, false);
     assert.equal(result.omittedPolicyNewScopeRetention, false);
+    assert.equal(result.activeViewCadence.mode, 'active_view');
+    assert.equal(result.activeViewCadence.intervalSeconds, 5);
+    assert.equal(result.activeViewCadence.expiresAt > 0, true);
+    assert.deepEqual(result.invalidIntervalCadence, {
+      mode: 'background',
+      intervalSeconds: 30,
+      expiresAt: 0,
+    });
+    assert.deepEqual(result.wrongAuthorityCadence, {
+      mode: 'background',
+      intervalSeconds: 30,
+      expiresAt: 0,
+    });
+    assert.deepEqual(result.unnegotiatedCadence, {
+      mode: 'background',
+      intervalSeconds: 30,
+      expiresAt: 0,
+    });
     assert.equal(result.leaseImmediateCaptureRequests >= 3, true);
     assert.equal(
       result.generationAfterContinuousRenewal,
@@ -4040,7 +4253,7 @@ async function main() {
     );
     assert.equal(result.unrelatedCommandBindingAccepted, true);
     assert.equal(result.allSupportedCapabilitiesAccepted, true);
-    assert.equal(result.individuallyAcceptedCapabilities.length, 9);
+    assert.equal(result.individuallyAcceptedCapabilities.length, 10);
     assert.equal(result.individuallyAcceptedCapabilities.every((entry) => entry.accepted), true);
     assert.equal(result.unmarkedScopedCapabilitiesRejected, true);
     assert.equal(result.nullRevisionCommandExecutions, 1);
@@ -4114,12 +4327,24 @@ async function main() {
       'screenshot-capability-heartbeat-required',
       'screenshot-paused-unobserved',
       'screenshot-authorization-denied',
+      'screenshot-policy-refresh',
     ]);
     assert.deepEqual(result.screenshotServiceUnavailableResult, {
       status: 'unavailable',
       reason: 'service_unavailable',
     });
     assert.equal(result.serviceUnavailableLeaseRetained, true);
+    assert.equal(result.rapidCadenceCombinedUploadCount, 2);
+    assert.deepEqual(result.rapidCadenceUploadOptions, [
+      { maxAttempts: 1 },
+      { maxAttempts: 1 },
+    ]);
+    assert.deepEqual(result.rapidCadenceMinGaps, {
+      navigation: 4_500,
+      tick: 4_500,
+    });
+    assert.equal(result.rapid503FetchAttempts, 1);
+    assert.equal(result.rapid429FetchAttempts, 1);
     assert.deepEqual(result.screenshotLicenseDeniedResult, {
       status: 'paused_unobserved',
       reason: 'license_denied',

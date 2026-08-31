@@ -152,7 +152,7 @@ async function main() {
     ],
     [
       'screenshot authorization denial',
-      'const responseBody = !response.ok && [401, 402, 403, 404, 409].includes(response.status)',
+      'const responseBody = await response.json().catch(() => ({}));',
       'if (response.status === 401 || response.status === 403) {',
       'const structuredAuthorityDenial =',
     ],

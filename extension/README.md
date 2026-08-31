@@ -8,7 +8,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 - **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Tracking-Window Screen Thumbnails**: Captures bounded active-tab screenshots about every 30 seconds while school-managed monitoring is active in an authorized tracking window, independent of teacher dashboard tab visibility, plus an exact-bound safety capture when requested
+- **Tracking-Window Screen Thumbnails**: Captures bounded active-tab screenshots about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active in the authorized tracking window, plus an exact-bound safety capture when requested
 - **Visible Indicators**: Shows in-page and popup indicators when school-managed monitoring is active
 - **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
@@ -69,6 +69,24 @@ The optional hall-pass control is separated from the student credential form
 and shown as a quiet **Kiosk mode** action in the bottom-left of the sign-in
 panel, reducing accidental launches on shared Chromebooks.
 
+### Authorized active-class preview cadence (2.8.0)
+
+When SchoolPilot and the extension negotiate
+`screenshotActiveObservationCadenceV1`, SchoolPilot may grant a short-lived
+five-second capture cadence only for the exact teaching session currently
+visible to an authorized teacher or administrator. The cadence is fenced to
+the current student, student session, teaching session, control revision, and
+authentication generation. Closing or changing that class view, changing any
+binding, or reaching the local lease deadline immediately returns capture to
+the ordinary 30-second tracking-window cadence.
+
+The rapid timer runs only in the extension's non-persistent offscreen document.
+The existing 30-second Chrome alarm remains the recovery path if that document
+or the MV3 service worker is suspended. At most one capture/upload may be in
+flight; overlapping ticks are dropped rather than queued or retried. Screenshot
+pixels are never persisted by the extension, and this release adds no Chrome
+permission.
+
 ### Late-sign-in Waypoint and SSO handoff (2.7.9)
 
 SchoolPilot can attach an explicit `lateSignInRestrictionSso` delivery marker
@@ -110,7 +128,7 @@ When SchoolPilot requests a capability heartbeat after a screenshot upload,
 the extension coalesces one near-immediate heartbeat without changing its
 normal 10-second cadence. A transient screenshot-store outage keeps only the
 otherwise valid lease and recovers through the existing bounded retry and
-30-second capture cadence.
+30-second background capture cadence.
 
 ### Private kiosk continuity tickets (2.7.1)
 
@@ -201,9 +219,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.7.9 release, the canonical artifact name will be
-`dist/ClassPilot-v2.7.9.zip` after clean-tag packaging. Any archive built before
-the late-sign-in SSO work landed is obsolete and must not be uploaded.
+For the final 2.8.0 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.0.zip` after clean-tag packaging. Any archive built before
+the active-class cadence work landed is obsolete and must not be uploaded.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
@@ -300,7 +318,7 @@ git rm --cached extension/config.js
 ### Automatic Monitoring
 - **Tab titles and URLs are collected automatically** - No student action required
 - Heartbeat sends data every 10 seconds
-- In negotiated tracking-window mode, active-tab thumbnails are captured about every 30 seconds while school-managed monitoring is active inside the server-authorized tracking window, whether or not a teacher currently has the dashboard tab visible
+- In negotiated tracking-window mode, active-tab thumbnails are captured about every 5 seconds only while an authorized teacher or administrator has the exact class view visible; otherwise capture remains about every 30 seconds while school-managed monitoring is active inside the server-authorized tracking window
 - Every upload is bound to the exact current student or teaching session and control revision. SchoolPilot discards gap/student-session pixels on receipt and retains only class-bound thumbnails
 - Capture stops when school tracking policy is hard-off, after sign-out/session expiry or an authentication/explicit license denial, or when the short-lived tracking-window lease expires or is revoked
 - The older observation-lease capability remains available for mixed-version rollout; a server-selected legacy screenshot mode remains an explicit fallback

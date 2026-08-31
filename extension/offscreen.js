@@ -54,6 +54,125 @@ let proxyAuthenticated = false;
 let proxyUrl = null;
 let proxyAuthContextId = null;
 let proxyServerOrigin = null;
+let screenshotCadenceTimer = null;
+let screenshotCadenceExpiryTimer = null;
+let screenshotCadenceTickInFlight = false;
+let screenshotCadenceSchedule = null;
+let latestScreenshotCadenceIssuedAt = 0;
+
+const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5000;
+const SCREENSHOT_ACTIVE_CADENCE_MAX_LEASE_MS = 90 * 1000;
+
+function clearScreenshotCadenceTimers() {
+  if (screenshotCadenceTimer) clearInterval(screenshotCadenceTimer);
+  if (screenshotCadenceExpiryTimer) clearTimeout(screenshotCadenceExpiryTimer);
+  screenshotCadenceTimer = null;
+  screenshotCadenceExpiryTimer = null;
+  screenshotCadenceTickInFlight = false;
+}
+
+function stopScreenshotCadence() {
+  clearScreenshotCadenceTimers();
+  screenshotCadenceSchedule = null;
+}
+
+function normalizeScreenshotCadenceRequest(message = {}) {
+  const cadenceId = String(message.cadenceId || '').trim();
+  const generation = Number(message.generation);
+  const issuedAt = Number(message.issuedAt);
+  const expiresAt = Number(message.expiresAt);
+  const intervalMs = Number(message.intervalMs);
+  const now = Date.now();
+  if (
+    !/^[A-Za-z0-9._-]{8,128}$/.test(cadenceId)
+    || !Number.isSafeInteger(generation)
+    || generation < 1
+    || !Number.isSafeInteger(issuedAt)
+    || issuedAt < 1
+    || !Number.isFinite(expiresAt)
+    || expiresAt <= now
+    || expiresAt > now + SCREENSHOT_ACTIVE_CADENCE_MAX_LEASE_MS
+    || intervalMs !== SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS
+  ) return null;
+  return Object.freeze({ cadenceId, generation, issuedAt, expiresAt, intervalMs });
+}
+
+async function expireScreenshotCadence(schedule) {
+  if (screenshotCadenceSchedule !== schedule) return false;
+  stopScreenshotCadence();
+  await chrome.runtime.sendMessage({
+    type: 'SCREENSHOT_CADENCE_EXPIRED',
+    cadenceId: schedule.cadenceId,
+    generation: schedule.generation,
+  }).catch(() => {});
+  return true;
+}
+
+async function emitScreenshotCadenceTick(schedule) {
+  if (screenshotCadenceSchedule !== schedule || screenshotCadenceTickInFlight) return false;
+  if (Date.now() >= schedule.expiresAt) {
+    await expireScreenshotCadence(schedule);
+    return false;
+  }
+  screenshotCadenceTickInFlight = true;
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SCREENSHOT_CADENCE_TICK',
+      cadenceId: schedule.cadenceId,
+      generation: schedule.generation,
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (screenshotCadenceSchedule === schedule) screenshotCadenceTickInFlight = false;
+  }
+}
+
+function startScreenshotCadence(message = {}) {
+  const schedule = normalizeScreenshotCadenceRequest(message);
+  if (!schedule) return { success: false, status: 'invalid-cadence' };
+  if (schedule.issuedAt < latestScreenshotCadenceIssuedAt) {
+    return { success: false, status: 'stale-cadence' };
+  }
+  if (schedule.issuedAt === latestScreenshotCadenceIssuedAt) {
+    const current = screenshotCadenceSchedule;
+    const idempotent = Boolean(
+      current
+      && current.cadenceId === schedule.cadenceId
+      && current.generation === schedule.generation
+      && current.expiresAt === schedule.expiresAt
+      && current.intervalMs === schedule.intervalMs
+    );
+    return idempotent
+      ? { success: true, status: 'active' }
+      : { success: false, status: 'stale-cadence' };
+  }
+  latestScreenshotCadenceIssuedAt = schedule.issuedAt;
+  stopScreenshotCadence();
+  screenshotCadenceSchedule = schedule;
+  screenshotCadenceTimer = setInterval(() => {
+    emitScreenshotCadenceTick(schedule).catch(() => {});
+  }, schedule.intervalMs);
+  screenshotCadenceExpiryTimer = setTimeout(() => {
+    expireScreenshotCadence(schedule).catch(() => {});
+  }, Math.max(0, schedule.expiresAt - Date.now()));
+  return { success: true, status: 'active' };
+}
+
+function handleScreenshotCadenceStop(message = {}) {
+  const issuedAt = Number(message.issuedAt);
+  const generation = Number(message.generation);
+  if (
+    !Number.isSafeInteger(issuedAt)
+    || issuedAt < latestScreenshotCadenceIssuedAt
+    || !Number.isSafeInteger(generation)
+    || generation < 1
+  ) return { success: false, status: 'stale-cadence' };
+  latestScreenshotCadenceIssuedAt = issuedAt;
+  stopScreenshotCadence();
+  return { success: true, status: 'stopped' };
+}
 
 function safeDiagnosticLabel(value) {
   const label = typeof value === 'string' ? value.trim() : '';
@@ -462,6 +581,8 @@ const OFFSCREEN_MESSAGE_TYPES = new Set([
   'WS_SEND',
   'WS_CLOSE',
   'WS_STATUS',
+  'SCREENSHOT_CADENCE_START',
+  'SCREENSHOT_CADENCE_STOP',
 ]);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -545,6 +666,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'WS_STATUS') {
         sendResponse(wsStatus());
+        return;
+      }
+
+      if (message.type === 'SCREENSHOT_CADENCE_START') {
+        sendResponse(startScreenshotCadence(message));
+        return;
+      }
+
+      if (message.type === 'SCREENSHOT_CADENCE_STOP') {
+        sendResponse(handleScreenshotCadenceStop(message));
         return;
       }
     } catch (error) {

@@ -648,7 +648,7 @@ function showPrivacyInfo() {
 ✓ Active Tab URL - The web address you're visiting
 ✓ Timestamps - When you visited each page
 ✓ Favicon - The small icon from the website
-✓ Tracking-window screen thumbnails - Images of the active visible tab about every 30 seconds while school-managed monitoring is active in an authorized tracking window
+✓ Tracking-window screen thumbnails - Images of the active visible tab about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active in an authorized tracking window
 ✓ Safety evidence - A single exact-tab image may be requested immediately before a safety tab closure
 ✓ Messages you choose to send through ClassPilot chat
 

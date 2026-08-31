@@ -316,6 +316,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'lateSignInRestrictionSsoV1',
   'studentChatIdempotencyV1',
   'screenshotTrackingWindowLeaseV1',
+  'screenshotActiveObservationCadenceV1',
   'screenshotObservationLeaseV1',
   'safetyEvidenceCaptureV1',
   'liveViewIceServersV1',
@@ -336,6 +337,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'screenshotTrackingWindowLeaseV1',
+  'screenshotActiveObservationCadenceV1',
   'screenshotObservationLeaseV1',
   'managedDeviceContinuityV1',
 ]);
@@ -710,11 +712,20 @@ let screenshotPolicyState = Object.freeze({
   scope: null,
   authority: null,
   authorityScope: null,
+  captureCadence: Object.freeze({
+    mode: 'background',
+    intervalSeconds: 30,
+    expiresAt: 0,
+  }),
   valid: false,
 });
 let screenshotPolicyGeneration = 0;
 let screenshotPolicyAbortController = new AbortController();
 let screenshotImmediateCapturePending = false;
+let screenshotCadenceGeneration = 0;
+let screenshotCadenceIssuedAt = 0;
+let activeScreenshotCadence = null;
+let screenshotNavigationDebounceTimer = null;
 let protocolPolicyRequestGeneration = 0;
 let protocolPolicyAppliedGeneration = 0;
 let screenshotPolicyRequestGeneration = 0;
@@ -8834,6 +8845,7 @@ function abortActiveAuthContext() {
     scope: null,
     authority: null,
     authorityScope: null,
+    captureCadence: backgroundScreenshotCaptureCadence(),
     valid: false,
   });
   screenshotPolicySource = 'pending';
@@ -9030,6 +9042,7 @@ function advanceScreenshotPolicyAuthority() {
   }
   screenshotPolicyAbortController = new AbortController();
   screenshotPolicyGeneration += 1;
+  stopActiveScreenshotCadence('authority-changed');
   return screenshotPolicyGeneration;
 }
 
@@ -9066,6 +9079,208 @@ function screenshotAuthorityScope(authority) {
     authority.teachingSessionId || '',
     authority.controlRevision,
   ]);
+}
+
+function backgroundScreenshotCaptureCadence() {
+  return Object.freeze({
+    mode: 'background',
+    intervalSeconds: 30,
+    expiresAt: 0,
+  });
+}
+
+function normalizeScreenshotCaptureCadence(rawPolicy, context, options, policy) {
+  const background = backgroundScreenshotCaptureCadence();
+  if (
+    policy?.mode !== 'tracking_window_lease'
+    || policy.valid !== true
+    || policy.captureAllowed !== true
+    || policy.authority?.kind !== 'teaching_session'
+    || !hasNegotiatedCapability('screenshotActiveObservationCadenceV1', context)
+  ) return background;
+
+  const rawCadence = rawPolicy?.captureCadence;
+  if (
+    !rawCadence
+    || typeof rawCadence !== 'object'
+    || Array.isArray(rawCadence)
+    || rawCadence.mode !== 'active_view'
+    || Number(rawCadence.intervalSeconds) !== 5
+  ) return background;
+
+  const expiresInSeconds = Number(rawCadence.expiresInSeconds);
+  const serverTime = Date.parse(String(rawPolicy?.serverTime || ''));
+  const responseReceivedAt = Number.isFinite(Number(options.responseReceivedAt))
+    ? Number(options.responseReceivedAt)
+    : Date.now();
+  const requestStartedAt = Number.isFinite(Number(options.requestStartedAt))
+    ? Number(options.requestStartedAt)
+    : responseReceivedAt;
+  if (
+    !Number.isFinite(expiresInSeconds)
+    || expiresInSeconds <= 0
+    || expiresInSeconds > 90
+    || !Number.isFinite(serverTime)
+    || requestStartedAt > responseReceivedAt
+    || serverTime < requestStartedAt - 30_000
+    || serverTime > responseReceivedAt + 30_000
+  ) return background;
+
+  const boundedCadenceMs = expiresInSeconds * 1000;
+  const roundTripMs = Math.max(0, responseReceivedAt - requestStartedAt);
+  const remainingCadenceMs = Math.max(0, Math.min(
+    boundedCadenceMs - roundTripMs,
+    serverTime + boundedCadenceMs - responseReceivedAt,
+    Number(policy.expiresAt || 0) - responseReceivedAt,
+  ));
+  if (remainingCadenceMs <= 0) return background;
+  return Object.freeze({
+    mode: 'active_view',
+    intervalSeconds: 5,
+    expiresAt: responseReceivedAt + remainingCadenceMs,
+  });
+}
+
+function activeObservationScreenshotCadenceAllowed(context, nowValue = Date.now()) {
+  try {
+    assertAuthenticatedContextCurrent(context, 'active observation screenshot cadence');
+  } catch {
+    return false;
+  }
+  const cadence = screenshotPolicyState.captureCadence;
+  return ambientScreenshotAllowed(context, nowValue)
+    && screenshotPolicyState.mode === 'tracking_window_lease'
+    && screenshotPolicyState.authority?.kind === 'teaching_session'
+    && cadence?.mode === 'active_view'
+    && cadence.intervalSeconds === 5
+    && Number(cadence.expiresAt || 0) > nowValue;
+}
+
+function nextScreenshotCadenceOrder() {
+  screenshotCadenceGeneration += 1;
+  screenshotCadenceIssuedAt = Math.max(Date.now(), screenshotCadenceIssuedAt + 1);
+  return {
+    generation: screenshotCadenceGeneration,
+    issuedAt: screenshotCadenceIssuedAt,
+  };
+}
+
+function clearScreenshotNavigationDebounce() {
+  if (screenshotNavigationDebounceTimer) clearTimeout(screenshotNavigationDebounceTimer);
+  screenshotNavigationDebounceTimer = null;
+}
+
+function stopActiveScreenshotCadence(reason = 'inactive') {
+  const retiredCadence = activeScreenshotCadence;
+  activeScreenshotCadence = null;
+  clearScreenshotNavigationDebounce();
+  chrome.alarms.clear(SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM);
+  const order = nextScreenshotCadenceOrder();
+  if (retiredCadence) {
+    chrome.runtime.sendMessage({
+      type: 'SCREENSHOT_CADENCE_STOP',
+      cadenceId: retiredCadence?.cadenceId,
+      generation: order.generation,
+      issuedAt: order.issuedAt,
+      reason,
+    }).catch(() => {});
+  }
+}
+
+function startActiveScreenshotCadence(context) {
+  if (!activeObservationScreenshotCadenceAllowed(context)) {
+    stopActiveScreenshotCadence('policy-inactive');
+    return false;
+  }
+  const order = nextScreenshotCadenceOrder();
+  const cadenceId = globalThis.crypto?.randomUUID?.()
+    || `cadence-${order.issuedAt.toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const expiresAt = Number(screenshotPolicyState.captureCadence.expiresAt);
+  const cadence = Object.freeze({
+    cadenceId,
+    generation: order.generation,
+    issuedAt: order.issuedAt,
+    expiresAt,
+    authorityScope: screenshotPolicyState.authorityScope,
+    authContextId: context.authContextId,
+  });
+  activeScreenshotCadence = cadence;
+  chrome.alarms.create(SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM, { when: expiresAt });
+  sendToOffscreen({
+    type: 'SCREENSHOT_CADENCE_START',
+    cadenceId,
+    generation: order.generation,
+    issuedAt: order.issuedAt,
+    expiresAt,
+    intervalMs: SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS,
+  }, {
+    assertCurrent: () => {
+      assertAuthenticatedContextCurrent(
+        context,
+        'active observation screenshot cadence scheduling',
+      );
+      if (
+        activeScreenshotCadence !== cadence
+        || cadence.authorityScope !== screenshotPolicyState.authorityScope
+        || !activeObservationScreenshotCadenceAllowed(context)
+      ) throw authContextSuperseded('active observation screenshot cadence scheduling');
+    },
+  }).catch(() => {});
+  return true;
+}
+
+function reconcileActiveScreenshotCadence(context) {
+  if (activeObservationScreenshotCadenceAllowed(context)) {
+    return startActiveScreenshotCadence(context);
+  }
+  stopActiveScreenshotCadence('background-cadence');
+  return false;
+}
+
+function expireActiveScreenshotCadence(reason = 'expired', nowValue = Date.now()) {
+  if (screenshotPolicyState.captureCadence?.mode !== 'active_view') return false;
+  const expiresAt = Number(screenshotPolicyState.captureCadence.expiresAt || 0);
+  if (expiresAt > nowValue) {
+    chrome.alarms.create(SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM, { when: expiresAt });
+    return false;
+  }
+  screenshotPolicyState = Object.freeze({
+    ...screenshotPolicyState,
+    captureCadence: backgroundScreenshotCaptureCadence(),
+  });
+  stopActiveScreenshotCadence(reason);
+  scheduleEventHeartbeat('screenshot-active-view-expired');
+  return true;
+}
+
+function scheduleActiveViewNavigationCapture(reason) {
+  let authContext;
+  try {
+    authContext = captureAuthenticatedContext(`screenshot navigation:${reason}`);
+  } catch {
+    return false;
+  }
+  if (!activeObservationScreenshotCadenceAllowed(authContext)) return false;
+  const cadence = activeScreenshotCadence;
+  if (!cadence) return false;
+  clearScreenshotNavigationDebounce();
+  screenshotNavigationDebounceTimer = setTimeout(() => {
+    screenshotNavigationDebounceTimer = null;
+    let currentContext;
+    try {
+      currentContext = captureAuthenticatedContext(`screenshot navigation:${reason}`);
+    } catch {
+      return;
+    }
+    if (
+      activeScreenshotCadence !== cadence
+      || cadence.authContextId !== currentContext.authContextId
+      || cadence.authorityScope !== screenshotPolicyState.authorityScope
+      || !activeObservationScreenshotCadenceAllowed(currentContext)
+    ) return;
+    captureAndSendScreenshot({ reason: 'active-view-navigation' }).catch(() => {});
+  }, SCREENSHOT_ACTIVE_NAVIGATION_DEBOUNCE_MS);
+  return true;
 }
 
 function adoptProtocolAndScreenshotPolicy(raw = {}, context, options = {}) {
@@ -9446,6 +9661,10 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
       valid: validShape,
     });
   }
+  next = Object.freeze({
+    ...next,
+    captureCadence: normalizeScreenshotCaptureCadence(rawPolicy, context, options, next),
+  });
   screenshotPolicyState = next;
   screenshotPolicySource = typeof options.policySource === 'string'
     ? options.policySource.slice(0, 32)
@@ -9468,6 +9687,7 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     chrome.alarms.create(SCREENSHOT_LEASE_EXPIRY_ALARM, { when: next.expiresAt });
   }
   scheduleScreenshotCapture(nextAllowed);
+  reconcileActiveScreenshotCadence(context);
   if (authorityChanged && nextAllowed) {
     requestImmediateScreenshotCapture();
   }
@@ -9497,6 +9717,27 @@ function applyServerScreenshotPolicyDenial(rawPolicy, context, options = {}) {
     leaseKind: hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', context)
       ? 'tracking_window'
       : 'observation',
+    policyPresent: true,
+  });
+}
+
+function applySuccessfulScreenshotUploadPolicy(rawPolicy, context, options = {}) {
+  assertAuthenticatedContextCurrent(context, 'successful screenshot upload policy');
+  if (!rawPolicy || typeof rawPolicy !== 'object') return screenshotPolicyState;
+  const capturedAuthorityScope = options.capturedAuthorityScope || null;
+  if (
+    screenshotPolicyState.mode !== 'tracking_window_lease'
+    || capturedAuthorityScope !== (screenshotPolicyState.authorityScope || null)
+  ) return screenshotPolicyState;
+  const requestGeneration = Number(options.screenshotRequestGeneration);
+  if (!Number.isSafeInteger(requestGeneration) || requestGeneration < screenshotPolicyAppliedGeneration) {
+    return screenshotPolicyState;
+  }
+  screenshotPolicyAppliedGeneration = requestGeneration;
+  return adoptScreenshotPolicy(rawPolicy, context, {
+    ...options,
+    policySource: 'upload_success',
+    leaseKind: 'tracking_window',
     policyPresent: true,
   });
 }
@@ -14391,6 +14632,7 @@ function handleScreenshotLeaseExpiryAlarm(alarm = {}, nowValue = Date.now()) {
     observed: false,
     captureAllowed: false,
     expiresAt: 0,
+    captureCadence: backgroundScreenshotCaptureCadence(),
   });
   scheduleScreenshotCapture(false);
   return true;
@@ -14478,6 +14720,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     expireClassroomOverlays().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot({ reason: 'alarm' });
+  } else if (alarm.name === SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM) {
+    expireActiveScreenshotCadence('active-view-expired');
   } else if (alarm.name === SCREENSHOT_LEASE_EXPIRY_ALARM) {
     handleScreenshotLeaseExpiryAlarm(alarm);
   }
@@ -14488,8 +14732,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 // MV3 service worker termination. setInterval dies when the SW goes inactive.
 const SCREENSHOT_ALARM_NAME = 'screenshot-capture';
 const SCREENSHOT_LEASE_EXPIRY_ALARM = 'screenshot-observation-lease-expiry';
+const SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM = 'screenshot-active-view-cadence-expiry';
 const SCREENSHOT_PERIOD_MS = 30 * 1000;
 const SCREENSHOT_SCHEDULED_MIN_GAP_MS = 25 * 1000;
+const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5 * 1000;
+const SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS = 4500;
+const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS;
+const SCREENSHOT_ACTIVE_NAVIGATION_DEBOUNCE_MS = 750;
 const SCREENSHOT_COMMAND_MIN_GAP_MS = 5 * 1000;
 let screenshotScheduled = false;
 
@@ -14568,13 +14817,18 @@ function isSameActiveCaptureTab(candidate, expected) {
   );
 }
 
+function screenshotCaptureMinimumGap(reason) {
+  if (['lease-start', 'authority-change'].includes(reason)) return 0;
+  if (reason === 'active-view-tick') return SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS;
+  if (reason === 'active-view-navigation') return SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS;
+  if (reason === 'command') return SCREENSHOT_COMMAND_MIN_GAP_MS;
+  return SCREENSHOT_SCHEDULED_MIN_GAP_MS;
+}
+
 async function captureAndSendScreenshot(options = {}) {
   const reason = options.reason || 'scheduled';
-  const minimumGap = ['lease-start', 'authority-change'].includes(reason)
-    ? 0
-    : reason === 'command'
-      ? SCREENSHOT_COMMAND_MIN_GAP_MS
-      : SCREENSHOT_SCHEDULED_MIN_GAP_MS;
+  const rapidCapture = reason === 'active-view-tick' || reason === 'active-view-navigation';
+  const minimumGap = screenshotCaptureMinimumGap(reason);
   if (lastScreenshotAttemptAt && Date.now() - lastScreenshotAttemptAt < minimumGap) {
     console.log(`[Screenshot] Coalescing ${reason} capture; cadence guard active`);
     return;
@@ -14754,6 +15008,7 @@ async function captureAndSendScreenshot(options = {}) {
       ? '/api/classpilot/device/screenshot'
       : '/api/device/screenshot';
     const screenshotUploadStartedAt = Date.now();
+    const screenshotUploadPolicyGeneration = reserveScreenshotPolicyRequestGeneration();
     const response = await fetchWithBackoff(`${screenshotAuthContext.serverOrigin}${screenshotUploadPath}`, {
       method: 'POST',
       headers,
@@ -14772,7 +15027,9 @@ async function captureAndSendScreenshot(options = {}) {
       signal: captureRequestAbortController.signal,
     }, {
       context: 'screenshot upload',
-      maxAttempts: 2,
+      // Rapid captures already receive another bounded cadence opportunity.
+      // Retrying the same pixels would amplify a store outage or rate limit.
+      maxAttempts: rapidCapture ? 1 : 2,
       beforeAttempt: () => assertAmbientScreenshotPolicyCurrent(
         screenshotAuthContext,
         capturePolicyGeneration,
@@ -14781,9 +15038,8 @@ async function captureAndSendScreenshot(options = {}) {
       ),
     });
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
-    const responseBody = !response.ok && [401, 402, 403, 404, 409].includes(response.status)
-      ? await response.json().catch(() => ({}))
-      : {};
+    const responseReceivedAt = Date.now();
+    const responseBody = await response.json().catch(() => ({}));
     if (response.status === 402 || (
       response.status === 403
       && isClassPilotNotEntitledResponse(responseBody)
@@ -14823,7 +15079,6 @@ async function captureAndSendScreenshot(options = {}) {
       || (response.status === 409 && !heartbeatRequired)
       || structuredAuthorityDenial
     )) {
-      const responseReceivedAt = Date.now();
       applyServerScreenshotPolicyDenial(responseBody.screenshotPolicy, screenshotAuthContext, {
         requestStartedAt: screenshotUploadStartedAt,
         responseReceivedAt,
@@ -14862,7 +15117,7 @@ async function captureAndSendScreenshot(options = {}) {
         await recordScreenshotError('upload_service_unavailable', Date.now(), screenshotAuthContext);
         // A transient store outage is not a screenshot-policy decision. Keep
         // the still-valid exact-scope lease and let the bounded request retry
-        // plus normal 30-second capture cadence recover naturally.
+        // plus the 30-second background capture cadence recover naturally.
         return { status: 'unavailable', reason: 'service_unavailable' };
       }
       await recordScreenshotError(response.status >= 500
@@ -14870,6 +15125,18 @@ async function captureAndSendScreenshot(options = {}) {
         : 'upload_client_error', Date.now(), screenshotAuthContext);
       console.warn('[Screenshot] Upload failed:', response.status);
     } else {
+      if (trackingWindowLeaseNegotiated && responseBody.screenshotPolicy) {
+        applySuccessfulScreenshotUploadPolicy(
+          responseBody.screenshotPolicy,
+          screenshotAuthContext,
+          {
+            screenshotRequestGeneration: screenshotUploadPolicyGeneration,
+            requestStartedAt: screenshotUploadStartedAt,
+            responseReceivedAt,
+            capturedAuthorityScope: captureAuthorityScope,
+          },
+        );
+      }
       await recordScreenshotSuccess(Date.now(), screenshotAuthContext);
       screenshotSuccessCount++;
       console.log('[Screenshot] Uploaded successfully');
@@ -19987,6 +20254,44 @@ async function stopScreenShare(options = {}) {
 }
 
 async function handleOffscreenMessage(message) {
+  if (message.type === 'SCREENSHOT_CADENCE_TICK') {
+    const cadence = activeScreenshotCadence;
+    if (
+      !cadence
+      || message.cadenceId !== cadence.cadenceId
+      || Number(message.generation) !== cadence.generation
+    ) return { success: true, ignored: true };
+    if (Date.now() >= cadence.expiresAt) {
+      expireActiveScreenshotCadence('active-view-expired');
+      return { success: true, expired: true };
+    }
+    let authContext;
+    try {
+      authContext = captureAuthenticatedContext('active observation screenshot tick');
+    } catch {
+      return { success: true, ignored: true };
+    }
+    if (
+      cadence.authContextId !== authContext.authContextId
+      || cadence.authorityScope !== screenshotPolicyState.authorityScope
+      || activeScreenshotCadence !== cadence
+      || !activeObservationScreenshotCadenceAllowed(authContext)
+    ) return { success: true, ignored: true };
+    await captureAndSendScreenshot({ reason: 'active-view-tick' });
+    return { success: true };
+  }
+
+  if (message.type === 'SCREENSHOT_CADENCE_EXPIRED') {
+    const cadence = activeScreenshotCadence;
+    if (
+      !cadence
+      || message.cadenceId !== cadence.cadenceId
+      || Number(message.generation) !== cadence.generation
+    ) return { success: true, ignored: true };
+    expireActiveScreenshotCadence('active-view-expired');
+    return { success: true, expired: true };
+  }
+
   if (message.type === 'WS_EVENT') {
     await handleWsEvent(
       message.event,
@@ -20628,6 +20933,20 @@ async function handleWsMessage(
         }
       }
 
+      if (message.type === 'screenshot-policy-refresh') {
+        if (!hasNegotiatedCapability('screenshotActiveObservationCadenceV1', authContext)) return;
+        if (!acceptsCurrentStudentBinding(message, 'screenshot policy refresh', { authContext })) return;
+        const teachingSessionId = String(message.teachingSessionId || '').trim();
+        if (
+          message.reason !== 'observation_changed'
+          || !teachingSessionId
+          || currentClassroomState?.teachingSessionId !== teachingSessionId
+          || currentClassroomState?.supervisionContextId
+        ) return;
+        scheduleEventHeartbeat('screenshot-policy-refresh');
+        return;
+      }
+
       if (message.type === 'fab-state-sync' || message.type === 'fab-state') {
         if (!acceptsCurrentStudentBinding(message, 'FAB state')) return;
         const fabState = message.fabState || message.state || message.data || message;
@@ -20979,6 +21298,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     queueNavigationEvent('tab_change', tab.url, tab.title || 'No title', { tabId: activeInfo.tabId });
     // Send immediate heartbeat to update teacher dashboard quickly
     scheduleEventHeartbeat('tab-activated');
+    scheduleActiveViewNavigationCapture('tab-activated');
   } catch (error) {
     console.warn('Failed to read active tab info:', safeDiagnosticError(error));
   }
@@ -21014,6 +21334,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       queueNavigationEvent('url_change', changeInfo.url, tab.title || 'No title', { tabId });
       // Send immediate heartbeat to update teacher dashboard quickly
       scheduleEventHeartbeat('url-changed');
+      scheduleActiveViewNavigationCapture('url-changed');
     }
   } catch (error) {
     console.warn('[Service Worker] Tab updated handler error:', safeDiagnosticError(error));
