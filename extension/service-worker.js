@@ -10426,13 +10426,13 @@ function assertAmbientScreenshotPolicyCurrent(
   assertAmbientScreenshotAllowed(context, reason);
 }
 
-function requestImmediateScreenshotCapture() {
+function requestImmediateScreenshotCapture(reason = 'authority-change') {
   if (screenshotCaptureInFlight) {
     screenshotImmediateCapturePending = true;
     return;
   }
   screenshotImmediateCapturePending = false;
-  captureAndSendScreenshot({ reason: 'authority-change' }).catch(() => {});
+  captureAndSendScreenshot({ reason }).catch(() => {});
 }
 
 function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
@@ -10568,6 +10568,14 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
   reconcileActiveScreenshotCadence(context);
   if (authorityChanged && nextAllowed) {
     requestImmediateScreenshotCapture();
+  } else if (nextAllowed
+      && priorState.captureCadence?.mode !== 'active_view'
+      && next.captureCadence?.mode === 'active_view') {
+    // Cadence activation without an authority change (teacher opened the
+    // class view) must not wait for the first 5s offscreen tick. Compare
+    // cadence mode, never object identity: every renewal adoption allocates
+    // a fresh frozen captureCadence object.
+    requestImmediateScreenshotCapture('lease-start');
   }
   return next;
 }

@@ -87,6 +87,13 @@ flight; overlapping ticks are dropped rather than queued or retried. Screenshot
 pixels are never persisted by the extension, and this release adds no Chrome
 permission.
 
+When an adopted policy first transitions the cadence into `active_view`, the
+extension captures one immediate frame (reason `lease-start`) instead of
+waiting for the first five-second tick, so an opening class view shows a fresh
+preview right away. Renewal adoptions of an already-active cadence never
+repeat this capture, and the immediate capture obeys every gate the scheduled
+captures do.
+
 ### Late-sign-in Waypoint and SSO handoff (2.7.9)
 
 SchoolPilot can attach an explicit `lateSignInRestrictionSso` delivery marker
