@@ -1586,6 +1586,28 @@ async function main() {
           requestStartedAt: cadenceNow - 50,
           responseReceivedAt: cadenceNow,
         }, cadencePolicyBase);
+        const stringIntervalCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: '5',
+            expiresInSeconds: 90,
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, cadencePolicyBase);
+        const stringExpiryCadence = normalizeScreenshotCaptureCadence({
+          serverTime: new Date(cadenceNow).toISOString(),
+          captureCadence: {
+            mode: 'active_view',
+            intervalSeconds: 5,
+            expiresInSeconds: '90',
+          },
+        }, authB, {
+          requestStartedAt: cadenceNow - 50,
+          responseReceivedAt: cadenceNow,
+        }, cadencePolicyBase);
         const wrongAuthorityCadence = normalizeScreenshotCaptureCadence({
           serverTime: new Date(cadenceNow).toISOString(),
           captureCadence: {
@@ -1621,6 +1643,208 @@ async function main() {
           serverProtocolVersion: 3,
           acceptedCapabilities: allSupportedCapabilities,
         }, authB);
+
+        const hardeningPriorPolicyState = screenshotPolicyState;
+        const hardeningPriorProtocolState = negotiatedProtocolState;
+        const hardeningPriorClassroomState = currentClassroomState;
+        const hardeningPriorRevisionAuthority = studentControlRevisionAuthority;
+        const hardeningPriorSendToOffscreen = sendToOffscreen;
+        const hardeningPriorFetchWithBackoff = fetchWithBackoff;
+        const cadenceSchedulerMessages = [];
+        let cadenceIdentityPreserved = false;
+        let cadenceRenewalPreservedInterval = false;
+        let authorityChangeTickCaptures = 0;
+        let staleAuthorityTickIgnored = false;
+        let authorityChangeStoppedCadence = false;
+        let heartbeatOmissionRetainedPermission = false;
+        let heartbeatOmissionDowngradedCadence = false;
+        let uploadOmissionRetainedPermission = false;
+        let uploadOmissionDowngradedCadence = false;
+        let malformedCadenceRetainedPermission = false;
+        let malformedCadenceDowngraded = false;
+        let authorityChangeRapidUploadAttempts = null;
+        try {
+          sendToOffscreen = async (message, sendOptions = {}) => {
+            sendOptions.assertCurrent?.();
+            cadenceSchedulerMessages.push({ ...message });
+            return { success: true };
+          };
+          currentClassroomState = {
+            schemaVersion: 1,
+            revision: 42,
+            teachingSessionId: 'teaching-session-b',
+            supervisionContextId: null,
+            hardExpiresAt: '2099-01-01T00:00:00.000Z',
+            restrictions: RuntimeCore.emptyRestrictions(),
+          };
+          observeStudentControlRevision(42, authB, 'rapid cadence hardening fixture');
+          const cadenceCapabilities = [
+            'scopedAuthorityChecksV1',
+            'screenshotTrackingWindowLeaseV1',
+            'screenshotActiveObservationCadenceV1',
+          ];
+          adoptNegotiatedProtocolState({
+            serverProtocolVersion: 3,
+            acceptedCapabilities: cadenceCapabilities,
+          }, authB);
+          const trackingPolicy = (serverTime = Date.now()) => ({
+            mode: 'tracking_window_lease',
+            captureAllowed: true,
+            expiresInSeconds: 84,
+            serverTime: new Date(serverTime).toISOString(),
+            authority: {
+              kind: 'teaching_session',
+              teachingSessionId: 'teaching-session-b',
+              controlRevision: 42,
+            },
+            captureCadence: {
+              mode: 'active_view',
+              intervalSeconds: 5,
+              expiresInSeconds: 84,
+            },
+          });
+          const cadenceClockBase = originalDateNow();
+          let cadenceClockNow = cadenceClockBase;
+          Date.now = () => cadenceClockNow;
+          try {
+            adoptScreenshotPolicy(trackingPolicy(cadenceClockNow), authB, {
+              requestStartedAt: cadenceClockNow,
+              responseReceivedAt: cadenceClockNow,
+              policySource: 'heartbeat',
+            });
+            const firstCadence = activeScreenshotCadence;
+            const firstStartCount = cadenceSchedulerMessages.filter(
+              (message) => message.type === 'SCREENSHOT_CADENCE_START',
+            ).length;
+            cadenceClockNow += 10_000;
+            adoptScreenshotPolicy(trackingPolicy(cadenceClockNow), authB, {
+              requestStartedAt: cadenceClockNow,
+              responseReceivedAt: cadenceClockNow,
+              policySource: 'heartbeat',
+            });
+            const renewedCadence = activeScreenshotCadence;
+            const renewalStarts = cadenceSchedulerMessages.filter(
+              (message) => message.type === 'SCREENSHOT_CADENCE_START',
+            );
+            cadenceIdentityPreserved = Boolean(
+              firstCadence
+              && renewedCadence
+              && firstCadence.cadenceId === renewedCadence.cadenceId
+              && firstCadence.generation === renewedCadence.generation
+              && firstCadence.issuedAt === renewedCadence.issuedAt
+              && renewedCadence.expiresAt > firstCadence.expiresAt
+            );
+            cadenceRenewalPreservedInterval = firstStartCount === 1
+              && renewalStarts.length === 2
+              && renewalStarts[0].cadenceId === renewalStarts[1].cadenceId
+              && renewalStarts[0].generation === renewalStarts[1].generation
+              && renewalStarts[0].issuedAt === renewalStarts[1].issuedAt
+              && !cadenceSchedulerMessages.some((message) => (
+                message.type === 'SCREENSHOT_CADENCE_STOP'
+                && message.cadenceId === firstCadence?.cadenceId
+              ));
+          } finally {
+            Date.now = originalDateNow;
+          }
+
+          const authorityChangeRetryOptions = [];
+          fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
+            authorityChangeRetryOptions.push(retryOptions.maxAttempts);
+            return new Response('{}', {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          };
+          lastScreenshotAttemptAt = 0;
+          await captureBeforeLeaseAdoption({
+            reason: 'authority-change',
+            queryActiveTab: async () => [{
+              id: 7099,
+              active: true,
+              windowId: 99,
+              url: 'https://observed.example/authority-change',
+              title: 'Authority change',
+              favIconUrl: '',
+            }],
+            captureVisibleTab: async () => 'data:image/jpeg;base64,YXV0aG9yaXR5LWNoYW5nZQ==',
+            subscribeTabActivation: () => () => {},
+            subscribeTabUpdate: () => () => {},
+          });
+          authorityChangeRapidUploadAttempts = authorityChangeRetryOptions.at(-1) ?? null;
+          uploadOmissionRetainedPermission = ambientScreenshotAllowed(authB);
+          uploadOmissionDowngradedCadence = screenshotPolicyState.captureCadence.mode === 'background'
+            && activeScreenshotCadence === null;
+
+          adoptScreenshotPolicy(trackingPolicy(), authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          adoptProtocolAndScreenshotPolicy({
+            serverProtocolVersion: 3,
+            acceptedCapabilities: cadenceCapabilities,
+          }, authB, {
+            requestGeneration: reserveProtocolPolicyRequestGeneration(),
+            screenshotRequestGeneration: reserveScreenshotPolicyRequestGeneration(),
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          heartbeatOmissionRetainedPermission = ambientScreenshotAllowed(authB);
+          heartbeatOmissionDowngradedCadence = screenshotPolicyState.captureCadence.mode === 'background'
+            && activeScreenshotCadence === null;
+
+          const malformedTrackingPolicy = trackingPolicy();
+          malformedTrackingPolicy.captureCadence.intervalSeconds = '5';
+          adoptScreenshotPolicy(malformedTrackingPolicy, authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          malformedCadenceRetainedPermission = ambientScreenshotAllowed(authB);
+          malformedCadenceDowngraded = screenshotPolicyState.captureCadence.mode === 'background'
+            && activeScreenshotCadence === null;
+
+          adoptScreenshotPolicy(trackingPolicy(), authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          captureAndSendScreenshot = async ({ reason } = {}) => {
+            if (reason === 'active-view-tick') authorityChangeTickCaptures += 1;
+            return { status: 'captured-by-cadence-hardening-double' };
+          };
+          const tickCadence = activeScreenshotCadence;
+          await handleOffscreenMessage({
+            type: 'SCREENSHOT_CADENCE_TICK',
+            cadenceId: tickCadence.cadenceId,
+            generation: tickCadence.generation,
+          });
+          const capturesBeforeAuthorityChange = authorityChangeTickCaptures;
+          currentClassroomState = {
+            ...currentClassroomState,
+            teachingSessionId: 'teaching-session-c',
+          };
+          const staleTickResult = await handleOffscreenMessage({
+            type: 'SCREENSHOT_CADENCE_TICK',
+            cadenceId: tickCadence.cadenceId,
+            generation: tickCadence.generation,
+          });
+          staleAuthorityTickIgnored = staleTickResult?.ignored === true
+            && authorityChangeTickCaptures === capturesBeforeAuthorityChange;
+          retireScreenshotAuthorityForClassroomChange();
+          authorityChangeStoppedCadence = activeScreenshotCadence === null;
+        } finally {
+          Date.now = originalDateNow;
+          stopActiveScreenshotCadence('hardening-fixture-cleanup');
+          sendToOffscreen = hardeningPriorSendToOffscreen;
+          fetchWithBackoff = hardeningPriorFetchWithBackoff;
+          currentClassroomState = hardeningPriorClassroomState;
+          studentControlRevisionAuthority = hardeningPriorRevisionAuthority;
+          negotiatedProtocolState = hardeningPriorProtocolState;
+          screenshotPolicyState = hardeningPriorPolicyState;
+          activeScreenshotCadence = null;
+        }
         captureAndSendScreenshot = captureBeforeLeaseAdoption;
         progress('capability adoption complete');
 
@@ -3876,6 +4100,20 @@ async function main() {
           rapidCadenceMinGaps,
           rapid503FetchAttempts,
           rapid429FetchAttempts,
+          stringIntervalCadence,
+          stringExpiryCadence,
+          cadenceIdentityPreserved,
+          cadenceRenewalPreservedInterval,
+          authorityChangeTickCaptures,
+          staleAuthorityTickIgnored,
+          authorityChangeStoppedCadence,
+          heartbeatOmissionRetainedPermission,
+          heartbeatOmissionDowngradedCadence,
+          uploadOmissionRetainedPermission,
+          uploadOmissionDowngradedCadence,
+          malformedCadenceRetainedPermission,
+          malformedCadenceDowngraded,
+          authorityChangeRapidUploadAttempts,
           screenshotLicenseDeniedResult,
           screenshotLicenseDenials,
           screenshotLicenseExpectedScope,
@@ -4224,6 +4462,16 @@ async function main() {
       intervalSeconds: 30,
       expiresAt: 0,
     });
+    assert.deepEqual(result.stringIntervalCadence, {
+      mode: 'background',
+      intervalSeconds: 30,
+      expiresAt: 0,
+    });
+    assert.deepEqual(result.stringExpiryCadence, {
+      mode: 'background',
+      intervalSeconds: 30,
+      expiresAt: 0,
+    });
     assert.deepEqual(result.wrongAuthorityCadence, {
       mode: 'background',
       intervalSeconds: 30,
@@ -4234,6 +4482,18 @@ async function main() {
       intervalSeconds: 30,
       expiresAt: 0,
     });
+    assert.equal(result.cadenceIdentityPreserved, true);
+    assert.equal(result.cadenceRenewalPreservedInterval, true);
+    assert.equal(result.authorityChangeTickCaptures, 1);
+    assert.equal(result.staleAuthorityTickIgnored, true);
+    assert.equal(result.authorityChangeStoppedCadence, true);
+    assert.equal(result.heartbeatOmissionRetainedPermission, true);
+    assert.equal(result.heartbeatOmissionDowngradedCadence, true);
+    assert.equal(result.uploadOmissionRetainedPermission, true);
+    assert.equal(result.uploadOmissionDowngradedCadence, true);
+    assert.equal(result.malformedCadenceRetainedPermission, true);
+    assert.equal(result.malformedCadenceDowngraded, true);
+    assert.equal(result.authorityChangeRapidUploadAttempts, 1);
     assert.equal(result.leaseImmediateCaptureRequests >= 3, true);
     assert.equal(
       result.generationAfterContinuousRenewal,

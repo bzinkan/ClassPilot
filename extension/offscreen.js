@@ -78,10 +78,10 @@ function stopScreenshotCadence() {
 
 function normalizeScreenshotCadenceRequest(message = {}) {
   const cadenceId = String(message.cadenceId || '').trim();
-  const generation = Number(message.generation);
-  const issuedAt = Number(message.issuedAt);
-  const expiresAt = Number(message.expiresAt);
-  const intervalMs = Number(message.intervalMs);
+  const generation = message.generation;
+  const issuedAt = message.issuedAt;
+  const expiresAt = message.expiresAt;
+  const intervalMs = message.intervalMs;
   const now = Date.now();
   if (
     !/^[A-Za-z0-9._-]{8,128}$/.test(cadenceId)
@@ -94,7 +94,7 @@ function normalizeScreenshotCadenceRequest(message = {}) {
     || expiresAt > now + SCREENSHOT_ACTIVE_CADENCE_MAX_LEASE_MS
     || intervalMs !== SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS
   ) return null;
-  return Object.freeze({ cadenceId, generation, issuedAt, expiresAt, intervalMs });
+  return { cadenceId, generation, issuedAt, expiresAt, intervalMs };
 }
 
 async function expireScreenshotCadence(schedule) {
@@ -141,12 +141,18 @@ function startScreenshotCadence(message = {}) {
       current
       && current.cadenceId === schedule.cadenceId
       && current.generation === schedule.generation
-      && current.expiresAt === schedule.expiresAt
       && current.intervalMs === schedule.intervalMs
     );
-    return idempotent
-      ? { success: true, status: 'active' }
-      : { success: false, status: 'stale-cadence' };
+    if (!idempotent) return { success: false, status: 'stale-cadence' };
+    if (current.expiresAt !== schedule.expiresAt) {
+      current.expiresAt = schedule.expiresAt;
+      if (screenshotCadenceExpiryTimer) clearTimeout(screenshotCadenceExpiryTimer);
+      screenshotCadenceExpiryTimer = setTimeout(() => {
+        expireScreenshotCadence(current).catch(() => {});
+      }, Math.max(0, current.expiresAt - Date.now()));
+      return { success: true, status: 'renewed' };
+    }
+    return { success: true, status: 'active' };
   }
   latestScreenshotCadenceIssuedAt = schedule.issuedAt;
   stopScreenshotCadence();
@@ -161,8 +167,8 @@ function startScreenshotCadence(message = {}) {
 }
 
 function handleScreenshotCadenceStop(message = {}) {
-  const issuedAt = Number(message.issuedAt);
-  const generation = Number(message.generation);
+  const issuedAt = message.issuedAt;
+  const generation = message.generation;
   if (
     !Number.isSafeInteger(issuedAt)
     || issuedAt < latestScreenshotCadenceIssuedAt

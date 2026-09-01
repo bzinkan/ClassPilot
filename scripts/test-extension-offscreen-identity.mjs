@@ -730,6 +730,16 @@ const invalidCadence = await dispatchOffscreenMessage({
 });
 assert.equal(invalidCadence.success, false);
 assert.equal(invalidCadence.status, 'invalid-cadence');
+const stringScalarCadence = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-string-scalars',
+  generation: '1',
+  issuedAt: cadenceIssuedAt + 1,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(stringScalarCadence.success, false);
+assert.equal(stringScalarCadence.status, 'invalid-cadence');
 
 const cadenceA = await dispatchOffscreenMessage({
   type: 'SCREENSHOT_CADENCE_START',
@@ -741,6 +751,7 @@ const cadenceA = await dispatchOffscreenMessage({
 });
 assert.equal(cadenceA.success, true);
 const cadenceAInterval = intervals.at(-1);
+const cadenceAExpiry = timers.at(-1);
 assert.equal(cadenceAInterval.delay, 5_000);
 assert.equal(cadenceAInterval.cleared, false);
 const cadenceASchedule = JSON.parse(JSON.stringify(evaluate('screenshotCadenceSchedule')));
@@ -757,8 +768,12 @@ const mutatedReplayCadenceA = await dispatchOffscreenMessage({
   ...cadenceASchedule,
   expiresAt: cadenceASchedule.expiresAt + 1,
 });
-assert.equal(mutatedReplayCadenceA.success, false);
-assert.equal(mutatedReplayCadenceA.status, 'stale-cadence');
+assert.equal(mutatedReplayCadenceA.success, true);
+assert.equal(mutatedReplayCadenceA.status, 'renewed');
+assert.equal(intervals.length, intervalCountBeforeIdempotentStart);
+assert.equal(cadenceAInterval.cleared, false);
+assert.equal(cadenceAExpiry.cleared, true);
+assert.equal(evaluate('screenshotCadenceSchedule.expiresAt'), cadenceASchedule.expiresAt + 1);
 const cadenceATicksBefore = relayed.filter((message) => (
   message.type === 'SCREENSHOT_CADENCE_TICK'
   && message.cadenceId === 'cadence-active-a'
