@@ -227,7 +227,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 **Privacy Features:**
 - Tab state is bounded and identity-bound; the extension may persist a limited local snapshot so exact tab references survive worker restarts
 - Student-facing indicators show when school-managed monitoring is active
-- Tracking-window thumbnails run about every 30 seconds while school-managed monitoring is active under a short-lived exact authority lease, independent of teacher dashboard visibility. SchoolPilot retains class-bound images and discards gap/student-session pixels; exact safety captures require a separate exact-bound request
+- Tracking-window thumbnails run about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active under a short-lived exact authority lease. SchoolPilot retains class-bound images and discards gap/student-session pixels; exact safety captures require a separate exact-bound request
 - Live View is an authorized, temporary encrypted stream and is not recorded by the extension or SchoolPilot servers; the teacher dashboard can explicitly save a local recording or still image, which the school must govern
 - The school setting governs heartbeat history and related session-report detail; ambient thumbnails, safety evidence, communications, account/audit records, and teacher-downloaded files follow their separate documented or contractual policies
 

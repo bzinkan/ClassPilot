@@ -13,6 +13,7 @@ const source = readFileSync(resolve(extensionPath, 'offscreen.js'), 'utf8');
 const relayed = [];
 const runtimeListeners = [];
 const timers = [];
+const intervals = [];
 let nextTimerId = 1;
 
 function createDeferred() {
@@ -166,7 +167,10 @@ const sandbox = {
   RTCIceCandidate: class RTCIceCandidate {
     constructor(value) { Object.assign(this, value); }
   },
-  clearInterval() {},
+  clearInterval(id) {
+    const interval = intervals.find((item) => item.id === id);
+    if (interval) interval.cleared = true;
+  },
   clearTimeout(id) {
     const timer = timers.find((item) => item.id === id);
     if (timer) timer.cleared = true;
@@ -184,7 +188,11 @@ const sandbox = {
       getDisplayMedia: async () => acquireFakeStream('getDisplayMedia'),
     },
   },
-  setInterval() { return 1; },
+  setInterval(callback, delay) {
+    const interval = { id: nextTimerId++, callback, delay, cleared: false };
+    intervals.push(interval);
+    return interval.id;
+  },
   setTimeout(callback, delay) {
     const timer = { id: nextTimerId++, callback, delay, cleared: false };
     timers.push(timer);
@@ -711,4 +719,145 @@ assert.equal(createdStreams.length, streamCountAfterRestart);
 assert.equal(evaluate('localStream'), restartedStream);
 assert.equal(restartedStream.track.stopped, false);
 
-console.log('ClassPilot offscreen WebSocket and Live View identity test passed.');
+const cadenceIssuedAt = Date.now();
+const invalidCadence = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-invalid',
+  generation: 1,
+  issuedAt: cadenceIssuedAt,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 4_000,
+});
+assert.equal(invalidCadence.success, false);
+assert.equal(invalidCadence.status, 'invalid-cadence');
+const stringScalarCadence = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-string-scalars',
+  generation: '1',
+  issuedAt: cadenceIssuedAt + 1,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(stringScalarCadence.success, false);
+assert.equal(stringScalarCadence.status, 'invalid-cadence');
+
+const cadenceA = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-active-a',
+  generation: 2,
+  issuedAt: cadenceIssuedAt + 1,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(cadenceA.success, true);
+const cadenceAInterval = intervals.at(-1);
+const cadenceAExpiry = timers.at(-1);
+assert.equal(cadenceAInterval.delay, 5_000);
+assert.equal(cadenceAInterval.cleared, false);
+const cadenceASchedule = JSON.parse(JSON.stringify(evaluate('screenshotCadenceSchedule')));
+const intervalCountBeforeIdempotentStart = intervals.length;
+const idempotentCadenceA = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  ...cadenceASchedule,
+});
+assert.equal(idempotentCadenceA.success, true);
+assert.equal(idempotentCadenceA.status, 'active');
+assert.equal(intervals.length, intervalCountBeforeIdempotentStart);
+const mutatedReplayCadenceA = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  ...cadenceASchedule,
+  expiresAt: cadenceASchedule.expiresAt + 1,
+});
+assert.equal(mutatedReplayCadenceA.success, true);
+assert.equal(mutatedReplayCadenceA.status, 'renewed');
+assert.equal(intervals.length, intervalCountBeforeIdempotentStart);
+assert.equal(cadenceAInterval.cleared, false);
+assert.equal(cadenceAExpiry.cleared, true);
+assert.equal(evaluate('screenshotCadenceSchedule.expiresAt'), cadenceASchedule.expiresAt + 1);
+const cadenceATicksBefore = relayed.filter((message) => (
+  message.type === 'SCREENSHOT_CADENCE_TICK'
+  && message.cadenceId === 'cadence-active-a'
+)).length;
+cadenceAInterval.callback();
+cadenceAInterval.callback();
+assert.equal(
+  relayed.filter((message) => (
+    message.type === 'SCREENSHOT_CADENCE_TICK'
+    && message.cadenceId === 'cadence-active-a'
+  )).length,
+  cadenceATicksBefore + 1,
+  'the offscreen scheduler must drop overlapping ticks instead of queuing captures',
+);
+await Promise.resolve();
+await Promise.resolve();
+
+const staleCadence = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-stale-a',
+  generation: 3,
+  issuedAt: cadenceIssuedAt,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(staleCadence.success, false);
+assert.equal(staleCadence.status, 'stale-cadence');
+assert.equal(cadenceAInterval.cleared, false);
+
+const cadenceB = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-active-b',
+  generation: 4,
+  issuedAt: cadenceIssuedAt + 2,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(cadenceB.success, true);
+assert.equal(cadenceAInterval.cleared, true);
+const cadenceBInterval = intervals.at(-1);
+assert.equal(cadenceBInterval.cleared, false);
+
+const staleStop = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_STOP',
+  cadenceId: 'cadence-active-a',
+  generation: 5,
+  issuedAt: cadenceIssuedAt + 1,
+});
+assert.equal(staleStop.success, false);
+assert.equal(staleStop.status, 'stale-cadence');
+assert.equal(cadenceBInterval.cleared, false);
+
+const currentStop = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_STOP',
+  cadenceId: 'cadence-active-b',
+  generation: 5,
+  issuedAt: cadenceIssuedAt + 3,
+});
+assert.equal(currentStop.success, true);
+assert.equal(currentStop.status, 'stopped');
+assert.equal(cadenceBInterval.cleared, true);
+assert.equal(evaluate('screenshotCadenceSchedule'), null);
+
+const cadenceC = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-active-c',
+  generation: 6,
+  issuedAt: cadenceIssuedAt + 4,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+});
+assert.equal(cadenceC.success, true);
+const cadenceCInterval = intervals.at(-1);
+const cadenceCExpiry = timers.at(-1);
+evaluate('screenshotCadenceTickInFlight = true');
+cadenceCExpiry.callback();
+await Promise.resolve();
+await Promise.resolve();
+assert.equal(cadenceCInterval.cleared, true);
+assert.equal(evaluate('screenshotCadenceSchedule'), null);
+assert.ok(relayed.some((message) => (
+  message.type === 'SCREENSHOT_CADENCE_EXPIRED'
+  && message.cadenceId === 'cadence-active-c'
+  && message.generation === 6
+)));
+
+console.log('ClassPilot offscreen WebSocket, Live View identity, and screenshot cadence test passed.');

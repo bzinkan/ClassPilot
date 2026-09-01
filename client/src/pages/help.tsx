@@ -208,7 +208,7 @@ export default function HelpCenter() {
         },
         {
           question: 'I can\'t see student screenshots',
-          answer: 'Tracking-window thumbnails are captured about every 30 seconds while school-managed monitoring is active under a short-lived exact authority lease; capture does not depend on whether the teacher dashboard tab or tile is visible. SchoolPilot retains class-bound thumbnails and discards gap/student-session pixels. Check the session, tracking policy, extension connection, and school configuration; managed deployments do not depend on a student screen-picker action.',
+          answer: 'Tracking-window thumbnails are captured about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active under a short-lived exact authority lease. SchoolPilot retains class-bound thumbnails and discards gap/student-session pixels. Check the session, tracking policy, extension connection, and school configuration; managed deployments do not depend on a student screen-picker action.',
         },
         {
           question: 'Google Classroom sync isn\'t working',

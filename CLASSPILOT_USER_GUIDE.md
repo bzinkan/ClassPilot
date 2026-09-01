@@ -457,7 +457,7 @@ ClassPilot is built with privacy as a core principle:
 
 ✅ **Purpose-Limited Data Processing**
 - Processes school-issued identifiers, active-tab URLs/titles, heartbeat state, and classroom communications needed for the service
-- May process tracking-window thumbnails about every 30 seconds while school-managed monitoring is active, independent of dashboard visibility; SchoolPilot retains class-bound images and discards gap/student-session pixels
+- May process tracking-window thumbnails about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active; SchoolPilot retains class-bound images and discards gap/student-session pixels
 - May process an exact-bound safety screenshot under the configured school policy
 - Does not intentionally collect keystrokes, typed passwords, microphone audio, camera video, incognito-window activity, or browsing from unmanaged profiles
 - The school setting controls heartbeat history and related report detail; ambient thumbnails, safety evidence, communications, account/audit records, and local teacher downloads follow separate policies

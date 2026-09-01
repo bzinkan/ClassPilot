@@ -31,10 +31,11 @@ SchoolPilot:
 - Active tab title, active tab URL, favicon URL, and timestamps.
 - Heartbeat and connection state used by the teacher dashboard.
 - Tracking-window screenshot thumbnails of the active visible HTTP/HTTPS tab.
-  Capture runs independently of teacher dashboard visibility while the exact
-  server-authorized tracking window remains active. SchoolPilot retains only
-  teaching-session-bound thumbnails and discards student-session/gap pixels on
-  receipt.
+  The 30-second background cadence runs independently of teacher dashboard
+  visibility while the exact server-authorized tracking window remains active;
+  the five-second cadence requires the exact authorized class view to be
+  visible. SchoolPilot retains only teaching-session-bound thumbnails and
+  discards student-session/gap pixels on receipt.
 - An exact-bound safety-evidence screenshot requested immediately before a
   specific safety tab closure, when capture succeeds within the bounded window.
 - Student-initiated hand raises, chat messages, poll responses, and sign-in
@@ -48,16 +49,21 @@ browsing from unmanaged user profiles.
 ## Live Viewing And Screenshots
 
 In negotiated tracking-window mode, the extension takes a JPEG thumbnail of the
-active visible HTTP/HTTPS tab about every 30 seconds while school-managed
-monitoring is active inside a short-lived server-authorized tracking window.
-Capture does not depend on whether a teacher has the dashboard tab visible,
-switched browser tabs, or scrolled a student tile offscreen. Each upload carries
-the exact student-session or teaching-session authority and control revision
-that authorized the pixels. SchoolPilot discards student-session/gap pixels on
+active visible HTTP/HTTPS tab about every five seconds only while an authorized
+teacher or administrator has the exact class view visible. It returns to about
+every 30 seconds when that view is not active but the short-lived
+server-authorized tracking window remains open. The five-second grant is bound
+to the exact student, student session, teaching session, control revision, and
+authentication generation; the extension independently expires it and drops
+overlapping captures rather than queuing them. Each upload carries the exact
+student-session or teaching-session authority and control revision that
+authorized the pixels. SchoolPilot discards student-session/gap pixels on
 receipt and retains only teaching-session-bound thumbnails. Capture stops when
 the tracking window closes, the lease expires or is revoked, school tracking
 policy is hard-off, the student signs out or the session expires/changes, or
 the school license is explicitly denied.
+The active-class cadence adds no Chrome permission and does not persist pixels
+in extension storage.
 The older observation-lease capability remains available during mixed-version
 migration, and the server may explicitly select legacy screenshot mode.
 
@@ -100,7 +106,7 @@ required; the ticket supplies continuity only.
 
 ## Deferred Restrictions And Authentication Pass-Through
 
-Version 2.7.9 can receive a SchoolPilot-marked Waypoint or Flight Path that was
+Version 2.7.9 and later can receive a SchoolPilot-marked Waypoint or Flight Path that was
 authored while the student was signed out. The extension accepts that marker
 only for the exact authenticated school, student, session, device, server
 origin, and control revision after both sides negotiated the capability.
@@ -161,7 +167,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.7.9.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.0.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
