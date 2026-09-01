@@ -796,7 +796,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("hasNegotiatedCapability('screenshotObservationLeaseV1', context)");
     expect(serviceWorker).toContain("status: 'paused_unobserved'");
     expect(serviceWorker).toContain("const maximumLeaseSeconds = leaseKind === 'tracking_window' ? 90 : 120");
-    expect(serviceWorker).toContain("function requestImmediateScreenshotCapture()");
+    expect(serviceWorker).toContain("function requestImmediateScreenshotCapture(reason = 'authority-change')");
     expect(serviceWorker).toContain("screenshotPolicyGeneration !== expectedGeneration");
     expect(serviceWorker).toContain("screenshotPolicyState.authorityScope || null");
     expect(serviceWorker).toContain("screenshotAuthority: captureScreenshotAuthority");
@@ -891,6 +891,8 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("type: 'SCREENSHOT_CADENCE_START'");
     expect(serviceWorker).toContain("message.type === 'SCREENSHOT_CADENCE_TICK'");
     expect(serviceWorker).toContain("captureAndSendScreenshot({ reason: 'active-view-tick' })");
+    expect(serviceWorker).toContain("requestImmediateScreenshotCapture('lease-start')");
+    expect(serviceWorker).toContain("next.captureCadence?.mode === 'active_view'");
     expect(serviceWorker).toContain("rawPolicy?.captureCadence");
     expect(serviceWorker).toContain("scheduleEventHeartbeat('screenshot-policy-refresh')");
     expect(serviceWorker).toContain("scheduleActiveViewNavigationCapture('tab-activated')");

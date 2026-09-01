@@ -1663,6 +1663,9 @@ async function main() {
         let malformedCadenceRetainedPermission = false;
         let malformedCadenceDowngraded = false;
         let authorityChangeRapidUploadAttempts = null;
+        let leaseStartCaptureOnActivation = false;
+        let leaseStartSuppressedOnRenewal = false;
+        let leaseStartBypassedAuthorityChange = false;
         try {
           sendToOffscreen = async (message, sendOptions = {}) => {
             sendOptions.assertCurrent?.();
@@ -1746,6 +1749,44 @@ async function main() {
           } finally {
             Date.now = originalDateNow;
           }
+
+          // 'lease-start' immediate capture: cadence activation without an
+          // authority change must fire exactly one gap-0 capture; downgrades
+          // and renewals must not. The double stays installed through the
+          // omission/malformed adoptions below so their re-activations count
+          // here instead of running real captures.
+          const leaseStartReasons = [];
+          captureAndSendScreenshot = async ({ reason } = {}) => {
+            leaseStartReasons.push(reason);
+            return { status: 'captured-by-lease-start-double' };
+          };
+          const countLeaseStarts = () => leaseStartReasons.filter(
+            (reason) => reason === 'lease-start',
+          ).length;
+          const backgroundOnlyPolicy = trackingPolicy();
+          delete backgroundOnlyPolicy.captureCadence;
+          adoptScreenshotPolicy(backgroundOnlyPolicy, authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          const leaseStartAfterDowngrade = countLeaseStarts();
+          adoptScreenshotPolicy(trackingPolicy(), authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          const leaseStartAfterActivation = countLeaseStarts();
+          adoptScreenshotPolicy(trackingPolicy(), authB, {
+            requestStartedAt: Date.now(),
+            responseReceivedAt: Date.now(),
+            policySource: 'heartbeat',
+          });
+          const leaseStartAfterRenewal = countLeaseStarts();
+          leaseStartCaptureOnActivation = leaseStartAfterDowngrade === 0
+            && leaseStartAfterActivation === 1;
+          leaseStartSuppressedOnRenewal = leaseStartAfterRenewal === leaseStartAfterActivation;
+          leaseStartBypassedAuthorityChange = !leaseStartReasons.includes('authority-change');
 
           const authorityChangeRetryOptions = [];
           fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
@@ -4117,6 +4158,9 @@ async function main() {
           malformedCadenceRetainedPermission,
           malformedCadenceDowngraded,
           authorityChangeRapidUploadAttempts,
+          leaseStartCaptureOnActivation,
+          leaseStartSuppressedOnRenewal,
+          leaseStartBypassedAuthorityChange,
           screenshotLicenseDeniedResult,
           screenshotLicenseDenials,
           screenshotLicenseExpectedScope,
@@ -4497,6 +4541,9 @@ async function main() {
     assert.equal(result.malformedCadenceRetainedPermission, true);
     assert.equal(result.malformedCadenceDowngraded, true);
     assert.equal(result.authorityChangeRapidUploadAttempts, 1);
+    assert.equal(result.leaseStartCaptureOnActivation, true);
+    assert.equal(result.leaseStartSuppressedOnRenewal, true);
+    assert.equal(result.leaseStartBypassedAuthorityChange, true);
     assert.equal(result.leaseImmediateCaptureRequests >= 3, true);
     assert.equal(
       result.generationAfterContinuousRenewal,
