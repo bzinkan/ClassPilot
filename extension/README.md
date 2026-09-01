@@ -115,6 +115,53 @@ later reconciliation for the same binding goes directly to the intended
 Waypoint or Flight Path destination. This behavior adds no Chrome permission
 and no managed-policy schema field.
 
+### School-configured sign-in during restrictions (2.8.1)
+
+Version 2.8.1 adds the complete `restrictionAuthPassThroughV1` contract for
+both live and deferred Waypoints and Flight Paths. SchoolPilot supplies a
+versioned, administrator-controlled authentication policy only after the exact
+school, student, session, device, server origin, control revision, and accepted
+capability are verified. The policy may contain Google, Clever, or bounded
+district identity-provider profiles. A teacher command cannot add or broaden
+an authentication host.
+
+A cold deferred restriction opens the school's configured default provider
+before the learning destination. A live restriction opens the destination
+normally and enters authentication only if that navigation redirects to an
+approved provider. Host matching is exact unless the administrator explicitly
+allows subdomains; substring matches and lookalike suffixes are rejected.
+Attention mode and school or teacher blocks have higher priority than the
+authentication exception, which in turn has higher priority than the
+Waypoint/Flight Path redirect.
+
+Authentication uses one exact-binding, control-revision, and policy-revision
+state machine with an absolute 300-second attempt limit. Reaching Clever,
+Google Accounts, or another provider does not mark the restriction complete;
+completion requires the active flow to reach the exact Waypoint destination or
+an allowed Flight Path destination. A timed-out flow returns to the destination
+and offers a bounded retry. An active authentication tab or popup is preserved
+without being counted as destination-compliant or pulling focus away mid-login.
+The state is cleared on sign-out, restriction removal, timeout, or any identity,
+school, device, server, or managed-policy transition, and it can be restored
+safely after an MV3 worker restart.
+
+Extension-local authentication state contains only a binding digest, policy
+revision, control revision, provider id, bounded timestamps, and the active tab
+id. Student-observed redirect paths, query strings, fragments, tokens, cookies,
+and credentials are not stored in classroom state, the monitoring outbox, or
+runtime logs. While an approved provider is active, heartbeat and screenshot
+metadata use the provider origin with a neutral title and no favicon rather
+than the observed OAuth URL.
+
+Heartbeat, control application, and screenshot work run as independent lanes.
+Essential DNR enforcement and desired-state persistence complete before a
+restriction ACK; bounded tab cleanup and focus work continue best effort after
+that safe boundary. Hung tab operations and screenshot `429` backoff cannot
+retain or suppress the heartbeat single-flight guard. A new control revision
+retires prior screenshot authority and requests one capture for the exact new
+revision. This feature adds no Chrome permission and no managed-policy schema
+field.
+
 ### Reliable observation policy reconciliation (2.7.2)
 
 Heartbeat and WebSocket protocol responses now order screenshot authority
@@ -219,9 +266,10 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.0 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.0.zip` after clean-tag packaging. Any archive built before
-the active-class cadence work landed is obsolete and must not be uploaded.
+For the final 2.8.1 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.1.zip` after clean-tag packaging. Existing 2.7.9 and 2.8.0
+archives do not contain the complete school-configured authentication and lane
+isolation behavior and must not be submitted.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
@@ -360,6 +408,11 @@ bounded title. Credentials, query strings, fragments, keystrokes, clipboard or
 form content, DOM content, screenshots, and arbitrary metadata are not stored
 in the event outbox.
 
+During an approved identity-provider flow, even the normal sanitized path is
+omitted: monitoring metadata is reduced to the provider origin, a neutral
+sign-in title, and no favicon. OAuth redirect paths and parameters therefore do
+not enter extension storage, event outboxes, or runtime logs.
+
 ### Connectivity and command delivery
 
 The toolbar badge and popup report heartbeat health without trying to infer why
@@ -380,6 +433,10 @@ Persistent classroom controls continue to reconcile from their full stored
 snapshot. Screenshot image bodies are never queued or written to local storage;
 only bounded attempt, success, and error diagnostic timestamps/codes survive a
 worker restart.
+
+Heartbeat delivery has its own timeout and backoff and never waits for DNR or
+tab reconciliation. Screenshot upload rate limits use a separate backoff, so a
+preview delay cannot make a connected student appear disconnected.
 
 Student-to-teacher chat uses a bounded local retry outbox (maximum 40 messages,
 128 KiB, and 30 minutes). An expiry alarm physically removes aged message

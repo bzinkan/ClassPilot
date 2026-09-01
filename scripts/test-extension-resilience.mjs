@@ -368,6 +368,112 @@ async function main() {
     assert.equal(initial.runtime.attentionModeActive, true);
     assert.equal(initial.runtime.currentMaxTabs, 5);
 
+    const hungHeartbeatTabQueries = await worker.evaluate(async () => {
+      scheduleHeartbeat(null);
+      await chrome.alarms.clear('heartbeat');
+      const drainDeadline = Date.now() + 5_000;
+      while (heartbeatInFlight && Date.now() < drainDeadline) {
+        await new Promise((resolveDrain) => setTimeout(resolveDrain, 10));
+      }
+      if (heartbeatInFlight) throw new Error('heartbeat did not drain before hung-tab fixture');
+      const originalFetch = globalThis.fetch;
+      let heartbeatRequests = 0;
+      globalThis.fetch = (url, init) => {
+        if (String(url).includes('/api/device/heartbeat')) {
+          heartbeatRequests += 1;
+          return Promise.resolve(new Response('{}', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }));
+        }
+        return originalFetch(url, init);
+      };
+      const startedAt = Date.now();
+      try {
+        const outcome = await safeSendHeartbeat('hung-tab-query-fixture', {
+          queryTabs: () => new Promise(() => {}),
+        });
+        return {
+          outcome,
+          elapsedMs: Date.now() - startedAt,
+          heartbeatRequests,
+          inFlight: heartbeatInFlight,
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+    assert.equal(hungHeartbeatTabQueries.outcome, true);
+    assert.equal(hungHeartbeatTabQueries.heartbeatRequests, 1);
+    assert.equal(hungHeartbeatTabQueries.inFlight, false);
+    assert.ok(hungHeartbeatTabQueries.elapsedMs >= 5_500);
+    assert.ok(hungHeartbeatTabQueries.elapsedMs < 15_000);
+
+    const hungControlAdoption = await worker.evaluate(async () => {
+      const drainDeadline = Date.now() + 5_000;
+      while (heartbeatInFlight && Date.now() < drainDeadline) {
+        await new Promise((resolveDrain) => setTimeout(resolveDrain, 10));
+      }
+      if (heartbeatInFlight) throw new Error('heartbeat did not drain before hung-control fixture');
+      const authContext = captureAuthenticatedContext('hung-control heartbeat fixture');
+      adoptLicenseState(true, 'active', authContext);
+      trackingState = TRACKING_STATES.ACTIVE;
+      heartbeatBackoffUntilMs = 0;
+      const originalFetch = globalThis.fetch;
+      let heartbeatRequests = 0;
+      let controlAdoptions = 0;
+      globalThis.fetch = (url, init) => {
+        if (String(url).includes('/api/device/heartbeat')) {
+          heartbeatRequests += 1;
+          return Promise.resolve(new Response(JSON.stringify({
+            studentId: authContext.studentId,
+            studentSessionId: authContext.studentSessionId,
+            schoolId: authContext.schoolId,
+            serverProtocolVersion: CLIENT_PROTOCOL_VERSION,
+            acceptedCapabilities: ['scopedAuthorityChecksV1'],
+          }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }));
+        }
+        return originalFetch(url, init);
+      };
+      const neverFinishesApplyingControl = () => {
+        controlAdoptions += 1;
+        return new Promise(() => {});
+      };
+      const startedAt = Date.now();
+      try {
+        const first = await safeSendHeartbeat('hung-control-fixture-first', {
+          queryTabs: () => Promise.resolve([]),
+          applyClassroomState: neverFinishesApplyingControl,
+        });
+        const releasedAfterFirst = heartbeatInFlight === false;
+        const second = await safeSendHeartbeat('hung-control-fixture-second', {
+          queryTabs: () => Promise.resolve([]),
+          applyClassroomState: neverFinishesApplyingControl,
+        });
+        return {
+          first,
+          second,
+          releasedAfterFirst,
+          releasedAfterSecond: heartbeatInFlight === false,
+          elapsedMs: Date.now() - startedAt,
+          heartbeatRequests,
+          controlAdoptions,
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+    assert.equal(hungControlAdoption.first, true);
+    assert.equal(hungControlAdoption.second, true);
+    assert.equal(hungControlAdoption.releasedAfterFirst, true);
+    assert.equal(hungControlAdoption.releasedAfterSecond, true);
+    assert.equal(hungControlAdoption.heartbeatRequests, 2);
+    assert.equal(hungControlAdoption.controlAdoptions, 2);
+    assert.ok(hungControlAdoption.elapsedMs < 5_000);
+
     const recoveryPrivacyAndBackoff = await worker.evaluate(async () => {
       const originalConfig = { ...CONFIG };
       const originalPolicyGeneration = managedAuthGatePolicyGeneration;
@@ -1506,7 +1612,7 @@ async function main() {
 
     const tabUrl = (host, path) => `http://${host}.localhost:${fixture.port}${path}`;
     const reconciliationUrls = {
-      lock: tabUrl('lock', '/assignment'),
+      lock: 'https://example.com/classpilot-resilience-assignment',
       outsideOne: tabUrl('outside', '/one'),
       outsideActive: tabUrl('outside', '/active'),
       otherTwo: tabUrl('other', '/two'),
@@ -1549,7 +1655,7 @@ async function main() {
           screenLock: {
             active: true,
             url: urls.lock,
-            domain: 'lock.localhost',
+            domain: 'example.com',
           },
         },
       });
@@ -1562,7 +1668,7 @@ async function main() {
         // deterministic invariant is that every remaining web tab is on the
         // locked domain, not that exactly one remains.
         return webUrls.length >= 1 && webUrls.every((url) =>
-          new URL(url).hostname === 'lock.localhost'
+          new URL(url).hostname === 'example.com'
         );
       });
       await drainTabPolicyMutations();
@@ -1621,7 +1727,7 @@ async function main() {
       `lock reconciliation result: ${JSON.stringify(existingTabReconciliation.afterLock)}`,
     );
     assert.ok(existingTabReconciliation.afterLock.web.every((url) =>
-      new URL(url).hostname === 'lock.localhost'
+      new URL(url).hostname === 'example.com'
     ));
     assert.ok(existingTabReconciliation.afterLock.web.includes(reconciliationUrls.lock));
     assert.ok(existingTabReconciliation.afterFlightPath.internal.length >= 1);
@@ -1632,7 +1738,12 @@ async function main() {
 
     const bestEffortTabFailure = await worker.evaluate(async ({ now }) => {
       const originalReconcile = reconcileExistingTabsForClassroomState;
+      let resolveReconcileAttempt;
+      const reconcileAttempted = new Promise((resolveAttempt) => {
+        resolveReconcileAttempt = resolveAttempt;
+      });
       reconcileExistingTabsForClassroomState = async () => {
+        resolveReconcileAttempt();
         throw new Error('simulated tab reconciliation failure');
       };
       let application;
@@ -1647,6 +1758,14 @@ async function main() {
             blockList: { active: true, blockedDomains: ['best-effort.example'] },
           },
         });
+        await Promise.race([
+          reconcileAttempted,
+          new Promise((_, reject) => setTimeout(
+            () => reject(new Error('post-ACK tab reconciliation did not run')),
+            2_000,
+          )),
+        ]);
+        await new Promise((resolveTick) => setTimeout(resolveTick, 0));
       } finally {
         reconcileExistingTabsForClassroomState = originalReconcile;
       }
@@ -2403,6 +2522,7 @@ async function main() {
       scheduleHeartbeat(null);
       const originalFetch = globalThis.fetch;
       const originalBuildOpaqueTabSnapshot = buildOpaqueTabSnapshot;
+      const originalCaptureAndSendScreenshot = captureAndSendScreenshot;
       const priorIdentity = {
         serverUrl: CONFIG.serverUrl,
         schoolId: CONFIG.schoolId,
@@ -2519,17 +2639,41 @@ async function main() {
           : null;
 
         installIdentity('screenshot-a');
+        // Ignore maintenance captures queued by earlier authority transitions;
+        // this fixture owns the one explicitly pause-pointed capture below.
+        captureAndSendScreenshot = (captureOptions = {}) => (
+          captureOptions.reason === 'auth-context-race'
+            ? originalCaptureAndSendScreenshot(captureOptions)
+            : Promise.resolve(undefined)
+        );
         lastScreenshotAttemptAt = Date.now();
         const screenshotAContext = captureAuthenticatedContext('screenshot race fixture');
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
           acceptedCapabilities: [],
         }, screenshotAContext);
-        adoptScreenshotPolicy(undefined, screenshotAContext);
+        // Let any capture already queued before the wrapper above either enter
+        // the in-flight lane or retire for the superseded identity.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await waitFor((async () => {
+          while (screenshotCaptureInFlight) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+        })(), 'prior screenshot lane');
+        // Keep policy adoption from starting an unrelated authority-change
+        // capture before this explicitly pause-pointed pixel acquisition.
+        const originalImmediateScreenshotCapture = requestImmediateScreenshotCapture;
+        requestImmediateScreenshotCapture = () => {};
+        try {
+          adoptScreenshotPolicy(undefined, screenshotAContext);
+        } finally {
+          requestImmediateScreenshotCapture = originalImmediateScreenshotCapture;
+        }
         trackingState = TRACKING_STATES.ACTIVE;
         apiBackoffUntilMs = 0;
+        screenshotBackoffUntilMs = 0;
         lastScreenshotAttemptAt = 0;
-        screenshotCaptureInFlight = false;
+        screenshotImmediateCapturePending = false;
         let releaseScreenshot;
         let markScreenshotStarted;
         const screenshotStarted = new Promise((resolveStarted) => {
@@ -2556,7 +2700,22 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
-        await waitFor(screenshotStarted, 'screenshot pixels');
+        const screenshotStartOutcome = await waitFor(Promise.race([
+          screenshotStarted.then(() => ({ started: true })),
+          delayedScreenshot.then((result) => ({
+            started: false,
+            result,
+            licenseActive: currentLicenseIsActive(),
+            trackingState,
+            screenshotCaptureInFlight,
+            screenshotBackoffUntilMs,
+            ambientAllowed: ambientScreenshotAllowed(screenshotAContext),
+            policy: screenshotPolicyState,
+          })),
+        ]), 'screenshot pixels');
+        if (!screenshotStartOutcome.started) {
+          throw new Error(`Screenshot exited before pixels: ${JSON.stringify(screenshotStartOutcome)}`);
+        }
         const finalAuthContextId = installIdentity('screenshot-b', priorIdentity);
         releaseScreenshot();
         await delayedScreenshot;
@@ -2583,6 +2742,7 @@ async function main() {
       } finally {
         globalThis.fetch = originalFetch;
         buildOpaqueTabSnapshot = originalBuildOpaqueTabSnapshot;
+        captureAndSendScreenshot = originalCaptureAndSendScreenshot;
         // Keep event-triggered maintenance heartbeats disabled for the rest of
         // this deterministic command/socket section. The harness invokes every
         // heartbeat it needs directly, and delayed callbacks from earlier cases

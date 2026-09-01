@@ -104,7 +104,7 @@ after reading it. The raw directory id is not placed in URLs, stored by the
 extension, or logged. Kiosk PIN or signed-token authentication remains
 required; the ticket supplies continuity only.
 
-## Deferred Restrictions And Authentication Pass-Through
+## Restricted Sign-In And Authentication Pass-Through
 
 Version 2.7.9 and later can receive a SchoolPilot-marked Waypoint or Flight Path that was
 authored while the student was signed out. The extension accepts that marker
@@ -126,6 +126,37 @@ scope record contains no raw student, session, school, device, token, or server
 identifier and is cleared on sign-out or any binding, server, or managed-policy
 transition. The feature adds no Chrome permission and no managed-policy key.
 
+Version 2.8.1 adds the separately negotiated
+`restrictionAuthPassThroughV1` contract for live and deferred Waypoints and
+Flight Paths. SchoolPilot projects a versioned authentication policy configured
+by the school administrator; a teacher restriction cannot add providers or
+broaden their hosts. The policy can contain Google, Clever, and bounded custom
+district providers. Exact-host matching is the default, subdomains require an
+explicit rule, and lookalike or substring matches are rejected. Attention mode,
+school blocks, and teacher blocks remain higher priority than every
+authentication exception.
+
+The extension tracks one 300-second authentication attempt scoped to the exact
+binding plus the control and policy revisions. Provider navigation is temporary
+and is not treated as reaching the assigned learning destination. On timeout,
+the tab returns to the restriction destination and a retry starts a new bounded
+attempt. The extension preserves an active authentication tab or popup during
+tab-limit reconciliation without counting it as destination-compliant.
+
+The trusted local record contains only an opaque binding digest, revision
+numbers, provider id, bounded timestamps, and active tab id. Student-observed
+redirect paths, query strings, fragments, tokens, cookies, and credentials are
+not stored in classroom state, monitoring outboxes, or logs. Monitoring metadata
+for an approved provider is reduced to its origin, a neutral sign-in title, and
+no favicon. Sign-out, restriction removal, timeout, or any identity, school,
+device, server, or managed-policy transition clears the attempt.
+
+Heartbeat, restriction application, and screenshot upload use independent
+timeouts and backoff. Essential DNR enforcement and desired-state persistence
+precede the restriction ACK; bounded tab reconciliation follows best effort.
+Screenshot rate limiting cannot delay heartbeat freshness. This behavior adds
+no Chrome permission and no managed-policy schema field.
+
 ## Chrome Web Store Privacy Disclosure Copy
 
 ClassPilot processes school-issued identifiers, active-tab activity, tab
@@ -144,11 +175,11 @@ device id to SchoolPilot only after the capability preflight described above.
 SchoolPilot immediately converts it to a school-scoped opaque id; the raw value
 is never stored, logged, or placed in a URL.
 
-For a capability-gated deferred Waypoint or Flight Path, ClassPilot may allow
-navigation through the exact Clever and Google Accounts domain families while
-the student authenticates. The extension stores only visited host names and an
-opaque local binding digest for this flow; it does not store SSO credentials or
-full SSO URLs in that record.
+For a capability-gated Waypoint or Flight Path, ClassPilot may allow navigation
+through only the identity-provider hosts configured by the school. The
+extension keeps only the opaque, revision-scoped attempt metadata described
+above. It does not store credentials or student-observed redirect URLs, and it
+reports provider monitoring metadata at origin level only.
 
 ## Retention
 
@@ -167,7 +198,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.0.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.1.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
@@ -177,7 +208,7 @@ Before each Chrome Web Store upload:
 - Confirm the Chrome Web Store listing and school notices disclose tab/URL
   heartbeat monitoring, tracking-window thumbnails and the server-side discard
   of student-session/gap pixels, exact safety capture,
-  managed-device kiosk continuity, deferred Clever/Google Accounts navigation,
+  managed-device kiosk continuity, school-configured restricted sign-in,
   and TURN-relayed Live View.
 - Use the hosted SchoolPilot privacy policy URL in Chrome Web Store:
   `https://school-pilot.net/privacy`.

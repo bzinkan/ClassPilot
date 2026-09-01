@@ -401,6 +401,17 @@ async function waitForWorker(context) {
   return context.serviceWorkers()[0] || context.waitForEvent('serviceworker', { timeout: 10_000 });
 }
 
+async function preparePageForWorkerStop(page) {
+  try {
+    await page.goto('chrome://version');
+  } catch (error) {
+    // Restriction reconciliation can win the same navigation turn and make
+    // Playwright report ERR_ABORTED while the page remains a valid CDP target.
+    if (page.isClosed() || !String(error?.message || '').includes('ERR_ABORTED')) throw error;
+  }
+  return page;
+}
+
 async function waitForLiveWorker(context) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -3136,7 +3147,7 @@ async function main() {
     });
     const authenticatedConfigRequestsBeforeNavigation = fixture.state.loginConfigRequests;
     const authenticatedPage = context.pages()[0] || await context.newPage();
-    await authenticatedPage.goto('chrome://version');
+    await preparePageForWorkerStop(authenticatedPage);
     const cohortStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
     assert.equal(cohortStop.stopped, true, 'could not stop the MV3 worker before cold cohort requests');
     await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
@@ -3169,7 +3180,7 @@ async function main() {
       'cold authenticated response cohort started login configuration network I/O',
     );
 
-    await authenticatedPage.goto('chrome://version');
+    await preparePageForWorkerStop(authenticatedPage);
     const authenticatedStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
     assert.equal(authenticatedStop.stopped, true, 'could not stop the MV3 worker before authenticated navigation');
     const authenticatedConfigRequestsImmediatelyBeforeNavigation =
@@ -3252,7 +3263,7 @@ async function main() {
     // binding, stop the MV3 worker, and prove the cold successor restores the
     // ledger instead of replaying the cold Clever landing. The same restored
     // runtime must keep both DNR and imperative navigation handling aligned.
-    const restrictionSsoDestination = `${fixture.origin}/restriction-sso-destination`;
+    const restrictionSsoDestination = 'https://classroom.google.com/restriction-sso-destination';
     const restrictionSsoRestartSeed = await worker.evaluate(async (destinationUrl) => {
       const authContext = captureAuthenticatedContext('restriction SSO restart seed');
       const controlRevision = Math.max(
@@ -3344,7 +3355,7 @@ async function main() {
       bindingDigest: restrictionSsoRestartSeed.bindingDigest,
     });
 
-    await authenticatedPage.goto('chrome://version');
+    await preparePageForWorkerStop(authenticatedPage);
     const restrictionSsoWorkerStop = await stopExtensionWorker(
       context,
       authenticatedPage,
@@ -3364,7 +3375,16 @@ async function main() {
       await classroomStateRestorePromise;
       await dynamicRuleCompositionTail;
       const stored = await rawLocalKv.get([RESTRICTION_SSO_VISIT_STORAGE_KEY]);
-      const tabs = await chrome.tabs.query({});
+      // Desired state and essential DNR restore before post-ACK tab
+      // reconciliation. Poll the browser-visible destination so this harness
+      // validates the detached control lane instead of depending on task order.
+      let tabs = [];
+      const destinationDeadline = Date.now() + 5_000;
+      do {
+        tabs = await chrome.tabs.query({});
+        if (tabs.some((tab) => tab.url === destinationUrl)) break;
+        await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
+      } while (Date.now() < destinationDeadline);
       const rules = await chrome.declarativeNetRequest.getDynamicRules();
       const restrictionSsoRules = rules
         .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'))
@@ -3440,14 +3460,17 @@ async function main() {
       };
     }, restrictionSsoDestination);
     assert.equal(restrictionSsoWorkerRestore.passThroughActive, true);
-    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, ['clever.com']);
+    assert.deepEqual(restrictionSsoWorkerRestore.visitedHosts, [
+      'accounts.google.com',
+      'clever.com',
+    ]);
     assert.equal(
       restrictionSsoWorkerRestore.storedVisit?.scopeDigest,
       restrictionSsoWorkerRestore.marker?.bindingDigest,
     );
     assert.ok(
       restrictionSsoWorkerRestore.destinationTabs >= 1,
-      'warm worker restore did not land directly on the restriction destination',
+      `warm worker restore did not land directly on the restriction destination: ${JSON.stringify(restrictionSsoWorkerRestore)}`,
     );
     assert.equal(
       restrictionSsoWorkerRestore.cleverTabs,
@@ -3473,6 +3496,608 @@ async function main() {
       )),
       'lookalike navigation was not redirected to the restored destination',
     );
+
+    const restrictionAuthDestination = 'https://classroom.google.com/c/restriction-auth-destination';
+    const restrictionAuthSecret = 'district_query_must_not_persist_2_8_1';
+    const restrictionAuthSeed = await worker.evaluate(async ({ destinationUrl, secret }) => {
+      const authContext = captureAuthenticatedContext('restriction auth Chrome fixture');
+      const controlRevision = Math.max(Number(currentStudentControlRevision() || 0) + 1, 92);
+      observeStudentControlRevision(controlRevision, authContext, 'restriction auth Chrome fixture');
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'lateSignInRestrictionSsoV1',
+          'restrictionAuthPassThroughV1',
+        ],
+      }, authContext);
+      const exactBinding = {
+        bindingVersion: 2,
+        schoolId: authContext.schoolId,
+        deviceId: authContext.deviceId,
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+        controlRevision,
+      };
+      const state = {
+        schemaVersion: 1,
+        revision: controlRevision,
+        receivedAt: Date.now(),
+        hardExpiresAt: Date.now() + 5 * 60_000,
+        deliveryContext: { lateSignInRestrictionSso: true },
+        authPassThrough: {
+          schemaVersion: 1,
+          policyRevision: 7,
+          defaultProfileId: 'clever',
+          attemptTtlSeconds: 300,
+          profiles: [{
+            id: 'clever',
+            name: 'District Clever',
+            startUrl: `https://district.clever.com/login?district_token=${secret}`,
+            hostRules: [
+              { hostname: 'clever.com', includeSubdomains: true },
+              { hostname: 'accounts.google.com', includeSubdomains: false },
+            ],
+          }, {
+            id: 'google',
+            name: 'Google',
+            startUrl: 'https://accounts.google.com/',
+            hostRules: [{ hostname: 'accounts.google.com', includeSubdomains: false }],
+          }],
+        },
+        authPassThroughPolicyRevision: 7,
+        restrictions: {
+          screenLock: {
+            active: true,
+            url: destinationUrl,
+            domain: new URL(destinationUrl).hostname,
+          },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: 1,
+          temporaryAllows: [],
+        },
+      };
+      const originalScheduleSideEffects = scheduleClassroomStateSideEffects;
+      scheduleClassroomStateSideEffects = () => {};
+      let applied;
+      try {
+        applied = await applyClassroomState(state, {
+          force: true,
+          reason: 'restriction_auth_chrome_fixture',
+          authContext,
+          authorityEnvelope: { exactBinding },
+        });
+      } finally {
+        scheduleClassroomStateSideEffects = originalScheduleSideEffects;
+      }
+      await restrictionAuthAttemptMutation;
+
+      // Keep this state-machine fixture deterministic: real identity-provider
+      // hosts can redirect or close a headless test tab before the worker-side
+      // assertions run. The authority-race harness exercises actual onCreated
+      // ordering; here we execute the same policy with an opener-bound tab.
+      const physicalTabs = await chrome.tabs.query({});
+      const stableTab = physicalTabs.find((tab) => Number.isInteger(tab?.id));
+      if (!stableTab) throw new Error('Restriction-auth fixture needs one stable Chrome tab');
+      const popup = {
+        id: stableTab.id,
+        windowId: stableTab.windowId,
+        openerTabId: 7_654_320,
+        active: true,
+        url: 'https://district.clever.com/login?popup_fixture=1',
+      };
+      const popupDecision = await createdTabPolicyDecision(
+        popup,
+        async () => [popup],
+      );
+
+      const phases = [];
+      await observeRestrictionAuthNavigationForAuth(
+        'https://district.clever.com/login?student_secret=redacted',
+        authContext,
+        popup.id,
+      );
+      phases.push(restrictionAuthAttemptState.phase);
+      await observeRestrictionAuthNavigationForAuth(
+        'https://accounts.google.com/o/oauth2/auth?code=redacted',
+        authContext,
+        popup.id,
+      );
+      phases.push(restrictionAuthAttemptState.phase);
+      const originalReconcileForProviderCallback = reconcileClassroomStateTabsBestEffort;
+      let providerCallbackReconcile = null;
+      reconcileClassroomStateTabsBestEffort = async (_state, options = {}) => {
+        providerCallbackReconcile = {
+          returnToDestination: options.authPassThroughReturnToDestination === true,
+          transientCurrentPage: options.transientCurrentPage === true,
+        };
+        return true;
+      };
+      await observeRestrictionAuthNavigationForAuth(
+        'https://district.clever.com/oauth/callback?code=redacted',
+        authContext,
+        popup.id,
+        { committed: true },
+      );
+      await new Promise((resolveTurn) => setTimeout(resolveTurn, 0));
+      reconcileClassroomStateTabsBestEffort = originalReconcileForProviderCallback;
+      phases.push(restrictionAuthAttemptState.phase);
+      const safeCommandSnapshot = await getClassroomCommandStateSnapshot({
+        queryTabs: async () => [{
+          id: popup.id,
+          windowId: popup.windowId,
+          active: true,
+          url: `https://accounts.google.com/o/oauth2/callback?code=${secret}&state=private`,
+          title: `OAuth ${secret}`,
+          favIconUrl: `https://accounts.google.com/favicon.ico?token=${secret}`,
+        }],
+      });
+      const storedCommandAck = normalizeCommandAckForStorage({
+        commandId: 'restriction-auth-private-ack',
+        ackState: 'received',
+        state: safeCommandSnapshot,
+        appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision(),
+      });
+      const currentPageSecret = `current-page-${secret}`;
+      const priorTransientCurrentPage = transientCurrentPageRestrictionActive;
+      const priorLockedUrl = lockedUrl;
+      const priorLockedDomain = lockedDomain;
+      let unrelatedCurrentPageSnapshot;
+      let unrelatedCurrentPageOutbox;
+      try {
+        transientCurrentPageRestrictionActive = true;
+        lockedUrl = `https://lesson.example/private/path?code=${currentPageSecret}#state`;
+        lockedDomain = 'lesson.example';
+        unrelatedCurrentPageSnapshot = await getClassroomCommandStateSnapshot({
+          queryTabs: async () => [{
+            id: 4_321,
+            windowId: 88,
+            active: true,
+            url: `https://lesson.example/private/path?code=${currentPageSecret}#state`,
+            title: `Private ${currentPageSecret}`,
+          }],
+        });
+        const unrelatedAckId = 'unrelated-command-current-page-privacy:completed';
+        await enqueueCommandAck({
+          commandId: 'unrelated-command-current-page-privacy',
+          ackId: unrelatedAckId,
+          ackState: 'completed',
+          commandType: 'message',
+          state: unrelatedCurrentPageSnapshot,
+          appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision(),
+        }, authContext);
+        await commandAckMutation;
+        unrelatedCurrentPageOutbox = await rawLocalKv.get([COMMAND_ACK_OUTBOX_KEY]);
+        await removeCommandAcks([unrelatedAckId], authContext);
+        await commandAckMutation;
+      } finally {
+        transientCurrentPageRestrictionActive = priorTransientCurrentPage;
+        lockedUrl = priorLockedUrl;
+        lockedDomain = priorLockedDomain;
+      }
+      const wrongDestinationCompleted = await observeRestrictionAuthNavigationForAuth(
+        `${new URL(destinationUrl).origin}/same-host-wrong-path`,
+        authContext,
+        popup.id,
+      );
+      const returning = restrictionAuthAttemptState?.phase === 'returning';
+      phases.push(restrictionAuthAttemptState.phase);
+      const completed = await observeRestrictionAuthNavigationForAuth(
+        destinationUrl,
+        authContext,
+        popup.id,
+      );
+      phases.push(restrictionAuthAttemptState.phase);
+
+      await observeRestrictionAuthNavigationForAuth(
+        'https://accounts.google.com/o/oauth2/auth?retry=cancel',
+        authContext,
+        popup.id,
+      );
+      const cancellationStartedAt = restrictionAuthAttemptState.startedAt;
+      const cancelled = await cancelRestrictionAuthAttemptForRemovedTab(
+        popup.id,
+        authContext,
+        { reconcile: false },
+      );
+      const cancelledPhase = restrictionAuthAttemptState.phase;
+      const cancelledTelemetry = restrictionAuthTelemetryState();
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 2));
+      await observeRestrictionAuthNavigationForAuth(
+        'https://district.clever.com/login?retry=one',
+        authContext,
+        popup.id,
+      );
+      const retryStartedAt = restrictionAuthAttemptState.startedAt;
+
+      const destinationForPlan = {
+        id: 7_654_322,
+        windowId: popup.windowId,
+        active: false,
+        url: destinationUrl,
+      };
+      const limitPlan = RuntimeCore.planClassroomTabReconciliation(
+        currentClassroomState,
+        [
+          { ...popup, url: 'about:blank', pendingUrl: '' },
+          { ...destinationForPlan, url: destinationUrl, pendingUrl: '' },
+        ],
+        {
+          foregroundTabId: popup.id,
+          maxTabs: 1,
+          restrictionAuthPassThrough: true,
+          authPassThroughAttempt: restrictionAuthAttemptState,
+        },
+      );
+      const dnrRules = (await chrome.declarativeNetRequest.getDynamicRules())
+        .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'));
+
+      await persistRestrictionAuthAttemptNow(authContext, currentClassroomState, {
+        ...restrictionAuthAttemptState,
+        phase: 'in_progress',
+        startedAt: Date.now() - 301_000,
+        expiresAt: Date.now() - 1,
+        activeTabId: popup.id,
+      });
+      const originalNotify = notifyTeacherMessageForAuth;
+      const originalReconcile = reconcileClassroomStateTabsBestEffort;
+      const timeoutNotifications = [];
+      let timeoutReconciliations = 0;
+      notifyTeacherMessageForAuth = async (message) => {
+        timeoutNotifications.push(message);
+        return true;
+      };
+      reconcileClassroomStateTabsBestEffort = async () => {
+        timeoutReconciliations += 1;
+        return true;
+      };
+      let firstTimeout;
+      let duplicateTimeout;
+      try {
+        firstTimeout = await handleRestrictionAuthAttemptExpiry();
+        duplicateTimeout = await handleRestrictionAuthAttemptExpiry();
+      } finally {
+        notifyTeacherMessageForAuth = originalNotify;
+        reconcileClassroomStateTabsBestEffort = originalReconcile;
+      }
+      const timedOutPhase = restrictionAuthAttemptState.phase;
+      const timeoutStorage = await chrome.storage.local.get([
+        RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY,
+        RESTRICTION_AUTH_POLICY_FENCE_STORAGE_KEY,
+      ]);
+      const timeoutAlarm = await chrome.alarms.get(RESTRICTION_AUTH_ATTEMPT_ALARM);
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      const durable = local[CLASSROOM_STATE_STORAGE_KEY];
+      return {
+        outcome: applied.outcome,
+        controlRevision,
+        popupId: popup.id,
+        destinationTabId: destinationForPlan.id,
+        popupWindowId: popup.windowId,
+        destinationWindowId: destinationForPlan.windowId,
+        popupDecision,
+        phases,
+        providerCallbackReconcile,
+        safeCommandSnapshot,
+        storedCommandAck,
+        unrelatedCurrentPageSnapshot,
+        unrelatedCurrentPageSecretPersisted: JSON.stringify(unrelatedCurrentPageOutbox)
+          .includes(currentPageSecret),
+        wrongDestinationCompleted,
+        returning,
+        completed,
+        cancelled,
+        cancelledPhase,
+        cancelledTelemetry,
+        cancellationStartedAt,
+        retryStartedAt,
+        firstTimeout,
+        duplicateTimeout,
+        timedOutPhase,
+        timeoutNotifications,
+        timeoutReconciliations,
+        timeoutAttemptStored: Boolean(timeoutStorage[RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY]),
+        timeoutFence: timeoutStorage[RESTRICTION_AUTH_POLICY_FENCE_STORAGE_KEY],
+        timeoutAlarmPresent: Boolean(timeoutAlarm),
+        dnrRuleCount: dnrRules.length,
+        limitPlan,
+        durableHasAuthPolicy: Object.prototype.hasOwnProperty.call(durable || {}, 'authPassThrough'),
+        secretInLocal: JSON.stringify(local).includes(secret),
+        secretInSession: JSON.stringify(session).includes(secret),
+        sessionSecretKeys: Object.entries(session)
+          .filter(([, value]) => JSON.stringify(value).includes(secret))
+          .map(([key]) => key),
+        startUrlInLocal: JSON.stringify(local).includes('district.clever.com/login'),
+      };
+    }, { destinationUrl: restrictionAuthDestination, secret: restrictionAuthSecret });
+    assert.equal(restrictionAuthSeed.outcome, 'applied');
+    assert.equal(restrictionAuthSeed.popupDecision.policySource, null);
+    assert.deepEqual(restrictionAuthSeed.phases, [
+      'in_progress', 'returning', 'returning', 'returning', 'complete',
+    ]);
+    assert.deepEqual(restrictionAuthSeed.providerCallbackReconcile, {
+      returnToDestination: true,
+      transientCurrentPage: false,
+    });
+    assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.url, 'https://accounts.google.com/');
+    assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.title, 'Signing in');
+    assert.equal(restrictionAuthSeed.storedCommandAck.appliedAuthPolicyRevision, 7);
+    assert.equal(JSON.stringify(restrictionAuthSeed.storedCommandAck).includes(restrictionAuthSecret), false);
+    assert.equal(restrictionAuthSeed.unrelatedCurrentPageSnapshot.lockedUrl, null);
+    assert.equal(restrictionAuthSeed.unrelatedCurrentPageSnapshot.lockedDomain, null);
+    assert.equal(restrictionAuthSeed.unrelatedCurrentPageSnapshot.activeTab.url, null);
+    assert.equal(restrictionAuthSeed.unrelatedCurrentPageSecretPersisted, false);
+    assert.equal(restrictionAuthSeed.wrongDestinationCompleted, false);
+    assert.equal(restrictionAuthSeed.returning, true);
+    assert.equal(restrictionAuthSeed.completed, true);
+    assert.equal(restrictionAuthSeed.cancelled, true);
+    assert.equal(restrictionAuthSeed.cancelledPhase, 'idle');
+    assert.equal(restrictionAuthSeed.cancelledTelemetry, 'idle');
+    assert.ok(restrictionAuthSeed.retryStartedAt > restrictionAuthSeed.cancellationStartedAt);
+    assert.equal(restrictionAuthSeed.firstTimeout, true);
+    assert.equal(restrictionAuthSeed.duplicateTimeout, false);
+    assert.equal(restrictionAuthSeed.timedOutPhase, 'timed_out');
+    assert.equal(restrictionAuthSeed.timeoutNotifications.length, 1);
+    assert.equal(restrictionAuthSeed.timeoutReconciliations, 1);
+    assert.equal(restrictionAuthSeed.timeoutAttemptStored, false);
+    assert.equal(restrictionAuthSeed.timeoutAlarmPresent, false);
+    assert.equal(restrictionAuthSeed.timeoutFence.present, true);
+    assert.equal(restrictionAuthSeed.dnrRuleCount, 2);
+    assert.deepEqual(restrictionAuthSeed.limitPlan.removeTabIds, []);
+    assert.deepEqual(restrictionAuthSeed.limitPlan.updates, []);
+    assert.equal(restrictionAuthSeed.secretInLocal, false);
+    assert.deepEqual(restrictionAuthSeed.sessionSecretKeys, []);
+    assert.equal(restrictionAuthSeed.secretInSession, false);
+    assert.equal(restrictionAuthSeed.startUrlInLocal, false);
+    assert.equal(restrictionAuthSeed.durableHasAuthPolicy, false);
+
+    await preparePageForWorkerStop(authenticatedPage);
+    const restrictionAuthWorkerStop = await stopExtensionWorker(
+      context,
+      authenticatedPage,
+      extensionId,
+    );
+    assert.equal(restrictionAuthWorkerStop.stopped, true);
+    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    const restrictionAuthRestore = await worker.evaluate(async ({ popupId, controlRevision, secret }) => {
+      await authStateRestorePromise;
+      await classroomStateRestorePromise;
+      await restrictionAuthAttemptMutation;
+      const popup = await chrome.tabs.get(popupId).catch(() => null);
+      const rules = (await chrome.declarativeNetRequest.getDynamicRules())
+        .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'));
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      return {
+        revision: currentClassroomState?.revision,
+        passThroughActive: restrictionAuthPassThroughActive,
+        policyRefreshPending: restrictionAuthPolicyRefreshPending,
+        attemptPhase: restrictionAuthAttemptState?.phase,
+        activeTabId: restrictionAuthAttemptState?.activeTabId,
+        popupPresent: Boolean(popup),
+        popupUrl: popup?.pendingUrl || popup?.url || '',
+        rules: rules.length,
+        exactGoogleAllowed: restrictionAuthenticationUrlAllowed(
+          'https://accounts.google.com/o/oauth2/auth',
+        ),
+        googleSubdomainAllowed: restrictionAuthenticationUrlAllowed(
+          'https://student.accounts.google.com/o/oauth2/auth',
+        ),
+        cleverSubdomainAllowed: restrictionAuthenticationUrlAllowed(
+          'https://district.clever.com/login',
+        ),
+        lookalikeAllowed: restrictionAuthenticationUrlAllowed(
+          'https://accounts.google.com.evil.test/login',
+        ),
+        secretInLocal: JSON.stringify(local).includes(secret),
+        secretInSession: JSON.stringify(session).includes(secret),
+        controlRevision,
+      };
+    }, {
+      popupId: restrictionAuthSeed.popupId,
+      controlRevision: restrictionAuthSeed.controlRevision,
+      secret: restrictionAuthSecret,
+    });
+    assert.equal(restrictionAuthRestore.revision, restrictionAuthSeed.controlRevision);
+    assert.equal(restrictionAuthRestore.passThroughActive, false);
+    assert.equal(restrictionAuthRestore.policyRefreshPending, true);
+    assert.equal(restrictionAuthRestore.attemptPhase, undefined);
+    assert.equal(restrictionAuthRestore.activeTabId, undefined);
+    assert.equal(restrictionAuthRestore.popupPresent, true);
+    assert.equal(restrictionAuthRestore.rules, 2);
+    assert.equal(restrictionAuthRestore.exactGoogleAllowed, true);
+    assert.equal(restrictionAuthRestore.googleSubdomainAllowed, false);
+    assert.equal(restrictionAuthRestore.cleverSubdomainAllowed, true);
+    assert.equal(restrictionAuthRestore.lookalikeAllowed, false);
+    assert.equal(restrictionAuthRestore.secretInLocal, false);
+    assert.equal(restrictionAuthRestore.secretInSession, false);
+
+    const restrictionAuthRetry = await worker.evaluate(async ({ destinationUrl, secret, popupId, controlRevision }) => {
+      const authContext = captureAuthenticatedContext('restriction auth exact-policy refresh');
+      adoptNegotiatedProtocolState({
+        serverProtocolVersion: 3,
+        acceptedCapabilities: [
+          'scopedAuthorityChecksV1',
+          'lateSignInRestrictionSsoV1',
+          'restrictionAuthPassThroughV1',
+        ],
+      }, authContext);
+      if (currentStudentControlRevision() === null) {
+        observeStudentControlRevision(
+          controlRevision,
+          authContext,
+          'restriction auth exact-policy refresh fixture',
+        );
+      }
+      const state = {
+        schemaVersion: 1,
+        revision: controlRevision,
+        receivedAt: Date.now(),
+        hardExpiresAt: Date.now() + 5 * 60_000,
+        deliveryContext: { lateSignInRestrictionSso: true },
+        authPassThrough: {
+          schemaVersion: 1,
+          policyRevision: 7,
+          defaultProfileId: 'clever',
+          attemptTtlSeconds: 300,
+          profiles: [{
+            id: 'clever',
+            name: 'District Clever',
+            startUrl: `https://district.clever.com/login?district_token=${secret}`,
+            hostRules: [
+              { hostname: 'clever.com', includeSubdomains: true },
+              { hostname: 'accounts.google.com', includeSubdomains: false },
+            ],
+          }, {
+            id: 'google',
+            name: 'Google',
+            startUrl: 'https://accounts.google.com/',
+            hostRules: [{ hostname: 'accounts.google.com', includeSubdomains: false }],
+          }],
+        },
+        authPassThroughPolicyRevision: 7,
+        restrictions: {
+          screenLock: {
+            active: true,
+            url: destinationUrl,
+            domain: new URL(destinationUrl).hostname,
+          },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: 1,
+          temporaryAllows: [],
+        },
+      };
+      const originalScheduleSideEffects = scheduleClassroomStateSideEffects;
+      scheduleClassroomStateSideEffects = () => {};
+      let applied;
+      try {
+        applied = await applyClassroomState(state, {
+          reason: 'restriction_auth_exact_policy_refresh',
+          authContext,
+          authorityEnvelope: {
+            exactBinding: {
+              bindingVersion: 2,
+              schoolId: authContext.schoolId,
+              deviceId: authContext.deviceId,
+              studentId: authContext.studentId,
+              studentSessionId: authContext.studentSessionId,
+              controlRevision,
+            },
+          },
+        });
+      } finally {
+        scheduleClassroomStateSideEffects = originalScheduleSideEffects;
+      }
+      const retryStarted = await observeRestrictionAuthNavigationForAuth(
+        'https://accounts.google.com/o/oauth2/auth?retry=after-timeout-restart',
+        authContext,
+        popupId,
+      );
+      await restrictionAuthAttemptMutation;
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      return {
+        outcome: applied.outcome,
+        retryStarted,
+        phase: restrictionAuthAttemptState?.phase,
+        activeTabId: restrictionAuthAttemptState?.activeTabId,
+        policyRefreshPending: restrictionAuthPolicyRefreshPending,
+        secretInLocal: JSON.stringify(local).includes(secret),
+        secretInSession: JSON.stringify(session).includes(secret),
+        durableHasAuthPolicy: Object.prototype.hasOwnProperty.call(
+          local[CLASSROOM_STATE_STORAGE_KEY] || {},
+          'authPassThrough',
+        ),
+      };
+    }, {
+      destinationUrl: restrictionAuthDestination,
+      secret: restrictionAuthSecret,
+      popupId: restrictionAuthSeed.popupId,
+      controlRevision: restrictionAuthSeed.controlRevision,
+    });
+    assert.equal(restrictionAuthRetry.outcome, 'applied');
+    assert.equal(restrictionAuthRetry.retryStarted, true);
+    assert.equal(restrictionAuthRetry.phase, 'in_progress');
+    assert.equal(restrictionAuthRetry.activeTabId, restrictionAuthSeed.popupId);
+    assert.equal(restrictionAuthRetry.policyRefreshPending, false);
+    assert.equal(restrictionAuthRetry.secretInLocal, false);
+    assert.equal(restrictionAuthRetry.secretInSession, false);
+    assert.equal(restrictionAuthRetry.durableHasAuthPolicy, false);
+
+    await preparePageForWorkerStop(authenticatedPage);
+    const restrictionAuthActiveWorkerStop = await stopExtensionWorker(
+      context,
+      authenticatedPage,
+      extensionId,
+    );
+    assert.equal(restrictionAuthActiveWorkerStop.stopped, true);
+    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+      waitUntil: 'domcontentloaded',
+    });
+    worker = await waitForLiveWorker(context);
+    const restrictionAuthActiveRestore = await worker.evaluate(async ({ popupId, secret }) => {
+      await authStateRestorePromise;
+      await classroomStateRestorePromise;
+      await restrictionAuthAttemptMutation;
+      const popup = await chrome.tabs.get(popupId).catch(() => null);
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      return {
+        policyRefreshPending: restrictionAuthPolicyRefreshPending,
+        phase: restrictionAuthAttemptState?.phase,
+        activeTabId: restrictionAuthAttemptState?.activeTabId,
+        popupPresent: Boolean(popup),
+        secretInLocal: JSON.stringify(local).includes(secret),
+        secretInSession: JSON.stringify(session).includes(secret),
+      };
+    }, { popupId: restrictionAuthSeed.popupId, secret: restrictionAuthSecret });
+    assert.equal(restrictionAuthActiveRestore.policyRefreshPending, true);
+    assert.equal(restrictionAuthActiveRestore.phase, 'in_progress');
+    assert.equal(restrictionAuthActiveRestore.activeTabId, restrictionAuthSeed.popupId);
+    assert.equal(restrictionAuthActiveRestore.popupPresent, true);
+    assert.equal(restrictionAuthActiveRestore.secretInLocal, false);
+    assert.equal(restrictionAuthActiveRestore.secretInSession, false);
+
+    await worker.evaluate(async ({ popupId, destinationTabId }) => {
+      const authContext = captureAuthenticatedContext('restriction auth fixture cleanup');
+      await cancelRestrictionAuthAttemptForRemovedTab(popupId, authContext, { reconcile: false });
+      await clearRestrictionAuthAttemptState();
+      await clearRestrictionSsoVisitState();
+      const cleared = {
+        ...currentClassroomState,
+        deliveryContext: {},
+        restrictions: {
+          screenLock: { active: false, url: null, domain: null },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: null,
+          temporaryAllows: [],
+        },
+      };
+      delete cleared.authPassThrough;
+      cleared.authPassThroughPolicyRevision = Number(
+        currentClassroomState?.authPassThroughPolicyRevision || 0,
+      ) + 1;
+      await applyClassroomState(cleared, {
+        force: true,
+        reason: 'restriction_auth_fixture_cleanup',
+        authContext,
+      });
+      // The active-flow fixture reuses a stable existing tab so it survives an
+      // MV3 worker restart. Do not remove that tab during cleanup.
+    }, {
+      popupId: restrictionAuthSeed.popupId,
+      destinationTabId: restrictionAuthSeed.destinationTabId,
+    });
     await authenticatedPage.goto(`${fixture.origin}/authenticated-after-sso-worker-restart`, {
       waitUntil: 'domcontentloaded',
     });
@@ -3480,6 +4105,125 @@ async function main() {
       state: 'detached',
       timeout: 12_000,
     });
+
+    const transientRollbackSecret = 'transient-current-page-rollback-must-not-persist';
+    const transientRollback = await worker.evaluate(async ({ secret }) => {
+      const authContext = captureAuthenticatedContext('transient current-page rollback fixture');
+      const previousRevision = Math.max(Number(currentStudentControlRevision() || 0), 120);
+      const nextRevision = previousRevision + 1;
+      const exactBinding = {
+        bindingVersion: 2,
+        schoolId: authContext.schoolId,
+        studentId: authContext.studentId,
+        studentSessionId: authContext.studentSessionId,
+        deviceId: authContext.deviceId,
+        controlRevision: nextRevision,
+      };
+      observeStudentControlRevision(nextRevision, authContext, 'transient rollback fixture');
+      const observedUrl = `https://lesson.example/private/path?code=${secret}#state`;
+      // Transient CURRENT_URL is the sole path that can hold an observed
+      // query-bearing URL in memory; ordinary normalization correctly rejects
+      // it. Model that already-authorized in-memory state directly so the
+      // rollback test proves it can never be promoted to durable storage.
+      const previousState = {
+        schemaVersion: 1,
+        revision: previousRevision,
+        studentControlRevision: previousRevision,
+        teachingSessionId: 'transient-rollback-teaching-session',
+        supervisionContextId: null,
+        receivedAt: Date.now(),
+        hardExpiresAt: Date.now() + 60_000,
+        restrictions: {
+          screenLock: { active: true, url: observedUrl, domain: 'lesson.example' },
+          flightPath: { active: false, allowedDomains: [] },
+          blockList: { active: false, blockedDomains: [] },
+          attentionMode: { active: false, message: '' },
+          tabLimit: null,
+          temporaryAllows: [],
+        },
+      };
+      currentClassroomState = previousState;
+      transientCurrentPageRestrictionActive = true;
+      screenLocked = true;
+      lockedUrl = observedUrl;
+      lockedDomain = 'lesson.example';
+      await kv.set({
+        [TRANSIENT_CURRENT_PAGE_RESTRICTION_STORAGE_KEY]: {
+          schemaVersion: 1,
+          revision: previousRevision,
+          hardExpiresAt: previousState.hardExpiresAt,
+        },
+        [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: previousState.hardExpiresAt,
+      });
+
+      const originalSet = kv.set.bind(kv);
+      let storageFailureInjected = false;
+      kv.set = async (values) => {
+        if (!storageFailureInjected
+          && Object.prototype.hasOwnProperty.call(values || {}, CLASSROOM_STATE_STORAGE_KEY)) {
+          storageFailureInjected = true;
+          throw new Error('fixture classroom snapshot storage failure');
+        }
+        return originalSet(values);
+      };
+      let rejected = false;
+      try {
+        await applyClassroomState({
+          schemaVersion: 1,
+          revision: nextRevision,
+          studentControlRevision: nextRevision,
+          teachingSessionId: 'transient-rollback-teaching-session',
+          supervisionContextId: null,
+          receivedAt: Date.now(),
+          hardExpiresAt: Date.now() + 60_000,
+          restrictions: {
+            screenLock: { active: false, url: null, domain: null },
+            flightPath: { active: false, allowedDomains: [] },
+            blockList: { active: false, blockedDomains: [] },
+            attentionMode: { active: false, message: '' },
+            tabLimit: null,
+            temporaryAllows: [],
+          },
+        }, {
+          force: true,
+          reason: 'transient_current_page_rollback_storage_failure_fixture',
+          authContext,
+          authorityEnvelope: { exactBinding },
+        });
+      } catch (error) {
+        rejected = String(error?.message || '').includes('fixture classroom snapshot storage failure');
+      } finally {
+        kv.set = originalSet;
+      }
+      const local = await chrome.storage.local.get(null);
+      const session = await chrome.storage.session.get(null);
+      const durableState = local[CLASSROOM_STATE_STORAGE_KEY];
+      const marker = local[TRANSIENT_CURRENT_PAGE_RESTRICTION_STORAGE_KEY];
+
+      currentClassroomState = null;
+      transientCurrentPageRestrictionActive = false;
+      screenLocked = false;
+      lockedUrl = null;
+      lockedDomain = null;
+      await kv.remove([
+        CLASSROOM_STATE_STORAGE_KEY,
+        CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY,
+        TRANSIENT_CURRENT_PAGE_RESTRICTION_STORAGE_KEY,
+      ]);
+      await composeAllManagedDynamicRules();
+      return {
+        rejected,
+        stateStored: Boolean(durableState),
+        markerRetained: Boolean(marker),
+        secretInLocal: JSON.stringify(local).includes(secret),
+        secretInSession: JSON.stringify(session).includes(secret),
+      };
+    }, { secret: transientRollbackSecret });
+    assert.equal(transientRollback.rejected, true);
+    assert.equal(transientRollback.stateStored, false);
+    assert.equal(transientRollback.markerRetained, true);
+    assert.equal(transientRollback.secretInLocal, false);
+    assert.equal(transientRollback.secretInSession, false);
 
     const authenticatedTabId = await tabIdFor(worker, authenticatedPage);
     const staleRollbackDelivery = await worker.evaluate(async ({ tabId, revision }) => {

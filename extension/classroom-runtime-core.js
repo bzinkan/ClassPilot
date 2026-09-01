@@ -35,6 +35,20 @@
     'accounts.google.com',
   ]);
   const RESTRICTION_SSO_COLD_START_URL = 'https://clever.com/';
+  const AUTH_PASS_THROUGH_SCHEMA_VERSION = 1;
+  const AUTH_PASS_THROUGH_ATTEMPT_TTL_SECONDS = 300;
+  const AUTH_PASS_THROUGH_MAX_PROFILES = 12;
+  const AUTH_PASS_THROUGH_MAX_HOST_RULES_PER_PROFILE = 12;
+  const AUTH_PASS_THROUGH_MAX_HOST_RULES = 144;
+  // Defense in depth only: SchoolPilot performs authoritative full-PSL
+  // validation (tldts) before an exact-bound envelope can reach the extension.
+  // This compact list catches common malformed-wire suffixes without shipping
+  // another dependency or managed-policy surface in the MV3 package.
+  const AUTH_PASS_THROUGH_PUBLIC_SUFFIXES = new Set([
+    'co.uk', 'org.uk', 'ac.uk', 'gov.uk',
+    'com.au', 'net.au', 'org.au', 'edu.au',
+    'co.nz', 'com.br', 'com.mx', 'co.jp', 'co.kr', 'co.in',
+  ]);
 
   const MONITORING_EVENT_TYPES = new Set([
     'tab_changed',
@@ -336,6 +350,176 @@
     return normalized;
   }
 
+  function normalizeAuthHostname(value) {
+    if (typeof value !== 'string') return null;
+    const candidate = value.trim().toLowerCase();
+    if (!candidate
+      || candidate.length > 253
+      || candidate.endsWith('.')
+      || candidate === 'localhost'
+      || AUTH_PASS_THROUGH_PUBLIC_SUFFIXES.has(candidate)) return null;
+    if (candidate.includes('://') || /[/?#@\\*]/.test(candidate)) return null;
+    if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(candidate) || candidate.includes(':')) return null;
+    const labels = candidate.split('.');
+    if (labels.length < 2 || labels.some((label) => (
+      !label
+      || label.length > 63
+      || label.startsWith('xn--')
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)
+    ))) return null;
+    const resemblesClever = labels.some((label) => label.includes('clever'));
+    const resemblesGoogle = labels.some((label) => label.includes('google'));
+    if (resemblesClever
+      && candidate !== 'clever.com'
+      && !candidate.endsWith('.clever.com')) return null;
+    if (resemblesGoogle && candidate !== 'accounts.google.com') return null;
+    try {
+      const parsed = new URL(`https://${candidate}/`);
+      return parsed.hostname.toLowerCase().replace(/\.$/, '') === candidate
+        ? candidate
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function authHostRuleMatchesHost(rule, hostValue) {
+    const host = normalizeAuthHostname(hostValue);
+    if (!host || !rule?.hostname) return false;
+    return rule.includeSubdomains === true
+      ? isHostWithinDomain(host, rule.hostname)
+      : host === rule.hostname;
+  }
+
+  function normalizeAuthPassThrough(rawPolicy) {
+    if (rawPolicy === undefined) return null;
+    if (!rawPolicy || typeof rawPolicy !== 'object' || Array.isArray(rawPolicy)) {
+      throw new Error('authPassThrough must be an object');
+    }
+    if (Number(rawPolicy.schemaVersion) !== AUTH_PASS_THROUGH_SCHEMA_VERSION) {
+      throw new Error('unsupported authPassThrough schema version');
+    }
+    const policyRevision = Number(rawPolicy.policyRevision);
+    if (!Number.isSafeInteger(policyRevision) || policyRevision < 0) {
+      throw new Error('authPassThrough policyRevision must be a non-negative safe integer');
+    }
+    if (Number(rawPolicy.attemptTtlSeconds) !== AUTH_PASS_THROUGH_ATTEMPT_TTL_SECONDS) {
+      throw new Error('authPassThrough attempt TTL must be 300 seconds');
+    }
+    if (!Array.isArray(rawPolicy.profiles)
+      || rawPolicy.profiles.length < 1
+      || rawPolicy.profiles.length > AUTH_PASS_THROUGH_MAX_PROFILES) {
+      throw new Error('authPassThrough profiles must contain 1 to 12 entries');
+    }
+    let hostRuleCount = 0;
+    const profileIds = new Set();
+    const profiles = rawPolicy.profiles.map((rawProfile) => {
+      const id = boundedString(rawProfile?.id, 64).toLowerCase();
+      const name = boundedString(rawProfile?.name, 120);
+      if (!/^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(id) || profileIds.has(id)) {
+        throw new Error('authPassThrough contains an invalid or duplicate profile id');
+      }
+      profileIds.add(id);
+      if (!name) throw new Error('authPassThrough profile name is required');
+      if (!Array.isArray(rawProfile?.hostRules)
+        || rawProfile.hostRules.length < 1
+        || rawProfile.hostRules.length > AUTH_PASS_THROUGH_MAX_HOST_RULES_PER_PROFILE) {
+        throw new Error('authPassThrough profile hostRules must contain 1 to 12 entries');
+      }
+      const seenRules = new Set();
+      const hostRules = rawProfile.hostRules.map((rawRule) => {
+        const hostname = normalizeAuthHostname(rawRule?.hostname);
+        if (!hostname || typeof rawRule?.includeSubdomains !== 'boolean') {
+          throw new Error('authPassThrough contains an invalid host rule');
+        }
+        const includeSubdomains = rawRule.includeSubdomains === true;
+        // Google Accounts is the narrowly-scoped authentication authority. A
+        // custom profile must not broaden it to arbitrary google.com children.
+        if (hostname === 'accounts.google.com' && includeSubdomains) {
+          throw new Error('accounts.google.com authentication must use exact-host matching');
+        }
+        const key = `${hostname}:${includeSubdomains ? 'subdomains' : 'exact'}`;
+        if (seenRules.has(key)) {
+          throw new Error('authPassThrough contains a duplicate host rule');
+        }
+        seenRules.add(key);
+        hostRuleCount += 1;
+        if (hostRuleCount > AUTH_PASS_THROUGH_MAX_HOST_RULES) {
+          throw new Error('authPassThrough exceeds the 144 host-rule limit');
+        }
+        return { hostname, includeSubdomains };
+      });
+      let parsedStartUrl;
+      try {
+        parsedStartUrl = new URL(String(rawProfile?.startUrl || ''));
+      } catch (_) {
+        throw new Error('authPassThrough contains an invalid start URL');
+      }
+      if (parsedStartUrl.protocol !== 'https:'
+        || parsedStartUrl.username
+        || parsedStartUrl.password
+        || parsedStartUrl.hash
+        || (parsedStartUrl.port && parsedStartUrl.port !== '443')
+        || String(rawProfile.startUrl).length > 2048) {
+        throw new Error('authPassThrough start URL is not safe');
+      }
+      const startHost = normalizeAuthHostname(parsedStartUrl.hostname);
+      if (!startHost || !hostRules.some((rule) => authHostRuleMatchesHost(rule, startHost))) {
+        throw new Error('authPassThrough start URL is outside its approved host rules');
+      }
+      return {
+        id,
+        name,
+        startUrl: parsedStartUrl.toString(),
+        hostRules,
+      };
+    });
+    const defaultProfileId = boundedString(rawPolicy.defaultProfileId, 64).toLowerCase();
+    if (!defaultProfileId || !profileIds.has(defaultProfileId)) {
+      throw new Error('authPassThrough defaultProfileId must select a profile');
+    }
+    return {
+      schemaVersion: AUTH_PASS_THROUGH_SCHEMA_VERSION,
+      policyRevision,
+      defaultProfileId,
+      attemptTtlSeconds: AUTH_PASS_THROUGH_ATTEMPT_TTL_SECONDS,
+      profiles,
+    };
+  }
+
+  function authPassThroughProfileForUrl(policy, urlValue) {
+    if (!policy || typeof urlValue !== 'string') return null;
+    let parsed;
+    try {
+      parsed = new URL(urlValue);
+    } catch (_) {
+      return null;
+    }
+    if (parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443')) return null;
+    const host = normalizeAuthHostname(parsed.hostname);
+    if (!host) return null;
+    const matches = policy.profiles.filter((profile) => (
+      profile.hostRules.some((rule) => authHostRuleMatchesHost(rule, host))
+    ));
+    if (matches.length < 2) return matches[0] || null;
+    // Clever intentionally includes exact accounts.google.com so its Google-
+    // backed login can continue, while the Google built-in also owns that
+    // exact start host. Prefer the profile whose launch URL begins on the
+    // observed host so the privacy-minimal provider id can represent a real
+    // Clever -> Google -> Clever round-trip without storing visited hosts.
+    return matches.find((profile) => {
+      try {
+        return normalizeAuthHostname(new URL(profile.startUrl).hostname) === host;
+      } catch (_) {
+        return false;
+      }
+    }) || matches[0];
+  }
+
+  function isAuthPassThroughTab(tab, policy) {
+    return Boolean(isHttpTab(tab) && authPassThroughProfileForUrl(policy, tabUrl(tab)));
+  }
+
   function normalizeTemporaryAllows(values, nowMs) {
     if (values === null || values === undefined) return [];
     if (!Array.isArray(values)) throw new Error('temporary allows must be an array');
@@ -403,6 +587,12 @@
     if (screenActive && !screenDomain) {
       throw new Error('active screen lock requires a valid domain');
     }
+    const safeScreenUrl = screenActive
+      ? safeRestrictionTarget(screenUrl || `https://${screenDomain}`, screenDomain)
+      : screenUrl;
+    if (screenActive && !safeScreenUrl) {
+      throw new Error('active screen lock requires a safe HTTPS URL without query or fragment data');
+    }
     if (blockActive && blockedDomains.length === 0) {
       throw new Error('active teacher block list requires at least one valid domain');
     }
@@ -410,7 +600,7 @@
     return {
       screenLock: {
         active: screenActive && Boolean(screenDomain),
-        url: screenUrl,
+        url: safeScreenUrl,
         domain: screenDomain,
       },
       flightPath: {
@@ -493,6 +683,21 @@
       ? rawState.deliveryContext
       : {};
 
+    const authPassThrough = rawState.authPassThrough !== undefined
+      ? normalizeAuthPassThrough(rawState.authPassThrough)
+      : null;
+    const rawAuthPolicyRevision = rawState.authPassThroughPolicyRevision;
+    const authPassThroughPolicyRevision = rawAuthPolicyRevision === undefined
+      ? null
+      : finiteInteger(rawAuthPolicyRevision, -1);
+    if (rawAuthPolicyRevision !== undefined && authPassThroughPolicyRevision < 0) {
+      throw new Error('authPassThroughPolicyRevision must be a non-negative safe integer');
+    }
+    if (authPassThrough
+      && authPassThroughPolicyRevision !== authPassThrough.policyRevision) {
+      throw new Error('authPassThrough policy revision does not match its ordering fence');
+    }
+
     return {
       schemaVersion: CLASSROOM_STATE_SCHEMA_VERSION,
       revision,
@@ -502,6 +707,8 @@
       scheduledEndAt,
       hardExpiresAt,
       restrictions,
+      ...(authPassThrough ? { authPassThrough } : {}),
+      ...(authPassThroughPolicyRevision !== null ? { authPassThroughPolicyRevision } : {}),
       ...(rawDeliveryContext.lateSignInRestrictionSso === true ? {
         deliveryContext: { lateSignInRestrictionSso: true },
       } : {}),
@@ -527,7 +734,35 @@
 
   function shouldApplyClassroomState(currentState, incomingState) {
     if (!currentState) return true;
-    return finiteInteger(incomingState?.revision, 0) > finiteInteger(currentState?.revision, 0);
+    const incomingRevision = finiteInteger(incomingState?.revision, 0);
+    const currentRevision = finiteInteger(currentState?.revision, 0);
+    if (incomingRevision !== currentRevision) return incomingRevision > currentRevision;
+    const currentPolicy = currentState?.authPassThrough || null;
+    const incomingPolicy = incomingState?.authPassThrough || null;
+    const currentFence = Number.isSafeInteger(currentState?.authPassThroughPolicyRevision)
+      ? currentState.authPassThroughPolicyRevision
+      : currentPolicy?.policyRevision ?? null;
+    const incomingFence = Number.isSafeInteger(incomingState?.authPassThroughPolicyRevision)
+      ? incomingState.authPassThroughPolicyRevision
+      : incomingPolicy?.policyRevision ?? null;
+    if (currentFence !== null) {
+      if (incomingFence === null || incomingFence < currentFence) return false;
+      if (incomingFence > currentFence) return true;
+    } else if (incomingFence !== null) {
+      return true;
+    }
+    if (Boolean(currentPolicy) !== Boolean(incomingPolicy)) return true;
+    if (!currentPolicy || !incomingPolicy) return false;
+    const currentPolicyRevision = finiteInteger(currentPolicy.policyRevision, 0);
+    const incomingPolicyRevision = finiteInteger(incomingPolicy.policyRevision, 0);
+    if (incomingPolicyRevision !== currentPolicyRevision) {
+      return incomingPolicyRevision > currentPolicyRevision;
+    }
+    // Equal policy revisions are immutable. Accepting different content or a
+    // presence toggle at the same fence would let a delayed frame re-enable a
+    // revoked IdP policy. The server must advance the independent fence for
+    // every policy or operator-gate transition.
+    return false;
   }
 
   function isRuleInRange(ruleId, rangeName) {
@@ -605,7 +840,10 @@
       for (const [index, domain] of teacherDomains.entries()) {
         rules.push({
           id: DNR_RANGES.teacher[0] + index,
-          priority: 20,
+          // Teacher policy is authoritative over authentication exceptions,
+          // Waypoints, and Flight Paths. A time-bounded temporary allow below
+          // remains the only teacher-scoped override.
+          priority: 800,
           action: { type: 'block' },
           condition: { resourceTypes: ['main_frame'], requestDomains: [domain] },
         });
@@ -614,10 +852,16 @@
 
     if (ranges.has('temporary')) {
       const temporaryAllows = normalizeTemporaryAllows(classroom.temporaryAllows, nowMs);
+      const destinationRestrictionActive = Boolean(
+        classroom.screenLock?.active || classroom.flightPath?.active,
+      );
       for (const [index, item] of temporaryAllows.entries()) {
         rules.push({
           id: DNR_RANGES.temporary[0] + index,
-          priority: 100,
+          // A teacher's temporary unblock can override their ordinary block
+          // list, but never becomes a second restriction escape hatch while
+          // a Waypoint or Flight Path is active.
+          priority: destinationRestrictionActive ? 100 : 900,
           action: { type: 'allow' },
           condition: { resourceTypes: ['main_frame'], requestDomains: [item.domain] },
         });
@@ -625,12 +869,38 @@
     }
 
     if (ranges.has('restrictionSso')) {
-      const restrictionSsoActive = input?.restrictionSsoPassThrough === true
+      const authPassThrough = classroomState?.authPassThrough || null;
+      const restrictionAuthPassThroughActive = input?.restrictionAuthPassThrough === true
+        && Boolean(authPassThrough)
+        && !classroom.attentionMode?.active
+        && (classroom.screenLock?.active || classroom.flightPath?.active);
+      const legacyRestrictionSsoActive = input?.restrictionSsoPassThrough === true
         && classroomState?.deliveryContext?.lateSignInRestrictionSso === true
         && !classroom.attentionMode?.active
         && (classroom.screenLock?.active || classroom.flightPath?.active);
-      if (restrictionSsoActive) {
-        for (const [index, domain] of RESTRICTION_SSO_DOMAINS.entries()) {
+      if (restrictionAuthPassThroughActive || legacyRestrictionSsoActive) {
+        const candidateAuthRules = restrictionAuthPassThroughActive
+          ? authPassThrough.profiles.flatMap((profile) => profile.hostRules)
+          : RESTRICTION_SSO_DOMAINS.map((hostname) => ({ hostname, includeSubdomains: true }));
+        const seenAuthRules = new Set();
+        const authRules = candidateAuthRules.filter((rule) => {
+          const key = `${rule.hostname}:${rule.includeSubdomains === true ? 'subdomains' : 'exact'}`;
+          if (seenAuthRules.has(key)) return false;
+          seenAuthRules.add(key);
+          return true;
+        });
+        for (const [index, rule] of authRules.entries()) {
+          const condition = rule.includeSubdomains
+            ? {
+                resourceTypes: ['main_frame'],
+                requestDomains: [rule.hostname],
+                regexFilter: '^https://[^/@:]+(?::443)?(?:/|$)',
+              }
+            : {
+                resourceTypes: ['main_frame'],
+                requestDomains: [rule.hostname],
+                regexFilter: `^https://${rule.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?::443)?(?:/|$)`,
+              };
           rules.push({
             id: DNR_RANGES.restrictionSso[0] + index,
             // This allow must outrank both the Waypoint block (500) and the
@@ -638,16 +908,16 @@
             // 1000 and attention mode at 2000.
             priority: 600,
             action: { type: 'allow' },
-            condition: { resourceTypes: ['main_frame'], requestDomains: [domain] },
+            condition,
           });
         }
         const teacherDomains = classroom.blockList?.active
           ? normalizeDomainList(classroom.blockList.blockedDomains, 'teacher block list')
           : [];
         const blockedSsoDomains = teacherDomains.filter((teacherDomain) => (
-          RESTRICTION_SSO_DOMAINS.some((ssoDomain) => (
-            isHostWithinDomain(ssoDomain, teacherDomain)
-            || isHostWithinDomain(teacherDomain, ssoDomain)
+          authRules.some((authRule) => (
+            isHostWithinDomain(authRule.hostname, teacherDomain)
+            || isHostWithinDomain(teacherDomain, authRule.hostname)
           ))
         ));
         for (const [index, domain] of blockedSsoDomains.entries()) {
@@ -691,20 +961,88 @@
     )));
   }
 
-  function safeRestrictionTarget(rawUrl, rawDomain) {
+  function restrictionSafeMonitoringMetadata(state, tab, options = {}) {
+    const rawUrl = typeof tab?.url === 'string' ? tab.url : '';
+    const rawTitle = typeof tab?.title === 'string' ? tab.title : '';
+    const rawFavicon = typeof tab?.favIconUrl === 'string' ? tab.favIconUrl : '';
+    const configurableAuthActive = options.restrictionAuthPassThrough === true
+      && Boolean(state?.authPassThrough)
+      && Boolean(state?.restrictions?.screenLock?.active || state?.restrictions?.flightPath?.active);
+    const legacyAuthActive = options.restrictionSsoPassThrough === true
+      && state?.deliveryContext?.lateSignInRestrictionSso === true
+      && Boolean(state?.restrictions?.screenLock?.active || state?.restrictions?.flightPath?.active);
+    const isAuthenticationUrl = configurableAuthActive
+      ? Boolean(authPassThroughProfileForUrl(state.authPassThrough, rawUrl))
+      : legacyAuthActive && isRestrictionSsoTab({ url: rawUrl });
+
+    if (!isAuthenticationUrl) {
+      return {
+        url: rawUrl,
+        title: rawTitle,
+        favicon: rawFavicon,
+        redacted: false,
+      };
+    }
+
+    let safeOrigin = '';
+    try {
+      const parsed = new URL(rawUrl);
+      if (/^https?:$/.test(parsed.protocol)) safeOrigin = `${parsed.origin}/`;
+    } catch (_) {
+      // Matching requires a valid URL. Keep the fallback empty if parsing
+      // behavior ever changes rather than exposing the original value.
+    }
+    return {
+      url: safeOrigin,
+      title: 'Signing in',
+      favicon: '',
+      redacted: true,
+    };
+  }
+
+  function safeRestrictionTarget(rawUrl, rawDomain, options = {}) {
     const domain = normalizeDomain(rawDomain || rawUrl);
     if (!domain) return null;
     try {
       const parsed = new URL(rawUrl);
-      if (/^https?:$/.test(parsed.protocol) && normalizeDomain(parsed.hostname) === domain) {
-        parsed.username = '';
-        parsed.password = '';
+      if (parsed.protocol === 'https:'
+        && !parsed.username
+        && !parsed.password
+        && (!parsed.port || parsed.port === '443')
+        && (options.allowTransientCurrentPage === true || !parsed.search)
+        && (options.allowTransientCurrentPage === true || !parsed.hash)
+        && normalizeDomain(parsed.hostname) === domain) {
         return parsed.toString();
       }
+      return null;
     } catch (_) {
       // A domain-only restriction gets the HTTPS fallback below.
     }
     return `https://${domain}`;
+  }
+
+  function isRestrictionDestinationUrl(state, urlValue) {
+    if (!state || typeof urlValue !== 'string') return false;
+    const restrictions = state.restrictions ?? emptyRestrictions();
+    if (restrictions.screenLock?.active) {
+      try {
+        const actual = new URL(urlValue);
+        const destination = new URL(restrictions.screenLock.url);
+        if (!/^https?:$/.test(actual.protocol) || !/^https?:$/.test(destination.protocol)) return false;
+        actual.username = '';
+        actual.password = '';
+        destination.username = '';
+        destination.password = '';
+        return actual.toString() === destination.toString();
+      } catch (_) {
+        return false;
+      }
+    }
+    const host = normalizeDomain(urlValue);
+    return Boolean(host && restrictions.flightPath?.active
+      && restrictions.flightPath.allowedDomains.some((domain) => (
+        isHostWithinDomain(host, normalizeDomain(domain))
+      )));
   }
 
   function preferredRestrictionTabId(state, tabs, foregroundTabId) {
@@ -823,9 +1161,25 @@
       activateTabId: null,
       focusFallbackUrl: null,
     };
-    const restrictionSsoPassThrough = options.restrictionSsoPassThrough === true
+    const authPassThrough = state?.authPassThrough || null;
+    const restrictionAuthPassThrough = options.restrictionAuthPassThrough === true
+      && Boolean(authPassThrough);
+    const legacyRestrictionSsoPassThrough = options.restrictionSsoPassThrough === true
       && state?.deliveryContext?.lateSignInRestrictionSso === true;
-    const ssoTabs = restrictionSsoPassThrough ? tabs.filter(isRestrictionSsoTab) : [];
+    const restrictionSsoPassThrough = restrictionAuthPassThrough || legacyRestrictionSsoPassThrough;
+    const authAttempt = options.authPassThroughAttempt;
+    const authAttemptInProgress = restrictionAuthPassThrough
+      && ['in_progress', 'returning'].includes(authAttempt?.phase);
+    const authCallbackReady = restrictionAuthPassThrough
+      && options.authPassThroughReturnToDestination === true;
+    const isAuthenticationTab = (tab) => restrictionAuthPassThrough
+      ? isAuthPassThroughTab(tab, authPassThrough)
+        || (authAttemptInProgress
+          && Number.isSafeInteger(authAttempt?.activeTabId)
+          && tab.id === authAttempt.activeTabId
+          && /^(?:about:blank)?$/i.test(tabUrl(tab)))
+      : isRestrictionSsoTab(tab);
+    const ssoTabs = restrictionSsoPassThrough ? tabs.filter(isAuthenticationTab) : [];
     // `active` is window-local: every background Chrome window has an active
     // tab, so that bit alone cannot prove an SSO flow is foreground. The
     // caller's fresh last-focused tab and a validated onCreated hint are the
@@ -835,9 +1189,15 @@
     const requestedSsoPreserveIds = Array.isArray(options.preserveRestrictionSsoTabIds)
       ? options.preserveRestrictionSsoTabIds
       : [];
-    const foregroundSsoTabId = ssoTabs.find((tab) => tab.id === foregroundTabId)?.id ?? null;
+    const mayProtectAuthenticationTab = (authAttemptInProgress && !authCallbackReady)
+      || legacyRestrictionSsoPassThrough;
+    const foregroundSsoTabId = mayProtectAuthenticationTab
+      ? ssoTabs.find((tab) => tab.id === foregroundTabId)?.id ?? null
+      : null;
     const validatedRequestedSsoPreserveIds = requestedSsoPreserveIds.filter((tabId) => (
-      Number.isSafeInteger(tabId) && ssoTabs.some((tab) => tab.id === tabId)
+      Number.isSafeInteger(tabId)
+        && mayProtectAuthenticationTab
+        && ssoTabs.some((tab) => tab.id === tabId)
     ));
     const focusProtectedSsoTabIds = [...new Set([
       ...(foregroundSsoTabId === null ? [] : [foregroundSsoTabId]),
@@ -856,9 +1216,17 @@
       Array.isArray(options.visitedSsoHosts) ? options.visitedSsoHosts : [],
       'visited restriction SSO hosts'
     ).filter((host) => RESTRICTION_SSO_DOMAINS.some((domain) => isHostWithinDomain(host, domain)));
-    const coldSsoStart = restrictionSsoPassThrough
-      && state?.deliveryContext?.lateSignInRestrictionSso === true
-      && visitedSsoHosts.length === 0;
+    const defaultAuthProfile = restrictionAuthPassThrough
+      ? authPassThrough.profiles.find((profile) => profile.id === authPassThrough.defaultProfileId)
+      : null;
+    const coldSsoStart = restrictionAuthPassThrough
+      ? state?.deliveryContext?.lateSignInRestrictionSso === true
+        && authAttemptInProgress
+        && !authCallbackReady
+      : legacyRestrictionSsoPassThrough && visitedSsoHosts.length === 0;
+    const coldSsoStartUrl = restrictionAuthPassThrough
+      ? defaultAuthProfile?.startUrl || null
+      : RESTRICTION_SSO_COLD_START_URL;
 
     // An in-progress authentication flow is intentionally not destination-
     // compliant, but reconciliation must not navigate it or steal focus while
@@ -871,7 +1239,7 @@
     if (focusProtectedSsoTabIds.length > 0
       && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
       const destinationTabs = tabs.filter((tab) => {
-        if (!isHttpTab(tab) || isRestrictionSsoTab(tab)) return false;
+        if (!isHttpTab(tab) || isAuthenticationTab(tab)) return false;
         const host = normalizeDomain(tabUrl(tab));
         if (restrictions.screenLock?.active) {
           const domain = normalizeDomain(
@@ -887,6 +1255,7 @@
         ? safeRestrictionTarget(
             restrictions.screenLock.url,
             restrictions.screenLock.domain,
+            { allowTransientCurrentPage: options.transientCurrentPage === true },
           )
         : `https://${normalizeDomainList(
             restrictions.flightPath.allowedDomains,
@@ -894,7 +1263,7 @@
           )[0]}`;
       const nonDestinationTabs = tabs.filter((tab) => (
         !isProtectedInternalTab(tab)
-        && !isRestrictionSsoTab(tab)
+        && !isAuthenticationTab(tab)
         && !destinationTabs.some((destination) => destination.id === tab.id)
         && (restrictions.screenLock?.active || isHttpTab(tab))
       ));
@@ -919,15 +1288,16 @@
     if (restrictions.screenLock?.active) {
       const destinationUrl = safeRestrictionTarget(
         restrictions.screenLock.url,
-        restrictions.screenLock.domain
+        restrictions.screenLock.domain,
+        { allowTransientCurrentPage: options.transientCurrentPage === true },
       );
-      const targetUrl = coldSsoStart ? RESTRICTION_SSO_COLD_START_URL : destinationUrl;
+      const targetUrl = coldSsoStart ? coldSsoStartUrl : destinationUrl;
       if (!targetUrl) throw new Error('screen lock requires a safe navigation target');
       const lockedDomain = normalizeDomain(
         restrictions.screenLock.domain || restrictions.screenLock.url
       );
       const controllable = tabs.filter((tab) => (
-        !isProtectedInternalTab(tab) && !(restrictionSsoPassThrough && isRestrictionSsoTab(tab))
+        !isProtectedInternalTab(tab) && !(mayProtectAuthenticationTab && isAuthenticationTab(tab))
       ));
       // A cold deferred restriction starts authentication even when an old
       // destination tab happens to remain open from before sign-in. Only a
@@ -978,10 +1348,10 @@
       );
       if (allowedDomains.length === 0) throw new Error('active Flight Path requires at least one domain');
       const firstUrl = coldSsoStart
-        ? RESTRICTION_SSO_COLD_START_URL
+        ? coldSsoStartUrl
         : `https://${allowedDomains[0]}`;
       const httpTabs = tabs.filter((tab) => (
-        isHttpTab(tab) && !(restrictionSsoPassThrough && isRestrictionSsoTab(tab))
+        isHttpTab(tab) && !(mayProtectAuthenticationTab && isAuthenticationTab(tab))
       ));
       const allowed = coldSsoStart ? [] : httpTabs.filter((tab) => {
         const domain = normalizeDomain(tabUrl(tab));
@@ -1233,6 +1603,8 @@
     DNR_RANGES,
     RESTRICTION_SSO_DOMAINS,
     RESTRICTION_SSO_COLD_START_URL,
+    AUTH_PASS_THROUGH_SCHEMA_VERSION,
+    AUTH_PASS_THROUGH_ATTEMPT_TTL_SECONDS,
     MAX_RULE_ENTRIES,
     MAX_EVENT_OUTBOX_ENTRIES,
     MAX_EVENT_OUTBOX_BYTES,
@@ -1257,6 +1629,14 @@
     normalizeDomain,
     isHostWithinDomain,
     isRestrictionSsoTab,
+    restrictionSafeMonitoringMetadata,
+    normalizeAuthHostname,
+    authHostRuleMatchesHost,
+    normalizeAuthPassThrough,
+    authPassThroughProfileForUrl,
+    isAuthPassThroughTab,
+    isRestrictionDestinationUrl,
+    safeRestrictionTarget,
     normalizeDomainList,
     normalizeTemporaryAllows,
     normalizeClassroomState,

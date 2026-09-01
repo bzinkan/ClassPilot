@@ -840,6 +840,15 @@ async function main() {
         teachingSessionId: 'tracking-upload-b',
         controlRevision: 74,
       };
+      const originalTrackingWindowCapture = captureAndSendScreenshot;
+      captureAndSendScreenshot = (captureOptions = {}) => (
+        [
+          'tracking-authority-upload-abort',
+          'tracking-window-upload-envelope',
+        ].includes(captureOptions.reason)
+          ? originalTrackingWindowCapture(captureOptions)
+          : Promise.resolve(undefined)
+      );
       screenshotCaptureInFlight = true;
       adoptScreenshotPolicy(trackingPolicy(uploadClassAAuthority), trackingWindowAuth);
       screenshotCaptureInFlight = false;
@@ -863,6 +872,7 @@ async function main() {
         });
       };
       lastScreenshotAttemptAt = 0;
+      screenshotBackoffUntilMs = 0;
       const screenshotErrorBeforeClassAUpload = lastScreenshotError;
       const classAUploadPromise = captureAndSendScreenshot({
         reason: 'tracking-authority-upload-abort',
@@ -895,7 +905,8 @@ async function main() {
         return new Response('{}', { status: 200 });
       };
       lastScreenshotAttemptAt = 0;
-      await captureAndSendScreenshot({
+      screenshotBackoffUntilMs = 0;
+      const trackingWindowCaptureResult = await captureAndSendScreenshot({
         reason: 'tracking-window-upload-envelope',
         queryActiveTab: async () => [{
           id: 4191,
@@ -909,6 +920,16 @@ async function main() {
         subscribeTabUpdate: () => () => {},
         subscribeWindowFocus: () => () => {},
       });
+      const trackingWindowCaptureDiagnostics = {
+        result: trackingWindowCaptureResult,
+        licenseActive: currentLicenseIsActive(),
+        trackingState,
+        screenshotCaptureInFlight,
+        screenshotBackoffUntilMs,
+        ambientAllowed: ambientScreenshotAllowed(trackingWindowAuth),
+        policy: screenshotPolicyState,
+      };
+      captureAndSendScreenshot = originalTrackingWindowCapture;
       fetchWithBackoff = originalFetchWithBackoff;
       observedByTeacher = false;
       scheduleScreenshotCapture(true);
@@ -2966,6 +2987,7 @@ async function main() {
         classAUploadSignalAborted,
         classAUploadDidNotRecordError,
         trackingWindowUpload,
+        trackingWindowCaptureDiagnostics,
         uploadClassBAuthority,
         noDashboardScreenshotAlarm: noDashboardScreenshotAlarm && {
           periodInMinutes: noDashboardScreenshotAlarm.periodInMinutes,
@@ -3310,6 +3332,7 @@ async function main() {
           'scopedAuthorityChecksV1',
           'studentAuthGatePresenceV1',
           'lateSignInRestrictionSsoV1',
+          'restrictionAuthPassThroughV1',
         ],
       },
     });
@@ -4329,7 +4352,10 @@ async function main() {
     assert.deepEqual(result.classAUploadResult, { status: 'paused_unobserved' });
     assert.equal(result.classAUploadSignalAborted, true);
     assert.equal(result.classAUploadDidNotRecordError, true);
-    assert.ok(result.trackingWindowUpload.url.endsWith('/api/classpilot/device/screenshot'));
+    assert.ok(
+      result.trackingWindowUpload?.url.endsWith('/api/classpilot/device/screenshot'),
+      JSON.stringify(result.trackingWindowCaptureDiagnostics),
+    );
     assert.deepEqual(
       result.trackingWindowUpload.body.screenshotAuthority,
       result.uploadClassBAuthority,
