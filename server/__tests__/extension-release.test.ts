@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.0");
+    expect(manifest.version).toBe("2.8.1");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -509,7 +509,8 @@ describe("ClassPilot extension release package guards", () => {
 
   it("treats explicit-null auth, heartbeat, and WebSocket state as authoritative", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
-    expect(serviceWorker).toContain("applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile')");
+    expect(serviceWorker).toContain("scheduleHeartbeatClassroomStateAdoption(data, heartbeatAuthContext");
+    expect(serviceWorker).toContain("applyState(data, 'heartbeat_reconcile', { authContext })");
     expect(serviceWorker).toContain("Object.prototype.hasOwnProperty.call(message, 'classroomState')");
     expect(serviceWorker).toContain("applyClassroomStateFromAuthResponse(message, 'websocket_reconcile')");
     expect(serviceWorker).toContain("reason: `${reason}_no_state`");
@@ -598,7 +599,7 @@ describe("ClassPilot extension release package guards", () => {
       sendHeartbeatStart,
     );
     const classroomResponseApply = serviceWorker.indexOf(
-      "await applyClassroomStateFromAuthResponse(data, 'heartbeat_reconcile')",
+      "scheduleHeartbeatClassroomStateAdoption(data, heartbeatAuthContext",
       sendHeartbeatStart
     );
     expect(responseBindingGuard).toBeGreaterThan(sendHeartbeatStart);
@@ -625,6 +626,7 @@ describe("ClassPilot extension release package guards", () => {
       "exactTabCloseV2",
       "studentAuthGatePresenceV1",
       "lateSignInRestrictionSsoV1",
+      "restrictionAuthPassThroughV1",
       "studentChatIdempotencyV1",
       "screenshotTrackingWindowLeaseV1",
       "screenshotActiveObservationCadenceV1",
@@ -643,7 +645,7 @@ describe("ClassPilot extension release package guards", () => {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
     expect(serviceWorker).toMatch(
-      /const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object\.freeze\(\[\s*'scopedAuthorityChecksV1',\s*'studentAuthGatePresenceV1',\s*'lateSignInRestrictionSsoV1',\s*\]\);/,
+      /const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object\.freeze\(\[\s*'scopedAuthorityChecksV1',\s*'studentAuthGatePresenceV1',\s*'lateSignInRestrictionSsoV1',\s*'restrictionAuthPassThroughV1',\s*\]\);/,
     );
     expect(serviceWorker).toContain("clientProtocolVersion: CLIENT_PROTOCOL_VERSION");
     expect(serviceWorker).toContain("const CLIENT_PROTOCOL_VERSION = 3");
@@ -674,6 +676,78 @@ describe("ClassPilot extension release package guards", () => {
     expect(runtimeCore).toContain("'accounts.google.com'");
     expect(runtimeCore).toContain("const RESTRICTION_SSO_COLD_START_URL = 'https://clever.com/'");
     expect(runtimeCore).toContain("restrictionSso: Object.freeze([4000, 6000])");
+  });
+
+  it("keeps configured restriction authentication exact-bound, private, and restart-safe", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
+    expect(serviceWorker).toContain("function validateRestrictionAuthPassThroughContext(");
+    expect(serviceWorker).toContain("hasNegotiatedCapability('restrictionAuthPassThroughV1', authContext)");
+    expect(serviceWorker).toContain("async function restoreClassroomStateAwaitingAuthPolicy(");
+    expect(serviceWorker).toContain("delete persisted.authPassThrough");
+    expect(serviceWorker).toContain("const RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY = 'restrictionAuthAttemptStateV1'");
+    expect(serviceWorker).toContain("restriction-auth-attempt-expiry");
+    expect(serviceWorker).toContain("phase: 'returning'");
+    expect(serviceWorker).toContain("phase: 'complete'");
+    expect(serviceWorker).toContain("phase: 'timed_out'");
+    expect(serviceWorker).toContain("ClassPilot is reopening your assigned page. Start sign-in again to retry.");
+    expect(serviceWorker).toContain("await clearRestrictionAuthAttemptState().catch(() => {})");
+    expect(serviceWorker).toContain("const restrictionAuthPolicyClearPromise = clearRestrictionAuthAttemptState()");
+    expect(serviceWorker).toContain("if (originChanged) await clearRestrictionAuthAttemptState()");
+    expect(serviceWorker).toContain("restrictionAuthAttemptInProgress:");
+    expect(serviceWorker).toContain("activeAuthPopupPlaceholder");
+    expect(serviceWorker).toContain("restrictionAuthState: restrictionAuthTelemetryState()");
+    expect(serviceWorker).toContain("appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision()");
+    expect(serviceWorker).toMatch(/function normalizeCommandAckForStorage[\s\S]*appliedAuthPolicyRevision:/);
+    expect(serviceWorker).toMatch(
+      /\['in_progress', 'returning', 'complete', 'timed_out'\]\.includes\(/,
+    );
+    expect(serviceWorker).toContain("previousStateWasTransientCurrentPage");
+    expect(serviceWorker).toContain("await kv.remove(CLASSROOM_STATE_STORAGE_KEY)");
+    expect(runtimeCore).toContain("function normalizeAuthPassThrough(rawPolicy)");
+    expect(runtimeCore).toContain("authPassThrough attempt TTL must be 300 seconds");
+    expect(runtimeCore).toContain("function isRestrictionDestinationUrl(state, urlValue)");
+    expect(runtimeCore).toContain("Equal policy revisions are immutable");
+  });
+
+  it("redacts approved authentication metadata and isolates monitoring backoff lanes", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
+    expect(runtimeCore).toContain("function restrictionSafeMonitoringMetadata(state, tab, options = {})");
+    expect(runtimeCore).toContain("title: 'Signing in'");
+    expect(runtimeCore).toContain("safeOrigin = `${parsed.origin}/`");
+    expect(serviceWorker).toMatch(/buildOpaqueTabSnapshot[\s\S]*restrictionSafeMonitoringMetadata\(tab\)/);
+    expect(serviceWorker).toMatch(/queueNavigationEvent[\s\S]*restrictionSafeMonitoringMetadata\(\{ url, title \}\)/);
+    expect(serviceWorker).toContain("const screenshotTabMetadata = restrictionSafeMonitoringMetadata(tab)");
+    expect(serviceWorker).toContain("const evidenceTabMetadata = restrictionSafeMonitoringMetadata(tab)");
+    expect(serviceWorker).toContain("let heartbeatBackoffUntilMs = 0");
+    expect(serviceWorker).toContain("let screenshotBackoffUntilMs = 0");
+    expect(serviceWorker).toContain("backoffLane: 'heartbeat'");
+    expect(serviceWorker).toContain("backoffLane: 'screenshot'");
+    expect(serviceWorker).toContain("const HEARTBEAT_TAB_QUERY_TIMEOUT_MS = 3 * 1000");
+    expect(serviceWorker).toContain("'heartbeat active-tab query'");
+    expect(serviceWorker).toContain("'heartbeat all-tabs query'");
+  });
+
+  it("persists and acknowledges classroom enforcement before bounded tab side effects", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const applyStart = serviceWorker.indexOf("async function applyClassroomStateNow(");
+    const applyEnd = serviceWorker.indexOf("function applyClassroomState(", applyStart);
+    const applySource = serviceWorker.slice(applyStart, applyEnd);
+    const persistIndex = applySource.indexOf(
+      "[CLASSROOM_STATE_STORAGE_KEY]: persistedClassroomStateSnapshot(normalized)",
+    );
+    const ackIndex = applySource.indexOf("sendClassroomStateAck(normalized, 'applied'");
+    const sideEffectsIndex = applySource.indexOf("scheduleClassroomStateSideEffects(normalized");
+    expect(persistIndex).toBeGreaterThan(-1);
+    expect(ackIndex).toBeGreaterThan(persistIndex);
+    expect(sideEffectsIndex).toBeGreaterThan(ackIndex);
+    expect(serviceWorker).toContain("const CLASSROOM_TAB_OPERATION_TIMEOUT_MS = 3000");
+    expect(serviceWorker).toContain("const CLASSROOM_DNR_OPERATION_TIMEOUT_MS = 5000");
+    expect(serviceWorker).toContain("function persistedClassroomStateSnapshot(state)");
+    expect(serviceWorker).toContain("delete persisted.authPassThrough");
+    expect(serviceWorker).toContain("restoreClassroomStateAwaitingAuthPolicy(");
+    expect(serviceWorker).toContain("restrictionAuthPolicyRefreshPending = true");
   });
 
   it("fences authenticated work to one immutable context and treats replacement as cancellation", () => {
@@ -860,7 +934,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("message.type === 'LIVE_VIEW_EXPIRED'");
     expect(serviceWorker).toContain("activeStudentSessionId: null");
     expect(serviceWorker).toContain("assertCurrentStudentBinding(envelope, 'remote-control command', {");
-    expect(serviceWorker).toContain("requireFullAuthority: requireExactTabAuthority");
+    expect(serviceWorker).toMatch(/assertCurrentStudentBinding\(envelope, 'remote-control command',[\s\S]*requireFullAuthority,/);
     expect(serviceWorker).toContain("assertCurrentStudentBinding(message, 'durable teacher message')");
     expect(serviceWorker).toMatch(/function clearStudentAuth[\s\S]*studentAuthInvalidating = true;[\s\S]*disconnectWebSocket\(\)/);
     expect(serviceWorker).toMatch(/function adoptAuthenticatedStudentBinding[\s\S]*enqueueStudentAuthMutation/);

@@ -2322,6 +2322,9 @@ async function main() {
           headers: { 'content-type': 'application/json' },
         });
         lastScreenshotAttemptAt = 0;
+        // Screenshot 429s now use an independent lane. Clear that lane between
+        // fixtures just as production waits for its retry window to elapse.
+        screenshotBackoffUntilMs = 0;
         const screenshotLicenseExpectedScope = licenseScopeForAuthContext(
           captureAuthenticatedContext('screenshot 402 expected scope'),
         );

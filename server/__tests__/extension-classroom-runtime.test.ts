@@ -23,7 +23,7 @@ const core = loadRuntimeCore();
 const NOW = Date.parse("2026-08-13T16:00:00.000Z");
 
 function state(revision: number, overrides: Record<string, unknown> = {}) {
-  return core.normalizeClassroomState({
+  const rawState: Record<string, unknown> = {
     schemaVersion: 1,
     revision,
     teachingSessionId: "session-1",
@@ -31,7 +31,38 @@ function state(revision: number, overrides: Record<string, unknown> = {}) {
     hardExpiresAt: NOW + 24 * 60 * 60 * 1000,
     restrictions: {},
     ...overrides,
-  }, NOW);
+  };
+  if (rawState.authPassThrough
+    && !Object.prototype.hasOwnProperty.call(rawState, "authPassThroughPolicyRevision")) {
+    rawState.authPassThroughPolicyRevision = (rawState.authPassThrough as any).policyRevision;
+  }
+  return core.normalizeClassroomState(rawState, NOW);
+}
+
+function authPolicy() {
+  return {
+    schemaVersion: 1,
+    policyRevision: 4,
+    defaultProfileId: "clever",
+    attemptTtlSeconds: 300,
+    profiles: [
+      {
+        id: "clever",
+        name: "Clever",
+        startUrl: "https://district.clever.com/login?school=one",
+        hostRules: [
+          { hostname: "clever.com", includeSubdomains: true },
+          { hostname: "accounts.google.com", includeSubdomains: false },
+        ],
+      },
+      {
+        id: "okta",
+        name: "District Okta",
+        startUrl: "https://district.okta.com/app/classpilot",
+        hostRules: [{ hostname: "district.okta.com", includeSubdomains: false }],
+      },
+    ],
+  };
 }
 
 describe("ClassPilot classroom runtime core", () => {
@@ -67,6 +98,36 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.shouldApplyClassroomState(state(9), state(10))).toBe(true);
   });
 
+  it("applies independent auth-policy updates and removal at the same control revision", () => {
+    const current = state(9, { authPassThrough: authPolicy() });
+    const higherPolicyRevision = state(9, {
+      authPassThrough: { ...authPolicy(), policyRevision: 5 },
+    });
+    const correctedSamePolicyRevision = state(9, {
+      authPassThrough: {
+        ...authPolicy(),
+        profiles: authPolicy().profiles.map((profile: any) => (
+          profile.id === "okta" ? { ...profile, name: "District Okta SSO" } : profile
+        )),
+      },
+    });
+    const stalePolicyRevision = state(9, {
+      authPassThrough: { ...authPolicy(), policyRevision: 3 },
+    });
+    const removedByGateOff = state(9, { authPassThroughPolicyRevision: 5 });
+    const reenabled = state(9, {
+      authPassThrough: { ...authPolicy(), policyRevision: 6 },
+    });
+
+    expect(core.shouldApplyClassroomState(current, higherPolicyRevision)).toBe(true);
+    expect(core.shouldApplyClassroomState(current, correctedSamePolicyRevision)).toBe(false);
+    expect(core.shouldApplyClassroomState(current, stalePolicyRevision)).toBe(false);
+    expect(core.shouldApplyClassroomState(current, removedByGateOff)).toBe(true);
+    expect(core.shouldApplyClassroomState(removedByGateOff, current)).toBe(false);
+    expect(core.shouldApplyClassroomState(removedByGateOff, reenabled)).toBe(true);
+    expect(core.shouldApplyClassroomState(reenabled, removedByGateOff)).toBe(false);
+  });
+
   it("expires at the scheduled end before the hard cap", () => {
     const normalized = state(2, { scheduledEndAt: NOW + 30_000 });
     expect(normalized.scheduledEndAt).toBe(NOW + 30_000);
@@ -93,6 +154,8 @@ describe("ClassPilot classroom runtime core", () => {
 
     expect(rules.map((rule: any) => rule.id)).toEqual([1, 2, 1000, 2000, 3000]);
     expect(rules.find((rule: any) => rule.id === 3000)?.action.type).toBe("allow");
+    expect(rules.find((rule: any) => rule.id === 2000)?.priority)
+      .toBeGreaterThan(rules.find((rule: any) => rule.id === 1)?.priority);
     expect(rules.find((rule: any) => rule.id === 1)?.priority)
       .toBeGreaterThan(rules.find((rule: any) => rule.id === 3000)?.priority);
     expect(rules.find((rule: any) => rule.id === 2)?.action.type).toBe("allow");
@@ -169,7 +232,7 @@ describe("ClassPilot classroom runtime core", () => {
       restrictions: {
         screenLock: {
           active: true,
-          url: "https://Lock.Example/assignment?step=1",
+          url: "https://Lock.Example/assignment/step-1",
           domain: "lock.example",
         },
       },
@@ -182,11 +245,11 @@ describe("ClassPilot classroom runtime core", () => {
     ]);
 
     expect(plan).toEqual({
-      updates: [{ tabId: 2, url: "https://lock.example/assignment?step=1" }],
+      updates: [{ tabId: 2, url: "https://lock.example/assignment/step-1" }],
       removeTabIds: [3, 4],
       createUrl: null,
       activateTabId: 2,
-      focusFallbackUrl: "https://lock.example/assignment?step=1",
+      focusFallbackUrl: "https://lock.example/assignment/step-1",
     });
   });
 
@@ -195,7 +258,7 @@ describe("ClassPilot classroom runtime core", () => {
       restrictions: {
         screenLock: {
           active: true,
-          url: "https://lock.example/assignment?step=1",
+          url: "https://lock.example/assignment/step-1",
           domain: "lock.example",
         },
       },
@@ -528,6 +591,322 @@ describe("ClassPilot classroom runtime core", () => {
       deliveryContext: { lateSignInRestrictionSso: true, ignored: true },
     });
     expect(deferred.deliveryContext).toEqual({ lateSignInRestrictionSso: true });
+  });
+
+  it("keeps temporary teacher unblocks useful outside destination restrictions", () => {
+    const normalized = state(5, {
+      restrictions: {
+        blockList: { active: true, blockedDomains: ["practice.example"] },
+        temporaryAllows: [{ domain: "practice.example", expiresAt: NOW + 60_000 }],
+      },
+    });
+    const rules = core.buildDnrRules({ classroomState: normalized }, ["teacher", "temporary"], NOW);
+    const teacherRule = rules.find((rule: any) => rule.id === 2000);
+    const temporaryRule = rules.find((rule: any) => rule.id === 3000);
+    expect(temporaryRule.priority).toBeGreaterThan(teacherRule.priority);
+  });
+
+  it("normalizes a bounded administrator auth-pass-through envelope", () => {
+    const normalized = state(10, { authPassThrough: authPolicy() });
+    expect(normalized.authPassThrough).toEqual(authPolicy());
+    expect(core.authPassThroughProfileForUrl(
+      normalized.authPassThrough,
+      "https://district.clever.com/oauth",
+    )?.id).toBe("clever");
+    expect(core.authPassThroughProfileForUrl(
+      normalized.authPassThrough,
+      "https://accounts.google.com/o/oauth2/auth",
+    )?.id).toBe("clever");
+    expect(core.authPassThroughProfileForUrl(
+      normalized.authPassThrough,
+      "https://child.accounts.google.com/o/oauth2/auth",
+    )).toBeNull();
+    expect(core.authPassThroughProfileForUrl(
+      normalized.authPassThrough,
+      "https://accounts.google.com.evil.example/",
+    )).toBeNull();
+    expect(core.authPassThroughProfileForUrl(
+      normalized.authPassThrough,
+      "https://accounts.google.com:8443/o/oauth2/auth",
+    )).toBeNull();
+  });
+
+  it("redacts approved authentication metadata without hiding ordinary destinations", () => {
+    const waypoint = state(10, {
+      authPassThrough: authPolicy(),
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://classroom.google.com/c/one",
+          domain: "classroom.google.com",
+        },
+      },
+    });
+    expect(core.restrictionSafeMonitoringMetadata(waypoint, {
+      url: "https://accounts.google.com/o/oauth2/auth?code=secret#token",
+      title: "Student - OAuth secret",
+      favIconUrl: "https://accounts.google.com/favicon.ico?token=secret",
+    }, { restrictionAuthPassThrough: true })).toEqual({
+      url: "https://accounts.google.com/",
+      title: "Signing in",
+      favicon: "",
+      redacted: true,
+    });
+    expect(core.restrictionSafeMonitoringMetadata(waypoint, {
+      url: "https://classroom.google.com/c/one?view=stream",
+      title: "Classroom",
+      favIconUrl: "https://classroom.google.com/favicon.ico",
+    }, { restrictionAuthPassThrough: true })).toEqual({
+      url: "https://classroom.google.com/c/one?view=stream",
+      title: "Classroom",
+      favicon: "https://classroom.google.com/favicon.ico",
+      redacted: false,
+    });
+  });
+
+  it("fails closed for malformed auth-pass-through policy", () => {
+    expect(() => state(10, {
+      authPassThrough: { ...authPolicy(), attemptTtlSeconds: 301 },
+    })).toThrow("TTL must be 300 seconds");
+    expect(() => state(10, {
+      authPassThrough: {
+        ...authPolicy(),
+        profiles: [{
+          id: "evil",
+          name: "Evil",
+          startUrl: "https://evilclever.com/login",
+          hostRules: [{ hostname: "clever.com", includeSubdomains: true }],
+        }],
+        defaultProfileId: "evil",
+      },
+    })).toThrow("outside its approved host rules");
+    expect(() => state(10, {
+      authPassThrough: {
+        ...authPolicy(),
+        profiles: [{
+          id: "wildcard",
+          name: "Wildcard",
+          startUrl: "https://district.example.com/login",
+          hostRules: [{ hostname: "*.example.com", includeSubdomains: true }],
+        }],
+        defaultProfileId: "wildcard",
+      },
+    })).toThrow("invalid host rule");
+    expect(() => state(10, {
+      authPassThrough: {
+        ...authPolicy(),
+        profiles: [{
+          id: "broad-google",
+          name: "Broad Google",
+          startUrl: "https://accounts.google.com/",
+          hostRules: [{ hostname: "accounts.google.com", includeSubdomains: true }],
+        }],
+        defaultProfileId: "broad-google",
+      },
+    })).toThrow("must use exact-host matching");
+    for (const lookalike of [
+      "evilclever.com",
+      "accounts.google.com.evil.test",
+      "google-login.example.org",
+      "xn--gogle-9ta.example",
+      "clever.com.",
+    ]) {
+      expect(() => state(10, {
+        authPassThrough: {
+          ...authPolicy(),
+          profiles: [{
+            id: "lookalike",
+            name: "Lookalike",
+            startUrl: `https://${lookalike}/login`,
+            hostRules: [{ hostname: lookalike, includeSubdomains: false }],
+          }],
+          defaultProfileId: "lookalike",
+        },
+      })).toThrow("invalid host rule");
+    }
+    expect(() => state(10, {
+      authPassThrough: {
+        ...authPolicy(),
+        profiles: [{
+          id: "suffix",
+          name: "Unsafe suffix",
+          startUrl: "https://co.uk/login",
+          hostRules: [{ hostname: "co.uk", includeSubdomains: true }],
+        }],
+        defaultProfileId: "suffix",
+      },
+    })).toThrow("invalid host rule");
+  });
+
+  it("composes configured auth rules between teacher policy and Waypoint", () => {
+    const waypoint = state(11, {
+      authPassThrough: authPolicy(),
+      restrictions: {
+        screenLock: { active: true, url: "https://classroom.google.com/c/one", domain: "classroom.google.com" },
+        blockList: { active: true, blockedDomains: ["accounts.google.com"] },
+      },
+    });
+    const rules = core.buildDnrRules({
+      classroomState: waypoint,
+      restrictionAuthPassThrough: true,
+    }, ["classroom", "teacher", "restrictionSso"], NOW);
+    const waypointRule = rules.find((rule: any) => rule.id === 1);
+    const cleverAllow = rules.find((rule: any) => rule.id === 4000);
+    const exactGoogleAllow = rules.find((rule: any) => rule.id === 4001);
+    const teacherBlock = rules.find((rule: any) => rule.id === 2000);
+    expect(cleverAllow.condition.requestDomains).toEqual(["clever.com"]);
+    expect(cleverAllow.condition.regexFilter).toBe("^https://[^/@:]+(?::443)?(?:/|$)");
+    expect(exactGoogleAllow.condition.regexFilter).toContain("accounts\\.google\\.com");
+    expect(teacherBlock.priority).toBeGreaterThan(exactGoogleAllow.priority);
+    expect(exactGoogleAllow.priority).toBeGreaterThan(waypointRule.priority);
+  });
+
+  it("accepts the canonical Clever and Google overlap while deduplicating DNR rules", () => {
+    const canonicalPolicy = {
+      ...authPolicy(),
+      defaultProfileId: "clever",
+      profiles: [
+        authPolicy().profiles[0],
+        {
+          id: "google",
+          name: "Google",
+          startUrl: "https://accounts.google.com/",
+          hostRules: [{ hostname: "accounts.google.com", includeSubdomains: false }],
+        },
+      ],
+    };
+    const waypoint = state(11, {
+      authPassThrough: canonicalPolicy,
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://classroom.google.com/c/one",
+          domain: "classroom.google.com",
+        },
+      },
+    });
+    const rules = core.buildDnrRules({
+      classroomState: waypoint,
+      restrictionAuthPassThrough: true,
+    }, ["restrictionSso"], NOW);
+    expect(rules).toHaveLength(2);
+    expect(rules.filter((rule: any) => (
+      String(rule.condition.regexFilter || "").includes("accounts\\.google\\.com")
+    ))).toHaveLength(1);
+  });
+
+  it("uses provider-first only for deferred state and protects only an active attempt", () => {
+    const deferred = state(12, {
+      authPassThrough: authPolicy(),
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: { active: true, url: "https://classroom.google.com/c/one", domain: "classroom.google.com" },
+      },
+    });
+    const live = state(13, {
+      authPassThrough: authPolicy(),
+      restrictions: deferred.restrictions,
+    });
+    const tabs = [{ id: 1, active: true, url: "https://outside.example/" }];
+    expect(core.planClassroomTabReconciliation(deferred, tabs, {
+      foregroundTabId: 1,
+      restrictionAuthPassThrough: true,
+      authPassThroughAttempt: { phase: "in_progress" },
+    }).updates).toEqual([{
+      tabId: 1,
+      url: "https://district.clever.com/login?school=one",
+    }]);
+    expect(core.planClassroomTabReconciliation(live, tabs, {
+      foregroundTabId: 1,
+      restrictionAuthPassThrough: true,
+      authPassThroughAttempt: null,
+    }).updates).toEqual([{
+      tabId: 1,
+      url: "https://classroom.google.com/c/one",
+    }]);
+    const timedOut = core.planClassroomTabReconciliation(deferred, [{
+      id: 1,
+      active: true,
+      url: "https://accounts.google.com/o/oauth2/auth",
+    }], {
+      foregroundTabId: 1,
+      restrictionAuthPassThrough: true,
+      authPassThroughAttempt: { phase: "timed_out" },
+    });
+    expect(timedOut.updates).toEqual([{
+      tabId: 1,
+      url: "https://classroom.google.com/c/one",
+    }]);
+
+    const popupPlaceholder = core.planClassroomTabReconciliation(deferred, [
+      { id: 7, windowId: 70, active: true, url: "about:blank" },
+      { id: 8, windowId: 80, active: true, url: "https://classroom.google.com/c/one" },
+    ], {
+      foregroundTabId: 7,
+      maxTabs: 1,
+      restrictionAuthPassThrough: true,
+      authPassThroughAttempt: { phase: "in_progress", activeTabId: 7 },
+    });
+    expect(popupPlaceholder.updates).toEqual([]);
+    expect(popupPlaceholder.removeTabIds).toEqual([]);
+    expect(popupPlaceholder.activateTabId).toBeNull();
+  });
+
+  it("returns a committed provider round-trip to the assignment without claiming completion", () => {
+    const deferred = state(13, {
+      authPassThrough: authPolicy(),
+      deliveryContext: { lateSignInRestrictionSso: true },
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://classroom.google.com/c/one",
+          domain: "classroom.google.com",
+        },
+      },
+    });
+    const plan = core.planClassroomTabReconciliation(deferred, [{
+      id: 7,
+      active: true,
+      url: "https://district.clever.com/oauth/callback?code=secret",
+    }], {
+      foregroundTabId: 7,
+      restrictionAuthPassThrough: true,
+      authPassThroughAttempt: {
+        phase: "returning",
+        providerId: "clever",
+        activeTabId: 7,
+      },
+      authPassThroughReturnToDestination: true,
+    });
+    expect(plan.updates).toEqual([{
+      tabId: 7,
+      url: "https://classroom.google.com/c/one",
+    }]);
+    expect(plan.removeTabIds).toEqual([]);
+  });
+
+  it("completes Waypoints only at the exact destination URL", () => {
+    const waypoint = state(14, {
+      restrictions: {
+        screenLock: {
+          active: true,
+          url: "https://classroom.google.com/c/one/authuser-0",
+          domain: "classroom.google.com",
+        },
+      },
+    });
+    expect(core.isRestrictionDestinationUrl(
+      waypoint,
+      "https://classroom.google.com/c/one/authuser-0",
+    )).toBe(true);
+    expect(core.isRestrictionDestinationUrl(
+      waypoint,
+      "https://classroom.google.com/c/two/authuser-0",
+    )).toBe(false);
+    expect(core.isRestrictionDestinationUrl(
+      waypoint,
+      "https://classroom.google.com/c/one/authuser-1",
+    )).toBe(false);
   });
 
   it("allows exact Clever and Google authentication families without accepting lookalikes", () => {
