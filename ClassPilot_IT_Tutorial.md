@@ -188,7 +188,7 @@ ClassPilot is a privacy-aware classroom monitoring system designed for education
 
 **WebRTC Screen Sharing:**
 - Real-time screen capture from student devices
-- Silent tab capture (works on managed Chromebooks)
+- Live View uses Chrome's tab/screen picker on the student device; there is no silent capture path
 - Advanced video controls (play/pause/fullscreen)
 - Privacy disclosure banner shown to students
 

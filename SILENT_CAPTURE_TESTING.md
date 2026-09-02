@@ -1,5 +1,20 @@
 # Silent Tab Capture - Testing Guide
 
+> **Correction (2026-09-01).** Earlier versions of this document claimed that
+> ClassPilot could capture a student tab silently on managed Chromebooks. That
+> claim was wrong and has been removed. The extension requests a tab stream via
+> `chrome.tabCapture.getMediaStreamId` (`extension/service-worker.js`). Chrome
+> only grants tab capture to an extension that holds an `activeTab` grant from a
+> user gesture on the extension's action, and ClassPilot's action is
+> `default_state: "disabled"` with no popup (`extension/manifest.json`), so that
+> grant never exists. On ChromeOS the student ALWAYS sees Chrome's tab/screen
+> picker. The `TabCaptureAllowedByOrigins`, `ScreenCaptureAllowedByOrigins`, and
+> `SameOriginTabCaptureAllowedByOrigins` Google Admin policies govern web origins
+> calling `getDisplayMedia()`, not this extension, so they do not enable silent
+> capture. Live View is currently disabled in the teacher UI
+> (`LIVE_VIEW_UI_ENABLED=false`). Any remaining "silent capture succeeded"
+> expectations further down are historical and do not occur.
+
 > **Historical test notes.** Hostnames and prototype flows below are not
 > production configuration. Validate ClassPilot 2.7.1 Live View only through the
 > exact-session direct and TURN/TURNS gates in the SchoolPilot repository's
@@ -7,22 +22,27 @@
 
 ## What Was Implemented
 
-The Chrome Extension now uses a **silent-first capture strategy**:
+The Chrome Extension uses a two-step capture attempt:
 
-1. **First Attempt**: `chrome.tabCapture.capture()` - Silent, no student prompt
-2. **Fallback**: `navigator.mediaDevices.getDisplayMedia()` - Shows picker if silent fails
+1. **First Attempt**: `chrome.tabCapture.getMediaStreamId()` - Succeeds only when the
+   extension holds an `activeTab` grant from a user gesture on its action. ClassPilot's
+   action is disabled with no popup, so this attempt fails on every device.
+2. **Fallback**: `navigator.mediaDevices.getDisplayMedia()` - Shows Chrome's tab/screen
+   picker to the student. This is the path Live View actually uses.
 
 ## Expected Behavior
 
-### On Managed Chromebooks (with Google Admin policy configured)
+### On Managed Chromebooks (with or without Google Admin capture policies)
 ```
-Teacher clicks "Go Live" → Silent tab capture → NO student prompt → Video streams
+Teacher clicks "Go Live" → tabCapture attempt fails (no activeTab grant) → Picker appears → Student selects → Video streams
 ```
 
-### On Non-Managed Devices (current testing environment)
+### On Non-Managed Devices
 ```
-Teacher clicks "Go Live" → Silent capture fails → Picker appears → Student selects → Video streams
+Teacher clicks "Go Live" → tabCapture attempt fails (no activeTab grant) → Picker appears → Student selects → Video streams
 ```
+
+The two flows are identical. There is no silent capture path.
 
 ## Testing Steps
 
@@ -60,23 +80,20 @@ Look for these logs in order:
 [Offscreen] Attempting silent tab capture...
 ```
 
-**Expected on non-managed devices:**
+**Expected on every device (managed or unmanaged, with or without Google Admin capture policies):**
 ```
 [Offscreen] Silent tab capture failed: Extension has not been invoked...
 [Offscreen] Tab capture not available, falling back to screen picker...
 ```
-→ **Picker should appear**
+→ **Chrome's tab/screen picker appears; the student must accept it before the stream starts**
 
-**Expected on managed devices (with policy):**
-```
-[Offscreen] ✅ Silent tab capture succeeded!
-[Offscreen] Got media stream from tab capture, creating peer connection
-```
-→ **No picker, silent capture works!**
+A `Silent tab capture succeeded!` line does not occur on any device. The
+tabCapture attempt always fails because the extension never holds an `activeTab`
+grant.
 
 ### 4. Check WebRTC Connection
 
-After selecting screen (or silent capture):
+After the student accepts the picker:
 
 ```
 [Offscreen] Created and set local description (answer)
@@ -90,33 +107,29 @@ After selecting screen (or silent capture):
 
 ## Console Log Reference
 
-### Success Flow (Silent Capture)
+### Expected Flow (Chrome Picker, every device)
 ```
 1. [Service Worker] Offscreen document created
 2. [Offscreen] Sending READY signal
 3. [Service Worker] Offscreen document is ready
 4. [WebRTC] Teacher requested screen share, mode: auto
 5. [Offscreen] Attempting silent tab capture...
-6. [Offscreen] ✅ Silent tab capture succeeded!
-7. [Offscreen] Got media stream from tab capture, creating peer connection
-8. [Offscreen] Tracks added to peer connection, ready for offer
-9. [Offscreen] Handling signal: offer
-10. [Offscreen] Set remote description (offer)
-11. [Offscreen] Created and set local description (answer)
-12. [Service Worker] Message from offscreen: ANSWER
-13. [Offscreen] Connection state: connected
-```
-
-### Fallback Flow (Picker Shown)
-```
-1-4. (Same as above)
-5. [Offscreen] Attempting silent tab capture...
 6. [Offscreen] Silent tab capture failed: Extension has not been invoked for the current page. Chrome pages cannot be captured.
 7. [Offscreen] Tab capture not available, falling back to screen picker...
-8. (User sees picker and selects screen/window/tab)
+8. (Student sees Chrome's picker and accepts a tab/window/screen)
 9. [Offscreen] Got media stream from screen picker, creating peer connection
-10-13. (Same as success flow)
+10. [Offscreen] Tracks added to peer connection, ready for offer
+11. [Offscreen] Handling signal: offer
+12. [Offscreen] Set remote description (offer)
+13. [Offscreen] Created and set local description (answer)
+14. [Service Worker] Message from offscreen: ANSWER
+15. [Offscreen] Connection state: connected
 ```
+
+There is no separate "silent success" flow. The historical step
+`[Offscreen] ✅ Silent tab capture succeeded!` → `Got media stream from tab capture`
+does not occur on any device: the tabCapture attempt always fails because the
+extension never holds an `activeTab` grant (see the correction note at the top).
 
 ### Error Scenarios
 
@@ -164,31 +177,41 @@ After selecting screen (or silent capture):
 
 ## Google Admin Policy Configuration
 
-To enable **truly silent capture** on managed Chromebooks, configure these policies:
+There is no Google Admin policy that makes ClassPilot's Live View silent.
 
-**Google Admin Console → Devices → Chrome → Settings → Users & browsers → [Student OU]**
+The capture policies under **Google Admin Console → Devices → Chrome → Settings →
+Users & browsers → [Student OU]** ("Screen capture allowed by URLs",
+"Tab capture allowed by URLs", "Same-origin tab capture allowed by URLs", i.e.
+`ScreenCaptureAllowedByOrigins`, `TabCaptureAllowedByOrigins`,
+`SameOriginTabCaptureAllowedByOrigins`) apply to **web origins** that call
+`navigator.mediaDevices.getDisplayMedia()`. They control which sites may capture
+and how Chrome presents the picker to those sites. They do not apply to a Chrome
+extension's `chrome.tabCapture` calls and they do not grant the extension the
+`activeTab` permission that `tabCapture.getMediaStreamId` requires. Listing any
+origin in them does not change what the student sees when a teacher starts Live
+View.
 
-| Policy Setting | Value |
-|---|---|
-| Screen capture allowed by URLs | `https://classpilot.replit.app` |
-| Tab capture allowed by URLs | `https://classpilot.replit.app` |
-| Same-origin tab capture allowed by URLs | `https://classpilot.replit.app` |
-
-After configuring:
-1. Force-install ClassPilot extension to student OU
-2. On student Chromebook: `chrome://policy` → "Reload policies"
-3. Verify policies appear in the list
-4. Test "Go Live" - should be **completely silent**
+What matters on a managed Chromebook:
+1. Force-install the ClassPilot extension to the student OU.
+2. Do not disable screen capture for the OU (`ScreenCaptureAllowed` must not be
+   `false`), or Live View fails with `NotAllowedError` before any picker appears.
+3. On the student Chromebook: `chrome://policy` → "Reload policies".
+4. Test "Go Live" - the student sees Chrome's tab/screen picker and must accept
+   it. The picker is expected behavior, not a misconfiguration.
 
 ## Common Issues
 
 ### Issue: Picker always shows (on managed devices)
-**Cause**: Google Admin policy not configured correctly  
-**Fix**: Verify policy settings match exactly as shown above
+**Cause**: Expected. Chrome only grants extension tab capture after an `activeTab`
+grant from a user gesture on the extension's action, and ClassPilot's action is
+disabled with no popup. No Google Admin policy changes this.  
+**Fix**: None needed. The picker is the designed Live View flow on every device.
 
 ### Issue: "Extension has not been invoked"
-**Cause**: `tabCapture` requires user interaction or policy  
-**Fix**: This is expected on non-managed devices - picker fallback works correctly
+**Cause**: `tabCapture` requires an `activeTab` grant from a user gesture on the
+extension's action, which this extension never receives  
+**Fix**: This is expected on every device, managed or not - the picker fallback is
+the real capture path
 
 ### Issue: Video doesn't appear in teacher dashboard
 **Cause**: WebRTC connection failed  
@@ -204,28 +227,26 @@ After configuring:
 
 ## Expected Test Results
 
-✅ **Without Google Admin Policy (Current Testing)**:
-- Silent capture fails
-- Picker appears automatically
-- Student selects screen/tab/window
+✅ **On every device (managed or unmanaged, with or without Google Admin capture policies)**:
+- tabCapture attempt fails (no activeTab grant)
+- Chrome's tab/screen picker appears
+- Student accepts the picker
 - Video streams to teacher
 
-✅ **With Google Admin Policy (Production)**:
-- Silent capture succeeds
-- No picker shown
-- No student interaction
-- Video streams instantly
+❌ **Not expected on any device**:
+- Silent capture with no picker and no student interaction. This was the
+  original design goal and never worked; see the correction note at the top.
 
 ## Next Steps After Testing
 
-If testing confirms fallback works correctly:
+If testing confirms the picker flow works correctly:
 1. Deploy to production
-2. Configure Google Admin policies
+2. Confirm screen capture is not disabled for the student OU
 3. Test on actual managed Chromebooks
-4. Verify completely silent capture
+4. Verify the picker appears and the stream starts after the student accepts it
 
 ---
 
 **Testing Date**: November 1, 2025  
-**Version**: 1.0.0 - Silent Tab Capture  
+**Version**: 1.0.0 - Tab capture via Chrome picker (corrected 2026-09-01; no silent path)  
 **Status**: Ready for testing

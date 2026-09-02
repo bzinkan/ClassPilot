@@ -277,9 +277,9 @@ This prevents students from needing to configure the server manually (future enh
 
 1. From an authorized teacher dashboard, request Live View for the exact test
    student and active teaching session.
-2. On a policy-installed managed Chromebook, verify the authorized stream starts
-   without a student picker. On an unmanaged test device, complete Chrome's
-   required tab/screen picker.
+2. On the student device (managed or unmanaged), Chrome shows its tab/screen
+   capture picker. Accept it as the student; the authorized stream starts after
+   the picker is accepted.
 3. Verify the student-facing sharing indicator and the teacher dashboard's Live
    View state both appear.
 4. Stop Live View from the teacher dashboard and verify the media tracks stop on
@@ -327,8 +327,8 @@ Before deploying, inform students and parents about the monitoring:
 > **Live View:**
 > - An authorized teacher may request a temporary Live View for the exact
 >   student and teaching session
-> - Managed, policy-installed Chromebooks can start the authorized stream
->   without a student picker; unmanaged devices use Chrome's picker
+> - Chrome shows its capture picker on the student device (managed and
+>   unmanaged alike); the authorized stream starts after the student accepts it
 > - The extension displays a sharing indicator while the stream is active
 > - Live View media is not recorded by the extension or SchoolPilot servers;
 >   an authorized teacher can explicitly save a local recording or still image,
@@ -362,8 +362,8 @@ Provide students with a quick reference:
 **When an authorized teacher starts Live View:**
 1. The extension verifies the exact school, student, student session, and Live
    View negotiation before starting media.
-2. Managed Chromebooks start the authorized stream without a picker; unmanaged
-   devices use Chrome's required picker.
+2. Chrome shows its capture picker on the student device (managed and
+   unmanaged alike); the authorized stream starts after the student accepts it.
 3. A visible indicator shows while sharing is active.
 4. The stream stops when the teacher ends it or when its authority/session
    changes. The extension and SchoolPilot servers do not record it; an
@@ -449,8 +449,8 @@ To update the extension after changes:
    `liveViewIceServersV1`.
 3. The server returned unexpired ICE credentials and signaling uses the current
    negotiation ID.
-4. On unmanaged devices only, the user completed Chrome's required capture
-   picker. Managed policy-installed Chromebooks do not depend on that picker.
+4. The student accepted Chrome's capture picker on the student device. Managed
+   and unmanaged devices both show the picker; there is no silent path.
 
 **Fix:**
 - End the failed negotiation and start a fresh exact-session Live View request.
