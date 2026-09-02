@@ -80,23 +80,20 @@ Look for these logs in order:
 [Offscreen] Attempting silent tab capture...
 ```
 
-**Expected on non-managed devices:**
+**Expected on every device (managed or unmanaged, with or without Google Admin capture policies):**
 ```
 [Offscreen] Silent tab capture failed: Extension has not been invoked...
 [Offscreen] Tab capture not available, falling back to screen picker...
 ```
-→ **Picker should appear**
+→ **Chrome's tab/screen picker appears; the student must accept it before the stream starts**
 
-**Expected on managed devices (with policy):**
-```
-[Offscreen] ✅ Silent tab capture succeeded!
-[Offscreen] Got media stream from tab capture, creating peer connection
-```
-→ **No picker, silent capture works!**
+A `Silent tab capture succeeded!` line does not occur on any device. The
+tabCapture attempt always fails because the extension never holds an `activeTab`
+grant.
 
 ### 4. Check WebRTC Connection
 
-After selecting screen (or silent capture):
+After the student accepts the picker:
 
 ```
 [Offscreen] Created and set local description (answer)
@@ -110,33 +107,29 @@ After selecting screen (or silent capture):
 
 ## Console Log Reference
 
-### Success Flow (Silent Capture)
+### Expected Flow (Chrome Picker, every device)
 ```
 1. [Service Worker] Offscreen document created
 2. [Offscreen] Sending READY signal
 3. [Service Worker] Offscreen document is ready
 4. [WebRTC] Teacher requested screen share, mode: auto
 5. [Offscreen] Attempting silent tab capture...
-6. [Offscreen] ✅ Silent tab capture succeeded!
-7. [Offscreen] Got media stream from tab capture, creating peer connection
-8. [Offscreen] Tracks added to peer connection, ready for offer
-9. [Offscreen] Handling signal: offer
-10. [Offscreen] Set remote description (offer)
-11. [Offscreen] Created and set local description (answer)
-12. [Service Worker] Message from offscreen: ANSWER
-13. [Offscreen] Connection state: connected
-```
-
-### Fallback Flow (Picker Shown)
-```
-1-4. (Same as above)
-5. [Offscreen] Attempting silent tab capture...
 6. [Offscreen] Silent tab capture failed: Extension has not been invoked for the current page. Chrome pages cannot be captured.
 7. [Offscreen] Tab capture not available, falling back to screen picker...
-8. (User sees picker and selects screen/window/tab)
+8. (Student sees Chrome's picker and accepts a tab/window/screen)
 9. [Offscreen] Got media stream from screen picker, creating peer connection
-10-13. (Same as success flow)
+10. [Offscreen] Tracks added to peer connection, ready for offer
+11. [Offscreen] Handling signal: offer
+12. [Offscreen] Set remote description (offer)
+13. [Offscreen] Created and set local description (answer)
+14. [Service Worker] Message from offscreen: ANSWER
+15. [Offscreen] Connection state: connected
 ```
+
+There is no separate "silent success" flow. The historical step
+`[Offscreen] ✅ Silent tab capture succeeded!` → `Got media stream from tab capture`
+does not occur on any device: the tabCapture attempt always fails because the
+extension never holds an `activeTab` grant (see the correction note at the top).
 
 ### Error Scenarios
 
@@ -234,25 +227,23 @@ the real capture path
 
 ## Expected Test Results
 
-✅ **Without Google Admin Policy (Current Testing)**:
-- Silent capture fails
-- Picker appears automatically
-- Student selects screen/tab/window
+✅ **On every device (managed or unmanaged, with or without Google Admin capture policies)**:
+- tabCapture attempt fails (no activeTab grant)
+- Chrome's tab/screen picker appears
+- Student accepts the picker
 - Video streams to teacher
 
-✅ **With Google Admin Policy (Production)**:
-- Silent capture succeeds
-- No picker shown
-- No student interaction
-- Video streams instantly
+❌ **Not expected on any device**:
+- Silent capture with no picker and no student interaction. This was the
+  original design goal and never worked; see the correction note at the top.
 
 ## Next Steps After Testing
 
-If testing confirms fallback works correctly:
+If testing confirms the picker flow works correctly:
 1. Deploy to production
-2. Configure Google Admin policies
+2. Confirm screen capture is not disabled for the student OU
 3. Test on actual managed Chromebooks
-4. Verify completely silent capture
+4. Verify the picker appears and the stream starts after the student accepts it
 
 ---
 
