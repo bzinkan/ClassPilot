@@ -443,6 +443,28 @@ archive—not a manually assembled or unversioned ZIP.</p>
     <li>Save</li>
 </ol>
 
+<p><strong>Required policies (student OU):</strong></p>
+<ol>
+    <li><strong>Restrict sign-in to your school domain.</strong> Navigate to: <strong>Devices → Chrome → Settings → Device → Sign-in settings → Sign-in restriction</strong> and enter <code>*@yourschool.org</code>. Personal Google accounts can no longer sign in on the device.</li>
+    <li><strong>Disable Guest mode</strong> (same page). "Browse as Guest" bypasses every policy, including the force-installed extension.</li>
+    <li><strong>Disable "Allow adding new users"</strong> at sign-in (same page), so only accounts from your domain can be added to the device.</li>
+</ol>
+<p><strong>Strongly recommended (student OU):</strong></p>
+<ol start="4">
+    <li><strong>Disallow Incognito mode.</strong> Navigate to: <strong>Devices → Chrome → Settings → Users & browsers → Security → Incognito mode</strong> → Disallow incognito mode.</li>
+    <li><strong>Never allow built-in developer tools.</strong> Same page (<strong>Security → Developer tools</strong>), so students cannot disable or inspect the extension.</li>
+    <li><strong>Force users to sign in to use the browser.</strong> <strong>Users & browsers → Security → Browser sign-in settings</strong> → Force users to sign in to use the browser.</li>
+    <li><strong>If API access is restricted:</strong> Navigate to: <strong>Security → Access and data control → API controls → Manage Third-Party App Access</strong> → add ClassPilot by its OAuth client ID and mark it <strong>Trusted</strong>.</li>
+</ol>
+<p><strong>Verify on a student Chromebook:</strong></p>
+<ul>
+    <li>The extension shows the force-installed ("Installed by your administrator") badge in <code>chrome://extensions</code></li>
+    <li>A personal Gmail account is rejected at sign-in</li>
+    <li>No "Browse as Guest" button appears on the login screen</li>
+    <li>A test student appears on the teacher dashboard within about 30 seconds</li>
+</ul>
+<p>ClassPilot cannot read Google Admin policy state; verify these settings in the Admin Console.</p>
+
 <h3>Step 4: Configure Dashboard</h3>
 <p><strong>Initial Setup:</strong></p>
 <ol>

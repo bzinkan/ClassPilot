@@ -375,6 +375,28 @@ not a manually assembled or unversioned ZIP.
    - **Organizational Unit:** Select student OU (e.g., "Students")
 6. Save
 
+**Required policies (student OU):**
+
+1. **Restrict sign-in to your school domain.** Navigate to: **Devices** → **Chrome** → **Settings** → **Device** → **Sign-in settings** → **Sign-in restriction** and enter `*@yourschool.org`. Personal Google accounts can no longer sign in on the device.
+2. **Disable Guest mode** (same page). "Browse as Guest" bypasses every policy, including the force-installed extension.
+3. **Disable "Allow adding new users"** at sign-in (same page), so only accounts from your domain can be added to the device.
+
+**Strongly recommended (student OU):**
+
+4. **Disallow Incognito mode.** Navigate to: **Devices** → **Chrome** → **Settings** → **Users & browsers** → **Security** → **Incognito mode** → Disallow incognito mode.
+5. **Never allow built-in developer tools.** Same page (**Security** → **Developer tools**), so students cannot disable or inspect the extension.
+6. **Force users to sign in to use the browser.** **Users & browsers** → **Security** → **Browser sign-in settings** → Force users to sign in to use the browser.
+7. **If API access is restricted:** Navigate to: **Security** → **Access and data control** → **API controls** → **Manage Third-Party App Access** → add ClassPilot by its OAuth client ID and mark it **Trusted**.
+
+**Verify on a student Chromebook:**
+
+- The extension shows the force-installed ("Installed by your administrator") badge in `chrome://extensions`
+- A personal Gmail account is rejected at sign-in
+- No "Browse as Guest" button appears on the login screen
+- A test student appears on the teacher dashboard within about 30 seconds
+
+ClassPilot cannot read Google Admin policy state; verify these settings in the Admin Console.
+
 **Extension Configuration (Optional):**
 
 You can set the dashboard URL via policy:
