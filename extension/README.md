@@ -396,7 +396,7 @@ git rm --cached extension/config.js
 - Active tab title
 - Active tab URL
 - Timestamps of activity
-- Favicon URL of the active tab and of each open HTTP/HTTPS tab (https-only, limited to origin and path, and capped at 512 characters)
+- Favicon URL of the active tab, and of each open HTTP/HTTPS tab in the tab snapshot (https-only, limited to origin and path, and capped at 512 characters)
 - Heartbeat, connection, and device health state
 - Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only teaching-session-bound thumbnails and discards student-session/gap pixels on receipt
 - An exact-bound screenshot immediately before a requested safety tab closure, when capture succeeds within the bounded window

@@ -32,6 +32,11 @@ describe("2.8.3 per-tab favicon release documentation", () => {
     const compliance = read("extension/COMPLIANCE.md");
 
     expect(readme).toContain("Per-tab favicons in the open-tab snapshot (2.8.3)");
+    // The 512-char filter applies to the open-tab snapshot only; the heartbeat's
+    // active-tab favicon is still Chrome's raw value, so the privacy bullet must
+    // scope the parenthetical to the snapshot rather than claim it for both.
+    expect(readme).toContain("Favicon URL of the active tab, and of each open HTTP/HTTPS tab in the tab snapshot (https-only, limited to origin and path, and capped at 512 characters)");
+    expect(readme).not.toContain("Favicon URL of the active tab and of each open HTTP/HTTPS tab (https-only");
     for (const source of [readme, compliance]) {
       expect(source).toContain("https-only, limited to origin and path, and capped at 512 characters");
       expect(source).toMatch(/not (persisted|stored) locally/);
