@@ -7,13 +7,14 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> For 2.8.1, upload only `dist/ClassPilot-v2.8.1.zip` produced from the clean,
+> For 2.8.2, upload only `dist/ClassPilot-v2.8.2.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.8.1.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.8.2.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Existing 2.7.9 and 2.8.0 archives are obsolete because they do not contain
-> the complete school-configured authentication pass-through and independent
-> heartbeat/control/screenshot lane behavior. They must not be submitted.
+> Existing 2.7.9, 2.8.0, and 2.8.1 archives are obsolete because they do not
+> contain the complete school-configured authentication pass-through, independent
+> heartbeat/control/screenshot lane behavior, and downscaled active-preview
+> uploads. They must not be submitted.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
 > test again after review, and publish only when the school-wide auto-update is
@@ -23,7 +24,7 @@
 > `restrictionAuthPassThroughV1`, while that capability remains disabled. Keep
 > authentication-policy projection off throughout Chrome Web Store review and
 > mixed-version fleet saturation. Enable it for a controlled school only after
-> recently active Chromebooks report 2.8.1 and both the raw and accepted
+> recently active Chromebooks report 2.8.2 and both the raw and accepted
 > capability. Keep the independent active-preview capability under its own
 > rollout policy.
 
@@ -127,14 +128,15 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.8.1 release artifact
+### 2.3 Build the canonical 2.8.2 release artifact
 
-Start from a clean, tagged, reviewed 2.8.1 commit at this repository's root.
+Start from a clean, tagged, reviewed 2.8.2 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, legacy exact-bound deferred-restriction marker, school-configured
 live and deferred authentication pass-through, independent heartbeat/control/
-screenshot lanes, and exact-authority active-class screenshot cadence together.
-A narrower 2.7.9 or 2.8.0 archive is not releasable.
+screenshot lanes, exact-authority active-class screenshot cadence, and the
+downscaled active-preview upload variant together.
+A narrower 2.7.9, 2.8.0, or 2.8.1 archive is not releasable.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -144,7 +146,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.1.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.2.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -164,7 +166,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.8.1.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.8.2.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -234,7 +236,7 @@ This prevents students from needing to configure the server manually (future enh
 ### 4.3 Test Active-Class Screenshot Cadence
 
 1. Keep `screenshotActiveObservationCadenceV1` disabled until the controlled
-   Chromebook has updated to 2.8.1 and reports the raw capability.
+   Chromebook has updated to 2.8.2 and reports the raw capability.
 2. Open the exact class view as an authorized teacher or administrator, enable
    the capability only for the controlled school, and confirm a fresh preview
    arrives about every five seconds without overlapping uploads.
@@ -245,13 +247,13 @@ This prevents students from needing to configure the server manually (future enh
 4. Exercise a `429` and screenshot-store `503`. Each rapid capture may make only
    one upload attempt; `429` must enter the existing backoff and neither failure
    may create a queued retry burst.
-5. Roll back by disabling the capability. Version 2.8.1 must continue the
+5. Roll back by disabling the capability. Version 2.8.2 must continue the
    existing 30-second tracking-window cadence without an extension rollback.
 
 ### 4.4 Test restricted student sign-in
 
 1. Keep `restrictionAuthPassThroughV1` disabled until the controlled
-   Chromebook reports 2.8.1 plus the raw and accepted capability.
+   Chromebook reports 2.8.2 plus the raw and accepted capability.
 2. Configure the school's Google, Clever, and any required district provider
    in SchoolPilot while projection remains off. Confirm every start URL and
    exact/subdomain host rule, then resolve block-policy warnings.
@@ -403,7 +405,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.8.1.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.8.2.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.

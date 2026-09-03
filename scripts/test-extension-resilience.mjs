@@ -2647,6 +2647,7 @@ async function main() {
             : Promise.resolve(undefined)
         );
         lastScreenshotAttemptAt = Date.now();
+        lastScreenshotPixelsAt = Date.now();
         const screenshotAContext = captureAuthenticatedContext('screenshot race fixture');
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
@@ -2673,6 +2674,7 @@ async function main() {
         apiBackoffUntilMs = 0;
         screenshotBackoffUntilMs = 0;
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         screenshotImmediateCapturePending = false;
         let releaseScreenshot;
         let markScreenshotStarted;
@@ -4824,6 +4826,7 @@ async function main() {
         screenshotCaptureInFlight = false;
         screenshotImmediateCapturePending = false;
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         apiBackoffUntilMs = 0;
       };
 

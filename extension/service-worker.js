@@ -739,6 +739,13 @@ let screenshotCadenceGeneration = 0;
 let screenshotCadenceIssuedAt = 0;
 let activeScreenshotCadence = null;
 let screenshotNavigationDebounceTimer = null;
+let screenshotCoalescedRetryTimer = null;
+// The cadence minimum gap exists to bound how often pixels leave the device.
+// A no-op capture (backoff, no active tab, non-HTTP page, changed tab, empty
+// frame) still records a health attempt but never acquires pixels, so it must
+// not consume the gap. This is deliberately separate from
+// lastScreenshotAttemptAt and is never persisted.
+let lastScreenshotPixelsAt = 0;
 let protocolPolicyRequestGeneration = 0;
 let protocolPolicyAppliedGeneration = 0;
 let screenshotPolicyRequestGeneration = 0;
@@ -9238,10 +9245,29 @@ function clearScreenshotNavigationDebounce() {
   screenshotNavigationDebounceTimer = null;
 }
 
+function clearCoalescedRapidScreenshotRetry() {
+  if (screenshotCoalescedRetryTimer) clearTimeout(screenshotCoalescedRetryTimer);
+  screenshotCoalescedRetryTimer = null;
+}
+
+// Spread the five-second wall across a fleet so a class does not upload in one
+// burst. The offset must be stable across service worker restarts, so it is
+// derived from the device identity rather than the per-cadence random id.
+function screenshotCadencePhaseOffsetMs(deviceId) {
+  const identity = String(deviceId || '');
+  let hash = 2166136261;
+  for (let index = 0; index < identity.length; index++) {
+    hash ^= identity.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS;
+}
+
 function stopActiveScreenshotCadence(reason = 'inactive') {
   const retiredCadence = activeScreenshotCadence;
   activeScreenshotCadence = null;
   clearScreenshotNavigationDebounce();
+  clearCoalescedRapidScreenshotRetry();
   chrome.alarms.clear(SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM);
   const order = nextScreenshotCadenceOrder();
   if (retiredCadence) {
@@ -9286,6 +9312,7 @@ function startActiveScreenshotCadence(context) {
         issuedAt: existing.issuedAt,
         expiresAt,
         intervalMs: SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS,
+        phaseOffsetMs: screenshotCadencePhaseOffsetMs(CONFIG.deviceId),
       }, {
         assertCurrent: () => {
           assertAuthenticatedContextCurrent(
@@ -9326,6 +9353,7 @@ function startActiveScreenshotCadence(context) {
     issuedAt: order.issuedAt,
     expiresAt,
     intervalMs: SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS,
+    phaseOffsetMs: screenshotCadencePhaseOffsetMs(CONFIG.deviceId),
   }, {
     assertCurrent: () => {
       assertAuthenticatedContextCurrent(
@@ -9379,6 +9407,11 @@ function scheduleActiveViewNavigationCapture(reason) {
   if (!activeObservationScreenshotCadenceAllowed(authContext)) return false;
   const cadence = activeScreenshotCadence;
   if (!cadence) return false;
+  // Fence on cadence identity, never on the object. Every lease renewal builds
+  // a fresh frozen cadence around the same cadenceId, so an identity compare
+  // silently drops any navigation capture whose debounce straddles a renewal.
+  const cadenceId = cadence.cadenceId;
+  const cadenceGeneration = cadence.generation;
   clearScreenshotNavigationDebounce();
   screenshotNavigationDebounceTimer = setTimeout(() => {
     screenshotNavigationDebounceTimer = null;
@@ -9388,10 +9421,13 @@ function scheduleActiveViewNavigationCapture(reason) {
     } catch {
       return;
     }
+    const currentCadence = activeScreenshotCadence;
     if (
-      activeScreenshotCadence !== cadence
-      || cadence.authContextId !== currentContext.authContextId
-      || cadence.authorityScope !== screenshotPolicyState.authorityScope
+      !currentCadence
+      || currentCadence.cadenceId !== cadenceId
+      || currentCadence.generation !== cadenceGeneration
+      || currentCadence.authContextId !== currentContext.authContextId
+      || currentCadence.authorityScope !== screenshotPolicyState.authorityScope
       || !activeObservationScreenshotCadenceAllowed(currentContext)
     ) return;
     captureAndSendScreenshot({ reason: 'active-view-navigation' }).catch(() => {});
@@ -15787,10 +15823,24 @@ const SCREENSHOT_PERIOD_MS = 30 * 1000;
 const SCREENSHOT_SCHEDULED_MIN_GAP_MS = 25 * 1000;
 const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5 * 1000;
 const SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS = 4500;
-const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS;
+// A navigation is what makes the wall feel live, so it gets its own gap rather
+// than the cadence gap. It must stay above the navigation debounce below,
+// otherwise a single navigation could queue two captures of the same page.
+const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = 1200;
 const SCREENSHOT_ACTIVE_NAVIGATION_DEBOUNCE_MS = 750;
 const SCREENSHOT_COMMAND_MIN_GAP_MS = 5 * 1000;
 const SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS = 3 * 1000;
+// Wall tiles are rendered far smaller than a Chromebook viewport, so the
+// default capture path ships a downscaled variant instead of the frame
+// captureVisibleTab produced. 640 is a starting point, not a measured value:
+// re-derive it from real Chromebook viewports before treating it as final.
+// (An earlier note that Securly captures at workArea/12 is unverified - it was
+// never established whether that divides dimensions or area, which is the
+// difference between a 114px and a 394px wide tile on a 1366x768 screen.)
+const SCREENSHOT_THUMBNAIL_WIDTH = 640;
+// The source frame is already JPEG quality 50, so the re-encode only needs to
+// avoid adding visible artefacts of its own on top of the downscale.
+const SCREENSHOT_THUMBNAIL_QUALITY = 0.6;
 let screenshotScheduled = false;
 
 function scheduleScreenshotCapture(enable) {
@@ -15876,6 +15926,83 @@ function screenshotCaptureMinimumGap(reason) {
   return SCREENSHOT_SCHEDULED_MIN_GAP_MS;
 }
 
+// A rapid capture that lands inside the gap is the frame a teacher is waiting
+// for. Defer it by exactly the remaining gap instead of dropping it. One
+// trailing retry at a time, fenced on cadence identity so a retired cadence
+// can never resurrect a capture, and a retry never re-arms itself.
+function scheduleCoalescedRapidScreenshotRetry(reason, waitMs) {
+  const cadence = activeScreenshotCadence;
+  if (!cadence || screenshotCoalescedRetryTimer) return false;
+  const cadenceId = cadence.cadenceId;
+  const cadenceGeneration = cadence.generation;
+  screenshotCoalescedRetryTimer = setTimeout(() => {
+    screenshotCoalescedRetryTimer = null;
+    const currentCadence = activeScreenshotCadence;
+    if (
+      !currentCadence
+      || currentCadence.cadenceId !== cadenceId
+      || currentCadence.generation !== cadenceGeneration
+    ) return;
+    let retryContext;
+    try {
+      retryContext = captureAuthenticatedContext(`screenshot retry:${reason}`);
+    } catch {
+      return;
+    }
+    if (
+      currentCadence.authContextId !== retryContext.authContextId
+      || currentCadence.authorityScope !== screenshotPolicyState.authorityScope
+      || !activeObservationScreenshotCadenceAllowed(retryContext)
+    ) return;
+    captureAndSendScreenshot({ reason, coalescedRetry: true }).catch(() => {});
+  }, Math.max(0, Math.min(waitMs, SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS)));
+  return true;
+}
+
+// Downscale a captured frame to the variant the wall actually renders.
+// MV3 service workers expose fetch, createImageBitmap and OffscreenCanvas
+// directly; this must never be routed through the offscreen document, whose
+// message channel is JSON-serialised - a Blob cannot cross it and the payload
+// would transit twice for no benefit.
+//
+// Every failure path returns the original data URL. A Chrome regression, an
+// undecodable frame or a slow encode has to degrade to today's full-resolution
+// behaviour; dropping the frame instead would cost a teacher a live tile.
+async function encodeScreenshotVariant(dataUrl, variant = 'thumbnail') {
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:image/')) return dataUrl;
+  if (variant !== 'thumbnail') return dataUrl;
+  try {
+    return await boundedClassroomOperation((async () => {
+      const source = await (await fetch(dataUrl)).blob();
+      const bitmap = await createImageBitmap(source);
+      try {
+        const width = Math.min(SCREENSHOT_THUMBNAIL_WIDTH, bitmap.width);
+        if (!(width > 0) || width >= bitmap.width) return dataUrl;
+        const height = Math.max(1, Math.round(bitmap.height * (width / bitmap.width)));
+        const canvas = new OffscreenCanvas(width, height);
+        const context = canvas.getContext('2d');
+        if (!context) return dataUrl;
+        context.drawImage(bitmap, 0, 0, width, height);
+        const encoded = await canvas.convertToBlob({
+          type: 'image/jpeg',
+          quality: SCREENSHOT_THUMBNAIL_QUALITY,
+        });
+        const bytes = new Uint8Array(await encoded.arrayBuffer());
+        if (!bytes.length) return dataUrl;
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        return `data:image/jpeg;base64,${btoa(binary)}`;
+      } finally {
+        bitmap.close?.();
+      }
+    })(), SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS, 'screenshot variant encode');
+  } catch {
+    return dataUrl;
+  }
+}
+
 async function captureAndSendScreenshot(options = {}) {
   // Identity restoration includes the lightweight auth-tab redaction fence.
   // Do not await classroom/DNR/tab work; previews are an independent lane.
@@ -15884,7 +16011,11 @@ async function captureAndSendScreenshot(options = {}) {
   const reason = options.reason || 'scheduled';
   let rapidCapture = reason === 'active-view-tick' || reason === 'active-view-navigation';
   const minimumGap = screenshotCaptureMinimumGap(reason);
-  if (lastScreenshotAttemptAt && Date.now() - lastScreenshotAttemptAt < minimumGap) {
+  const elapsedSincePixels = Date.now() - lastScreenshotPixelsAt;
+  if (lastScreenshotPixelsAt && elapsedSincePixels < minimumGap) {
+    if (rapidCapture && !options.coalescedRetry) {
+      scheduleCoalescedRapidScreenshotRetry(reason, minimumGap - elapsedSincePixels);
+    }
     console.log(`[Screenshot] Coalescing ${reason} capture; cadence guard active`);
     return;
   }
@@ -16026,6 +16157,8 @@ async function captureAndSendScreenshot(options = {}) {
       // Fix the pixel acquisition time immediately. Retries reuse this value;
       // upload time must never relabel old pixels as a newer authority sample.
       capturedAt = new Date().toISOString();
+      // Only a real frame consumes the cadence gap.
+      lastScreenshotPixelsAt = Date.now();
       assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:captured-pixels`);
       assertAmbientScreenshotPolicyCurrent(
         screenshotAuthContext,
@@ -16060,6 +16193,13 @@ async function captureAndSendScreenshot(options = {}) {
       console.log('[Screenshot] Capture returned empty');
       return;
     }
+
+    // Downscale after capturedAt is fixed and before the body is built. Doing
+    // it earlier would relabel the pixels with the encode time and drift them
+    // out of the server's |capturedAt - timestamp| <= 1s fence; doing it later
+    // would mean uploading the frame we just replaced. Safety evidence is
+    // deliberately excluded - it is retained at capture resolution.
+    dataUrl = await encodeScreenshotVariant(dataUrl, 'thumbnail');
 
     // Send screenshot to server with tab metadata
     screenshotPhase = 'upload';

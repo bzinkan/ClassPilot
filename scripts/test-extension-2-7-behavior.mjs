@@ -274,10 +274,50 @@ async function main() {
         ]);
         if (outcome.kind === 'rejected') throw outcome.error;
         if (outcome.kind !== 'paused') {
+          // Name the gate that swallowed the capture. Every early return in
+          // captureAndSendScreenshot resolves to undefined, so the outcome
+          // alone cannot say which one fired.
+          const laneState = JSON.stringify({
+            captureInFlight: screenshotCaptureInFlight,
+            immediatePending: screenshotImmediateCapturePending,
+            lastScreenshotAttemptAt,
+            lastScreenshotPixelsAt,
+            screenshotBackoffUntilMs,
+            apiBackoffUntilMs,
+            trackingState,
+            licenseActive: currentLicenseIsActive(),
+            studentAuth: hasStudentAuth(),
+            ambientAllowed: (() => {
+              try {
+                return ambientScreenshotAllowed(
+                  captureAuthenticatedContext('deterministic pause diagnostics'),
+                );
+              } catch {
+                return 'no-auth-context';
+              }
+            })(),
+          });
           throw new Error(
-            `${label} did not reach its deterministic pause (outcome: ${JSON.stringify(outcome)})`,
+            `${label} did not reach its deterministic pause `
+            + `(outcome: ${JSON.stringify(outcome)}, lane: ${laneState})`,
           );
         }
+      };
+      // A background 30-second alarm capture can still be in flight when a
+      // fixture opens its own gated capture; captureAndSendScreenshot returns
+      // immediately in that case and the fixture never reaches its pause
+      // point. Drain the lane first so these fixtures stay deterministic.
+      const drainScreenshotCaptureLane = async (label) => {
+        const deadline = Date.now() + 5_000;
+        let waits = 0;
+        while (screenshotCaptureInFlight) {
+          if (Date.now() > deadline) {
+            throw new Error(`${label} timed out waiting for the screenshot lane to drain`);
+          }
+          waits += 1;
+          await new Promise((resolveDrain) => setTimeout(resolveDrain, 10));
+        }
+        if (waits) progress(`${label} drained the screenshot lane after ${waits} waits`);
       };
       await Promise.all([
         authStateRestorePromise.catch(() => {}),
@@ -1653,6 +1693,13 @@ async function main() {
         const cadenceSchedulerMessages = [];
         let cadenceIdentityPreserved = false;
         let cadenceRenewalPreservedInterval = false;
+        let cadenceStartPhaseOffsets = [];
+        let navigationCaptureScheduled = false;
+        let navigationCadenceObjectReplaced = false;
+        let navigationCaptureSurvivedRenewal = false;
+        let coalescedRapidCaptureArmedRetry = false;
+        let coalescedRapidCaptureRetried = false;
+        let coalescedRetryRetiredWithCadence = false;
         let authorityChangeTickCaptures = 0;
         let staleAuthorityTickIgnored = false;
         let authorityChangeStoppedCadence = false;
@@ -1737,17 +1784,125 @@ async function main() {
               && firstCadence.issuedAt === renewedCadence.issuedAt
               && renewedCadence.expiresAt > firstCadence.expiresAt
             );
+            cadenceStartPhaseOffsets = renewalStarts.map(
+              (message) => message.phaseOffsetMs,
+            );
             cadenceRenewalPreservedInterval = firstStartCount === 1
               && renewalStarts.length === 2
               && renewalStarts[0].cadenceId === renewalStarts[1].cadenceId
               && renewalStarts[0].generation === renewalStarts[1].generation
               && renewalStarts[0].issuedAt === renewalStarts[1].issuedAt
+              && renewalStarts[0].intervalMs === 5_000
+              && renewalStarts[1].intervalMs === 5_000
+              && renewalStarts[0].phaseOffsetMs === renewalStarts[1].phaseOffsetMs
               && !cadenceSchedulerMessages.some((message) => (
                 message.type === 'SCREENSHOT_CADENCE_STOP'
                 && message.cadenceId === firstCadence?.cadenceId
               ));
           } finally {
             Date.now = originalDateNow;
+          }
+
+          const deferredCaptureFixture = {
+            queryActiveTab: async () => [{
+              id: 7020,
+              active: true,
+              windowId: 20,
+              url: 'https://observed.example/deferred-navigation',
+              title: 'Deferred navigation',
+              favIconUrl: '',
+            }],
+            captureVisibleTab: async () => 'data:image/jpeg;base64,ZGVmZXJyZWQtbmF2aWdhdGlvbg==',
+            subscribeTabActivation: () => () => {},
+            subscribeTabUpdate: () => () => {},
+          };
+
+          // A navigation capture whose 750ms debounce straddles a cadence
+          // renewal must still fire. Renewal reuses cadenceId and generation
+          // while allocating a fresh frozen object, so an object-identity
+          // compare in the debounce would drop this capture silently.
+          const navigationRenewalReasons = [];
+          const captureBeforeNavigationRenewal = captureAndSendScreenshot;
+          try {
+            captureAndSendScreenshot = async ({ reason } = {}) => {
+              navigationRenewalReasons.push(reason);
+              return { status: 'captured-by-navigation-renewal-double' };
+            };
+            const cadenceBeforeNavigation = activeScreenshotCadence;
+            navigationCaptureScheduled = scheduleActiveViewNavigationCapture('url-changed');
+            adoptScreenshotPolicy(trackingPolicy(), authB, {
+              requestStartedAt: Date.now(),
+              responseReceivedAt: Date.now(),
+              policySource: 'heartbeat',
+            });
+            navigationCadenceObjectReplaced = Boolean(
+              cadenceBeforeNavigation
+              && activeScreenshotCadence
+              && activeScreenshotCadence !== cadenceBeforeNavigation
+              && activeScreenshotCadence.cadenceId === cadenceBeforeNavigation.cadenceId
+              && activeScreenshotCadence.generation === cadenceBeforeNavigation.generation
+            );
+            await new Promise((resolveDebounce) => setTimeout(resolveDebounce, 1_000));
+            navigationCaptureSurvivedRenewal = navigationRenewalReasons.filter(
+              (reason) => reason === 'active-view-navigation',
+            ).length === 1;
+          } finally {
+            clearScreenshotNavigationDebounce();
+            captureAndSendScreenshot = captureBeforeNavigationRenewal;
+          }
+
+          // A rapid capture that lands inside its minimum gap is the frame a
+          // teacher is waiting for: defer it by the remaining gap instead of
+          // dropping it, and retire the deferral with its cadence.
+          const coalescedRetryCalls = [];
+          const captureBeforeCoalescedRetry = captureAndSendScreenshot;
+          try {
+            captureAndSendScreenshot = async (retryOptions = {}) => {
+              coalescedRetryCalls.push({
+                reason: retryOptions.reason,
+                coalescedRetry: retryOptions.coalescedRetry === true,
+              });
+              return { status: 'captured-by-coalesced-retry-double' };
+            };
+            lastScreenshotAttemptAt = 0;
+            // 1,000ms into the 1,200ms navigation gap: 200ms still to wait.
+            lastScreenshotPixelsAt = Date.now() - 1_000;
+            const coalescedResult = await captureBeforeLeaseAdoption({
+              reason: 'active-view-navigation',
+              ...deferredCaptureFixture,
+            });
+            coalescedRapidCaptureArmedRetry = coalescedResult === undefined
+              && coalescedRetryCalls.length === 0
+              && screenshotCoalescedRetryTimer !== null;
+            await new Promise((resolveRetry) => setTimeout(resolveRetry, 500));
+            coalescedRapidCaptureRetried = coalescedRetryCalls.length === 1
+              && coalescedRetryCalls[0].reason === 'active-view-navigation'
+              && coalescedRetryCalls[0].coalescedRetry === true
+              && screenshotCoalescedRetryTimer === null;
+
+            // 100ms short of the 4,500ms cadence gap, so a retry is armed.
+            lastScreenshotPixelsAt = Date.now() - 4_400;
+            await captureBeforeLeaseAdoption({
+              reason: 'active-view-tick',
+              ...deferredCaptureFixture,
+            });
+            const retryArmedBeforeCadenceStop = screenshotCoalescedRetryTimer !== null;
+            stopActiveScreenshotCadence('coalesced-retry-fence-fixture');
+            coalescedRetryRetiredWithCadence = retryArmedBeforeCadenceStop
+              && screenshotCoalescedRetryTimer === null;
+            await new Promise((resolveRetired) => setTimeout(resolveRetired, 400));
+            coalescedRetryRetiredWithCadence = coalescedRetryRetiredWithCadence
+              && coalescedRetryCalls.length === 1;
+          } finally {
+            clearCoalescedRapidScreenshotRetry();
+            captureAndSendScreenshot = captureBeforeCoalescedRetry;
+            lastScreenshotAttemptAt = 0;
+            lastScreenshotPixelsAt = 0;
+            adoptScreenshotPolicy(trackingPolicy(), authB, {
+              requestStartedAt: Date.now(),
+              responseReceivedAt: Date.now(),
+              policySource: 'heartbeat',
+            });
           }
 
           // 'lease-start' immediate capture: cadence activation without an
@@ -1797,6 +1952,7 @@ async function main() {
             });
           };
           lastScreenshotAttemptAt = 0;
+          lastScreenshotPixelsAt = 0;
           await captureBeforeLeaseAdoption({
             reason: 'authority-change',
             queryActiveTab: async () => [{
@@ -1904,6 +2060,12 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
+        // This lane runs at whatever wall-clock time it is started, so a
+        // schedule boundary can flip tracking off mid-run. These fixtures are
+        // about screenshot authority, not the schedule.
+        trackingState = TRACKING_STATES.ACTIVE;
+        await drainScreenshotCaptureLane('lease-renewal screenshot capture');
         const leaseRenewalCapturePromise = captureAndSendScreenshot({
           reason: 'lease-renewal-race',
           queryActiveTab: async () => [{
@@ -1954,6 +2116,12 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
+        // This lane runs at whatever wall-clock time it is started, so a
+        // schedule boundary can flip tracking off mid-run. These fixtures are
+        // about screenshot authority, not the schedule.
+        trackingState = TRACKING_STATES.ACTIVE;
+        await drainScreenshotCaptureLane('lease-generation screenshot capture');
         const supersededPolicyCapturePromise = captureAndSendScreenshot({
           reason: 'lease-generation-race',
           queryActiveTab: async () => [{
@@ -2005,6 +2173,7 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         await captureAndSendScreenshot({
           reason: 'lease-fixture',
           queryActiveTab: async () => [{
@@ -2019,6 +2188,113 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
+
+        // Wall tiles carry a downscaled variant, not the captured frame. The
+        // other screenshot fixtures use short undecodable stubs that
+        // legitimately fall open, so this one builds a real JPEG wider than
+        // SCREENSHOT_THUMBNAIL_WIDTH to make the encode path actually run.
+        const buildFixtureJpeg = async (width, height) => {
+          const canvas = new OffscreenCanvas(width, height);
+          const context = canvas.getContext('2d');
+          const gradient = context.createLinearGradient(0, 0, width, height);
+          gradient.addColorStop(0, '#0b3d91');
+          gradient.addColorStop(1, '#f2c744');
+          context.fillStyle = gradient;
+          context.fillRect(0, 0, width, height);
+          context.fillStyle = '#ffffff';
+          for (let index = 0; index < 48; index++) {
+            context.fillRect((index * 37) % width, (index * 53) % height, 96, 26);
+          }
+          const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          let binary = '';
+          for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+          }
+          return `data:image/jpeg;base64,${btoa(binary)}`;
+        };
+        // Decoding the uploaded data URL is the proof that it still renders.
+        const measureDataUrl = async (candidate) => {
+          const blob = await (await fetch(candidate)).blob();
+          const bitmap = await createImageBitmap(blob);
+          const measured = {
+            width: bitmap.width,
+            height: bitmap.height,
+            bytes: candidate.length,
+          };
+          bitmap.close?.();
+          return measured;
+        };
+
+        const thumbnailSourceDataUrl = await buildFixtureJpeg(1366, 768);
+        const thumbnailFixture = {
+          queryActiveTab: async () => [{
+            id: 7031,
+            active: true,
+            windowId: 31,
+            url: 'https://observed.example/thumbnail',
+            title: 'Thumbnail fixture',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => thumbnailSourceDataUrl,
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        };
+        let thumbnailUploadBody = null;
+        fetchWithBackoff = async (_url, init = {}) => {
+          thumbnailUploadBody = JSON.parse(String(init.body || '{}'));
+          return new Response('{}', { status: 200 });
+        };
+        trackingState = TRACKING_STATES.ACTIVE;
+        lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
+        await drainScreenshotCaptureLane('thumbnail downscale capture');
+        await captureAndSendScreenshot({
+          reason: 'thumbnail-downscale-fixture',
+          ...thumbnailFixture,
+        });
+        const thumbnailUpload = {
+          source: await measureDataUrl(thumbnailSourceDataUrl),
+          uploaded: thumbnailUploadBody
+            ? await measureDataUrl(thumbnailUploadBody.screenshot)
+            : null,
+          differsFromSource: Boolean(thumbnailUploadBody)
+            && thumbnailUploadBody.screenshot !== thumbnailSourceDataUrl,
+          // Re-encoding happens after capturedAt is fixed, so the server's
+          // |capturedAt - timestamp| fence must still see one instant.
+          capturedAtMatchesTimestamp: Boolean(thumbnailUploadBody)
+            && Date.parse(thumbnailUploadBody.capturedAt) === thumbnailUploadBody.timestamp,
+        };
+
+        // A Chrome regression in the encode path must degrade to today's
+        // full-resolution upload, never to a dropped frame.
+        let failOpenUploadBody = null;
+        fetchWithBackoff = async (_url, init = {}) => {
+          failOpenUploadBody = JSON.parse(String(init.body || '{}'));
+          return new Response('{}', { status: 200 });
+        };
+        const originalCreateImageBitmap = globalThis.createImageBitmap;
+        let thumbnailEncodeReached = false;
+        try {
+          globalThis.createImageBitmap = async () => {
+            thumbnailEncodeReached = true;
+            throw new Error('createImageBitmap regression fixture');
+          };
+          lastScreenshotAttemptAt = 0;
+          lastScreenshotPixelsAt = 0;
+          await drainScreenshotCaptureLane('thumbnail encode fail-open capture');
+          await captureAndSendScreenshot({
+            reason: 'thumbnail-fail-open-fixture',
+            ...thumbnailFixture,
+          });
+        } finally {
+          globalThis.createImageBitmap = originalCreateImageBitmap;
+        }
+        const thumbnailEncodeFailOpen = {
+          reachedEncode: thumbnailEncodeReached,
+          uploadedCapturedFrameVerbatim: Boolean(failOpenUploadBody)
+            && failOpenUploadBody.screenshot === thumbnailSourceDataUrl,
+        };
 
         let releaseStaleUploadDenial;
         let staleUploadStarted;
@@ -2046,6 +2322,7 @@ async function main() {
           });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const staleUploadDenialPromise = captureAndSendScreenshot({
           reason: 'stale-upload-denial-after-newer-allow',
           queryActiveTab: async () => [{
@@ -2103,6 +2380,7 @@ async function main() {
           headers: { 'content-type': 'application/json' },
         });
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const heartbeatRequiredCaptureResult = await captureAndSendScreenshot({
           reason: 'heartbeat-required-fixture',
           queryActiveTab: async () => [{
@@ -2150,12 +2428,14 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const pausedUnobservedCaptureResult = await captureAndSendScreenshot({
           reason: 'paused-unobserved-fixture',
           ...pausedUnobservedFixture,
         });
         const pausedUnobservedLeaseRevoked = !ambientScreenshotAllowed(authB);
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const captureAfterPausedUnobservedResult = await captureAndSendScreenshot({
           reason: 'paused-unobserved-second-attempt',
           ...pausedUnobservedFixture,
@@ -2185,6 +2465,7 @@ async function main() {
           });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const authorizationDeniedCaptureResult = await captureAndSendScreenshot({
           reason: 'authorization-denied-fixture',
           ...pausedUnobservedFixture,
@@ -2206,6 +2487,7 @@ async function main() {
         });
         const authorizationDeniedLeaseRevoked = !ambientScreenshotAllowed(authB);
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const captureAfterAuthorizationDeniedResult = await captureAndSendScreenshot({
           reason: 'authorization-denied-second-attempt',
           ...pausedUnobservedFixture,
@@ -2237,6 +2519,7 @@ async function main() {
           headers: { 'content-type': 'application/json' },
         });
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const screenshotServiceUnavailableResult = await captureAndSendScreenshot({
           reason: 'service-unavailable-fixture',
           queryActiveTab: async () => [{
@@ -2266,6 +2549,23 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         };
+        // A dwell on a non-HTTP page records a health attempt but never
+        // acquires pixels, so it must not consume the navigation gap.
+        const rapidNonHttpFixture = {
+          queryActiveTab: async () => [{
+            id: 7016,
+            active: true,
+            windowId: 16,
+            url: 'chrome://newtab/',
+            title: 'New tab',
+            favIconUrl: '',
+          }],
+          captureVisibleTab: async () => {
+            throw new Error('non-HTTP pages must never reach pixel capture');
+          },
+          subscribeTabActivation: () => () => {},
+          subscribeTabUpdate: () => () => {},
+        };
         const rapidCadenceUploadOptions = [];
         fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
           rapidCadenceUploadOptions.push({ maxAttempts: retryOptions.maxAttempts });
@@ -2278,23 +2578,60 @@ async function main() {
         let rapidClockNow = rapidClockBase;
         Date.now = () => rapidClockNow;
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
+        let rapidNonHttpRecordedAttempt = false;
+        let rapidNonHttpBurnedNavigationGap = true;
+        let rapidNavigationGapIsShorterThanCadenceGap = false;
         try {
+          await captureAndSendScreenshot({
+            reason: 'active-view-navigation',
+            ...rapidNonHttpFixture,
+          });
+          rapidNonHttpRecordedAttempt = lastScreenshotAttemptAt === rapidClockBase
+            && lastScreenshotPixelsAt === 0
+            && rapidCadenceUploadOptions.length === 0;
+          // 100ms later: far inside the navigation gap. This only uploads
+          // because the chrome:// dwell above never stamped the pixel clock.
+          rapidClockNow = rapidClockBase + 100;
           await captureAndSendScreenshot({
             reason: 'active-view-navigation',
             ...rapidCaptureFixture,
           });
-          rapidClockNow = rapidClockBase + 1_000;
+          rapidNonHttpBurnedNavigationGap = rapidCadenceUploadOptions.length !== 1;
+
+          // A tick inside the 4.5s cadence gap coalesces; the same tick once
+          // the gap has elapsed uploads.
+          rapidClockNow = rapidClockBase + 1_100;
           await captureAndSendScreenshot({
             reason: 'active-view-tick',
             ...rapidCaptureFixture,
           });
-          rapidClockNow = rapidClockBase + 4_500;
+          rapidClockNow = rapidClockBase + 4_600;
           await captureAndSendScreenshot({
             reason: 'active-view-tick',
             ...rapidCaptureFixture,
           });
+
+          // The navigation gap is its own, much shorter, budget: 500ms after
+          // that tick's pixels coalesces, 1,200ms after them does not.
+          rapidClockNow = rapidClockBase + 5_100;
+          await captureAndSendScreenshot({
+            reason: 'active-view-navigation',
+            ...rapidCaptureFixture,
+          });
+          const uploadsInsideNavigationGap = rapidCadenceUploadOptions.length;
+          rapidClockNow = rapidClockBase + 5_800;
+          await captureAndSendScreenshot({
+            reason: 'active-view-navigation',
+            ...rapidCaptureFixture,
+          });
+          rapidNavigationGapIsShorterThanCadenceGap = uploadsInsideNavigationGap === 2
+            && rapidCadenceUploadOptions.length === 3;
         } finally {
           Date.now = originalDateNow;
+          // No cadence is active here, so nothing was deferred; clear the lane
+          // anyway so a stray retry can never leak into a later fixture.
+          clearCoalescedRapidScreenshotRetry();
         }
         const rapidCadenceCombinedUploadCount = rapidCadenceUploadOptions.length;
         const rapidCadenceMinGaps = {
@@ -2306,9 +2643,15 @@ async function main() {
         const fetchWithBackoffBeforeRapidFailureCases = fetchWithBackoff;
         let rapid503FetchAttempts = 0;
         let rapid429FetchAttempts = 0;
+        // encodeScreenshotVariant reads the captured frame back through fetch
+        // before the upload. These fixtures count upload attempts, so data
+        // URLs are served by the real implementation and never counted.
+        const nativeFetchForRapidFailures = fetchBeforeRapidFailureCases.bind(globalThis);
+        const isDataUrlRequest = (input) => String(input?.url ?? input ?? '').startsWith('data:');
         try {
           fetchWithBackoff = originalFetchWithBackoff;
-          globalThis.fetch = async () => {
+          globalThis.fetch = async (input, init) => {
+            if (isDataUrlRequest(input)) return nativeFetchForRapidFailures(input, init);
             rapid503FetchAttempts += 1;
             return new Response(JSON.stringify({
               ok: false,
@@ -2319,12 +2662,14 @@ async function main() {
             });
           };
           lastScreenshotAttemptAt = 0;
+          lastScreenshotPixelsAt = 0;
           await captureAndSendScreenshot({
             reason: 'active-view-tick',
             ...rapidCaptureFixture,
           });
 
-          globalThis.fetch = async () => {
+          globalThis.fetch = async (input, init) => {
+            if (isDataUrlRequest(input)) return nativeFetchForRapidFailures(input, init);
             rapid429FetchAttempts += 1;
             return new Response('{}', {
               status: 429,
@@ -2335,6 +2680,7 @@ async function main() {
             });
           };
           lastScreenshotAttemptAt = 0;
+          lastScreenshotPixelsAt = 0;
           apiBackoffUntilMs = 0;
           await captureAndSendScreenshot({
             reason: 'active-view-navigation',
@@ -2363,6 +2709,7 @@ async function main() {
           headers: { 'content-type': 'application/json' },
         });
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         // Screenshot 429s now use an independent lane. Clear that lane between
         // fixtures just as production waits for its retry window to elapse.
         screenshotBackoffUntilMs = 0;
@@ -2416,6 +2763,7 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const ambientActivationRaceResult = await captureAndSendScreenshot({
           reason: 'lease-activation-race',
           queryActiveTab: async () => [{
@@ -2444,6 +2792,7 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const ambientNavigationRaceResult = await captureAndSendScreenshot({
           reason: 'lease-navigation-race',
           queryActiveTab: async () => {
@@ -2471,6 +2820,7 @@ async function main() {
           return new Response('{}', { status: 200 });
         };
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const ambientNavigationBounceResult = await captureAndSendScreenshot({
           reason: 'lease-navigation-bounce-race',
           queryActiveTab: async () => [{
@@ -4123,6 +4473,8 @@ async function main() {
           nullRevisionCommandResult,
           nullRevisionCommandOutbox,
           ambientUpload,
+          thumbnailUpload,
+          thumbnailEncodeFailOpen,
           staleUploadNewerAllowWasActive,
           staleUploadDenialResult,
           staleUploadDenialRevokedNewerAllow,
@@ -4142,12 +4494,22 @@ async function main() {
           rapidCadenceCombinedUploadCount,
           rapidCadenceUploadOptions,
           rapidCadenceMinGaps,
+          rapidNonHttpRecordedAttempt,
+          rapidNonHttpBurnedNavigationGap,
+          rapidNavigationGapIsShorterThanCadenceGap,
           rapid503FetchAttempts,
           rapid429FetchAttempts,
           stringIntervalCadence,
           stringExpiryCadence,
           cadenceIdentityPreserved,
           cadenceRenewalPreservedInterval,
+          cadenceStartPhaseOffsets,
+          navigationCaptureScheduled,
+          navigationCadenceObjectReplaced,
+          navigationCaptureSurvivedRenewal,
+          coalescedRapidCaptureArmedRetry,
+          coalescedRapidCaptureRetried,
+          coalescedRetryRetiredWithCadence,
           authorityChangeTickCaptures,
           staleAuthorityTickIgnored,
           authorityChangeStoppedCadence,
@@ -4531,6 +4893,24 @@ async function main() {
     });
     assert.equal(result.cadenceIdentityPreserved, true);
     assert.equal(result.cadenceRenewalPreservedInterval, true);
+    assert.equal(result.cadenceStartPhaseOffsets.length, 2);
+    for (const phaseOffsetMs of result.cadenceStartPhaseOffsets) {
+      assert.equal(Number.isSafeInteger(phaseOffsetMs), true,
+        'every cadence start must carry a bounded integer phase offset');
+      assert.equal(phaseOffsetMs >= 0 && phaseOffsetMs < 5_000, true,
+        'the cadence phase offset must stay inside one five-second interval');
+    }
+    assert.equal(result.navigationCaptureScheduled, true);
+    assert.equal(result.navigationCadenceObjectReplaced, true,
+      'the renewal fixture must actually replace the frozen cadence object');
+    assert.equal(result.navigationCaptureSurvivedRenewal, true,
+      'a navigation capture debounced across a cadence renewal must still fire');
+    assert.equal(result.coalescedRapidCaptureArmedRetry, true,
+      'a rapid capture inside the minimum gap must arm one trailing retry');
+    assert.equal(result.coalescedRapidCaptureRetried, true,
+      'the trailing retry must fire once the minimum gap has elapsed');
+    assert.equal(result.coalescedRetryRetiredWithCadence, true,
+      'a retired cadence must never resurrect a deferred capture');
     assert.equal(result.authorityChangeTickCaptures, 1);
     assert.equal(result.staleAuthorityTickIgnored, true);
     assert.equal(result.authorityChangeStoppedCadence, true);
@@ -4606,6 +4986,36 @@ async function main() {
     assert.deepEqual(result.sensitiveCleanupConsole, ['[Auth] Failed cleanup: Error']);
     assert.equal(result.ambientUpload.url.endsWith('/api/classpilot/device/screenshot'), true);
     assert.equal(result.ambientUpload.body.clientProtocolVersion, 3);
+    assert.ok(result.thumbnailUpload.uploaded,
+      'a downscaled frame must still reach the upload body');
+    assert.equal(result.thumbnailUpload.source.width, 1366,
+      'the downscale fixture must start from a frame wider than the thumbnail width');
+    assert.equal(result.thumbnailUpload.uploaded.width, 640,
+      'the uploaded frame must be re-encoded to SCREENSHOT_THUMBNAIL_WIDTH');
+    assert.equal(result.thumbnailUpload.uploaded.height, 360,
+      'the downscale must preserve the captured aspect ratio');
+    assert.equal(result.thumbnailUpload.differsFromSource, true,
+      'the uploaded frame must not be the captured frame');
+    assert.equal(result.thumbnailUpload.capturedAtMatchesTimestamp, true,
+      're-encoding must never relabel the capture timestamp');
+    assert.equal(
+      result.thumbnailUpload.uploaded.bytes < result.thumbnailUpload.source.bytes,
+      true,
+      'the downscaled upload must be smaller than the captured frame '
+      + `(captured ${result.thumbnailUpload.source.bytes} bytes, `
+      + `uploaded ${result.thumbnailUpload.uploaded.bytes} bytes)`,
+    );
+    assert.equal(result.thumbnailEncodeFailOpen.reachedEncode, true,
+      'the fail-open fixture must actually reach the screenshot encode path');
+    assert.equal(result.thumbnailEncodeFailOpen.uploadedCapturedFrameVerbatim, true,
+      'a failed encode must upload the captured frame rather than dropping it');
+    console.log(
+      '[thumbnail] captured '
+      + `${result.thumbnailUpload.source.width}x${result.thumbnailUpload.source.height} `
+      + `(${result.thumbnailUpload.source.bytes} data-URL bytes) -> uploaded `
+      + `${result.thumbnailUpload.uploaded.width}x${result.thumbnailUpload.uploaded.height} `
+      + `(${result.thumbnailUpload.uploaded.bytes} data-URL bytes).`,
+    );
     assert.equal(result.staleUploadNewerAllowWasActive, true);
     assert.deepEqual(result.staleUploadDenialResult, {
       status: 'paused_unobserved',
@@ -4644,13 +5054,20 @@ async function main() {
       reason: 'service_unavailable',
     });
     assert.equal(result.serviceUnavailableLeaseRetained, true);
-    assert.equal(result.rapidCadenceCombinedUploadCount, 2);
+    assert.equal(result.rapidNonHttpRecordedAttempt, true,
+      'a non-HTTP dwell must still record a screenshot health attempt');
+    assert.equal(result.rapidNonHttpBurnedNavigationGap, false,
+      'a non-HTTP dwell must not consume the navigation minimum gap');
+    assert.equal(result.rapidNavigationGapIsShorterThanCadenceGap, true,
+      'navigation captures must use their own gap, not the 4.5s cadence gap');
+    assert.equal(result.rapidCadenceCombinedUploadCount, 3);
     assert.deepEqual(result.rapidCadenceUploadOptions, [
+      { maxAttempts: 1 },
       { maxAttempts: 1 },
       { maxAttempts: 1 },
     ]);
     assert.deepEqual(result.rapidCadenceMinGaps, {
-      navigation: 4_500,
+      navigation: 1_200,
       tick: 4_500,
     });
     assert.equal(result.rapid503FetchAttempts, 1);

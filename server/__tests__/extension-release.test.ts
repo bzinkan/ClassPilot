@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.1");
+    expect(manifest.version).toBe("2.8.2");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -801,6 +801,42 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("screenshotPolicyState.authorityScope || null");
     expect(serviceWorker).toContain("screenshotAuthority: captureScreenshotAuthority");
     expect(serviceWorker).toContain("capturedAt,");
+    // The default capture path uploads a downscaled variant. The width stays a
+    // named constant so it can be re-derived from measured Chromebook
+    // viewports instead of being edited inline at the call site.
+    expect(serviceWorker).toContain("const SCREENSHOT_THUMBNAIL_WIDTH = 640;");
+    expect(serviceWorker).toContain(
+      "async function encodeScreenshotVariant(dataUrl, variant = 'thumbnail')",
+    );
+    expect(serviceWorker).toContain("dataUrl = await encodeScreenshotVariant(dataUrl, 'thumbnail');");
+    // A Chrome regression must degrade to today's full-resolution behavior, so
+    // the bounded encode has to fail open to the captured frame.
+    expect(serviceWorker).toMatch(
+      /SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS, 'screenshot variant encode'\);\s*\} catch \{\s*return dataUrl;/,
+    );
+    const encodeVariantStart = serviceWorker.indexOf("async function encodeScreenshotVariant(");
+    const encodeVariantEnd = serviceWorker.indexOf("async function captureAndSendScreenshot(", encodeVariantStart);
+    expect(encodeVariantEnd).toBeGreaterThan(encodeVariantStart);
+    // The offscreen message channel is JSON-serialized: a Blob cannot cross it
+    // and the payload would transit twice. Encode in the worker itself.
+    expect(serviceWorker.slice(encodeVariantStart, encodeVariantEnd))
+      .not.toContain("sendToOffscreen(");
+    // Order is load-bearing: the encode must land after capturedAt is fixed so
+    // upload time never relabels older pixels, and before the upload body so
+    // the frame we replaced is not the one that ships.
+    const capturedAtFixedIndex = serviceWorker.indexOf("capturedAt = new Date().toISOString();");
+    const variantEncodeIndex = serviceWorker.indexOf("dataUrl = await encodeScreenshotVariant(");
+    const uploadBodyIndex = serviceWorker.indexOf("screenshot: dataUrl,  // base64 data URL");
+    expect(capturedAtFixedIndex).toBeGreaterThan(-1);
+    expect(variantEncodeIndex).toBeGreaterThan(capturedAtFixedIndex);
+    expect(uploadBodyIndex).toBeGreaterThan(variantEncodeIndex);
+    // Retained safety evidence has its own server-side format validation and
+    // must keep its capture resolution.
+    const safetyEvidenceStart = serviceWorker.indexOf("async function captureSafetyEvidence(");
+    const safetyEvidenceEnd = serviceWorker.indexOf("function screenLockIsActive(", safetyEvidenceStart);
+    expect(safetyEvidenceEnd).toBeGreaterThan(safetyEvidenceStart);
+    expect(serviceWorker.slice(safetyEvidenceStart, safetyEvidenceEnd))
+      .not.toContain("encodeScreenshotVariant");
     expect(serviceWorker).toContain("serverTime + boundedLeaseMs - responseReceivedAt");
     expect(serviceWorker).toMatch(
       /wsAuthenticatedResponseGuard = \{[\s\S]*protocolPolicyGeneration:[\s\S]*screenshotPolicyGeneration:[\s\S]*requestStartedAt:/,
@@ -884,8 +920,40 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("SCREENSHOT_COMMAND_MIN_GAP_MS");
     expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5 * 1000");
     expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS = 4500");
+    // The navigation gap is deliberately its own literal, not the cadence gap:
+    // it must stay above SCREENSHOT_ACTIVE_NAVIGATION_DEBOUNCE_MS and well
+    // below the cadence gap so tab switches still reach the wall.
+    expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = 1200");
+    expect(serviceWorker).toContain("const SCREENSHOT_ACTIVE_NAVIGATION_DEBOUNCE_MS = 750");
+    // Only acquired pixels consume the gap; a no-op capture still records a
+    // health attempt, so the two clocks must stay separate.
+    expect(serviceWorker).toContain("let lastScreenshotPixelsAt = 0");
+    expect(serviceWorker).toContain("lastScreenshotPixelsAt = Date.now();");
     expect(serviceWorker).toContain(
-      "const SCREENSHOT_ACTIVE_NAVIGATION_MIN_GAP_MS = SCREENSHOT_ACTIVE_CADENCE_MIN_GAP_MS",
+      "if (lastScreenshotPixelsAt && elapsedSincePixels < minimumGap) {",
+    );
+    expect(serviceWorker).toContain(
+      "scheduleCoalescedRapidScreenshotRetry(reason, minimumGap - elapsedSincePixels)",
+    );
+    expect(serviceWorker).toContain("function clearCoalescedRapidScreenshotRetry(");
+    expect(serviceWorker).toMatch(
+      /function stopActiveScreenshotCadence\([\s\S]*?clearCoalescedRapidScreenshotRetry\(\);/,
+    );
+    // Renewal reuses cadenceId while allocating a fresh frozen object, so both
+    // deferred rapid paths must fence on identity fields, never on the object.
+    expect(serviceWorker).toMatch(
+      /function scheduleActiveViewNavigationCapture\([\s\S]*?currentCadence\.cadenceId !== cadenceId[\s\S]*?currentCadence\.generation !== cadenceGeneration/,
+    );
+    expect(serviceWorker).toMatch(
+      /function scheduleCoalescedRapidScreenshotRetry\([\s\S]*?currentCadence\.cadenceId !== cadenceId[\s\S]*?currentCadence\.generation !== cadenceGeneration/,
+    );
+    expect(serviceWorker).toContain("function screenshotCadencePhaseOffsetMs(deviceId)");
+    expect(serviceWorker).toContain(
+      "phaseOffsetMs: screenshotCadencePhaseOffsetMs(CONFIG.deviceId)",
+    );
+    expect(offscreen).toContain("phaseOffsetMs >= SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS");
+    expect(offscreen).toMatch(
+      /screenshotCadencePhaseTimer = setTimeout\([\s\S]*?setInterval\([\s\S]*?schedule\.intervalMs\);[\s\S]*?\}, schedule\.phaseOffsetMs\);/,
     );
     expect(serviceWorker).toContain("maxAttempts: rapidCapture ? 1 : 2");
     expect(serviceWorker).toContain("type: 'SCREENSHOT_CADENCE_START'");
