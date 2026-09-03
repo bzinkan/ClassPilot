@@ -94,6 +94,25 @@ preview right away. Renewal adoptions of an already-active cadence never
 repeat this capture, and the immediate capture obeys every gate the scheduled
 captures do.
 
+### Downscaled active-preview uploads (2.8.2)
+
+Before upload, the ordinary screenshot path re-encodes the captured frame to a
+thumbnail no wider than `SCREENSHOT_THUMBNAIL_WIDTH` (640 px), preserving the
+captured aspect ratio. Teacher tiles render far smaller than a Chromebook
+viewport, so a full-resolution frame spends bandwidth and battery on pixels the
+grid discards. The re-encode happens entirely inside the service worker
+(`fetch` -> `createImageBitmap` -> `OffscreenCanvas` -> `convertToBlob`); no
+additional Chrome permission is required and no pixels are persisted.
+
+The downscale runs after the capture timestamp is fixed, so upload time can
+never relabel older pixels. Any failure - an undecodable frame, a missing
+canvas API, or a slow encode - falls open to the original captured frame rather
+than dropping it. Exact safety-evidence captures are deliberately excluded and
+are still retained at capture resolution.
+
+The 640 px width is a starting point and should be re-derived from measured
+Chromebook viewports before it is treated as final.
+
 ### Late-sign-in Waypoint and SSO handoff (2.7.9)
 
 SchoolPilot can attach an explicit `lateSignInRestrictionSso` delivery marker
@@ -273,10 +292,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.1 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.1.zip` after clean-tag packaging. Existing 2.7.9 and 2.8.0
-archives do not contain the complete school-configured authentication and lane
-isolation behavior and must not be submitted.
+For the final 2.8.2 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.2.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
+and 2.8.1 archives do not contain the complete school-configured authentication,
+lane isolation, and downscaled active-preview behavior and must not be
+submitted.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 

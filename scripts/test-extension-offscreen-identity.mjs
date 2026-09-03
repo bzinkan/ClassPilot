@@ -10,6 +10,23 @@ const extensionPath = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
   ? resolve(process.env.CLASSPILOT_EXTENSION_PATH)
   : resolve(repoRoot, 'extension');
 const source = readFileSync(resolve(extensionPath, 'offscreen.js'), 'utf8');
+// The phase offset is derived in the service worker (the offscreen document
+// has no CONFIG), so evaluate that exact derivation here rather than
+// re-implementing it: the two halves of the jitter must stay in agreement.
+const serviceWorkerSource = readFileSync(resolve(extensionPath, 'service-worker.js'), 'utf8');
+const phaseOffsetDeclaration = 'function screenshotCadencePhaseOffsetMs(deviceId) {';
+const phaseOffsetStart = serviceWorkerSource.indexOf(phaseOffsetDeclaration);
+assert.ok(
+  phaseOffsetStart >= 0,
+  'service-worker.js must derive the screenshot cadence phase offset from the device id',
+);
+const phaseOffsetEnd = serviceWorkerSource.indexOf('\n}', phaseOffsetStart);
+assert.ok(phaseOffsetEnd > phaseOffsetStart);
+const screenshotCadencePhaseOffsetMs = vm.runInNewContext([
+  'const SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS = 5000;',
+  serviceWorkerSource.slice(phaseOffsetStart, phaseOffsetEnd + 2),
+  'screenshotCadencePhaseOffsetMs;',
+].join('\n'));
 const relayed = [];
 const runtimeListeners = [];
 const timers = [];
@@ -719,6 +736,55 @@ assert.equal(createdStreams.length, streamCountAfterRestart);
 assert.equal(evaluate('localStream'), restartedStream);
 assert.equal(restartedStream.track.stopped, false);
 
+// A cadence start arms its phase one-shot first, then its expiry timer. Fire
+// the phase timer to arm the interval, and pin that the interval itself stays
+// exactly five seconds no matter what the phase is.
+let lastCadencePhaseTimer = null;
+function armScreenshotCadencePhase(expectedPhaseOffsetMs) {
+  const phaseTimer = timers.at(-2);
+  lastCadencePhaseTimer = phaseTimer;
+  assert.equal(phaseTimer.cleared, false);
+  assert.equal(
+    phaseTimer.delay,
+    expectedPhaseOffsetMs,
+    'the cadence interval must start on this device\'s phase offset',
+  );
+  const intervalsBeforePhase = intervals.length;
+  phaseTimer.callback();
+  assert.equal(
+    intervals.length,
+    intervalsBeforePhase + 1,
+    'the phase one-shot must arm exactly one cadence interval',
+  );
+  const interval = intervals.at(-1);
+  assert.equal(
+    interval.delay,
+    5_000,
+    'the cadence interval must stay exactly five seconds under any phase',
+  );
+  assert.equal(interval.cleared, false);
+  return interval;
+}
+
+const phaseDeviceA = 'classpilot-device-alpha';
+const phaseDeviceB = 'classpilot-device-beta';
+const phaseOffsetA = screenshotCadencePhaseOffsetMs(phaseDeviceA);
+const phaseOffsetB = screenshotCadencePhaseOffsetMs(phaseDeviceB);
+for (const offset of [phaseOffsetA, phaseOffsetB]) {
+  assert.equal(Number.isSafeInteger(offset), true);
+  assert.ok(offset >= 0 && offset < 5_000, 'a phase offset must fit inside one interval');
+}
+assert.notEqual(
+  phaseOffsetA,
+  phaseOffsetB,
+  'two device ids must not share a cadence phase, or the fleet stays synchronized',
+);
+assert.equal(
+  screenshotCadencePhaseOffsetMs(phaseDeviceA),
+  phaseOffsetA,
+  'a phase offset must be stable across service worker restarts',
+);
+
 const cadenceIssuedAt = Date.now();
 const invalidCadence = await dispatchOffscreenMessage({
   type: 'SCREENSHOT_CADENCE_START',
@@ -727,6 +793,7 @@ const invalidCadence = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt,
   expiresAt: Date.now() + 60_000,
   intervalMs: 4_000,
+  phaseOffsetMs: phaseOffsetA,
 });
 assert.equal(invalidCadence.success, false);
 assert.equal(invalidCadence.status, 'invalid-cadence');
@@ -737,9 +804,23 @@ const stringScalarCadence = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt + 1,
   expiresAt: Date.now() + 60_000,
   intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetA,
 });
 assert.equal(stringScalarCadence.success, false);
 assert.equal(stringScalarCadence.status, 'invalid-cadence');
+for (const unboundedPhaseOffsetMs of [undefined, -1, 5_000, 5_001, 12.5, '250']) {
+  const unboundedPhaseCadence = await dispatchOffscreenMessage({
+    type: 'SCREENSHOT_CADENCE_START',
+    cadenceId: 'cadence-unbounded-phase',
+    generation: 2,
+    issuedAt: cadenceIssuedAt + 1,
+    expiresAt: Date.now() + 60_000,
+    intervalMs: 5_000,
+    phaseOffsetMs: unboundedPhaseOffsetMs,
+  });
+  assert.equal(unboundedPhaseCadence.success, false);
+  assert.equal(unboundedPhaseCadence.status, 'invalid-cadence');
+}
 
 const cadenceA = await dispatchOffscreenMessage({
   type: 'SCREENSHOT_CADENCE_START',
@@ -748,12 +829,11 @@ const cadenceA = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt + 1,
   expiresAt: Date.now() + 60_000,
   intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetA,
 });
 assert.equal(cadenceA.success, true);
-const cadenceAInterval = intervals.at(-1);
 const cadenceAExpiry = timers.at(-1);
-assert.equal(cadenceAInterval.delay, 5_000);
-assert.equal(cadenceAInterval.cleared, false);
+const cadenceAInterval = armScreenshotCadencePhase(phaseOffsetA);
 const cadenceASchedule = JSON.parse(JSON.stringify(evaluate('screenshotCadenceSchedule')));
 const intervalCountBeforeIdempotentStart = intervals.length;
 const idempotentCadenceA = await dispatchOffscreenMessage({
@@ -798,11 +878,13 @@ const staleCadence = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt,
   expiresAt: Date.now() + 60_000,
   intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetA,
 });
 assert.equal(staleCadence.success, false);
 assert.equal(staleCadence.status, 'stale-cadence');
 assert.equal(cadenceAInterval.cleared, false);
 
+// A different device id phases the same five-second wall differently.
 const cadenceB = await dispatchOffscreenMessage({
   type: 'SCREENSHOT_CADENCE_START',
   cadenceId: 'cadence-active-b',
@@ -810,10 +892,20 @@ const cadenceB = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt + 2,
   expiresAt: Date.now() + 60_000,
   intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetB,
 });
 assert.equal(cadenceB.success, true);
 assert.equal(cadenceAInterval.cleared, true);
-const cadenceBInterval = intervals.at(-1);
+const retiredCadenceAPhaseTimer = lastCadencePhaseTimer;
+const cadenceBInterval = armScreenshotCadencePhase(phaseOffsetB);
+assert.equal(cadenceAInterval.delay, cadenceBInterval.delay);
+const intervalCountBeforeRetiredPhase = intervals.length;
+retiredCadenceAPhaseTimer.callback();
+assert.equal(
+  intervals.length,
+  intervalCountBeforeRetiredPhase,
+  'a retired cadence phase must never arm an interval over its replacement',
+);
 assert.equal(cadenceBInterval.cleared, false);
 
 const staleStop = await dispatchOffscreenMessage({
@@ -844,10 +936,11 @@ const cadenceC = await dispatchOffscreenMessage({
   issuedAt: cadenceIssuedAt + 4,
   expiresAt: Date.now() + 60_000,
   intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetA,
 });
 assert.equal(cadenceC.success, true);
-const cadenceCInterval = intervals.at(-1);
 const cadenceCExpiry = timers.at(-1);
+const cadenceCInterval = armScreenshotCadencePhase(phaseOffsetA);
 evaluate('screenshotCadenceTickInFlight = true');
 cadenceCExpiry.callback();
 await Promise.resolve();
@@ -859,5 +952,38 @@ assert.ok(relayed.some((message) => (
   && message.cadenceId === 'cadence-active-c'
   && message.generation === 6
 )));
+
+// A cadence stopped inside its phase window must leave no pending one-shot
+// behind: the interval is armed by that timer, so a leaked one would resume
+// a retired cadence.
+const cadenceD = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_START',
+  cadenceId: 'cadence-active-d',
+  generation: 7,
+  issuedAt: cadenceIssuedAt + 5,
+  expiresAt: Date.now() + 60_000,
+  intervalMs: 5_000,
+  phaseOffsetMs: phaseOffsetB,
+});
+assert.equal(cadenceD.success, true);
+const cadenceDPhase = timers.at(-2);
+assert.equal(cadenceDPhase.delay, phaseOffsetB);
+assert.equal(cadenceDPhase.cleared, false);
+const cadenceDStop = await dispatchOffscreenMessage({
+  type: 'SCREENSHOT_CADENCE_STOP',
+  cadenceId: 'cadence-active-d',
+  generation: 8,
+  issuedAt: cadenceIssuedAt + 6,
+});
+assert.equal(cadenceDStop.success, true);
+assert.equal(cadenceDPhase.cleared, true);
+const intervalCountAfterPhaseStop = intervals.length;
+cadenceDPhase.callback();
+assert.equal(
+  intervals.length,
+  intervalCountAfterPhaseStop,
+  'a cadence stopped inside its phase window must never arm an interval',
+);
+assert.equal(evaluate('screenshotCadenceSchedule'), null);
 
 console.log('ClassPilot offscreen WebSocket, Live View identity, and screenshot cadence test passed.');

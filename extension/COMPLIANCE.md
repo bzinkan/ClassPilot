@@ -136,6 +136,13 @@ explicit rule, and lookalike or substring matches are rejected. Attention mode,
 school blocks, and teacher blocks remain higher priority than every
 authentication exception.
 
+Version 2.8.2 reduces what leaves the device on the ordinary screenshot path:
+captured frames are downscaled to a thumbnail no wider than 640 px inside the
+service worker before upload, so teacher previews carry less student pixel
+detail than earlier releases. The downscale adds no Chrome permission, persists
+nothing, and never applies to exact safety-evidence captures, which remain at
+capture resolution for their existing retention and validation rules.
+
 The extension tracks one 300-second authentication attempt scoped to the exact
 binding plus the control and policy revisions. Provider navigation is temporary
 and is not treated as reaching the assigned learning destination. On timeout,
@@ -198,7 +205,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.1.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.2.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release

@@ -8,17 +8,37 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.8.1 restricted sign-in release documentation", () => {
-  it("pins every active release instruction to the versioned 2.8.1 artifact", () => {
+describe("2.8.2 downscaled-preview release documentation", () => {
+  it("pins every active release instruction to the versioned 2.8.2 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.8.1.zip");
+      expect(source).toContain("ClassPilot-v2.8.2.zip");
+      expect(source).not.toContain("ClassPilot-v2.8.1.zip");
     }
-    expect(readme).toContain("Existing 2.7.9 and 2.8.0");
-    expect(deployment).toContain("Existing 2.7.9 and 2.8.0 archives are obsolete");
+    // 2.8.1 is now a superseded archive, not a releasable one, so it joins the
+    // obsolete list rather than staying an active upload instruction.
+    expect(readme).toContain("Existing 2.7.9, 2.8.0,");
+    expect(readme).toContain("and 2.8.1 archives do not contain");
+    expect(deployment).toContain("Existing 2.7.9, 2.8.0, and 2.8.1 archives are obsolete");
+    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, or 2.8.1 archive is not releasable.");
+  });
+
+  it("documents the downscaled active-preview upload and its evidence exemption", () => {
+    const readme = read("extension/README.md");
+    const compliance = read("extension/COMPLIANCE.md");
+
+    expect(readme).toContain("SCREENSHOT_THUMBNAIL_WIDTH");
+    for (const source of [readme, compliance]) {
+      expect(source).toMatch(/640\s?px/);
+      expect(source).toMatch(/safety-evidence captures[\s\S]*capture resolution/);
+      expect(source).toMatch(/no additional Chrome permission|adds no Chrome permission/);
+    }
+    // The width is explicitly provisional; do not let it harden into a
+    // documented constant without a measurement behind it.
+    expect(readme).toContain("starting point");
   });
 
   it("documents exact policy scope, privacy reduction, and independent processing lanes", () => {

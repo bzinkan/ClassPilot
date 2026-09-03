@@ -716,6 +716,7 @@ async function main() {
       adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: [] }, screenshotAuth);
       adoptScreenshotPolicy(undefined, screenshotAuth);
       lastScreenshotAttemptAt = 0;
+      lastScreenshotPixelsAt = 0;
       screenshotCaptureInFlight = false;
       let focusChanged;
       let screenshotUploads = 0;
@@ -872,6 +873,7 @@ async function main() {
         });
       };
       lastScreenshotAttemptAt = 0;
+      lastScreenshotPixelsAt = 0;
       screenshotBackoffUntilMs = 0;
       const screenshotErrorBeforeClassAUpload = lastScreenshotError;
       const classAUploadPromise = captureAndSendScreenshot({
@@ -905,6 +907,7 @@ async function main() {
         return new Response('{}', { status: 200 });
       };
       lastScreenshotAttemptAt = 0;
+      lastScreenshotPixelsAt = 0;
       screenshotBackoffUntilMs = 0;
       const trackingWindowCaptureResult = await captureAndSendScreenshot({
         reason: 'tracking-window-upload-envelope',
@@ -2823,6 +2826,7 @@ async function main() {
         };
 
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const alexCapturePromise = captureAndSendScreenshot({
           reason: 'manual-handoff-alex-in-flight',
           queryActiveTab: async () => [{
@@ -2894,6 +2898,7 @@ async function main() {
           await new Promise((resolve) => setTimeout(resolve, 1));
         }
         lastScreenshotAttemptAt = 0;
+        lastScreenshotPixelsAt = 0;
         const bobCaptureResult = await captureAndSendScreenshot({
           reason: 'manual-handoff-bob-first-capture',
           queryActiveTab: async () => [{

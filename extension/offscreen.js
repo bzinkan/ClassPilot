@@ -55,6 +55,7 @@ let proxyUrl = null;
 let proxyAuthContextId = null;
 let proxyServerOrigin = null;
 let screenshotCadenceTimer = null;
+let screenshotCadencePhaseTimer = null;
 let screenshotCadenceExpiryTimer = null;
 let screenshotCadenceTickInFlight = false;
 let screenshotCadenceSchedule = null;
@@ -65,8 +66,10 @@ const SCREENSHOT_ACTIVE_CADENCE_MAX_LEASE_MS = 90 * 1000;
 
 function clearScreenshotCadenceTimers() {
   if (screenshotCadenceTimer) clearInterval(screenshotCadenceTimer);
+  if (screenshotCadencePhaseTimer) clearTimeout(screenshotCadencePhaseTimer);
   if (screenshotCadenceExpiryTimer) clearTimeout(screenshotCadenceExpiryTimer);
   screenshotCadenceTimer = null;
+  screenshotCadencePhaseTimer = null;
   screenshotCadenceExpiryTimer = null;
   screenshotCadenceTickInFlight = false;
 }
@@ -82,6 +85,7 @@ function normalizeScreenshotCadenceRequest(message = {}) {
   const issuedAt = message.issuedAt;
   const expiresAt = message.expiresAt;
   const intervalMs = message.intervalMs;
+  const phaseOffsetMs = message.phaseOffsetMs;
   const now = Date.now();
   if (
     !/^[A-Za-z0-9._-]{8,128}$/.test(cadenceId)
@@ -93,8 +97,11 @@ function normalizeScreenshotCadenceRequest(message = {}) {
     || expiresAt <= now
     || expiresAt > now + SCREENSHOT_ACTIVE_CADENCE_MAX_LEASE_MS
     || intervalMs !== SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS
+    || !Number.isSafeInteger(phaseOffsetMs)
+    || phaseOffsetMs < 0
+    || phaseOffsetMs >= SCREENSHOT_ACTIVE_CADENCE_INTERVAL_MS
   ) return null;
-  return { cadenceId, generation, issuedAt, expiresAt, intervalMs };
+  return { cadenceId, generation, issuedAt, expiresAt, intervalMs, phaseOffsetMs };
 }
 
 async function expireScreenshotCadence(schedule) {
@@ -157,9 +164,16 @@ function startScreenshotCadence(message = {}) {
   latestScreenshotCadenceIssuedAt = schedule.issuedAt;
   stopScreenshotCadence();
   screenshotCadenceSchedule = schedule;
-  screenshotCadenceTimer = setInterval(() => {
-    emitScreenshotCadenceTick(schedule).catch(() => {});
-  }, schedule.intervalMs);
+  // Hold the five-second interval exactly, but start it on a per-device phase
+  // so a class does not upload in one synchronized burst. Renewals reuse the
+  // existing schedule and never re-arm this, keeping the phase stable.
+  screenshotCadencePhaseTimer = setTimeout(() => {
+    screenshotCadencePhaseTimer = null;
+    if (screenshotCadenceSchedule !== schedule) return;
+    screenshotCadenceTimer = setInterval(() => {
+      emitScreenshotCadenceTick(schedule).catch(() => {});
+    }, schedule.intervalMs);
+  }, schedule.phaseOffsetMs);
   screenshotCadenceExpiryTimer = setTimeout(() => {
     expireScreenshotCadence(schedule).catch(() => {});
   }, Math.max(0, schedule.expiresAt - Date.now()));
