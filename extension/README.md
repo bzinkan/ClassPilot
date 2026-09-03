@@ -94,6 +94,24 @@ preview right away. Renewal adoptions of an already-active cadence never
 repeat this capture, and the immediate capture obeys every gate the scheduled
 captures do.
 
+### Per-tab favicons in the open-tab snapshot (2.8.3)
+
+Version 2.8.3 sends a favicon URL for every tab in the open-tab snapshot, not
+only the active tab, so the teacher tile's open-tab strip can show site icons
+instead of placeholder dots. Each value is the icon URL Chrome already reports
+for the tab, filtered inside the service worker before it leaves the device:
+https-only, limited to origin and path, and capped at 512 characters. Query
+strings, fragments, embedded credentials, `http:` and `data:` icons, and
+over-length values are dropped and sent as an empty value, never truncated.
+
+Favicons ride only on the wire projection of the snapshot. They are
+not stored locally and do not take part in the snapshot revision, so an icon
+Chrome resolves late still reaches the tile without a revision bump or a
+storage write, and exact tab close keeps its existing revision fence. Approved
+identity-provider tabs keep their neutral sign-in title, origin-only URL, and
+no favicon, exactly as before. The change adds no Chrome permission and no
+managed-policy key.
+
 ### Downscaled active-preview uploads (2.8.2)
 
 Before upload, the ordinary screenshot path re-encodes the captured frame to a
@@ -292,11 +310,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.2 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.2.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
-and 2.8.1 archives do not contain the complete school-configured authentication,
-lane isolation, and downscaled active-preview behavior and must not be
-submitted.
+For the final 2.8.3 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.3.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
+2.8.1, and 2.8.2 archives do not contain the complete school-configured
+authentication, lane isolation, downscaled active-preview, and per-tab favicon
+behavior and must not be submitted.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
@@ -378,7 +396,7 @@ git rm --cached extension/config.js
 - Active tab title
 - Active tab URL
 - Timestamps of activity
-- Website favicon URL
+- Favicon URL of the active tab and of each open HTTP/HTTPS tab (https-only, limited to origin and path, and capped at 512 characters)
 - Heartbeat, connection, and device health state
 - Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only teaching-session-bound thumbnails and discards student-session/gap pixels on receipt
 - An exact-bound screenshot immediately before a requested safety tab closure, when capture succeeds within the bounded window

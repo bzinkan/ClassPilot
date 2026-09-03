@@ -6259,6 +6259,32 @@ function generateOpaqueTabRef() {
   return `tab_${String(random).replace(/[^a-zA-Z0-9]/g, '')}`;
 }
 
+const TAB_SNAPSHOT_FAVICON_MAX_LENGTH = 512;
+
+// Per-tab favicons ride only on the wire projection of the open-tab snapshot.
+// They are never persisted in tabSnapshotV1 and never join the revision
+// compare, so an icon Chrome resolves after the first snapshot still reaches
+// the teacher tile without a revision bump or a storage write. Only https
+// icons reduced to origin and path are forwarded; everything else becomes ''.
+// Over-length values are dropped rather than truncated: the realtime overflow
+// rule evicts whole tabs, and a truncated icon URL cannot be fetched anyway.
+function snapshotFaviconUrl(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch (_) {
+    return '';
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname) return '';
+  if (parsed.username || parsed.password) return '';
+  parsed.search = '';
+  parsed.hash = '';
+  const favicon = parsed.toString();
+  return favicon.length > TAB_SNAPSHOT_FAVICON_MAX_LENGTH ? '' : favicon;
+}
+
 function tabSnapshotAuthBinding(authContext = null) {
   return authContext
     ? monitoringEventAuthBindingForContext(authContext)
@@ -6291,8 +6317,10 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
     const bindingMatches = prior?.binding === binding;
     const priorById = new Map((bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
       .map((entry) => [entry.tabId, entry]));
+    const faviconByTabId = new Map();
     const localEntries = tabs.map((tab) => {
       const metadata = restrictionSafeMonitoringMetadata(tab);
+      faviconByTabId.set(tab.id, snapshotFaviconUrl(metadata.favicon));
       return {
         tabId: tab.id,
         tabRef: priorById.get(tab.id)?.tabRef || generateOpaqueTabRef(),
@@ -6300,6 +6328,14 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
         title: String(metadata.title || 'Untitled').slice(0, 512),
       };
     });
+    // Wire projection only: favicons stay out of localEntries, the persisted
+    // record, and the revision compare below.
+    const wireTabs = () => localEntries.map(({ tabId, tabRef, url, title }) => ({
+      tabRef,
+      url,
+      title,
+      favicon: faviconByTabId.get(tabId) || '',
+    }));
     const previousProjection = (bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
       .map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }));
     const changed = JSON.stringify(previousProjection) !== JSON.stringify(localEntries);
@@ -6309,7 +6345,7 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
       return {
         schemaVersion: 1,
         revision: priorRevision,
-        tabs: localEntries.map(({ tabRef, url, title }) => ({ tabRef, url, title })),
+        tabs: wireTabs(),
         localEntries,
       };
     }
@@ -6328,7 +6364,7 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
     return {
       schemaVersion: 1,
       revision,
-      tabs: localEntries.map(({ tabRef, url, title }) => ({ tabRef, url, title })),
+      tabs: wireTabs(),
       localEntries,
     };
   });

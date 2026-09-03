@@ -2619,7 +2619,12 @@ async function main() {
           return {
             schemaVersion: 1,
             revision: 1,
-            tabs: [{ tabRef: 'retired-tab', url: 'https://student-a.example/private', title: 'Student A' }],
+            tabs: [{
+              tabRef: 'retired-tab',
+              url: 'https://student-a.example/private',
+              title: 'Student A',
+              favicon: '',
+            }],
             localEntries: [],
           };
         };
