@@ -3640,6 +3640,28 @@ async function main() {
         state: safeCommandSnapshot,
         appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision(),
       });
+      // 2.8.3 sends per-tab favicons on the open-tab snapshot wire projection.
+      // An approved identity-provider tab must still yield no favicon at all,
+      // even when Chrome reports an icon URL whose path and query carry the
+      // attempt secret; the favicon sanitizer alone would keep the path.
+      const authTabSnapshot = await buildOpaqueTabSnapshot([{
+        id: popup.id,
+        windowId: popup.windowId,
+        active: true,
+        url: `https://accounts.google.com/o/oauth2/callback?code=${secret}&state=private`,
+        title: `OAuth ${secret}`,
+        favIconUrl: `https://accounts.google.com/icons/${secret}/favicon.ico?token=${secret}`,
+      }], authContext);
+      const authTabSnapshotWire = {
+        tabCount: authTabSnapshot.tabs.length,
+        hasFaviconKey: Object.prototype.hasOwnProperty.call(authTabSnapshot.tabs[0] || {}, 'favicon'),
+        favicon: authTabSnapshot.tabs[0]?.favicon,
+        url: authTabSnapshot.tabs[0]?.url,
+        title: authTabSnapshot.tabs[0]?.title,
+        secretInSnapshot: JSON.stringify(authTabSnapshot).includes(secret),
+        attemptOwnsTab: restrictionAuthAttemptState?.activeTabId === popup.id,
+        attemptPhase: restrictionAuthAttemptState?.phase,
+      };
       const currentPageSecret = `current-page-${secret}`;
       const priorTransientCurrentPage = transientCurrentPageRestrictionActive;
       const priorLockedUrl = lockedUrl;
@@ -3782,6 +3804,7 @@ async function main() {
         phases,
         providerCallbackReconcile,
         safeCommandSnapshot,
+        authTabSnapshotWire,
         storedCommandAck,
         unrelatedCurrentPageSnapshot,
         unrelatedCurrentPageSecretPersisted: JSON.stringify(unrelatedCurrentPageOutbox)
@@ -3824,6 +3847,12 @@ async function main() {
     });
     assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.url, 'https://accounts.google.com/');
     assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.title, 'Signing in');
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.tabCount, 1);
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.hasFaviconKey, true);
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.favicon, '');
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.secretInSnapshot, false);
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.url, 'https://accounts.google.com/');
+    assert.equal(restrictionAuthSeed.authTabSnapshotWire.title, 'Signing in');
     assert.equal(restrictionAuthSeed.storedCommandAck.appliedAuthPolicyRevision, 7);
     assert.equal(JSON.stringify(restrictionAuthSeed.storedCommandAck).includes(restrictionAuthSecret), false);
     assert.equal(restrictionAuthSeed.unrelatedCurrentPageSnapshot.lockedUrl, null);

@@ -3292,19 +3292,43 @@ async function main() {
         }, authB);
 
         await kv.remove(TAB_SNAPSHOT_STORAGE_KEY);
+        // Three raw tabs: an https icon carrying query/fragment (kept, reduced
+        // to origin and path), an http icon (dropped), and a data: icon
+        // (dropped). Tab 2 gains a late https icon between the two snapshots;
+        // it must reach the wire projection without a revision bump or a
+        // storage write, because favicons live outside localEntries.
         const rawTabs = [{
           id: 8101,
           url: 'https://snapshot.example/page',
           title: 'Snapshot',
+          favIconUrl: 'https://snapshot.example/favicon.ico?v=3#frag',
+        }, {
+          id: 8102,
+          url: 'https://plain.example/page',
+          title: 'Plain',
+          favIconUrl: 'http://plain.example/favicon.ico',
+        }, {
+          id: 8103,
+          url: 'https://inline.example/page',
+          title: 'Inline',
+          favIconUrl: 'data:image/png;base64,iVBORw0KGgo=',
         }];
-        await buildOpaqueTabSnapshot(rawTabs, authB);
+        const firstFaviconSnapshot = await buildOpaqueTabSnapshot(rawTabs, authB);
         let snapshotWrites = 0;
         kv.set = async (value) => {
           if (Object.prototype.hasOwnProperty.call(value, TAB_SNAPSHOT_STORAGE_KEY)) snapshotWrites += 1;
           return originalKvSet(value);
         };
-        await buildOpaqueTabSnapshot(rawTabs, authB);
+        rawTabs[1].favIconUrl = 'https://plain.example/late-favicon.png';
+        const secondFaviconSnapshot = await buildOpaqueTabSnapshot(rawTabs, authB);
         kv.set = originalKvSet;
+        const persistedFaviconSnapshot = (await kv.get(TAB_SNAPSHOT_STORAGE_KEY))[TAB_SNAPSHOT_STORAGE_KEY];
+        const snapshotFavicons = {
+          first: firstFaviconSnapshot.tabs.map((tab) => tab.favicon),
+          second: secondFaviconSnapshot.tabs.map((tab) => tab.favicon),
+          revisionUnchanged: firstFaviconSnapshot.revision === secondFaviconSnapshot.revision,
+          persistedEntryKeys: Object.keys(persistedFaviconSnapshot.entries[0]).sort(),
+        };
 
         let heartbeatCalls = 0;
         let releaseHeartbeat;
@@ -4552,6 +4576,7 @@ async function main() {
           duplicateLiveViewStartCount,
           loginReservationRevokedSynchronously,
           snapshotWrites,
+          snapshotFavicons,
           heartbeatCalls,
           healthyRecoveryRuns,
           steadyCadenceCalls,
@@ -5130,6 +5155,10 @@ async function main() {
     assert.equal(result.duplicateLiveViewStartCount, 1);
     assert.equal(result.loginReservationRevokedSynchronously, true);
     assert.equal(result.snapshotWrites, 0);
+    assert.deepEqual(result.snapshotFavicons.first, ['https://snapshot.example/favicon.ico', '', '']);
+    assert.equal(result.snapshotFavicons.second[1], 'https://plain.example/late-favicon.png');
+    assert.equal(result.snapshotFavicons.revisionUnchanged, true);
+    assert.deepEqual(result.snapshotFavicons.persistedEntryKeys, ['tabId', 'tabRef', 'title', 'url']);
     assert.equal(result.healthyRecoveryRuns, 0);
     assert.equal(result.steadyCadenceCalls, 6);
     assert.equal(result.staleRecoveryRan, true);

@@ -8,22 +8,40 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.8.2 downscaled-preview release documentation", () => {
-  it("pins every active release instruction to the versioned 2.8.2 artifact", () => {
+describe("2.8.3 per-tab favicon release documentation", () => {
+  it("pins every active release instruction to the versioned 2.8.3 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.8.2.zip");
+      expect(source).toContain("ClassPilot-v2.8.3.zip");
+      expect(source).not.toContain("ClassPilot-v2.8.2.zip");
       expect(source).not.toContain("ClassPilot-v2.8.1.zip");
     }
-    // 2.8.1 is now a superseded archive, not a releasable one, so it joins the
+    // 2.8.2 is now a superseded archive, not a releasable one, so it joins the
     // obsolete list rather than staying an active upload instruction.
     expect(readme).toContain("Existing 2.7.9, 2.8.0,");
-    expect(readme).toContain("and 2.8.1 archives do not contain");
-    expect(deployment).toContain("Existing 2.7.9, 2.8.0, and 2.8.1 archives are obsolete");
-    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, or 2.8.1 archive is not releasable.");
+    expect(readme).toContain("2.8.1, and 2.8.2 archives do not contain");
+    expect(deployment).toContain("Existing 2.7.9, 2.8.0, 2.8.1, and 2.8.2 archives are obsolete");
+    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, 2.8.1, or 2.8.2 archive is not releasable.");
+  });
+
+  it("documents the per-tab favicon scope of the open-tab snapshot", () => {
+    const readme = read("extension/README.md");
+    const compliance = read("extension/COMPLIANCE.md");
+
+    expect(readme).toContain("Per-tab favicons in the open-tab snapshot (2.8.3)");
+    // The 512-char filter applies to the open-tab snapshot only; the heartbeat's
+    // active-tab favicon is still Chrome's raw value, so the privacy bullet must
+    // scope the parenthetical to the snapshot rather than claim it for both.
+    expect(readme).toContain("Favicon URL of the active tab, and of each open HTTP/HTTPS tab in the tab snapshot (https-only, limited to origin and path, and capped at 512 characters)");
+    expect(readme).not.toContain("Favicon URL of the active tab and of each open HTTP/HTTPS tab (https-only");
+    for (const source of [readme, compliance]) {
+      expect(source).toContain("https-only, limited to origin and path, and capped at 512 characters");
+      expect(source).toMatch(/not (persisted|stored) locally/);
+      expect(source).toMatch(/no favicon/);
+    }
   });
 
   it("documents the downscaled active-preview upload and its evidence exemption", () => {

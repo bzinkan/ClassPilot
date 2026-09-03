@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.2");
+    expect(manifest.version).toBe("2.8.3");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -727,6 +727,21 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("const HEARTBEAT_TAB_QUERY_TIMEOUT_MS = 3 * 1000");
     expect(serviceWorker).toContain("'heartbeat active-tab query'");
     expect(serviceWorker).toContain("'heartbeat all-tabs query'");
+  });
+
+  it("sends sanitized per-tab favicons only on the open-tab snapshot wire projection", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    expect(serviceWorker).toContain("const TAB_SNAPSHOT_FAVICON_MAX_LENGTH = 512");
+    expect(serviceWorker).toContain("function snapshotFaviconUrl(value)");
+    expect(serviceWorker).toMatch(/buildOpaqueTabSnapshot[\s\S]*snapshotFaviconUrl\(metadata\.favicon\)/);
+    expect(serviceWorker).toContain("favicon: faviconByTabId.get(tabId) || ''");
+    expect(serviceWorker).toMatch(/tabs: wireTabs\(\),[\s\S]*tabs: wireTabs\(\),/);
+    // The persisted tabSnapshotV1 record and the revision compare keep the
+    // four-field shape, so an icon change never rewrites storage or bumps
+    // the revision that exact tab close is fenced on.
+    expect(serviceWorker).toContain(
+      ".map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }))",
+    );
   });
 
   it("persists and acknowledges classroom enforcement before bounded tab side effects", () => {
