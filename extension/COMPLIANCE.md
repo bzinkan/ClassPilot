@@ -156,6 +156,17 @@ and never change the snapshot revision. Approved identity-provider tabs still
 carry no favicon. The change adds no Chrome permission and no managed-policy
 key.
 
+Version 2.8.4 corrects a sign-in failure present since 2.8.1: a student who had
+a Waypoint or Flight Path assigned could not sign in to ClassPilot, because the
+extension rejected its own successful sign-in while applying the assigned
+restriction and returned the Chromebook to the sign-in screen. Version 2.8.4
+accepts that restriction as part of the same sign-in. This is a correctness fix
+only. The same authority checks run over the same identity fields, a
+restriction that does not match the signed-in student, session, school, device,
+or server is still rejected, and no monitoring, retention, or reporting
+behavior changes. The fix adds no Chrome permission, no additional data
+collection, and no managed-policy key.
+
 The extension tracks one 300-second authentication attempt scoped to the exact
 binding plus the control and policy revisions. Provider navigation is temporary
 and is not treated as reaching the assigned learning destination. On timeout,
@@ -218,7 +229,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.3.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.4.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release

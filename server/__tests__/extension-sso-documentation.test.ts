@@ -8,23 +8,40 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.8.3 per-tab favicon release documentation", () => {
-  it("pins every active release instruction to the versioned 2.8.3 artifact", () => {
+describe("2.8.4 restricted sign-in fix release documentation", () => {
+  it("pins every active release instruction to the versioned 2.8.4 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.8.3.zip");
+      expect(source).toContain("ClassPilot-v2.8.4.zip");
+      expect(source).not.toContain("ClassPilot-v2.8.3.zip");
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
-      expect(source).not.toContain("ClassPilot-v2.8.1.zip");
     }
-    // 2.8.2 is now a superseded archive, not a releasable one, so it joins the
+    // 2.8.3 is now a superseded archive, not a releasable one, so it joins the
     // obsolete list rather than staying an active upload instruction.
     expect(readme).toContain("Existing 2.7.9, 2.8.0,");
-    expect(readme).toContain("2.8.1, and 2.8.2 archives do not contain");
-    expect(deployment).toContain("Existing 2.7.9, 2.8.0, 2.8.1, and 2.8.2 archives are obsolete");
-    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, 2.8.1, or 2.8.2 archive is not releasable.");
+    expect(readme).toContain("2.8.1, 2.8.2, and 2.8.3 archives do not contain");
+    expect(deployment).toContain("Existing 2.7.9, 2.8.0, 2.8.1, 2.8.2, and 2.8.3 archives are obsolete");
+    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, 2.8.1, 2.8.2, or 2.8.3 archive is not releasable.");
+  });
+
+  it("documents the restricted sign-in fix as a correctness fix only", () => {
+    const readme = read("extension/README.md");
+    const compliance = read("extension/COMPLIANCE.md");
+
+    expect(readme).toContain("Restricted sign-in acceptance fix (2.8.4)");
+    for (const source of [readme, compliance]) {
+      // The customer-visible symptom, not the internal auth-context mechanism.
+      expect(source).toContain("rejected its own successful sign-in");
+      expect(source).toMatch(/Waypoint or (a )?Flight Path/);
+      expect(source).toContain("correctness fix");
+      // 2.8.4 grants nothing new; the documentation must not read as a feature.
+      expect(source).toContain("no additional data");
+      expect(source).toMatch(/no Chrome permission/);
+      expect(source).toMatch(/no managed-policy key/);
+    }
   });
 
   it("documents the per-tab favicon scope of the open-tab snapshot", () => {
