@@ -4117,6 +4117,318 @@ async function main() {
     assert.ok(malformedManualLoginCleanup.retryableCleanup.pendingRetryDelayMs > 115_000);
     assert.ok(malformedManualLoginCleanup.retryableCleanup.pendingRetryDelayMs <= 120_000);
 
+    // 2.8.1 rejected every sign-in whose login response already carried a
+    // classroom restriction with an SSO pass-through envelope. The restriction
+    // authority gate reads the expected control revision while the student
+    // auth commit is still pending, when hasStudentAuth() is deliberately
+    // false, so a context-free read returned null, requireFullAuthority threw
+    // STUDENT_BINDING_MISMATCH, and the accepted server session was released
+    // straight back — stranding the student on the sign-in screen. Every other
+    // login fixture returns `classroomState: null`, so only this shape reaches
+    // the path; drive the real login end to end for both restriction kinds.
+    const restrictionAuthPassThroughLoginAdoption = await worker.evaluate(async () => {
+      const originalFetch = globalThis.fetch;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalCheckLicenseStatus = checkLicenseStatus;
+      const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
+      const originalConfig = { ...CONFIG };
+      const originalSharedSignInConfig = { ...sharedSignInLoginConfig };
+      const releases = {};
+      const signOuts = {};
+      let activeCase = null;
+      let responseBody = null;
+
+      const authPassThroughPolicy = (policyRevision) => ({
+        schemaVersion: 1,
+        policyRevision,
+        defaultProfileId: 'clever',
+        attemptTtlSeconds: 300,
+        profiles: [{
+          id: 'clever',
+          name: 'Clever',
+          startUrl: 'https://clever.com/',
+          hostRules: [
+            { hostname: 'accounts.google.com', includeSubdomains: false },
+            { hostname: 'clever.com', includeSubdomains: true },
+          ],
+        }],
+      });
+
+      // The exact binding's controlRevision and the snapshot revision are the
+      // same server-side control row, and the ordering fence must equal the
+      // policy revision or normalization rejects the state for an unrelated
+      // reason. Keep both invariants inside the fixture builder.
+      const buildLoginResponse = (name, revision, policyRevision, restrictions) => {
+        const now = Date.now();
+        return {
+          success: true,
+          serverProtocolVersion: 3,
+          acceptedCapabilities: [
+            'classroomStateV1',
+            'scopedAuthorityChecksV1',
+            'restrictionAuthPassThroughV1',
+          ],
+          schoolId: 'restriction-auth-school',
+          studentSessionId: `${name}-session`,
+          student: {
+            id: `${name}-student`,
+            email: `${name}@example.edu`,
+            firstName: 'Ada',
+            lastName: 'Student',
+          },
+          studentToken: `${name}-bearer`,
+          sessionRecovery: { token: 'R'.repeat(43) },
+          exactBinding: {
+            bindingVersion: 2,
+            schoolId: 'restriction-auth-school',
+            deviceId: `${name}-device`,
+            studentId: `${name}-student`,
+            studentSessionId: `${name}-session`,
+            controlRevision: revision,
+          },
+          classroomState: {
+            schemaVersion: 1,
+            revision,
+            teachingSessionId: `${name}-teaching-session`,
+            receivedAt: now,
+            hardExpiresAt: now + 60 * 60 * 1000,
+            restrictions,
+            authPassThroughPolicyRevision: policyRevision,
+            authPassThrough: authPassThroughPolicy(policyRevision),
+          },
+        };
+      };
+
+      fetchWithBackoff = async (url) => {
+        const target = String(url);
+        if (target.endsWith('/api/extension/student-login')) {
+          return new Response(JSON.stringify(responseBody), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (target.endsWith('/api/extension/sign-out')) {
+          signOuts[activeCase] = (signOuts[activeCase] || 0) + 1;
+          return new Response(null, { status: 204 });
+        }
+        if (target.endsWith('/api/extension/session-release')) {
+          releases[activeCase] = (releases[activeCase] || 0) + 1;
+          return new Response(null, { status: 204 });
+        }
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+      globalThis.fetch = async (url) => {
+        const target = String(url);
+        if (target.endsWith('/api/extension/session-release')) {
+          releases[activeCase] = (releases[activeCase] || 0) + 1;
+          return new Response(null, { status: 204 });
+        }
+        if (target.endsWith('/api/extension/sign-out')) {
+          signOuts[activeCase] = (signOuts[activeCase] || 0) + 1;
+          return new Response(null, { status: 204 });
+        }
+        return new Response('{}', {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      };
+
+      const runCase = async (name, revision, policyRevision, restrictions) => {
+        activeCase = name;
+        responseBody = buildLoginResponse(name, revision, policyRevision, restrictions);
+        CONFIG.serverUrl = 'https://school-pilot.net';
+        CONFIG.schoolId = 'restriction-auth-school';
+        CONFIG.schoolSlug = 'restriction-auth-school';
+        CONFIG.deviceId = `${name}-device`;
+        CONFIG.activeStudentId = null;
+        CONFIG.activeStudentSessionId = null;
+        CONFIG.studentToken = null;
+        CONFIG.authContextId = null;
+        CONFIG.identitySource = null;
+        CONFIG.autoRegistrationPaused = true;
+        studentAuthInvalidating = false;
+        studentAuthCommitPending = false;
+        studentAuthCommitPendingGeneration = 0;
+        // A successful login resets the shared sign-in config cache and
+        // re-broadcasts the gate. Keep that work inline (slow gate) and
+        // resolved against this fixture's school so no background login-config
+        // refresh can escape and change a later fixture's gate phase.
+        fastAuthGateEnabled = false;
+        checkLicenseStatus = async () => {};
+        initializeAdaptiveTracking = async () => {};
+        sharedSignInLoginConfig = {
+          ...sharedSignInLoginConfig,
+          phase: 'ready',
+          sharedSignInEnabled: true,
+          loginMethod: 'email_id',
+          pinLoginEnabled: false,
+          schoolId: 'restriction-auth-school',
+        };
+        resetLoginRosterRuntimeCache();
+        let error = null;
+        let login = null;
+        try {
+          login = await manualStudentLogin({
+            mode: 'email_id',
+            studentEmail: `${name}@example.edu`,
+            studentIdNumber: '1004',
+          });
+        } catch (caught) {
+          error = caught?.message || String(caught);
+        }
+        await studentAuthMutationTail;
+        const rules = await chrome.declarativeNetRequest.getDynamicRules();
+        let authenticatedContextStudentId = null;
+        try {
+          authenticatedContextStudentId = captureAuthenticatedContext(
+            `${name} restriction pass-through verification`,
+          ).studentId;
+        } catch {
+          authenticatedContextStudentId = null;
+        }
+        const result = {
+          error,
+          loginSuccess: login?.success === true,
+          releases: releases[name] || 0,
+          signOuts: signOuts[name] || 0,
+          hasAuth: hasStudentAuth(),
+          authenticatedContextStudentId,
+          activeStudentId: CONFIG.activeStudentId,
+          classroomRevision: currentClassroomState?.revision ?? null,
+          appliedPolicyRevision: currentClassroomState?.authPassThrough?.policyRevision ?? null,
+          authPassThroughActive: restrictionAuthPassThroughActive,
+          classroomBlockRule: rules
+            .find((rule) => rule.id === RuntimeCore.DNR_RANGES.classroom[0]) || null,
+          authAllowRules: rules
+            .filter((rule) => RuntimeCore.isRuleInRange(rule.id, 'restrictionSso'))
+            .map((rule) => ({
+              id: rule.id,
+              priority: rule.priority,
+              action: rule.action.type,
+              requestDomains: rule.condition?.requestDomains || [],
+            })),
+        };
+        if (hasStudentAuth()) {
+          const current = captureAuthenticatedContext(
+            `${name} restriction pass-through fixture cleanup`,
+          );
+          await clearStudentAuth(`${name}_restriction_auth_fixture_cleanup`, {
+            notifyBackend: false,
+            serverSessionEnded: true,
+            pauseAutoRegistration: true,
+            expectedAuthContext: current,
+          });
+        }
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        return result;
+      };
+
+      try {
+        return {
+          flightPath: await runCase('flightpath', 8410, 41, {
+            flightPath: {
+              active: true,
+              allowedDomains: ['clever.com', 'ixl.com', 'coolmathgames.com'],
+              name: 'Login Flight Path',
+            },
+          }),
+          waypoint: await runCase('waypoint', 8420, 42, {
+            screenLock: {
+              active: true,
+              url: 'https://clever.com/lessons',
+              domain: 'clever.com',
+            },
+          }),
+        };
+      } finally {
+        await clearManagedDeviceContinuityState();
+        await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+        // Drain the gate work a successful login schedules before restoring
+        // the seams, so nothing from this fixture lands inside a later one.
+        await awaitAuthGateRosterContextStable().catch(() => {});
+        if (sharedSignInConfigPromise) await sharedSignInConfigPromise.catch(() => {});
+        await chrome.alarms.clear(SHARED_SIGN_IN_CONFIG_RETRY_ALARM);
+        resetLoginRosterRuntimeCache();
+        globalThis.fetch = originalFetch;
+        fetchWithBackoff = originalFetchWithBackoff;
+        fastAuthGateEnabled = originalFastAuthGateEnabled;
+        checkLicenseStatus = originalCheckLicenseStatus;
+        initializeAdaptiveTracking = originalInitializeAdaptiveTracking;
+        sharedSignInLoginConfig = originalSharedSignInConfig;
+        CONFIG = originalConfig;
+      }
+    });
+    for (const name of ['flightPath', 'waypoint']) {
+      const result = restrictionAuthPassThroughLoginAdoption[name];
+      // One compound check: the regression rejected the login, released the
+      // accepted server session, and dropped auth together, so report all of
+      // those outcomes in a single diff.
+      assert.deepEqual({
+        error: result.error,
+        loginSuccess: result.loginSuccess,
+        exactReleases: result.releases,
+        legacySignOuts: result.signOuts,
+        hasAuth: result.hasAuth,
+        authPassThroughActive: result.authPassThroughActive,
+      }, {
+        error: null,
+        loginSuccess: true,
+        exactReleases: 0,
+        legacySignOuts: 0,
+        hasAuth: true,
+        authPassThroughActive: true,
+      }, `${name} login must adopt its login-delivered restriction`);
+      assert.equal(
+        result.authenticatedContextStudentId,
+        result.activeStudentId,
+        `${name} must keep a usable authenticated context`,
+      );
+    }
+    const restrictionAuthFlightPath = restrictionAuthPassThroughLoginAdoption.flightPath;
+    assert.equal(restrictionAuthFlightPath.activeStudentId, 'flightpath-student');
+    assert.equal(restrictionAuthFlightPath.classroomRevision, 8410);
+    assert.equal(restrictionAuthFlightPath.appliedPolicyRevision, 41);
+    assert.equal(restrictionAuthFlightPath.classroomBlockRule.action.type, 'block');
+    assert.deepEqual(
+      [...restrictionAuthFlightPath.classroomBlockRule.condition.excludedRequestDomains].sort(),
+      ['clever.com', 'coolmathgames.com', 'ixl.com'],
+    );
+    const flightPathAuthAllow = restrictionAuthFlightPath.authAllowRules.find((rule) => (
+      rule.requestDomains.includes('clever.com')
+    ));
+    assert.ok(flightPathAuthAllow, 'Flight Path login must publish a clever.com pass-through allow');
+    assert.equal(flightPathAuthAllow.action, 'allow');
+    assert.equal(flightPathAuthAllow.priority, 600);
+    assert.ok(
+      restrictionAuthFlightPath.authAllowRules.some((rule) => (
+        rule.requestDomains.includes('accounts.google.com') && rule.priority === 600
+      )),
+      'Flight Path login must publish the accounts.google.com pass-through allow',
+    );
+    const restrictionAuthWaypoint = restrictionAuthPassThroughLoginAdoption.waypoint;
+    assert.equal(restrictionAuthWaypoint.activeStudentId, 'waypoint-student');
+    assert.equal(restrictionAuthWaypoint.classroomRevision, 8420);
+    assert.equal(restrictionAuthWaypoint.appliedPolicyRevision, 42);
+    assert.deepEqual(
+      restrictionAuthWaypoint.classroomBlockRule.condition.excludedRequestDomains,
+      ['clever.com'],
+    );
+    const waypointAuthAllow = restrictionAuthWaypoint.authAllowRules.find((rule) => (
+      rule.requestDomains.includes('clever.com')
+    ));
+    assert.ok(waypointAuthAllow, 'Waypoint login must publish a clever.com pass-through allow');
+    assert.equal(waypointAuthAllow.action, 'allow');
+    assert.equal(waypointAuthAllow.priority, 600);
+    assert.ok(
+      waypointAuthAllow.priority > restrictionAuthWaypoint.classroomBlockRule.priority,
+      'pass-through must outrank the Waypoint block',
+    );
+    assert.deepEqual(serviceWorkerErrors, []);
+
     const boundedRecoveryAlarmGateCoalescing = await worker.evaluate(async () => {
       await studentSessionRecoveryFlushPromise?.catch(() => {});
       const originalFetch = globalThis.fetch;

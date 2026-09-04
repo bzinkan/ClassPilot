@@ -94,6 +94,26 @@ preview right away. Renewal adoptions of an already-active cadence never
 repeat this capture, and the immediate capture obeys every gate the scheduled
 captures do.
 
+### Restricted sign-in acceptance fix (2.8.4)
+
+Version 2.8.4 is a correctness fix for student sign-in. Since 2.8.1, a student
+who had a Waypoint or a Flight Path assigned could be unable to sign in to
+ClassPilot at all: the extension rejected its own successful sign-in while
+applying the assigned restriction, released the session it had just
+established, and returned the Chromebook to the ClassPilot sign-in screen.
+Retrying produced the same result for as long as that restriction stayed
+assigned. Students with no Waypoint or Flight Path assigned were unaffected,
+and so were students who were already signed in when the restriction reached
+them.
+
+Version 2.8.4 accepts that restriction as part of the same sign-in, so an
+assigned Waypoint or Flight Path now applies on a fresh sign-in exactly as it
+already did for a student who was already signed in. Nothing else changes: the
+same authority checks run over the same identity fields, and a restriction that
+does not match the signed-in student, session, school, device, or server is
+still rejected. The fix adds no Chrome permission, no additional data
+collection, and no managed-policy key.
+
 ### Per-tab favicons in the open-tab snapshot (2.8.3)
 
 Version 2.8.3 sends a favicon URL for every tab in the open-tab snapshot, not
@@ -310,11 +330,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.3 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.3.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
-2.8.1, and 2.8.2 archives do not contain the complete school-configured
-authentication, lane isolation, downscaled active-preview, and per-tab favicon
-behavior and must not be submitted.
+For the final 2.8.4 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.4.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
+2.8.1, 2.8.2, and 2.8.3 archives do not contain the complete school-configured
+authentication, lane isolation, downscaled active-preview, per-tab favicon, and
+restricted-sign-in behavior and must not be submitted.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 

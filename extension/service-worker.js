@@ -5113,10 +5113,20 @@ function observeExactStudentControlRevision(raw, authContext = null, reason = 'e
   return observeStudentControlRevision(binding.controlRevision, context, reason);
 }
 
-function currentStudentControlRevision() {
+function currentStudentControlRevision(expectedContext = null) {
+  // A caller that already holds the authenticated context must pass it here.
+  // Inside the student-login commit window hasStudentAuth() is false, so
+  // captureAuthenticatedContext() cannot mint a context and this returned
+  // null. Every requireFullAuthority check then rejected a restriction that
+  // arrived in the login response itself, which rejected the sign-in and
+  // stranded students on the sign-in screen (2026-09-04 incident).
+  // assertAuthenticatedContextCurrent honours allowCommitPending while still
+  // validating every identity field, so exact authority is unchanged.
   let context;
   try {
-    context = captureAuthenticatedContext('control revision');
+    context = expectedContext
+      ? assertAuthenticatedContextCurrent(expectedContext, 'control revision')
+      : captureAuthenticatedContext('control revision');
   } catch {
     return null;
   }
@@ -5136,7 +5146,7 @@ function assertCurrentStudentBinding(raw = {}, label = 'message', options = {}) 
   const requireFullAuthority = options.requireFullAuthority === true;
   const expectedSchoolId = context?.schoolId ?? (String(CONFIG.schoolId || '').trim() || null);
   const expectedDeviceId = context?.deviceId ?? CONFIG.deviceId;
-  const expectedControlRevision = currentStudentControlRevision();
+  const expectedControlRevision = currentStudentControlRevision(context);
   if (
     studentAuthInvalidating
     || !CONFIG.activeStudentId
@@ -9039,7 +9049,7 @@ function assertBindingMatchesAuthContext(
   options = {},
 ) {
   const requireFullAuthority = options.requireFullAuthority === true;
-  const expectedControlRevision = currentStudentControlRevision();
+  const expectedControlRevision = currentStudentControlRevision(context);
   if (
     !binding
     || binding.studentId !== context?.studentId
