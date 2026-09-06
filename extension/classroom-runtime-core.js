@@ -281,6 +281,7 @@
       const parts = new Intl.DateTimeFormat('en-US', {
         timeZone: input.timezone || 'America/New_York',
         weekday: 'long',
+        year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
         hourCycle: 'h23',
@@ -291,15 +292,24 @@
       const current = (Number(value.hour) % 24) * 60 + Number(value.minute);
       if (!Number.isFinite(current)) return true;
 
+      let date = `${value.year}-${value.month}-${value.day}`;
+      const afterMidnight = end < start && current <= end;
+      if (afterMidnight) date = new Date(Date.parse(`${date}T12:00:00Z`) - 86400000).toISOString().slice(0, 10);
+      const calendarWeekday = new Date(`${date}T12:00:00Z`).getUTCDay();
+      const override = input.schedulingDateOverrides?.[date];
+      const instructional = override?.instructional ?? (![0, 6].includes(calendarWeekday)
+        && !(input.instructionalCalendar?.[date.slice(0, 7)]?.nonInstructionalDates || []).includes(date));
+      if (!instructional) return false;
+      const meetingWeekday = override?.instructional === true ? override.meetingWeekday ?? calendarWeekday : calendarWeekday;
+      const enabledDay = activeDays.has(WEEKDAYS[meetingWeekday]);
+
       if (end > start) {
-        return activeDays.has(value.weekday) && current >= start && current <= end;
+        return enabledDay && current >= start && current <= end;
       }
 
       // An end at or before the start is an overnight window. The segment
       // after midnight belongs to the prior configured school day.
-      const previousWeekday = WEEKDAYS[(weekdayIndex + WEEKDAYS.length - 1) % WEEKDAYS.length];
-      return (current >= start && activeDays.has(value.weekday))
-        || (current <= end && activeDays.has(previousWeekday));
+      return enabledDay && (current >= start || current <= end);
     } catch (_) {
       // Preserve the existing fail-open behavior if a managed timezone is
       // malformed; the server will continue reporting the settings error.

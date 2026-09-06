@@ -8,7 +8,7 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 - **Transparent Disclosure**: Clearly displays to students what's being monitored
 - **Automatic Heartbeats**: Sends active tab title and URL every 10 seconds
 - **Immediate Tab Updates**: Notifies server when student changes tabs
-- **Tracking-Window Screen Thumbnails**: Captures bounded active-tab screenshots about every 5 seconds only while an authorized teacher or administrator has the exact class view visible, and about every 30 seconds otherwise while school-managed monitoring remains active in the authorized tracking window, plus an exact-bound safety capture when requested
+- **Tracking-Window Screen Thumbnails**: Captures bounded active-tab screenshots about every 30 seconds during an authorized full-monitoring window. A separately enabled capability permits about every 5 seconds only while an authorized teacher or administrator has the exact class view visible
 - **Visible Indicators**: Shows in-page and popup indicators when school-managed monitoring is active
 - **School Policy Compliance**: Designed for managed Chromebooks with district monitoring policies
 
@@ -93,6 +93,45 @@ waiting for the first five-second tick, so an opening class view shows a fresh
 preview right away. Renewal adoptions of an already-active cadence never
 repeat this capture, and the immediate capture obeys every gate the scheduled
 captures do.
+
+### School monitoring calendar, limited after-hours safety, and website policy (2.8.5)
+
+Version 2.8.5 follows the school's timezone, instructional calendar, and explicit
+date overrides when deciding whether the normal monitoring window is open.
+An overnight window belongs to its starting school date. Settings refresh about
+once a minute, and an authenticated heartbeat response can apply a changed
+monitoring-hours policy immediately.
+
+Outside that window, the school's **Off**, **Safety only**, or **Full** after-hours
+setting still controls behavior. Safety only (stored as `limited`) requires SchoolPilot and the
+extension to negotiate `afterHoursSafetyOnlyV1`; without that agreement it stays
+off. In safety-only mode, authenticated observations contain only the current tab's
+URL and title plus the protocol descriptor needed for server classification.
+The extension does not enumerate the other tabs, upload screenshots or safety
+evidence, connect the classroom WebSocket, or execute remote classroom commands
+in this mode. SchoolPilot handles safety review and notifications; safety-only mode
+does not provide teacher dashboard activity or close tabs for a safety finding.
+Full after-hours mode continues to permit normal monitoring when selected.
+
+When both sides negotiate `schoolWebsiteBlockEnforcementV1`, a school's updated
+website block policy installs navigation rules and closes already-open matching
+HTTP/HTTPS tabs during full monitoring. Domain rules match the named host and
+its subdomains, never a lookalike suffix. The worker checks the current student
+authority and each tab's unchanged URL immediately before closing it. It keeps
+a scoped policy revision and delivery result locally, retries acknowledgments,
+and rejects an older revision after a newer one has been applied. These policy
+closures do not request a screenshot. A policy update is distinct from an
+automatic classifier finding.
+
+This release adds no Chrome permission or managed-policy key. It preserves the
+2.8.4 restricted-sign-in fix below. It does not enable the independently gated
+five-second preview cadence. Current Safety Center findings require administrator
+review and never automatically close tabs or request safety-evidence screenshots.
+Before wider rollout, test the exact ZIP on
+Google Admin-managed Chromebooks across school-hours and calendar transitions,
+all three after-hours modes, a website block/unblock, a worker restart, and a
+student change. Automated Chromium tests do not replace that managed-device
+check or Chrome Web Store review.
 
 ### Restricted sign-in acceptance fix (2.8.4)
 
@@ -330,11 +369,10 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.4 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.4.zip` after clean-tag packaging. Existing 2.7.9, 2.8.0,
-2.8.1, 2.8.2, and 2.8.3 archives do not contain the complete school-configured
-authentication, lane isolation, downscaled active-preview, per-tab favicon, and
-restricted-sign-in behavior and must not be submitted.
+For the final 2.8.5 release, the canonical artifact name will be
+`dist/ClassPilot-v2.8.5.zip` after clean-tag packaging. Earlier archives do not
+contain this release's school-calendar, limited after-hours safety, and
+revisioned website-policy behavior and must not be submitted for this release.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
@@ -413,13 +451,24 @@ git rm --cached extension/config.js
 ## Privacy & Transparency
 
 ### What's Monitored Automatically
+During full monitoring:
+
 - Active tab title
 - Active tab URL
 - Timestamps of activity
 - Favicon URL of the active tab, and of each open HTTP/HTTPS tab in the tab snapshot (https-only, limited to origin and path, and capped at 512 characters)
 - Heartbeat, connection, and device health state
 - Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only teaching-session-bound thumbnails and discards student-session/gap pixels on receipt
-- An exact-bound screenshot immediately before a requested safety tab closure, when capture succeeds within the bounded window
+
+Current Safety Center findings require administrator review and do not
+automatically close tabs or request safety-evidence screenshots. Explicit
+administrator website policies and authorized classroom actions remain separate.
+
+If the school selects negotiated **Safety only** after-hours mode, only the current
+tab's URL and title are sent for safety classification with authenticated
+protocol metadata. Other-tab snapshots, screenshots, classroom WebSocket
+activity, and remote classroom commands stop. **Off** sends no browsing
+observations; **Full** retains normal monitoring behavior.
 
 ### What's NOT Monitored
 - Keystrokes or typed content
@@ -433,7 +482,7 @@ git rm --cached extension/config.js
 - Heartbeat sends data every 10 seconds
 - In negotiated tracking-window mode, active-tab thumbnails are captured about every 5 seconds only while an authorized teacher or administrator has the exact class view visible; otherwise capture remains about every 30 seconds while school-managed monitoring is active inside the server-authorized tracking window
 - Every upload is bound to the exact current student or teaching session and control revision. SchoolPilot discards gap/student-session pixels on receipt and retains only class-bound thumbnails
-- Capture stops when school tracking policy is hard-off, after sign-out/session expiry or an authentication/explicit license denial, or when the short-lived tracking-window lease expires or is revoked
+- Capture stops when school tracking policy is hard-off or limited safety-only, after sign-out/session expiry or an authentication/explicit license denial, or when the short-lived tracking-window lease expires or is revoked
 - The older observation-lease capability remains available for mixed-version rollout; a server-selected legacy screenshot mode remains an explicit fallback
 - Teacher sees current tab and URL history in real-time
 - Complies with school district monitoring policies for managed Chromebooks

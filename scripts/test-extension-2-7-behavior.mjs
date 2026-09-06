@@ -423,6 +423,12 @@ async function main() {
         trackingState = TRACKING_STATES.ACTIVE;
         const authContext = captureAuthenticatedContext(`fixture-${suffix}`);
         adoptLicenseState(true, 'active', authContext);
+        // Each authenticated fixture has a matching, permissive school policy.
+        // Capture and command entrypoints now independently check school hours.
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(authContext);
+        schoolSettingsFetchedAt = Date.now();
+
         return authContext;
       };
 
@@ -439,6 +445,7 @@ async function main() {
       const transmissions = [];
       try {
         const authA = installIdentity('a');
+        await durableLocalKv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope, [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
           acceptedCapabilities: ['studentChatIdempotencyV1'],
@@ -1087,6 +1094,7 @@ async function main() {
           sessionId: 'teaching-session-a',
         });
         let authB = installIdentity('b');
+        await durableLocalKv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope, [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
         const adoptedAuthRevisionRaceBinding = await adoptAuthenticatedStudentBinding(
           authRevisionRace,
           'auth revision race fixture',
@@ -1244,9 +1252,12 @@ async function main() {
         // authority transition. The remainder of the suite deliberately
         // starts without inheriting the prior context's revision watermark.
         authB = installIdentity('b');
+        await durableLocalKv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope, [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
         let replayCalls = 0;
-        fetchWithBackoff = async () => {
-          replayCalls += 1;
+        fetchWithBackoff = async (url) => {
+          // Background settings/ACK work may share this transport while the
+          // next fixtures run. Count only an attempted student-chat replay.
+          if (String(url).endsWith('/api/student/send-message')) replayCalls += 1;
           return new Response('{}', { status: 500 });
         };
         await flushStudentChatOutbox();
@@ -3286,6 +3297,7 @@ async function main() {
         ));
         revokeRetiredOffscreenAuthority = originalRevokeRetiredOffscreenAuthority;
         authB = installIdentity('b');
+        await durableLocalKv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope, [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
           acceptedCapabilities: allSupportedCapabilities,
@@ -4842,7 +4854,7 @@ async function main() {
       studentSessionId: 'student-session-b',
       controlRevision: 42,
     });
-    assert.equal(result.cleanAuthOrdinaryCommandExecutions, 1);
+    assert.equal(result.cleanAuthOrdinaryCommandExecutions, 1, JSON.stringify(result.cleanAuthOrdinaryCommandResult));
     assert.equal(
       result.cleanAuthOrdinaryCommandResult.openedUrl,
       'https://ordinary-command.example/',

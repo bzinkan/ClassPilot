@@ -37,6 +37,7 @@ try {
   console.info('[Config] No config.js override loaded; using managed policy or defaults');
 }
 importScripts('classroom-runtime-core.js');
+importScripts('school-website-policy.js');
 importScripts('vendor/sentry.browser.min.js');
 
 const RuntimeCore = globalThis.ClassPilotRuntimeCore;
@@ -315,6 +316,8 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'afterHoursSafetyOnlyV1',
+  'schoolWebsiteBlockEnforcementV1',
   'studentChatIdempotencyV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotActiveObservationCadenceV1',
@@ -332,6 +335,8 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'domainPreservingRestrictionsV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'afterHoursSafetyOnlyV1',
+  'schoolWebsiteBlockEnforcementV1',
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
@@ -560,6 +565,7 @@ const cameraActiveTabs = new Set();
 const TRACKING_STATES = {
   ACTIVE: 'ACTIVE',
   IDLE: 'IDLE',
+  SAFETY_ONLY: 'SAFETY_ONLY',
   OFF: 'OFF',
 };
 
@@ -567,7 +573,10 @@ const SCHOOL_SETTINGS_CACHE_KEY = 'schoolSettings';
 const SCHOOL_SETTINGS_FETCHED_AT_KEY = 'schoolSettingsFetchedAt';
 const SCHOOL_SETTINGS_SCOPE_KEY = 'schoolSettingsScopeV1';
 const GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY = 'globalBlockedDomainsScopeV1';
-const SETTINGS_FETCH_INTERVAL_MS = 60 * 60 * 1000;
+const SCHOOL_WEBSITE_POLICY_REVISION_KEY = 'schoolWebsitePolicyRevisionV1';
+const SCHOOL_WEBSITE_POLICY_ACK_KEY = 'schoolWebsitePolicyAckV1';
+let schoolWebsiteReconciliationTail = Promise.resolve();
+const SETTINGS_FETCH_INTERVAL_MS = 60 * 1000;
 const IDLE_DETECTION_SECONDS = 180;
 // The in-memory interval is the only steady-state heartbeat cadence. Chrome's
 // recurring alarm exists solely to recover after MV3 suspends the worker and
@@ -4364,7 +4373,9 @@ function isWithinTrackingHours(
   trackingStartTime,
   trackingEndTime,
   schoolTimezone,
-  trackingDays
+  trackingDays,
+  instructionalCalendar,
+  schedulingDateOverrides,
 ) {
   try {
     return RuntimeCore.isWithinTrackingWindow({
@@ -4373,6 +4384,8 @@ function isWithinTrackingHours(
       endTime: trackingEndTime || '23:59',
       timezone: schoolTimezone || 'America/New_York',
       activeDays: trackingDays || ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+      instructionalCalendar,
+      schedulingDateOverrides,
       now: Date.now(),
     });
   } catch (error) {
@@ -4512,7 +4525,9 @@ async function refreshSchoolSettings(options = {}) {
       return null;
     }
     const authenticatedResponseGuard = captureAuthenticatedResponseGuard();
-    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/extension/settings`, {
+    const settingsProtocolQuery = new URLSearchParams({ clientProtocolVersion: String(CLIENT_PROTOCOL_VERSION), capabilities: EXTENSION_CAPABILITIES.join(',') });
+    const settingsProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+    const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/extension/settings?${settingsProtocolQuery}`, {
       cache: 'no-store',
       headers: {
         'Authorization': `Bearer ${authContext.studentToken}`,
@@ -4528,6 +4543,10 @@ async function refreshSchoolSettings(options = {}) {
     }
     const settings = await response.json();
     assertCurrent();
+    if (Array.isArray(settings.acceptedCapabilities) && settingsProtocolGeneration >= protocolPolicyAppliedGeneration) {
+      protocolPolicyAppliedGeneration = settingsProtocolGeneration;
+      adoptNegotiatedProtocolState(settings, authContext);
+    }
     await adoptAuthenticatedStudentBinding(
       settings,
       'extension settings',
@@ -4552,6 +4571,9 @@ async function refreshSchoolSettings(options = {}) {
       schoolSettingsScope = expectedScope;
     }));
     console.log('[School Hours] Settings updated');
+    if (Number.isSafeInteger(settings.policyRevision) && [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
+      await reconcileSchoolWebsitePolicy(settings.blockedDomains || [], settings.policyRevision, { authContext });
+    }
     return settings;
   } catch (error) {
     if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
@@ -6031,10 +6053,18 @@ function determineTrackingState() {
     effectiveSettings.trackingStartTime,
     effectiveSettings.trackingEndTime,
     effectiveSettings.schoolTimezone,
-    effectiveSettings.trackingDays
+    effectiveSettings.trackingDays,
+    effectiveSettings.instructionalCalendar,
+    effectiveSettings.schedulingDateOverrides,
   );
 
   if (!withinHours) {
+    if (afterHoursMode === 'limited') {
+      const context = captureAuthenticatedContext('after-hours safety policy');
+      const supported = hasNegotiatedCapability('afterHoursSafetyOnlyV1', context);
+      isScheduleHardOff = !supported;
+      return supported ? TRACKING_STATES.SAFETY_ONLY : TRACKING_STATES.OFF;
+    }
     if (afterHoursMode === 'off') {
       isScheduleHardOff = true;
       return TRACKING_STATES.OFF;
@@ -6571,7 +6601,7 @@ async function transitionTrackingStateNow(nextState, reason, options = {}) {
   ) return false;
   const changedAt = Date.now();
   trackingState = nextState;
-  if (nextState === TRACKING_STATES.OFF) {
+  if (nextState === TRACKING_STATES.OFF || nextState === TRACKING_STATES.SAFETY_ONLY) {
     advanceScreenshotPolicyAuthority();
     screenshotImmediateCapturePending = false;
   }
@@ -6710,6 +6740,13 @@ async function updateTrackingState(reason = 'state-check') {
     scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
     scheduleScreenshotCapture(true);  // Enable screenshot capture when active
     connectWebSocket().catch(() => {});
+  } else if (trackingState === TRACKING_STATES.SAFETY_ONLY) {
+    scheduleHeartbeat(HEARTBEAT_ACTIVE_MINUTES);
+    scheduleScreenshotCapture(false);
+    await disconnectWebSocket(disconnectOptions);
+    await clearTeacherSessionStateForSignOut({ reason: 'after-hours-safety-only', emitEvent: false });
+    assertDecisionCurrent();
+    await clearFabAndOverlayState('after-hours-safety-only', { closeChat: true });
   } else if (trackingState === TRACKING_STATES.IDLE) {
     // Keep same heartbeat frequency and WebSocket connected even when Chrome reports idle
     // Chrome's idle detection (no keyboard/mouse) doesn't mean student is away
@@ -8505,6 +8542,7 @@ function scheduleMonitoringEventFlush(delayMs = MONITORING_EVENT_FLUSH_MS) {
 }
 
 function enqueueMonitoringEvent(type, metadata = {}, options = {}) {
+  if (trackingState === TRACKING_STATES.SAFETY_ONLY) return Promise.resolve(false);
   if (!hasStudentAuth() && !options.allowWithoutAuth) return Promise.resolve(false);
   let authContext;
   try {
@@ -10460,6 +10498,7 @@ function screenshotPolicyScope(context) {
 }
 
 function ambientScreenshotAllowed(context, nowValue = Date.now()) {
+  if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) return false;
   try {
     assertAuthenticatedContextCurrent(context, 'screenshot tracking-window lease');
   } catch {
@@ -14815,6 +14854,69 @@ async function clearClassroomBlockingRule() {
   await composeDynamicRules(['classroom', 'restrictionSso']);
 }
 
+async function flushSchoolWebsitePolicyAck(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'school policy acknowledgement');
+  const stored = (await durableLocalKv.get(SCHOOL_WEBSITE_POLICY_ACK_KEY))[SCHOOL_WEBSITE_POLICY_ACK_KEY];
+  if (!stored || stored.binding !== monitoringEventAuthBindingForContext(authContext)) return;
+  const { binding: _binding, ...payload } = stored;
+  const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/school-policy-acks`, {
+    method: 'POST', headers: buildDeviceAuthHeaders(authContext), body: JSON.stringify(payload), signal: authContext.signal,
+  }, { context: 'school policy acknowledgement', maxAttempts: 1 });
+  assertAuthenticatedContextCurrent(authContext, 'school policy acknowledgement response');
+  if (!response.ok) return;
+  const receipt = await response.json();
+  assertAuthenticatedContextCurrent(authContext, 'school policy acknowledgement receipt');
+  if (receipt.policyRevision !== stored.policyRevision || (!receipt.accepted && !receipt.terminal)) return;
+  const latest = (await durableLocalKv.get(SCHOOL_WEBSITE_POLICY_ACK_KEY))[SCHOOL_WEBSITE_POLICY_ACK_KEY];
+  if (latest?.binding === stored.binding && latest.policyRevision === stored.policyRevision) {
+    await durableLocalKv.remove(SCHOOL_WEBSITE_POLICY_ACK_KEY);
+  }
+}
+
+function reconcileSchoolWebsitePolicy(blockedDomains, policyRevision, options = {}) {
+  const authContext = options.authContext || captureAuthenticatedContext('school website policy');
+  const run = async () => {
+    const assertCurrent = () => {
+      assertAuthenticatedContextCurrent(authContext, 'school website policy enforcement');
+      if (options.sourceMessage) assertCurrentStudentBinding(options.sourceMessage, 'school website policy', { authContext });
+      if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
+        throw Object.assign(new Error('Website enforcement paused outside school hours'), { code: 'MONITORING_OUTSIDE_SCHOOL_HOURS' });
+      }
+    };
+    assertCurrent();
+    const capable = hasNegotiatedCapability('schoolWebsiteBlockEnforcementV1', authContext);
+    if (!capable || !Number.isSafeInteger(policyRevision) || policyRevision < 0) {
+      return updateGlobalBlacklistRules(blockedDomains, options);
+    }
+    const scope = schoolPolicyScopeForAuthContext(authContext);
+    const previous = (await durableLocalKv.get(SCHOOL_WEBSITE_POLICY_REVISION_KEY))[SCHOOL_WEBSITE_POLICY_REVISION_KEY];
+    assertCurrent();
+    if (previous?.scope === scope && previous.revision > policyRevision) return;
+    let outcome;
+    try {
+      const rules = await updateGlobalBlacklistRules(blockedDomains, { ...options, authContext });
+      assertCurrent();
+      outcome = await globalThis.ClassPilotSchoolWebsitePolicy.enforceExistingTabs({
+        rules, queryTabs: () => chrome.tabs.query({}), getTab: (id) => chrome.tabs.get(id),
+        closeTab: (id) => chrome.tabs.remove(id), assertCurrent,
+      });
+      assertCurrent();
+      await durableLocalKv.set({ [SCHOOL_WEBSITE_POLICY_REVISION_KEY]: { scope, revision: policyRevision } });
+    } catch (error) {
+      if (isAuthContextCancellation(error) || error?.code === 'MONITORING_OUTSIDE_SCHOOL_HOURS') throw error;
+      outcome = { status: 'failed', closedTabCount: 0, errorCode: 'POLICY_APPLY_FAILED' };
+    }
+    assertCurrent();
+    await durableLocalKv.set({ [SCHOOL_WEBSITE_POLICY_ACK_KEY]: {
+      binding: monitoringEventAuthBindingForContext(authContext), policyRevision, ...outcome,
+    } });
+    await flushSchoolWebsitePolicyAck(authContext).catch(() => {});
+  };
+  const next = schoolWebsiteReconciliationTail.catch(() => {}).then(run);
+  schoolWebsiteReconciliationTail = next.catch(() => {});
+  return next;
+}
+
 function updateGlobalBlacklistRules(blockedDomains, options = {}) {
   let authContext = options.authContext || null;
   if (!authContext && hasStudentAuth()) {
@@ -15307,6 +15409,9 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
     console.log('Skipping heartbeat - no deviceId');
     return;
   }
+  const effectiveTrackingState = determineTrackingState();
+  if (effectiveTrackingState !== trackingState) await updateTrackingState('heartbeat-school-hours');
+  if (effectiveTrackingState === TRACKING_STATES.OFF) return;
   let heartbeatAuthContext;
   try {
     heartbeatAuthContext = captureAuthenticatedContext(`heartbeat:${reason}`);
@@ -15367,19 +15472,22 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
     }
     // If tabs.length === 0, keep empty strings (no focused window or all windows minimized)
     
+    const safetyOnly = determineTrackingState() === TRACKING_STATES.SAFETY_ONLY;
+    // Safety-only observations never enumerate the student's other tabs.
     // Collect ALL open tabs for teacher dashboard
     // Use caching to prevent flickering when chrome.tabs.query returns inconsistent results
     let allOpenTabs = [];
     let tabSnapshotRevision = currentTabSnapshotRevision;
     try {
-      const allTabs = await boundedClassroomOperation(
+      const allTabs = safetyOnly ? [] : await boundedClassroomOperation(
         queryTabs({}),
         tabQueryTimeoutMs,
         'heartbeat all-tabs query',
       );
       assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:all-tabs`);
       const httpTabs = allTabs.filter(tab => tab.url && tab.url.startsWith('http'));
-      const tabSnapshot = await buildOpaqueTabSnapshot(httpTabs, heartbeatAuthContext);
+      const tabSnapshot = safetyOnly ? { tabs: [], revision: 0, localEntries: [] }
+        : await buildOpaqueTabSnapshot(httpTabs, heartbeatAuthContext);
       assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:tab-snapshot`);
       allOpenTabs = tabSnapshot.tabs;
       tabSnapshotRevision = tabSnapshot.revision;
@@ -15458,9 +15566,12 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
     };
     
     const headers = buildDeviceAuthHeaders(heartbeatAuthContext);
+    const requestPayload = safetyOnly ? {
+      ...extensionProtocolDescriptor(), activeTabUrl, activeTabTitle,
+    } : heartbeatData;
     const heartbeatMessageBinding = messageInboxAuthBinding();
     const heartbeatAuthResponseGuard = captureAuthenticatedResponseGuard();
-    attachLegacyStudentToken(heartbeatData, headers, heartbeatAuthContext);
+    attachLegacyStudentToken(requestPayload, headers, heartbeatAuthContext);
     if (headers.Authorization) {
       console.log('Sending JWT-authenticated heartbeat');
     } else {
@@ -15482,7 +15593,7 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
       response = await fetchWithBackoff(`${heartbeatAuthContext.serverOrigin}/api/device/heartbeat`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(heartbeatData),
+        body: JSON.stringify(requestPayload),
         signal: heartbeatRequestController.signal,
       }, {
         context: 'device heartbeat',
@@ -15565,6 +15676,7 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
       await recordHeartbeatFailure('server_unavailable', Date.now(), heartbeatAuthContext);
       console.warn('Heartbeat server responded:', response.status);
     } else if (response.ok) {
+      if (!safetyOnly) await flushSchoolWebsitePolicyAck(heartbeatAuthContext).catch(() => {});
       await recordHeartbeatSuccess(Date.now(), heartbeatAuthContext);
       if (isManualIdentitySource()) {
         assertAuthenticatedContextCurrent(heartbeatAuthContext, `heartbeat:${reason}:manual-last-seen`);
@@ -15589,6 +15701,37 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
           responseReceivedAt: heartbeatResponseReceivedAt,
           policySource: 'heartbeat',
         });
+        if (data.monitoringPolicy && data.monitoringPolicy.mode !== 'full') {
+          // A changed administrator schedule is authoritative immediately. Only
+          // the tracking-hours projection is accepted on this response path.
+          if (validSchoolSettingsPayload(data.trackingSettings)) {
+            const hours = data.trackingSettings;
+            await enqueueStudentAuthMutation(() => enqueueSchoolSettingsMutation(async () => {
+              assertAuthenticatedContextCurrent(heartbeatAuthContext, 'heartbeat monitoring settings');
+              const refreshed = {
+                ...schoolSettings,
+                enableTrackingHours: hours.enableTrackingHours,
+                trackingStartTime: hours.trackingStartTime,
+                trackingEndTime: hours.trackingEndTime,
+                trackingDays: hours.trackingDays,
+                schoolTimezone: hours.schoolTimezone,
+                afterHoursMode: hours.afterHoursMode,
+                instructionalCalendar: hours.instructionalCalendar || {},
+                schedulingDateOverrides: hours.schedulingDateOverrides || {},
+              };
+              const scope = schoolPolicyScopeForAuthContext(heartbeatAuthContext);
+              await kv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: refreshed, [SCHOOL_SETTINGS_SCOPE_KEY]: scope, [SCHOOL_SETTINGS_FETCHED_AT_KEY]: Date.now() });
+              assertAuthenticatedContextCurrent(heartbeatAuthContext, 'heartbeat monitoring settings saved');
+              schoolSettings = refreshed;
+              schoolSettingsScope = scope;
+              schoolSettingsFetchedAt = Date.now();
+            }));
+          } else {
+            await refreshSchoolSettings({ force: true, authContext: heartbeatAuthContext });
+          }
+          await updateTrackingState('server-monitoring-policy');
+          return;
+        }
         scheduleHeartbeatClassroomStateAdoption(data, heartbeatAuthContext, {
           applyClassroomState: options.applyClassroomState,
         });
@@ -16050,6 +16193,7 @@ async function encodeScreenshotVariant(dataUrl, variant = 'thumbnail') {
 }
 
 async function captureAndSendScreenshot(options = {}) {
+  if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) return;
   // Identity restoration includes the lightweight auth-tab redaction fence.
   // Do not await classroom/DNR/tab work; previews are an independent lane.
   await authStateRestorePromise;
@@ -16456,6 +16600,9 @@ function parseBoundedExpiry(value) {
 }
 
 async function captureSafetyEvidence(rawRequest, exactTargets, authContext, options = {}) {
+  if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
+    return { status: 'unavailable', reason: 'outside_school_hours' };
+  }
   const request = rawRequest && typeof rawRequest === 'object' ? rawRequest : null;
   const requestId = String(request?.requestId || '').trim().slice(0, 256);
   const tabRef = String(request?.tabRef || '').trim().slice(0, 256);
@@ -19278,6 +19425,11 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
 }
 
 async function executeRemoteControlCommand(command, executionContext = {}) {
+  if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
+    throw Object.assign(new Error('Classroom controls are unavailable outside monitoring hours'), {
+      code: 'MONITORING_OUTSIDE_SCHOOL_HOURS',
+    });
+  }
   console.log('[Command] Exact-bound remote control received:', safeDiagnosticLabel(command?.type));
   const commandAuthContext = executionContext.authContext
     || captureAuthenticatedContext(`remote-control:${command?.type || 'unknown'}`);
@@ -22697,6 +22849,7 @@ async function connectWebSocket() {
 }
 
 async function connectWebSocketNow(requestedAuthContext = null) {
+  if (trackingState === TRACKING_STATES.SAFETY_ONLY) return;
   if (trackingState === TRACKING_STATES.OFF) {
     console.log('Skipping WebSocket - tracking state is OFF');
     return;
@@ -22987,7 +23140,7 @@ async function handleWsMessage(
 
           // Apply blacklist rules and persist to storage
           try {
-            await updateGlobalBlacklistRules(receivedGlobalBlockedDomains, {
+            await reconcileSchoolWebsitePolicy(receivedGlobalBlockedDomains, message.settings.policyRevision, {
               authContext,
               sourceMessage: message,
             });
@@ -23110,7 +23263,7 @@ async function handleWsMessage(
         
         // Apply updated blacklist rules and persist to storage
         try {
-          await updateGlobalBlacklistRules(receivedGlobalBlockedDomains, {
+          await reconcileSchoolWebsitePolicy(receivedGlobalBlockedDomains, message.policyRevision, {
             authContext,
             sourceMessage: message,
           });

@@ -8,23 +8,22 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.8.4 restricted sign-in fix release documentation", () => {
-  it("pins every active release instruction to the versioned 2.8.4 artifact", () => {
+describe("2.8.5 release documentation and preserved sign-in guarantees", () => {
+  it("pins every active release instruction to the versioned 2.8.5 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.8.4.zip");
+      expect(source).toContain("ClassPilot-v2.8.5.zip");
+      expect(source).not.toContain("ClassPilot-v2.8.4.zip");
       expect(source).not.toContain("ClassPilot-v2.8.3.zip");
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
     }
-    // 2.8.3 is now a superseded archive, not a releasable one, so it joins the
-    // obsolete list rather than staying an active upload instruction.
-    expect(readme).toContain("Existing 2.7.9, 2.8.0,");
-    expect(readme).toContain("2.8.1, 2.8.2, and 2.8.3 archives do not contain");
-    expect(deployment).toContain("Existing 2.7.9, 2.8.0, 2.8.1, 2.8.2, and 2.8.3 archives are obsolete");
-    expect(deployment).toContain("A narrower 2.7.9, 2.8.0, 2.8.1, 2.8.2, or 2.8.3 archive is not releasable.");
+    expect(readme).toContain("Earlier archives do not");
+    expect(deployment).toContain("An earlier archive is not releasable as 2.8.5.");
+    expect(deployment).toContain("afterHoursSafetyOnlyV1");
+    expect(deployment).toContain("schoolWebsiteBlockEnforcementV1");
   });
 
   it("documents the restricted sign-in fix as a correctness fix only", () => {
