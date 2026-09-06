@@ -526,6 +526,20 @@
     }) || matches[0];
   }
 
+  function isDefaultRestrictionPortalUrl(policy, urlValue) {
+    if (!authPassThroughProfileForUrl(policy, urlValue)) return false;
+    const profile = policy.profiles.find((candidate) => candidate.id === policy.defaultProfileId);
+    if (!profile) return false;
+    const startHost = new URL(profile.startUrl).hostname;
+    const destinationHost = new URL(urlValue).hostname;
+    // A Clever profile also includes Google as an IdP dependency. Only the
+    // approved host family containing the configured launch URL proves portal
+    // entry; a leftover Google tab must not consume a fresh Clever login.
+    return profile.hostRules.some((rule) => (
+      authHostRuleMatchesHost(rule, startHost) && authHostRuleMatchesHost(rule, destinationHost)
+    ));
+  }
+
   function isAuthPassThroughTab(tab, policy) {
     return Boolean(isHttpTab(tab) && authPassThroughProfileForUrl(policy, tabUrl(tab)));
   }
@@ -719,8 +733,11 @@
       restrictions,
       ...(authPassThrough ? { authPassThrough } : {}),
       ...(authPassThroughPolicyRevision !== null ? { authPassThroughPolicyRevision } : {}),
-      ...(rawDeliveryContext.lateSignInRestrictionSso === true ? {
-        deliveryContext: { lateSignInRestrictionSso: true },
+      ...(rawDeliveryContext.lateSignInRestrictionSso === true || rawDeliveryContext.portalFirstOnLogin === true ? {
+        deliveryContext: {
+          ...(rawDeliveryContext.lateSignInRestrictionSso === true ? { lateSignInRestrictionSso: true } : {}),
+          ...(rawDeliveryContext.portalFirstOnLogin === true ? { portalFirstOnLogin: true } : {}),
+        },
       } : {}),
     };
   }
@@ -1035,18 +1052,11 @@
     if (!state || typeof urlValue !== 'string') return false;
     const restrictions = state.restrictions ?? emptyRestrictions();
     if (restrictions.screenLock?.active) {
-      try {
-        const actual = new URL(urlValue);
-        const destination = new URL(restrictions.screenLock.url);
-        if (!/^https?:$/.test(actual.protocol) || !/^https?:$/.test(destination.protocol)) return false;
-        actual.username = '';
-        actual.password = '';
-        destination.username = '';
-        destination.password = '';
-        return actual.toString() === destination.toString();
-      } catch (_) {
-        return false;
-      }
+      if (!isHttpTab({ url: urlValue })) return false;
+      return isHostWithinDomain(
+        normalizeDomain(urlValue),
+        normalizeDomain(restrictions.screenLock.domain || restrictions.screenLock.url),
+      );
     }
     const host = normalizeDomain(urlValue);
     return Boolean(host && restrictions.flightPath?.active
@@ -1180,8 +1190,6 @@
     const authAttempt = options.authPassThroughAttempt;
     const authAttemptInProgress = restrictionAuthPassThrough
       && ['in_progress', 'returning'].includes(authAttempt?.phase);
-    const authCallbackReady = restrictionAuthPassThrough
-      && options.authPassThroughReturnToDestination === true;
     const isAuthenticationTab = (tab) => restrictionAuthPassThrough
       ? isAuthPassThroughTab(tab, authPassThrough)
         || (authAttemptInProgress
@@ -1199,8 +1207,10 @@
     const requestedSsoPreserveIds = Array.isArray(options.preserveRestrictionSsoTabIds)
       ? options.preserveRestrictionSsoTabIds
       : [];
-    const mayProtectAuthenticationTab = (authAttemptInProgress && !authCallbackReady)
-      || legacyRestrictionSsoPassThrough;
+    // Approved authentication portals remain available for student app
+    // selection after bounded authentication bookkeeping has expired. A
+    // provider callback is not permission to choose an app for the student.
+    const mayProtectAuthenticationTab = restrictionSsoPassThrough;
     const foregroundSsoTabId = mayProtectAuthenticationTab
       ? ssoTabs.find((tab) => tab.id === foregroundTabId)?.id ?? null
       : null;
@@ -1231,12 +1241,45 @@
       : null;
     const coldSsoStart = restrictionAuthPassThrough
       ? state?.deliveryContext?.lateSignInRestrictionSso === true
+        && options.portalFirstLoginHandled !== true
         && authAttemptInProgress
-        && !authCallbackReady
       : legacyRestrictionSsoPassThrough && visitedSsoHosts.length === 0;
     const coldSsoStartUrl = restrictionAuthPassThrough
       ? defaultAuthProfile?.startUrl || null
       : RESTRICTION_SSO_COLD_START_URL;
+
+    if (options.portalFirstOnLogin === true && defaultAuthProfile
+      && !restrictions.attentionMode?.active
+      && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
+      // Login entry is independent of control revisions. Preserve every
+      // teacher-approved page, and reuse a portal tab without reloading it.
+      const portalTab = ssoTabs.find((tab) => (
+        isDefaultRestrictionPortalUrl(authPassThrough, tabUrl(tab))
+      ));
+      const destinationTabs = tabs.filter((tab) => (
+        isHttpTab(tab) && !isAuthenticationTab(tab) && isRestrictionDestinationUrl(state, tabUrl(tab))
+      ));
+      const outsideTabs = tabs.filter((tab) => (
+        isHttpTab(tab) && !isAuthenticationTab(tab)
+        && !destinationTabs.some((destination) => destination.id === tab.id)
+      ));
+      const retained = portalTab;
+      let portalTabId = retained?.id ?? null;
+      if (retained) {
+        if (retained.id !== foregroundTabId) plan.activateTabId = retained.id;
+        plan.removeTabIds.push(...outsideTabs.map((tab) => tab.id));
+      } else if (outsideTabs[0]) {
+        portalTabId = outsideTabs[0].id;
+        plan.updates.push({ tabId: portalTabId, url: defaultAuthProfile.startUrl });
+        plan.activateTabId = portalTabId;
+        plan.removeTabIds.push(...outsideTabs.slice(1).map((tab) => tab.id));
+      } else {
+        plan.createUrl = defaultAuthProfile.startUrl;
+      }
+      plan.focusFallbackUrl = defaultAuthProfile.startUrl;
+      return appendTabLimitRemovals(plan, state, tabs, { ...options, foregroundTabId },
+        portalTabId, [portalTabId, destinationTabs[0]?.id]);
+    }
 
     // An in-progress authentication flow is intentionally not destination-
     // compliant, but reconciliation must not navigate it or steal focus while
@@ -1644,6 +1687,7 @@
     authHostRuleMatchesHost,
     normalizeAuthPassThrough,
     authPassThroughProfileForUrl,
+    isDefaultRestrictionPortalUrl,
     isAuthPassThroughTab,
     isRestrictionDestinationUrl,
     safeRestrictionTarget,

@@ -795,7 +795,7 @@ describe("ClassPilot classroom runtime core", () => {
     ))).toHaveLength(1);
   });
 
-  it("uses provider-first only for deferred state and protects only an active attempt", () => {
+  it("preserves approved authentication portals after bounded attempt expiry", () => {
     const deferred = state(12, {
       authPassThrough: authPolicy(),
       deliveryContext: { lateSignInRestrictionSso: true },
@@ -833,10 +833,8 @@ describe("ClassPilot classroom runtime core", () => {
       restrictionAuthPassThrough: true,
       authPassThroughAttempt: { phase: "timed_out" },
     });
-    expect(timedOut.updates).toEqual([{
-      tabId: 1,
-      url: "https://classroom.google.com/c/one",
-    }]);
+    expect(timedOut.updates).toEqual([]);
+    expect(timedOut.activateTabId).toBeNull();
 
     const popupPlaceholder = core.planClassroomTabReconciliation(deferred, [
       { id: 7, windowId: 70, active: true, url: "about:blank" },
@@ -852,7 +850,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(popupPlaceholder.activateTabId).toBeNull();
   });
 
-  it("returns a committed provider round-trip to the assignment without claiming completion", () => {
+  it("leaves a committed provider round-trip in the portal for student app selection", () => {
     const deferred = state(13, {
       authPassThrough: authPolicy(),
       deliveryContext: { lateSignInRestrictionSso: true },
@@ -876,16 +874,94 @@ describe("ClassPilot classroom runtime core", () => {
         providerId: "clever",
         activeTabId: 7,
       },
-      authPassThroughReturnToDestination: true,
     });
-    expect(plan.updates).toEqual([{
-      tabId: 7,
-      url: "https://classroom.google.com/c/one",
-    }]);
+    expect(plan.updates).toEqual([]);
+    expect(plan.activateTabId).toBeNull();
     expect(plan.removeTabIds).toEqual([]);
   });
 
-  it("completes Waypoints only at the exact destination URL", () => {
+  it("enters the login portal while preserving approved app pages without reloads", () => {
+    const snapshot = state(14, {
+      authPassThrough: authPolicy(),
+      restrictions: {
+        flightPath: { active: true, allowedDomains: ["ixl.com", "math.example"] },
+      },
+    });
+    const options = {
+      foregroundTabId: 1,
+      restrictionAuthPassThrough: true,
+      portalFirstOnLogin: true,
+      portalFirstLoginHandled: true,
+    };
+    const approvedTabs = [
+      { id: 1, active: true, url: "https://www.ixl.com/math/grade-3?skill=one" },
+      { id: 2, active: false, url: "https://math.example/lesson/two#answer" },
+    ];
+    const create = core.planClassroomTabReconciliation(snapshot, approvedTabs, options);
+    expect(create.updates).toEqual([]);
+    expect(create.removeTabIds).toEqual([]);
+    expect(create.createUrl).toBe("https://district.clever.com/login?school=one");
+    const reuse = core.planClassroomTabReconciliation(snapshot, [
+      ...approvedTabs,
+      { id: 3, active: false, url: "https://district.clever.com/in/student" },
+      { id: 4, active: false, url: "https://outside.example/app" },
+    ], options);
+    expect(reuse.updates).toEqual([]);
+    expect(reuse.createUrl).toBeNull();
+    expect(reuse.activateTabId).toBe(3);
+    expect(reuse.removeTabIds).toEqual([4]);
+    const priorGoogle = core.planClassroomTabReconciliation(snapshot, [
+      ...approvedTabs,
+      { id: 9, active: true, url: "https://accounts.google.com/o/oauth2/auth" },
+    ], { ...options, foregroundTabId: 9 });
+    expect(priorGoogle.createUrl).toBe("https://district.clever.com/login?school=one");
+    expect(priorGoogle.activateTabId).toBeNull();
+    expect(core.isDefaultRestrictionPortalUrl(snapshot.authPassThrough,
+      "https://accounts.google.com/o/oauth2/auth")).toBe(false);
+    expect(core.isDefaultRestrictionPortalUrl(snapshot.authPassThrough,
+      "https://clever.com/in/student")).toBe(true);
+    const subsequent = core.planClassroomTabReconciliation({
+      ...snapshot, revision: 15,
+      deliveryContext: { lateSignInRestrictionSso: true },
+    }, approvedTabs, {
+      ...options, portalFirstOnLogin: false,
+      authPassThroughAttempt: { phase: "in_progress" },
+    });
+    expect(subsequent.createUrl).toBeNull();
+    expect(subsequent.updates).toEqual([]);
+  });
+
+  it("keeps portal entry within the independent tab limit and attention control", () => {
+    const snapshot = state(15, {
+      authPassThrough: authPolicy(),
+      restrictions: {
+        screenLock: { active: true, url: "https://ixl.com/math", domain: "ixl.com" },
+        tabLimit: { active: true, maxTabs: 1 },
+      },
+    });
+    const tabs = [
+      { id: 1, active: true, url: "https://ixl.com/math/one" },
+      { id: 2, active: false, url: "https://ixl.com/math/two" },
+      { id: 3, active: false, url: "https://district.clever.com/in/student" },
+    ];
+    const plan = core.planClassroomTabReconciliation(snapshot, tabs, {
+      foregroundTabId: 1, maxTabs: 1,
+      restrictionAuthPassThrough: true, portalFirstOnLogin: true,
+    });
+    expect(plan.activateTabId).toBe(3);
+    expect(plan.removeTabIds).toContain(2);
+    expect(plan.removeTabIds).not.toContain(3);
+    const attention = core.planClassroomTabReconciliation({
+      ...snapshot,
+      restrictions: { ...snapshot.restrictions, attentionMode: { active: true, message: "Look up" } },
+    }, tabs, {
+      foregroundTabId: 1, restrictionAuthPassThrough: true, portalFirstOnLogin: true,
+    });
+    expect(attention.createUrl).not.toBe("https://district.clever.com/login?school=one");
+    expect(attention.updates.some((update: { url: string }) => update.url.includes("clever.com"))).toBe(false);
+  });
+
+  it("completes Waypoints on the approved domain including subpages and queries", () => {
     const waypoint = state(14, {
       restrictions: {
         screenLock: {
@@ -902,11 +978,13 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isRestrictionDestinationUrl(
       waypoint,
       "https://classroom.google.com/c/two/authuser-0",
-    )).toBe(false);
+    )).toBe(true);
     expect(core.isRestrictionDestinationUrl(
       waypoint,
       "https://classroom.google.com/c/one/authuser-1",
-    )).toBe(false);
+    )).toBe(true);
+    expect(core.isRestrictionDestinationUrl(waypoint, "https://classroom.google.com.evil.example/c/one")).toBe(false);
+    expect(core.isRestrictionDestinationUrl(waypoint, "https://sub.classroom.google.com/c/two?app=math#lesson")).toBe(true);
   });
 
   it("allows exact Clever and Google authentication families without accepting lookalikes", () => {

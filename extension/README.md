@@ -228,10 +228,20 @@ capability are verified. The policy may contain Google, Clever, or bounded
 district identity-provider profiles. A teacher command cannot add or broaden
 an authentication host.
 
-A cold deferred restriction opens the school's configured default provider
-before the learning destination. A live restriction opens the destination
-normally and enters authentication only if that navigation redirects to an
-approved provider. Host matching is exact unless the administrator explicitly
+With the 2.8.6 `restrictionPortalFirstV1` companion capability, signing into
+ClassPilot while a Waypoint or Flight Path is already active opens the school's
+configured default portal first. This applies to both existing and deferred
+restrictions. The student signs into the portal and selects an app; provider
+callbacks do not force a return to the teacher's starting page. Existing
+approved pages remain open without reloading, subject to the separate tab limit.
+Deferred restrictions still require the independent `lateSignInRestrictionSsoV1`
+gate; portal-first does not bypass deferred-delivery eligibility.
+Later teacher actions and heartbeat updates do not reopen the portal. An app
+selected from the portal must still be inside the teacher's allowed domain(s).
+Waypoint allows the selected site's domain and subdomains; Flight Path allows
+the selected websites, including their paths and query strings. Later navigation
+may still use the approved sign-in providers. Authentication host matching is exact
+unless the administrator explicitly
 allows subdomains; substring matches and lookalike suffixes are rejected.
 Attention mode and school or teacher blocks have higher priority than the
 authentication exception, which in turn has higher priority than the
@@ -240,13 +250,28 @@ Waypoint/Flight Path redirect.
 Authentication uses one exact-binding, control-revision, and policy-revision
 state machine with an absolute 300-second attempt limit. Reaching Clever,
 Google Accounts, or another provider does not mark the restriction complete;
-completion requires the active flow to reach the exact Waypoint destination or
-an allowed Flight Path destination. A timed-out flow returns to the destination
-and offers a bounded retry. An active authentication tab or popup is preserved
+completion requires the active flow to reach an approved Waypoint domain or
+an allowed Flight Path destination. Attempt expiry clears bounded bookkeeping;
+it does not close the portal, choose an app, or move the student's tab. A later
+sign-in can start another bounded attempt. An authentication tab or popup is preserved
 without being counted as destination-compliant or pulling focus away mid-login.
 The state is cleared on sign-out, restriction removal, timeout, or any identity,
 school, device, server, or managed-policy transition, and it can be restored
 safely after an MV3 worker restart.
+
+Portal-first requires the existing school authentication rollout and exact
+negotiation of `restrictionPortalFirstV1`; it adds no separate operator flag.
+Only the exact login response can initiate it, after the authentication commit.
+The sign-in overlay stays on loading until those restrictions are installed;
+students are not asked to re-enter their credentials during that interval.
+A separate local record retains an opaque binding digest and pending/entered/
+cancelled phase. Pending records also hold the initial control/policy revisions
+and original restriction deadline plus the numeric portal tab ID. Changing those revisions, blocking the
+default portal, removing the restriction, expiry, or sign-out cancels pending
+entry. Already-entered bindings never reopen the portal on policy updates.
+The pending record is saved before commit so a worker restart cannot lose it;
+no provider URL, raw student identifier, or credential is stored in this record.
+These changes add no Chrome permission or managed-policy schema field.
 
 Extension-local authentication state contains only a binding digest, policy
 revision, control revision, provider id, bounded timestamps, and the active tab
@@ -369,10 +394,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the final 2.8.5 release, the canonical artifact name will be
-`dist/ClassPilot-v2.8.5.zip` after clean-tag packaging. Earlier archives do not
-contain this release's school-calendar, limited after-hours safety, and
-revisioned website-policy behavior and must not be submitted for this release.
+For the prepared 2.8.6 candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.8.6.zip` after clean-tag packaging. Earlier archives do not
+contain this release's portal-first student app selection and must not be
+submitted for this release. The candidate must also retain 2.8.5's school-calendar,
+limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 

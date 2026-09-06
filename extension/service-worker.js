@@ -316,6 +316,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'restrictionPortalFirstV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
   'studentChatIdempotencyV1',
@@ -343,6 +344,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'restrictionPortalFirstV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotActiveObservationCadenceV1',
   'screenshotObservationLeaseV1',
@@ -646,11 +648,13 @@ const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object.freeze([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'restrictionPortalFirstV1',
 ]);
 const RESTRICTION_SSO_VISIT_STORAGE_KEY = 'restrictionSsoVisitStateV1';
 const RESTRICTION_SSO_VISIT_SCHEMA_VERSION = 1;
 const RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY = 'restrictionAuthAttemptStateV1';
 const RESTRICTION_AUTH_ATTEMPT_SCHEMA_VERSION = 1;
+const RESTRICTION_PORTAL_ENTRY_STORAGE_KEY = 'restrictionPortalEntryV1';
 const RESTRICTION_AUTH_ATTEMPT_ALARM = 'restriction-auth-attempt-expiry';
 const RESTRICTION_AUTH_POLICY_FENCE_STORAGE_KEY = 'restrictionAuthPolicyFenceV1';
 const RESTRICTION_AUTH_POLICY_FENCE_SCHEMA_VERSION = 1;
@@ -9741,7 +9745,151 @@ let restrictionAuthAttemptScopeDigest = null;
 let restrictionAuthAttemptState = null;
 let restrictionAuthAttemptMutation = Promise.resolve();
 let restrictionAuthPolicyFenceState = null;
+let restrictionPortalEntryState = null;
+let restrictionPortalEntryScopeDigest = null;
+let restrictionPortalEntryMutation = Promise.resolve();
+let restrictionPortalPolicyRefreshPending = false;
+let restrictionPortalPresentationFence = null;
 const restrictionAuthPopupPlaceholders = new Map();
+
+async function restoreRestrictionPortalEntryNow(context) {
+  assertAuthenticatedContextCurrent(context, 'restriction portal binding');
+  const source = JSON.stringify([
+    'restriction-portal-login-v1', context.serverOrigin, context.schoolId,
+    context.studentId, context.studentSessionId, context.deviceId, context.authContextId,
+  ]);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+  assertAuthenticatedContextCurrent(context, 'restriction portal binding');
+  const scopeDigest = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (restrictionPortalEntryScopeDigest === scopeDigest) return restrictionPortalEntryState;
+  const stored = await rawLocalKv.get([RESTRICTION_PORTAL_ENTRY_STORAGE_KEY]);
+  assertAuthenticatedContextCurrent(context, 'restriction portal restore');
+  const record = stored[RESTRICTION_PORTAL_ENTRY_STORAGE_KEY];
+  restrictionPortalEntryScopeDigest = scopeDigest;
+  restrictionPortalEntryState = record?.schemaVersion === 1 && record.scopeDigest === scopeDigest
+    && ['pending', 'entered', 'cancelled'].includes(record.phase) ? record : null;
+  if (record && !restrictionPortalEntryState) await rawLocalKv.remove(RESTRICTION_PORTAL_ENTRY_STORAGE_KEY);
+  assertAuthenticatedContextCurrent(context, 'restriction portal restore');
+  return restrictionPortalEntryState;
+}
+
+function enqueueRestrictionPortalEntryMutation(operation) {
+  const next = restrictionPortalEntryMutation.then(operation, operation);
+  restrictionPortalEntryMutation = next.catch(() => undefined);
+  return next;
+}
+
+function ensureRestrictionPortalEntryForContext(context) {
+  return enqueueRestrictionPortalEntryMutation(() => restoreRestrictionPortalEntryNow(context));
+}
+
+function setRestrictionPortalEntryPhase(context, phase, options = {}) {
+  return enqueueRestrictionPortalEntryMutation(async () => {
+    const existing = await restoreRestrictionPortalEntryNow(context);
+    if (options.initializeOnly === true && existing) return existing;
+    if (options.pendingOnly === true && existing?.phase !== 'pending') return existing;
+    const record = {
+      schemaVersion: 1, scopeDigest: restrictionPortalEntryScopeDigest, phase,
+      ...(phase === 'pending' ? {
+        controlRevision: options.state.revision,
+        policyRevision: options.state.authPassThrough.policyRevision,
+        expiresAt: Math.min(options.state.hardExpiresAt, options.state.scheduledEndAt || Infinity),
+      } : {}),
+    };
+    await rawLocalKv.set({ [RESTRICTION_PORTAL_ENTRY_STORAGE_KEY]: record });
+    assertAuthenticatedContextCurrent(context, 'restriction portal persistence');
+    restrictionPortalEntryState = record;
+    return record;
+  });
+}
+
+function clearRestrictionPortalEntryState() {
+  return enqueueRestrictionPortalEntryMutation(async () => {
+    restrictionPortalEntryState = null;
+    restrictionPortalEntryScopeDigest = null;
+    restrictionPortalPolicyRefreshPending = false;
+    restrictionPortalPresentationFence = null;
+    await rawLocalKv.remove(RESTRICTION_PORTAL_ENTRY_STORAGE_KEY);
+  });
+}
+
+function beginRestrictionPortalPresentation(context, expiresAt) {
+  assertAuthenticatedContextCurrent(context, 'portal login presentation');
+  restrictionPortalPresentationFence = { authContextId: context.authContextId, expiresAt };
+}
+
+function restrictionPortalPresentationPending() {
+  if (restrictionPortalPresentationFence
+    && (restrictionPortalPresentationFence.authContextId !== CONFIG.authContextId
+      || restrictionPortalPresentationFence.expiresAt <= Date.now())) {
+    restrictionPortalPresentationFence = null;
+  }
+  return Boolean(restrictionPortalPresentationFence
+    || (restrictionPortalPolicyRefreshPending && restrictionPortalEntryState?.phase === 'pending'
+      && Number.isFinite(restrictionPortalEntryState.expiresAt)
+      && restrictionPortalEntryState.expiresAt > Date.now()));
+}
+
+function releaseRestrictionPortalPresentation(context) {
+  if (restrictionPortalPresentationFence?.authContextId !== context?.authContextId) return false;
+  restrictionPortalPresentationFence = null;
+  return true;
+}
+
+function rememberRestrictionPortalTab(context, tabId) {
+  if (!Number.isInteger(tabId)) return Promise.resolve();
+  return enqueueRestrictionPortalEntryMutation(async () => {
+    const entry = await restoreRestrictionPortalEntryNow(context);
+    if (entry?.phase !== 'pending') return;
+    const record = { ...entry, tabId };
+    await rawLocalKv.set({ [RESTRICTION_PORTAL_ENTRY_STORAGE_KEY]: record });
+    assertAuthenticatedContextCurrent(context, 'restriction portal tab ownership');
+    restrictionPortalEntryState = record;
+  });
+}
+
+async function cancelRestrictionPortalForRemovedTab(context, tabId) {
+  const entry = await ensureRestrictionPortalEntryForContext(context);
+  if (entry?.phase === 'pending' && entry.tabId === tabId) {
+    await setRestrictionPortalEntryPhase(context, 'cancelled', { pendingOnly: true });
+  }
+}
+
+async function restrictionPortalEntryPending(state, context) {
+  const entry = await ensureRestrictionPortalEntryForContext(context);
+  if (entry?.phase !== 'pending') return false;
+  if (restrictionPortalPolicyRefreshPending
+    && Number.isFinite(entry.expiresAt) && entry.expiresAt > Date.now()) return false;
+  if (!restrictionAuthPassThroughForState(state)
+    || !hasNegotiatedCapability('restrictionPortalFirstV1', context)
+    || entry.controlRevision !== state?.revision
+    || entry.policyRevision !== state?.authPassThrough?.policyRevision
+    || !Number.isFinite(entry.expiresAt) || entry.expiresAt <= Date.now()
+    || RuntimeCore.classroomStateExpiry(state, Date.now()).expired) {
+    await setRestrictionPortalEntryPhase(context, 'cancelled', { pendingOnly: true });
+    return false;
+  }
+  if (state.restrictions.attentionMode?.active) return false;
+  const profile = state.authPassThrough.profiles.find((candidate) => (
+    candidate.id === state.authPassThrough.defaultProfileId
+  ));
+  if (!profile || restrictionAuthUrlBlockedByHigherPriority(profile.startUrl)) {
+    await setRestrictionPortalEntryPhase(context, 'cancelled', { pendingOnly: true });
+    return false;
+  }
+  return true;
+}
+
+async function observeRestrictionPortalEntry(urlValue, state, context) {
+  if (!restrictionAuthPassThroughForState(state)
+    || !RuntimeCore.isDefaultRestrictionPortalUrl(state.authPassThrough, urlValue)
+    || restrictionAuthUrlBlockedByHigherPriority(urlValue)) return;
+  if (!await restrictionPortalEntryPending(state, context)) return;
+  const entry = await ensureRestrictionPortalEntryForContext(context);
+  if (entry?.phase === 'pending') {
+    await setRestrictionPortalEntryPhase(context, 'entered', { pendingOnly: true });
+  }
+}
 
 function enqueueRestrictionAuthAttemptMutation(operation) {
   const run = () => operation();
@@ -10301,6 +10449,7 @@ function observeRestrictionAuthNavigationForAuth(urlValue, context, tabId = null
     assertAuthenticatedContextCurrent(context, 'restriction auth navigation');
     const state = currentClassroomState;
     if (!restrictionAuthPassThroughForState(state)) return false;
+    if (options.committed === true) await observeRestrictionPortalEntry(urlValue, state, context);
     await ensureRestrictionAuthAttemptForStateNow(state, context);
     assertAuthenticatedContextCurrent(context, 'restriction auth navigation');
     if (restrictionAuthDestinationMatches(urlValue, state)) {
@@ -10344,15 +10493,12 @@ function observeRestrictionAuthNavigationForAuth(urlValue, context, tabId = null
     const observedExternalProvider = existingActive
       && restrictionAuthAttemptState.phase === 'in_progress'
       && profile.id !== initialProviderId;
-    const completedProviderRoundTrip = existingActive
-      && restrictionAuthAttemptState.phase === 'returning'
-      && profile.id === initialProviderId;
     const next = existingActive
       ? {
           ...restrictionAuthAttemptState,
           // Keep the initial provider id as the privacy-minimal round-trip
           // anchor. Clever -> Google marks `returning`; the later Clever
-          // callback can then attempt the assignment without claiming success.
+          // callback returns to the portal for student app selection.
           phase: observedExternalProvider ? 'returning' : restrictionAuthAttemptState.phase,
           providerId: initialProviderId,
           activeTabId: Number.isInteger(tabId) ? tabId : restrictionAuthAttemptState.activeTabId,
@@ -10372,16 +10518,8 @@ function observeRestrictionAuthNavigationForAuth(urlValue, context, tabId = null
     scheduleEventHeartbeat(observedExternalProvider
       ? 'restriction-auth-returning'
       : 'restriction-auth-started');
-    if (completedProviderRoundTrip && options.committed === true) {
-      // The provider callback has committed, so cookies/session state are no
-      // longer at risk of being interrupted. Try the assigned destination;
-      // only a later exact destination commit marks authentication complete.
-      Promise.resolve().then(() => reconcileClassroomStateTabsBestEffort(state, {
-        authContext: context,
-        authPassThroughReturnToDestination: true,
-        transientCurrentPage: transientCurrentPageRestrictionActive,
-      })).catch(() => {});
-    }
+    // Provider completion leaves the portal open. Only a later navigation to
+    // a teacher-approved website completes the restriction's auth attempt.
     return true;
   });
 }
@@ -10426,6 +10564,7 @@ function cancelRestrictionAuthAttemptForRemovedTab(tabId, context, options = {})
     assertAuthenticatedContextCurrent(context, 'restriction auth tab cancellation');
     const state = currentClassroomState;
     if (!restrictionAuthPassThroughForState(state)) return false;
+    await cancelRestrictionPortalForRemovedTab(context, tabId);
     await ensureRestrictionAuthAttemptForStateNow(state, context);
     if (!restrictionAuthAttemptState
       || !['in_progress', 'returning', 'complete'].includes(restrictionAuthAttemptState.phase)
@@ -10475,20 +10614,9 @@ async function handleRestrictionAuthAttemptExpiry() {
       return false;
     }
     await retireRestrictionAuthAttemptAfterTimeoutNow(context, state);
-    notifyTeacherMessageForAuth({
-      title: 'Sign-in timed out',
-      message: 'ClassPilot is reopening your assigned page. Start sign-in again to retry.',
-      priority: 1,
-    }, context, browserPolicyEnvelopeForAuth(context), 'restriction-auth-timeout').catch((error) => {
-      if (!isAuthContextCancellation(error)) {
-        console.warn('[Restriction Auth] Timeout notification deferred:', safeDiagnosticError(error));
-      }
-    });
     scheduleEventHeartbeat('restriction-auth-timeout');
-    reconcileClassroomStateTabsBestEffort(state, {
-      authContext: context,
-      transientCurrentPage: transientCurrentPageRestrictionActive,
-    }).catch(() => {});
+    // The five-minute limit bounds the auth attempt record, not the student's
+    // time to choose an approved app. Keep the portal and its focus intact.
     return true;
   });
 }
@@ -11663,12 +11791,13 @@ function refreshSharedSignInLoginConfig(options = {}) {
 
 function getAuthGateState() {
   const hasSchoolSetup = hasManagedSchoolSetup();
-  const authRequired = !hasStudentAuth();
+  const presentationPending = restrictionPortalPresentationPending();
+  const authRequired = !hasStudentAuth() || presentationPending;
   if (lastAuthGateAuthRequired !== authRequired) {
     lastAuthGateAuthRequired = authRequired;
     bumpAuthGateStateRevision();
   }
-  const phase = authRequired
+  const phase = presentationPending ? 'loading' : authRequired
     ? (fastAuthGateEnabled
       ? sharedSignInLoginConfig.phase
       : (!hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true
@@ -12288,6 +12417,7 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
   // school, session, device, or server transition. Do not attempt an old
   // message under a later credential.
   await discardStudentChatOutbox().catch(() => {});
+  await clearRestrictionPortalEntryState().catch(() => {});
   await clearRestrictionSsoVisitState().catch(() => {});
   await clearRestrictionAuthAttemptState().catch(() => {});
   await clearRestrictionAuthPolicyFenceState().catch(() => {});
@@ -13068,12 +13198,22 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
     assertCurrent();
   }
   if (!snapshot) {
+    if (authContext) {
+      if (restrictionPortalPolicyRefreshPending) {
+        beginRestrictionPortalPresentation(authContext, restrictionPortalEntryState?.expiresAt || Date.now());
+      }
+      restrictionPortalPolicyRefreshPending = false;
+      await setRestrictionPortalEntryPhase(authContext, 'cancelled', { pendingOnly: true });
+    }
     await clearTeacherSessionStateForSignOut({
       emitEvent: false,
       reason: `${reason}_no_state`,
       preserveTransientOverlays: true,
     });
     assertCurrent();
+    if (authContext && releaseRestrictionPortalPresentation(authContext)) {
+      notifyAuthGateStateToTabs({ triggerRefresh: false }).catch(() => {});
+    }
     if (CONFIG.activeStudentId) {
       await setManualAuthState({
         [CLASSROOM_STATE_STUDENT_BINDING_KEY]: CONFIG.activeStudentId,
@@ -13094,7 +13234,11 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
     // student/session/device token binding. It is authoritative across student
     // changes on a shared device, where revisions are not comparable between
     // the old and new student's independent control rows.
-    await applyClassroomState(snapshot, { reason, authContext, authorityEnvelope: data });
+    await applyClassroomState(snapshot, {
+      reason, authContext, authorityEnvelope: data,
+      trustedPortalFirstLogin: options.trustedPortalFirstLogin === true,
+      force: options.trustedPortalFirstLogin === true,
+    });
     assertCurrent();
     if (CONFIG.activeStudentId) {
       await setManualAuthState({
@@ -13113,6 +13257,60 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
       { authContext, authorityEnvelope: data },
     );
     assertCurrent();
+  }
+}
+
+async function applyLoginClassroomStateAndCommit(data, reason, context, generation, beforeCommit = () => {}) {
+  const portalFirst = data?.classroomState?.deliveryContext?.portalFirstOnLogin === true;
+  const options = { requireApplied: true, authContext: context, authMutationHeld: true };
+  let stagedData = data;
+  if (portalFirst) {
+    // Validate and stage the exact login response without running destination
+    // tab side effects against a still-pending authentication context.
+    assertCurrentStudentBinding(data, 'portal login staging', { authContext: context });
+    observeExactStudentControlRevision(data, context, 'portal login control revision');
+    const prepared = await resolveCurrentUrlMarker(data.classroomState, () => (
+      assertAuthenticatedContextCurrent(context, 'portal login staging')
+    ));
+    await validateRestrictionAuthPassThroughContext(prepared, data, context, {
+      trustedPortalFirstLogin: true,
+    });
+    const stagedState = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (!restrictionAuthPassThroughForState(stagedState)) {
+      throw new Error('Portal entry requires an active classroom restriction');
+    }
+    // Survive a worker stop after auth commit but before the staged snapshot
+    // applies. A later exact server snapshot can resume this bounded intent;
+    // provider URLs and the login marker never need to be persisted.
+    await setRestrictionPortalEntryPhase(context, 'pending', { initializeOnly: true, state: stagedState });
+    await kv.set({
+      [CLASSROOM_STATE_STORAGE_KEY]: persistedClassroomStateSnapshot(stagedState),
+      [CLASSROOM_STATE_FAILSAFE_EXPIRY_KEY]: stagedState.hardExpiresAt,
+    });
+    await setManualAuthState({ [CLASSROOM_STATE_STUDENT_BINDING_KEY]: context.studentId });
+    assertAuthenticatedContextCurrent(context, 'portal login durable staging');
+    beginRestrictionPortalPresentation(context, Math.min(stagedState.hardExpiresAt, stagedState.scheduledEndAt || Infinity));
+    stagedData = { ...data, classroomState: prepared };
+  } else {
+    await applyClassroomStateFromAuthResponse(data, reason, options);
+  }
+  assertAuthMutationCurrent(generation, reason);
+  beforeCommit();
+  await completeStudentAuthCommit(generation, `${reason} commit`);
+  if (portalFirst) {
+    try {
+      await applyClassroomStateFromAuthResponse(stagedData, reason, {
+        ...options, trustedPortalFirstLogin: true,
+      });
+    } catch (error) {
+      // Restore the durable failure fence so both manual and Chrome-profile
+      // callers retire partially applied credentials using their normal path.
+      if (generation === studentAuthMutationGeneration) {
+        await beginStudentAuthCommit(generation, `${reason} portal snapshot failed`);
+      }
+      releaseRestrictionPortalPresentation(context);
+      throw error;
+    }
   }
 }
 
@@ -13508,14 +13706,10 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   // Login-provided classroom restrictions are local enforcement authority and
   // must be reconciled before any page unlocks. License/settings refreshes are
   // not part of that critical path.
-  await applyClassroomStateFromAuthResponse(data, 'student_login', {
-    requireApplied: true,
-    authContext: committedAuthContext,
-    authMutationHeld: true,
-  });
-  assertAuthMutationCurrent(mutationGeneration, 'student login');
-  assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
-  await completeStudentAuthCommit(mutationGeneration, 'student login commit');
+  await applyLoginClassroomStateAndCommit(
+    data, 'student_login', committedAuthContext, mutationGeneration,
+    () => assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption'),
+  );
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
   await replayClassroomUiForAuth(committedAuthContext, 'student login UI replay');
   assertAuthGatePolicyGuardCurrent(committedPolicyGuard, 'student login adoption');
@@ -13941,19 +14135,8 @@ async function ensureRegisteredNow() {
             authContext: committedAuthContext,
             expectedBinding: monitoringEventAuthBindingForContext(committedAuthContext),
           });
-          await applyClassroomStateFromAuthResponse(
-            data,
-            'student_registration',
-            {
-              requireApplied: true,
-              authContext: committedAuthContext,
-              authMutationHeld: true,
-            },
-          );
-          assertAuthMutationCurrent(registrationGeneration, 'student registration');
-          await completeStudentAuthCommit(
-            registrationGeneration,
-            'student registration commit',
+          await applyLoginClassroomStateAndCommit(
+            data, 'student_registration', committedAuthContext, registrationGeneration,
           );
           await replayClassroomUiForAuth(
             committedAuthContext,
@@ -15286,19 +15469,8 @@ async function registerDeviceWithStudentNow(deviceId, deviceName, classId, stude
         authContext: committedAuthContext,
         expectedBinding: monitoringEventAuthBindingForContext(committedAuthContext),
       });
-      await applyClassroomStateFromAuthResponse(
-        data,
-        'student_registration',
-        {
-          requireApplied: true,
-          authContext: committedAuthContext,
-          authMutationHeld: true,
-        },
-      );
-      assertAuthMutationCurrent(registrationGeneration, 'student auto-registration');
-      await completeStudentAuthCommit(
-        registrationGeneration,
-        'student auto-registration commit',
+      await applyLoginClassroomStateAndCommit(
+        data, 'student_registration', committedAuthContext, registrationGeneration,
       );
       await replayClassroomUiForAuth(
         committedAuthContext,
@@ -16831,6 +17003,7 @@ function persistedClassroomStateSnapshot(state) {
   // rules survive an MV3 worker restart; the worker preserves those rules and
   // requests an exact server snapshot before resuming JavaScript policy work.
   delete persisted.authPassThrough;
+  if (persisted.deliveryContext) delete persisted.deliveryContext.portalFirstOnLogin;
   if (state.authPassThrough && persisted.deliveryContext) {
     delete persisted.deliveryContext.lateSignInRestrictionSso;
     delete persisted.deliveryContext.bindingDigest;
@@ -17120,6 +17293,9 @@ async function restoreTransientCurrentPageRestrictionAtWorkerWake(
 
 async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policyFence, authContext) {
   assertAuthenticatedContextCurrent(authContext, 'worker auth-policy refresh restore');
+  const portalEntry = await ensureRestrictionPortalEntryForContext(authContext);
+  restrictionPortalPolicyRefreshPending = portalEntry?.phase === 'pending'
+    && Number.isFinite(portalEntry.expiresAt) && portalEntry.expiresAt > Date.now();
   const prepared = JSON.parse(JSON.stringify(rawState));
   const restrictionSsoBinding = await validateRestrictionSsoDeliveryContext(
     prepared,
@@ -17140,21 +17316,21 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
     normalized,
     authContext,
   );
-  if (!restoredFence?.present) return false;
-  restrictionAuthPolicyFenceState = restoredFence;
-  const restoredAttempt = await restoreRestrictionAuthAttemptForPolicyRefresh(
-    attempt,
-    normalized,
-    authContext,
-  );
+  if (!restoredFence?.present && !restrictionPortalPolicyRefreshPending) return false;
+  // A committed login may have only the staged, deliberately stripped
+  // snapshot. That absence is not an authoritative policy tombstone.
+  restrictionAuthPolicyFenceState = restoredFence?.present ? restoredFence : null;
+  const restoredAttempt = restoredFence?.present
+    ? await restoreRestrictionAuthAttemptForPolicyRefresh(attempt, normalized, authContext)
+    : null;
   if (!restoredAttempt) {
     restrictionAuthAttemptScopeDigest = null;
     restrictionAuthAttemptState = null;
   }
 
-  // The durable desired state deliberately contains no IdP policy. Adopt only
-  // the already-enforced restriction/runtime metadata, leave Chrome's dynamic
-  // rule transaction untouched, and request exact fresh server authority.
+  // The durable desired state deliberately contains no IdP policy. Adopt the
+  // restriction metadata and request fresh authority. Previously exact-bound
+  // rules survive; unowned IdP exceptions are removed below for a new login.
   currentClassroomState = normalized;
   classroomRuntimeOwner = createClassroomRuntimeOwner(authContext, normalized.revision);
   const restrictions = normalized.restrictions;
@@ -17172,7 +17348,15 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
   activeAuthPassThroughPolicy = null;
   teacherMaxTabs = restrictions.tabLimit;
   currentMaxTabs = effectiveTabLimit();
-  restrictionAuthPolicyRefreshHosts = await survivingRestrictionAuthHosts();
+  if (restoredFence?.present) {
+    restrictionAuthPolicyRefreshHosts = await survivingRestrictionAuthHosts();
+  } else {
+    // No exact policy fence survived for this new login. Remove old IdP
+    // exceptions and await the server; a digest never authorizes auth hosts.
+    restrictionAuthPolicyRefreshHosts = new Map();
+    await composeDynamicRules(['restrictionSso']);
+    assertAuthenticatedContextCurrent(authContext, 'worker pending portal auth-rule clear');
+  }
   restrictionAuthPolicyRefreshPending = true;
   scheduleClassroomStateExpiry(normalized);
   requestClassroomStateSync('worker-auth-policy-refresh', true);
@@ -17385,8 +17569,6 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
         runtimeOwner,
         tabMutationJournal: options.tabMutationJournal,
         transientCurrentPage: options.transientCurrentPage === true,
-        authPassThroughReturnToDestination:
-          options.authPassThroughReturnToDestination === true,
       });
     } catch (error) {
       if (isAuthContextCancellation(error)) return;
@@ -17506,7 +17688,7 @@ async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
   const assertCurrent = options.assertCurrent || (() => {});
   try {
     assertCurrent('classroom tab reconciliation');
-    if (restrictionAuthPolicyRefreshPending) {
+    if (restrictionAuthPolicyRefreshPending || restrictionPortalPolicyRefreshPending) {
       requestClassroomStateSync('auth-policy-reconciliation-pending', true);
       return false;
     }
@@ -17600,6 +17782,9 @@ async function reconcileExistingTabsForClassroomState(
   // asynchronously updated last-focused-window query. The hint is accepted
   // only for a fresh tab in this inventory and only for a marked restriction.
   const foregroundTab = hintedForegroundSso || queriedForegroundTab;
+  const portalFirstOnLogin = authContext
+    ? await restrictionPortalEntryPending(state, authContext) : false;
+  assertCurrent('classroom portal entry');
   const plan = RuntimeCore.planClassroomTabReconciliation(state, tabs, {
     foregroundTabId: foregroundTab?.id,
     preserveRestrictionSsoTabIds: hintedForegroundSso ? [hintedForegroundSso.id] : [],
@@ -17609,9 +17794,22 @@ async function reconcileExistingTabsForClassroomState(
     authPassThroughAttempt: restrictionAuthAttemptState,
     visitedSsoHosts: [...visitedRestrictionSsoHosts],
     transientCurrentPage: browserApi.transientCurrentPage === true,
-    authPassThroughReturnToDestination:
-      browserApi.authPassThroughReturnToDestination === true,
+    portalFirstOnLogin,
+    portalFirstLoginHandled: authContext
+      ? hasNegotiatedCapability('restrictionPortalFirstV1', authContext) : false,
   });
+  if (portalFirstOnLogin && authContext) {
+    const portalUpdate = plan.updates.find((update) => (
+      RuntimeCore.isDefaultRestrictionPortalUrl(state.authPassThrough, update.url)
+    ));
+    const retainedForegroundPortalId = RuntimeCore.isDefaultRestrictionPortalUrl(
+      state.authPassThrough, foregroundTab?.pendingUrl || foregroundTab?.url || '',
+    ) ? foregroundTab.id : null;
+    await rememberRestrictionPortalTab(
+      authContext, portalUpdate?.tabId ?? plan.activateTabId ?? retainedForegroundPortalId,
+    );
+    assertCurrent('classroom portal tab ownership');
+  }
   const failedUpdateIds = new Set();
   for (const update of plan.updates) {
     try {
@@ -17705,11 +17903,17 @@ async function reconcileExistingTabsForClassroomState(
         Number.isInteger(tab?.id) && restrictionAuthenticationTab(tab, state)
       ));
     }
+    // A fresh login must enter the configured default portal even when an
+    // unrelated provider tab survived from the previous browsing context.
+    if (portalFirstOnLogin) preserveRestrictionSsoFocus = false;
     assertCurrent('classroom tab creation');
     const createdTab = await createTab({
       url: fallbackUrl,
       active: !preserveRestrictionSsoFocus,
     });
+    if (portalFirstOnLogin && authContext) {
+      await rememberRestrictionPortalTab(authContext, createdTab?.id);
+    }
     if (Number.isInteger(createdTab?.id)) tabMutationJournal?.createdTabIds.add(createdTab.id);
     assertCurrent('classroom tab creation');
     if (!preserveRestrictionSsoFocus && Number.isInteger(createdTab?.windowId)) {
@@ -17726,6 +17930,15 @@ async function reconcileExistingTabsForClassroomState(
   }
   await refreshTabs(authContext);
   assertCurrent('classroom tab cache refresh');
+  if (portalFirstOnLogin && authContext) {
+    const committedForeground = await queryTabs({ active: true, lastFocusedWindow: true });
+    assertCurrent('classroom portal reuse verification');
+    for (const tab of committedForeground) {
+      // pendingUrl is not proof of a real portal entry. onCommitted handles a
+      // newly opened portal; this path consumes an already-loaded reused tab.
+      if (!tab.pendingUrl && tab.url) await observeRestrictionPortalEntry(tab.url, state, authContext);
+    }
+  }
 }
 
 async function resolveCurrentUrlMarker(rawState, assertCurrent = () => {}) {
@@ -17817,6 +18030,14 @@ async function validateRestrictionAuthPassThroughContext(
   authContext,
   options = {},
 ) {
+  if (prepared?.deliveryContext?.portalFirstOnLogin === true
+    && (options.trustedPortalFirstLogin !== true
+      || !prepared.authPassThrough
+      || !hasNegotiatedCapability('restrictionPortalFirstV1', authContext))) {
+    const error = new Error('Portal entry requires the negotiated exact login response');
+    error.code = 'RESTRICTION_PORTAL_LOGIN_REQUIRED';
+    throw error;
+  }
   if (prepared?.authPassThrough === undefined) return null;
   const normalizedPolicy = RuntimeCore.normalizeAuthPassThrough(prepared.authPassThrough);
   if (!authContext) {
@@ -17898,6 +18119,14 @@ async function applyClassroomStateNow(rawState, options = {}) {
     );
     assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (options.trustedPortalFirstLogin === true
+      && normalized.deliveryContext?.portalFirstOnLogin === true) {
+      if (!restrictionAuthPassThroughForState(normalized)) {
+        throw new Error('Portal entry requires an active classroom restriction');
+      }
+      await setRestrictionPortalEntryPhase(authContext, 'pending', { initializeOnly: true, state: normalized });
+      delete normalized.deliveryContext.portalFirstOnLogin;
+    }
     if (authContext) {
       nextAuthPolicyFence = await nextRestrictionAuthPolicyFence(normalized, authContext);
     }
@@ -17931,12 +18160,13 @@ async function applyClassroomStateNow(rawState, options = {}) {
     throw error;
   }
   const previousState = currentClassroomState;
+  const previousPortalPolicyRefreshPending = restrictionPortalPolicyRefreshPending;
   const previousStateWasTransientCurrentPage = transientCurrentPageRestrictionActive;
   const previousAuthPolicyFence = restrictionAuthPolicyFenceState
     ? { ...restrictionAuthPolicyFenceState }
     : null;
   const resolvesWorkerAuthPolicyRefresh = Boolean(
-    restrictionAuthPolicyRefreshPending
+    (restrictionAuthPolicyRefreshPending || restrictionPortalPolicyRefreshPending)
     && normalized.revision >= Number(currentClassroomState?.revision || 0),
   );
   if (!options.force
@@ -17962,11 +18192,18 @@ async function applyClassroomStateNow(rawState, options = {}) {
     };
   }
 
+  if (options.trustedPersistedRestrictionSso !== true) {
+    if (restrictionPortalPolicyRefreshPending && authContext) {
+      beginRestrictionPortalPresentation(authContext, restrictionPortalEntryState?.expiresAt || Date.now());
+    }
+    restrictionPortalPolicyRefreshPending = false;
+  }
   const expiry = RuntimeCore.classroomStateExpiry(normalized, Date.now());
   const screenshotAuthorityChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
     || currentStudentControlRevision() !== previousControlRevision;
   if (expiry.expired) {
     assertCurrent();
+    if (authContext) await restrictionPortalEntryPending(normalized, authContext);
     currentClassroomState = normalized;
     if (screenshotAuthorityChanged) {
       retireScreenshotAuthorityForClassroomChange();
@@ -17995,6 +18232,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
     } else {
       await clearRestrictionAuthAttemptState();
     }
+    if (authContext) await restrictionPortalEntryPending(normalized, authContext);
     assertCurrent();
     await setRuntimeFromClassroomState(normalized, {
       authContext,
@@ -18029,6 +18267,9 @@ async function applyClassroomStateNow(rawState, options = {}) {
     if (resolvesWorkerAuthPolicyRefresh) {
       restrictionAuthPolicyRefreshPending = false;
       restrictionAuthPolicyRefreshHosts = new Map();
+    }
+    if (authContext && releaseRestrictionPortalPresentation(authContext)) {
+      notifyAuthGateStateToTabs({ triggerRefresh: false }).catch(() => {});
     }
     await kv.remove([
       'lockScreenState',
@@ -18129,6 +18370,8 @@ async function applyClassroomStateNow(rawState, options = {}) {
       console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', safeDiagnosticError(error));
       return { outcome: 'applied', appliedRevision: normalized.revision };
     }
+    if (authContext) releaseRestrictionPortalPresentation(authContext);
+    restrictionPortalPolicyRefreshPending = previousPortalPolicyRefreshPending;
     try {
       assertCurrent('classroom state rollback');
       if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
@@ -21429,8 +21672,6 @@ function restrictionSsoTabLimitPreserveIds(tabs, options = {}) {
   if (!restrictionSsoPassThroughActive
     && !restrictionAuthPassThroughActive
     && !restrictionAuthPolicyRefreshPending) return [];
-  if (restrictionAuthPassThroughActive
-    && !['in_progress', 'returning'].includes(restrictionAuthAttemptState?.phase)) return [];
   const destination = tabs.find(restrictionDestinationTab) || null;
   const ssoTabs = tabs.filter((tab) => restrictionAuthenticationTab(tab));
   const requestedPreserveIds = Array.isArray(options.preserveSsoTabIds)
@@ -21462,8 +21703,6 @@ function activeCreatedRestrictionSsoTabId(tab) {
   return (restrictionSsoPassThroughActive
     || restrictionAuthPassThroughActive
     || restrictionAuthPolicyRefreshPending)
-    && (!restrictionAuthPassThroughActive
-      || ['in_progress', 'returning'].includes(restrictionAuthAttemptState?.phase))
     && tab?.active === true
     && (restrictionAuthenticationTab(tab)
       || (restrictionAuthPolicyRefreshPending
