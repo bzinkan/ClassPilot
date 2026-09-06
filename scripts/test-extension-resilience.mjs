@@ -1059,6 +1059,12 @@ async function main() {
       const originalConfig = { ...CONFIG };
       const originalTrackingState = trackingState;
       const originalStudentAuthInvalidating = studentAuthInvalidating;
+      const originalSchoolSettings = schoolSettings;
+      const originalSchoolSettingsScope = schoolSettingsScope;
+      const originalSchoolSettingsFetchedAt = schoolSettingsFetchedAt;
+      const schoolSettingsKeys = [
+        SCHOOL_SETTINGS_CACHE_KEY, SCHOOL_SETTINGS_SCOPE_KEY, SCHOOL_SETTINGS_FETCHED_AT_KEY,
+      ];
       // Quiesce real startup/transport maintenance before installing the
       // synthetic protocol identity. Otherwise a delayed registration,
       // heartbeat, or socket callback can legitimately retire authority
@@ -1077,6 +1083,8 @@ async function main() {
         throw new Error('Background heartbeat did not drain before protocol resilience fixture');
       }
       await studentAuthMutationTail.catch(() => {});
+      await schoolSettingsMutation.catch(() => {});
+      const originalStoredSchoolSettings = await kv.get(schoolSettingsKeys);
       // Keep alarm/event callbacks out of the synthetic identity until the
       // fixture restores the real worker state below.
       heartbeatInFlight = true;
@@ -1091,9 +1099,29 @@ async function main() {
       studentAuthCommitPending = false;
       advanceStudentAuthMutationGeneration();
       activateAuthenticatedContext(generateAuthContextId());
-      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
-      schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('protocol full-monitoring fixture'));
-      schoolSettingsFetchedAt = Date.now();
+      const protocolAuthContext = captureAuthenticatedContext('protocol full-monitoring fixture');
+      await loadCachedSchoolSettings({ authContext: protocolAuthContext });
+      const mismatchedSchoolCacheRejected = determineTrackingState() === TRACKING_STATES.OFF;
+      if (!mismatchedSchoolCacheRejected) throw new Error('Prior-school settings must not authorize the synthetic school');
+      // The synthetic school needs a matching durable cache, too. Tab/worker
+      // maintenance can reload settings while this multi-command probe runs;
+      // a cache for the prior school correctly clears memory and fails closed.
+      await enqueueSchoolSettingsMutation(async () => {
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(protocolAuthContext);
+        schoolSettingsFetchedAt = Date.now();
+        await kv.set({
+          [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings,
+          [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope,
+          [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt,
+        });
+      });
+      // Exercise the real cache read deterministically rather than depending
+      // on whether a background callback happens to run on this platform.
+      await loadCachedSchoolSettings({ authContext: protocolAuthContext });
+      const fullMonitoringAfterCacheRead = [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE]
+        .includes(determineTrackingState());
+      if (!fullMonitoringAfterCacheRead) throw new Error('Protocol fixture did not restore full monitoring settings');
       trackingState = TRACKING_STATES.OFF;
       adoptNegotiatedProtocolState({
         serverProtocolVersion: 3,
@@ -1478,8 +1506,17 @@ async function main() {
         advanceStudentAuthMutationGeneration();
         activateAuthenticatedContext(generateAuthContextId());
       }
+      await enqueueSchoolSettingsMutation(async () => {
+        await kv.remove(schoolSettingsKeys);
+        if (Object.keys(originalStoredSchoolSettings).length > 0) await kv.set(originalStoredSchoolSettings);
+        schoolSettings = originalSchoolSettings;
+        schoolSettingsScope = originalSchoolSettingsScope;
+        schoolSettingsFetchedAt = originalSchoolSettingsFetchedAt;
+      });
       trackingState = originalTrackingState;
       return {
+        mismatchedSchoolCacheRejected,
+        fullMonitoringAfterCacheRead,
         descriptor: extensionProtocolDescriptor(),
         queuedAckIds: queuedAcks.map((ack) => ack.ackId),
         remainingAckIds: remainingAcks.map((ack) => ack.ackId),
@@ -1511,6 +1548,8 @@ async function main() {
         afterConcurrentFabState,
       };
     }, { fixturePort: fixture.port });
+    assert.equal(protocolResilience.mismatchedSchoolCacheRejected, true);
+    assert.equal(protocolResilience.fullMonitoringAfterCacheRead, true);
     assert.equal(protocolResilience.descriptor.clientProtocolVersion, 3);
     assert.ok(protocolResilience.descriptor.capabilities.includes('scopedAuthorityChecksV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('authBoundTelemetryV1'));
