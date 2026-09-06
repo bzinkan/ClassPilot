@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.4");
+    expect(manifest.version).toBe("2.8.5");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -464,7 +464,8 @@ describe("ClassPilot extension release package guards", () => {
     const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
     expect(serviceWorker).toContain("RuntimeCore.isWithinTrackingWindow");
     expect(runtimeCore).toContain("end > start");
-    expect(runtimeCore).toContain("activeDays.has(previousWeekday)");
+    expect(runtimeCore).toContain("const afterMidnight = end < start && current <= end");
+    expect(runtimeCore).toContain("activeDays.has(WEEKDAYS[meetingWeekday])");
   });
 
   it("restores revisioned teacher state instead of clearing it on worker auth", () => {

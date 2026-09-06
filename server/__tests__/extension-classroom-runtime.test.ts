@@ -1304,6 +1304,24 @@ describe("ClassPilot tracking windows", () => {
       now: Date.parse("2026-08-19T03:00:00.000Z"), // Tuesday 23:00 EDT
     })).toBe(false);
   });
+
+  it("honors school-local closures and explicit makeup weekdays", () => {
+    const daytime = { enabled: true, startTime: "08:00", endTime: "15:00", timezone: "America/New_York", activeDays: ["Tuesday"] };
+    const now = Date.parse("2026-09-08T14:00:00Z");
+    expect(core.isWithinTrackingWindow({ ...daytime, now, instructionalCalendar: { "2026-09": { nonInstructionalDates: ["2026-09-08"] } } })).toBe(false);
+    expect(core.isWithinTrackingWindow({ ...daytime, now, schedulingDateOverrides: { "2026-09-08": { instructional: false } } })).toBe(false);
+    const makeup = { ...daytime, now: Date.parse("2026-09-12T14:00:00Z"), schedulingDateOverrides: { "2026-09-12": { instructional: true, meetingWeekday: 2 } } };
+    expect(core.isWithinTrackingWindow(makeup)).toBe(true);
+    expect(core.isWithinTrackingWindow({ ...makeup, activeDays: ["Monday"] })).toBe(false);
+    expect(core.isWithinTrackingWindow({ ...daytime, enabled: false, now, schedulingDateOverrides: { "2026-09-08": { instructional: false } } })).toBe(true);
+  });
+
+  it("keeps overnight eligibility on the starting date through a holiday and DST fallback", () => {
+    expect(core.isWithinTrackingWindow({ ...overnight, now: Date.parse("2026-09-08T05:00:00Z"), instructionalCalendar: { "2026-09": { nonInstructionalDates: ["2026-09-07"] } } })).toBe(false);
+    expect(core.isWithinTrackingWindow({ ...overnight, now: Date.parse("2026-09-08T05:00:00Z"), instructionalCalendar: { "2026-09": { nonInstructionalDates: ["2026-09-08"] } } })).toBe(true);
+    const makeup = { ...overnight, schedulingDateOverrides: { "2026-10-31": { instructional: true, meetingWeekday: 1 } } };
+    for (const time of ["2026-11-01T05:30:00Z", "2026-11-01T06:30:00Z"]) expect(core.isWithinTrackingWindow({ ...makeup, now: Date.parse(time) })).toBe(true);
+  });
 });
 
 describe("ClassPilot connectivity and screenshot diagnostics", () => {

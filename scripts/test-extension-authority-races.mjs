@@ -419,6 +419,9 @@ async function main() {
         activateAuthenticatedContext(`auth-context-${suffix}-${Date.now()}`);
         const authContext = captureAuthenticatedContext(`authority race ${suffix}`);
         adoptLicenseState(true, 'active', authContext);
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(authContext);
+        schoolSettingsFetchedAt = Date.now();
         trackingState = TRACKING_STATES.ACTIVE;
         apiBackoffUntilMs = 0;
         return authContext;
@@ -2707,6 +2710,9 @@ async function main() {
           authContextId: alexAuth.authContextId,
         });
         adoptLicenseState(true, 'active', alexAuth);
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(alexAuth);
+        schoolSettingsFetchedAt = Date.now();
         trackingState = TRACKING_STATES.ACTIVE;
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,
@@ -2869,6 +2875,9 @@ async function main() {
         await new Promise((resolve) => setTimeout(resolve, 0));
         const bobAuth = captureAuthenticatedContext('Bob screenshot handoff');
         adoptLicenseState(true, 'active', bobAuth);
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(bobAuth);
+        schoolSettingsFetchedAt = Date.now();
         trackingState = TRACKING_STATES.ACTIVE;
         adoptNegotiatedProtocolState({
           serverProtocolVersion: 3,

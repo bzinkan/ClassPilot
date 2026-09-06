@@ -309,6 +309,14 @@ async function main() {
       activateAuthenticatedContext(CONFIG.authContextId);
       const authContext = captureAuthenticatedContext('resilience initial fixture');
       adoptLicenseState(true, 'active', authContext);
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(authContext);
+      schoolSettingsFetchedAt = Date.now();
+      await durableLocalKv.set({
+        [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings,
+        [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope,
+        [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt,
+      });
       trackingState = TRACKING_STATES.ACTIVE;
       await updateGlobalBlacklistRules(['school-policy.example'], {
         scope: schoolPolicyScope(),
@@ -961,6 +969,9 @@ async function main() {
 
       try {
         CONFIG.schoolId = 'authority-school';
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('tab limit full-monitoring fixture'));
+        schoolSettingsFetchedAt = Date.now();
         enqueueMonitoringEvent = async () => {};
         teacherMaxTabs = 50;
         schoolMaxTabs = null;
@@ -1080,6 +1091,9 @@ async function main() {
       studentAuthCommitPending = false;
       advanceStudentAuthMutationGeneration();
       activateAuthenticatedContext(generateAuthContextId());
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('protocol full-monitoring fixture'));
+      schoolSettingsFetchedAt = Date.now();
       trackingState = TRACKING_STATES.OFF;
       adoptNegotiatedProtocolState({
         serverProtocolVersion: 3,
@@ -2301,6 +2315,9 @@ async function main() {
         'active',
         captureAuthenticatedContext('heartbeat race Student A'),
       );
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('heartbeat Student A monitoring fixture'));
+      schoolSettingsFetchedAt = Date.now();
       trackingState = TRACKING_STATES.ACTIVE;
       screenshotScheduled = false;
       apiBackoffUntilMs = 0;
@@ -2358,6 +2375,9 @@ async function main() {
         'active',
         captureAuthenticatedContext('heartbeat race Student B'),
       );
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('heartbeat Student B monitoring fixture'));
+      schoolSettingsFetchedAt = Date.now();
 
       releaseInboxMutation();
       await blockerTask;
@@ -2567,6 +2587,9 @@ async function main() {
           'active',
           captureAuthenticatedContext(`race identity ${suffix}`),
         );
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext(`race monitoring ${suffix}`));
+        schoolSettingsFetchedAt = Date.now();
         trackingState = TRACKING_STATES.ACTIVE;
         return authContextId;
       };
@@ -3452,6 +3475,9 @@ async function main() {
       const before = await getClassroomCommandStateSnapshot();
       const entitlementAuthContext = captureAuthenticatedContext('entitlement cleanup fixture');
       adoptLicenseState(true, 'active', entitlementAuthContext);
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(entitlementAuthContext);
+      schoolSettingsFetchedAt = Date.now();
       trackingState = TRACKING_STATES.ACTIVE;
       persistedMonitoringState = {
         state: TRACKING_STATES.ACTIVE,
@@ -5213,6 +5239,9 @@ async function main() {
           authContextId,
         });
         adoptLicenseState(true, 'active', authContext);
+        schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+        schoolSettingsScope = schoolPolicyScopeForAuthContext(authContext);
+        schoolSettingsFetchedAt = Date.now();
         trackingState = TRACKING_STATES.ACTIVE;
         if (source === 'screenshot') {
           adoptNegotiatedProtocolState({

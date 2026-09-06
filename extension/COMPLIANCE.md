@@ -22,7 +22,7 @@ Schools should verify the policy in `chrome://policy` before student use.
 
 ## Data Collected By The Extension
 
-While ClassPilot tracking is active, the extension may send the following to
+While ClassPilot full monitoring is active, the extension may send the following to
 SchoolPilot:
 
 - Student/session identity from SchoolPilot-issued tokens or Chrome profile
@@ -39,11 +39,28 @@ SchoolPilot:
   the five-second cadence requires the exact authorized class view to be
   visible. SchoolPilot retains only teaching-session-bound thumbnails and
   discards student-session/gap pixels on receipt.
-- An exact-bound safety-evidence screenshot requested immediately before a
-  specific safety tab closure, when capture succeeds within the bounded window.
 - Student-initiated hand raises, chat messages, poll responses, and sign-in
   events.
 - Runtime diagnostics with PII and URLs scrubbed before Sentry submission.
+
+When the school enables **Safety only** after-hours monitoring (stored as
+`limited`) and the server
+accepts the extension's safety-only capability, the browsing observation is
+limited to the current active tab's URL and title, authenticated to the current
+student session and accompanied by the extension protocol descriptor.
+SchoolPilot uses it for safety classification and review. The extension does
+not enumerate other tabs, send screenshots or safety-evidence captures, connect
+the classroom WebSocket, or execute remote classroom commands in this mode.
+It does not close tabs as a result of safety-only classification.
+If the capability is unavailable, safety-only mode stays off. The school's **Off**
+setting sends no browsing observations; **Full** permits normal monitoring.
+The school calendar, date overrides, and school timezone determine the normal
+monitoring window, including the starting date of an overnight window.
+
+Current SchoolPilot Safety Center findings require administrator review. A
+classifier finding does not automatically close a tab or request an evidence
+screenshot. Explicit school website policies and authorized classroom actions
+are separate from classification.
 
 ClassPilot does not intentionally collect keystrokes, typed passwords,
 microphone audio, camera video, incognito/private-window activity, or personal
@@ -51,7 +68,8 @@ browsing from unmanaged user profiles.
 
 ## Live Viewing And Screenshots
 
-In negotiated tracking-window mode, the extension takes a JPEG thumbnail of the
+In negotiated tracking-window mode, with the separately controlled active-view
+capability enabled, the extension takes a JPEG thumbnail of the
 active visible HTTP/HTTPS tab about every five seconds only while an authorized
 teacher or administrator has the exact class view visible. It returns to about
 every 30 seconds when that view is not active but the short-lived
@@ -63,18 +81,21 @@ student-session or teaching-session authority and control revision that
 authorized the pixels. SchoolPilot discards student-session/gap pixels on
 receipt and retains only teaching-session-bound thumbnails. Capture stops when
 the tracking window closes, the lease expires or is revoked, school tracking
-policy is hard-off, the student signs out or the session expires/changes, or
+policy is hard-off or limited safety-only, the student signs out or the session expires/changes, or
 the school license is explicitly denied.
 The active-class cadence adds no Chrome permission and does not persist pixels
-in extension storage.
+in extension storage. Installing version 2.8.5 does not enable that capability;
+the ordinary background cadence remains about 30 seconds.
 The older observation-lease capability remains available during mixed-version
 migration, and the server may explicitly select legacy screenshot mode.
 
-For a safety action, SchoolPilot may issue a short-lived request bound to one
-student session, opaque tab reference, and tab-snapshot revision. The extension
-attempts that one screenshot for up to three seconds before closing only the
-exact tab; closure proceeds if capture is unavailable. Captured data is never
-uploaded after an authentication or student-session transition.
+For compatibility with older server contracts, the extension retains an
+exact-bound evidence-and-tab-close command during full monitoring. That legacy
+command can attempt one screenshot for up to three seconds before closing only
+the exact tab; capture is rejected after an authentication or student-session
+transition. The current SchoolPilot Safety Center does not issue this command
+for classifier findings. Neither this legacy path nor ordinary capture runs
+in safety-only mode.
 
 Live screen viewing may also be requested by a teacher during an active class
 session. On managed ChromeOS devices, a school Chrome policy can allow silent
@@ -167,6 +188,18 @@ or server is still rejected, and no monitoring, retention, or reporting
 behavior changes. The fix adds no Chrome permission, no additional data
 collection, and no managed-policy key.
 
+Version 2.8.5 adds the limited after-hours behavior and school-calendar handling
+described above. It also accepts a separately negotiated, revisioned school
+website-block policy during full monitoring. The extension installs navigation
+rules and closes already-open HTTP/HTTPS tabs matching the policy's domain or
+subdomains after rechecking the exact authenticated student context and the
+tab's unchanged URL. These school-policy closures do not capture screenshots.
+The extension retains a scoped policy revision and pending application result
+locally to reject stale updates and retry acknowledgments; the result includes
+the revision, success/failure, closed-tab count, and a bounded error code when
+needed. This record does not contain tab URLs, titles, or screenshots. The
+policy feature adds no Chrome permission or managed-policy key.
+
 The extension tracks one 300-second authentication attempt scoped to the exact
 binding plus the control and policy revisions. Provider navigation is temporary
 and is not treated as reaching the assigned learning destination. On timeout,
@@ -201,6 +234,14 @@ controlled by the school.
 ClassPilot does not claim that Live View or the extension operates without
 processing personal data.
 
+Schools may select **Safety only** after-hours monitoring. In that mode,
+ClassPilot sends the current tab's URL and title for safety classification and
+review without screenshots, other-tab snapshots, or teacher live monitoring.
+School administrators may also publish website-block policies that prevent
+navigation and close matching open tabs during full monitoring. The extension
+reports policy application results without including the closed tabs' URLs or
+content in that result.
+
 An explicit authorized managed-kiosk launch may send the raw Chrome directory
 device id to SchoolPilot only after the capability preflight described above.
 SchoolPilot immediately converts it to a school-scoped opaque id; the raw value
@@ -229,7 +270,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.4.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.5.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
@@ -238,8 +279,14 @@ Before each Chrome Web Store upload:
   run the Chrome integration suites against the unpacked versioned zip.
 - Confirm the Chrome Web Store listing and school notices disclose tab/URL
   heartbeat monitoring, tracking-window thumbnails and the server-side discard
-  of student-session/gap pixels, exact safety capture,
+  of student-session/gap pixels, review-first safety findings,
   managed-device kiosk continuity, school-configured restricted sign-in,
-  and TURN-relayed Live View.
+  safety-only after-hours URL/title observations, school website-policy
+  enforcement, and TURN-relayed Live View.
+- Test the exact release package on controlled Google Admin-managed Chromebooks
+  across school-hours/calendar transitions, Off/Safety only/Full after-hours modes,
+  website block/unblock, worker restart, and student changes. Repeat managed
+  policy-change and kill-switch checks before organizational-unit rollout;
+  automated Chromium cannot populate enterprise managed storage policy.
 - Use the hosted SchoolPilot privacy policy URL in Chrome Web Store:
   `https://school-pilot.net/privacy`.
