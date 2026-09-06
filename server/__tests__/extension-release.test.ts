@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.5");
+    expect(manifest.version).toBe("2.8.6");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -174,7 +174,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("const AUTH_GATE_REVISION_STORAGE_KEY = 'authGateRevisionV1'");
     expect(serviceWorker).toContain("const AUTH_GATE_REVISION_BLOCK_SIZE = 1000000");
     expect(serviceWorker).toMatch(
-      /manualStudentLoginNow[\s\S]*beginStudentAuthCommit[\s\S]*setManualAuthState[\s\S]*applyClassroomStateFromAuthResponse[\s\S]*completeStudentAuthCommit[\s\S]*notifyAuthGateStateToTabs/,
+      /manualStudentLoginNow[\s\S]*beginStudentAuthCommit[\s\S]*setManualAuthState[\s\S]*applyLoginClassroomStateAndCommit[\s\S]*notifyAuthGateStateToTabs/,
     );
     expect(serviceWorker).toMatch(
       /function hasStudentAuth\(\)[\s\S]*!studentAuthInvalidating[\s\S]*!studentAuthCommitPending/,
@@ -252,23 +252,21 @@ describe("ClassPilot extension release package guards", () => {
         sessionPersistIndex,
       );
       const applyIndex = registration.indexOf(
-        "await applyClassroomStateFromAuthResponse(",
+        "await applyLoginClassroomStateAndCommit(",
         persistCompleteIndex,
       );
-      const requireIndex = registration.indexOf("requireApplied: true", applyIndex);
       const contextIndex = registration.indexOf(
-        "authContext: committedAuthContext",
-        requireIndex,
+        "committedAuthContext, registrationGeneration",
+        applyIndex,
       );
-      const completeIndex = registration.indexOf("await completeStudentAuthCommit(", contextIndex);
+      const replayIndex = registration.indexOf("await replayClassroomUiForAuth(", contextIndex);
       expect(beginIndex).toBeGreaterThan(-1);
       expect(persistStartIndex).toBeGreaterThan(beginIndex);
       expect(sessionPersistIndex).toBeGreaterThan(persistStartIndex);
       expect(persistCompleteIndex).toBeGreaterThan(sessionPersistIndex);
       expect(applyIndex).toBeGreaterThan(persistCompleteIndex);
-      expect(requireIndex).toBeGreaterThan(applyIndex);
-      expect(contextIndex).toBeGreaterThan(requireIndex);
-      expect(completeIndex).toBeGreaterThan(contextIndex);
+      expect(contextIndex).toBeGreaterThan(applyIndex);
+      expect(replayIndex).toBeGreaterThan(contextIndex);
     }
     expect(ensureRegistration).toContain("student_registration_commit_failed");
     expect(directRegistration).toContain("student_auto_registration_commit_failed");
@@ -479,19 +477,24 @@ describe("ClassPilot extension release package guards", () => {
   it("applies classroom state returned by every supported student login path", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     expect(serviceWorker).toContain("async function applyClassroomStateFromAuthResponse");
-    expect(serviceWorker).toContain(
-      "await applyClassroomState(snapshot, { reason, authContext, authorityEnvelope: data })",
-    );
+    expect(serviceWorker).toMatch(/await applyClassroomState\(snapshot, \{\s*reason, authContext, authorityEnvelope: data,/);
     expect(serviceWorker).toContain("emitEvent: false");
     expect(serviceWorker).toContain("CLASSROOM_STATE_STUDENT_BINDING_KEY");
     expect(serviceWorker).toMatch(
-      /applyClassroomStateFromAuthResponse\(data, 'student_login', \{\s*requireApplied: true,\s*authContext: committedAuthContext,\s*authMutationHeld: true,?\s*\}\)/,
+      /applyLoginClassroomStateAndCommit\(\s*data, 'student_login', committedAuthContext, mutationGeneration,/,
     );
     expect(
       serviceWorker.match(
-        /applyClassroomStateFromAuthResponse\(\s*data,\s*'student_registration',\s*\{\s*requireApplied: true,\s*authContext: committedAuthContext,\s*authMutationHeld: true,?\s*\},?\s*\)/g,
+        /applyLoginClassroomStateAndCommit\(\s*data, 'student_registration', committedAuthContext, registrationGeneration,/g,
       ),
     ).toHaveLength(2);
+    const helper = serviceWorker.slice(serviceWorker.indexOf("async function applyLoginClassroomStateAndCommit("),
+      serviceWorker.indexOf("function assertAuthGatePolicyGuardCurrentAfterCanonicalSchoolAdoption("));
+    expect(helper).toContain("requireApplied: true");
+    expect(helper).toContain("await validateRestrictionAuthPassThroughContext(prepared, data, context");
+    expect(helper.indexOf("await completeStudentAuthCommit(")).toBeLessThan(
+      helper.indexOf("await applyClassroomStateFromAuthResponse(stagedData"));
+    expect(helper).toContain("await beginStudentAuthCommit(generation");
   });
 
   it("reports protocol capability and preserves the independent recovery expiry", () => {
@@ -646,7 +649,7 @@ describe("ClassPilot extension release package guards", () => {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
     expect(serviceWorker).toMatch(
-      /const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object\.freeze\(\[\s*'scopedAuthorityChecksV1',\s*'studentAuthGatePresenceV1',\s*'lateSignInRestrictionSsoV1',\s*'restrictionAuthPassThroughV1',\s*\]\);/,
+      /const STUDENT_AUTH_GATE_PRESENCE_CAPABILITIES = Object\.freeze\(\[\s*'scopedAuthorityChecksV1',\s*'studentAuthGatePresenceV1',\s*'lateSignInRestrictionSsoV1',\s*'restrictionAuthPassThroughV1',\s*'restrictionPortalFirstV1',\s*\]\);/,
     );
     expect(serviceWorker).toContain("clientProtocolVersion: CLIENT_PROTOCOL_VERSION");
     expect(serviceWorker).toContain("const CLIENT_PROTOCOL_VERSION = 3");
@@ -691,7 +694,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("phase: 'returning'");
     expect(serviceWorker).toContain("phase: 'complete'");
     expect(serviceWorker).toContain("phase: 'timed_out'");
-    expect(serviceWorker).toContain("ClassPilot is reopening your assigned page. Start sign-in again to retry.");
+    expect(serviceWorker).not.toContain("ClassPilot is reopening your assigned page. Start sign-in again to retry.");
+    expect(serviceWorker).not.toContain("authPassThroughReturnToDestination");
+    expect(serviceWorker).toContain("delete persisted.deliveryContext.portalFirstOnLogin");
     expect(serviceWorker).toContain("await clearRestrictionAuthAttemptState().catch(() => {})");
     expect(serviceWorker).toContain("const restrictionAuthPolicyClearPromise = clearRestrictionAuthAttemptState()");
     expect(serviceWorker).toContain("if (originChanged) await clearRestrictionAuthAttemptState()");

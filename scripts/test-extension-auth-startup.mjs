@@ -3700,14 +3700,14 @@ async function main() {
         lockedDomain = priorLockedDomain;
       }
       const wrongDestinationCompleted = await observeRestrictionAuthNavigationForAuth(
-        `${new URL(destinationUrl).origin}/same-host-wrong-path`,
+        'https://unapproved-app.example/same-path',
         authContext,
         popup.id,
       );
       const returning = restrictionAuthAttemptState?.phase === 'returning';
       phases.push(restrictionAuthAttemptState.phase);
       const completed = await observeRestrictionAuthNavigationForAuth(
-        destinationUrl,
+        `${new URL(destinationUrl).origin}/approved-subpage?lesson=math#work`,
         authContext,
         popup.id,
       );
@@ -3841,10 +3841,7 @@ async function main() {
     assert.deepEqual(restrictionAuthSeed.phases, [
       'in_progress', 'returning', 'returning', 'returning', 'complete',
     ]);
-    assert.deepEqual(restrictionAuthSeed.providerCallbackReconcile, {
-      returnToDestination: true,
-      transientCurrentPage: false,
-    });
+    assert.equal(restrictionAuthSeed.providerCallbackReconcile, null);
     assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.url, 'https://accounts.google.com/');
     assert.equal(restrictionAuthSeed.safeCommandSnapshot.activeTab.title, 'Signing in');
     assert.equal(restrictionAuthSeed.authTabSnapshotWire.tabCount, 1);
@@ -3869,8 +3866,8 @@ async function main() {
     assert.equal(restrictionAuthSeed.firstTimeout, true);
     assert.equal(restrictionAuthSeed.duplicateTimeout, false);
     assert.equal(restrictionAuthSeed.timedOutPhase, 'timed_out');
-    assert.equal(restrictionAuthSeed.timeoutNotifications.length, 1);
-    assert.equal(restrictionAuthSeed.timeoutReconciliations, 1);
+    assert.equal(restrictionAuthSeed.timeoutNotifications.length, 0);
+    assert.equal(restrictionAuthSeed.timeoutReconciliations, 0);
     assert.equal(restrictionAuthSeed.timeoutAttemptStored, false);
     assert.equal(restrictionAuthSeed.timeoutAlarmPresent, false);
     assert.equal(restrictionAuthSeed.timeoutFence.present, true);

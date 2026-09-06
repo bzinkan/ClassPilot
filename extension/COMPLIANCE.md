@@ -203,8 +203,9 @@ policy feature adds no Chrome permission or managed-policy key.
 The extension tracks one 300-second authentication attempt scoped to the exact
 binding plus the control and policy revisions. Provider navigation is temporary
 and is not treated as reaching the assigned learning destination. On timeout,
-the tab returns to the restriction destination and a retry starts a new bounded
-attempt. The extension preserves an active authentication tab or popup during
+only the bounded attempt record expires; the portal remains available for
+student app selection, and later sign-in starts a new bounded attempt.
+The extension preserves an authentication tab or popup during
 tab-limit reconciliation without counting it as destination-compliant.
 
 The trusted local record contains only an opaque binding digest, revision
@@ -214,6 +215,17 @@ not stored in classroom state, monitoring outboxes, or logs. Monitoring metadata
 for an approved provider is reduced to its origin, a neutral sign-in title, and
 no favicon. Sign-out, restriction removal, timeout, or any identity, school,
 device, server, or managed-policy transition clears the attempt.
+
+The 2.8.6 `restrictionPortalFirstV1` companion capability enters the school's
+selected portal once after student login while a Waypoint or Flight Path is
+active. It shares the existing authentication rollout gate. Provider callbacks
+do not choose the learning app; the selected app still requires the teacher's
+allowed domain. A separate local entry record stores only an opaque binding
+digest, phase, and (while pending) the initial control/policy revision numbers
+and original restriction deadline plus the numeric portal tab ID. Superseded or revoked policy cancels pending
+entry; completed entry does not restart on heartbeat or teacher-control updates.
+The record contains no raw student identifiers, URLs, titles, or credentials.
+This candidate adds no Chrome permission or managed-policy schema field.
 
 Heartbeat, restriction application, and screenshot upload use independent
 timeouts and backoff. Essential DNR enforcement and desired-state persistence
@@ -270,7 +282,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.5.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.6.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release

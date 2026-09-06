@@ -3347,6 +3347,7 @@ async function main() {
           'studentAuthGatePresenceV1',
           'lateSignInRestrictionSsoV1',
           'restrictionAuthPassThroughV1',
+          'restrictionPortalFirstV1',
         ],
       },
     });

@@ -7,13 +7,14 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> For 2.8.5, upload only `dist/ClassPilot-v2.8.5.zip` produced from the clean,
+> For 2.8.6, upload only `dist/ClassPilot-v2.8.6.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.8.5.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.8.6.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Earlier archives do not contain this release's school-calendar, limited
-> after-hours safety, and revisioned website-policy behavior. They must not be
-> submitted for this release. Version 2.8.5 also retains the restricted-sign-in
+> Earlier archives do not contain this release's portal-first student app
+> selection and retained-portal behavior. The candidate must also retain 2.8.5's school-calendar, limited
+> after-hours safety, and revisioned website-policy behavior. Earlier archives must not be
+> submitted for this release. Version 2.8.6 also retains the restricted-sign-in
 > acceptance fix and other previously reviewed behavior.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
@@ -24,8 +25,10 @@
 > `restrictionAuthPassThroughV1`, while that capability remains disabled. Keep
 > authentication-policy projection off throughout Chrome Web Store review and
 > mixed-version fleet saturation. Enable it for a controlled school only after
-> recently active Chromebooks report 2.8.5 and both the raw and accepted
-> capability. Keep the independent active-preview capability under its own
+> recently active Chromebooks report 2.8.6 and the raw authentication and
+> `restrictionPortalFirstV1` capabilities. After enabling the controlled-school
+> rollout, verify both accepted capabilities before exercising portal-first.
+> Keep the independent active-preview capability under its own
 > rollout policy.
 >
 > The paired SchoolPilot deployment must also support `afterHoursSafetyOnlyV1`
@@ -134,9 +137,9 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.8.5 release artifact
+### 2.3 Build the canonical 2.8.6 release artifact
 
-Start from a clean, tagged, reviewed 2.8.5 commit at this repository's root.
+Start from a clean, tagged, reviewed 2.8.6 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, legacy exact-bound deferred-restriction marker, school-configured
 live and deferred authentication pass-through, independent heartbeat/control/
@@ -144,7 +147,11 @@ screenshot lanes, exact-authority active-class screenshot cadence, the
 downscaled active-preview upload variant, per-tab open-tab favicons, and the
 restricted-sign-in acceptance fix together with school-calendar handling,
 limited after-hours safety, and revisioned school website-policy enforcement.
-An earlier archive is not releasable as 2.8.5.
+It must include 2.8.6 portal-first login staging and restart-safe entry,
+student-selected allowed apps, and portal preservation after callbacks and
+attempt expiry. Calendar, limited safety, and website-policy behavior are
+retained from 2.8.5.
+An earlier archive is not releasable as 2.8.6.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -154,7 +161,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.5.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.6.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -174,7 +181,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.8.5.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.8.6.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -244,7 +251,7 @@ This prevents students from needing to configure the server manually (future enh
 ### 4.3 Test Active-Class Screenshot Cadence
 
 1. Keep `screenshotActiveObservationCadenceV1` disabled until the controlled
-   Chromebook has updated to 2.8.5 and reports the raw capability.
+   Chromebook has updated to 2.8.6 and reports the raw capability.
 2. Open the exact class view as an authorized teacher or administrator, enable
    the capability only for the controlled school, and confirm a fresh preview
    arrives about every five seconds without overlapping uploads.
@@ -255,18 +262,21 @@ This prevents students from needing to configure the server manually (future enh
 4. Exercise a `429` and screenshot-store `503`. Each rapid capture may make only
    one upload attempt; `429` must enter the existing backoff and neither failure
    may create a queued retry burst.
-5. Roll back by disabling the capability. Version 2.8.5 must continue the
+5. Roll back by disabling the capability. Version 2.8.6 must continue the
    existing 30-second tracking-window cadence without an extension rollback.
 
 ### 4.4 Test restricted student sign-in
 
 1. Keep `restrictionAuthPassThroughV1` disabled until the controlled
-   Chromebook reports 2.8.5 plus the raw and accepted capability.
+   Chromebook reports 2.8.6 plus the raw authentication and
+   `restrictionPortalFirstV1` capabilities. Acceptance is checked after the
+   controlled-school enablement in step 3.
 2. Configure the school's Google, Clever, and any required district provider
    in SchoolPilot while projection remains off. Confirm every start URL and
    exact/subdomain host rule, then resolve block-policy warnings.
-3. Enable the capability for the controlled school and test a cold deferred
-   Clever → Google Accounts → Clever callback → destination flow. Repeat with
+3. Enable the capability for the controlled school, confirm the companion
+   `restrictionPortalFirstV1` is accepted, and test a cold deferred
+   Clever → Google Accounts → Clever portal → student-selected allowed app flow. Repeat with
    direct Google sign-in, a live destination that redirects to sign-in, and the
    custom provider when configured.
 4. During each flow, verify the Dashboard continues to receive heartbeats,
@@ -276,13 +286,16 @@ This prevents students from needing to configure the server manually (future enh
 5. Restart the MV3 worker during each authentication phase and exercise an IdP
    popup plus a second window. The active sign-in tab must survive tab-limit
    cleanup without being counted as the learning destination or stealing focus.
-6. Verify cancellation, five-minute timeout, bounded retry, restriction
+6. Verify cancellation, five-minute attempt expiry without portal closure or
+   forced navigation, bounded retry, restriction
    removal, sign-out, and student/session/school/policy transitions clear the
    exact attempt. Attention and school/teacher blocks must still win.
 7. Sign a signed-out student in on the controlled Chromebook while a Waypoint
    and again while a Flight Path is already assigned to that student. Each
-   sign-in must complete and land on the assigned destination; the student must
-   never be returned to the ClassPilot sign-in screen. This is the 2.8.4 fix.
+   sign-in must complete and enter the configured portal first while preserving
+   existing approved pages. The student must never be returned to the ClassPilot
+   sign-in screen. Later same-binding heartbeat/control updates must not reopen
+   the portal; test a worker restart between auth commit and portal entry.
 8. Disable the capability to roll back policy projection before changing any
    extension deployment. Clear active restrictions for students who must
    authenticate while rollback is in effect.
@@ -439,7 +452,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.8.5.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.8.6.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.
