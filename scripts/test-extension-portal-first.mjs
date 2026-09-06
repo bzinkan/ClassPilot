@@ -407,16 +407,52 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
       await secondDestination.close();
       await portal.bringToFront();
     }
-    const failedRequest = context.waitForEvent('requestfailed', {
-      predicate: request => request.url() === blockedUrl && request.isNavigationRequest(),
-    });
     await portal.getByRole('link', { name: 'Unapproved app', exact: true }).click();
-    const blockedRequest = await failedRequest;
-    assert.match(blockedRequest.failure()?.errorText || '', /ERR_BLOCKED_BY_CLIENT/, 'Chrome must actually block the unapproved app request');
     await worker.evaluate(async () => {
       await reconcileClassroomStateTabsBestEffort(currentClassroomState, { authContext: captureAuthenticatedContext('unapproved app fixture') });
     });
+    await until(async () => (await worker.evaluate(() => chrome.tabs.query({})))
+      .every(tab => tab.url !== blockedUrl && tab.pendingUrl !== blockedUrl), 'unapproved portal application closed or redirected');
     assert.equal(documents.includes(blockedUrl), false, 'Clever granted access to an unapproved app');
+
+    // A content/worker handler may stop the portal click before a request is
+    // made. Prove the network boundary independently from an already attached
+    // tab, and observe Chrome's native navigation error before starting it.
+    // Playwright can miss an extension-created popup's initial request event.
+    // Reuse the attached page and remove prior popup results so the fixture's
+    // four-tab limit cannot close a new probe before its allowed baseline loads.
+    for (const page of context.pages()) if (page !== portal) await page.close();
+    const dnrProbe = portal;
+    await dnrProbe.goto(lessonUrl);
+    await dnrProbe.getByRole('heading', { name: 'Allowed lesson', exact: true }).waitFor();
+    await worker.evaluate(url => {
+      globalThis.portalFixtureDnrErrors = [];
+      globalThis.portalFixtureDnrListener = details => {
+        if (details.url === url && details.frameId === 0) globalThis.portalFixtureDnrErrors.push(details.error);
+      };
+      chrome.webNavigation.onErrorOccurred.addListener(globalThis.portalFixtureDnrListener);
+    }, blockedUrl);
+    try {
+      await dnrProbe.goto(blockedUrl).catch(() => {});
+      await until(() => worker.evaluate(() => globalThis.portalFixtureDnrErrors
+        .some(error => error.includes('ERR_BLOCKED_BY_CLIENT'))), 'native Chrome DNR main-frame denial');
+      assert.equal(documents.includes(blockedUrl), false, 'the direct denied request reached the fixture server');
+    } finally {
+      await worker.evaluate(() => {
+        chrome.webNavigation.onErrorOccurred.removeListener(globalThis.portalFixtureDnrListener);
+        delete globalThis.portalFixtureDnrListener;
+        delete globalThis.portalFixtureDnrErrors;
+      });
+    }
+    await worker.evaluate(async () => {
+      await reconcileClassroomStateTabsBestEffort(currentClassroomState, { authContext: captureAuthenticatedContext('post-DNR fixture recovery') });
+    });
+    // Chrome reports the denied network request before the worker's compliant
+    // fallback navigation completes. Let that navigation settle before the
+    // independent check that an approved URL remains usable.
+    await dnrProbe.waitForLoadState('networkidle');
+    await dnrProbe.goto(lessonUrl);
+    await dnrProbe.getByRole('heading', { name: 'Allowed lesson', exact: true }).waitFor();
 
     // Remove all prior portal pages so a leftover tab cannot make the new
     // binding test pass. Preserve work on an approved page across sign-in.
