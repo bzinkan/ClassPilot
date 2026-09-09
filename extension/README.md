@@ -394,13 +394,37 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.8.6 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.8.6.zip` after clean-tag packaging. Earlier archives do not
-contain this release's portal-first student app selection and must not be
-submitted for this release. The candidate must also retain 2.8.5's school-calendar,
+For the prepared 2.8.7 candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.8.7.zip` after clean-tag packaging. Earlier archives do not
+contain this release's bounded sign-in recovery and safe script lifecycle and must not be
+submitted for this release. The candidate retains 2.8.6's portal-first student app
+selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
+
+### Bounded sign-in recovery (2.8.7)
+
+Managed-policy reads have a three-second deadline. Gate responses have a
+nine-second worker watchdog and an independent ten-second UI deadline; live
+HTTP/body requests retain their five-second limit. Failed reads recover through
+one shared fresh-policy attempt with bounded backoff. A timeout never grants
+authentication, treats cached school authority as current, or bypasses pending
+durable authentication cleanup. A lost sign-in reply is reconciled before the
+student can submit another sign-in.
+
+Versioned page controllers own their listeners, timers and frames. Legacy
+2.8.6 pages may reload once after an actual update only when the worker verifies
+signed-out authority and isolated-world ownership of the existing blocking gate.
+Kiosks, ambiguous ownership and newly navigated documents are excluded. Such a
+reload can discard unsaved underlying page work. Chrome update timing and the
+existing manual-session cleanup on update are unchanged.
+
+Operational diagnostics use fixed stages/causes and a bounded trusted-session
+history. They contain no student/device identity, credentials, roster or URLs.
+They do not add an unauthenticated reporting endpoint; an error before a request
+reaches SchoolPilot can remain invisible in AWS logs. See
+`../CLASSPILOT_2_8_7_RELEASE.md` for the managed-Chromebook publication gate.
 
 ### Publish Through Chrome Web Store
 

@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:extension:policy": "node --test scripts/test-school-website-policy.mjs",
-    "test:extension:chrome": "npm run test:extension:policy && node scripts/test-extension-resilience.mjs && node scripts/test-extension-authority-races.mjs && node scripts/test-extension-2-7-behavior.mjs && node scripts/test-extension-offscreen-identity.mjs && node scripts/test-extension-popup-identity.mjs && node scripts/test-extension-auth-layout.mjs && node scripts/test-extension-auth-startup.mjs && node scripts/test-extension-portal-first.mjs",
+    "test:extension:recovery": "node --test scripts/test-extension-worker-recovery.mjs scripts/test-extension-auth-diagnostics.mjs scripts/test-extension-auth-gate-transport.mjs scripts/test-page-lifecycle.mjs scripts/test-content-injection.mjs scripts/test-extension-reload-authority.mjs && node scripts/test-extension-auth-recovery-frame.mjs && node scripts/test-extension-page-lifecycle.mjs && node scripts/test-extension-auth-recovery-browser.mjs",
+    "test:extension:chrome": "npm run test:extension:policy && node scripts/test-extension-resilience.mjs && node scripts/test-extension-authority-races.mjs && node scripts/test-extension-2-7-behavior.mjs && node scripts/test-extension-offscreen-identity.mjs && node scripts/test-extension-popup-identity.mjs && node scripts/test-extension-auth-layout.mjs && node scripts/test-extension-auth-startup.mjs && node scripts/test-extension-portal-first.mjs && npm run test:extension:recovery",
     "test:extension:package": "node scripts/verify-extension-package.mjs",
     "db:push": "drizzle-kit push"
   },

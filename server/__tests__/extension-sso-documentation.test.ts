@@ -8,20 +8,20 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.8.6 release documentation and preserved sign-in guarantees", () => {
-  it("pins every active release instruction to the versioned 2.8.6 artifact", () => {
+describe("2.8.7 release documentation and preserved sign-in guarantees", () => {
+  it("pins every active release instruction to the versioned 2.8.7 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.8.6.zip");
+      expect(source).toContain("ClassPilot-v2.8.7.zip");
       expect(source).not.toContain("ClassPilot-v2.8.4.zip");
       expect(source).not.toContain("ClassPilot-v2.8.3.zip");
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
     }
     expect(readme).toContain("Earlier archives do not");
-    expect(deployment).toContain("An earlier archive is not releasable as 2.8.6.");
+    expect(deployment).toContain("An earlier archive is not releasable as 2.8.7.");
     expect(deployment).toContain("afterHoursSafetyOnlyV1");
     expect(deployment).toContain("schoolWebsiteBlockEnforcementV1");
   });

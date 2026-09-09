@@ -40,6 +40,16 @@
   let rosterSnapshot = null;
   let lastFocusedControlId = '';
   let initialized = false;
+  let disposed = false;
+  let stateController = null;
+  let rosterController = null;
+  let rosterRequestKey = null;
+  let confirmationController = null;
+  let manualLoginController = null;
+  let manualLoginPending = false;
+  let manualLoginUncertain = false;
+  let reloadRequestId = 0;
+  let reloadTimer = null;
   const embeddingOrigin = (() => {
     const ancestorOrigin = window.location.ancestorOrigins?.[0];
     if (typeof ancestorOrigin === 'string' && ancestorOrigin) return ancestorOrigin;
@@ -59,6 +69,44 @@
     }, embeddingOrigin);
   }
 
+  function gateMessage(message, options, callback) {
+    const transport = globalThis.ClassPilotAuthGateTransport;
+    if (!transport) {
+      callback(null, { code: 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: Date.now() + 2_000 });
+      return;
+    }
+    transport.sendMessage(message, { timeoutMs: 10_000, ...options }).then(
+      response => callback(response, null),
+      error => { if (error.code !== 'AUTH_GATE_REQUEST_CANCELLED') callback(null, error); },
+    );
+  }
+
+  function transportFailure(error) {
+    if (error?.code === 'AUTH_GATE_LOGIN_PENDING') {
+      manualLoginPending = true;
+      manualLoginUncertain = true;
+    }
+    render({
+      phase: 'unavailable', authRequired: true,
+      errorCode: error?.code || error?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+      retryAt: Number(error?.retryAt) || Date.now() + nextRetryDelay(),
+      loginConfirmationPending: manualLoginUncertain,
+    });
+  }
+
+  function cancelStateRequest() {
+    stateRequestGeneration += 1;
+    stateController?.abort();
+    stateController = null;
+  }
+
+  function clearCredentials() {
+    for (const id of ['classpilot-auth-email', 'classpilot-auth-student-id', 'classpilot-auth-pin']) {
+      const input = document.getElementById(id);
+      if (input) input.value = '';
+    }
+  }
+
   function authGatePhase(state = {}) {
     if (AUTH_GATE_PHASES.has(state.phase)) return state.phase;
     if (state.authRequired === false) return 'authenticated';
@@ -69,7 +117,7 @@
   }
 
   function authGateRevision(state = {}) {
-    const revision = Number(state.revision);
+    const revision = Number(state?.revision);
     return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
   }
 
@@ -196,6 +244,20 @@
   }
 
   function unavailableMarkup(state = {}) {
+    if (state.errorCode === 'AUTH_GATE_CONTEXT_INVALIDATED') {
+      return `
+        <div class="classpilot-auth-state-card" role="status"><span><strong>ClassPilot needs a fresh page</strong>Browsing stays locked. Reload this page to reconnect to the extension.</span></div>
+        <button class="classpilot-auth-retry" id="classpilot-auth-reload" type="button">Reload page</button>
+        <div class="classpilot-auth-retry-status" id="classpilot-auth-retry-status" aria-live="polite">If this action cannot reconnect, use the browser’s Reload button.</div>
+      `;
+    }
+    if (state.loginConfirmationPending) {
+      return `
+        <div class="classpilot-auth-state-card" role="status"><span><strong>Checking your previous sign-in</strong>ClassPilot has not confirmed whether it finished. Your sign-in will not be sent again while its result is unknown.</span></div>
+        <button class="classpilot-auth-retry" id="classpilot-auth-retry" type="button">Retry now</button>
+        <div class="classpilot-auth-retry-status" id="classpilot-auth-retry-status" aria-live="polite">Retry checks the existing sign-in. Browsing stays protected.</div>
+      `;
+    }
     const retryAt = Number(state.retryAt);
     const retryMessage = Number.isFinite(retryAt) && retryAt > Date.now()
       ? 'ClassPilot will retry automatically. You can also retry now.'
@@ -274,9 +336,25 @@
   }
 
   function render(state = {}) {
+    if (manualLoginPending && authGatePhase(state) !== 'authenticated') {
+      manualLoginUncertain = true;
+      clearCredentials();
+      if (authGatePhase(state) !== 'setup_required') {
+        state = { phase: 'unavailable', authRequired: true, errorCode: state.errorCode,
+          retryAt: state.retryAt, loginConfirmationPending: true };
+      }
+    }
     clearTimers();
+    if (reloadTimer !== null) clearTimeout(reloadTimer);
+    reloadTimer = null;
+    reloadRequestId += 1;
     loginConfirmationGeneration += 1;
     rosterRequestGeneration += 1;
+    rosterController?.abort();
+    rosterController = null;
+    rosterRequestKey = null;
+    confirmationController?.abort();
+    confirmationController = null;
     liveRosterLoaded = false;
     rosterSnapshot = null;
 
@@ -314,8 +392,9 @@
         unavailableMarkup(state),
       );
       document.getElementById('classpilot-auth-retry')?.addEventListener('click', () => requestRefresh(true));
-      installFocusTrap('#classpilot-auth-retry');
-      scheduleUnavailableRetry(state);
+      document.getElementById('classpilot-auth-reload')?.addEventListener('click', requestPageReload);
+      installFocusTrap(state.errorCode === 'AUTH_GATE_CONTEXT_INVALIDATED' ? '#classpilot-auth-reload' : '#classpilot-auth-retry');
+      if (state.errorCode !== 'AUTH_GATE_CONTEXT_INVALIDATED' && !state.loginConfirmationPending) scheduleUnavailableRetry(state);
       return;
     }
 
@@ -351,8 +430,18 @@
       return;
     }
     const revision = authGateRevision(state);
-    if (revision !== null && revision < latestRevision) return;
+    if (revision !== null && revision < latestRevision) return false;
     if (revision !== null) latestRevision = Math.max(latestRevision, revision);
+
+    if (authGatePhase(state) === 'authenticated') {
+      manualLoginPending = false;
+      manualLoginUncertain = false;
+    }
+
+    if (manualLoginUncertain && authGatePhase(state) !== 'authenticated') {
+      transportFailure({ code: 'AUTH_GATE_RPC_UNAVAILABLE' });
+      return;
+    }
 
     const nextPhase = authGatePhase(state);
     const currentPhase = authGatePhase(currentState || {});
@@ -396,23 +485,32 @@
   }
 
   function requestLatestState() {
+    if (disposed || stateController) return;
     const generation = ++stateRequestGeneration;
-    chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
+    const controller = new AbortController();
+    stateController = controller;
+    gateMessage({ type: 'get-auth-state' }, {
+      signal: controller.signal, isCurrent: () => generation === stateRequestGeneration && !disposed, stage: 'frame_state',
+    }, (response, runtimeError) => {
+      if (stateController === controller) stateController = null;
       if (generation !== stateRequestGeneration) return;
       if (runtimeError || !response?.state) {
-        applyState({
-          phase: 'unavailable',
-          authRequired: true,
-          retryAt: Date.now() + nextRetryDelay(),
-        });
+        transportFailure(runtimeError);
         return;
       }
-      applyState(response.state);
+      const revision = authGateRevision(response.state);
+      // The worker withholds normal ready replies while a login may still commit.
+      if (manualLoginUncertain && response.success !== false &&
+          authGatePhase(response.state) === 'ready' && revision !== null && revision >= latestRevision) {
+        manualLoginUncertain = false;
+        manualLoginPending = false;
+      }
+      if (applyState(response.state) === false) transportFailure({ code: 'AUTH_GATE_RPC_UNAVAILABLE' });
     });
   }
 
   function requestRefresh(userInitiated) {
+    if (disposed) return;
     clearTimers();
     const retryButton = document.getElementById('classpilot-auth-retry');
     const retryStatus = document.getElementById('classpilot-auth-retry-status');
@@ -423,27 +521,52 @@
     }
     if (retryStatus) retryStatus.textContent = 'Checking the live ClassPilot sign-in service…';
 
+    cancelStateRequest();
+    if (manualLoginUncertain) {
+      requestLatestState();
+      return;
+    }
     const generation = ++stateRequestGeneration;
+    const controller = new AbortController();
+    stateController = controller;
     const message = {
       type: 'refresh-auth-state',
       reason: userInitiated ? 'user' : 'page_timer',
     };
     if (latestRevision >= 0) message.revision = latestRevision;
-    chrome.runtime.sendMessage(message, (response) => {
-      const runtimeError = chrome.runtime.lastError;
+    gateMessage(message, {
+      signal: controller.signal, isCurrent: () => generation === stateRequestGeneration && !disposed, stage: 'frame_refresh',
+    }, (response, runtimeError) => {
+      if (stateController === controller) stateController = null;
       if (generation !== stateRequestGeneration) return;
-      if (response?.state) {
-        applyState(response.state);
+      if (!runtimeError && response?.state) {
+        if (applyState(response.state) === false) transportFailure({ code: 'AUTH_GATE_RPC_UNAVAILABLE' });
         return;
       }
-      applyState({
-        ...(currentState || {}),
-        phase: 'unavailable',
-        authRequired: true,
-        retryAt: Date.now() + nextRetryDelay(),
-        error: response?.error || runtimeError?.message,
-      });
+      transportFailure(runtimeError);
     });
+  }
+
+  function requestPageReload() {
+    if (disposed || reloadTimer !== null) return;
+    const requestId = ++reloadRequestId;
+    const button = document.getElementById('classpilot-auth-reload');
+    const status = document.getElementById('classpilot-auth-retry-status');
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Requesting a fresh page…';
+    reloadTimer = setTimeout(() => finishPageReload(false), 10_000);
+    notifyParent('CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST', { requestId });
+  }
+
+  function finishPageReload(success) {
+    if (reloadTimer !== null) clearTimeout(reloadTimer);
+    reloadTimer = null;
+    const button = document.getElementById('classpilot-auth-reload');
+    const status = document.getElementById('classpilot-auth-retry-status');
+    if (button) button.disabled = false;
+    if (status) status.textContent = success
+      ? 'Reload requested. If the page does not change, use the browser’s Reload button.'
+      : 'ClassPilot could not request a reload. Use the browser’s Reload button to reconnect.';
   }
 
   function attachReadyHandlers(state) {
@@ -522,11 +645,17 @@
     const submit = document.getElementById('classpilot-auth-pin-submit');
     const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
     if (!gradeSelect || !studentSelect || !status || !submit) return;
+    const requestKey = `grades:${rosterContextGeneration(currentState || {})}:${options.forceRecovery === true}`;
+    if (rosterController && rosterRequestKey === requestKey) return;
 
     clearRosterRefreshTimer();
     liveRosterLoaded = false;
     rosterSnapshot = null;
     const generation = ++rosterRequestGeneration;
+    rosterController?.abort();
+    const controller = new AbortController();
+    rosterController = controller;
+    rosterRequestKey = requestKey;
     const preserveControls = options.background === true || options.forceRefresh === true;
     const previousGrade = gradeSelect.value;
     const focusedControl = preserveControls && document.activeElement instanceof HTMLElement
@@ -547,12 +676,14 @@
       refreshButton.setAttribute('aria-busy', 'true');
     }
 
-    chrome.runtime.sendMessage({
+    gateMessage({
       type: 'get-login-roster',
       ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
       ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
-    }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
+    }, {
+      signal: controller.signal, isCurrent: () => generation === rosterRequestGeneration && !disposed, stage: 'frame_roster',
+    }, (response, runtimeError) => {
+      if (rosterController === controller) { rosterController = null; rosterRequestKey = null; }
       if (generation !== rosterRequestGeneration || !status.isConnected) return;
       status.setAttribute('aria-busy', 'false');
       if (refreshButton) {
@@ -666,12 +797,21 @@
     const refreshButton = document.getElementById('classpilot-auth-roster-refresh');
     const selectedGrade = gradeSelect?.value || '';
     if (!gradeSelect || !studentSelect || !status || !submit) return;
+    const requestKey = `roster:${selectedGrade}:${rosterContextGeneration(currentState || {})}:${options.forceRecovery === true}`;
+    if (rosterController && rosterRequestKey === requestKey) return;
 
     clearRosterRefreshTimer();
     const hasSnapshot = hasCurrentRosterSnapshot(selectedGrade);
     liveRosterLoaded = hasSnapshot;
     const generation = ++rosterRequestGeneration;
+    rosterController?.abort();
+    const controller = new AbortController();
+    rosterController = controller;
+    rosterRequestKey = requestKey;
     if (!selectedGrade) {
+      controller.abort();
+      rosterController = null;
+      rosterRequestKey = null;
       rosterSnapshot = null;
       setRosterStatus('');
       status.setAttribute('aria-busy', 'false');
@@ -699,13 +839,15 @@
       studentSelect.disabled = true;
       submit.disabled = true;
     }
-    chrome.runtime.sendMessage({
+    gateMessage({
       type: 'get-login-roster',
       gradeLevel: selectedGrade,
       ...(options.forceRefresh === true ? { forceRefresh: true } : {}),
       ...(options.forceRecovery === true ? { forceRecovery: true } : {}),
-    }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
+    }, {
+      signal: controller.signal, isCurrent: () => generation === rosterRequestGeneration && !disposed, stage: 'frame_roster',
+    }, (response, runtimeError) => {
+      if (rosterController === controller) { rosterController = null; rosterRequestKey = null; }
       if (generation !== rosterRequestGeneration || !status.isConnected || gradeSelect.value !== selectedGrade) return;
       status.setAttribute('aria-busy', 'false');
       if (refreshButton) {
@@ -714,6 +856,10 @@
         refreshButton.setAttribute('aria-busy', 'false');
       }
       if (runtimeError || !response?.success) {
+        if (runtimeError) {
+          handleRosterFailure(response, runtimeError, 'Could not load the classroom roster.');
+          return;
+        }
         if (response?.phase === 'setup_required') {
           handleRosterFailure(response, runtimeError, 'Could not load the classroom roster.');
           return;
@@ -776,6 +922,10 @@
   }
 
   function handleRosterFailure(response, runtimeError, fallbackMessage) {
+    if (runtimeError) {
+      transportFailure(runtimeError);
+      return;
+    }
     const failurePhase = response?.phase === 'setup_required'
       ? 'setup_required'
       : response?.phase === 'unavailable' || runtimeError
@@ -801,11 +951,14 @@
     const submit = document.getElementById('classpilot-auth-pin-submit');
     if (!studentSelect || !pinInput || !submit) return;
     const selectedStudent = studentSelect.selectedOptions?.[0];
-    submit.disabled = !liveRosterLoaded || studentSelect.disabled ||
+    submit.disabled = manualLoginPending || manualLoginUncertain || !liveRosterLoaded || studentSelect.disabled ||
       !selectedStudent?.value || selectedStudent.disabled || !/^\d{4}$/.test(pinInput.value);
   }
 
   function submitLogin(payload, submitButton) {
+    if (disposed || manualLoginPending || manualLoginUncertain) return;
+    manualLoginPending = true;
+    manualLoginUncertain = false;
     setError('');
     const submit = submitButton || document.getElementById(
       payload.mode === 'pin' ? 'classpilot-auth-pin-submit' : 'classpilot-auth-email-submit',
@@ -817,12 +970,24 @@
     }
 
     const confirmationGeneration = ++loginConfirmationGeneration;
+    manualLoginController?.abort();
+    const controller = new AbortController();
+    manualLoginController = controller;
     scheduleCommittedAuthConfirmation(confirmationGeneration, Date.now());
-    chrome.runtime.sendMessage({ type: 'manual-student-login', payload }, (response) => {
-      const runtimeError = chrome.runtime.lastError;
+    gateMessage({ type: 'manual-student-login', payload }, {
+      signal: controller.signal, isCurrent: () => confirmationGeneration === loginConfirmationGeneration && !disposed, stage: 'frame_login',
+    }, (response, runtimeError) => {
+      if (manualLoginController === controller) manualLoginController = null;
       if (confirmationGeneration !== loginConfirmationGeneration) return;
-      if (runtimeError || !response?.success) {
+      if (runtimeError || !response) {
+        holdUncertainLogin(runtimeError);
+        return;
+      }
+      if (!response.success) {
+        manualLoginPending = false;
         loginConfirmationGeneration += 1;
+        confirmationController?.abort();
+        confirmationController = null;
         if (authCommitPollTimer !== null) {
           clearTimeout(authCommitPollTimer);
           authCommitPollTimer = null;
@@ -876,38 +1041,65 @@
         return;
       }
 
-      for (const id of ['classpilot-auth-email', 'classpilot-auth-student-id', 'classpilot-auth-pin']) {
-        const input = document.getElementById(id);
-        if (input) input.value = '';
-      }
+      manualLoginPending = false;
+      manualLoginUncertain = false;
+      clearCredentials();
       applyState({ phase: 'authenticated', authRequired: false });
     });
   }
 
+  function holdUncertainLogin(error) {
+    manualLoginPending = true;
+    manualLoginUncertain = true;
+    clearCredentials();
+    transportFailure(error);
+    // Only a new, read-only worker reply can resolve an unknown submission.
+    // Neither this path nor Retry resends the credentials.
+    if (error?.code !== 'AUTH_GATE_CONTEXT_INVALIDATED') {
+      cancelStateRequest();
+      requestLatestState();
+    }
+  }
+
   function scheduleCommittedAuthConfirmation(generation, startedAt) {
-    if (generation !== loginConfirmationGeneration) return;
+    if (disposed || generation !== loginConfirmationGeneration) return;
     authCommitPollTimer = setTimeout(() => {
       authCommitPollTimer = null;
-      chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
-        const runtimeError = chrome.runtime.lastError;
+      const controller = new AbortController();
+      confirmationController = controller;
+      gateMessage({ type: 'get-auth-state' }, {
+        signal: controller.signal, isCurrent: () => generation === loginConfirmationGeneration && !disposed, stage: 'frame_login_confirmation',
+      }, (response, runtimeError) => {
+        if (confirmationController === controller) confirmationController = null;
         if (generation !== loginConfirmationGeneration) return;
+        const revision = authGateRevision(response?.state);
         if (!runtimeError && response?.state &&
+            (revision === null || revision >= latestRevision) &&
             (response.state.authRequired === false || authGatePhase(response.state) === 'authenticated')) {
           // get-auth-state is a fresh, direct worker read. It becomes
           // authoritative as soon as the local student session is committed,
           // even if noncritical post-login initialization is still running.
-          for (const id of ['classpilot-auth-email', 'classpilot-auth-student-id', 'classpilot-auth-pin']) {
-            const input = document.getElementById(id);
-            if (input) input.value = '';
+          manualLoginPending = false;
+          manualLoginUncertain = false;
+          clearCredentials();
+          applyState(response.state);
+          return;
+        }
+        if (runtimeError) {
+          if (runtimeError.code === 'AUTH_GATE_LOGIN_PENDING' && Date.now() - startedAt < 15_000) {
+            scheduleCommittedAuthConfirmation(generation, startedAt);
+            return;
           }
-          render({ ...response.state, phase: 'authenticated', authRequired: false });
+          holdUncertainLogin(runtimeError);
           return;
         }
         if (Date.now() - startedAt < 15_000) {
           scheduleCommittedAuthConfirmation(generation, startedAt);
+        } else {
+          holdUncertainLogin({ code: 'AUTH_GATE_RPC_TIMEOUT' });
         }
       });
-    }, 250);
+    }, 500);
   }
 
   function installFocusTrap(preferredSelector) {
@@ -986,17 +1178,32 @@
   });
 
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (!initialized) return;
+    if (!initialized || disposed) return;
     if (sender?.id && sender.id !== chrome.runtime.id) return;
     if (message?.type === 'CLASSPILOT_AUTH_COMPLETE') {
+      const revision = authGateRevision(message.state);
+      if (revision !== null && revision < latestRevision) return;
+      cancelStateRequest();
+      manualLoginPending = false;
+      manualLoginUncertain = false;
       applyState({ ...(message.state || {}), phase: 'authenticated', authRequired: false });
     } else if (message?.type === 'CLASSPILOT_AUTH_REQUIRED') {
+      const revision = authGateRevision(message.state);
+      if (revision !== null && revision < latestRevision) return;
+      cancelStateRequest();
       applyState(message.state || { phase: 'loading', authRequired: true });
     }
   });
 
   window.addEventListener('message', (event) => {
-    if (initialized || event.source !== window.parent || !embeddingOrigin ||
+    if (initialized && !disposed && event.source === window.parent && embeddingOrigin &&
+        event.origin === embeddingOrigin && event.data?.nonce === INSTANCE_NONCE &&
+        event.data?.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_RESULT' &&
+        event.data?.requestId === reloadRequestId && reloadTimer !== null) {
+      finishPageReload(event.data.success === true);
+      return;
+    }
+    if (initialized || disposed || event.source !== window.parent || !embeddingOrigin ||
         event.origin !== embeddingOrigin ||
         event.data?.type !== 'CLASSPILOT_AUTH_FRAME_INIT' ||
         event.data?.nonce !== INSTANCE_NONCE || !/^[a-f0-9]{64}$/.test(INSTANCE_NONCE)) {
@@ -1010,5 +1217,15 @@
 
   window.addEventListener('pagehide', () => {
     notifyParent('CLASSPILOT_AUTH_FRAME_LEAVING');
+    disposed = true;
+    clearTimers();
+    cancelStateRequest();
+    rosterRequestGeneration += 1;
+    loginConfirmationGeneration += 1;
+    rosterController?.abort();
+    confirmationController?.abort();
+    manualLoginController?.abort();
+    if (reloadTimer !== null) clearTimeout(reloadTimer);
+    reloadTimer = null;
   });
 })();

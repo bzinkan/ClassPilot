@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
@@ -592,132 +592,135 @@ async function exerciseRosterRefreshUi(frame) {
   await frame.evaluate(() => globalThis.__classpilotRosterUiHarness.restore());
 }
 
+async function legacyConflictFixture() {
+  if (typeof submitAuthGateLogin !== 'function') {
+    return { available: false };
+  }
+  const kioskTemplate = document.createElement('template');
+  kioskTemplate.innerHTML = buildAuthGateMarkup({
+    phase: 'ready',
+    authRequired: true,
+    loginMethod: 'name_pin',
+    kioskUrl: 'https://school-pilot.net/passpilot/kiosk/simple?launch=gate',
+  });
+  const legacyKioskButton = kioskTemplate.content.querySelector(
+    '#classpilot-auth-kiosk-launch',
+  );
+  const legacyKiosk = {
+    text: legacyKioskButton?.textContent,
+    iconCount: legacyKioskButton?.querySelectorAll('svg').length,
+    insideForm: Boolean(legacyKioskButton?.closest('form')),
+    panelClass: legacyKioskButton?.closest('.classpilot-auth-panel')?.className,
+  };
+  const fixture = document.createElement('div');
+  fixture.id = 'classpilot-legacy-conflict-fixture';
+  fixture.innerHTML = `
+    <div id="classpilot-auth-gate"></div>
+    <div id="classpilot-auth-error"></div>
+    <div id="classpilot-auth-roster-status"></div>
+    <select id="classpilot-auth-grade"><option value="5">Grade 5</option></select>
+    <select id="classpilot-auth-student"><option value="student-bob">Bob Student</option></select>
+    <input id="classpilot-auth-pin" value="2468">
+    <button id="classpilot-auth-pin-submit">Sign In</button>
+    <button id="classpilot-auth-roster-refresh">Refresh names</button>
+  `;
+  document.documentElement.appendChild(fixture);
+  const nativeRuntime = globalThis.chrome.runtime;
+  const originalSendMessage = nativeRuntime.sendMessage;
+  const messages = [];
+  let loginFailure = 'conflict';
+  authGateLiveRosterLoaded = true;
+  authGateRosterSnapshot = {
+    gradeLevel: '5',
+    recoveryGrantId: 'roster_legacy_cross_student',
+    students: [{
+      id: 'student-bob',
+      name: 'Bob Student',
+      hasPin: true,
+      reclaimable: false,
+    }],
+  };
+  nativeRuntime.sendMessage = (message, callback) => {
+    messages.push(structuredClone(message));
+    if (message?.type === 'manual-student-login') {
+      queueMicrotask(() => callback?.(loginFailure === 'conflict' ? {
+        success: false,
+        status: 409,
+        code: 'STUDENT_SESSION_ACTIVE',
+      } : {
+        success: false,
+        status: 503,
+        code: 'STUDENT_SESSION_TRANSFER_UNAVAILABLE',
+      }));
+    } else if (message?.type === 'get-login-roster') {
+      queueMicrotask(() => callback?.({
+        success: true,
+        recoveryGrantId: 'roster_legacy_cross_student',
+        students: [{
+          id: 'student-bob',
+          name: 'Bob Student',
+          hasPin: true,
+          reclaimable: false,
+        }],
+      }));
+    }
+    return undefined;
+  };
+  try {
+    submitAuthGateLogin({
+      mode: 'pin',
+      studentId: 'student-bob',
+      pin: '2468',
+      recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
+    }, document.getElementById('classpilot-auth-pin-submit'));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    const conflict = {
+      error: document.getElementById('classpilot-auth-error')?.textContent,
+      pin: document.getElementById('classpilot-auth-pin')?.value,
+    };
+    loginFailure = 'unavailable';
+    document.getElementById('classpilot-auth-student').value = 'student-bob';
+    document.getElementById('classpilot-auth-student').dispatchEvent(
+      new Event('change', { bubbles: true }),
+    );
+    document.getElementById('classpilot-auth-pin').value = '1357';
+    document.getElementById('classpilot-auth-pin').dispatchEvent(
+      new Event('input', { bubbles: true }),
+    );
+    submitAuthGateLogin({
+      mode: 'pin',
+      studentId: 'student-bob',
+      pin: '1357',
+      recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
+    }, document.getElementById('classpilot-auth-pin-submit'));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+    return {
+      available: true,
+      legacyKiosk,
+      conflict,
+      unavailable: {
+        error: document.getElementById('classpilot-auth-error')?.textContent,
+        pin: document.getElementById('classpilot-auth-pin')?.value,
+        student: document.getElementById('classpilot-auth-student')?.value,
+        submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
+      },
+      gatePresent: Boolean(document.getElementById('classpilot-auth-gate')),
+      messages,
+    };
+  } finally {
+    nativeRuntime.sendMessage = originalSendMessage;
+    fixture.remove();
+  }
+}
+
 async function exerciseLegacyConflictUi(worker, tabId) {
   const result = await worker.evaluate(async (targetTabId) => {
     const injection = await chrome.scripting.executeScript({
       target: { tabId: targetTabId },
       world: 'ISOLATED',
-      func: async () => {
-        if (typeof submitAuthGateLogin !== 'function') {
-          return { available: false };
-        }
-        const kioskTemplate = document.createElement('template');
-        kioskTemplate.innerHTML = buildAuthGateMarkup({
-          phase: 'ready',
-          authRequired: true,
-          loginMethod: 'name_pin',
-          kioskUrl: 'https://school-pilot.net/passpilot/kiosk/simple?launch=gate',
-        });
-        const legacyKioskButton = kioskTemplate.content.querySelector(
-          '#classpilot-auth-kiosk-launch',
-        );
-        const legacyKiosk = {
-          text: legacyKioskButton?.textContent,
-          iconCount: legacyKioskButton?.querySelectorAll('svg').length,
-          insideForm: Boolean(legacyKioskButton?.closest('form')),
-          panelClass: legacyKioskButton?.closest('.classpilot-auth-panel')?.className,
-        };
-        const fixture = document.createElement('div');
-        fixture.id = 'classpilot-legacy-conflict-fixture';
-        fixture.innerHTML = `
-          <div id="classpilot-auth-gate"></div>
-          <div id="classpilot-auth-error"></div>
-          <div id="classpilot-auth-roster-status"></div>
-          <select id="classpilot-auth-grade"><option value="5">Grade 5</option></select>
-          <select id="classpilot-auth-student"><option value="student-bob">Bob Student</option></select>
-          <input id="classpilot-auth-pin" value="2468">
-          <button id="classpilot-auth-pin-submit">Sign In</button>
-          <button id="classpilot-auth-roster-refresh">Refresh names</button>
-        `;
-        document.documentElement.appendChild(fixture);
-        const originalSendMessage = chrome.runtime.sendMessage;
-        const messages = [];
-        let loginFailure = 'conflict';
-        authGateLiveRosterLoaded = true;
-        authGateRosterSnapshot = {
-          gradeLevel: '5',
-          recoveryGrantId: 'roster_legacy_cross_student',
-          students: [{
-            id: 'student-bob',
-            name: 'Bob Student',
-            hasPin: true,
-            reclaimable: false,
-          }],
-        };
-        chrome.runtime.sendMessage = (message, callback) => {
-          messages.push(structuredClone(message));
-          if (message?.type === 'manual-student-login') {
-            queueMicrotask(() => callback?.(loginFailure === 'conflict' ? {
-              success: false,
-              status: 409,
-              code: 'STUDENT_SESSION_ACTIVE',
-            } : {
-              success: false,
-              status: 503,
-              code: 'STUDENT_SESSION_TRANSFER_UNAVAILABLE',
-            }));
-          } else if (message?.type === 'get-login-roster') {
-            queueMicrotask(() => callback?.({
-              success: true,
-              recoveryGrantId: 'roster_legacy_cross_student',
-              students: [{
-                id: 'student-bob',
-                name: 'Bob Student',
-                hasPin: true,
-                reclaimable: false,
-              }],
-            }));
-          }
-          return undefined;
-        };
-        try {
-          submitAuthGateLogin({
-            mode: 'pin',
-            studentId: 'student-bob',
-            pin: '2468',
-            recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
-          }, document.getElementById('classpilot-auth-pin-submit'));
-          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-          const conflict = {
-            error: document.getElementById('classpilot-auth-error')?.textContent,
-            pin: document.getElementById('classpilot-auth-pin')?.value,
-          };
-          loginFailure = 'unavailable';
-          document.getElementById('classpilot-auth-student').value = 'student-bob';
-          document.getElementById('classpilot-auth-student').dispatchEvent(
-            new Event('change', { bubbles: true }),
-          );
-          document.getElementById('classpilot-auth-pin').value = '1357';
-          document.getElementById('classpilot-auth-pin').dispatchEvent(
-            new Event('input', { bubbles: true }),
-          );
-          submitAuthGateLogin({
-            mode: 'pin',
-            studentId: 'student-bob',
-            pin: '1357',
-            recoveryGrantId: authGateRosterSnapshot.recoveryGrantId,
-          }, document.getElementById('classpilot-auth-pin-submit'));
-          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-          await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-          return {
-            available: true,
-            legacyKiosk,
-            conflict,
-            unavailable: {
-              error: document.getElementById('classpilot-auth-error')?.textContent,
-              pin: document.getElementById('classpilot-auth-pin')?.value,
-              student: document.getElementById('classpilot-auth-student')?.value,
-              submitDisabled: document.getElementById('classpilot-auth-pin-submit')?.disabled,
-            },
-            gatePresent: Boolean(document.getElementById('classpilot-auth-gate')),
-            messages,
-          };
-        } finally {
-          chrome.runtime.sendMessage = originalSendMessage;
-          fixture.remove();
-        }
-      },
+      func: async () => globalThis.__classpilotLayoutLegacyFixture?.() || { available: false },
     });
     return injection?.[0]?.result || { available: false };
   }, tabId);
@@ -885,14 +888,24 @@ async function main() {
       throw new Error('Chrome for Testing was not found. Run `npx playwright install chromium`.');
     }
     profilePath = mkdtempSync(join(tmpdir(), 'classpilot-auth-layout-'));
+    const fixtureExtensionPath = join(profilePath, 'extension-fixture');
+    cpSync(extensionPath, fixtureExtensionPath, { recursive: true });
+    const fixtureContentPath = join(fixtureExtensionPath, 'content.js');
+    const contentSource = readFileSync(fixtureContentPath, 'utf8');
+    const instanceEnd = '})(); // End of this page instance';
+    assert.equal(contentSource.split(instanceEnd).length, 2, 'content instance boundary must be unique');
+    // Keep the production IIFE and lifecycle protection intact. Only this
+    // temporary extension copy exposes the legacy fixture inside that scope.
+    writeFileSync(fixtureContentPath, contentSource.replace(instanceEnd,
+      `globalThis.__classpilotLayoutLegacyFixture = ${legacyConflictFixture.toString()};\n${instanceEnd}`));
     fixture = await startFixtureServer();
     context = await chromium.launchPersistentContext(profilePath, {
       executablePath,
       headless: true,
       viewport: { width: 1366, height: 600 },
       args: [
-        `--disable-extensions-except=${extensionPath}`,
-        `--load-extension=${extensionPath}`,
+        `--disable-extensions-except=${fixtureExtensionPath}`,
+        `--load-extension=${fixtureExtensionPath}`,
       ],
     });
     const worker = await waitForWorker(context);
@@ -1114,7 +1127,10 @@ async function main() {
       if (fixture?.server) {
         await new Promise((resolveClose) => fixture.server.close(resolveClose));
       }
-      if (profilePath) rmSync(profilePath, { recursive: true, force: true });
+      if (profilePath) {
+        assert.ok(resolve(profilePath).startsWith(`${resolve(tmpdir())}${sep}`), 'fixture cleanup must stay in the temporary directory');
+        rmSync(profilePath, { recursive: true, force: true });
+      }
     }
   }
 }

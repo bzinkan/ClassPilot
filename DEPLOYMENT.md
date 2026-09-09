@@ -7,21 +7,24 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> For 2.8.6, upload only `dist/ClassPilot-v2.8.6.zip` produced from the clean,
+> For 2.8.7, upload only `dist/ClassPilot-v2.8.7.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.8.6.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.8.7.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Earlier archives do not contain this release's portal-first student app
-> selection and retained-portal behavior. The candidate must also retain 2.8.5's school-calendar, limited
+> Earlier archives do not contain this release's bounded sign-in recovery and
+> safe upgrade handling. Retain 2.8.6's portal-first student app selection and
+> retained-portal behavior, together with 2.8.5's school-calendar, limited
 > after-hours safety, and revisioned website-policy behavior. Earlier archives must not be
-> submitted for this release. Version 2.8.6 also retains the restricted-sign-in
+> submitted for this release. Version 2.8.7 also retains the restricted-sign-in
 > acceptance fix and other previously reviewed behavior.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
 > test again after review, and publish only when the school-wide auto-update is
 > ready to begin.
 >
-> The paired SchoolPilot deployment must land first with support for
+> The 2.8.7 extension-only release requires no new SchoolPilot deployment or
+> capability change. Its focused checks are in `CLASSPILOT_2_8_7_RELEASE.md`.
+> The existing paired SchoolPilot deployment must support
 > `restrictionAuthPassThroughV1`, while that capability remains disabled. Keep
 > authentication-policy projection off throughout Chrome Web Store review and
 > mixed-version fleet saturation. Enable it for a controlled school only after
@@ -137,9 +140,9 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.8.6 release artifact
+### 2.3 Build the canonical 2.8.7 release artifact
 
-Start from a clean, tagged, reviewed 2.8.6 commit at this repository's root.
+Start from a clean, tagged, reviewed 2.8.7 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, legacy exact-bound deferred-restriction marker, school-configured
 live and deferred authentication pass-through, independent heartbeat/control/
@@ -151,7 +154,9 @@ It must include 2.8.6 portal-first login staging and restart-safe entry,
 student-selected allowed apps, and portal preservation after callbacks and
 attempt expiry. Calendar, limited safety, and website-policy behavior are
 retained from 2.8.5.
-An earlier archive is not releasable as 2.8.6.
+It must also include 2.8.7's bounded managed-policy recovery, independent worker
+and frame deadlines, mutation-safe Retry, and versioned page-controller handover.
+An earlier archive is not releasable as 2.8.7.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -161,7 +166,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.6.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.7.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -181,7 +186,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.8.6.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.8.7.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -448,11 +453,12 @@ separate Chromebook/device surface.
 ### 6.4 Update Extension
 
 To update the extension after changes:
-1. Land the reviewed changes and obtain green paired SchoolPilot/ClassPilot CI.
+1. Land the reviewed changes and obtain green ClassPilot post-merge CI. The
+   focused 2.8.7 recovery release requires no new paired SchoolPilot deployment.
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.8.6.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.8.7.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.

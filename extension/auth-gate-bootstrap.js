@@ -8,10 +8,15 @@
 (() => {
   'use strict';
 
-  if (globalThis.__CLASSPILOT_AUTH_GATE_BOOTSTRAP_LOADED__) return;
-  globalThis.__CLASSPILOT_AUTH_GATE_BOOTSTRAP_LOADED__ = true;
-
   if (window.top !== window || !/^https?:$/.test(window.location.protocol)) return;
+  const lifecycleStart = globalThis.ClassPilotPageLifecycle.begin('bootstrap', {
+    legacyFlag: '__CLASSPILOT_AUTH_GATE_BOOTSTRAP_LOADED__',
+    legacyControllerKey: '__classpilotAuthGateBootstrap',
+  });
+  if (lifecycleStart.action !== 'created') return;
+  const lifecycle = lifecycleStart.scope;
+  const chrome = lifecycle.chrome;
+  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask, MutationObserver } = lifecycle;
 
   const startedAt = performance.now();
   const blockedEvents = [
@@ -124,22 +129,22 @@
       const options = eventName === 'wheel' || eventName.startsWith('touch')
         ? { capture: true, passive: false }
         : true;
-      window.addEventListener(eventName, blockBehindGate, options);
-      document.addEventListener(eventName, blockBehindGate, options);
+      lifecycle.listen(window, eventName, blockBehindGate, options);
+      lifecycle.listen(document, eventName, blockBehindGate, options);
     }
-    window.addEventListener('focusin', containFocus, true);
-    document.addEventListener('focusin', containFocus, true);
+    lifecycle.listen(window, 'focusin', containFocus, true);
+    lifecycle.listen(document, 'focusin', containFocus, true);
     interactionBlockersInstalled = true;
   }
 
   function removeInteractionBlockers() {
     if (!interactionBlockersInstalled) return;
     for (const eventName of blockedEvents) {
-      window.removeEventListener(eventName, blockBehindGate, true);
-      document.removeEventListener(eventName, blockBehindGate, true);
+      lifecycle.unlisten(window, eventName, blockBehindGate, true);
+      lifecycle.unlisten(document, eventName, blockBehindGate, true);
     }
-    window.removeEventListener('focusin', containFocus, true);
-    document.removeEventListener('focusin', containFocus, true);
+    lifecycle.unlisten(window, 'focusin', containFocus, true);
+    lifecycle.unlisten(document, 'focusin', containFocus, true);
     interactionBlockersInstalled = false;
   }
 
@@ -369,17 +374,17 @@
       attributes: true,
       attributeFilter: ['inert', 'open', 'style'],
     });
-    document.addEventListener('fullscreenchange', scheduleIntegrityReconcile, true);
-    document.addEventListener('toggle', scheduleIntegrityReconcile, true);
-    document.addEventListener('beforetoggle', preventPagePopoverWhileLocked, true);
+    lifecycle.listen(document, 'fullscreenchange', scheduleIntegrityReconcile, true);
+    lifecycle.listen(document, 'toggle', scheduleIntegrityReconcile, true);
+    lifecycle.listen(document, 'beforetoggle', preventPagePopoverWhileLocked, true);
   }
 
   function stopIntegrityWatchdog() {
     integrityObserver?.disconnect();
     integrityObserver = null;
-    document.removeEventListener('fullscreenchange', scheduleIntegrityReconcile, true);
-    document.removeEventListener('toggle', scheduleIntegrityReconcile, true);
-    document.removeEventListener('beforetoggle', preventPagePopoverWhileLocked, true);
+    lifecycle.unlisten(document, 'fullscreenchange', scheduleIntegrityReconcile, true);
+    lifecycle.unlisten(document, 'toggle', scheduleIntegrityReconcile, true);
+    lifecycle.unlisten(document, 'beforetoggle', preventPagePopoverWhileLocked, true);
     integrityReconcileScheduled = false;
     integrityRecovering = false;
     if (integrityDeferredTimer !== null) {
@@ -438,6 +443,11 @@
     },
   };
   globalThis.__classpilotAuthGateBootstrap = controller;
+  lifecycle.register({
+    reconcile() { if (active) { startIntegrityWatchdog(); scheduleIntegrityReconcile(); requestLocalAuthState(); } },
+    inspect() { return { ownedGate: active && gateRoot?.isConnected === true }; },
+    dispose() { release({ fromContent: true }); },
+  });
 
   function recordLoadingPaint() {
     if (loadingPaintMs !== null) return;
@@ -500,9 +510,9 @@
     if (!gate) {
       gate = document.createElement('div');
       gate.id = 'classpilot-auth-gate';
-      document.documentElement.appendChild(gate);
+      lifecycle.ownNode(document.documentElement.appendChild(gate));
     } else if (gate.parentElement !== document.documentElement) {
-      document.documentElement.appendChild(gate);
+      lifecycle.ownNode(document.documentElement.appendChild(gate));
     }
     gateRoot = gate;
     restoreQuarantinedElement(gate);
@@ -515,9 +525,10 @@
     if (gate.dataset.classpilotAuthContainmentInstalled !== 'true') {
       gate.dataset.classpilotAuthContainmentInstalled = 'true';
       for (const eventName of blockedEvents) {
-        gate.addEventListener(eventName, (event) => event.stopPropagation());
+        lifecycle.listen(gate, eventName, (event) => event.stopPropagation());
       }
     }
+    const unavailable = state.phase === 'unavailable';
     gate.innerHTML = `
       <style>
         html.classpilot-auth-locked,
@@ -628,7 +639,7 @@
           }
         }
       </style>
-      <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" aria-busy="true" tabindex="-1">
+      <div class="classpilot-auth-panel" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" aria-busy="${unavailable ? 'false' : 'true'}" tabindex="-1">
         <div class="classpilot-auth-loading-content">
           <div class="classpilot-auth-product">
             <span class="classpilot-auth-logo" aria-hidden="true">
@@ -636,9 +647,9 @@
             </span>
             <span>ClassPilot</span>
           </div>
-          <h1 id="classpilot-auth-title">Connecting to ClassPilot…</h1>
-          <p id="classpilot-auth-subtitle">Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.</p>
-          <div class="classpilot-auth-spinner" aria-hidden="true"></div>
+          <h1 id="classpilot-auth-title">${unavailable ? 'ClassPilot can’t connect right now' : 'Connecting to ClassPilot…'}</h1>
+          <p id="classpilot-auth-subtitle">${unavailable ? 'Browsing stays locked. Check your connection, then use your browser’s Reload button to try again.' : 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'}</p>
+          ${unavailable ? '' : '<div class="classpilot-auth-spinner" aria-hidden="true"></div>'}
         </div>
       </div>
     `;
@@ -690,7 +701,7 @@
       if (!active || !enabled || pendingManagedPolicyFence > 0 ||
           requestGeneration !== stateRequestGeneration) return;
       if (chrome.runtime.lastError || !response?.success || !response.state) {
-        paintConnectingGate({ phase: 'loading', authRequired: true });
+        paintConnectingGate({ phase: 'unavailable', authRequired: true });
         return;
       }
       applyAuthState(response.state);

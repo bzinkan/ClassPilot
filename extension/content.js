@@ -3,11 +3,16 @@
 // Handles attention mode, timers, and polls
 // Monitors camera usage
 
-// Prevent double-injection
-if (window.__CLASSPILOT_CONTENT_LOADED__) {
-  // Script already loaded, exit early
-} else {
-  window.__CLASSPILOT_CONTENT_LOADED__ = true;
+// Each isolated page document has one versioned owner. Legacy owners are never overwritten.
+(() => {
+  if (window.top !== window) return;
+  const lifecycleStart = globalThis.ClassPilotPageLifecycle.begin('content', {
+    legacyFlag: '__CLASSPILOT_CONTENT_LOADED__',
+  });
+  if (lifecycleStart.action !== 'created') return;
+  const lifecycle = lifecycleStart.scope;
+  const chrome = lifecycle.chrome;
+  const { setTimeout, clearTimeout, setInterval, clearInterval, requestAnimationFrame, cancelAnimationFrame, queueMicrotask, MutationObserver } = lifecycle;
 
 // Track active camera streams
 let activeCameraStreams = new Set();
@@ -45,6 +50,10 @@ let authGateSecureFrameReady = false;
 let authGateSecureFrameTrusted = false;
 let authGateSecureFramePendingPhase = 'loading';
 let authGateSecureFrameRecoveryTimer = null;
+let authGateSecureFrameDeadlineTimer = null;
+let authGateSecureFrameRecoveryStartedAt = 0;
+let authGateSecureFrameRecoveryAttempts = 0;
+let authGateSecureFrameFailed = false;
 let authGateConnectionObserver = null;
 let authGateWatchdogScheduled = false;
 let authGateWatchdogRecovering = false;
@@ -509,8 +518,9 @@ function requestAuthGateState() {
     if (requestGeneration !== authGateStateRequestGeneration ||
         isAuthGateManagedPolicyFencePending()) return;
     if (chrome.runtime.lastError || !response?.success || !response.state) {
-      if (globalThis.__classpilotAuthGateBootstrap?.active) {
-        showAuthGate({ phase: 'loading', authRequired: true });
+      if (authGateActive || globalThis.__classpilotAuthGateBootstrap?.active) {
+        showAuthGate({ ...(authGateCurrentState || {}), phase: 'unavailable', authRequired: true,
+          errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: response?.retryAt ?? null });
       }
       return;
     }
@@ -767,7 +777,7 @@ function installAuthGateEventContainment(gate) {
   if (!gate || gate.dataset.classpilotAuthContainmentInstalled === 'true') return;
   gate.dataset.classpilotAuthContainmentInstalled = 'true';
   for (const eventName of AUTH_GATE_BLOCKED_INPUT_EVENTS) {
-    gate.addEventListener(eventName, (event) => event.stopPropagation());
+    lifecycle.listen(gate, eventName, (event) => event.stopPropagation());
   }
 }
 
@@ -813,11 +823,11 @@ function installAuthGateBlockers() {
     const options = eventName === 'wheel' || eventName.startsWith('touch')
       ? { capture: true, passive: false }
       : true;
-    window.addEventListener(eventName, blockBehindGate, options);
-    document.addEventListener(eventName, blockBehindGate, options);
+    lifecycle.listen(window, eventName, blockBehindGate, options);
+    lifecycle.listen(document, eventName, blockBehindGate, options);
   }
-  window.addEventListener('focusin', containAuthGateFocus, true);
-  document.addEventListener('focusin', containAuthGateFocus, true);
+  lifecycle.listen(window, 'focusin', containAuthGateFocus, true);
+  lifecycle.listen(document, 'focusin', containAuthGateFocus, true);
   window.__classpilotAuthGateBlocker = blockBehindGate;
   window.__classpilotAuthGateFocusContainment = containAuthGateFocus;
   window.__classpilotAuthGateBlockedEvents = AUTH_GATE_BLOCKED_INPUT_EVENTS;
@@ -828,12 +838,12 @@ function removeAuthGateBlockers() {
   if (!authGateBlockerInstalled || !window.__classpilotAuthGateBlocker) return;
   const blockBehindGate = window.__classpilotAuthGateBlocker;
   for (const eventName of window.__classpilotAuthGateBlockedEvents || []) {
-    window.removeEventListener(eventName, blockBehindGate, true);
-    document.removeEventListener(eventName, blockBehindGate, true);
+    lifecycle.unlisten(window, eventName, blockBehindGate, true);
+    lifecycle.unlisten(document, eventName, blockBehindGate, true);
   }
   if (window.__classpilotAuthGateFocusContainment) {
-    window.removeEventListener('focusin', window.__classpilotAuthGateFocusContainment, true);
-    document.removeEventListener('focusin', window.__classpilotAuthGateFocusContainment, true);
+    lifecycle.unlisten(window, 'focusin', window.__classpilotAuthGateFocusContainment, true);
+    lifecycle.unlisten(document, 'focusin', window.__classpilotAuthGateFocusContainment, true);
   }
   delete window.__classpilotAuthGateBlocker;
   delete window.__classpilotAuthGateFocusContainment;
@@ -854,7 +864,7 @@ function installAuthGateFocusManagement(gate) {
 
   if (gate.dataset.classpilotFocusManagerInstalled !== 'true') {
     gate.dataset.classpilotFocusManagerInstalled = 'true';
-    gate.addEventListener('keydown', (event) => {
+    lifecycle.listen(gate, 'keydown', (event) => {
       if (event.key !== 'Tab') return;
       const currentPanel = gate.querySelector('.classpilot-auth-panel');
       const focusable = getAuthGateFocusableElements(gate);
@@ -942,9 +952,9 @@ function showAuthGate(state = {}) {
   const gate = existing || document.createElement('div');
   if (!existing) {
     gate.id = 'classpilot-auth-gate';
-    document.documentElement.appendChild(gate);
+    lifecycle.ownNode(document.documentElement.appendChild(gate));
   } else if (gate.parentElement !== document.documentElement) {
-    document.documentElement.appendChild(gate);
+    lifecycle.ownNode(document.documentElement.appendChild(gate));
   }
   const requestedPhase = authGatePhase(state);
   gate.dataset.classpilotAuthOwner = 'content';
@@ -1204,9 +1214,9 @@ function installAuthGateConnectionWatchdog() {
     attributes: true,
     attributeFilter: ['inert', 'open', 'style'],
   });
-  document.addEventListener('fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
-  document.addEventListener('toggle', scheduleAuthGateWatchdogReconcile, true);
-  document.addEventListener('beforetoggle', preventPagePopoverWhileAuthLocked, true);
+  lifecycle.listen(document, 'fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
+  lifecycle.listen(document, 'toggle', scheduleAuthGateWatchdogReconcile, true);
+  lifecycle.listen(document, 'beforetoggle', preventPagePopoverWhileAuthLocked, true);
 }
 
 function preventPagePopoverWhileAuthLocked(event) {
@@ -1218,9 +1228,9 @@ function preventPagePopoverWhileAuthLocked(event) {
 function stopAuthGateConnectionWatchdog() {
   authGateConnectionObserver?.disconnect();
   authGateConnectionObserver = null;
-  document.removeEventListener('fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
-  document.removeEventListener('toggle', scheduleAuthGateWatchdogReconcile, true);
-  document.removeEventListener('beforetoggle', preventPagePopoverWhileAuthLocked, true);
+  lifecycle.unlisten(document, 'fullscreenchange', scheduleAuthGateWatchdogReconcile, true);
+  lifecycle.unlisten(document, 'toggle', scheduleAuthGateWatchdogReconcile, true);
+  lifecycle.unlisten(document, 'beforetoggle', preventPagePopoverWhileAuthLocked, true);
   authGateWatchdogScheduled = false;
   authGateWatchdogRecovering = false;
   if (authGateWatchdogDeferredTimer !== null) {
@@ -1266,8 +1276,8 @@ function ensureSecureAuthGateFrame(gate) {
     replacement.dataset.classpilotAuthOwner = 'content';
     replacement.dataset.classpilotAuthPhase = 'loading';
     replacement.dataset.classpilotAuthFrameStatus = 'verifying';
-    if (gate.isConnected) gate.replaceWith(replacement);
-    else document.documentElement.appendChild(replacement);
+    if (gate.isConnected) { gate.replaceWith(replacement); lifecycle.ownNode(replacement); }
+    else lifecycle.ownNode(document.documentElement.appendChild(replacement));
     authGateTrustedRoot = replacement;
     authGateTrustedPhase = 'loading';
     authGateSecureShadow = null;
@@ -1342,7 +1352,7 @@ function ensureSecureAuthGateFrame(gate) {
   frame.referrerPolicy = 'origin';
   authGateSecureFrameNonce = createAuthGateFrameNonce();
   frame.src = secureAuthGateFrameUrl(authGateSecureFrameNonce);
-  frame.addEventListener('load', () => {
+  lifecycle.listen(frame, 'load', () => {
     if (!frame.isConnected) return;
     beginSecureAuthGateFrameVerification();
   });
@@ -1351,6 +1361,7 @@ function ensureSecureAuthGateFrame(gate) {
   authGateSecureFrame = frame;
   authGateSecureFallback = fallback;
   gate.dataset.classpilotAuthFrameStatus = 'verifying';
+  startSecureAuthGateFrameRecoveryWindow();
 }
 
 function createAuthGateFrameNonce() {
@@ -1368,6 +1379,41 @@ function clearSecureAuthGateFrameRecovery() {
     clearTimeout(authGateSecureFrameRecoveryTimer);
     authGateSecureFrameRecoveryTimer = null;
   }
+}
+
+function startSecureAuthGateFrameRecoveryWindow() {
+  if (authGateSecureFrameFailed) { paintSecureAuthGateFrameFailure(); return; }
+  if (authGateSecureFrameDeadlineTimer !== null) return;
+  authGateSecureFrameRecoveryStartedAt = Date.now();
+  authGateSecureFrameRecoveryAttempts = 1;
+  authGateSecureFrameDeadlineTimer = setTimeout(() => {
+    authGateSecureFrameDeadlineTimer = null;
+    if (!authGateActive || authGateSecureFrameTrusted) return;
+    authGateSecureFrameFailed = true;
+    clearSecureAuthGateFrameRecovery();
+    paintSecureAuthGateFrameFailure();
+    try {
+      globalThis.ClassPilotAuthRecoveryDiagnostics?.record({ stage: 'script_recovery', cause: 'timeout',
+        elapsedMs: Date.now() - authGateSecureFrameRecoveryStartedAt, attemptCount: authGateSecureFrameRecoveryAttempts });
+    } catch { /* A diagnostic failure cannot affect the locked fallback. */ }
+  }, 10000);
+}
+
+function paintSecureAuthGateFrameFailure() {
+  authGateSecureFrame?.classList.remove('classpilot-auth-frame-loaded');
+  if (authGateSecureFallback) {
+    authGateSecureFallback.hidden = false;
+    authGateSecureFallback.textContent = 'ClassPilot needs this page to reload. Browsing stays locked. Use your browser’s Reload button to try again.';
+  }
+  authGateTrustedRoot?.setAttribute('data-classpilot-auth-frame-status', 'unavailable');
+}
+
+function clearSecureAuthGateFrameRecoveryWindow() {
+  if (authGateSecureFrameDeadlineTimer !== null) clearTimeout(authGateSecureFrameDeadlineTimer);
+  authGateSecureFrameDeadlineTimer = null;
+  authGateSecureFrameRecoveryStartedAt = 0;
+  authGateSecureFrameRecoveryAttempts = 0;
+  authGateSecureFrameFailed = false;
 }
 
 function markSecureAuthGateFrameUntrusted() {
@@ -1391,7 +1437,7 @@ function markSecureAuthGateFrameUntrusted() {
 }
 
 function beginSecureAuthGateFrameVerification() {
-  if (!authGateSecureFrame?.contentWindow || !authGateSecureFrameNonce) return;
+  if (authGateSecureFrameFailed || !authGateSecureFrame?.contentWindow || !authGateSecureFrameNonce) return;
   markSecureAuthGateFrameUntrusted();
   try {
     authGateSecureFrame.contentWindow.postMessage({
@@ -1409,14 +1455,15 @@ function beginSecureAuthGateFrameVerification() {
 }
 
 function resetSecureAuthGateFrame() {
-  if (!authGateSecureFrame?.isConnected) return;
+  if (authGateSecureFrameFailed || !authGateSecureFrame?.isConnected) return;
+  authGateSecureFrameRecoveryAttempts += 1;
   markSecureAuthGateFrameUntrusted();
   authGateSecureFrameNonce = createAuthGateFrameNonce();
   authGateSecureFrame.src = secureAuthGateFrameUrl(authGateSecureFrameNonce);
 }
 
 function applyTrustedAuthGateFramePhase(phase) {
-  if (!AUTH_GATE_PHASES.has(phase) || !authGateTrustedRoot?.isConnected) return;
+  if (authGateSecureFrameFailed || !AUTH_GATE_PHASES.has(phase) || !authGateTrustedRoot?.isConnected) return;
   if (isAuthGateManagedPolicyFencePending()) {
     markSecureAuthGateFrameUntrusted();
     return;
@@ -1442,6 +1489,7 @@ function applyTrustedAuthGateFramePhase(phase) {
   authGateSecureFrame?.classList.add('classpilot-auth-frame-loaded');
   if (authGateSecureFallback) authGateSecureFallback.hidden = true;
   clearSecureAuthGateFrameRecovery();
+  clearSecureAuthGateFrameRecoveryWindow();
   globalThis.__classpilotAuthGateBootstrap?.adoptSecureGate?.(authGateTrustedRoot, {
     ...(authGateCurrentState || {}),
     phase,
@@ -1452,7 +1500,7 @@ function applyTrustedAuthGateFramePhase(phase) {
   reconcileAuthGatePresenceSignal();
 }
 
-window.addEventListener('message', (event) => {
+lifecycle.listen(window, 'message', (event) => {
   if (!event.isTrusted || event.source !== authGateSecureFrame?.contentWindow ||
       event.origin !== AUTH_GATE_FRAME_ORIGIN ||
       event.data?.nonce !== authGateSecureFrameNonce) {
@@ -1468,8 +1516,22 @@ window.addEventListener('message', (event) => {
     applyTrustedAuthGateFramePhase(authGateSecureFramePendingPhase);
     return;
   }
+  if (event.data.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST') {
+    const requestId = event.data.requestId;
+    if (!authGateActive || !Number.isSafeInteger(requestId) || requestId <= 0) return;
+    const frame = authGateSecureFrame;
+    const nonce = authGateSecureFrameNonce;
+    chrome.runtime.sendMessage({ type: 'classpilot-request-page-reload' }, response => {
+      if (!authGateActive || frame !== authGateSecureFrame || nonce !== authGateSecureFrameNonce) return;
+      frame?.contentWindow?.postMessage({ type: 'CLASSPILOT_AUTH_FRAME_RELOAD_RESULT', nonce, requestId,
+        success: response?.success === true,
+        errorCode: response?.success === true ? null : 'AUTH_GATE_RELOAD_UNAVAILABLE' }, AUTH_GATE_FRAME_ORIGIN);
+    });
+    return;
+  }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_LEAVING') {
     markSecureAuthGateFrameUntrusted();
+    startSecureAuthGateFrameRecoveryWindow();
     clearSecureAuthGateFrameRecovery();
     authGateSecureFrameRecoveryTimer = setTimeout(resetSecureAuthGateFrame, 100);
   }
@@ -1497,6 +1559,7 @@ function removeAuthGate() {
   authGateSecureFrameTrusted = false;
   authGateSecureFramePendingPhase = 'loading';
   clearSecureAuthGateFrameRecovery();
+  clearSecureAuthGateFrameRecoveryWindow();
   authGateStateRequestGeneration += 1;
   authGateRosterRequestGeneration += 1;
   const gate = authGateTrustedRoot;
@@ -2475,7 +2538,7 @@ function updatePinAuthSubmitState() {
 function attachAuthGateHandlers(state) {
   const phase = authGatePhase(state);
   if (phase === 'unavailable') {
-    document.getElementById('classpilot-auth-retry')?.addEventListener('click', () => {
+    lifecycle.listen(document.getElementById('classpilot-auth-retry'), 'click', () => {
       requestAuthGateRefresh(true);
     });
     scheduleAuthGateRetry(state);
@@ -2493,7 +2556,7 @@ function attachAuthGateHandlers(state) {
   const pinForm = document.getElementById('classpilot-auth-pin-form');
 
   if (emailForm) {
-    emailForm.addEventListener('submit', (event) => {
+    lifecycle.listen(emailForm, 'submit', (event) => {
       event.preventDefault();
       submitAuthGateLogin({
         mode: 'email_id',
@@ -2507,22 +2570,22 @@ function attachAuthGateHandlers(state) {
     const gradeSelect = document.getElementById('classpilot-auth-grade');
     const studentSelect = document.getElementById('classpilot-auth-student');
     if (gradeSelect) {
-      gradeSelect.addEventListener('change', () => {
+      lifecycle.listen(gradeSelect, 'change', () => {
         authGateRosterSnapshot = null;
         clearAuthGateRosterRefreshTimer();
         loadAuthGateRoster();
       });
     }
-    studentSelect?.addEventListener('change', updatePinAuthSubmitState);
-    document.getElementById('classpilot-auth-roster-refresh')?.addEventListener('click', () => {
+    lifecycle.listen(studentSelect, 'change', updatePinAuthSubmitState);
+    lifecycle.listen(document.getElementById('classpilot-auth-roster-refresh'), 'click', () => {
       refreshAuthGateRosterOrGrades({ forceRefresh: true });
     });
     const pinInput = document.getElementById('classpilot-auth-pin');
-    pinInput?.addEventListener('input', () => {
+    lifecycle.listen(pinInput, 'input', () => {
       pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 4);
       updatePinAuthSubmitState();
     });
-    pinForm.addEventListener('submit', (event) => {
+    lifecycle.listen(pinForm, 'submit', (event) => {
       event.preventDefault();
       submitAuthGateLogin({
         mode: 'pin',
@@ -2541,7 +2604,7 @@ function attachAuthGateHandlers(state) {
     // Current-tab navigation; the click originates inside the gate element so
     // the input blockers permit it, and the URL is built by the service
     // worker (never from page-controlled data).
-    kioskButton.addEventListener('click', () => {
+    lifecycle.listen(kioskButton, 'click', () => {
       const requestGeneration = authGateStateRequestGeneration;
       const expectedRevision = authGateRevision(state);
       const expectedKioskUrl = state.kioskUrl;
@@ -2917,10 +2980,12 @@ function submitAuthGateLogin(payload, submitButton) {
     return; // Browser doesn't support getUserMedia
   }
   
-  const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  const originalGetUserMediaMethod = navigator.mediaDevices.getUserMedia;
+  const originalGetUserMedia = originalGetUserMediaMethod.bind(navigator.mediaDevices);
   
-  navigator.mediaDevices.getUserMedia = async function(constraints) {
+  const ownedGetUserMedia = async function(constraints) {
     const stream = await originalGetUserMedia(constraints);
+    if (!lifecycle.active) return stream;
     
     // Check if video (camera) was requested
     if (constraints && constraints.video) {
@@ -2931,7 +2996,7 @@ function submitAuthGateLogin(payload, submitButton) {
       // Monitor when stream ends
       const videoTracks = stream.getVideoTracks();
       videoTracks.forEach(track => {
-        track.addEventListener('ended', () => {
+        lifecycle.listen(track, 'ended', () => {
           console.log('[ClassPilot] Camera track ended');
           activeCameraStreams.delete(stream);
           
@@ -2949,6 +3014,12 @@ function submitAuthGateLogin(payload, submitButton) {
     
     return stream;
   };
+  navigator.mediaDevices.getUserMedia = ownedGetUserMedia;
+  lifecycle.onDispose(() => {
+    if (navigator.mediaDevices.getUserMedia === ownedGetUserMedia) {
+      navigator.mediaDevices.getUserMedia = originalGetUserMediaMethod;
+    }
+  });
 })();
 
 // Update camera status and notify service worker
@@ -3000,7 +3071,7 @@ function showLicenseBanner(planStatus) {
   banner.style.padding = '10px 16px';
   banner.style.textAlign = 'center';
   banner.style.boxShadow = '0 2px 6px rgba(0,0,0,0.2)';
-  document.body.appendChild(banner);
+  lifecycle.ownNode(document.body.appendChild(banner));
 }
 
 function removeLicenseBanner() {
@@ -3052,12 +3123,12 @@ function showMessageModal(data) {
   addModalStyles();
   
   // Add to page
-  document.body.appendChild(modal);
+  lifecycle.ownNode(document.body.appendChild(modal));
   
   // Add event listener to close button - use querySelector on modal element
   const closeBtn = modal.querySelector('#classpilot-close-msg-btn');
   if (closeBtn) {
-    closeBtn.addEventListener('click', () => {
+    lifecycle.listen(closeBtn, 'click', () => {
       modal.remove();
     });
   }
@@ -3215,7 +3286,7 @@ function addModalStyles() {
     }
   `;
   
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // Escape HTML to prevent XSS
@@ -3250,7 +3321,7 @@ function showAttentionOverlay(message) {
   `;
 
   addAttentionStyles();
-  document.body.appendChild(overlay);
+  lifecycle.ownNode(document.body.appendChild(overlay));
 }
 
 function hideAttentionOverlay() {
@@ -3336,7 +3407,7 @@ function addAttentionStyles() {
     }
   `;
 
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // ============================================
@@ -3374,7 +3445,7 @@ function startTimerOverlay(seconds, message, absoluteEndsAt = null) {
   `;
 
   addTimerStyles();
-  document.body.appendChild(overlay);
+  lifecycle.ownNode(document.body.appendChild(overlay));
 
   // Update timer display
   updateTimerDisplay();
@@ -3514,7 +3585,7 @@ function addTimerStyles() {
     }
   `;
 
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // ============================================
@@ -3561,11 +3632,11 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null) {
   `;
 
   addPollStyles();
-  document.body.appendChild(overlay);
+  lifecycle.ownNode(document.body.appendChild(overlay));
 
   // Add click handlers to options
   overlay.querySelectorAll('.classpilot-poll-option').forEach(button => {
-    button.addEventListener('click', () => {
+    lifecycle.listen(button, 'click', () => {
       const selectedIndex = parseInt(button.dataset.index, 10);
       submitPollResponse(pollId, selectedIndex, button);
     });
@@ -3835,7 +3906,7 @@ function addPollStyles() {
     }
   `;
 
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // ============================================
@@ -3865,10 +3936,10 @@ function showChatNotification(message, fromName) {
   `;
 
   addChatNotificationStyles();
-  document.body.appendChild(notification);
+  lifecycle.ownNode(document.body.appendChild(notification));
 
   // Add close handler
-  notification.querySelector('.classpilot-chat-notification-close').addEventListener('click', () => {
+  lifecycle.listen(notification.querySelector('.classpilot-chat-notification-close'), 'click', () => {
     notification.classList.add('classpilot-chat-notification-out');
     setTimeout(() => notification.remove(), 300);
   });
@@ -3965,7 +4036,7 @@ function addChatNotificationStyles() {
     }
   `;
 
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // ============================================
@@ -4182,7 +4253,7 @@ function createFloatingActionButton() {
       </div>
     `;
     addFabStyles();
-    document.body.appendChild(fabContainer);
+    lifecycle.ownNode(document.body.appendChild(fabContainer));
     return;
   }
   fabContainer.innerHTML = `
@@ -4225,19 +4296,19 @@ function createFloatingActionButton() {
   `;
 
   addFabStyles();
-  document.body.appendChild(fabContainer);
+  lifecycle.ownNode(document.body.appendChild(fabContainer));
 
   // Get initial state
   readFabStorageForCurrentContext(hydrateFabStateFromStorage);
 
   // Main FAB click - toggle menu
-  document.getElementById('classpilot-fab-main').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-main'), 'click', (e) => {
     e.stopPropagation();
     toggleFabMenu();
   });
 
   // Raise Hand button
-  document.getElementById('classpilot-fab-hand').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-hand'), 'click', (e) => {
     e.stopPropagation();
     if (!handRaisingEnabled) {
       showFabNotification('Hand raising is currently disabled by your teacher.', true);
@@ -4251,7 +4322,7 @@ function createFloatingActionButton() {
   });
 
   // Message button - show message box
-  document.getElementById('classpilot-fab-message').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-message'), 'click', (e) => {
     e.stopPropagation();
     if (!messagingEnabled) {
       showFabNotification('Messaging is currently disabled by your teacher.', true);
@@ -4266,24 +4337,24 @@ function createFloatingActionButton() {
     showMessageBox();
   });
 
-  document.getElementById('classpilot-fab-signout').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-signout'), 'click', (e) => {
     e.stopPropagation();
     signOutStudent();
   });
 
   // Close message box
-  document.getElementById('classpilot-fab-message-close').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-message-close'), 'click', (e) => {
     e.stopPropagation();
     hideMessageBox();
   });
 
   // Send message via button click
-  document.getElementById('classpilot-fab-chat-send-btn').addEventListener('click', () => {
+  lifecycle.listen(document.getElementById('classpilot-fab-chat-send-btn'), 'click', () => {
     sendMessage();
   });
 
   // Send message via Enter key
-  document.getElementById('classpilot-fab-chat-input').addEventListener('keydown', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-chat-input'), 'keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -4291,17 +4362,17 @@ function createFloatingActionButton() {
   });
 
   // Prevent clicks on message box from closing it
-  document.getElementById('classpilot-fab-message-box').addEventListener('click', (e) => {
+  lifecycle.listen(document.getElementById('classpilot-fab-message-box'), 'click', (e) => {
     e.stopPropagation();
   });
 
-  // Close menu when clicking outside (but keep chat open)
-  document.addEventListener('click', (e) => {
-    if (!fabContainer.contains(e.target)) {
-      closeFabMenu();
-    }
-  });
 }
+
+// One document listener survives FAB DOM remounts; it belongs to this page instance.
+lifecycle.listen(document, 'click', (event) => {
+  const container = document.getElementById('classpilot-fab-container');
+  if (container && !container.contains(event.target)) closeFabMenu();
+});
 
 function toggleFabMenu() {
   const menu = document.getElementById('classpilot-fab-menu');
@@ -4582,7 +4653,7 @@ function showFabNotification(message, isError = false) {
   notification.id = 'classpilot-fab-notification';
   notification.className = isError ? 'classpilot-fab-notification-error' : '';
   notification.textContent = message;
-  document.body.appendChild(notification);
+  lifecycle.ownNode(document.body.appendChild(notification));
 
   setTimeout(() => {
     notification.classList.add('classpilot-fab-notification-out');
@@ -4955,7 +5026,7 @@ function addFabStyles() {
     }
   `;
 
-  document.head.appendChild(style);
+  lifecycle.ownNode(document.head.appendChild(style));
 }
 
 // Listen for storage changes to update FAB state
@@ -4987,20 +5058,20 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
   }
 });
 
-window.addEventListener('focus', () => {
+lifecycle.listen(window, 'focus', () => {
   refreshVisibleAuthGateRoster();
   reconcileAuthGatePresenceSignal();
 });
-window.addEventListener('pageshow', () => {
+lifecycle.listen(window, 'pageshow', () => {
   refreshVisibleAuthGateRoster();
   reconcileAuthGatePresenceSignal();
 });
-window.addEventListener('online', () => {
+lifecycle.listen(window, 'online', () => {
   refreshVisibleAuthGateRoster();
   reconcileAuthGatePresenceSignal();
 });
-window.addEventListener('pagehide', stopAuthGatePresenceSignal);
-document.addEventListener('visibilitychange', () => {
+lifecycle.listen(window, 'pagehide', stopAuthGatePresenceSignal);
+lifecycle.listen(document, 'visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
     clearAuthGateRosterRefreshTimer();
     stopAuthGatePresenceSignal();
@@ -5010,9 +5081,29 @@ document.addEventListener('visibilitychange', () => {
   reconcileAuthGatePresenceSignal();
 });
 
+lifecycle.register({
+  reconcile() {
+    if (document.readyState === 'loading') return;
+    if (!document.getElementById('classpilot-fab-container')) {
+      createFloatingActionButton();
+      requestClassroomOverlayState();
+    }
+    requestAuthGateState();
+  },
+  inspect() {
+    return { ownedGate: authGateActive && authGateTrustedRoot?.isConnected === true,
+      secureFrameOwned: authGateSecureShadow !== null && authGateSecureFrame?.isConnected === true && authGateSecureFrameNonce.length > 0 };
+  },
+  dispose() {
+    studentMessageEpoch += 1;
+    removeAuthGate();
+    activeCameraStreams.clear();
+  },
+});
+
 // Initialize FAB when DOM is ready
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => {
+  lifecycle.listen(document, 'DOMContentLoaded', () => {
     createFloatingActionButton();
     requestAuthGateState();
     requestClassroomOverlayState();
@@ -5036,6 +5127,7 @@ async function signOutStudent() {
       resolve(response || null);
     });
   });
+  if (!lifecycle.active) return;
   const studentMessageContext = contextResponse?.success === true
     ? contextResponse.studentMessageContext
     : null;
@@ -5062,4 +5154,4 @@ async function signOutStudent() {
 
 console.log('ClassPilot content script loaded');
 
-} // End of double-injection guard
+})(); // End of this page instance
