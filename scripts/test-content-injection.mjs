@@ -139,13 +139,31 @@ test('forget invalidates an outstanding transaction without allowing a concurren
 
 test('hung marker reads finish safely and pending writes block retries without late reload', async () => {
   const read = fixture({ legacy: true, timeoutMs: 8 }); read.setRead(() => new Promise(() => {}));
-  assert.equal((await read.api.ensure(7, { allowLegacyReload: true })).reason, 'page_unavailable');
+  assert.equal((await read.api.ensure(7, { allowLegacyReload: true })).reason, 'marker_persistence_unavailable');
+  assert.deepEqual(read.actions, []);
   read.setRead(null);
   assert.equal((await read.api.ensure(7, { allowLegacyReload: true })).status, 'reloaded');
   const write = fixture({ legacy: true, timeoutMs: 8 }), wait = deferred(); write.setWrite(() => wait.promise);
-  assert.equal((await write.api.ensure(7, { allowLegacyReload: true })).reason, 'page_unavailable');
+  assert.equal((await write.api.ensure(7, { allowLegacyReload: true })).reason, 'marker_persistence_unavailable');
   assert.equal((await write.api.ensure(7, { allowLegacyReload: true })).reason, 'marker_write_pending');
   wait.resolve(); await new Promise(resolve => setImmediate(resolve));
   assert.equal((await write.api.ensure(7, { allowLegacyReload: true })).reason, 'already_attempted');
+  assert.deepEqual(write.actions, ['marker']);
+});
+
+test('rejected marker reads and writes return a terminal fixed reason without reloading', async () => {
+  const read = fixture({ legacy: true });
+  read.setRead(() => { throw new Error('private storage failure detail'); });
+  const readResult = await read.api.ensure(7, { allowLegacyReload: true });
+  assert.equal(readResult.status, 'manual_reload_required');
+  assert.equal(readResult.reason, 'marker_persistence_unavailable');
+  assert.ok(!JSON.stringify(readResult).includes('private'));
+  assert.deepEqual(read.actions, []);
+  const write = fixture({ legacy: true });
+  write.setWrite(() => { throw new Error('private storage failure detail'); });
+  const writeResult = await write.api.ensure(7, { allowLegacyReload: true });
+  assert.equal(writeResult.status, 'manual_reload_required');
+  assert.equal(writeResult.reason, 'marker_persistence_unavailable');
+  assert.ok(!JSON.stringify(writeResult).includes('private'));
   assert.deepEqual(write.actions, ['marker']);
 });

@@ -7,12 +7,32 @@ import { fileURLToPath } from 'node:url';
 
 const nonce = 'a'.repeat(64);
 const extensionRoot = process.env.CLASSPILOT_EXTENSION_PATH || fileURLToPath(new URL('../extension/', import.meta.url));
-const files = new Map(['auth-gate-transport.js','auth-gate-frame.js'].map(name => [name, readFileSync(resolve(extensionRoot, name), 'utf8')]));
+const files = new Map(['auth-gate-transport.js','auth-gate-frame.js','page-lifecycle.js','auth-gate-bootstrap.js','content.js']
+  .map(name => [name, readFileSync(resolve(extensionRoot, name), 'utf8')]));
 const server = createServer((request, response) => {
   const url = new URL(request.url, 'http://fixture.invalid');
   const name = url.pathname.slice(1);
   if (files.has(name)) { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(files.get(name)); return; }
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  if (url.pathname === '/real-parent') {
+    response.end(`<!doctype html><html><body><input id="page-draft" value="protected draft"><script>
+      window.parentFixture = { reloadCalls:0, messages:[] };
+      const eventSource = () => ({ addListener(){}, removeListener(){} });
+      window.chrome = { runtime: { id:'fixture-extension', getManifest:()=>({version:'2.8.7'}),
+        getURL:path => path === 'auth-gate-frame.html' ? location.origin+'/frame?scenario=invalid' : location.origin+'/'+path,
+        onMessage:eventSource(), sendMessage(message,callback) {
+          parentFixture.messages.push(message.type);
+          if(message.type==='classpilot-request-page-reload') {
+            parentFixture.reloadCalls++; callback({success:false,errorCode:'AUTH_GATE_UNAVAILABLE'}); return;
+          }
+          if(message.type==='get-auth-state') { callback({success:true,state:{phase:'ready',authRequired:true,loginMethod:'email_id',revision:5,rosterContextGeneration:1}}); return; }
+          callback?.({success:false});
+        } }, storage: { onChanged:eventSource(), managed:{get:(_keys,callback)=>callback({})},
+          local:{get:(_keys,callback)=>callback({})}, session:{get:(_keys,callback)=>callback({})} } };
+      </script><script src="/auth-gate-transport.js"></script><script src="/page-lifecycle.js"></script>
+      <script src="/auth-gate-bootstrap.js"></script><script src="/content.js"></script></body></html>`);
+    return;
+  }
   if (url.pathname === '/frame') {
     response.end(`<!doctype html><html><body><div id="classpilot-auth-gate"></div><script>
       const scenario = new URL(location.href).searchParams.get('scenario');
@@ -110,6 +130,37 @@ try {
     assert.match(await frame.locator('#classpilot-auth-retry-status').textContent(), /browser’s Reload/);
     assert.equal(await frame.evaluate(() => JSON.stringify(fixture.diagnostics).includes('secret')), false);
   });
+
+  {
+    const page = await browser.newPage();
+    try {
+      await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2030-01-01T00:00:01Z'));
+      await page.goto(`${origin}/real-parent`);
+      const frame = page.frames().find(item => item.url().startsWith(`${origin}/frame`));
+      assert.ok(frame, 'actual content controller creates its frame');
+      await frame.waitForSelector('#classpilot-auth-reload');
+      const frameNonce = decodeURIComponent(new URL(frame.url()).hash.slice(1));
+      // A page-origin sender and malformed IDs cannot trigger the worker action,
+      // even when this test deliberately supplies the private fixture nonce.
+      await page.evaluate(({nonce}) => postMessage({type:'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST',nonce,requestId:1},location.origin), {nonce:frameNonce});
+      await frame.evaluate(({nonce}) => {
+        for (const requestId of ['1', 0, -1, Number.MAX_SAFE_INTEGER + 1]) {
+          parent.postMessage({type:'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST',nonce,requestId},location.origin);
+        }
+        parent.postMessage({type:'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST',nonce:'wrong',requestId:1},location.origin);
+      }, {nonce:frameNonce});
+      await page.clock.runFor(20);
+      assert.equal(await page.evaluate(() => parentFixture.reloadCalls), 0);
+      await click(frame, '#classpilot-auth-reload');
+      await frame.waitForFunction(() => !document.getElementById('classpilot-auth-reload').disabled, null, {timeout:2000});
+      assert.equal(await page.evaluate(() => parentFixture.reloadCalls), 1);
+      assert.match(await frame.locator('#classpilot-auth-retry-status').textContent(), /could not request a reload/);
+      assert.equal(await page.evaluate(() => document.body.inert), true);
+      assert.equal(await page.locator('#page-draft').inputValue(), 'protected draft');
+      passed += 1; console.log('PASS real content parent forwards numeric frame reload ID once and delivers the validated result');
+    } finally { await page.close(); }
+  }
 
   await scenario('uncertain manual login is never replayed and can reconcile a committed session', 'normal', async (page, frame) => {
     await submit(frame); await page.clock.runFor(10_010);

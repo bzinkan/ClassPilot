@@ -1385,7 +1385,15 @@ async function assertUnderlyingPageLocked(page, options = {}) {
 
 async function requestLiveRefresh(worker) {
   return worker.evaluate(async () => {
-    await refreshSharedSignInLoginConfig({ force: true, reason: 'chromium_test' });
+    // Match the public refresh path's policy coordinator before using its
+    // already-applied snapshot. A direct low-level refresh would incorrectly
+    // reread enterprise storage in this explicitly unmanaged browser fixture.
+    await ensureManagedAuthGatePolicyAvailable({ userInitiated: true });
+    await refreshSharedSignInLoginConfig({
+      force: true,
+      reason: 'chromium_test',
+      managedConfigAlreadyApplied: true,
+    });
     return getAuthGateState();
   });
 }

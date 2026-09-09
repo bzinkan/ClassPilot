@@ -113,7 +113,7 @@ test('startup unsettled state schedules one retry; successful recovery and termi
   assert.equal(f.ensureCalls, 0); assert.equal(f.timers.size, 1);
   f.context.authGateStartupComplete = true; f.setOutcome({ status: 'reloaded' });
   await f.nextTimer(); assert.equal(f.ensureCalls, 1); assert.equal(f.timers.size, 0); assert.equal(f.context.recoverySnapshot().pending, false);
-  for (const reason of ['ownership_unproven', 'already_attempted', 'document_or_ownership_changed']) {
+  for (const reason of ['ownership_unproven', 'already_attempted', 'document_or_ownership_changed', 'marker_persistence_unavailable']) {
     const terminal = recoveryFixture({ result: { status: 'manual_reload_required', reason } }); await flush();
     terminal.remember({ reason: 'update', previousVersion: '2.8.6' }); await flush();
     assert.equal(terminal.ensureCalls, 1, reason); assert.equal(terminal.timers.size, 0, reason);

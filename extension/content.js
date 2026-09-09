@@ -1518,7 +1518,7 @@ lifecycle.listen(window, 'message', (event) => {
   }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST') {
     const requestId = event.data.requestId;
-    if (!authGateActive || typeof requestId !== 'string' || !requestId || requestId.length > 128) return;
+    if (!authGateActive || !Number.isSafeInteger(requestId) || requestId <= 0) return;
     const frame = authGateSecureFrame;
     const nonce = authGateSecureFrameNonce;
     chrome.runtime.sendMessage({ type: 'classpilot-request-page-reload' }, response => {

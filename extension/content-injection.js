@@ -75,14 +75,25 @@
       const proof = await bounded(authorizeReload({ tabId, documentId: initial.documentId, reason }));
       if (!isCurrent() || !proof) return manual('policy_not_authorized');
       const key = markerKey(tabId);
-      const stored = await bounded(chrome.storage.session.get(key));
+      let stored;
+      try {
+        stored = await bounded(chrome.storage.session.get(key));
+      } catch {
+        return manual('marker_persistence_unavailable');
+      }
       if (!isCurrent() || pendingMarkerWrites.has(tabId)) return manual('operation_superseded');
       if (stored?.[key]) return manual('already_attempted');
       // Persist before the action, including failures/navigation, so worker restarts cannot loop.
       pendingMarkerWrites.add(tabId);
       const write = Promise.resolve().then(() => chrome.storage.session.set({ [key]: { version, attempted: true } }));
       void write.then(() => pendingMarkerWrites.delete(tabId), () => pendingMarkerWrites.delete(tabId));
-      await bounded(write);
+      try {
+        await bounded(write);
+      } catch {
+        // A failed/unknown persistence result never grants another automatic attempt.
+        // Keep the pending-write fence until the original browser operation settles.
+        return manual('marker_persistence_unavailable');
+      }
       if (!isCurrent() || isReloadAuthorizationCurrent(proof) !== true) return manual('policy_changed');
       const result = await probe(tabId, initial.documentId, 'reload', initial.proofToken);
       return result?.status === 'reloaded' ? result : manual('document_or_ownership_changed');

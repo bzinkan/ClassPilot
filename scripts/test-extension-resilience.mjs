@@ -281,6 +281,15 @@ async function main() {
       await authStateRestorePromise.catch(() => {});
       await classroomStateRestorePromise.catch(() => {});
       await studentAuthMutationTail.catch(() => {});
+      // Adopt the synthetic identity at the same boundary as a manual login.
+      // A cold-start registration may still hold the prior stored device ID
+      // after the restore barrier opens; it must finish before this fixture
+      // installs a replacement authority that the heartbeat will capture.
+      advanceStudentAuthMutationGeneration();
+      CONFIG.autoRegistrationPaused = true;
+      const priorRegistration = chromeProfileRegistrationInFlight;
+      if (priorRegistration) await priorRegistration.catch(() => {});
+      await studentAuthMutationTail.catch(() => {});
       CONFIG.serverUrl = 'https://school-pilot.net';
       CONFIG.schoolId = 'integration-school';
       CONFIG.deviceId = 'diagnostic-device';
@@ -384,8 +393,31 @@ async function main() {
         await new Promise((resolveDrain) => setTimeout(resolveDrain, 10));
       }
       if (heartbeatInFlight) throw new Error('heartbeat did not drain before hung-tab fixture');
+      const fixtureAuthContext = captureAuthenticatedContext('hung-tab eligibility fixture');
+      const eligibility = () => ({
+        activeLicense: currentLicenseIsActive(),
+        licenseFlag: licenseActive === true,
+        fixtureLicenseScopeMatches: licenseStateScope === licenseScopeForAuthContext(fixtureAuthContext),
+        changedAuthorityFields: (() => {
+          try {
+            const current = captureAuthenticatedContext('hung-tab fixture');
+            return [
+              'authContextId', 'mutationGeneration', 'serverOrigin', 'schoolId',
+              'deviceId', 'studentId', 'studentSessionId', 'studentToken',
+            ].filter((key) => current[key] !== fixtureAuthContext[key]);
+          } catch { return ['unavailable']; }
+        })(),
+        tracking: Object.values(TRACKING_STATES).includes(trackingState) ? trackingState : 'unknown',
+        authenticated: hasStudentAuth(),
+        deviceAvailable: Boolean(CONFIG.deviceId),
+        pendingLicenseCheck: Boolean(licenseStatusRequestInFlight),
+        schoolSettingsValid: validSchoolSettingsPayload(schoolSettings),
+        schoolSettingsScopeMatches: schoolSettingsScope === schoolPolicyScope(),
+      });
+      const eligibilityBefore = eligibility();
       const originalFetch = globalThis.fetch;
       let heartbeatRequests = 0;
+      let tabQueries = 0;
       globalThis.fetch = (url, init) => {
         if (String(url).includes('/api/device/heartbeat')) {
           heartbeatRequests += 1;
@@ -399,20 +431,24 @@ async function main() {
       const startedAt = Date.now();
       try {
         const outcome = await safeSendHeartbeat('hung-tab-query-fixture', {
-          queryTabs: () => new Promise(() => {}),
+          queryTabs: () => { tabQueries += 1; return new Promise(() => {}); },
         });
         return {
           outcome,
           elapsedMs: Date.now() - startedAt,
           heartbeatRequests,
           inFlight: heartbeatInFlight,
+          eligibilityBefore,
+          eligibilityAfter: eligibility(),
+          tabQueries,
         };
       } finally {
         globalThis.fetch = originalFetch;
       }
     });
     assert.equal(hungHeartbeatTabQueries.outcome, true);
-    assert.equal(hungHeartbeatTabQueries.heartbeatRequests, 1);
+    assert.equal(hungHeartbeatTabQueries.heartbeatRequests, 1,
+      `Hung-tab heartbeat was not dispatched: ${JSON.stringify(hungHeartbeatTabQueries)}`);
     assert.equal(hungHeartbeatTabQueries.inFlight, false);
     assert.ok(hungHeartbeatTabQueries.elapsedMs >= 5_500);
     assert.ok(hungHeartbeatTabQueries.elapsedMs < 15_000);
@@ -4494,6 +4530,21 @@ async function main() {
     );
     assert.deepEqual(serviceWorkerErrors, []);
 
+    // The remaining recovery-contract cases replace worker authority directly.
+    // Retire pages opened by the earlier command tests before supplying those
+    // synthetic schools; their real sign-in polling is a separate producer.
+    // Browser gate behavior is exercised by the dedicated startup/recovery gates.
+    for (const fixturePage of context.pages()) {
+      if (/^https?:/.test(fixturePage.url())) await fixturePage.goto('about:blank');
+    }
+    await worker.evaluate(async () => {
+      await Promise.allSettled([
+        sharedSignInConfigPromise,
+        ...loginRosterInFlight.values(),
+        studentAuthGatePresencePublishInFlight,
+      ].filter(Boolean));
+    });
+
     const boundedRecoveryAlarmGateCoalescing = await worker.evaluate(async () => {
       await studentSessionRecoveryFlushPromise?.catch(() => {});
       const originalFetch = globalThis.fetch;
@@ -5666,6 +5717,7 @@ async function main() {
       const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
       const originalTrackingState = trackingState;
       const originalNoteStudentAuthGatePresence = noteStudentAuthGatePresence;
+      const originalRefreshSharedSignInLoginConfig = refreshSharedSignInLoginConfig;
       const fixtureFetchLoginRosterForGate = fetchLoginRosterForGate;
       const fixtureFetchLoginRosterNetworkForGate = fetchLoginRosterNetworkForGate;
       const fixtureRequestManagedDeviceContinuityProof = requestManagedDeviceContinuityProof;
@@ -5697,6 +5749,10 @@ async function main() {
         fetchLoginRosterForGate = unrelatedRosterUnavailable;
         fetchLoginRosterNetworkForGate = unrelatedRosterUnavailable;
         requestManagedDeviceContinuityProof = async () => null;
+        // This fixture supplies login-config itself. Drain and fence ordinary
+        // gate polling so it cannot replace that synthetic school authority
+        // while the production continuity contract is being exercised.
+        refreshSharedSignInLoginConfig = async () => sharedSignInLoginConfig;
         // The real content-script gate pulses every ten seconds. Fence those
         // unrelated presence publishes before replacing the continuity fetch
         // seam, otherwise a pulse can issue a second preflight into this
@@ -5711,6 +5767,7 @@ async function main() {
           ...loginRosterInFlight.values(),
           managedDeviceContinuityIssuancePromise,
           managedDeviceContinuityLoadPromise,
+          sharedSignInConfigPromise,
         ].filter(Boolean));
         if (hasStudentAuth()) {
           const current = captureAuthenticatedContext('managed continuity fixture reset');
@@ -6047,6 +6104,7 @@ async function main() {
         fetchLoginRosterForGate = fixtureFetchLoginRosterForGate;
         fetchLoginRosterNetworkForGate = fixtureFetchLoginRosterNetworkForGate;
         requestManagedDeviceContinuityProof = fixtureRequestManagedDeviceContinuityProof;
+        refreshSharedSignInLoginConfig = originalRefreshSharedSignInLoginConfig;
       }
     });
     assert.equal(managedDeviceContinuityFlow.releasesBeforeCanonicalResolution, 0);
