@@ -18,7 +18,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '2.8.6';
+const expectedPreparedReleaseVersion = '2.8.7';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -144,6 +144,15 @@ function runPackagedTests() {
     'test-extension-auth-layout.mjs',
     'test-extension-auth-startup.mjs',
     'test-extension-portal-first.mjs',
+    'test-extension-worker-recovery.mjs',
+    'test-extension-auth-diagnostics.mjs',
+    'test-extension-auth-gate-transport.mjs',
+    'test-page-lifecycle.mjs',
+    'test-content-injection.mjs',
+    'test-extension-reload-authority.mjs',
+    'test-extension-auth-recovery-frame.mjs',
+    'test-extension-page-lifecycle.mjs',
+    'test-extension-auth-recovery-browser.mjs',
   ]) {
     execFileSync(process.execPath, [resolve(scriptDir, script)], {
       cwd: repoRoot,

@@ -1,0 +1,14 @@
+{
+  "sourceCommit": "69010a3b9af19b5069fe2ba0e09afcdf961d8afb",
+  "extensionVersion": "2.8.6",
+  "description": "Exact legacy runtime files for the same-ID in-place upgrade regression. Unchanged extension assets are supplied by the candidate fixture. No production configuration or credentials are included.",
+  "files": {
+    "manifest.json": "ad4c88ec7a1cce581d631b84c97dcf70d19db4a775da0d69427cc64a29e1f613",
+    "service-worker.js": "3b0f7e560fac101810aca89c01f842fab7e3123b9cfe7d9ca8e30e8391694012",
+    "auth-gate-bootstrap.js": "29371c8476fcb61f3701731ba7de06f779e2824d59cd88d3dca472d54c1ecd2c",
+    "content.js": "9bdd439787ef08ad4f2b0fab7953aa7c5aec5cbd1c02556a233b162f8a527bef",
+    "auth-gate-frame.js": "9715b6ee6b2ceb59c8c157c6b8b5d6139f28b2c3b4a17044903912a5840f8f3b",
+    "auth-gate-frame.html": "c5698cd99b82c2387f2f5dc60422cc682314966ae9ec3f3b98078cfd814da000"
+  },
+  "archiveSha256": "86da0fad99d8aea84c9d8239bcfc0fa35ca56eb5351da641dfba88c5fbc8a155"
+}

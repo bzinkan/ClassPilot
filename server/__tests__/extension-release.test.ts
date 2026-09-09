@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.6");
+    expect(manifest.version).toBe("2.8.7");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -26,11 +26,11 @@ describe("ClassPilot extension release package guards", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
     expect(manifest.content_scripts).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        js: ["auth-gate-bootstrap.js"],
+        js: ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "auth-gate-bootstrap.js"],
         run_at: "document_start",
       }),
       expect.objectContaining({
-        js: ["content.js"],
+        js: ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "content.js"],
         run_at: "document_idle",
       }),
     ]));
@@ -162,10 +162,10 @@ describe("ClassPilot extension release package guards", () => {
     expect(contentScript).toContain("authGateStateRequestGeneration += 1");
     expect(contentScript).toContain("__classpilotAuthGateBootstrap.release({ fromContent: true })");
     expect(bootstrap).toContain("gateOwnedByContent && options.fromContent !== true");
-    expect(serviceWorker).toContain("async function revalidateManagedAuthGatePolicy(managedPolicyFence)");
+    expect(serviceWorker).toContain("async function revalidateManagedAuthGatePolicy(managedPolicyFence, options = { userInitiated: true })");
     expect(serviceWorker).toContain("managedPolicyFence,");
     expect(serviceWorker).toContain("managedPolicyGeneration: policyGeneration");
-    expect(serviceWorker).toContain("These proof fields exist only on this correlated direct reply");
+    expect(serviceWorker).toContain("Each caller receives only its own proof from the shared durable cycle.");
   });
 
   it("durably fences login enforcement and reserves restart-safe revisions", () => {
@@ -220,9 +220,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("let managedAuthGateDirectRevalidationInFlight = null");
     expect(serviceWorker).toContain("async function runManagedAuthGatePolicyRevalidation()");
     expect(serviceWorker).toMatch(
-      /if \(!managedAuthGateDirectRevalidationInFlight\)[\s\S]*runManagedAuthGatePolicyRevalidation\(\)[\s\S]*managedAuthGateDirectRevalidationInFlight = trackedRun/,
+      /if \(managedAuthGateDirectRevalidationInFlight\) return managedAuthGateDirectRevalidationInFlight;[\s\S]*runManagedAuthGatePolicyRevalidation\(\)[\s\S]*managedAuthGateDirectRevalidationInFlight = trackedRun/,
     );
-    expect(serviceWorker).toContain("const result = await managedAuthGateDirectRevalidationInFlight");
+    expect(serviceWorker).toContain("const result = await sharedManagedAuthGatePolicyRevalidation(options)");
     expect(serviceWorker).toMatch(
       /return \{[\s\S]*\.\.\.result,[\s\S]*managedPolicyFence,[\s\S]*\};/,
     );

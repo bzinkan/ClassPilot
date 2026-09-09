@@ -5666,6 +5666,9 @@ async function main() {
       const originalInitializeAdaptiveTracking = initializeAdaptiveTracking;
       const originalTrackingState = trackingState;
       const originalNoteStudentAuthGatePresence = noteStudentAuthGatePresence;
+      const fixtureFetchLoginRosterForGate = fetchLoginRosterForGate;
+      const fixtureFetchLoginRosterNetworkForGate = fetchLoginRosterNetworkForGate;
+      const fixtureRequestManagedDeviceContinuityProof = requestManagedDeviceContinuityProof;
       const rawDirectoryDeviceId = 'managed-directory-identifier-must-not-leak';
       const preflightToken = `cpmp1.${'A'.repeat(32)}.${'T'.repeat(43)}`;
       const continuityProof = `cpmd1.${'B'.repeat(32)}.${'P'.repeat(43)}`;
@@ -5683,6 +5686,17 @@ async function main() {
       let loginRequestDeviceId = null;
       let directoryReads = 0;
       try {
+        // Existing real gate frames may poll while this fixture temporarily
+        // supplies its own school/recovery state. Isolate those public reads,
+        // including a roster call already awaiting recovery preparation, from
+        // this fixture's exact request sequence. The explicit checks below
+        // still execute the original production continuity and network code.
+        const unrelatedRosterUnavailable = async () => ({
+          success: false, unavailable: true, phase: 'unavailable', refreshAfterMs: 5000,
+        });
+        fetchLoginRosterForGate = unrelatedRosterUnavailable;
+        fetchLoginRosterNetworkForGate = unrelatedRosterUnavailable;
+        requestManagedDeviceContinuityProof = async () => null;
         // The real content-script gate pulses every ten seconds. Fence those
         // unrelated presence publishes before replacing the continuity fetch
         // seam, otherwise a pulse can issue a second preflight into this
@@ -5693,6 +5707,11 @@ async function main() {
         if (studentAuthGatePresencePublishInFlight) {
           await studentAuthGatePresencePublishInFlight.catch(() => {});
         }
+        await Promise.allSettled([
+          ...loginRosterInFlight.values(),
+          managedDeviceContinuityIssuancePromise,
+          managedDeviceContinuityLoadPromise,
+        ].filter(Boolean));
         if (hasStudentAuth()) {
           const current = captureAuthenticatedContext('managed continuity fixture reset');
           await clearStudentAuth('managed_continuity_fixture_reset', {
@@ -5838,7 +5857,7 @@ async function main() {
           throw new Error('unexpected continuity fixture request');
         };
 
-        const proof = await requestManagedDeviceContinuityProof({
+        const proof = await fixtureRequestManagedDeviceContinuityProof({
           recoveryRecord: matchingRecovery,
           readDirectoryDeviceId: async () => {
             requestOrder.push('directory');
@@ -5850,7 +5869,7 @@ async function main() {
           local: await chrome.storage.local.get(),
           session: await chrome.storage.session.get(),
         };
-        const roster = await fetchLoginRosterNetworkForGate({
+        const roster = await fixtureFetchLoginRosterNetworkForGate({
           gradeLevel: '5',
           continuityRecord: proof,
         });
@@ -5937,7 +5956,7 @@ async function main() {
           jsonValid: true,
         });
         let deniedDirectoryReads = 0;
-        const deniedProof = await requestManagedDeviceContinuityProof({
+        const deniedProof = await fixtureRequestManagedDeviceContinuityProof({
           readDirectoryDeviceId: async () => {
             deniedDirectoryReads += 1;
             return rawDirectoryDeviceId;
@@ -5952,6 +5971,8 @@ async function main() {
           releasesBeforeCanonicalResolution,
           releasedOnlyOtherSchool: releasedTokens.length === 1
             && releasedTokens[0] === `ClassPilot-Recovery ${otherSchoolRecoveryToken}`,
+          releaseOutcomes: releasedTokens.map(value => value === `ClassPilot-Recovery ${otherSchoolRecoveryToken}`
+            ? 'other-school' : value === `ClassPilot-Recovery ${currentRecoveryToken}` ? 'current-school' : 'unexpected'),
           currentRecoveryPreserved: matchingRecovery?.token === currentRecoveryToken,
           requestOrder,
           preflightIdentifierFree: preflightBody
@@ -6023,10 +6044,14 @@ async function main() {
         studentAuthGatePresenceAbortController?.abort();
         studentAuthGatePresenceSources.clear();
         noteStudentAuthGatePresence = originalNoteStudentAuthGatePresence;
+        fetchLoginRosterForGate = fixtureFetchLoginRosterForGate;
+        fetchLoginRosterNetworkForGate = fixtureFetchLoginRosterNetworkForGate;
+        requestManagedDeviceContinuityProof = fixtureRequestManagedDeviceContinuityProof;
       }
     });
     assert.equal(managedDeviceContinuityFlow.releasesBeforeCanonicalResolution, 0);
-    assert.equal(managedDeviceContinuityFlow.releasedOnlyOtherSchool, true);
+    assert.equal(managedDeviceContinuityFlow.releasedOnlyOtherSchool, true,
+      `Expected only other-school release; observed ${JSON.stringify(managedDeviceContinuityFlow.releaseOutcomes)}`);
     assert.equal(managedDeviceContinuityFlow.currentRecoveryPreserved, true);
     assert.deepEqual(managedDeviceContinuityFlow.requestOrder, [
       'preflight',

@@ -38,6 +38,8 @@ try {
 }
 importScripts('classroom-runtime-core.js');
 importScripts('school-website-policy.js');
+importScripts('auth-recovery-diagnostics.js');
+importScripts('content-injection.js');
 importScripts('vendor/sentry.browser.min.js');
 
 const RuntimeCore = globalThis.ClassPilotRuntimeCore;
@@ -302,6 +304,7 @@ let negotiatedProtocolState = null;
 let studentAuthMutationTail = Promise.resolve();
 let chromeProfileRegistrationInFlight = null;
 let manualStudentLoginPendingGeneration = 0;
+let studentAuthMutationPendingCount = 0;
 const manualStudentLoginSuccessfulResponseFailures = new Set();
 
 const CLIENT_PROTOCOL_VERSION = 3;
@@ -616,6 +619,9 @@ const SHARED_SIGN_IN_CONFIG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const SHARED_SIGN_IN_CONFIG_RETRY_ALARM = 'shared-sign-in-config-retry';
 const SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000]);
 const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
+const AUTH_GATE_POLICY_READ_TIMEOUT_MS = 3000;
+const AUTH_GATE_RPC_RESPONSE_TIMEOUT_MS = 9000;
+const AUTH_GATE_POLICY_RECOVERY_ALARM = 'auth-gate-policy-recovery';
 const STUDENT_AUTH_GATE_PRESENCE_REQUEST_TIMEOUT_MS = 5000;
 const STUDENT_AUTH_GATE_PRESENCE_SOURCE_TTL_MS = 30 * 1000;
 const STUDENT_AUTH_GATE_PRESENCE_MIN_PUBLISH_MS = 8 * 1000;
@@ -852,6 +858,14 @@ let authGateRosterContextMutationTail = Promise.resolve();
 let managedAuthGateSetupUnavailable = false;
 let managedAuthGatePolicyRestorePromise = Promise.resolve({});
 let managedAuthGateDirectRevalidationInFlight = null;
+let managedConfigReadGeneration = -1;
+let managedConfigReadPromise = null;
+let managedAuthGatePolicyFailure = null;
+let managedAuthGatePolicyRecoveryAttempt = 0;
+let managedAuthGatePolicyUserRetryAt = null;
+let sharedSignInConfigUserRetryAt = null;
+let authGateStartupComplete = false;
+let manualStudentLoginRequestsPending = 0;
 let authoritativeManagedSchoolPolicyScope = null;
 let sharedSignInLoginConfig = {
   phase: 'loading',
@@ -3601,21 +3615,72 @@ function normalizeManagedString(value) {
 }
 
 async function readManagedConfig(options = {}) {
-  if (!chrome.storage?.managed) {
-    return {};
+  const policyGeneration = managedAuthGatePolicyGeneration;
+  if (managedConfigReadGeneration !== policyGeneration || !managedConfigReadPromise) {
+    managedConfigReadGeneration = policyGeneration;
+    // One native read supplies a generation, including callers that arrive
+    // while its policy/auth persistence barrier is still pending. Retain a
+    // failed attempt as failure; only a new authoritative generation may retry.
+    managedConfigReadPromise = readManagedConfigOnce({ ...options, failClosed: true });
+    managedConfigReadPromise.catch(() => {});
+  }
+  const config = await managedConfigReadPromise;
+  if (policyGeneration !== managedAuthGatePolicyGeneration) {
+    throw authMutationSuperseded('managed config snapshot');
+  }
+  return config;
+}
+
+async function readManagedConfigOnce(options = {}) {
+  const policyGeneration = managedAuthGatePolicyGeneration;
+  if (typeof chrome.storage?.managed?.get !== 'function') {
+    recordAuthGateRecoveryDiagnostic('policy_read', 'internal');
+    throw authGateRecoveryError('AUTH_GATE_POLICY_UNAVAILABLE');
   }
   try {
-    return await new Promise((resolve, reject) => chrome.storage.managed.get(MANAGED_CONFIG_KEYS, (config) => {
-      const runtimeError = chrome.runtime?.lastError;
-      if (runtimeError) {
-        reject(new Error(runtimeError.message || 'Managed configuration is unavailable'));
-        return;
+    const startedAt = Date.now();
+    return await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error, config) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve(config || {});
+      };
+      const timer = setTimeout(() => {
+        const error = authGateRecoveryError('AUTH_GATE_POLICY_TIMEOUT');
+        recordAuthGateRecoveryDiagnostic('policy_read', 'timeout', Date.now() - startedAt);
+        finish(error);
+      }, AUTH_GATE_POLICY_READ_TIMEOUT_MS);
+      try {
+        chrome.storage.managed.get(MANAGED_CONFIG_KEYS, (config) => {
+          // Consume lastError even when this callback belongs to an expired
+          // attempt. A late callback must never apply an obsolete policy.
+          const runtimeError = chrome.runtime?.lastError;
+          if (settled) return;
+          if (policyGeneration !== managedAuthGatePolicyGeneration) {
+            finish(authMutationSuperseded('managed config read'));
+            return;
+          }
+          if (runtimeError) {
+            recordAuthGateRecoveryDiagnostic('policy_read', 'internal', Date.now() - startedAt);
+            finish(authGateRecoveryError('AUTH_GATE_POLICY_UNAVAILABLE'));
+            return;
+          }
+          finish(null, config);
+        });
+      } catch (_error) {
+        recordAuthGateRecoveryDiagnostic('policy_read', 'internal', Date.now() - startedAt);
+        finish(authGateRecoveryError('AUTH_GATE_POLICY_UNAVAILABLE'));
       }
-      resolve(config || {});
-    }));
+    });
   } catch (error) {
     console.warn('[Service Worker] Managed config read failed:', safeDiagnosticError(error));
-    if (options.failClosed === true) throw error;
+    // A timed-out read is not an authoritative empty policy, including for
+    // callers that historically permitted an unavailable unmanaged store.
+    if (options.failClosed === true || error?.code === 'AUTH_GATE_POLICY_TIMEOUT'
+        || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
     return {};
   }
 }
@@ -4302,7 +4367,10 @@ async function resolveServerUrl() {
   if (isExplicitUnmanagedDevelopmentServer(CONFIG.serverUrl || INJECTED_SERVER_URL)) {
     return CONFIG.serverUrl || INJECTED_SERVER_URL;
   }
+  const policyGeneration = managedAuthGatePolicyGeneration;
+  const policyBarrier = managedAuthGatePolicyRestorePromise;
   const managedConfig = await readManagedConfig();
+  assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'server URL managed policy read');
   applyManagedSchoolConfig(managedConfig);
 
   const managedUrl = normalizeManagedString(managedConfig?.serverUrl)
@@ -4326,6 +4394,7 @@ async function resolveServerUrl() {
     'config',
     MANAGED_AUTH_GATE_BINDING_KEY,
   ]);
+  assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'server URL policy fallback');
   if (localConfig?.[MANAGED_AUTH_GATE_BINDING_KEY]?.serverManaged) {
     // The prior managed endpoint was removed. Absence is authoritative and
     // cannot fall back to the endpoint persisted by that former policy.
@@ -11011,6 +11080,128 @@ function assertAuthGatePolicyGuardCurrent(guard, reason) {
   }
 }
 
+function recordAuthGateRecoveryDiagnostic(stage, cause, elapsedMs = 0) {
+  try {
+    globalThis.ClassPilotAuthRecoveryDiagnostics?.record({
+      stage,
+      cause,
+      elapsedMs: Math.max(0, Math.round(elapsedMs)),
+      attemptCount: managedAuthGatePolicyRecoveryAttempt,
+    });
+  } catch {
+    // Diagnostics never participate in policy or authentication decisions.
+  }
+}
+
+function authGateRecoveryError(code, retryAt = 0) {
+  const error = new Error('ClassPilot sign-in is temporarily unavailable');
+  error.code = code;
+  if (retryAt > 0) error.retryAt = retryAt;
+  return error;
+}
+
+function authGateRecoveryFailurePayload(error) {
+  const allowedCodes = new Set([
+    'AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE',
+    'AUTH_GATE_SERVER_TIMEOUT',
+    'AUTH_GATE_STARTUP_TIMEOUT', 'AUTH_GATE_RPC_TIMEOUT',
+    'AUTH_GATE_LOGIN_PENDING', 'AUTH_GATE_UNAVAILABLE',
+  ]);
+  return {
+    success: false,
+    errorCode: allowedCodes.has(error?.code) ? error.code
+      : error?.code === 'AUTH_GATE_TIMEOUT' ? 'AUTH_GATE_SERVER_TIMEOUT'
+      : managedAuthGatePolicyFailure?.code || 'AUTH_GATE_UNAVAILABLE',
+    retryAt: Math.max(Date.now() + 2000, Number(error?.retryAt || managedAuthGatePolicyFailure?.retryAt || 0)),
+  };
+}
+
+function createAuthGateResponseDeadline(sendResponse, stage = 'message_transport') {
+  let settled = false;
+  const startedAt = Date.now();
+  const reply = (response) => {
+    if (settled) return false;
+    settled = true;
+    clearTimeout(timer);
+    try { sendResponse(response); } catch { /* The originating document closed. */ }
+    return true;
+  };
+  const timer = setTimeout(() => {
+    const error = authGateRecoveryError(
+      !authGateStartupComplete ? 'AUTH_GATE_STARTUP_TIMEOUT' : 'AUTH_GATE_RPC_TIMEOUT',
+    );
+    recordAuthGateRecoveryDiagnostic(!authGateStartupComplete ? 'startup' : stage, 'timeout', Date.now() - startedAt);
+    // Do not await publication, invent a revision, or acknowledge a policy
+    // fence here: any one of those authority barriers may be what is blocked.
+    reply(authGateRecoveryFailurePayload(error));
+  }, AUTH_GATE_RPC_RESPONSE_TIMEOUT_MS);
+  reply.fail = (error) => reply(authGateRecoveryFailurePayload(error));
+  return reply;
+}
+
+function armManagedPolicyRecovery(minDelayMs = 2000) {
+  if (!managedAuthGatePolicyFailure) return;
+  const when = Math.max(Date.now() + minDelayMs, managedAuthGatePolicyFailure.retryAt);
+  try {
+    chrome.alarms.create(AUTH_GATE_POLICY_RECOVERY_ALARM, { when })?.catch?.(() => {});
+  } catch { /* An active gate can also request the same due recovery. */ }
+}
+
+function noteManagedPolicyRecoveryFailure(generation, error) {
+  if (generation !== managedAuthGatePolicyGeneration) return;
+  if (managedAuthGatePolicyFailure?.generation === generation) return;
+  const delay = SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[Math.min(
+    managedAuthGatePolicyRecoveryAttempt++, SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS.length - 1,
+  )];
+  managedAuthGatePolicyFailure = {
+    generation,
+    code: error?.code === 'AUTH_GATE_POLICY_TIMEOUT' ? error.code : 'AUTH_GATE_POLICY_UNAVAILABLE',
+    retryAt: Date.now() + delay,
+  };
+  armManagedPolicyRecovery();
+}
+
+function clearManagedPolicyRecoveryFailure(generation) {
+  if (generation !== managedAuthGatePolicyGeneration) return;
+  if (managedAuthGatePolicyFailure) recordAuthGateRecoveryDiagnostic('policy_read', 'recovered');
+  managedAuthGatePolicyFailure = null;
+  managedAuthGatePolicyRecoveryAttempt = 0;
+  managedAuthGatePolicyUserRetryAt = null;
+  try { chrome.alarms.clear(AUTH_GATE_POLICY_RECOVERY_ALARM)?.catch?.(() => {}); } catch { /* Best effort. */ }
+}
+
+async function ensureManagedAuthGatePolicyAvailable(options = {}) {
+  await authStateRestorePromise;
+  if (managedAuthGatePolicyFailure?.generation === managedAuthGatePolicyGeneration) {
+    await sharedManagedAuthGatePolicyRevalidation(options);
+  }
+  await awaitManagedAuthGatePolicyStable();
+  requestLegacyGateRecovery();
+}
+
+async function sharedManagedAuthGatePolicyRevalidation(options = {}) {
+  await authStateRestorePromise;
+  // Never retire this pointer on an RPC deadline: strict auth cleanup or
+  // durable policy persistence may still be running in the shared cycle.
+  if (managedAuthGateDirectRevalidationInFlight) return managedAuthGateDirectRevalidationInFlight;
+  const failure = managedAuthGatePolicyFailure;
+  if (failure && failure.retryAt > Date.now()) {
+    const userBypass = options.userInitiated === true && managedAuthGatePolicyUserRetryAt !== failure.retryAt;
+    if (!userBypass) throw authGateRecoveryError(failure.code, failure.retryAt);
+    managedAuthGatePolicyUserRetryAt = failure.retryAt;
+  }
+  const run = runManagedAuthGatePolicyRevalidation();
+  const trackedRun = run.finally(() => {
+    if (managedAuthGateDirectRevalidationInFlight === trackedRun) {
+      managedAuthGateDirectRevalidationInFlight = null;
+      if (managedAuthGatePolicyFailure) armManagedPolicyRecovery();
+    }
+  });
+  managedAuthGateDirectRevalidationInFlight = trackedRun;
+  trackedRun.catch(() => {});
+  return trackedRun;
+}
+
 async function awaitManagedAuthGatePolicyStable() {
   while (true) {
     const generation = managedAuthGatePolicyGeneration;
@@ -11221,6 +11412,7 @@ async function runManagedAuthGatePolicyRevalidation() {
       policyBarrier,
       'managed policy direct publication',
     );
+    clearManagedPolicyRecoveryFailure(policyGeneration);
     return {
       state,
       managedPolicyGeneration: policyGeneration,
@@ -11232,6 +11424,7 @@ async function runManagedAuthGatePolicyRevalidation() {
     ) {
       // A failed local read/write cannot prove the policy snapshot. Keep every
       // client fenced and fail closed without attaching an acknowledgement.
+      noteManagedPolicyRecoveryFailure(policyGeneration, error);
       managedAuthGateSetupUnavailable = true;
       authoritativeManagedSchoolPolicyScope = null;
       CONFIG.serverUrl = DEFAULT_SERVER_URL;
@@ -11269,31 +11462,16 @@ async function runManagedAuthGatePolicyRevalidation() {
   return run;
 }
 
-async function revalidateManagedAuthGatePolicy(managedPolicyFence) {
+async function revalidateManagedAuthGatePolicy(managedPolicyFence, options = { userInitiated: true }) {
   if (!Number.isSafeInteger(managedPolicyFence) || managedPolicyFence <= 0) {
     const error = new Error('Managed policy fence must be a positive safe integer');
     error.code = 'AUTH_GATE_INVALID_POLICY_FENCE';
     throw error;
   }
-
-  await authStateRestorePromise;
-
-  if (!managedAuthGateDirectRevalidationInFlight) {
-    const run = runManagedAuthGatePolicyRevalidation();
-    const trackedRun = run.finally(() => {
-      if (managedAuthGateDirectRevalidationInFlight === trackedRun) {
-        managedAuthGateDirectRevalidationInFlight = null;
-      }
-    });
-    managedAuthGateDirectRevalidationInFlight = trackedRun;
-    trackedRun.catch(() => {});
-  }
-
-  const result = await managedAuthGateDirectRevalidationInFlight;
+  const result = await sharedManagedAuthGatePolicyRevalidation(options);
   return {
     ...result,
-    // The expensive authoritative cycle is shared, but each direct caller
-    // receives only its own correlation fence. Broadcasts remain marker-free.
+    // Each caller receives only its own proof from the shared durable cycle.
     managedPolicyFence,
   };
 }
@@ -11385,6 +11563,9 @@ async function persistContentAuthGateTiming(rawTiming) {
 
 function recordAuthGateTiming({ outcome, startedAt, coldWorker = false }) {
   const completedAt = Date.now();
+  if (outcome === 'unavailable_invalid_config') {
+    recordAuthGateRecoveryDiagnostic('login_config', 'invalid_payload', completedAt - startedAt);
+  }
   kv.get([AUTH_GATE_TIMING_STORAGE_KEY]).then((stored) => {
     const prior = stored[AUTH_GATE_TIMING_STORAGE_KEY] || {};
     const loadingPaintMs = Number(prior.loadingPaintMs);
@@ -11407,12 +11588,14 @@ function recordAuthGateTiming({ outcome, startedAt, coldWorker = false }) {
 }
 
 async function fetchAuthGateRequest(url, init = {}) {
+  const startedAt = Date.now();
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), AUTH_GATE_REQUEST_TIMEOUT_MS);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     let data = {};
     let jsonValid = true;
+    let bodyFailureCause = 'invalid_payload';
     try {
       data = await response.json();
       if (!data || typeof data !== 'object' || Array.isArray(data)) {
@@ -11422,14 +11605,20 @@ async function fetchAuthGateRequest(url, init = {}) {
     } catch (error) {
       if (controller.signal.aborted) throw error;
       jsonValid = false;
+      bodyFailureCause = error instanceof SyntaxError ? 'invalid_payload' : 'network_failure';
+    }
+    if (!response.ok || !jsonValid) {
+      recordAuthGateRecoveryDiagnostic('server_request', response.ok ? bodyFailureCause : 'http_failure', Date.now() - startedAt);
     }
     return { response, data, jsonValid };
   } catch (error) {
     if (controller.signal.aborted) {
+      recordAuthGateRecoveryDiagnostic('server_request', 'timeout', Date.now() - startedAt);
       const timeoutError = new Error('ClassPilot request timed out');
       timeoutError.code = 'AUTH_GATE_TIMEOUT';
       throw timeoutError;
     }
+    recordAuthGateRecoveryDiagnostic('server_request', 'network_failure', Date.now() - startedAt);
     throw error;
   } finally {
     clearTimeout(timeoutId);
@@ -11491,7 +11680,11 @@ function scheduleSharedSignInConfigRetry() {
 async function refreshSharedSignInLoginConfigFast(options = {}) {
   const force = options.force === true;
   if (options.managedConfigAlreadyApplied !== true) {
-    applyManagedAuthGatePolicySnapshot(await readManagedConfig());
+    const policyGeneration = managedAuthGatePolicyGeneration;
+    const policyBarrier = managedAuthGatePolicyRestorePromise;
+    const managedConfig = await readManagedConfig();
+    assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'fast login config managed policy read');
+    applyManagedAuthGatePolicySnapshot(managedConfig);
   }
   if (!fastAuthGateEnabled) {
     return refreshSharedSignInLoginConfigLegacy({
@@ -11684,7 +11877,11 @@ async function refreshSharedSignInLoginConfigFast(options = {}) {
 async function refreshSharedSignInLoginConfigLegacy(options = {}) {
   const force = options.force === true;
   if (options.managedConfigAlreadyApplied !== true) {
-    applyManagedAuthGatePolicySnapshot(await readManagedConfig());
+    const policyGeneration = managedAuthGatePolicyGeneration;
+    const policyBarrier = managedAuthGatePolicyRestorePromise;
+    const managedConfig = await readManagedConfig();
+    assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'legacy login config managed policy read');
+    applyManagedAuthGatePolicySnapshot(managedConfig);
   }
   if (fastAuthGateEnabled) {
     return refreshSharedSignInLoginConfigFast({
@@ -11797,7 +11994,7 @@ function getAuthGateState() {
     lastAuthGateAuthRequired = authRequired;
     bumpAuthGateStateRevision();
   }
-  const phase = presentationPending ? 'loading' : authRequired
+  const phase = presentationPending ? 'loading' : authRequired && managedAuthGatePolicyFailure ? 'unavailable' : authRequired
     ? (fastAuthGateEnabled
       ? sharedSignInLoginConfig.phase
       : (!hasSchoolSetup || sharedSignInLoginConfig.setupRequired === true
@@ -11822,7 +12019,7 @@ function getAuthGateState() {
     phase,
     revision: authGateStateRevision,
     configFetchedAt: sharedSignInLoginConfig.fetchedAt || null,
-    retryAt: sharedSignInLoginConfig.retryAt || null,
+    retryAt: managedAuthGatePolicyFailure?.retryAt || sharedSignInLoginConfig.retryAt || null,
     // kioskUrl is null unless the school's PassPilot kiosk is usable;
     // kioskOrigin is always present so the content script can skip painting
     // the gate on kiosk pages even when the button is hidden.
@@ -12029,8 +12226,9 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
         throw authMutationSuperseded('managed policy persistence');
       }
 
+      clearManagedPolicyRecoveryFailure(policyGeneration);
       if (fastAuthGateEnabled && !hasStudentAuth()) {
-        refreshSharedSignInLoginConfig({ reason: 'managed_policy_change' }).catch(() => {});
+        refreshSharedSignInLoginConfig({ reason: 'managed_policy_change', managedConfigAlreadyApplied: true }).catch(() => {});
         await notifyAuthGateStateToTabs({
           triggerRefresh: false,
           skipManagedPolicyWait: true,
@@ -12056,6 +12254,7 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       return currentManagedConfig;
     }).catch((error) => {
       if (policyGeneration === managedAuthGatePolicyGeneration) {
+        noteManagedPolicyRecoveryFailure(policyGeneration, error);
         managedAuthGateSetupUnavailable = true;
         authoritativeManagedSchoolPolicyScope = null;
         CONFIG.serverUrl = DEFAULT_SERVER_URL;
@@ -12141,10 +12340,7 @@ async function enforceAuthGateForTab(tabOrId, options = {}) {
     } catch (error) {
       if (!hasStudentAuth() && chrome.scripting) {
         try {
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: ['content.js'],
-          });
+          await ensureContentScriptInjected(tab.id);
           await chrome.tabs.sendMessage(tab.id, message);
         } catch {
           // Some pages reject extension scripts; the gate will apply on the next normal page.
@@ -12157,9 +12353,13 @@ async function enforceAuthGateForTab(tabOrId, options = {}) {
 }
 
 function enqueueStudentAuthMutation(mutation) {
+  studentAuthMutationPendingCount += 1;
   const run = studentAuthMutationTail.then(mutation, mutation);
-  studentAuthMutationTail = run.catch(() => undefined);
-  return run;
+  const tracked = run.finally(() => {
+    studentAuthMutationPendingCount -= 1;
+  });
+  studentAuthMutationTail = tracked.catch(() => undefined);
+  return tracked;
 }
 
 function startAuthCommitRecoveryBarrier() {
@@ -13922,7 +14122,11 @@ async function ensureRegisteredNow() {
     if (!hasStudentAuth() && !storedHasExactStudentAuth) {
       await fetchClientConfig(serverUrl);
     }
-    applyManagedSchoolConfig(await readManagedConfig());
+    const policyGeneration = managedAuthGatePolicyGeneration;
+    const policyBarrier = managedAuthGatePolicyRestorePromise;
+    const managedConfig = await readManagedConfig();
+    assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'student registration managed policy read');
+    applyManagedSchoolConfig(managedConfig);
 
     if (stored[STUDENT_AUTH_INVALIDATING_KEY] === true) {
       studentAuthInvalidating = true;
@@ -14228,6 +14432,7 @@ async function ensureRegisteredNow() {
 chrome.runtime.onInstalled.addListener((details = {}) => {
   console.log('[Service Worker] Extension installed/updated');
   disableToolbarAction();
+  if (details.reason === 'update' && details.previousVersion === '2.8.6') rememberLegacyGateUpdate(details);
   authStateRestorePromise
     .then(() => awaitManagedAuthGatePolicyStable())
     .then(async () => {
@@ -14242,6 +14447,7 @@ chrome.runtime.onInstalled.addListener((details = {}) => {
           preserveRecoveryForGate: true,
         });
       }
+      requestLegacyGateRecovery();
       flushStudentSessionRecovery({ maxRecords: 1 }).catch(() => {});
       scheduleLicenseCheck();
       ensureRegistered().catch(() => {});
@@ -14283,6 +14489,7 @@ const authStateRestorePromise = new Promise((resolve) => {
   markAuthStateRestored = () => {
     if (settled) return;
     settled = true;
+    authGateStartupComplete = true;
     resolve();
   };
 });
@@ -14383,6 +14590,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       { allowUnmanagedFallback, managedReadFailed: Boolean(error) },
     );
     if (error) {
+      noteManagedPolicyRecoveryFailure(wakePolicyGeneration, error);
       managedPolicyChanged = true;
       managedSetupUnavailable = true;
       managedAuthGateSetupUnavailable = true;
@@ -14473,7 +14681,10 @@ const authStateRestorePromise = new Promise((resolve) => {
     if (wakePolicyGeneration === managedAuthGatePolicyGeneration) {
       const appliedConfig = applyWorkerWakeManagedPolicy(managedOutcome);
       if (managedOutcome.error) rejectWakePolicyRestore(managedOutcome.error);
-      else resolveWakePolicyRestore(appliedConfig);
+      else {
+        clearManagedPolicyRecoveryFailure(wakePolicyGeneration);
+        resolveWakePolicyRestore(appliedConfig);
+      }
     } else {
       rejectWakePolicyRestore(authMutationSuperseded('worker wake managed policy'));
       await awaitManagedAuthGatePolicyStable().catch(() => {});
@@ -14532,16 +14743,18 @@ const authStateRestorePromise = new Promise((resolve) => {
     if (!authGateRosterContextReady) rejectAuthGateRosterContextReady(error);
     throw error;
   }
-  // Ordinary cold start can release the page gate as soon as the local
-  // credential snapshot is resolved. Crash-recovery paths must keep the
-  // barrier pending until their durable invalidation markers are removed;
-  // otherwise callers can observe a fail-closed UI while recovery is still
-  // only half committed on disk.
+  // An authenticated cold start can release the page gate as soon as the
+  // local credential snapshot is resolved. Unsigned wakes still perform the
+  // required browser-session-ended cleanup below, just like crash recovery.
+  // Keep their barrier pending through that durable cleanup; otherwise a
+  // page can start login-config work that the same wake immediately retires
+  // by clearing auth and resetting its in-flight config request.
   if (
     !interruptedAuthClear
     && !interruptedAuthCommit
     && !manualAuthTimestampInvalid
     && !manualAuthSessionStorageUnavailable
+    && hasStudentAuth()
   ) {
     markAuthStateRestored();
   }
@@ -15216,7 +15429,11 @@ async function getLoggedInUserInfo() {
 // Auto-detect and register student based on Chromebook login
 async function autoDetectAndRegister() {
   assertChromeProfileRegistrationAllowed('student auto-detection');
-  applyManagedSchoolConfig(await readManagedConfig());
+  const policyGeneration = managedAuthGatePolicyGeneration;
+  const policyBarrier = managedAuthGatePolicyRestorePromise;
+  const managedConfig = await readManagedConfig();
+  assertManagedPolicyRevalidationCurrent(policyGeneration, policyBarrier, 'student auto-detection managed policy read');
+  applyManagedSchoolConfig(managedConfig);
   const authPause = await chrome.storage.local.get(['autoRegistrationPaused']);
   if (authPause.autoRegistrationPaused) {
     console.log('[Auth] Auto-detect registration paused until manual sign-in');
@@ -16114,13 +16331,25 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     checkLicenseStatus('retry-alarm').catch(() => {});
   } else if (alarm.name === LICENSE_CONTROL_CLEANUP_ALARM) {
     handleLicenseControlCleanupAlarm().catch(() => {});
+  } else if (alarm.name === AUTH_GATE_POLICY_RECOVERY_ALARM) {
+    // Do not attach endless alarm waiters to a strict startup/auth mutation.
+    if (!authGateStartupComplete || managedAuthGateDirectRevalidationInFlight) {
+      armManagedPolicyRecovery(30000);
+      return;
+    }
+    ensureManagedAuthGatePolicyAvailable().then(() => {
+      if (!hasStudentAuth()) {
+        return refreshSharedSignInLoginConfig({ reason: 'policy_recovery', managedConfigAlreadyApplied: true });
+      }
+    }).catch(() => armManagedPolicyRecovery());
   } else if (alarm.name === SHARED_SIGN_IN_CONFIG_RETRY_ALARM) {
-    authStateRestorePromise.then(() => {
+    if (!authGateStartupComplete) return;
+    ensureManagedAuthGatePolicyAvailable().then(() => {
       if (!fastAuthGateEnabled || hasStudentAuth()) {
         clearSharedSignInConfigRetry();
         return;
       }
-      refreshSharedSignInLoginConfig({ force: true, reason: 'retry_alarm' }).catch(() => {});
+      return refreshSharedSignInLoginConfig({ reason: 'retry_alarm', managedConfigAlreadyApplied: true });
     }).catch(() => {});
   } else if (alarm.name === SHARED_AUTH_LOCK_ALARM_NAME) {
     handleSharedAuthLockTimeout().catch(() => {});
@@ -20582,33 +20811,175 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
   };
 }
 
-// Track which tabs have content script injected to avoid repeated injection attempts
-const injectedTabs = new Set();
+const PAGE_RECOVERY_FILES = Object.freeze([
+  'auth-recovery-diagnostics.js', 'auth-gate-transport.js', 'page-lifecycle.js',
+  'auth-gate-bootstrap.js', 'content.js',
+]);
+const LEGACY_GATE_UPDATE_KEY = 'classpilotLegacyGateUpdateV1';
+const PAGE_RECOVERY_VERSION = chrome.runtime.getManifest().version;
+let pendingLegacyGateUpdate = null;
+let legacyGateRecoverySweep = null;
+let legacyGateRecoveryRetryTimer = null;
+let legacyGateRecoveryRetryAttempt = 0;
+const legacyGateRecoveryTerminalTabs = new Set();
+const LEGACY_GATE_RECOVERY_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 30000]);
+const LEGACY_GATE_RECOVERY_TRANSIENT_REASONS = new Set([
+  'policy_not_authorized', 'policy_changed', 'page_unavailable', 'document_unavailable',
+  'document_changed', 'operation_superseded', 'marker_write_pending', 'installation_unconfirmed',
+  'legacy_requires_update_authorization',
+]);
 
-// Helper function to ensure content script is injected (optimized for speed)
-async function ensureContentScriptInjected(tabId) {
-  // Skip if we already know content script is injected
-  if (injectedTabs.has(tabId)) {
-    return;
-  }
+function reloadAuthIsSettled() {
+  return authGateStartupComplete && !hasStudentAuth() && !CONFIG.studentToken
+    && !studentAuthInvalidating && !studentAuthCommitPending
+    && studentAuthMutationPendingCount === 0 && manualStudentLoginRequestsPending === 0
+    && manualStudentLoginPendingGeneration === 0 && !chromeProfileRegistrationInFlight
+    && !resolveAuthCommitRecovery && !rejectAuthCommitRecovery
+    && !managedAuthGateDirectRevalidationInFlight && !managedAuthGatePolicyFailure
+    && authGateRevisionReady && authGateRosterContextReady;
+}
 
-  // Try to inject the content script directly (faster than ping-then-inject)
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      files: ['content.js']
-    });
-    injectedTabs.add(tabId);
-  } catch (injectError) {
-    // Script might already be injected or tab doesn't support scripting
-    // Either way, mark as "attempted" to avoid repeated failures
-    injectedTabs.add(tabId);
+function legacyUpdateIsCurrent() {
+  return pendingLegacyGateUpdate?.version === PAGE_RECOVERY_VERSION
+    && pendingLegacyGateUpdate.previousVersion === '2.8.6'
+    && pendingLegacyGateUpdate.expiresAt > Date.now();
+}
+
+async function authorizePageRecoveryReload({ tabId, documentId, reason }) {
+  if (reason === 'legacy_update' && !legacyUpdateIsCurrent()) return null;
+  await authStateRestorePromise;
+  // A page reload receives fresh managed authority, not just a cached UI state.
+  // Revalidation can itself invalidate auth, so pending logins must be excluded
+  // before beginning that work as well as before authorizing the final action.
+  if (!reloadAuthIsSettled()) return null;
+  await sharedManagedAuthGatePolicyRevalidation({ userInitiated: true });
+  await awaitManagedAuthGatePolicyStable();
+  const tab = await chrome.tabs.get(tabId);
+  let url;
+  try { url = new URL(tab.url); } catch { return null; }
+  if (!/^https?:$/.test(url.protocol) || isKioskGateUrl(url.href)
+    || url.pathname === '/passpilot/kiosk' || url.pathname.startsWith('/passpilot/kiosk/')) return null;
+  const state = await getPublishableAuthGateState();
+  if (!reloadAuthIsSettled() || state.authRequired !== true) return null;
+  return {
+    tabId, documentId, reason, authGeneration: studentAuthMutationGeneration,
+    policyGeneration: managedAuthGatePolicyGeneration, bindingKey: authGateConfigBindingKey(),
+  };
+}
+
+function pageRecoveryAuthorizationIsCurrent(proof) {
+  return Boolean(proof) && reloadAuthIsSettled()
+    && proof.authGeneration === studentAuthMutationGeneration
+    && proof.policyGeneration === managedAuthGatePolicyGeneration
+    && proof.bindingKey === authGateConfigBindingKey()
+    && (proof.reason !== 'legacy_update' || legacyUpdateIsCurrent());
+}
+
+const classPilotContentInjection = ClassPilotContentInjection.create({
+  chrome, version: PAGE_RECOVERY_VERSION, files: PAGE_RECOVERY_FILES,
+  authorizeReload: authorizePageRecoveryReload,
+  isReloadAuthorizationCurrent: pageRecoveryAuthorizationIsCurrent,
+});
+
+function reportPageRecoveryOutcome(result) {
+  if (result?.status === 'manual_reload_required') {
+    ClassPilotAuthRecoveryDiagnostics.record({ stage: 'script_recovery', cause: 'reload_required' });
+  } else if (result?.status === 'reloaded') {
+    ClassPilotAuthRecoveryDiagnostics.record({ stage: 'script_recovery', cause: 'recovered' });
   }
 }
 
-// Clean up injectedTabs when tabs are closed
+function retireLegacyGateUpdate(intent) {
+  if (pendingLegacyGateUpdate !== intent) return;
+  pendingLegacyGateUpdate = null;
+  if (legacyGateRecoveryRetryTimer !== null) clearTimeout(legacyGateRecoveryRetryTimer);
+  legacyGateRecoveryRetryTimer = null;
+  legacyGateRecoveryRetryAttempt = 0;
+  legacyGateRecoveryTerminalTabs.clear();
+  chrome.storage.session.remove(LEGACY_GATE_UPDATE_KEY).catch(() => {});
+}
+
+function scheduleLegacyGateRecoveryRetry() {
+  if (!legacyUpdateIsCurrent() || legacyGateRecoveryRetryTimer !== null || legacyGateRecoverySweep) return;
+  const delay = LEGACY_GATE_RECOVERY_RETRY_DELAYS_MS[Math.min(
+    legacyGateRecoveryRetryAttempt++, LEGACY_GATE_RECOVERY_RETRY_DELAYS_MS.length - 1,
+  )];
+  legacyGateRecoveryRetryTimer = setTimeout(() => {
+    legacyGateRecoveryRetryTimer = null;
+    requestLegacyGateRecovery();
+  }, Math.min(delay, pendingLegacyGateUpdate.expiresAt - Date.now()));
+}
+
+function requestLegacyGateRecovery() {
+  if (!legacyUpdateIsCurrent()) {
+    if (pendingLegacyGateUpdate) retireLegacyGateUpdate(pendingLegacyGateUpdate);
+    return;
+  }
+  // Ordinary auth polling cannot bypass the one tracked backoff timer.
+  if (legacyGateRecoverySweep || legacyGateRecoveryRetryTimer !== null) return;
+  if (!reloadAuthIsSettled()) { scheduleLegacyGateRecoveryRetry(); return; }
+  const intent = pendingLegacyGateUpdate;
+  let retryNeeded = false;
+  const run = Promise.resolve().then(async () => {
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!legacyUpdateIsCurrent() || pendingLegacyGateUpdate !== intent) return;
+      if (!reloadAuthIsSettled()) { retryNeeded = true; return; }
+      if (!Number.isInteger(tab.id) || !/^https?:\/\//.test(tab.url || '') || isKioskGateUrl(tab.url)
+        || legacyGateRecoveryTerminalTabs.has(tab.id)) continue;
+      const result = await classPilotContentInjection.ensure(tab.id, { allowLegacyReload: true });
+      reportPageRecoveryOutcome(result);
+      if (LEGACY_GATE_RECOVERY_TRANSIENT_REASONS.has(result?.reason)) retryNeeded = true;
+      else legacyGateRecoveryTerminalTabs.add(tab.id);
+    }
+    if (!retryNeeded) retireLegacyGateUpdate(intent);
+  }).catch(() => {
+    retryNeeded = true;
+    ClassPilotAuthRecoveryDiagnostics.record({ stage: 'script_recovery', cause: 'internal' });
+  }).finally(() => {
+    if (legacyGateRecoverySweep === run) legacyGateRecoverySweep = null;
+    if (pendingLegacyGateUpdate !== intent) { scheduleLegacyGateRecoveryRetry(); return; }
+    if (!legacyUpdateIsCurrent()) retireLegacyGateUpdate(intent);
+    else if (retryNeeded) scheduleLegacyGateRecoveryRetry();
+  });
+  legacyGateRecoverySweep = run;
+}
+
+function rememberLegacyGateUpdate(details) {
+  if (details?.reason !== 'update' || details.previousVersion !== '2.8.6') return;
+  const intent = { version: PAGE_RECOVERY_VERSION, previousVersion: '2.8.6', expiresAt: Date.now() + 10 * 60_000 };
+  // An incomplete marker write grants no automatic reload permission.
+  chrome.storage.session.set({ [LEGACY_GATE_UPDATE_KEY]: intent }).then(() => {
+    if (intent.expiresAt <= Date.now()) return;
+    pendingLegacyGateUpdate = intent;
+    if (legacyGateRecoveryRetryTimer !== null) clearTimeout(legacyGateRecoveryRetryTimer);
+    legacyGateRecoveryRetryTimer = null;
+    legacyGateRecoveryRetryAttempt = 0;
+    legacyGateRecoveryTerminalTabs.clear();
+    requestLegacyGateRecovery();
+  }).catch(() => {});
+}
+
+chrome.storage.session.get(LEGACY_GATE_UPDATE_KEY).then((stored) => {
+  if (pendingLegacyGateUpdate) return;
+  const intent = stored?.[LEGACY_GATE_UPDATE_KEY];
+  if (intent?.version === PAGE_RECOVERY_VERSION && intent.previousVersion === '2.8.6' && Number.isFinite(intent.expiresAt)
+    && intent.expiresAt > Date.now() && intent.expiresAt <= Date.now() + 10 * 60_000) {
+    pendingLegacyGateUpdate = intent;
+    authStateRestorePromise.then(() => requestLegacyGateRecovery()).catch(() => {});
+  }
+}).catch(() => {});
+
+async function ensureContentScriptInjected(tabId) {
+  const result = await classPilotContentInjection.ensure(tabId);
+  reportPageRecoveryOutcome(result);
+  if (result.status !== 'ready') throw authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
+  return result;
+}
+
+// Navigation and closure invalidate the document proof, never authorize retry on a new document.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  injectedTabs.delete(tabId);
+  classPilotContentInjection.forgetTab(tabId);
   removeStudentAuthGatePresenceSourcesForTab(tabId);
 });
 
@@ -20632,11 +21003,7 @@ async function broadcastToAllTabsUnbound(messageType, messageData) {
       });
     } catch {
       try {
-        await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content.js'],
-        });
-        injectedTabs.add(tab.id);
+        await ensureContentScriptInjected(tab.id);
         await chrome.tabs.sendMessage(tab.id, {
           type: messageType,
           data: messageData,
@@ -20827,7 +21194,7 @@ async function broadcastToAllTabsForAuth(
   const sendTabMessage = transport.sendMessage
     || ((tabId, payload) => chrome.tabs.sendMessage(tabId, payload));
   const injectContentScript = transport.executeScript
-    || ((details) => chrome.scripting.executeScript(details));
+    || ((details) => ensureContentScriptInjected(details.target.tabId));
   const tabs = await queryTabs();
   assertCurrent();
   const validTabs = tabs.filter((tab) => (
@@ -20853,7 +21220,6 @@ async function broadcastToAllTabsForAuth(
           files: ['content.js'],
         });
         assertCurrent();
-        injectedTabs.add(tab.id);
         await sendTabMessage(tab.id, {
           type: messageType,
           data: messageData,
@@ -23817,6 +24183,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
 // Tab update listener - send heartbeat on URL/title change
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.url || changeInfo.status === 'loading') classPilotContentInjection.forgetTab(tabId);
   let navigationAuthContext = null;
   try {
     navigationAuthContext = captureAuthenticatedContext('tab update');
@@ -23962,6 +24329,25 @@ async function updateServerOriginForSignedOutProfile(rawServerUrl) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'record-auth-gate-diagnostic') {
+    sendResponse({ success: sender.id === chrome.runtime.id
+      && ClassPilotAuthRecoveryDiagnostics.record(message.diagnostic) });
+    return false;
+  }
+  if (message.type === 'classpilot-request-page-reload') {
+    const reply = createAuthGateResponseDeadline(sendResponse, 'script_recovery');
+    classPilotContentInjection.requestReload(sender).then((result) => {
+      reportPageRecoveryOutcome(result);
+      reply({ success: result.status === 'reloaded',
+        ...(result.status === 'reloaded' ? {} : { code: 'AUTH_GATE_UNAVAILABLE', errorCode: 'AUTH_GATE_UNAVAILABLE' }) });
+    }).catch(() => reply.fail(authGateRecoveryError('AUTH_GATE_UNAVAILABLE')));
+    return true;
+  }
+  if (['get-auth-state', 'refresh-auth-state', 'get-login-roster'].includes(message.type)) {
+    sendResponse = createAuthGateResponseDeadline(
+      sendResponse, message.type === 'get-login-roster' ? 'roster' : 'message_transport',
+    );
+  }
   if (message.type === 'student-auth-gate-presence') {
     sendResponse({ success: noteStudentAuthGatePresence(message, sender) });
     return true;
@@ -24239,129 +24625,80 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'get-auth-state') {
     if (message.revalidateManagedPolicy === true) {
-      revalidateManagedAuthGatePolicy(message.managedPolicyFence)
-        .then(({ state, managedPolicyFence, managedPolicyGeneration }) => {
-          const response = {
-            success: true,
-            state,
-            // These proof fields exist only on this correlated direct reply.
-            // Broadcast CLASSPILOT_* messages never carry either field.
-            managedPolicyFence,
-            managedPolicyGeneration,
-          };
-          sendResponse(response);
-        })
-        .catch(async (error) => {
-          try {
-            const response = {
-              success: false,
-              error: error?.message || 'Managed policy revalidation failed',
-              state: await getPublishableAuthGateState(),
-            };
-            sendResponse(response);
-          } catch {
-            sendResponse({ success: false, error: 'Authentication state is unavailable' });
-          }
-        });
+      revalidateManagedAuthGatePolicy(message.managedPolicyFence, {
+        userInitiated: message.reason === 'user',
+      }).then(({ state, managedPolicyFence, managedPolicyGeneration }) => {
+        sendResponse({ success: true, state, managedPolicyFence, managedPolicyGeneration });
+      }).catch((error) => sendResponse.fail(error));
       return true;
     }
 
-    // All ordinary callers that arrive before the first ordinary reply belong
-    // to the same cold-worker cohort. Local restoration can finish between
-    // concurrent messages, so its completion is not a reliable cohort fence.
     const authStateWasCold = ordinaryAuthStateColdCohortOpen;
-    const sendOrdinaryAuthStateResponse = (response) => {
-      sendResponse(response);
-      ordinaryAuthStateColdCohortOpen = false;
-    };
-    authStateRestorePromise
-      .then(async () => {
-        expireManualAuthIfStaleFailClosed('get-auth-state');
-        authGateStateColdWorker = authStateWasCold;
-        if (hasStudentAuth()) return;
-
-        await awaitManagedAuthGatePolicyStable();
+    authStateRestorePromise.then(async () => {
+      expireManualAuthIfStaleFailClosed('get-auth-state');
+      authGateStateColdWorker = authStateWasCold;
+      if (!hasStudentAuth()) {
+        await ensureManagedAuthGatePolicyAvailable();
         if (fastAuthGateEnabled) {
+          // The shared managed barrier already proved this generation. A
+          // 500ms page poll must not issue another managed read or force HTTP.
           refreshSharedSignInLoginConfig({
-            reason: 'get_auth_state',
-            coldWorker: authStateWasCold,
+            reason: 'get_auth_state', coldWorker: authStateWasCold,
+            managedConfigAlreadyApplied: true,
           }).catch(() => {});
-          return;
+        } else {
+          await expireManualAuthIfStale('get-auth-state');
+          if (!hasStudentAuth()) {
+            await refreshSharedSignInLoginConfig({ managedConfigAlreadyApplied: true });
+          }
         }
-
-        await expireManualAuthIfStale('get-auth-state');
-        if (!hasStudentAuth()) {
-          await refreshSharedSignInLoginConfig({ managedConfigAlreadyApplied: true });
-        }
-      })
-      .then(async () => {
-        const state = await getPublishableAuthGateState();
-        state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
-        const response = { success: true, state };
-        sendOrdinaryAuthStateResponse(response);
-      })
-      .catch(async (error) => {
-        try {
-          const state = await getPublishableAuthGateState();
-          state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
-          const response = {
-            success: false,
-            error: error.message,
-            state,
-          };
-          sendOrdinaryAuthStateResponse(response);
-        } catch {
-          sendOrdinaryAuthStateResponse({
-            success: false,
-            error: 'Authentication state is unavailable',
-          });
-        }
-      });
+      }
+      const state = await getPublishableAuthGateState();
+      state.coldWorker = state.fastAuthGateEnabled && authStateWasCold;
+      if (state.authRequired !== false && (manualStudentLoginRequestsPending > 0
+        || manualStudentLoginPendingGeneration > 0 || studentAuthCommitPending)) {
+        sendResponse.fail(authGateRecoveryError('AUTH_GATE_LOGIN_PENDING'));
+        return;
+      }
+      const sent = sendResponse({ success: true, state });
+      if (sent) ordinaryAuthStateColdCohortOpen = false;
+    }).catch((error) => sendResponse.fail(error));
     return true;
   }
 
   if (message.type === 'refresh-auth-state') {
-    authStateRestorePromise
-      .then(async () => {
-        expireManualAuthIfStaleFailClosed('refresh-auth-state');
-        if (!hasStudentAuth()) await awaitManagedAuthGatePolicyStable();
-        if (!fastAuthGateEnabled) await expireManualAuthIfStale('refresh-auth-state');
-        if (!hasStudentAuth()) {
-          await refreshSharedSignInLoginConfig({
-            force: true,
-            reason: 'retry_now',
-            managedConfigAlreadyApplied: true,
-          });
-        }
-        const state = await getPublishableAuthGateState();
-        sendResponse({ success: state.phase !== 'unavailable', state });
-      })
-      .catch(async () => {
-        try {
-          sendResponse({ success: false, state: await getPublishableAuthGateState() });
-        } catch {
-          sendResponse({ success: false, error: 'Authentication state is unavailable' });
-        }
-      });
+    authStateRestorePromise.then(async () => {
+      const userInitiated = message.reason === 'user';
+      expireManualAuthIfStaleFailClosed('refresh-auth-state');
+      if (!hasStudentAuth()) await ensureManagedAuthGatePolicyAvailable({ userInitiated });
+      if (!fastAuthGateEnabled) await expireManualAuthIfStale('refresh-auth-state');
+      if (!hasStudentAuth()) {
+        const retryAt = Number(sharedSignInLoginConfig.retryAt || 0);
+        const force = userInitiated && (!retryAt || sharedSignInConfigUserRetryAt !== retryAt);
+        if (force && retryAt) sharedSignInConfigUserRetryAt = retryAt;
+        await refreshSharedSignInLoginConfig({
+          force,
+          reason: userInitiated ? 'retry_now' : 'page_timer',
+          managedConfigAlreadyApplied: true,
+        });
+      }
+      const state = await getPublishableAuthGateState();
+      sendResponse({ success: state.phase !== 'unavailable', state });
+    }).catch((error) => sendResponse.fail(error));
     return true;
   }
 
   if (message.type === 'get-login-roster') {
-    authStateRestorePromise
-      .then(async () => {
-        await awaitManagedAuthGatePolicyStable();
-        return fetchLoginRosterForGate({
-          gradeLevel: message.gradeLevel,
-          forceRefresh: message.forceRefresh === true,
-          forceRecovery: message.forceRecovery === true,
-        });
-      })
-      .then((data) => sendResponse(data))
-      .catch((error) => sendResponse({ success: false, error: error.message || 'Could not load roster' }));
+    ensureManagedAuthGatePolicyAvailable().then(() => fetchLoginRosterForGate({
+      gradeLevel: message.gradeLevel,
+      forceRefresh: message.forceRefresh === true,
+      forceRecovery: message.forceRecovery === true,
+    })).then((data) => sendResponse(data)).catch((error) => sendResponse.fail(error));
     return true;
   }
 
   if (message.type === 'manual-student-login') {
+    manualStudentLoginRequestsPending += 1;
     manualStudentLogin(message.payload || {})
       .then((data) => sendResponse(data))
       .catch((error) => {
@@ -24376,6 +24713,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           failure.code = error.code;
         }
         sendResponse(failure);
+      }).finally(() => {
+        manualStudentLoginRequestsPending -= 1;
       });
     return true;
   }

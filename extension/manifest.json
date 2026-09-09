@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClassPilot",
-  "version": "2.8.6",
+  "version": "2.8.7",
   "description": "Privacy-aware classroom monitoring for managed Chromebooks. Displays active tab information to teachers with transparent disclosure.",
   "icons": {
     "16": "icons/icon16.png",
@@ -48,12 +48,12 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["auth-gate-bootstrap.js"],
+      "js": ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "auth-gate-bootstrap.js"],
       "run_at": "document_start"
     },
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "js": ["auth-recovery-diagnostics.js", "auth-gate-transport.js", "page-lifecycle.js", "content.js"],
       "run_at": "document_idle"
     }
   ],
@@ -62,7 +62,9 @@
       "resources": [
         "auth-gate-frame.html",
         "auth-gate-frame.css",
-        "auth-gate-frame.js"
+        "auth-gate-frame.js",
+        "auth-recovery-diagnostics.js",
+        "auth-gate-transport.js"
       ],
       "matches": ["http://*/*", "https://*/*"],
       "use_dynamic_url": true

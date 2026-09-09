@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -38,6 +38,7 @@ function json(response, status, body) {
 async function startFixtureServer() {
   const state = {
     loginConfigRequests: 0,
+    cohortLoginConfigRequestAt: null,
     rosterRequests: 0,
     rosterDelayMs: 0,
     rosterStatus: 200,
@@ -75,6 +76,7 @@ async function startFixtureServer() {
     const url = new URL(request.url || '/', 'http://fixture.invalid');
     if (url.pathname === '/api/extension/login-config') {
       state.loginConfigRequests += 1;
+      if (state.cohortLoginConfigRequestAt === null) state.cohortLoginConfigRequestAt = Date.now();
       setTimeout(() => {
         if (state.configDisconnect) {
           request.socket.destroy();
@@ -554,7 +556,7 @@ async function openAuthGateIsolatedWorld(context, page, extensionId) {
           expression: `({
             runtimeId: globalThis.chrome?.runtime?.id || null,
             hasBootstrapFence: typeof globalThis.__classpilotAuthGateBootstrap?.beginManagedPolicyFence === 'function',
-            hasContentFence: typeof beginAuthGateManagedPolicyFence === 'function'
+            hasContentFence: typeof globalThis.__classpilotTestEvaluate === 'function'
           })`,
           returnByValue: true,
         });
@@ -580,7 +582,7 @@ async function openAuthGateIsolatedWorld(context, page, extensionId) {
 async function evaluateInAuthGateWorld(world, expression) {
   const result = await world.cdp.send('Runtime.evaluate', {
     contextId: world.contextId,
-    expression,
+    expression: `globalThis.__classpilotTestEvaluate(${JSON.stringify(expression)})`,
     awaitPromise: true,
     returnByValue: true,
     userGesture: true,
@@ -615,8 +617,8 @@ async function exerciseLegacyEmptyGradeRecovery(context, page, extensionId) {
       document.documentElement.appendChild(root);
 
       const originalSendMessage = chrome.runtime.sendMessage;
-      const originalSetTimeout = window.setTimeout.bind(window);
-      const originalClearTimeout = window.clearTimeout.bind(window);
+      const originalSetTimeout = globalThis.__classpilotTestClockNative.setTimeout;
+      const originalClearTimeout = globalThis.__classpilotTestClockNative.clearTimeout;
       const harness = {
         responses: [{ success: true, grades: [] }],
         defaultResponse: { success: true, grades: [] },
@@ -636,7 +638,8 @@ async function exerciseLegacyEmptyGradeRecovery(context, page, extensionId) {
         },
       };
 
-      window.setTimeout = function(callback, delay, ...args) {
+      globalThis.__classpilotTestClock = {};
+      globalThis.__classpilotTestClock.setTimeout = function(callback, delay, ...args) {
         if (Number(delay) >= 25_000 && Number(delay) <= 5 * 60_000) {
           const timerId = harness.nextTimerId--;
           harness.refreshTimers.set(timerId, { callback, delay: Number(delay), args });
@@ -644,7 +647,7 @@ async function exerciseLegacyEmptyGradeRecovery(context, page, extensionId) {
         }
         return originalSetTimeout(callback, delay, ...args);
       };
-      window.clearTimeout = function(timerId) {
+      globalThis.__classpilotTestClock.clearTimeout = function(timerId) {
         if (harness.refreshTimers.delete(timerId)) return;
         originalClearTimeout(timerId);
       };
@@ -731,8 +734,7 @@ async function exerciseLegacyEmptyGradeRecovery(context, page, extensionId) {
       } finally {
         clearAuthGateRosterRefreshTimer();
         chrome.runtime.sendMessage = originalSendMessage;
-        window.setTimeout = originalSetTimeout;
-        window.clearTimeout = originalClearTimeout;
+        delete globalThis.__classpilotTestClock;
         root.remove();
         removeAuthGate();
       }
@@ -1402,6 +1404,31 @@ async function main() {
     fixture = await startFixtureServer();
     cpSync(sourceExtensionPath, extensionPath, { recursive: true });
     writeFileSync(join(extensionPath, 'config.js'), `globalThis.CLASSPILOT_SERVER_URL = ${JSON.stringify(fixture.origin)};\n`);
+    // Existing white-box fence/legacy-roster checks need lexical access after
+    // content became a private lifecycle instance. Add this bridge only to the
+    // disposable fixture copy; never expose it in the release extension.
+    const fixtureContentPath = join(extensionPath, 'content.js');
+    let fixtureContent = readFileSync(fixtureContentPath, 'utf8');
+    const scopeAnchor = '  const lifecycle = lifecycleStart.scope;';
+    assert.equal(fixtureContent.split(scopeAnchor).length, 2);
+    fixtureContent = fixtureContent.replace(scopeAnchor, scopeAnchor + `
+      globalThis.__classpilotTestClockNative = {
+        setTimeout:lifecycle.setTimeout, clearTimeout:lifecycle.clearTimeout,
+      };
+      lifecycle.setTimeout = (...args) => (globalThis.__classpilotTestClock?.setTimeout
+        || globalThis.__classpilotTestClockNative.setTimeout)(...args);
+      lifecycle.clearTimeout = (...args) => (globalThis.__classpilotTestClock?.clearTimeout
+        || globalThis.__classpilotTestClockNative.clearTimeout)(...args);
+    `);
+    const endAnchor = '})(); // End of this page instance';
+    assert.equal(fixtureContent.split(endAnchor).length, 2);
+    fixtureContent = fixtureContent.replace(endAnchor, `
+      globalThis.__classpilotTestEvaluate = expression => {
+        const chrome = globalThis.chrome;
+        return eval(expression);
+      };
+    ` + endAnchor);
+    writeFileSync(fixtureContentPath, fixtureContent);
     writeFileSync(
       join(extensionPath, 'cold-auth-cohort.html'),
       '<!doctype html><meta charset="utf-8"><title>Cold auth cohort</title><script src="cold-auth-cohort.js"></script>',
@@ -1435,6 +1462,10 @@ async function main() {
     const coldStop = await stopExtensionWorker(context, firstPage, extensionId);
     assert.equal(coldStop.stopped, true, 'could not stop the MV3 worker before measured navigation');
 
+    // Profile priming and the worker explicitly stopped above may have made
+    // their own requests. Only the fresh measured worker belongs to this cohort.
+    const coldConfigRequestBaseline = fixture.state.loginConfigRequests;
+    fixture.state.cohortLoginConfigRequestAt = null;
     const navigationStartedAt = Date.now();
     const firstNavigation = firstPage.goto(`${fixture.origin}/cold-start`, { waitUntil: 'domcontentloaded' });
     await firstPage.waitForSelector(GATE_SELECTOR, { state: 'attached', timeout: LOADING_LIMIT_MS });
@@ -1442,8 +1473,25 @@ async function main() {
     assert.ok(loadingPaintMs < LOADING_LIMIT_MS, `loading gate painted in ${loadingPaintMs}ms (limit ${LOADING_LIMIT_MS}ms)`);
     await waitForGatePhase(firstPage, 'loading', LOADING_LIMIT_MS);
     await firstNavigation;
-    await assertUnderlyingPageLocked(firstPage);
+
+    // Check the actual concurrent cohort before the hostile-page exercises.
+    // Those interactions can legitimately outlast the 5s HTTP deadline plus
+    // recovery backoff, at which point a second request is an expected retry.
+    const secondPage = await context.newPage();
+    await secondPage.goto(`${fixture.origin}/concurrent-tab`, { waitUntil: 'domcontentloaded' });
+    await waitForGatePhase(secondPage, 'loading', LOADING_LIMIT_MS);
+    const configRequestDeadline = Date.now() + 4_000;
+    while (fixture.state.loginConfigRequests === coldConfigRequestBaseline && Date.now() < configRequestDeadline) {
+      await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
+    }
     worker = await waitForLiveWorker(context);
+    assert.ok(Date.now() - fixture.state.cohortLoginConfigRequestAt < 5_000,
+      'concurrent-tab fixture missed the initial in-flight request cohort');
+    assert.equal(await worker.evaluate(() => Boolean(sharedSignInConfigPromise)), true,
+      'concurrent-tab assertion must observe an active shared config request');
+    assert.equal(fixture.state.loginConfigRequests, coldConfigRequestBaseline + 1,
+      `concurrent tabs did not deduplicate login configuration (prior-worker baseline ${coldConfigRequestBaseline})`);
+    await assertUnderlyingPageLocked(firstPage);
 
     // Hold the parser open so document_idle cannot run, then let hostile page
     // script remove the document_start bootstrap host and add full-screen
@@ -1522,17 +1570,6 @@ async function main() {
       'parser-held host recovery entered a replacement loop',
     );
     await parserHeldPage.close();
-
-    // A second tab opened while the first live config request is held must
-    // share that request instead of creating a thundering herd.
-    const secondPage = await context.newPage();
-    await secondPage.goto(`${fixture.origin}/concurrent-tab`, { waitUntil: 'domcontentloaded' });
-    await waitForGatePhase(secondPage, 'loading', LOADING_LIMIT_MS);
-    const configRequestDeadline = Date.now() + 4_000;
-    while (fixture.state.loginConfigRequests === 0 && Date.now() < configRequestDeadline) {
-      await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
-    }
-    assert.equal(fixture.state.loginConfigRequests, 1, 'concurrent tabs did not deduplicate login configuration');
 
     await waitForGatePhase(firstPage, 'unavailable', 7_500);
     await waitForGatePhase(secondPage, 'unavailable', 7_500);
