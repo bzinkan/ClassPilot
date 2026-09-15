@@ -164,6 +164,8 @@ function withCurrentStudentMessageContext(message, apply, sendResponse) {
       && !chrome.runtime.lastError
       && response?.success
       && response.current === true
+      && (!studentClassroomContext(message.data) || (response.activeContexts || response.activeTeachingSessionIds?.map(teachingSessionId => ({ teachingSessionId })) || [])
+        .some(value => studentClassroomKey(value) === studentClassroomKey(message.data)))
     ) {
       currentStudentMessageContext = { ...studentMessageContext };
       currentFabAuthorityBinding = response.fabBinding || null;
@@ -187,6 +189,23 @@ function sameStudentMessageContext(left, right) {
   );
 }
 
+function studentClassroomContext(value) {
+  const teachingSessionId = String(value?.teachingSessionId || value?.sessionId || '').trim();
+  const supervisionContextId = String(value?.supervisionContextId || '').trim();
+  if (Boolean(teachingSessionId) === Boolean(supervisionContextId)) return null;
+  return supervisionContextId ? { supervisionContextId } : { teachingSessionId };
+}
+
+function studentClassroomKey(value) {
+  const context = studentClassroomContext(value);
+  return context ? context.supervisionContextId ? `supervision:${context.supervisionContextId}` : `teaching:${context.teachingSessionId}` : null;
+}
+
+function studentClassroomContexts(value) {
+  return (value?.activeContexts || (value?.activeSessionIds || []).map(teachingSessionId => ({ teachingSessionId })))
+    .map(studentClassroomContext).filter(Boolean);
+}
+
 function captureStudentActionContext(preferredSessionId = null) {
   const sessions = Array.isArray(currentFabContext?.activeSessionIds)
     ? currentFabContext.activeSessionIds.map((value) => String(value || '').trim()).filter(Boolean)
@@ -198,15 +217,22 @@ function captureStudentActionContext(preferredSessionId = null) {
     : fabSessionId && sessions.includes(fabSessionId)
       ? fabSessionId
       : sessions.length === 1 ? sessions[0] : null;
+  const contexts = studentClassroomContexts(currentFabContext);
+  const preferred = typeof preferredSessionId === 'object' ? studentClassroomContext(preferredSessionId)
+    : studentClassroomContext({ teachingSessionId: sessionId });
+  const context = preferred && contexts.find(value => studentClassroomKey(value) === studentClassroomKey(preferred))
+    || (!preferredSessionId && contexts.length === 1 ? contexts[0] : null);
   if (
     !currentStudentMessageContext?.authContextId
     || !currentFabAuthorityBinding
-    || !sessionId
+    || !context
   ) return null;
   return Object.freeze({
     studentMessageContext: { ...currentStudentMessageContext },
     fabBinding: currentFabAuthorityBinding,
     sessionId,
+    ...context,
+    ...(context.supervisionContextId ? { studentControlRevision: currentFabContext?.ownershipRevision } : {}),
     epoch: studentMessageEpoch,
   });
 }
@@ -220,7 +246,8 @@ function studentActionContextIsCurrent(context) {
     && context.epoch === studentMessageEpoch
     && sameStudentMessageContext(context.studentMessageContext, currentStudentMessageContext)
     && context.fabBinding === currentFabAuthorityBinding
-    && sessions.includes(context.sessionId)
+    && studentClassroomContexts(currentFabContext).some(value => studentClassroomKey(value) === studentClassroomKey(context))
+    && (!context.supervisionContextId || context.studentControlRevision === currentFabContext?.ownershipRevision)
   );
 }
 
@@ -229,6 +256,8 @@ function studentActionAuthorityPayload(context) {
     studentMessageContext: { ...context.studentMessageContext },
     fabBinding: context.fabBinding,
     sessionId: context.sessionId,
+    ...studentClassroomContext(context),
+    ...(context.supervisionContextId ? { studentControlRevision: context.studentControlRevision } : {}),
   };
 }
 
@@ -385,6 +414,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chatMessages.push({
         id: message.data?.chatMessageId || message.data?.messageId || msgId,
         sessionId: message.data?.sessionId,
+        ...studentClassroomContext(message.data),
         sender: 'teacher',
         text: message.data.message,
         fromName: message.data.fromName,
@@ -468,6 +498,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           message.data.question,
           message.data.options,
           message.data.teachingSessionId,
+          message.data.supervisionContextId,
         );
       } else if (message.data.action === 'close') {
         hidePollOverlay();
@@ -804,7 +835,7 @@ function applyClassroomUiSnapshot(snapshot = {}) {
     }
     const poll = snapshot.overlays?.poll;
     if (poll && !poll.response && poll.expiresAt > Date.now()) {
-      showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId);
+      showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId, poll.supervisionContextId);
     } else if (!poll) {
       hidePollOverlay();
     }
@@ -3706,14 +3737,14 @@ function addTimerStyles() {
 // POLL OVERLAY
 // ============================================
 
-function showPollOverlay(pollId, question, options, teachingSessionId = null) {
+function showPollOverlay(pollId, question, options, teachingSessionId = null, supervisionContextId = null) {
   // Skip if student already responded to this poll
   if (respondedPollIds.has(pollId)) {
     return;
   }
   clearPollCompletionTimeouts();
   activePollId = pollId;
-  activePollTeachingSessionId = String(teachingSessionId || '').trim() || null;
+  activePollTeachingSessionId = studentClassroomContext({ teachingSessionId, supervisionContextId });
 
   // Remove any existing poll overlay
   const existing = document.getElementById('classpilot-poll-overlay');
@@ -4273,17 +4304,18 @@ function applyFabState(state = {}) {
   const wasMessagingEnabled = messagingEnabled;
   const priorContext = currentFabContext;
   const nextContext = state.context || priorContext;
-  const priorSessions = [...new Set(priorContext?.activeSessionIds || [])].sort();
+  const priorSessions = studentClassroomContexts(priorContext).map(studentClassroomKey).sort();
   const nextSessions = [...new Set(
     nextContext?.activeSessionIds || state.activeSessionIds ||
     (state.teachingSessionId ? [state.teachingSessionId] : [])
   )].sort();
+  const nextContexts = studentClassroomContexts(nextContext || state);
   const bindingChanged = Boolean(priorContext?.binding && nextContext?.binding
     && priorContext.binding !== nextContext.binding);
   const sessionSetChanged = Boolean(priorContext)
-    && JSON.stringify(priorSessions) !== JSON.stringify(nextSessions);
+    && JSON.stringify(priorSessions) !== JSON.stringify(nextContexts.map(studentClassroomKey).sort());
   const sessionEnded = reason === 'session-ended'
-    || (Boolean(nextContext) && nextSessions.length === 0);
+    || (Boolean(nextContext) && nextContexts.length === 0);
 
   if (
     priorContext?.binding === nextContext?.binding &&
@@ -4297,6 +4329,7 @@ function applyFabState(state = {}) {
     currentFabContext = {
       ...nextContext,
       activeSessionIds: nextSessions,
+      activeContexts: nextContexts,
       revision: Number(state.revision ?? nextContext.revision ?? 0),
       lifecycleRevision: Number(state.lifecycleRevision ?? nextContext.lifecycleRevision ?? 0),
     };
@@ -4679,6 +4712,7 @@ function sendMessage() {
   chatMessages.push({
     id: clientMessageId,
     clientMessageId,
+    ...studentClassroomContext(actionContext),
     sender: 'student',
     text: message,
     time: Date.now(),

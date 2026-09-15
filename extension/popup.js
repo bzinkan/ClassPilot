@@ -340,13 +340,15 @@ async function capturePopupStudentActionContext() {
     || response?.success !== true
     || !response.studentMessageContext?.authContextId
     || !response.fabBinding
-    || !response.activeTeachingSessionId
+    || !(response.activeContext || response.activeTeachingSessionId)
   ) return null;
   return Object.freeze({
     epoch,
     studentMessageContext: { ...response.studentMessageContext },
     fabBinding: response.fabBinding,
     sessionId: response.activeTeachingSessionId,
+    ...(response.activeContext || { teachingSessionId: response.activeTeachingSessionId }),
+    studentControlRevision: response.studentControlRevision,
   });
 }
 
@@ -355,6 +357,8 @@ function popupStudentActionPayload(context) {
     studentMessageContext: { ...context.studentMessageContext },
     fabBinding: context.fabBinding,
     sessionId: context.sessionId,
+    ...(context.supervisionContextId ? { supervisionContextId: context.supervisionContextId } : { teachingSessionId: context.teachingSessionId || context.sessionId }),
+    ...(context.supervisionContextId ? { studentControlRevision: context.studentControlRevision } : {}),
   };
 }
 
@@ -369,8 +373,10 @@ async function popupStudentActionContextIsCurrent(context) {
     && response?.success === true
     && response.current === true
     && response.fabBinding === context.fabBinding
-    && Array.isArray(response.activeTeachingSessionIds)
-    && response.activeTeachingSessionIds.includes(context.sessionId)
+    && (context.supervisionContextId
+      ? response.studentControlRevision === context.studentControlRevision
+        && response.activeContexts?.some(value => value.supervisionContextId === context.supervisionContextId && !value.teachingSessionId)
+      : response.activeTeachingSessionIds?.includes(context.sessionId))
   );
 }
 

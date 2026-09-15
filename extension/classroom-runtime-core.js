@@ -742,6 +742,25 @@
     };
   }
 
+  function classroomContext(value) {
+    if (!value || typeof value !== 'object') return null;
+    const teachingSessionId = boundedString(value.teachingSessionId ?? value.sessionId, 256) || null;
+    const supervisionContextId = boundedString(value.supervisionContextId, 256) || null;
+    if (Boolean(teachingSessionId) === Boolean(supervisionContextId)) return null;
+    return supervisionContextId ? { supervisionContextId } : { teachingSessionId };
+  }
+
+  function classroomContextKey(value) {
+    const context = classroomContext(value);
+    return context ? context.supervisionContextId ? `supervision:${context.supervisionContextId}` : `teaching:${context.teachingSessionId}` : null;
+  }
+
+  function classroomContexts(value = {}) {
+    const values = Array.isArray(value.activeContexts) ? value.activeContexts
+      : (value.activeSessionIds || []).map(teachingSessionId => ({ teachingSessionId }));
+    return [...new Map(values.map(classroomContext).filter(Boolean).map(context => [classroomContextKey(context), context])).values()];
+  }
+
   function classroomStateExpiry(state, nowValue = Date.now()) {
     if (!state) return { expired: false, reason: null, expiresAt: null };
     const nowMs = timestampMs(nowValue) ?? Date.now();
@@ -1598,6 +1617,7 @@
     return {
       id,
       message,
+      ...classroomContext(rawMessage),
       fromName: boundedString(rawMessage?.fromName, 120) || 'Teacher',
       timestamp: positiveTimestamp(rawMessage?.timestamp ?? rawMessage?.createdAt)
         ?? positiveTimestamp(nowValue)
@@ -1694,6 +1714,9 @@
     normalizeDomainList,
     normalizeTemporaryAllows,
     normalizeClassroomState,
+    classroomContext,
+    classroomContextKey,
+    classroomContexts,
     classroomStateExpiry,
     shouldApplyClassroomState,
     isRuleInRange,

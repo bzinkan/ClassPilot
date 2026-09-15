@@ -22,6 +22,29 @@ function loadRuntimeCore() {
 const core = loadRuntimeCore();
 const NOW = Date.parse("2026-08-13T16:00:00.000Z");
 
+describe("typed classroom contexts", () => {
+  it("keeps teaching and supervision namespaces distinct and rejects ambiguous authority", () => {
+    expect(core.classroomContext({ sessionId: "same" })).toEqual({ teachingSessionId: "same" });
+    expect(core.classroomContext({ supervisionContextId: "same" })).toEqual({ supervisionContextId: "same" });
+    expect(core.classroomContextKey({ teachingSessionId: "same" })).not.toEqual(core.classroomContextKey({ supervisionContextId: "same" }));
+    expect(core.classroomContext({ teachingSessionId: "same", supervisionContextId: "same" })).toBeNull();
+    expect(core.classroomContext({ sessionId: "old", supervisionContextId: "current" })).toBeNull();
+    expect(core.classroomContext({})).toBeNull();
+  });
+  it("preserves explicit empty ownership and normalizes legacy teaching lists without aliasing supervision", () => {
+    expect(core.classroomContexts({ activeSessionIds: ["a", "a"] })).toEqual([{ teachingSessionId: "a" }]);
+    expect(core.classroomContexts({ activeContexts: [], activeSessionIds: ["old"] })).toEqual([]);
+    expect(core.classroomContexts({ activeContexts: [{ supervisionContextId: "s" }, { supervisionContextId: "s" }, { teachingSessionId: "s" }, {}] }))
+      .toEqual([{ supervisionContextId: "s" }, { teachingSessionId: "s" }]);
+  });
+  it("retains a message's original classroom scope through inbox hydration", () => {
+    const message = core.normalizeTeacherMessage({ id: "reply", message: "Continue testing", supervisionContextId: "s" }, NOW);
+    expect(message.supervisionContextId).toBe("s");
+    expect(message.teachingSessionId).toBeUndefined();
+    expect(core.mergeTeacherMessageInbox([], [], [message], NOW).messages[0].supervisionContextId).toBe("s");
+  });
+});
+
 function state(revision: number, overrides: Record<string, unknown> = {}) {
   const rawState: Record<string, unknown> = {
     schemaVersion: 1,

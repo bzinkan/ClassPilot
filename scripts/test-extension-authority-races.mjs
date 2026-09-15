@@ -1037,6 +1037,7 @@ async function main() {
       // inventory as teacher messages. A late notification create is removed
       // when A retires, and the raw offscreen error body is never displayed.
       const liveErrorAuthA = installIdentity('live-error-a');
+      installCommandAuthority(liveErrorAuthA, 'live-error-session-a');
       activeLiveViewNegotiationId = 'live-error-negotiation-a';
       activeLiveViewTeachingSessionId = 'live-error-session-a';
       activeLiveViewContext = liveViewContextFor(
@@ -1073,7 +1074,7 @@ async function main() {
         return true;
       };
       const liveErrorPromise = handleOffscreenMessage(liveErrorMessage);
-      await liveErrorNotificationReady;
+      await boundedWait(liveErrorNotificationReady, 'Live View error notification');
       advanceStudentAuthMutationGeneration();
       releaseLiveErrorNotification();
       const liveErrorResult = await liveErrorPromise;
@@ -1422,6 +1423,7 @@ async function main() {
       // cancellation path issues an exact STOP for A and leaves B's worker
       // owner untouched.
       const startCancelAuthA = installIdentity('start-cancel-a');
+      installCommandAuthority(startCancelAuthA, 'start-cancel-session-a');
       activeLiveViewNegotiationId = 'start-cancel-negotiation-a';
       activeLiveViewTeachingSessionId = 'start-cancel-session-a';
       const startCancelContextA = liveViewContextFor(

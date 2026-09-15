@@ -313,6 +313,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'fabStateRevisionV1',
   'exactTabCloseV1',
   'scopedAuthorityChecksV1',
+  'scheduledClassroomV1',
   'authBoundTelemetryV1',
   'exactBindingAckV2',
   'exactTabCloseV2',
@@ -339,6 +340,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'domainPreservingRestrictionsV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'scheduledClassroomV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
   'authBoundTelemetryV1',
@@ -5694,6 +5696,16 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     && Number(ownershipRevisionValue) >= 0
     ? Number(ownershipRevisionValue)
     : 0;
+  const supervisionContextId = Object.hasOwn(rawState, 'supervisionContextId')
+    ? String(rawState.supervisionContextId || '').trim() || null : hasSessionField ? null : fallbackState.supervisionContextId || null;
+  if (teachingSessionId && supervisionContextId) throw new Error('FAB state has ambiguous classroom authority');
+  const activeContexts = RuntimeCore.classroomContexts({ activeContexts: rawState.activeContexts
+    ?? (hasSessionField || Object.hasOwn(rawState, 'supervisionContextId') || Array.isArray(rawState.activeSessionIds) ? undefined : fallbackState.activeContexts),
+    activeSessionIds }).filter(context => !context.supervisionContextId || hasNegotiatedCapability('scheduledClassroomV1'));
+  const scheduledUnavailable = Boolean(supervisionContextId && (!hasNegotiatedCapability('scheduledClassroomV1')
+    || currentClassroomState?.supervisionContextId === supervisionContextId
+      && RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expired));
+  if (scheduledUnavailable) activeContexts.length = 0;
   return {
     schemaVersion: 1,
     revision,
@@ -5705,11 +5717,15 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
       rawState.studentSessionId || fallbackState.studentSessionId || ''
     ).trim() || null,
     teachingSessionId,
+    supervisionContextId,
+    activeContexts,
+    contextSource: rawState.contextSource || fallbackState.contextSource || null,
+    contextName: String(rawState.contextName || fallbackState.contextName || '').slice(0, 200),
     activeSessionIds,
-    messagingEnabled: typeof rawState.messagingEnabled === 'boolean'
+    messagingEnabled: scheduledUnavailable ? false : typeof rawState.messagingEnabled === 'boolean'
       ? rawState.messagingEnabled
       : fallbackState.messagingEnabled !== false,
-    handRaisingEnabled: typeof rawState.handRaisingEnabled === 'boolean'
+    handRaisingEnabled: scheduledUnavailable ? false : typeof rawState.handRaisingEnabled === 'boolean'
       ? rawState.handRaisingEnabled
       : fallbackState.handRaisingEnabled !== false,
     handRaised: typeof rawState.handRaised === 'boolean'
@@ -5800,8 +5816,8 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   const priorState = stored[FAB_STATE_STORAGE_KEY] || currentFabState || {};
   const priorContext = stored[FAB_CONTEXT_STORAGE_KEY] || {};
   const nextState = normalizeFabState(rawFabState, priorState);
-  const priorSessionIds = normalizeIdList(priorContext.activeSessionIds);
-  const sessionSetChanged = JSON.stringify(priorSessionIds) !== JSON.stringify(nextState.activeSessionIds);
+  const priorSessionIds = RuntimeCore.classroomContexts(priorContext).map(RuntimeCore.classroomContextKey).sort();
+  const sessionSetChanged = JSON.stringify(priorSessionIds) !== JSON.stringify(nextState.activeContexts.map(RuntimeCore.classroomContextKey).sort());
   if (priorContext.binding === binding) {
     const priorOwnershipKnown = priorContext.ownershipRevisionKnown === true;
     const nextOwnershipKnown = nextState.ownershipRevisionKnown === true;
@@ -5835,12 +5851,14 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
 
   const bindingChanged = priorContext.binding !== binding;
   const lifecycleEnded = ['session-ended', 'entitlement-inactive']
-    .includes(nextState.reason) || nextState.activeSessionIds.length === 0;
+    .includes(nextState.reason) || nextState.activeContexts.length === 0;
   const lifecycleChanged = bindingChanged || sessionSetChanged;
   const context = {
     schemaVersion: 1,
     binding,
     teachingSessionId: nextState.teachingSessionId,
+    supervisionContextId: nextState.supervisionContextId,
+    activeContexts: nextState.activeContexts,
     activeSessionIds: nextState.activeSessionIds,
     revision: nextState.revision,
     lifecycleRevision: nextState.lifecycleRevision,
@@ -5982,6 +6000,35 @@ function activeTeachingSessionIds() {
   return fabSessions.length > 0 ? fabSessions : classroomSessions;
 }
 
+function activeClassroomContexts() {
+  const state = currentClassroomState;
+  if (state && RuntimeCore.classroomStateExpiry(state, Date.now()).expired) return [];
+  if (state?.supervisionContextId) {
+    if (!hasNegotiatedCapability('scheduledClassroomV1')) return [];
+    const context = RuntimeCore.classroomContext(state);
+    const fab = RuntimeCore.classroomContexts(currentFabState || {});
+    return context && fab.some(value => RuntimeCore.classroomContextKey(value) === RuntimeCore.classroomContextKey(context))
+      && Number(currentFabState?.ownershipRevision || 0) >= Number(state.revision || 0) ? [context] : [];
+  }
+  return activeTeachingSessionIds().map(teachingSessionId => ({ teachingSessionId }));
+}
+
+function classroomContextIsCurrent(value) {
+  const key = RuntimeCore.classroomContextKey(value);
+  return Boolean(key && activeClassroomContexts().some(context => RuntimeCore.classroomContextKey(context) === key));
+}
+
+function classroomAuthorityPayload(value) {
+  const context = RuntimeCore.classroomContext(value);
+  return context ? { ...context, ...(context.supervisionContextId && Number.isSafeInteger(value.studentControlRevision)
+    ? { studentControlRevision: value.studentControlRevision } : {}) } : {};
+}
+
+function commandClassroomContext(command = {}) {
+  return RuntimeCore.classroomContext(command.authority || command.data || command)
+    || RuntimeCore.classroomContext(currentClassroomState);
+}
+
 function commandTeachingSessionId(command = {}) {
   return String(
     command.data?.teachingSessionId ||
@@ -6058,10 +6105,10 @@ function persistTimerOverlay(command, executionContext = {}) {
       return { ...state, binding, timer: null, updatedAt: Date.now() };
     }
     const seconds = Math.max(0, Number(command.data?.seconds || 0));
-    const endsAt = overlayExpiresAt(
+    const endsAt = Math.min(overlayExpiresAt(
       command.data?.endsAt ?? command.data?.endAt,
       Date.now() + seconds * 1000
-    );
+    ), RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expiresAt || Number.MAX_SAFE_INTEGER);
     if (!Number.isFinite(endsAt) || endsAt <= Date.now()) {
       throw new Error('Timer end time is missing or expired');
     }
@@ -6070,7 +6117,7 @@ function persistTimerOverlay(command, executionContext = {}) {
       binding,
       timer: {
         commandId: executionContext.commandId || null,
-        teachingSessionId: commandTeachingSessionId(command),
+        ...commandClassroomContext(command),
         endsAt,
         message: String(command.data?.message || '').slice(0, 500),
         receivedAt: Date.now(),
@@ -6096,17 +6143,17 @@ function persistPollOverlay(command, executionContext = {}) {
       Date.now() + 2 * 60 * 60 * 1000,
       Number(classExpiry || Number.MAX_SAFE_INTEGER)
     );
-    const expiresAt = overlayExpiresAt(
+    const expiresAt = Math.min(overlayExpiresAt(
       command.data?.pollExpiresAt ?? command.data?.expiresAt,
       defaultExpiry
-    );
+    ), classExpiry || Number.MAX_SAFE_INTEGER);
     return {
       ...state,
       binding,
       poll: {
         commandId: executionContext.commandId || null,
         pollId,
-        teachingSessionId: commandTeachingSessionId(command),
+        ...commandClassroomContext(command),
         question: String(command.data?.question || '').slice(0, 1000),
         options: (Array.isArray(command.data?.options) ? command.data.options : [])
           .slice(0, 20)
@@ -6198,8 +6245,8 @@ function getRestorableClassroomOverlayState(options = {}) {
       }
       const now = Date.now();
       const sessionIds = activeTeachingSessionIds();
-      const sessionMatches = (overlay) => !overlay?.teachingSessionId
-        || sessionIds.includes(overlay.teachingSessionId);
+      const sessionMatches = (overlay) => RuntimeCore.classroomContext(overlay)
+        ? classroomContextIsCurrent(overlay) : !currentClassroomState?.supervisionContextId;
       const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
         ? state.timer
         : null;
@@ -6245,8 +6292,8 @@ async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI
   const now = Date.now();
   const activeSessions = activeTeachingSessionIds();
   const overlayCurrent = expectedFabBinding && storedOverlay?.binding === expectedFabBinding;
-  const sessionMatches = (overlay) => !overlay?.teachingSessionId
-    || activeSessions.includes(overlay.teachingSessionId);
+  const sessionMatches = (overlay) => RuntimeCore.classroomContext(overlay)
+    ? classroomContextIsCurrent(overlay) : !currentClassroomState?.supervisionContextId;
   const overlays = {
     timer: overlayCurrent
       && Number(storedOverlay.timer?.endsAt || 0) > now
@@ -6362,6 +6409,7 @@ async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expect
     messageId,
     chatMessageId: messageId,
     sessionId: message.sessionId,
+    ...classroomAuthorityPayload(message),
     deliveryStatus,
     status: deliveryStatus,
     errorMessage: errorMessage || null,
@@ -7569,6 +7617,7 @@ function enqueueChatAck(rawAck, authContext) {
     messageId: String(rawAck.messageId).slice(0, 256),
     chatMessageId: String(rawAck.messageId).slice(0, 256),
     sessionId: rawAck.sessionId ? String(rawAck.sessionId).slice(0, 256) : undefined,
+    ...classroomAuthorityPayload(rawAck),
     deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
     status: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
     errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
@@ -7577,7 +7626,8 @@ function enqueueChatAck(rawAck, authContext) {
     deviceId: authContext.deviceId,
     studentId: authContext.studentId,
     studentSessionId: authContext.studentSessionId,
-    studentControlRevision: currentStudentControlRevision() ?? undefined,
+    studentControlRevision: rawAck.supervisionContextId
+      ? rawAck.studentControlRevision : currentStudentControlRevision() ?? undefined,
     timestamp: rawAck.timestamp || new Date().toISOString(),
     queuedAt: Date.now(),
   };
@@ -7784,8 +7834,9 @@ function normalizeStudentChatEntry(raw = {}) {
   const clientMessageId = String(raw.clientMessageId || '').trim().slice(0, 128);
   const message = String(raw.message || '').trim().slice(0, 500);
   const sessionId = String(raw.sessionId || '').trim().slice(0, 256);
+  const context = RuntimeCore.classroomContext(raw);
   const binding = String(raw.binding || '').trim();
-  if (!clientMessageId || !message || !sessionId || !binding) return null;
+  if (!clientMessageId || !message || !context || !binding) return null;
   const status = ['sending', 'retrying', 'failed'].includes(raw.status)
     ? raw.status
     : 'sending';
@@ -7795,6 +7846,8 @@ function normalizeStudentChatEntry(raw = {}) {
     message,
     messageType: raw.messageType === 'question' ? 'question' : 'message',
     sessionId,
+    ...context,
+    ...(context.supervisionContextId ? { studentControlRevision: raw.studentControlRevision } : {}),
     binding,
     queuedAt: Number(raw.queuedAt || Date.now()),
     updatedAt: Number(raw.updatedAt || Date.now()),
@@ -8050,7 +8103,7 @@ function scheduleStudentChatExpiry(entries, nowValue = Date.now()) {
 function assertStudentChatSessionCurrent(entry, authContext, reason = 'student message session') {
   assertAuthenticatedContextCurrent(authContext, reason);
   const sessionId = String(entry?.sessionId || '').trim();
-  if (!sessionId || !activeTeachingSessionIds().includes(sessionId)) {
+  if (!classroomContextIsCurrent(entry) || entry.supervisionContextId && entry.studentControlRevision !== currentStudentControlRevision()) {
     const error = new Error('Student message belongs to a retired teaching session');
     error.code = 'STUDENT_CHAT_SESSION_RETIRED';
     throw error;
@@ -8104,6 +8157,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
           message: attempted.message,
           messageType: attempted.messageType,
           sessionId: attempted.sessionId,
+          ...classroomAuthorityPayload(attempted),
         }),
         signal: authContext.signal,
       },
@@ -8255,14 +8309,14 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     error.code = 'STUDENT_CHAT_INVALID';
     throw error;
   }
-  const activeSessionIds = activeTeachingSessionIds();
   const requestedSessionId = String(raw.sessionId || '').trim();
-  if (!requestedSessionId || !activeSessionIds.includes(requestedSessionId)) {
+  if (!classroomContextIsCurrent(raw)) {
     const error = new Error('No exact active class session for messaging');
     error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
     throw error;
   }
   if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
+    if (raw.supervisionContextId) throw new Error('Scheduled classroom messaging requires durable chat support');
     return sendLegacyStudentChatMessage(raw, authContext, requestedSessionId);
   }
   const entry = await persistStudentChatEntry({
@@ -8271,6 +8325,7 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     message,
     messageType: raw.messageType,
     sessionId: requestedSessionId,
+    ...classroomAuthorityPayload(raw),
     queuedAt: Date.now(),
     status: 'sending',
   }, authContext);
@@ -9136,14 +9191,15 @@ function persistFabChatStateForRequest(message, actionRequest) {
     .map((entry) => ({
       id: String(entry?.id || '').slice(0, 200) || null,
       clientMessageId: String(entry?.clientMessageId || '').slice(0, 200) || null,
-      sessionId: String(entry?.sessionId || actionRequest.sessionId).slice(0, 200),
+      sessionId: String(entry?.sessionId || actionRequest.sessionId || '').slice(0, 200),
+      ...classroomAuthorityPayload(RuntimeCore.classroomContext(entry) ? entry : actionRequest),
       sender: entry?.sender === 'teacher' ? 'teacher' : 'student',
       text: String(entry?.text || '').slice(0, 500),
       fromName: String(entry?.fromName || '').slice(0, 100) || null,
       time: Number.isFinite(Number(entry?.time)) ? Number(entry.time) : Date.now(),
       status: allowedStatuses.has(entry?.status) ? entry.status : null,
     }))
-    .filter((entry) => entry.text && entry.sessionId === actionRequest.sessionId);
+    .filter((entry) => entry.text && RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(actionRequest));
   const options = {
     authContext: actionRequest.authContext,
     expectedBinding: monitoringEventAuthBindingForContext(actionRequest.authContext),
@@ -9153,8 +9209,9 @@ function persistFabChatStateForRequest(message, actionRequest) {
     const context = {
       schemaVersion: 1,
       binding: actionRequest.fabBinding,
-      teachingSessionId: actionRequest.sessionId,
+      ...classroomAuthorityPayload(actionRequest),
       activeSessionIds: activeTeachingSessionIds(),
+      activeContexts: activeClassroomContexts(),
       revision: Number(currentFabState?.revision || 0),
       lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
       ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
@@ -9546,13 +9603,18 @@ function normalizeScreenshotAuthority(rawAuthority) {
   const controlRevision = Number(rawAuthority.controlRevision);
   if (!Number.isSafeInteger(controlRevision) || controlRevision < 0) return null;
   if (kind === 'student_session') {
-    if (String(rawAuthority.teachingSessionId || '').trim()) return null;
+    if (String(rawAuthority.teachingSessionId || rawAuthority.supervisionContextId || '').trim()) return null;
     return Object.freeze({ kind, controlRevision });
   }
   if (kind === 'teaching_session') {
+    if (rawAuthority.supervisionContextId) return null;
     const teachingSessionId = String(rawAuthority.teachingSessionId || '').trim();
     if (!teachingSessionId || teachingSessionId.length > 256) return null;
     return Object.freeze({ kind, teachingSessionId, controlRevision });
+  }
+  if (kind === 'supervision_context' && hasNegotiatedCapability('scheduledClassroomV1')) {
+    const context = RuntimeCore.classroomContext(rawAuthority);
+    return context?.supervisionContextId ? Object.freeze({ kind, ...context, controlRevision }) : null;
   }
   return null;
 }
@@ -9562,6 +9624,7 @@ function screenshotAuthorityScope(authority) {
   return JSON.stringify([
     authority.kind,
     authority.teachingSessionId || '',
+    authority.supervisionContextId || '',
     authority.controlRevision,
   ]);
 }
@@ -9580,7 +9643,8 @@ function normalizeScreenshotCaptureCadence(rawPolicy, context, options, policy) 
     policy?.mode !== 'tracking_window_lease'
     || policy.valid !== true
     || policy.captureAllowed !== true
-    || policy.authority?.kind !== 'teaching_session'
+    || !['teaching_session', 'supervision_context'].includes(policy.authority?.kind)
+    || policy.authority?.kind === 'supervision_context' && !hasNegotiatedCapability('scheduledClassroomV1', context)
     || !hasNegotiatedCapability('screenshotActiveObservationCadenceV1', context)
   ) return background;
 
@@ -9635,11 +9699,11 @@ function screenshotTrackingAuthorityMatchesCurrentState(authority = screenshotPo
     ? RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now())
     : { expired: true };
   return Boolean(
-    authority?.kind === 'teaching_session'
-    && teachingSessionId
-    && !currentClassroomState?.supervisionContextId
+    ['teaching_session', 'supervision_context'].includes(authority?.kind)
+    && (authority.kind !== 'supervision_context' || hasNegotiatedCapability('scheduledClassroomV1'))
+    && RuntimeCore.classroomContextKey(authority)
     && classroomExpiry.expired !== true
-    && authority.teachingSessionId === teachingSessionId
+    && RuntimeCore.classroomContextKey(authority) === RuntimeCore.classroomContextKey(currentClassroomState)
     && Number.isSafeInteger(controlRevision)
     && authority.controlRevision === controlRevision
   );
@@ -9654,7 +9718,7 @@ function activeObservationScreenshotCadenceAllowed(context, nowValue = Date.now(
   const cadence = screenshotPolicyState.captureCadence;
   return ambientScreenshotAllowed(context, nowValue)
     && screenshotPolicyState.mode === 'tracking_window_lease'
-    && screenshotPolicyState.authority?.kind === 'teaching_session'
+    && ['teaching_session', 'supervision_context'].includes(screenshotPolicyState.authority?.kind)
     && screenshotTrackingAuthorityMatchesCurrentState()
     && cadence?.mode === 'active_view'
     && cadence.intervalSeconds === 5
@@ -9718,6 +9782,7 @@ function startActiveScreenshotCadence(context) {
   }
   const expiresAt = Number(screenshotPolicyState.captureCadence.expiresAt);
   const teachingSessionId = screenshotPolicyState.authority.teachingSessionId;
+  const supervisionContextId = screenshotPolicyState.authority.supervisionContextId;
   const controlRevision = screenshotPolicyState.authority.controlRevision;
   const existing = activeScreenshotCadence;
   const canRenewExisting = Boolean(
@@ -9726,6 +9791,7 @@ function startActiveScreenshotCadence(context) {
     && existing.policyGeneration === screenshotPolicyGeneration
     && existing.authorityScope === screenshotPolicyState.authorityScope
     && existing.teachingSessionId === teachingSessionId
+    && existing.supervisionContextId === supervisionContextId
     && existing.controlRevision === controlRevision
   );
   if (canRenewExisting) {
@@ -9771,6 +9837,7 @@ function startActiveScreenshotCadence(context) {
     authorityScope: screenshotPolicyState.authorityScope,
     policyGeneration: screenshotPolicyGeneration,
     teachingSessionId,
+    supervisionContextId,
     controlRevision,
     authContextId: context.authContextId,
   });
@@ -9794,7 +9861,7 @@ function startActiveScreenshotCadence(context) {
         activeScreenshotCadence !== cadence
         || cadence.policyGeneration !== screenshotPolicyGeneration
         || cadence.authorityScope !== screenshotPolicyState.authorityScope
-        || cadence.teachingSessionId !== currentClassroomState?.teachingSessionId
+        || RuntimeCore.classroomContextKey(cadence) !== RuntimeCore.classroomContextKey(currentClassroomState)
         || cadence.controlRevision !== currentStudentControlRevision()
         || !activeObservationScreenshotCadenceAllowed(context)
       ) throw authContextSuperseded('active observation screenshot cadence scheduling');
@@ -18754,6 +18821,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
   }
   const expiry = RuntimeCore.classroomStateExpiry(normalized, Date.now());
   const screenshotAuthorityChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
+    || normalized.supervisionContextId !== previousState?.supervisionContextId
     || currentStudentControlRevision() !== previousControlRevision;
   if (expiry.expired) {
     assertCurrent();
@@ -18860,6 +18928,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
     ).catch(() => {});
     const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
       || normalized.supervisionContextId !== previousState?.supervisionContextId;
+    if (scopeChanged) await clearClassroomOverlayState('classroom-authority-changed', { authContext });
     if (screenshotAuthorityChanged) {
       scheduleEventHeartbeat('screenshot-authority-changed');
     }
@@ -18867,8 +18936,8 @@ async function applyClassroomStateNow(rawState, options = {}) {
       activeLiveViewNegotiationId
       && (
         scopeChanged
-        || normalized.supervisionContextId
-        || normalized.teachingSessionId !== activeLiveViewTeachingSessionId
+        || RuntimeCore.classroomContextKey(normalized) !== RuntimeCore.classroomContextKey(activeLiveViewContext)
+        || normalized.supervisionContextId && normalized.revision !== activeLiveViewContext?.controlRevision
       )
     ) {
       await stopScreenShare({ reason: 'classroom-authority-changed' });
@@ -19074,6 +19143,13 @@ async function expireClassroomState(reason = 'hard_expiry', options = {}) {
     });
     assertCurrent();
     currentClassroomState = expiredState;
+    if (expiredState.supervisionContextId && currentFabState) {
+      await applyFabSettings({ ...currentFabState, activeContexts: [], activeSessionIds: [],
+        teachingSessionId: null, supervisionContextId: null, messagingEnabled: false,
+        handRaisingEnabled: false, handRaised: false, reason: 'session-ended' }, { authContext, authorityEnvelope });
+      assertCurrent();
+    }
+    await clearClassroomOverlayState(`classroom-${reason}`, { authContext });
     await clearRestrictionAuthAttemptState();
     assertCurrent();
     await kv.set({
@@ -19345,7 +19421,7 @@ async function persistLegacyClassroomState(command, envelope = {}, executionCont
   };
   const candidateState = {
     ...base,
-    teachingSessionId: envelope.teachingSessionId || envelope.sessionId || command?.data?.teachingSessionId || base.teachingSessionId,
+    ...(commandClassroomContext({ ...command, authority: envelope.authority || command.authority }) || {}),
     restrictions: classroomRestrictionsFromRuntime(),
   };
   delete candidateState.authPassThrough;
@@ -19727,6 +19803,11 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
     throw error;
   }
 
+  if (currentClassroomState && RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expired) {
+    const error = new Error('Command belongs to an expired classroom context');
+    error.code = 'COMMAND_AUTHORITY_MISMATCH';
+    throw error;
+  }
   if (authority.teachingSessionId) {
     const activeSessionIds = activeTeachingSessionIds();
     if (
@@ -19742,6 +19823,12 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
 
   if (currentClassroomState?.supervisionContextId !== authority.supervisionContextId) {
     const error = new Error('Command belongs to an inactive supervision context');
+    error.code = 'COMMAND_AUTHORITY_MISMATCH';
+    throw error;
+  }
+  if (['timer', 'poll', 'teacher-message', 'messaging-toggle', 'hand-raising-toggle', 'hand-dismissed'].includes(commandType)
+    && !hasNegotiatedCapability('scheduledClassroomV1')) {
+    const error = new Error('Scheduled classroom tools were not negotiated');
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
   }
@@ -19950,10 +20037,10 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       },
     );
     assertCurrentCommandAuthority(command, envelope);
-    if (authority?.teachingSessionId) {
+    if (authority?.teachingSessionId || authority?.supervisionContextId) {
       command.data = {
         ...(command.data || {}),
-        teachingSessionId: authority.teachingSessionId,
+        ...classroomAuthorityPayload(authority),
       };
     }
     const classroomState = envelope?.classroomState
@@ -20931,7 +21018,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           seconds: timerSeconds,
           message: timerMessage,
           endsAt: timerEndsAt,
-          teachingSessionId: timerState?.timer?.teachingSessionId || null,
+          ...classroomAuthorityPayload(timerState?.timer),
         });
 
         if (timerAction === 'start') {
@@ -20983,7 +21070,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           question: pollQuestion,
           options: pollOptions,
           expiresAt: pollState?.poll?.expiresAt || null,
-          teachingSessionId: pollState?.poll?.teachingSessionId || null,
+          ...classroomAuthorityPayload(pollState?.poll),
         });
 
         if (pollAction === 'start') {
@@ -21436,12 +21523,15 @@ function captureStudentActionRequest(message, reason = 'student action') {
     throw authContextSuperseded(reason);
   }
   const sessionId = String(message?.sessionId || '').trim();
-  if (!sessionId || !activeTeachingSessionIds().includes(sessionId)) {
+  if (!classroomContextIsCurrent(message) || message.supervisionContextId
+    && message.studentControlRevision !== currentStudentControlRevision()) {
     const error = new Error('Student action has no exact active teaching session');
     error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
     throw error;
   }
-  return Object.freeze({ authContext, fabBinding: expectedFabBinding, sessionId });
+  const context = classroomAuthorityPayload(message);
+  return Object.freeze({ authContext, fabBinding: expectedFabBinding, sessionId, ...context,
+    ...(context.supervisionContextId ? { studentControlRevision: currentStudentControlRevision() } : {}) });
 }
 
 function captureStudentIdentityRequest(message, reason = 'student identity action') {
@@ -21462,7 +21552,8 @@ function assertStudentActionRequestCurrent(request, reason = 'student action') {
   assertAuthenticatedContextCurrent(request.authContext, reason);
   if (
     request.fabBinding !== fabIdentityBinding()
-    || !activeTeachingSessionIds().includes(request.sessionId)
+    || !classroomContextIsCurrent(request)
+    || request.supervisionContextId && request.studentControlRevision !== currentStudentControlRevision()
   ) throw authContextSuperseded(reason);
 }
 
@@ -21561,6 +21652,12 @@ async function broadcastToAllTabsForAuth(
 
 // Chat/Message Handlers (Phase 2)
 function messageMatchesActiveFabSession(message = {}) {
+  if (message.supervisionContextId) {
+    const revision = message.studentControlRevision ?? message.controlRevision;
+    return classroomContextIsCurrent(message)
+      && (revision === undefined && getCommandIdFromMessage(message)
+        ? true : Number.isSafeInteger(revision) && revision === currentStudentControlRevision());
+  }
   const sessionId = String(message.sessionId || message.teachingSessionId || '').trim();
   if (!sessionId) return true; // Legacy 2.5.7-compatible announcements
   if (currentClassroomState?.teachingSessionId || currentClassroomState?.supervisionContextId) {
@@ -21606,6 +21703,7 @@ async function handleChatMessage(message, options = {}) {
 
   // Show browser notification immediately (fastest feedback)
   assertAuthenticatedContextCurrent(authContext, 'teacher chat notification');
+  if (!messageMatchesActiveFabSession(message)) throw authContextSuperseded('teacher chat authority');
   await notifyTeacherMessageForAuth({
     title: `Message from ${inboxMessage.fromName || 'Teacher'}`,
     message: inboxMessage.message,
@@ -21614,10 +21712,12 @@ async function handleChatMessage(message, options = {}) {
   }, authContext, message, inboxMessage.id);
   assertAuthenticatedContextCurrent(authContext, 'teacher chat notification');
   assertCurrentStudentBinding(message, 'teacher chat notification', { authContext });
+  if (!messageMatchesActiveFabSession(message)) throw authContextSuperseded('teacher chat authority');
 
   // Fire-and-forget broadcast to all tabs for instant delivery
   await broadcastToAllTabsForAuth('show-message', {
     id: inboxMessage.id,
+    ...classroomAuthorityPayload(message),
     message: inboxMessage.message,
     fromName: inboxMessage.fromName || 'Teacher',
     timestamp: inboxMessage.timestamp || Date.now(),
@@ -21672,6 +21772,7 @@ async function handleDurableTeacherMessage(message, options = {}) {
     });
     assertAuthenticatedContextCurrent(authContext, 'durable teacher message persistence');
     assertCurrentStudentBinding(message, 'durable teacher message persistence', { authContext });
+    if (!messageMatchesActiveFabSession(message)) throw authContextSuperseded('durable teacher message authority');
     const deduplicated = !inboxResult.addedMessageIds.includes(inboxMessage.id);
 
     if (commandId) {
@@ -21704,6 +21805,7 @@ async function handleDurableTeacherMessage(message, options = {}) {
         chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
         messageId: message.chatMessageId || message.messageId || inboxMessage.id,
         sessionId: message.sessionId,
+        ...classroomAuthorityPayload(message),
         studentId: message.studentId,
         message: inboxMessage.message,
         fromName: inboxMessage.fromName || 'Teacher',
@@ -22940,11 +23042,13 @@ async function fetchLiveViewIceConfiguration(negotiationId, authContext) {
   return { iceServers, expiresAt, legacy: false };
 }
 
-function liveViewContextFor(authContext, negotiationId, teachingSessionId) {
+function liveViewContextFor(authContext, negotiationId, teachingSessionId, supervisionContextId = null) {
   liveViewStartGeneration = Math.max(liveViewStartGeneration + 1, Date.now());
   return Object.freeze({
     negotiationId,
     teachingSessionId,
+    supervisionContextId,
+    ...(supervisionContextId ? { controlRevision: currentStudentControlRevision() } : {}),
     startGeneration: liveViewStartGeneration,
     authContextId: authContext.authContextId,
     authGeneration: authContext.mutationGeneration,
@@ -22993,12 +23097,25 @@ function liveViewContextMatches(value, authContext = null) {
 function assertLiveViewRequestCurrent(requestContext, authContext, reason = 'Live View request') {
   assertAuthenticatedContextCurrent(authContext, reason);
   if (activeLiveViewContext !== requestContext
-    || !liveViewContextMatches(requestContext, authContext)) {
+    || !liveViewContextMatches(requestContext, authContext)
+    || !liveViewClassroomAuthorityCurrent(requestContext)) {
     const error = new Error('Live View request was replaced by a newer negotiation');
     error.code = 'LIVE_VIEW_CONTEXT_SUPERSEDED';
     throw error;
   }
   return requestContext;
+}
+
+function classroomStateContextIsCurrent(value) {
+  const context = RuntimeCore.classroomContext(value);
+  return Boolean(context && (!context.supervisionContextId || hasNegotiatedCapability('scheduledClassroomV1'))
+    && RuntimeCore.classroomContextKey(context) === RuntimeCore.classroomContextKey(currentClassroomState)
+    && !RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expired);
+}
+
+function liveViewClassroomAuthorityCurrent(value) {
+  return classroomStateContextIsCurrent(value)
+    && (!value.supervisionContextId || value.controlRevision === currentStudentControlRevision());
 }
 
 async function notifyLiveViewErrorForAuth(authContext, requestContext, reason = 'capture') {
@@ -23098,6 +23215,7 @@ async function handleScreenShareRequest(
   teachingSessionId = null,
   setupExpiresAt = null,
   expiresAt = null,
+  supervisionContextId = null,
 ) {
   let authContext;
   let requestContext = null;
@@ -23108,6 +23226,7 @@ async function handleScreenShareRequest(
     if (!negotiationId
       || negotiationId !== activeLiveViewNegotiationId
       || teachingSessionId !== activeLiveViewTeachingSessionId
+      || !liveViewClassroomAuthorityCurrent(requestContext)
       || !liveViewContextMatches(requestContext, authContext)) return;
     console.log('[WebRTC] Teacher requested screen share, mode:', safeDiagnosticLabel(mode));
 
@@ -23166,6 +23285,7 @@ async function handleScreenShareRequest(
       streamId: streamId,
       negotiationId,
       teachingSessionId,
+      supervisionContextId,
       setupExpiresAt,
       expiresAt,
       iceServers: iceConfiguration.iceServers,
@@ -23463,7 +23583,7 @@ async function handleOffscreenMessage(message) {
       cadence.authContextId !== authContext.authContextId
       || cadence.policyGeneration !== screenshotPolicyGeneration
       || cadence.authorityScope !== screenshotPolicyState.authorityScope
-      || cadence.teachingSessionId !== currentClassroomState?.teachingSessionId
+      || RuntimeCore.classroomContextKey(cadence) !== RuntimeCore.classroomContextKey(currentClassroomState)
       || cadence.controlRevision !== currentStudentControlRevision()
       || !screenshotTrackingAuthorityMatchesCurrentState()
       || activeScreenshotCadence !== cadence
@@ -24129,12 +24249,10 @@ async function handleWsMessage(
       if (message.type === 'screenshot-policy-refresh') {
         if (!hasNegotiatedCapability('screenshotActiveObservationCadenceV1', authContext)) return;
         if (!acceptsCurrentStudentBinding(message, 'screenshot policy refresh', { authContext })) return;
-        const teachingSessionId = String(message.teachingSessionId || '').trim();
         if (
           message.reason !== 'observation_changed'
-          || !teachingSessionId
-          || currentClassroomState?.teachingSessionId !== teachingSessionId
-          || currentClassroomState?.supervisionContextId
+          // This hint only triggers a fresh authorized heartbeat. It grants no lease.
+          || !classroomStateContextIsCurrent(message)
         ) return;
         scheduleEventHeartbeat('screenshot-policy-refresh');
         return;
@@ -24151,10 +24269,9 @@ async function handleWsMessage(
       if (message.type === 'student-session-ended' || message.type === 'session-ended') {
         if (!acceptsCurrentStudentBinding(message, 'student session lifecycle')) return;
         const authoritativeFabState = message.fabState || message.state || null;
-        const endedSessionId = String(
-          message.teachingSessionId || message.sessionId || message.data?.teachingSessionId || ''
-        ).trim() || null;
-        const activeSessionIds = normalizeIdList(currentFabState?.activeSessionIds);
+        const endedContext = RuntimeCore.classroomContext({ ...message, ...message.data });
+        const contexts = RuntimeCore.classroomContexts(currentFabState || {});
+        const endedKey = RuntimeCore.classroomContextKey(endedContext);
         if (authoritativeFabState) {
           await applyFabSettings({
             ...authoritativeFabState,
@@ -24162,10 +24279,10 @@ async function handleWsMessage(
           }, { authContext, authorityEnvelope: message }).catch((error) => {
             console.warn('[FAB] Session-end snapshot failed:', safeDiagnosticError(error));
           });
-        } else if (!endedSessionId || activeSessionIds.includes(endedSessionId)) {
-          const remainingSessionIds = endedSessionId
-            ? activeSessionIds.filter((sessionId) => sessionId !== endedSessionId)
-            : [];
+        } else if (!endedKey || contexts.some(context => RuntimeCore.classroomContextKey(context) === endedKey)) {
+          const remainingContexts = endedKey
+            ? contexts.filter(context => RuntimeCore.classroomContextKey(context) !== endedKey) : [];
+          const remainingSessionIds = remainingContexts.flatMap(context => context.teachingSessionId ? [context.teachingSessionId] : []);
           await applyFabSettings({
             ...(currentFabState || {}),
             revision: message.revision ?? currentFabState?.revision ?? 0,
@@ -24173,10 +24290,12 @@ async function handleWsMessage(
               ?? message.studentControlRevision
               ?? currentFabState?.ownershipRevision
               ?? 0,
-            teachingSessionId: remainingSessionIds.length === 1 ? remainingSessionIds[0] : null,
+            teachingSessionId: remainingContexts.length === 1 ? remainingContexts[0].teachingSessionId || null : null,
+            supervisionContextId: remainingContexts.length === 1 ? remainingContexts[0].supervisionContextId || null : null,
+            activeContexts: remainingContexts,
             activeSessionIds: remainingSessionIds,
-            messagingEnabled: remainingSessionIds.length > 0 && currentFabState?.messagingEnabled === true,
-            handRaisingEnabled: remainingSessionIds.length > 0 && currentFabState?.handRaisingEnabled === true,
+            messagingEnabled: remainingContexts.length > 0 && currentFabState?.messagingEnabled === true,
+            handRaisingEnabled: remainingContexts.length > 0 && currentFabState?.handRaisingEnabled === true,
             handRaised: false,
             reason: 'session-ended',
           }, { authContext, authorityEnvelope: message }).catch((error) => {
@@ -24223,12 +24342,12 @@ async function handleWsMessage(
         const mode = message.mode || 'auto';
         const negotiationId = String(message.negotiationId || '').trim();
         const teachingSessionId = String(message.teachingSessionId || '').trim();
+        const supervisionContextId = String(message.supervisionContextId || '').trim();
         const authorityMatches = Boolean(
           acceptsCurrentStudentBinding(message, 'live-view request')
           && negotiationId
-          && teachingSessionId
-          && currentClassroomState?.teachingSessionId === teachingSessionId
-          && !currentClassroomState?.supervisionContextId
+          && liveViewClassroomAuthorityCurrent({ teachingSessionId, supervisionContextId,
+            controlRevision: message.controlRevision ?? message.studentControlRevision })
         );
         if (authorityMatches) {
           if (!reserveLiveViewNegotiation(negotiationId, authContext)) {
@@ -24268,14 +24387,14 @@ async function handleWsMessage(
             'Live View replacement',
           );
           if (
-            currentClassroomState?.teachingSessionId !== teachingSessionId
-            || currentClassroomState?.supervisionContextId
+            !liveViewClassroomAuthorityCurrent({ teachingSessionId, supervisionContextId,
+              controlRevision: message.controlRevision ?? message.studentControlRevision })
           ) {
             throw authContextSuperseded('Live View replacement classroom authority');
           }
           activeLiveViewNegotiationId = negotiationId;
           activeLiveViewTeachingSessionId = teachingSessionId;
-          activeLiveViewContext = liveViewContextFor(authContext, negotiationId, teachingSessionId);
+          activeLiveViewContext = liveViewContextFor(authContext, negotiationId, teachingSessionId, supervisionContextId);
           liveViewTelemetryAttempts = new Set();
           await handleScreenShareRequest(
             mode,
@@ -24283,6 +24402,7 @@ async function handleWsMessage(
             teachingSessionId,
             message.setupExpiresAt,
             message.expiresAt,
+            supervisionContextId,
           );
         } else if (negotiationId) {
           wsSend({
@@ -24696,6 +24816,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       const authContext = captureAuthenticatedContext('student content context');
       const activeSessionIds = activeTeachingSessionIds();
+      const activeContexts = activeClassroomContexts();
       const preferredSessionId = String(
         currentFabState?.teachingSessionId || currentClassroomState?.teachingSessionId || '',
       ).trim();
@@ -24704,6 +24825,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         studentMessageContext: studentMessageContextFor(authContext),
         fabBinding: fabIdentityBinding(),
         activeTeachingSessionIds: activeSessionIds,
+        activeContexts,
+        activeContext: activeContexts.length === 1 ? activeContexts[0] : null,
+        studentControlRevision: currentStudentControlRevision(authContext),
         activeTeachingSessionId: activeSessionIds.includes(preferredSessionId)
           ? preferredSessionId
           : activeSessionIds.length === 1 ? activeSessionIds[0] : null,
@@ -24720,6 +24844,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       current: studentMessageContextIsCurrent(message.studentMessageContext),
       fabBinding: fabIdentityBinding(),
       activeTeachingSessionIds: activeTeachingSessionIds(),
+      activeContexts: activeClassroomContexts(),
+      studentControlRevision: currentStudentControlRevision(),
     });
     return true;
   }
@@ -25087,7 +25213,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (
         !overlays.poll
         || overlays.poll.pollId !== pollId
-        || overlays.poll.teachingSessionId !== actionRequest.sessionId
+        || RuntimeCore.classroomContextKey(overlays.poll) !== RuntimeCore.classroomContextKey(actionRequest)
       ) {
         throw new Error('This poll is no longer active for the signed-in student');
       }
@@ -25103,7 +25229,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           deviceId: actionRequest.authContext.deviceId,
           studentId: actionRequest.authContext.studentId,
           studentSessionId: actionRequest.authContext.studentSessionId,
-          teachingSessionId: actionRequest.sessionId,
+          ...classroomAuthorityPayload(actionRequest),
           selectedOption: option,
         }),
         signal: actionRequest.authContext.signal,
@@ -25124,7 +25250,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       assertStudentActionRequestCurrent(actionRequest, 'poll response persistence');
       await broadcastToAllTabsForAuth(
         'poll-response-succeeded',
-        { pollId, selectedOption: option, teachingSessionId: actionRequest.sessionId },
+        { pollId, selectedOption: option, ...classroomAuthorityPayload(actionRequest) },
         actionRequest.authContext,
         {
           studentId: actionRequest.authContext.studentId,
@@ -25156,7 +25282,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           deviceId: actionRequest.authContext.deviceId,
           studentId: actionRequest.authContext.studentId,
           studentSessionId: actionRequest.authContext.studentSessionId,
-          teachingSessionId: actionRequest.sessionId,
+          ...classroomAuthorityPayload(actionRequest),
         }),
         signal: actionRequest.authContext.signal,
       }, {
@@ -25194,7 +25320,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           deviceId: actionRequest.authContext.deviceId,
           studentId: actionRequest.authContext.studentId,
           studentSessionId: actionRequest.authContext.studentSessionId,
-          teachingSessionId: actionRequest.sessionId,
+          ...classroomAuthorityPayload(actionRequest),
         }),
         signal: actionRequest.authContext.signal,
       }, {
@@ -25237,6 +25363,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message: message.message,
       messageType: message.messageType,
       sessionId: actionRequest.sessionId,
+      ...classroomAuthorityPayload(actionRequest),
     }, actionRequest.authContext).then((result) => {
       assertStudentActionRequestCurrent(actionRequest, 'student message request completion');
       sendResponse(result);
