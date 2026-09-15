@@ -394,10 +394,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.8.7 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.8.7.zip` after clean-tag packaging. Earlier archives do not
-contain this release's bounded sign-in recovery and safe script lifecycle and must not be
-submitted for this release. The candidate retains 2.8.6's portal-first student app
+For the prepared 2.8.8 candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.8.8.zip` after clean-tag packaging. Earlier archives do not
+contain all of this release's startup recovery corrections and must not be
+submitted for this release. The candidate retains 2.8.7's bounded sign-in recovery
+and safe script lifecycle, plus 2.8.6's portal-first student app
 selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
@@ -425,6 +426,27 @@ history. They contain no student/device identity, credentials, roster or URLs.
 They do not add an unauthenticated reporting endpoint; an error before a request
 reaches SchoolPilot can remain invisible in AWS logs. See
 `../CLASSPILOT_2_8_7_RELEASE.md` for the managed-Chromebook publication gate.
+
+### Startup recovery corrections (2.8.8 candidate)
+
+Managed-policy refresh failures retain a visible Retry action while the page
+controllers keep their authority checks pending. The initial document-start
+policy read is bounded too. Completed failures in the initial native auth reads
+and revision/roster publication can retry through an owned operation;
+unresolved authentication writes remain
+protected and credential submissions are never automatically replayed.
+
+The unavailable card shows a fixed support code and retains it during Retry.
+Only failure codes already supplied by the recovery path are distinguished;
+`AUTH_GATE_UNAVAILABLE` remains the fallback when the cause is unknown. The code
+contains no identity, credential, URL or school configuration. This adds no
+reporting endpoint or Chrome permission.
+
+Chrome may isolate an obsolete controller's execution context during an
+in-place update. When ownership cannot be proved, the safe fallback requires
+an explicit page reload. Automated upgrade evidence must record whether that
+fallback was used, rather than claiming seamless replacement. See
+`../CLASSPILOT_2_8_8_RELEASE.md` for current validation and publication gates.
 
 ### Publish Through Chrome Web Store
 

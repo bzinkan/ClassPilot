@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 const nonce = 'a'.repeat(64);
 const extensionRoot = process.env.CLASSPILOT_EXTENSION_PATH || fileURLToPath(new URL('../extension/', import.meta.url));
+const extensionVersion=JSON.parse(readFileSync(resolve(extensionRoot,'manifest.json'),'utf8')).version;
 const files = new Map(['auth-gate-transport.js','auth-gate-frame.js','page-lifecycle.js','auth-gate-bootstrap.js','content.js']
   .map(name => [name, readFileSync(resolve(extensionRoot, name), 'utf8')]));
 const server = createServer((request, response) => {
@@ -18,7 +19,7 @@ const server = createServer((request, response) => {
     response.end(`<!doctype html><html><body><input id="page-draft" value="protected draft"><script>
       window.parentFixture = { reloadCalls:0, messages:[] };
       const eventSource = () => ({ addListener(){}, removeListener(){} });
-      window.chrome = { runtime: { id:'fixture-extension', getManifest:()=>({version:'2.8.7'}),
+      window.chrome = { runtime: { id:'fixture-extension', getManifest:()=>({version:${JSON.stringify(extensionVersion)}}),
         getURL:path => path === 'auth-gate-frame.html' ? location.origin+'/frame?scenario=invalid' : location.origin+'/'+path,
         onMessage:eventSource(), sendMessage(message,callback) {
           parentFixture.messages.push(message.type);
@@ -38,7 +39,7 @@ const server = createServer((request, response) => {
       const scenario = new URL(location.href).searchParams.get('scenario');
       window.fixture = {
         calls: [], stateCallbacks: [], rosterCallbacks: [], diagnostics: [],
-        stateMode: scenario === 'missing' ? 'hold' : scenario === 'invalid' ? 'throw' : 'normal',
+        stateMode: scenario === 'missing'||scenario.startsWith('initial-failure') ? 'hold' : scenario === 'invalid' ? 'throw' : 'normal',
         rosterMode: scenario === 'roster' ? 'hold' : 'normal',
         state: { phase:'ready', authRequired:true, loginMethod:scenario === 'roster' ? 'name_pin' : 'email_id', revision:5, rosterContextGeneration:1 },
       };
@@ -63,7 +64,7 @@ const server = createServer((request, response) => {
   }
   response.end(`<!doctype html><html><body><iframe id="gate" src="/frame?scenario=${encodeURIComponent(url.searchParams.get('scenario') || 'normal')}#${nonce}"></iframe><script>
     window.messages=[];addEventListener('message',event=>messages.push(event.data));
-    document.getElementById('gate').addEventListener('load',()=>document.getElementById('gate').contentWindow.postMessage({type:'CLASSPILOT_AUTH_FRAME_INIT',nonce:'${nonce}'},location.origin));
+    document.getElementById('gate').addEventListener('load',()=>document.getElementById('gate').contentWindow.postMessage({type:'CLASSPILOT_AUTH_FRAME_INIT',nonce:'${nonce}',${url.searchParams.get('scenario')?.startsWith('initial-failure')?`initialFailure:{code:${JSON.stringify(url.searchParams.get('scenario')==='initial-failure-invalid'?'private-token@example.invalid <img src=x>':'AUTH_GATE_STARTUP_TIMEOUT')},retryAt:Date.now()+2000},`:''}},location.origin));
   </script></body></html>`);
 });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -96,15 +97,42 @@ async function submit(frame) {
   });
 }
 try {
+  await scenario('a bounded parent startup failure is visible immediately without a second worker deadline','initial-failure',async(page,frame)=>{
+    assert.equal(await phase(frame),'unavailable');
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_STARTUP_TIMEOUT');
+    assert.equal(await frame.evaluate(()=>fixture.calls.length),0,'frame must not discard the parent failure then wait for another RPC');
+    await click(frame,'#classpilot-auth-retry');
+    assert.equal(await frame.evaluate(()=>fixture.calls.length),1);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_STARTUP_TIMEOUT');
+    await page.clock.runFor(10_010);assert.equal(await phase(frame),'unavailable');
+    await frame.evaluate(()=>{fixture.stateMode='normal';});
+    await click(frame,'#classpilot-auth-retry');assert.equal(await phase(frame),'ready');
+    assert.equal(await frame.locator('#classpilot-auth-support-code').count(),0);
+  });
+  await scenario('unknown initial failure is redacted and ordinary retry respects the supplied bounded backoff','initial-failure-invalid',async(page,frame)=>{
+    assert.equal(await phase(frame),'unavailable');
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_UNAVAILABLE');
+    assert.equal(await frame.evaluate(()=>document.body.textContent.includes('private')),false);
+    await page.clock.runFor(1_999);assert.equal(await frame.evaluate(()=>fixture.calls.length),0);
+    await page.clock.runFor(1);assert.equal(await frame.evaluate(()=>fixture.calls.length),1);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_UNAVAILABLE');
+    await page.clock.runFor(5_000);assert.equal(await frame.evaluate(()=>fixture.calls.length),1,'backoff and polling must not duplicate the active RPC');
+  });
   await scenario('missing state callback restores Retry and ignores late auth proof', 'missing', async (page, frame) => {
     await page.clock.runFor(10_010);
     assert.equal(await phase(frame), 'unavailable');
     assert.equal(await frame.locator('#classpilot-auth-retry').isEnabled(), true);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_RPC_TIMEOUT');
+    await click(frame,'#classpilot-auth-retry');
+    assert.match(await frame.locator('#classpilot-auth-retry').textContent(),/Connecting/);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_RPC_TIMEOUT');
+    await page.clock.runFor(10_010);
     await frame.evaluate(() => fixture.stateCallbacks[0]({success:true,state:{phase:'authenticated',authRequired:false,revision:8}}));
     assert.equal(await phase(frame), 'unavailable');
     await frame.evaluate(() => { fixture.stateMode = 'normal'; });
     await click(frame, '#classpilot-auth-retry');
     assert.equal(await phase(frame), 'ready');
+    assert.equal(await frame.locator('#classpilot-auth-support-code').count(),0);
     assert.equal(await frame.evaluate(() => fixture.calls.at(-1).reason), 'user');
   });
 
@@ -120,6 +148,7 @@ try {
   await scenario('invalidated context uses a nonce-bound explicit reload action', 'invalid', async (page, frame) => {
     assert.equal(await phase(frame), 'unavailable');
     assert.equal(await frame.locator('#classpilot-auth-reload').isEnabled(), true);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_CONTEXT_INVALIDATED');
     await click(frame, '#classpilot-auth-reload');
     const request = await page.evaluate(() => messages.find(message => message.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST'));
     assert.deepEqual(Object.keys(request).sort(), ['nonce','requestId','type']);
@@ -204,6 +233,46 @@ try {
     await frame.evaluate(() => fixture.stateCallbacks[0]({state:{phase:'authenticated',authRequired:false,revision:8}}));
     assert.equal(await phase(frame), 'loading');
     assert.equal(await frame.evaluate(() => fixture.diagnostics.length), 0);
+  });
+  await scenario('support codes are allowlisted, selectable, bounded and never include diagnostic input', 'normal', async (_page,frame)=>{
+    const codes=['AUTH_GATE_POLICY_TIMEOUT','AUTH_GATE_POLICY_UNAVAILABLE','AUTH_GATE_STARTUP_TIMEOUT',
+      'AUTH_GATE_RPC_TIMEOUT','AUTH_GATE_RPC_UNAVAILABLE','AUTH_GATE_CONTEXT_INVALIDATED',
+      'AUTH_GATE_SERVER_TIMEOUT','AUTH_GATE_LOGIN_PENDING','AUTH_GATE_UNAVAILABLE'];
+    let revision=10;
+    for(const code of [...codes,'private@example.invalid <img src=x onerror=alert(1)>','AUTH_GATE_POLICY_TIMEOUT\nprivate-token']) {
+      await frame.evaluate(({code,revision})=>fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'unavailable',authRequired:true,revision,errorCode:code,error:'secret-private-error',message:'secret-private-message'}},{id:'fixture-extension'}),{code,revision:revision++});
+      const expected=codes.includes(code)?code:'AUTH_GATE_UNAVAILABLE';
+      assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),`Support code: ${expected}`);
+      assert.equal(await frame.evaluate(()=>document.body.textContent.includes('private')),false);
+      const layout=await frame.locator('#classpilot-auth-support-code').evaluate(element=>({
+        selectable:getComputedStyle(element).userSelect!=='none',
+        withinCard:element.getBoundingClientRect().right<=element.closest('.classpilot-auth-main-inner').getBoundingClientRect().right,
+        noOverflow:element.scrollWidth<=element.clientWidth,
+      }));
+      assert.deepEqual(layout,{selectable:true,withinCard:true,noOverflow:true});
+    }
+    await frame.evaluate(revision=>fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'loading',authRequired:true,revision}},{id:'fixture-extension'}),revision++);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_UNAVAILABLE');
+    await frame.evaluate(revision=>fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'ready',authRequired:true,loginMethod:'email_id',revision}},{id:'fixture-extension'}),revision++);
+    assert.equal(await frame.locator('#classpilot-auth-support-code').count(),0);
+  });
+  await scenario('failure-only parent recovery validates nonce, redacts input and cannot publish ready authority','normal',async(page,frame)=>{
+    const recovery={type:'CLASSPILOT_AUTH_FRAME_POLICY_RECOVERY',nonce:'wrong',policyRecovery:{errorCode:'private-token@example.invalid',retryAt:0}};
+    await page.evaluate(message=>document.getElementById('gate').contentWindow.postMessage(message,location.origin),recovery);
+    await page.clock.runFor(1);assert.equal(await phase(frame),'ready');
+    await page.evaluate(message=>document.getElementById('gate').contentWindow.postMessage(message,location.origin),{...recovery,nonce});
+    await frame.waitForFunction(()=>document.getElementById('classpilot-auth-gate').dataset.classpilotAuthPhase==='unavailable');
+    assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_UNAVAILABLE');
+    assert.equal(await frame.evaluate(()=>document.body.textContent.includes('private')),false);
+    const before=await frame.evaluate(()=>fixture.calls.length);
+    await frame.evaluate(()=>fixture.broadcast({type:'CLASSPILOT_AUTH_COMPLETE',state:{phase:'authenticated',authRequired:false,revision:99}},{id:'fixture-extension'}));
+    assert.equal(await phase(frame),'unavailable');
+    await click(frame,'#classpilot-auth-retry');
+    assert.equal(await frame.evaluate(()=>fixture.calls.length),before,'failure-only frame must delegate to parent fence, not fetch or submit credentials');
+    const request=await page.evaluate(()=>messages.find(message=>message.type==='CLASSPILOT_AUTH_FRAME_POLICY_RETRY'));
+    assert.equal(request.nonce,nonce);assert.equal(request.userInitiated,true);
+    await page.clock.runFor(10_010);assert.equal(await phase(frame),'unavailable');
+    assert.equal(await frame.locator('#classpilot-auth-retry').isEnabled(),true);
   });
   console.log(`Auth recovery frame: ${passed} scenarios passed.`);
 } finally {

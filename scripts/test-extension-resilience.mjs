@@ -42,6 +42,10 @@ function launchTestContext(executablePath) {
     executablePath,
     headless: true,
     args: [
+      // Install the guard before the extension starts: synthetic authority
+      // fixtures must never fall through an unmocked fetch to a live backend.
+      '--no-proxy-server',
+      '--host-resolver-rules=MAP *.localhost 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost',
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
@@ -6159,6 +6163,7 @@ async function main() {
       const originalConfig = { ...CONFIG };
       const originalSharedSignInConfig = sharedSignInLoginConfig;
       const originalFastAuthGateEnabled = fastAuthGateEnabled;
+      const originalRefreshSharedSignInLoginConfig = refreshSharedSignInLoginConfig;
       const originalFetchAuthGateRequest = fetchAuthGateRequest;
       const originalFetchWithBackoff = fetchWithBackoff;
       const now = Date.now();
@@ -6178,8 +6183,31 @@ async function main() {
       }, 'pending', now - 2000);
       const proofValue = `cpmd1.${'D'.repeat(32)}.${'S'.repeat(43)}`;
       const rosterAuthorizations = [];
+      const diagnosticSnapshot = () => ({
+        authGeneration: studentAuthMutationGeneration,
+        configGeneration: sharedSignInConfigGeneration,
+        policyGeneration: managedAuthGatePolicyGeneration,
+        configPhase: sharedSignInLoginConfig.phase,
+        hasSetup: hasManagedSchoolSetup(),
+        authenticated: hasStudentAuth(),
+        configInFlight: Boolean(sharedSignInConfigPromise),
+        rosterInFlight: loginRosterInFlight.size,
+        continuityInFlight: Boolean(managedDeviceContinuityIssuancePromise),
+        recoveryInFlight: Boolean(studentSessionRecoveryFlushPromise),
+        authPending: studentAuthMutationPendingCount,
+        authCommitPending: studentAuthCommitPending,
+        proofMatches: currentManagedDeviceContinuityProof()?.generation === proof?.generation,
+        recoveryMatches: matchingStudentSessionRecoveryRecord()?.generation === recovery.generation,
+      });
+      let proof;
       let loginRequests = 0;
       try {
+        // This case supplies its own ready configuration. Fence unsolicited
+        // refreshes and drain any earlier read before replacing its authority;
+        // otherwise persistence awaits let that read overwrite it with loading.
+        // Keep the real roster/network/fallback functions under test below.
+        refreshSharedSignInLoginConfig = async () => sharedSignInLoginConfig;
+        await Promise.resolve(sharedSignInConfigPromise).catch(() => {});
         Object.assign(CONFIG, {
           serverUrl: 'https://school-pilot.net',
           schoolId: 'mixed-backend-school',
@@ -6210,7 +6238,7 @@ async function main() {
           armed: null,
           pending: [recovery],
         });
-        const proof = normalizeManagedDeviceContinuityRecord({
+        proof = normalizeManagedDeviceContinuityRecord({
           generation: generateManagedDeviceContinuityGeneration(),
           proof: proofValue,
           serverOrigin: 'https://school-pilot.net',
@@ -6247,7 +6275,21 @@ async function main() {
             jsonValid: true,
           };
         };
+        const beforeRoster = diagnosticSnapshot();
         const roster = await fetchLoginRosterForGate({ gradeLevel: '5', forceRefresh: true });
+        const rosterDiagnostic = {
+          before: beforeRoster,
+          after: diagnosticSnapshot(),
+          outcome: {
+            success: roster.success === true,
+            stale: roster.stale === true,
+            unavailable: roster.unavailable === true,
+            setupRequired: roster.setupRequired === true,
+            continuityFallbackRequired: roster.continuityFallbackRequired === true,
+            phase: ['loading', 'ready', 'unavailable', 'setup_required', 'authenticated'].includes(roster.phase)
+              ? roster.phase : null,
+          },
+        };
         const fallbackGrant = recoveryGrantForStudentLogin(
           'mixed-backend-student',
           roster.recoveryGrantId,
@@ -6289,6 +6331,7 @@ async function main() {
 
         return {
           rosterSuccess: roster.success === true,
+          rosterDiagnostic,
           rosterAuthorizations,
           fallbackGrantKind: fallbackGrant?.authorizationKind || null,
           proofCleared: currentManagedDeviceContinuityProof() === null,
@@ -6304,11 +6347,13 @@ async function main() {
         fastAuthGateEnabled = originalFastAuthGateEnabled;
         fetchAuthGateRequest = originalFetchAuthGateRequest;
         fetchWithBackoff = originalFetchWithBackoff;
+        refreshSharedSignInLoginConfig = originalRefreshSharedSignInLoginConfig;
         studentAuthInvalidating = false;
         studentAuthCommitPending = false;
       }
     });
-    assert.equal(mixedBackendContinuityFallback.rosterSuccess, true);
+    assert.equal(mixedBackendContinuityFallback.rosterSuccess, true,
+      `Mixed backend roster rejected: ${JSON.stringify(mixedBackendContinuityFallback.rosterDiagnostic)}`);
     assert.deepEqual(mixedBackendContinuityFallback.rosterAuthorizations, [
       `ClassPilot-Device cpmd1.${'D'.repeat(32)}.${'S'.repeat(43)}`,
       `ClassPilot-Recovery ${'M'.repeat(43)}`,

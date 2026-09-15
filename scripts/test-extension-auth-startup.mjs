@@ -1467,6 +1467,11 @@ async function main() {
     context = await launchContext(executablePath, profilePath, extensionPath);
     let firstPage = context.pages()[0] || await context.newPage();
     await firstPage.goto('chrome://version');
+    // Prepare both browser targets before the proven worker stop. Creating a
+    // second tab during the measurement spends the five-second HTTP budget on
+    // browser setup instead of observing an actually concurrent cold cohort.
+    const secondPage=await context.newPage();
+    await secondPage.goto('chrome://version');
     const coldStop = await stopExtensionWorker(context, firstPage, extensionId);
     assert.equal(coldStop.stopped, true, 'could not stop the MV3 worker before measured navigation');
 
@@ -1476,23 +1481,37 @@ async function main() {
     fixture.state.cohortLoginConfigRequestAt = null;
     const navigationStartedAt = Date.now();
     const firstNavigation = firstPage.goto(`${fixture.origin}/cold-start`, { waitUntil: 'domcontentloaded' });
+    const secondNavigation=secondPage.goto(`${fixture.origin}/concurrent-tab`,{waitUntil:'domcontentloaded'});
     await firstPage.waitForSelector(GATE_SELECTOR, { state: 'attached', timeout: LOADING_LIMIT_MS });
     const loadingPaintMs = Date.now() - navigationStartedAt;
     assert.ok(loadingPaintMs < LOADING_LIMIT_MS, `loading gate painted in ${loadingPaintMs}ms (limit ${LOADING_LIMIT_MS}ms)`);
     await waitForGatePhase(firstPage, 'loading', LOADING_LIMIT_MS);
-    await firstNavigation;
+    await Promise.all([firstNavigation,secondNavigation]);
 
     // Check the actual concurrent cohort before the hostile-page exercises.
     // Those interactions can legitimately outlast the 5s HTTP deadline plus
     // recovery backoff, at which point a second request is an expected retry.
-    const secondPage = await context.newPage();
-    await secondPage.goto(`${fixture.origin}/concurrent-tab`, { waitUntil: 'domcontentloaded' });
     await waitForGatePhase(secondPage, 'loading', LOADING_LIMIT_MS);
     const configRequestDeadline = Date.now() + 4_000;
     while (fixture.state.loginConfigRequests === coldConfigRequestBaseline && Date.now() < configRequestDeadline) {
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
     }
     worker = await waitForLiveWorker(context);
+    if(fixture.state.cohortLoginConfigRequestAt===null||Date.now()-fixture.state.cohortLoginConfigRequestAt>=5_000) {
+      console.log('Cold concurrent cohort failure state',JSON.stringify({
+        requests:fixture.state.loginConfigRequests,baseline:coldConfigRequestBaseline,
+        requestAgeMs:fixture.state.cohortLoginConfigRequestAt===null?null:Date.now()-fixture.state.cohortLoginConfigRequestAt,
+        navigationElapsedMs:Date.now()-navigationStartedAt,
+        worker:await worker.evaluate(()=>({
+          startup:authGateStartupComplete,revisionReady:authGateRevisionReady,rosterReady:authGateRosterContextReady,
+          policyGeneration:managedAuthGatePolicyGeneration,policyFailure:managedAuthGatePolicyFailure?{code:managedAuthGatePolicyFailure.errorCode,retryAt:managedAuthGatePolicyFailure.retryAt}:null,
+          configPhase:sharedSignInLoginConfig.phase,configRetryAt:sharedSignInLoginConfig.retryAt,configInFlight:Boolean(sharedSignInConfigPromise),
+          publicationOwners:typeof authGateStartupPublicationOwners==='undefined'?[]:[...authGateStartupPublicationOwners.values()].map(({kind,attempts,inFlight,failed,settled})=>({kind,attempts,inFlight:Boolean(inFlight),failed,settled})),
+          authMutationPending:studentAuthMutationPendingCount,authCommitPending:studentAuthCommitPending,
+        })),
+      }));
+    }
+    assert.notEqual(fixture.state.cohortLoginConfigRequestAt,null,'cold worker did not start a login-config request');
     assert.ok(Date.now() - fixture.state.cohortLoginConfigRequestAt < 5_000,
       'concurrent-tab fixture missed the initial in-flight request cohort');
     assert.equal(await worker.evaluate(() => Boolean(sharedSignInConfigPromise)), true,
@@ -5331,14 +5350,18 @@ async function main() {
             ['bootstrap', 'content'],
             `${scenario.label}: ${invalidKind} did not acknowledge bootstrap and content`,
           );
-          await waitForManagedFenceRequests(managedFenceWorld, 2, {
-            revalidate: true,
-            timeout: 7_000,
-          });
+          // Invalid proof must offer bounded failure recovery while preserving
+          // the exact fence. The old loading/250ms replay expectation would
+          // reject the recovery behavior this release intentionally adds.
+          await waitForGatePhase(corruptPage,'unavailable',2_000);
           assertManagedFenceLocked(
             await managedFenceSnapshot(corruptPage, scenario.referenceName),
             `${scenario.label} ${invalidKind} acknowledgement`,
+            {allowedPhases:['unavailable']},
           );
+          const recoveryFrame=await waitForAuthFramePhase(corruptPage,'unavailable',2_000);
+          await recoveryFrame.locator('#classpilot-auth-retry').click({timeout:2_000});
+          await waitForManagedFenceRequests(managedFenceWorld,2,{revalidate:true,timeout:2_000});
         }
 
         await worker.evaluate((managedPolicy) => {

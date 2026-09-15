@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "3cbaa59ac06d3a71e0c01cbaf7c43f2af95061d2",
+  "extensionVersion": "2.8.7",
+  "description": "Immutable 2.8.7 runtime scripts and manifest for same-ID cooperative-controller upgrade acceptance. Candidate supplies unchanged images/styles and a synthetic managed API fixture; no configuration or credentials included.",
+  "files": {
+    "auth-gate-bootstrap.js": "e9bae89fe019907617b98654e4f5ef3b1f6aad6d58037dbf2d290b549f90ea42",
+    "auth-gate-frame.html": "11dd5cfe631f8f76cd393beaf744069d879651b155ba0f42367f4f297858e1a6",
+    "auth-gate-frame.js": "d4264ebb499f10e1c7c5bc2eaf39e1cf9e2ce8cc44ac1256a966fa4ea9587d57",
+    "auth-gate-transport.js": "f13bae4a2c5f7a33d815d4015f7ce2861bc9b5a99002b1811bc999dd2cac72c1",
+    "auth-recovery-diagnostics.js": "54db4a942cb51e73964648371640928d2b0479693349e18100d05d2d553e8d09",
+    "classroom-runtime-core.js": "3c6ce7064433dca53e968c52d958800a780ec3fce4545cc0fba171b44b7aceb4",
+    "config.example.js": "46de9cc74a672ca354f7487dbc059a729ebeb84b2a523fd4fd5a199b118240ea",
+    "content-injection.js": "742ac3b09e1559eb7e8c7bf2a989d05f1694b06f4838a164633289ada4867db1",
+    "content.js": "b2dbc0ee9a0562c2217dbc37bbba77b923efcaa0b652b41774a4eb8128608d59",
+    "manifest.json": "e0af91d6195f02f5a55686816c15219fdd240b2107f20431a8a2dc80e985fbf2",
+    "offscreen.js": "6736b3644f99353f6c001bacf0693f4a0971e5e830dafd83e8efa018b657e2c2",
+    "page-lifecycle.js": "c0fac6b5a18b12003a2a0ceed30f1200565d272355881d9ab2575c78dccd66c9",
+    "popup.js": "46515052a196b6167ac344df3c72084e65789520f336f7d1369d8ade7f863655",
+    "school-website-policy.js": "58debc61211064d8282dc78441d9eca759e54ef91ae3653aeb74cd23c41e71a0",
+    "service-worker.js": "fa84dcec2e36c1657af379cde2a7c0cfafe7547bf8c818812349523198301e65"
+  },
+  "archiveSha256": "5eb6e4fabba496b2dfce6b779c706f28b981df4e04e7c7aae95e1044901c672a"
+}
