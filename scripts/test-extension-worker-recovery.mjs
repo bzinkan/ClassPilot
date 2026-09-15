@@ -657,7 +657,7 @@ test('errors after the native prefix do not replay migration or masquerade as re
 // Only Chrome storage and already-covered auth/ledger cleanup bodies are seams.
 function managedWakeTransitionHarness() {
   const h = durablePublicationHarness({ autoStart: false, failCount: 0 }), c = h.context;
-  const initialRead = deferred(), clears = [], deliveries = [], policyWrites = [];
+  const initialRead = deferred(), clears = [], deliveries = [], policyWrites = [], notificationRuns = [];
   const baseRead = c.rawLocalKv.get, baseWrite = c.durableLocalKv.set;
   Object.assign(c, {
     initialReadCalls: 0, oldWakeContinued: 0, wakeFailures: [], retiredWakePolicies: 0,
@@ -725,11 +725,15 @@ function managedWakeTransitionHarness() {
   const barrierEnd = source.indexOf('\n\n// Run immediately on service worker load/wake-up', barrierStart);
   vm.runInContext(`${source.slice(barrierStart, barrierEnd)}
     globalThis.fixtureAuthRestore = authStateRestorePromise;
-    globalThis.notifyAuthGateStateToTabs = async () => {
-      await authStateRestorePromise;
-      await awaitAuthGateRosterContextStable();
-      deliveries.push('current-state');
-    };`, Object.assign(c, { deliveries }));
+    globalThis.notifyAuthGateStateToTabs = () => {
+      const run = (async () => {
+        await authStateRestorePromise;
+        await awaitAuthGateRosterContextStable();
+        deliveries.push('current-state');
+      })();
+      notificationRuns.push(run);
+      return run;
+    };`, Object.assign(c, { deliveries, notificationRuns }));
   const wakeStart = source.indexOf('  let authStored;', source.indexOf('// Run immediately on service worker load/wake-up'));
   const wakeEnd = source.indexOf('  const storedServerUrl =', wakeStart);
   assert.ok(wakeStart > 0 && wakeEnd > wakeStart);
@@ -747,21 +751,38 @@ function managedWakeTransitionHarness() {
       h.managedCallbacks[index]({ schoolId: `fixture-policy-${index}`, enrollmentKey: 'fixture-current-key' });
     },
     resolveOldRead() { initialRead.resolve({ studentToken: 'private-obsolete-token' }); },
+    async waitForNotifications() {
+      assert.ok(notificationRuns.length > 0, 'the policy producer must request tab delivery');
+      await Promise.all(notificationRuns);
+    },
   };
 }
 
-test('actual wake retires an obsolete native auth read and opens only current signed-out durable state', async () => {
+test('actual wake retires an obsolete native auth read and opens only current signed-out durable state', { timeout: 10000 }, async () => {
   const h = managedWakeTransitionHarness(), c = h.context;
+  const digestStarted = deferred(), digestReleased = deferred(), originalCrypto = c.crypto;
+  c.crypto = { subtle: { digest: async (...args) => {
+    digestStarted.resolve();
+    await digestReleased.promise;
+    return originalCrypto.subtle.digest(...args);
+  } } };
   await h.settle(); h.change(); h.acceptPolicy(); h.resolveOldRead(); await h.settle();
   assert.equal(c.authGateStartupComplete, false); assert.equal(c.authGateRosterContextReady, false);
   assert.equal(c.retiredWakePolicies, 1); assert.equal(h.clears.length, 1);
-  h.clears[0].resolve(); await h.settle(); await c.fixtureWake;
+  h.clears[0].resolve(); await digestStarted.promise;
+  assert.equal(c.authGateStartupComplete, false); assert.equal(c.authGateRosterContextReady, false);
+  assert.equal(h.deliveries.length, 0, 'tab delivery must stay behind the durable roster publication');
+  digestReleased.resolve(); await c.fixtureWake;
   assert.equal(c.authGateStartupComplete, true); assert.equal(c.authGateRosterContextReady, true);
   assert.equal(c.authGateRevisionReady, true); assert.equal(c.studentAuthInvalidating, true);
   assert.equal(c.oldWakeContinued, 0); assert.equal(c.CONFIG.studentToken, null);
   assert.equal(c.initialReadCalls, 1); assert.equal(c.wakeFailures.length, 0);
   assert.equal(c.authGateStartupPublicationOwners.has('auth_snapshot'), false);
   assert.equal(c.managedAuthGateStartupAuthorityTransition, null);
+  // Startup intentionally does not await tab delivery: doing so would cycle
+  // back through its own auth barrier. Await the actual requested deliveries,
+  // not an assumed number of event-loop turns after native crypto completes.
+  await h.waitForNotifications();
   assert.ok(h.deliveries.length > 0, 'notifications must resume after startup without cycling');
 });
 
@@ -838,7 +859,7 @@ test('pending or same-code rejected policy writes never qualify as native read t
   assert.equal(c.authGateStartupComplete, false); assert.equal(c.wakeFailures.length, 1);
 });
 
-test('policy-only change completes its strict barrier without waiting for startup or clearing auth', async () => {
+test('policy-only change completes its strict barrier without waiting for startup or clearing auth', { timeout: 10000 }, async () => {
   const h = managedWakeTransitionHarness(), c = h.context;
   await h.settle();
   const change = h.change({ fastAuthGateEnabled: { newValue: true } });
@@ -851,7 +872,7 @@ test('policy-only change completes its strict barrier without waiting for startu
   assert.equal(c.authGateStartupSupersessionOwnsReadiness, false);
   await c.initializeAuthGateRevisionPublication();
   await c.initializeAuthGateRosterContextPublication(undefined, { readFresh: true });
-  vm.runInContext('markAuthStateRestored();', c); await h.settle();
+  vm.runInContext('markAuthStateRestored();', c); await h.waitForNotifications();
   assert.ok(h.deliveries.length > 0);
   const delivery = deferred(); c.notifyAuthGateStateToTabs = () => delivery.promise;
   let finished = false;
