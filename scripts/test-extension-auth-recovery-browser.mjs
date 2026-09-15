@@ -306,6 +306,7 @@ async function managedChange(worker, pages, changes) {
 }
 
 async function assertProtected(page) {
+  await page.bringToFront();
   assert.equal(await page.locator('#classpilot-auth-gate').count(), 1);
   assert.equal(await page.locator('#classpilot-auth-gate').isVisible(), true);
   const protectedPage = await page.evaluate(() => {
@@ -321,6 +322,14 @@ async function assertProtected(page) {
   await page.mouse.click(225, 15);
   assert.equal(await page.evaluate(() => window.underlyingClicks), 0);
   assert.equal(await page.locator('#underlying-work').inputValue(), '');
+}
+
+async function clickRetry(frame) {
+  // A visible background extension frame can stop producing animation frames.
+  // Playwright's stability check then waits without ever attempting a click.
+  // Select the tab as a user would; retain all normal actionability checks.
+  await frame.page().bringToFront();
+  await frame.locator('#classpilot-auth-retry').click({timeout:2_000});
 }
 
 await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixture }) => {
@@ -358,12 +367,12 @@ await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixtu
   try {
     // Drive one visible tab at a time; both requests still overlap the same
     // three-second native read. Parallel pointer actions fight browser focus.
-    for(const frame of frames)await frame.locator('#classpilot-auth-retry').click({timeout:2_000});
+    for(const frame of frames)await clickRetry(frame);
   } catch (error) {
     const diagnostics = await Promise.all(pages.map(async page => ({
       controller: await pageFixture(worker,page,'summary'),
       presentation: await page.evaluate(() => [...document.querySelectorAll('#classpilot-auth-gate, .classpilot-auth-frame-fallback, iframe')].map(element => ({tag:element.tagName,role:element.id||element.className,display:getComputedStyle(element).display,visibility:getComputedStyle(element).visibility,opacity:getComputedStyle(element).opacity,pointerEvents:getComputedStyle(element).pointerEvents}))),
-      frames: await Promise.all(page.frames().filter(frame => frame.url().includes('auth-gate-frame.html')).map(frame => frame.evaluate(() => ({phase:document.getElementById('classpilot-auth-gate')?.dataset.classpilotAuthPhase,retryDisabled:document.getElementById('classpilot-auth-retry')?.disabled})).catch(() => ({detached:true})))),
+      frames: await Promise.all(page.frames().filter(frame => frame.url().includes('auth-gate-frame.html')).map(frame => frame.evaluate(() => ({phase:document.getElementById('classpilot-auth-gate')?.dataset.classpilotAuthPhase,retryDisabled:document.getElementById('classpilot-auth-retry')?.disabled,visibility:document.visibilityState,focused:document.hasFocus()})).catch(() => ({detached:true})))),
     })));
     console.log('Retry actionability diagnostics',JSON.stringify(diagnostics));
     throw error;
@@ -373,7 +382,7 @@ await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixtu
   const duringRetry = await worker.evaluate(() => ({reads:__managedRecoveryFixture.reads,generation:managedAuthGatePolicyGeneration}));
   assert.ok(duringRetry.reads - beforeRetry <= 1, 'concurrent Retry created duplicate managed reads');
   assert.ok(duringRetry.generation > initial.generation, 'recovery must use fresh worker policy authority');
-  await Promise.all(pages.map(page => assertProtected(page)));
+  for(const page of pages)await assertProtected(page);
 
   // Return an expired first-generation callback with foreign authority, then
   // complete only the latest real read with the current enterprise policy.
@@ -411,7 +420,7 @@ await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixtu
   const current = await worker.evaluate(() => ({generation:managedAuthGatePolicyGeneration,schoolId:CONFIG.schoolId}));
   const oldAcks = await Promise.all(pages.map(page => pageFixture(worker, page, 'release')));
   assert.ok(oldAcks.every(count=>count>0));
-  await Promise.all(pages.map(page => assertProtected(page)));
+  for(const page of pages)await assertProtected(page);
   await Promise.all(pages.map(page => waitForPhase(page, 'ready')));
   assert.deepEqual(await worker.evaluate(() => ({generation:managedAuthGatePolicyGeneration,schoolId:CONFIG.schoolId})), current);
   console.log('PASS managed policy-change timeout, concurrent protected Retry, bounded traffic and stale acknowledgements', JSON.stringify({unavailableMs,policyRequests,expiredCallbacks:released.expired,activeRetryReads:released.active,tabs:pages.length}));
@@ -460,7 +469,7 @@ await withBrowser({caseName:'asymmetric-ack'},async({context,worker,fixture})=>{
   assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_RPC_TIMEOUT');
   await assertProtected(page);
   await pageFixture(worker,page,'hold',false);
-  await frame.locator('#classpilot-auth-retry').click({timeout:2_000});
+  await clickRetry(frame);
   await waitForPhase(page,'ready');
   const before=await worker.evaluate(()=>({generation:managedAuthGatePolicyGeneration,schoolId:CONFIG.schoolId}));
   assert.ok(await pageFixture(worker,page,'release')>0);
@@ -552,8 +561,8 @@ await withBrowser({caseName:'auth-read-pending',authReadMode:'never'},async({con
   assert.equal(before.startup,false);assert.equal(before.pending,1);assert.equal(before.reads,1);
   assert.equal(fixture.state.configRequests,0);
   for(const frame of frames)assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_STARTUP_TIMEOUT');
-  for(const frame of frames)await frame.locator('#classpilot-auth-retry').click({timeout:2_000});
-  await Promise.all(pages.map(page=>assertProtected(page)));
+  for(const frame of frames)await clickRetry(frame);
+  for(const page of pages)await assertProtected(page);
   assert.equal(await worker.evaluate(()=>__managedRecoveryFixture.authReads),1,'concurrent Retry cannot abandon pending native read');
   // An actual managed event while the initial native snapshot is unresolved
   // used to create a startup↔policy notification wait cycle.
@@ -564,7 +573,7 @@ await withBrowser({caseName:'auth-read-pending',authReadMode:'never'},async({con
     fixture.authCallbacks.splice(0).forEach(callback=>callback());
   });
   await Promise.all(pages.map(page=>waitForPhase(page,'ready',12_000)));
-  await Promise.all(pages.map(page=>assertProtected(page)));
+  for(const page of pages)await assertProtected(page);
   const current=await worker.evaluate(()=>({startup:authGateStartupComplete,roster:authGateRosterContextReady,
     schoolId:CONFIG.schoolId,fast:fastAuthGateEnabled,reads:__managedRecoveryFixture.authReads,retainedSnapshot:authGateStartupPublicationOwners.has('auth_snapshot')}));
   assert.equal(current.startup,true);assert.equal(current.roster,true);assert.equal(current.fast,true);
