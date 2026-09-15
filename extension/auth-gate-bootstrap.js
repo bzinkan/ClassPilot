@@ -50,6 +50,20 @@
   let managedPolicyFenceSerial = 0;
   let pendingManagedPolicyFence = 0;
   let managedPolicyFenceRetryTimer = null;
+  let managedPolicyRequestFence = 0;
+  let managedPolicyFailure = null;
+  let managedPolicyRetryIndex = 0;
+  let localAuthStateRequestPending = false;
+  let localAuthStateRetryTimer = null;
+  let localAuthStateRetryIndex = 0;
+  let bootstrapRecoveryButton = null;
+  let bootstrapSupportCodeElement = null;
+  let lastFailureSupportCode = null;
+  const SUPPORT_CODES = new Set([
+    'AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE', 'AUTH_GATE_STARTUP_TIMEOUT',
+    'AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_RPC_UNAVAILABLE', 'AUTH_GATE_CONTEXT_INVALIDATED',
+    'AUTH_GATE_SERVER_TIMEOUT', 'AUTH_GATE_LOGIN_PENDING', 'AUTH_GATE_UNAVAILABLE',
+  ]);
   const quarantinedElements = new Map();
   const detachedBrowsingContexts = new Map();
 
@@ -91,6 +105,21 @@
   const blockBehindGate = (event) => {
     if (!active) return;
     const gate = gateRoot?.isConnected ? gateRoot : null;
+    if (!gateOwnedByContent && event.target === bootstrapSupportCodeElement && bootstrapSupportCodeElement?.isConnected) {
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (!gateOwnedByContent && event.target === bootstrapRecoveryButton && bootstrapRecoveryButton?.isConnected) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.isTrusted && (event.type === 'click' || (event.type === 'keydown' && ['Enter', ' '].includes(event.key)))) {
+        bootstrapRecoveryButton.disabled = true;
+        bootstrapRecoveryButton.textContent = 'Connecting…';
+        if (pendingManagedPolicyFence > 0) requestManagedPolicyRevalidation(pendingManagedPolicyFence, true);
+        else requestLocalAuthState(true);
+      }
+      return;
+    }
     // The loading gate has no interactive controls. Consume its events at the
     // earliest window capture listener too, so host-page window listeners
     // cannot observe clicks, keys, wheel, or touch while local auth/config is
@@ -117,6 +146,14 @@
   const containFocus = (event) => {
     if (!active) return;
     const gate = gateRoot?.isConnected ? gateRoot : null;
+    if (!gateOwnedByContent && event.target === bootstrapSupportCodeElement && bootstrapSupportCodeElement?.isConnected) {
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (!gateOwnedByContent && event.target === bootstrapRecoveryButton && bootstrapRecoveryButton?.isConnected) {
+      event.stopImmediatePropagation();
+      return;
+    }
     if (gate && event.target === gate) return;
     event.preventDefault();
     event.stopImmediatePropagation();
@@ -422,6 +459,12 @@
     get managedPolicyFence() {
       return pendingManagedPolicyFence;
     },
+    get managedPolicyFailure() {
+      return managedPolicyFailure ? { ...managedPolicyFailure } : null;
+    },
+    retryManagedPolicy(userInitiated = false) {
+      if (pendingManagedPolicyFence > 0) requestManagedPolicyRevalidation(pendingManagedPolicyFence, userInitiated);
+    },
     release,
     showLoading: paintConnectingGate,
     recordOutcome,
@@ -529,6 +572,10 @@
       }
     }
     const unavailable = state.phase === 'unavailable';
+    if (state.phase === 'ready' || state.phase === 'authenticated') lastFailureSupportCode = null;
+    else if (unavailable) lastFailureSupportCode = SUPPORT_CODES.has(state.errorCode) ? state.errorCode : 'AUTH_GATE_UNAVAILABLE';
+    bootstrapRecoveryButton = null;
+    bootstrapSupportCodeElement = null;
     gate.innerHTML = `
       <style>
         html.classpilot-auth-locked,
@@ -611,6 +658,17 @@
           font-size: 17px !important;
           line-height: 1.55 !important;
         }
+        #classpilot-auth-gate .classpilot-auth-bootstrap-retry {
+          margin-top: 24px !important;
+          min-height: 48px !important;
+          padding: 12px 28px !important;
+          border: 0 !important;
+          border-radius: 12px !important;
+          background: #f5b81f !important;
+          color: #0e2a57 !important;
+          font: 800 18px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+          cursor: pointer !important;
+        }
         #classpilot-auth-gate .classpilot-auth-spinner {
           width: 36px !important;
           height: 36px !important;
@@ -648,11 +706,14 @@
             <span>ClassPilot</span>
           </div>
           <h1 id="classpilot-auth-title">${unavailable ? 'ClassPilot can’t connect right now' : 'Connecting to ClassPilot…'}</h1>
-          <p id="classpilot-auth-subtitle">${unavailable ? 'Browsing stays locked. Check your connection, then use your browser’s Reload button to try again.' : 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'}</p>
-          ${unavailable ? '' : '<div class="classpilot-auth-spinner" aria-hidden="true"></div>'}
+          <p id="classpilot-auth-subtitle">${unavailable ? 'Browsing stays locked. Retry the school connection. If this page cannot reconnect to the extension, use your browser’s Reload button.' : 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'}</p>
+          ${unavailable ? '<button type="button" class="classpilot-auth-bootstrap-retry">Retry now</button>' : '<div class="classpilot-auth-spinner" aria-hidden="true"></div>'}
+          ${lastFailureSupportCode ? `<p id="classpilot-auth-support-code" style="font-size:12px!important;line-height:1.5!important;overflow-wrap:anywhere!important">Support code: <code tabindex="0" style="user-select:text!important">${lastFailureSupportCode}</code></p>` : ''}
         </div>
       </div>
     `;
+    bootstrapRecoveryButton = gate.querySelector('.classpilot-auth-bootstrap-retry');
+    bootstrapSupportCodeElement = gate.querySelector('#classpilot-auth-support-code code');
 
     quarantinePageSurfaces();
     recordLoadingPaint();
@@ -678,6 +739,13 @@
     secureFrameFocusTarget = null;
     gateOwnedByContent = false;
     pendingManagedPolicyFence = 0;
+    managedPolicyRequestFence = 0;
+    managedPolicyFailure = null;
+    bootstrapRecoveryButton = null;
+    bootstrapSupportCodeElement = null;
+    lastFailureSupportCode = null;
+    if (localAuthStateRetryTimer !== null) clearTimeout(localAuthStateRetryTimer);
+    localAuthStateRetryTimer = null;
     stateRequestGeneration += 1;
     if (managedPolicyFenceRetryTimer !== null) {
       clearTimeout(managedPolicyFenceRetryTimer);
@@ -695,17 +763,42 @@
     document.body?.classList.remove('classpilot-auth-locked');
   }
 
-  function requestLocalAuthState() {
+  function requestLocalAuthState(userInitiated = false) {
+    if (!active || !enabled || localAuthStateRequestPending || pendingManagedPolicyFence > 0) return;
+    if (localAuthStateRetryTimer !== null) clearTimeout(localAuthStateRetryTimer);
+    localAuthStateRetryTimer = null;
+    localAuthStateRequestPending = true;
     const requestGeneration = ++stateRequestGeneration;
-    chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
+    chrome.runtime.sendMessage(userInitiated
+      ? { type: 'refresh-auth-state', reason: 'user' } : { type: 'get-auth-state' }, (response) => {
+      localAuthStateRequestPending = false;
       if (!active || !enabled || pendingManagedPolicyFence > 0 ||
           requestGeneration !== stateRequestGeneration) return;
       if (chrome.runtime.lastError || !response?.success || !response.state) {
-        paintConnectingGate({ phase: 'unavailable', authRequired: true });
+        const failure = policyRecoveryFailure(response, localAuthStateRetryIndex++);
+        paintConnectingGate({ ...failure, phase: 'unavailable', authRequired: true });
+        localAuthStateRetryTimer = setTimeout(() => {
+          localAuthStateRetryTimer = null;
+          requestLocalAuthState();
+        }, Math.max(0, failure.retryAt - Date.now()));
         return;
       }
+      localAuthStateRetryIndex = 0;
+      enabled = response.state.fastAuthGateEnabled !== false;
+      managedKioskOrigin = configuredOrigin(response.state.kioskOrigin);
+      if (!enabled) { release(); return; }
       applyAuthState(response.state);
     });
+  }
+
+  function policyRecoveryFailure(response, attempt) {
+    const delays = [2000, 5000, 15000, 30000];
+    const retryAt = Number(response?.retryAt);
+    return {
+      errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+      retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
+        ? Math.min(retryAt, Date.now() + 300000) : Date.now() + delays[Math.min(attempt, delays.length - 1)],
+    };
   }
 
   function nextManagedPolicyFence() {
@@ -720,16 +813,25 @@
     managedPolicyFenceRetryTimer = setTimeout(() => {
       managedPolicyFenceRetryTimer = null;
       requestManagedPolicyRevalidation(fence);
-    }, 250);
+    }, Math.max(0, Number(managedPolicyFailure?.retryAt || Date.now() + 2000) - Date.now()));
   }
 
-  function requestManagedPolicyRevalidation(fence) {
-    if (!active || pendingManagedPolicyFence !== fence) return;
+  function requestManagedPolicyRevalidation(fence, userInitiated = false) {
+    if (!active || pendingManagedPolicyFence !== fence || managedPolicyRequestFence === fence) return;
+    if (!userInitiated && Number(managedPolicyFailure?.retryAt) > Date.now()) {
+      scheduleManagedPolicyFenceRetry(fence);
+      return;
+    }
+    if (managedPolicyFenceRetryTimer !== null) clearTimeout(managedPolicyFenceRetryTimer);
+    managedPolicyFenceRetryTimer = null;
+    managedPolicyRequestFence = fence;
     chrome.runtime.sendMessage({
       type: 'get-auth-state',
       revalidateManagedPolicy: true,
       managedPolicyFence: fence,
+      reason: userInitiated ? 'user' : 'page_timer',
     }, (response) => {
+      if (managedPolicyRequestFence === fence) managedPolicyRequestFence = 0;
       if (!active || pendingManagedPolicyFence !== fence) return;
       const responseRevision = stateRevision(response?.state);
       const workerGeneration = Number(response?.managedPolicyGeneration);
@@ -738,16 +840,21 @@
         Number.isSafeInteger(workerGeneration) && workerGeneration >= 0 &&
         responseRevision !== null && responseRevision >= latestRevision;
       if (!validFenceAck) {
+        managedPolicyFailure = policyRecoveryFailure(response, managedPolicyRetryIndex++);
         paintConnectingGate({
-          phase: 'loading',
+          ...managedPolicyFailure,
+          phase: 'unavailable',
           authRequired: true,
           revision: latestRevision >= 0 ? latestRevision : undefined,
         });
         scheduleManagedPolicyFenceRetry(fence);
+        globalThis.ClassPilotPageLifecycle?.reconcile();
         return;
       }
 
       pendingManagedPolicyFence = 0;
+      managedPolicyFailure = null;
+      managedPolicyRetryIndex = 0;
       if (managedPolicyFenceRetryTimer !== null) {
         clearTimeout(managedPolicyFenceRetryTimer);
         managedPolicyFenceRetryTimer = null;
@@ -757,15 +864,20 @@
       if (!enabled) {
         recordOutcome(response.state);
         release();
+        globalThis.ClassPilotPageLifecycle?.reconcile();
         return;
       }
       applyAuthState(response.state, { managedPolicyFenceValidated: true });
+      globalThis.ClassPilotPageLifecycle?.reconcile();
     });
   }
 
   function beginManagedPolicyFence() {
     const fence = nextManagedPolicyFence();
     pendingManagedPolicyFence = fence;
+    managedPolicyRequestFence = 0;
+    managedPolicyFailure = null;
+    managedPolicyRetryIndex = 0;
     stateRequestGeneration += 1;
     if (managedPolicyFenceRetryTimer !== null) {
       clearTimeout(managedPolicyFenceRetryTimer);
@@ -830,11 +942,30 @@
   loadingPaintTimer = setTimeout(() => paintConnectingGate({ phase: 'loading', authRequired: true }), 250);
 
   const initialManagedPolicyReadGeneration = stateRequestGeneration;
-  chrome.storage.managed.get(['fastAuthGateEnabled', 'serverUrl'], (policy) => {
-    if (pendingManagedPolicyFence > 0 ||
-        initialManagedPolicyReadGeneration !== stateRequestGeneration) return;
+  let initialManagedPolicyReadSettled = false;
+  const initialManagedPolicyReadStartedAt = Date.now();
+  const initialManagedPolicyReadTimer = setTimeout(() => {
+    if (initialManagedPolicyReadSettled) return;
+    initialManagedPolicyReadSettled = true;
+    if (!active || pendingManagedPolicyFence > 0 || initialManagedPolicyReadGeneration !== stateRequestGeneration) return;
+    try {
+      globalThis.ClassPilotAuthRecoveryDiagnostics?.record({ stage: 'policy_read', cause: 'timeout',
+        elapsedMs: Date.now() - initialManagedPolicyReadStartedAt, attemptCount: 1 });
+    } catch { /* Diagnostics cannot delay recovery. */ }
+    // A missing presentation hint is not empty policy. Ask the worker's fresh,
+    // coordinated authority instead; only its proof can release this gate.
+    paintConnectingGate({ phase: 'unavailable', authRequired: true, errorCode: 'AUTH_GATE_POLICY_TIMEOUT' });
+    requestLocalAuthState();
+  }, 3000);
+  const acceptInitialManagedPolicy = (policy, failed = false) => {
     const storageError = chrome.runtime.lastError;
-    enabled = storageError ? true : policy?.fastAuthGateEnabled !== false;
+    if (initialManagedPolicyReadSettled) return;
+    initialManagedPolicyReadSettled = true;
+    clearTimeout(initialManagedPolicyReadTimer);
+    if (!lifecycle.active || !active || pendingManagedPolicyFence > 0 ||
+        initialManagedPolicyReadGeneration !== stateRequestGeneration) return;
+    if (failed || storageError) { requestLocalAuthState(); return; }
+    enabled = policy?.fastAuthGateEnabled !== false;
     if (!enabled) {
       release();
       return;
@@ -847,7 +978,12 @@
     }
 
     requestLocalAuthState();
-  });
+  };
+  try {
+    // Keep this callback alive only to consume lastError after retirement;
+    // the settlement and lifecycle guards above forbid obsolete UI changes.
+    globalThis.chrome.storage.managed.get(['fastAuthGateEnabled', 'serverUrl'], acceptInitialManagedPolicy);
+  } catch { acceptInitialManagedPolicy(null, true); }
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'managed') return;

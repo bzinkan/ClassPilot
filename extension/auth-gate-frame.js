@@ -41,6 +41,14 @@
   let lastFocusedControlId = '';
   let initialized = false;
   let disposed = false;
+  let parentPolicyRecovery = null;
+  let parentPolicyReplyTimer = null;
+  let lastFailureSupportCode = null;
+  const SUPPORT_CODES = new Set([
+    'AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE', 'AUTH_GATE_STARTUP_TIMEOUT',
+    'AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_RPC_UNAVAILABLE', 'AUTH_GATE_CONTEXT_INVALIDATED',
+    'AUTH_GATE_SERVER_TIMEOUT', 'AUTH_GATE_LOGIN_PENDING', 'AUTH_GATE_UNAVAILABLE',
+  ]);
   let stateController = null;
   let rosterController = null;
   let rosterRequestKey = null;
@@ -193,6 +201,7 @@
             <div class="classpilot-auth-divider"></div>
             <div class="classpilot-auth-error" id="classpilot-auth-error" role="alert" aria-live="assertive"></div>
             ${body}
+            ${lastFailureSupportCode ? `<p id="classpilot-auth-support-code" style="margin:12px 0 0;font-size:12px;line-height:1.5;color:#526174;user-select:text;overflow-wrap:anywhere">Support code: <code>${lastFailureSupportCode}</code></p>` : ''}
             <div class="classpilot-auth-footnote">${icon('shield')}<span>Shared Chromebook sign-in</span></div>
           </div>
         </div>
@@ -359,6 +368,10 @@
     rosterSnapshot = null;
 
     const phase = authGatePhase(state);
+    if (phase === 'ready' || phase === 'authenticated') lastFailureSupportCode = null;
+    else if (phase === 'unavailable') {
+      lastFailureSupportCode = SUPPORT_CODES.has(state.errorCode) ? state.errorCode : 'AUTH_GATE_UNAVAILABLE';
+    }
     root.dataset.classpilotAuthPhase = phase;
     currentState = { ...state, phase };
     notifyParent('CLASSPILOT_AUTH_FRAME_PHASE', { phase });
@@ -425,6 +438,9 @@
   }
 
   function applyState(state = {}) {
+    // A page policy fence can only be retired by its own correlated worker
+    // proof. This frame remains a failure-only surface until a fresh remount.
+    if (parentPolicyRecovery) return;
     if (!state || typeof state !== 'object') {
       render({ phase: 'loading', authRequired: true });
       return;
@@ -485,7 +501,7 @@
   }
 
   function requestLatestState() {
-    if (disposed || stateController) return;
+    if (disposed || stateController || parentPolicyRecovery) return;
     const generation = ++stateRequestGeneration;
     const controller = new AbortController();
     stateController = controller;
@@ -522,6 +538,15 @@
     if (retryStatus) retryStatus.textContent = 'Checking the live ClassPilot sign-in service…';
 
     cancelStateRequest();
+    if (parentPolicyRecovery) {
+      if (parentPolicyReplyTimer !== null) return;
+      notifyParent('CLASSPILOT_AUTH_FRAME_POLICY_RETRY', { userInitiated: userInitiated === true });
+      parentPolicyReplyTimer = setTimeout(() => {
+        parentPolicyReplyTimer = null;
+        if (!disposed && parentPolicyRecovery) showParentPolicyRecovery(parentPolicyRecovery);
+      }, 10000);
+      return;
+    }
     if (manualLoginUncertain) {
       requestLatestState();
       return;
@@ -1154,6 +1179,26 @@
     refreshRosterOrGrades({ forceRefresh: true, background: true });
   }
 
+  function showParentPolicyRecovery(value) {
+    const retryAt = Number(value?.retryAt);
+    parentPolicyRecovery = {
+      errorCode: SUPPORT_CODES.has(value?.errorCode) ? value.errorCode : 'AUTH_GATE_UNAVAILABLE',
+      retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
+        ? Math.min(retryAt, Date.now() + 300000) : Date.now() + 2000,
+    };
+    if (parentPolicyReplyTimer !== null) clearTimeout(parentPolicyReplyTimer);
+    parentPolicyReplyTimer = null;
+    clearTimers();
+    cancelStateRequest();
+    rosterRequestGeneration += 1;
+    rosterController?.abort();
+    clearCredentials();
+    render({ ...parentPolicyRecovery, phase: 'unavailable', authRequired: true });
+    // The parent owns the automatic retry clock for its exact fence. Do not
+    // create a second polling loop or send credentials from this surface.
+    clearTimers();
+  }
+
   document.addEventListener('focusin', (event) => {
     const target = event.target;
     if (target instanceof HTMLElement && target.id &&
@@ -1178,7 +1223,7 @@
   });
 
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (!initialized || disposed) return;
+    if (!initialized || disposed || parentPolicyRecovery) return;
     if (sender?.id && sender.id !== chrome.runtime.id) return;
     if (message?.type === 'CLASSPILOT_AUTH_COMPLETE') {
       const revision = authGateRevision(message.state);
@@ -1198,6 +1243,12 @@
   window.addEventListener('message', (event) => {
     if (initialized && !disposed && event.source === window.parent && embeddingOrigin &&
         event.origin === embeddingOrigin && event.data?.nonce === INSTANCE_NONCE &&
+        event.data?.type === 'CLASSPILOT_AUTH_FRAME_POLICY_RECOVERY') {
+      showParentPolicyRecovery(event.data.policyRecovery);
+      return;
+    }
+    if (initialized && !disposed && event.source === window.parent && embeddingOrigin &&
+        event.origin === embeddingOrigin && event.data?.nonce === INSTANCE_NONCE &&
         event.data?.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_RESULT' &&
         event.data?.requestId === reloadRequestId && reloadTimer !== null) {
       finishPageReload(event.data.success === true);
@@ -1210,14 +1261,27 @@
       return;
     }
     initialized = true;
-    render({ phase: 'loading', authRequired: true });
+    if (event.data.policyRecovery) showParentPolicyRecovery(event.data.policyRecovery);
+    else if (event.data.initialFailure) {
+      const failure = event.data.initialFailure;
+      const retryAt = Number(failure.retryAt);
+      transportFailure({
+        code: SUPPORT_CODES.has(failure.code) ? failure.code : 'AUTH_GATE_UNAVAILABLE',
+        retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
+          ? Math.min(retryAt, Date.now() + 300000) : null,
+      });
+    } else render({ phase: 'loading', authRequired: true });
     notifyParent('CLASSPILOT_AUTH_FRAME_READY');
-    requestLatestState();
+    // A failure inherited from the parent already has a recovery deadline.
+    // Ordinary Retry owns the next read; initialization must not hide the
+    // actionable error behind a second, sequential worker response timeout.
+    if (!event.data.initialFailure) requestLatestState();
   });
 
   window.addEventListener('pagehide', () => {
     notifyParent('CLASSPILOT_AUTH_FRAME_LEAVING');
     disposed = true;
+    if (parentPolicyReplyTimer !== null) clearTimeout(parentPolicyReplyTimer);
     clearTimers();
     cancelStateRequest();
     rosterRequestGeneration += 1;

@@ -64,6 +64,11 @@ let authGateWatchdogRecoverySerial = 0;
 let authGateFullscreenExitPending = false;
 let authGateManagedPolicyFenceSerial = 0;
 let authGatePendingManagedPolicyFence = 0;
+let authGateManagedPolicyRequestFence = 0;
+let authGateManagedPolicyFailure = null;
+let authGateManagedPolicyRetryIndex = 0;
+let authGatePolicyRecoveryFrameLatched = false;
+let authGateAcknowledgedBootstrapFence = 0;
 let authGateManagedPolicyFenceRetryTimer = null;
 let studentMessageEpoch = 0;
 let currentStudentMessageContext = null;
@@ -510,8 +515,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 function requestAuthGateState() {
   if (isAuthGateManagedPolicyFencePending()) {
+    const bootstrap = globalThis.__classpilotAuthGateBootstrap;
+    if (authGatePendingManagedPolicyFence === 0 &&
+        authGateAcknowledgedBootstrapFence === bootstrap?.managedPolicyFence) {
+      if (bootstrap.managedPolicyFailure) showAuthGatePolicyFailure(bootstrap.managedPolicyFailure);
+      return;
+    }
     if (authGatePendingManagedPolicyFence === 0) beginAuthGateManagedPolicyFence();
     return;
+  }
+  if (authGatePolicyRecoveryFrameLatched) {
+    // Both owners have acknowledged their fences. Retire the failure-only
+    // frame now; its replacement still needs a fresh worker state before any
+    // form or authenticated phase can be accepted. A failed state read must
+    // not strand Retry in a parent recovery mode whose fences already ended.
+    authGateManagedPolicyFailure = null;
+    authGateManagedPolicyRetryIndex = 0;
+    authGatePolicyRecoveryFrameLatched = false;
+    if (authGateActive) resetSecureAuthGateFrame();
   }
   const requestGeneration = ++authGateStateRequestGeneration;
   chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
@@ -545,19 +566,64 @@ function nextAuthGateManagedPolicyFence() {
 function scheduleAuthGateManagedPolicyFenceRetry(fence) {
   if (authGatePendingManagedPolicyFence !== fence ||
       authGateManagedPolicyFenceRetryTimer !== null) return;
+  const retryAt = Number(authGateManagedPolicyFailure?.retryAt);
+  const delay = Number.isFinite(retryAt) && retryAt > Date.now()
+    ? retryAt - Date.now() : 2000;
   authGateManagedPolicyFenceRetryTimer = setTimeout(() => {
     authGateManagedPolicyFenceRetryTimer = null;
     requestAuthGateManagedPolicyRevalidation(fence);
-  }, 250);
+  }, delay);
 }
 
-function requestAuthGateManagedPolicyRevalidation(fence) {
-  if (authGatePendingManagedPolicyFence !== fence) return;
+function notifyAuthGatePolicyRecovery() {
+  if (!authGateManagedPolicyFailure || !authGateSecureFrame?.contentWindow || !authGateSecureFrameNonce) return;
+  try {
+    authGateSecureFrame.contentWindow.postMessage({
+      type: 'CLASSPILOT_AUTH_FRAME_POLICY_RECOVERY', nonce: authGateSecureFrameNonce,
+      policyRecovery: authGateManagedPolicyFailure,
+    }, AUTH_GATE_FRAME_ORIGIN);
+  } catch { /* The frame-load handshake repeats this failure-only notice. */ }
+}
+
+function showAuthGatePolicyFailure(failure) {
+  authGateManagedPolicyFailure = { errorCode: failure.errorCode, retryAt: failure.retryAt };
+  authGatePolicyRecoveryFrameLatched = true;
+  showAuthGate({
+    ...authGateManagedPolicyFailure, phase: 'unavailable', authRequired: true,
+    revision: authGateLatestRevision >= 0 ? authGateLatestRevision : undefined,
+  });
+  notifyAuthGatePolicyRecovery();
+}
+
+function retryAuthGateManagedPolicy(userInitiated = false) {
+  globalThis.__classpilotAuthGateBootstrap?.retryManagedPolicy?.(userInitiated);
+  if (authGatePendingManagedPolicyFence > 0) {
+    requestAuthGateManagedPolicyRevalidation(authGatePendingManagedPolicyFence, userInitiated);
+  } else if (isAuthGateManagedPolicyFencePending()) {
+    if (authGateAcknowledgedBootstrapFence !== globalThis.__classpilotAuthGateBootstrap?.managedPolicyFence) {
+      beginAuthGateManagedPolicyFence();
+    }
+  } else {
+    requestAuthGateState();
+  }
+}
+
+function requestAuthGateManagedPolicyRevalidation(fence, userInitiated = false) {
+  if (authGatePendingManagedPolicyFence !== fence || authGateManagedPolicyRequestFence === fence) return;
+  if (!userInitiated && Number(authGateManagedPolicyFailure?.retryAt) > Date.now()) {
+    scheduleAuthGateManagedPolicyFenceRetry(fence);
+    return;
+  }
+  if (authGateManagedPolicyFenceRetryTimer !== null) clearTimeout(authGateManagedPolicyFenceRetryTimer);
+  authGateManagedPolicyFenceRetryTimer = null;
+  authGateManagedPolicyRequestFence = fence;
   chrome.runtime.sendMessage({
     type: 'get-auth-state',
     revalidateManagedPolicy: true,
     managedPolicyFence: fence,
+    reason: userInitiated ? 'user' : 'page_timer',
   }, (response) => {
+    if (authGateManagedPolicyRequestFence === fence) authGateManagedPolicyRequestFence = 0;
     if (authGatePendingManagedPolicyFence !== fence) return;
     const responseRevision = authGateRevision(response?.state);
     const workerGeneration = Number(response?.managedPolicyGeneration);
@@ -566,12 +632,15 @@ function requestAuthGateManagedPolicyRevalidation(fence) {
       Number.isSafeInteger(workerGeneration) && workerGeneration >= 0 &&
       responseRevision !== null && responseRevision >= authGateLatestRevision;
     if (!validFenceAck) {
-      showAuthGate({
-        phase: 'loading',
-        authRequired: true,
-        revision: authGateLatestRevision >= 0 ? authGateLatestRevision : undefined,
-      });
-      markSecureAuthGateFrameUntrusted();
+      const delays = [2000, 5000, 15000, 30000];
+      const delay = delays[Math.min(authGateManagedPolicyRetryIndex++, delays.length - 1)];
+      const hintedRetryAt = Number(response?.retryAt);
+      const failure = {
+        errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+        retryAt: Number.isFinite(hintedRetryAt) && hintedRetryAt > Date.now()
+          ? Math.min(hintedRetryAt, Date.now() + 300000) : Date.now() + delay,
+      };
+      showAuthGatePolicyFailure(failure);
       scheduleAuthGateManagedPolicyFenceRetry(fence);
       return;
     }
@@ -581,9 +650,22 @@ function requestAuthGateManagedPolicyRevalidation(fence) {
       clearTimeout(authGateManagedPolicyFenceRetryTimer);
       authGateManagedPolicyFenceRetryTimer = null;
     }
+    // The bootstrap owns its own correlated proof. Its completion reconciles
+    // content after clearing that fence; this reply cannot clear it by proxy.
+    if (globalThis.__classpilotAuthGateBootstrap?.managedPolicyFencePending) {
+      authGateAcknowledgedBootstrapFence = globalThis.__classpilotAuthGateBootstrap.managedPolicyFence;
+      if (globalThis.__classpilotAuthGateBootstrap.managedPolicyFailure) {
+        showAuthGatePolicyFailure(globalThis.__classpilotAuthGateBootstrap.managedPolicyFailure);
+      }
+      globalThis.__classpilotAuthGateBootstrap.retryManagedPolicy?.(false);
+      return;
+    }
+    authGateManagedPolicyFailure = null;
+    authGateManagedPolicyRetryIndex = 0;
     reconcileKioskFabSuppression(response.state.kioskOrigin);
     applyAuthGateState(response.state, { managedPolicyFenceValidated: true });
     updateFabIdentityState(response.state);
+    authGatePolicyRecoveryFrameLatched = false;
     if (authGateActive) resetSecureAuthGateFrame();
   });
 }
@@ -591,6 +673,10 @@ function requestAuthGateManagedPolicyRevalidation(fence) {
 function beginAuthGateManagedPolicyFence() {
   const fence = nextAuthGateManagedPolicyFence();
   authGatePendingManagedPolicyFence = fence;
+  authGateManagedPolicyRequestFence = 0;
+  authGateManagedPolicyFailure = null;
+  authGateManagedPolicyRetryIndex = 0;
+  authGateAcknowledgedBootstrapFence = 0;
   authGateStateRequestGeneration += 1;
   if (authGateManagedPolicyFenceRetryTimer !== null) {
     clearTimeout(authGateManagedPolicyFenceRetryTimer);
@@ -1443,6 +1529,15 @@ function beginSecureAuthGateFrameVerification() {
     authGateSecureFrame.contentWindow.postMessage({
       type: 'CLASSPILOT_AUTH_FRAME_INIT',
       nonce: authGateSecureFrameNonce,
+      ...(authGateManagedPolicyFailure ? { policyRecovery: authGateManagedPolicyFailure } : {}),
+      // The first parent state read may already have exhausted its deadline
+      // before this frame mounts. Transfer only that failure, never a usable
+      // authentication state, so handover cannot start another loading window.
+      ...(!authGateManagedPolicyFailure && authGatePhase(authGateCurrentState || {}) === 'unavailable'
+        ? { initialFailure: {
+          code: authGateCurrentState.errorCode,
+          retryAt: authGateCurrentState.retryAt,
+        } } : {}),
     }, AUTH_GATE_FRAME_ORIGIN);
   } catch (_error) {
     // The recovery timer below restores the genuine extension document.
@@ -1464,10 +1559,17 @@ function resetSecureAuthGateFrame() {
 
 function applyTrustedAuthGateFramePhase(phase) {
   if (authGateSecureFrameFailed || !AUTH_GATE_PHASES.has(phase) || !authGateTrustedRoot?.isConnected) return;
-  if (isAuthGateManagedPolicyFencePending()) {
+  const policyFailurePresentation = isAuthGateManagedPolicyFencePending()
+    && phase === 'unavailable' && authGateManagedPolicyFailure;
+  if (isAuthGateManagedPolicyFencePending() && !policyFailurePresentation) {
     markSecureAuthGateFrameUntrusted();
+    notifyAuthGatePolicyRecovery();
     return;
   }
+  // The existing nonce-bound frame does not repeat its one-time READY message
+  // after a policy change. Its failure-only phase acknowledges this recovery
+  // presentation; it grants no authority to show credentials or release the gate.
+  if (policyFailurePresentation) authGateSecureFrameReady = true;
   authGateSecureFramePendingPhase = phase;
   if (!authGateSecureFrameReady) return;
   if (phase === 'authenticated') {
@@ -1513,7 +1615,14 @@ lifecycle.listen(window, 'message', (event) => {
   }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_READY') {
     authGateSecureFrameReady = true;
+    notifyAuthGatePolicyRecovery();
     applyTrustedAuthGateFramePhase(authGateSecureFramePendingPhase);
+    return;
+  }
+  if (event.data.type === 'CLASSPILOT_AUTH_FRAME_POLICY_RETRY') {
+    if (authGateActive && authGateManagedPolicyFailure && isAuthGateManagedPolicyFencePending()) {
+      retryAuthGateManagedPolicy(event.data.userInitiated === true);
+    }
     return;
   }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST') {
@@ -1542,6 +1651,11 @@ function removeAuthGate() {
   clearAuthGateRetryTimer();
   clearAuthGateRosterRefreshTimer();
   authGatePendingManagedPolicyFence = 0;
+  authGateManagedPolicyRequestFence = 0;
+  authGateManagedPolicyFailure = null;
+  authGateManagedPolicyRetryIndex = 0;
+  authGatePolicyRecoveryFrameLatched = false;
+  authGateAcknowledgedBootstrapFence = 0;
   if (authGateManagedPolicyFenceRetryTimer !== null) {
     clearTimeout(authGateManagedPolicyFenceRetryTimer);
     authGateManagedPolicyFenceRetryTimer = null;

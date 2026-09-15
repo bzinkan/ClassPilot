@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.7");
+    expect(manifest.version).toBe("2.8.8");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -183,8 +183,11 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("const durableLocalKv = routedStudentStorageArea(rawLocalKv, rawSessionKv)");
     expect(serviceWorker).toContain("const durableSessionKv = rawSessionKv");
     expect(serviceWorker).toContain("await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling })");
+    // The startup owner retries only completed native storage failures. Its
+    // behavioral failure/hang checks live in test-extension-worker-recovery.
+    expect(serviceWorker).toContain("const authGateRevisionReservationAtWake = initializeAuthGateRevisionPublication()");
     expect(serviceWorker).toMatch(
-      /durableLocalKv\.get\(\[AUTH_GATE_REVISION_STORAGE_KEY\]\)[\s\S]*reserveAuthGateRevisionBlock\(stored\[AUTH_GATE_REVISION_STORAGE_KEY\]\)/,
+      /readAuthGateStartupPublication\(AUTH_GATE_REVISION_STORAGE_KEY\)[\s\S]*reserveAuthGateRevisionBlock\(stored\[AUTH_GATE_REVISION_STORAGE_KEY\], \{ startupPublication: true \}\)/,
     );
     expect(serviceWorker).toContain("const authGateRevisionReadyPromise = new Promise");
     expect(serviceWorker).toContain("async function awaitAuthGateRevisionPublicationReady()");

@@ -622,6 +622,7 @@ const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
 const AUTH_GATE_POLICY_READ_TIMEOUT_MS = 3000;
 const AUTH_GATE_RPC_RESPONSE_TIMEOUT_MS = 9000;
 const AUTH_GATE_POLICY_RECOVERY_ALARM = 'auth-gate-policy-recovery';
+const AUTH_GATE_STARTUP_PUBLICATION_RECOVERY_ALARM = 'auth-gate-startup-publication-recovery';
 const STUDENT_AUTH_GATE_PRESENCE_REQUEST_TIMEOUT_MS = 5000;
 const STUDENT_AUTH_GATE_PRESENCE_SOURCE_TTL_MS = 30 * 1000;
 const STUDENT_AUTH_GATE_PRESENCE_MIN_PUBLISH_MS = 8 * 1000;
@@ -855,6 +856,11 @@ const authGateRosterContextReadyPromise = new Promise((resolve, reject) => {
 });
 authGateRosterContextReadyPromise.catch(() => {});
 let authGateRosterContextMutationTail = Promise.resolve();
+const authGateStartupPublicationOwners = new Map();
+const authGateStartupPublicationStorageFailures = new WeakSet();
+const authGateStartupAuthSnapshotSupersededFailures = new WeakSet();
+let managedAuthGateStartupAuthorityTransition = null;
+let authGateStartupSupersessionOwnsReadiness = false;
 let managedAuthGateSetupUnavailable = false;
 let managedAuthGatePolicyRestorePromise = Promise.resolve({});
 let managedAuthGateDirectRevalidationInFlight = null;
@@ -968,7 +974,17 @@ async function authGateRosterContextFingerprintForCurrentMaterial() {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function reconcileAuthGateRosterContext(storedState) {
+async function reconcileAuthGateRosterContext(storedState, options = {}) {
+  const startupGuard = options.startupPublication === true ? {
+    policyGeneration: managedAuthGatePolicyGeneration,
+    configGeneration: sharedSignInConfigGeneration,
+    material: authGateRosterContextMaterial(),
+  } : null;
+  const startupGuardCurrent = () => !startupGuard || (
+    startupGuard.policyGeneration === managedAuthGatePolicyGeneration
+    && startupGuard.configGeneration === sharedSignInConfigGeneration
+    && startupGuard.material === authGateRosterContextMaterial()
+  );
   const prior = storedState === undefined
     ? normalizedAuthGateRosterContextState({
       schemaVersion: AUTH_GATE_ROSTER_CONTEXT_SCHEMA_VERSION,
@@ -977,6 +993,7 @@ async function reconcileAuthGateRosterContext(storedState) {
     })
     : normalizedAuthGateRosterContextState(storedState);
   const fingerprint = await authGateRosterContextFingerprintForCurrentMaterial();
+  if (!startupGuardCurrent()) return null;
   const unchanged = prior?.fingerprint === fingerprint;
   const generation = unchanged
     ? prior.generation
@@ -987,14 +1004,20 @@ async function reconcileAuthGateRosterContext(storedState) {
     throw new Error('Auth gate roster context generation space exhausted');
   }
   if (!unchanged) {
-    await durableLocalKv.set({
+    const publication = {
       [AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY]: {
         schemaVersion: AUTH_GATE_ROSTER_CONTEXT_SCHEMA_VERSION,
         generation,
         fingerprint,
       },
-    });
+    };
+    if (startupGuard) await writeAuthGateStartupPublication(publication);
+    else await durableLocalKv.set(publication);
   }
+  // A completed old write may remain on disk, but it must never release the
+  // ready barrier for changed policy. The owner rereads and publishes current
+  // material serially before the original startup continuation may proceed.
+  if (!startupGuardCurrent()) return null;
   authGateRosterContextGeneration = generation;
   authGateRosterContextFingerprint = fingerprint;
   if (!authGateRosterContextReady) {
@@ -1002,6 +1025,250 @@ async function reconcileAuthGateRosterContext(storedState) {
     resolveAuthGateRosterContextReady(generation);
   }
   return generation;
+}
+
+async function writeAuthGateStartupPublication(values) {
+  try {
+    await durableLocalKv.set(values);
+  } catch (_error) {
+    // Only this completed storage operation is retryable. Validation,
+    // authority and other startup failures are not relabeled as storage errors.
+    const error = authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
+    authGateStartupPublicationStorageFailures.add(error);
+    throw error;
+  }
+}
+
+async function readAuthGateStartupPublication(key) {
+  if (key !== AUTH_GATE_REVISION_STORAGE_KEY && key !== AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY) {
+    throw new Error('Invalid startup publication key');
+  }
+  try {
+    // These two counters are local-only. Use the native storage adapter, not
+    // auth restoration, migration, normalization or a credential-bearing read.
+    return await rawLocalKv.get([key]);
+  } catch (_error) {
+    const error = authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
+    authGateStartupPublicationStorageFailures.add(error);
+    throw error;
+  }
+}
+
+function armAuthGateStartupPublicationRecovery() {
+  const failed = [...authGateStartupPublicationOwners.values()]
+    .filter(owner => owner.failed && !owner.settled && !owner.inFlight);
+  if (failed.length === 0) return;
+  const when = Math.max(Date.now(), Math.min(...failed.map(owner => owner.retryAt)));
+  try {
+    chrome.alarms.create(AUTH_GATE_STARTUP_PUBLICATION_RECOVERY_ALARM, { when })?.catch?.(() => {});
+  } catch { /* A due page Retry can nudge the same tracked owner. */ }
+}
+
+function runAuthGateStartupPublication(owner) {
+  if (owner.settled || owner.inFlight) return;
+  owner.failed = false;
+  owner.attempts += 1;
+  const startedAt = Date.now();
+  const run = Promise.resolve().then(owner.operation);
+  owner.inFlight = run;
+  run.then(value => {
+    if (owner.inFlight !== run || owner.settled) return;
+    owner.inFlight = null;
+    owner.settled = true;
+    if (owner.attempts > 1) recordAuthGateRecoveryDiagnostic('startup', 'recovered', Date.now() - startedAt, owner.attempts);
+    owner.resolve(value);
+  }, error => {
+    if (owner.inFlight !== run || owner.settled) return;
+    owner.inFlight = null;
+    if (!error || typeof error !== 'object' || !authGateStartupPublicationStorageFailures.has(error)) {
+      owner.settled = true;
+      owner.reject(error);
+      return;
+    }
+    owner.failed = true;
+    owner.userRetryUsed = false;
+    owner.retryAt = Date.now() + SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[Math.min(
+      owner.attempts - 1, SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS.length - 1,
+    )];
+    recordAuthGateRecoveryDiagnostic('startup', 'internal', Date.now() - startedAt, owner.attempts);
+    // Keep the original continuation pending. A watchdog cannot cancel or
+    // replay this operation; this branch runs only after storage has rejected.
+    armAuthGateStartupPublicationRecovery();
+  });
+}
+
+function beginAuthGateStartupPublication(kind, operation) {
+  if (kind !== 'revision' && kind !== 'roster_context' && kind !== 'auth_snapshot') {
+    throw new Error('Invalid startup publication');
+  }
+  const existing = authGateStartupPublicationOwners.get(kind);
+  if (existing) return existing.promise;
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  promise.catch(() => {});
+  const owner = { kind, operation, promise, resolve, reject, inFlight: null,
+    settled: false, failed: false, attempts: 0, retryAt: 0, userRetryUsed: false };
+  authGateStartupPublicationOwners.set(kind, owner);
+  runAuthGateStartupPublication(owner);
+  return promise;
+}
+
+function retryAuthGateStartupPublications(options = {}) {
+  for (const owner of authGateStartupPublicationOwners.values()) {
+    if (owner.settled || owner.inFlight || !owner.failed) continue;
+    if (owner.retryAt > Date.now()) {
+      if (options.userInitiated !== true || owner.userRetryUsed) continue;
+      owner.userRetryUsed = true;
+    }
+    runAuthGateStartupPublication(owner);
+  }
+  armAuthGateStartupPublicationRecovery();
+}
+
+function initializeAuthGateRevisionPublication() {
+  return beginAuthGateStartupPublication('revision', async () => {
+    // A callback rejection can follow a write that reached storage. Rereading
+    // the ceiling prevents a retry from reusing any previously reserved range.
+    const stored = await readAuthGateStartupPublication(AUTH_GATE_REVISION_STORAGE_KEY);
+    return reserveAuthGateRevisionBlock(stored[AUTH_GATE_REVISION_STORAGE_KEY], { startupPublication: true });
+  });
+}
+
+function initializeAuthGateRosterContextPublication(storedState, options = {}) {
+  let initial = options.readFresh !== true;
+  return beginAuthGateStartupPublication('roster_context', async () => {
+    while (true) {
+      const stored = initial ? storedState
+        : (await readAuthGateStartupPublication(AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY))[AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY];
+      initial = false;
+      const result = await reconcileAuthGateRosterContext(stored, { startupPublication: true });
+      if (result !== null) return result;
+    }
+  });
+}
+
+async function readAuthGateStartupAuthSnapshot(keys) {
+  const authGeneration = studentAuthMutationGeneration;
+  const pending = beginAuthGateStartupPublication('auth_snapshot', async () => {
+    while (true) {
+      // A newer auth mutation owns its authority. Native-read recovery must
+      // never rebase the wake's existing adoption fence onto that mutation.
+      if (authGeneration !== studentAuthMutationGeneration) {
+        const error = authMutationSuperseded('worker wake auth snapshot');
+        authGateStartupAuthSnapshotSupersededFailures.add(error);
+        throw error;
+      }
+      const policyGeneration = managedAuthGatePolicyGeneration;
+      const sessionAvailable = hasSessionStorage();
+      let local;
+      let session;
+      try {
+        local = await rawLocalKv.get(keys);
+        session = sessionAvailable ? await durableSessionKv.get(keys) : {};
+      } catch (_error) {
+        // Only the native read prefix may be repeated. Migration, marker
+        // cleanup, credential adoption and backend cleanup run once in the
+        // original getStoredAuthState continuation after this owner resolves.
+        const error = authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
+        authGateStartupPublicationStorageFailures.add(error);
+        throw error;
+      }
+      if (authGeneration !== studentAuthMutationGeneration) {
+        const error = authMutationSuperseded('worker wake auth snapshot');
+        authGateStartupAuthSnapshotSupersededFailures.add(error);
+        throw error;
+      }
+      if (policyGeneration !== managedAuthGatePolicyGeneration) continue;
+      return { local, session };
+    }
+  });
+  try {
+    return await pending;
+  } finally {
+    const owner = authGateStartupPublicationOwners.get('auth_snapshot');
+    if (owner?.promise === pending && owner.settled) {
+      // Unlike numeric publication results, the native snapshot can contain
+      // credentials. Never retain its settled promise in the coordinator.
+      authGateStartupPublicationOwners.delete('auth_snapshot');
+    }
+  }
+}
+
+function startupManagedAuthorityTransitionIsCurrent(transition) {
+  return Boolean(transition
+    && transition === managedAuthGateStartupAuthorityTransition
+    && transition.authGeneration === studentAuthMutationGeneration
+    && transition.policyGeneration === managedAuthGatePolicyGeneration
+    && transition.policyBarrier === managedAuthGatePolicyRestorePromise);
+}
+
+function assertStartupAuthorityIsSignedOut(transition) {
+  if (!startupManagedAuthorityTransitionIsCurrent(transition)
+    || CONFIG.studentToken || CONFIG.authContextId || CONFIG.activeStudentId
+    || CONFIG.activeStudentSessionId || CONFIG.studentEmail || CONFIG.studentName
+    || studentAuthCommitPending || studentAuthCommitPendingGeneration > 0
+    || studentAuthMutationPendingCount > 0
+    || manualStudentLoginRequestsPending > 0 || manualStudentLoginPendingGeneration > 0) {
+    throw authMutationSuperseded('superseded worker wake authority');
+  }
+}
+
+async function finishSupersededAuthWakeAtCurrentSignedOutPolicy() {
+  while (true) {
+    const transition = managedAuthGateStartupAuthorityTransition;
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) {
+      throw authMutationSuperseded('superseded worker wake transition');
+    }
+    try {
+      // This is the original strict clear, not the swallowed mutation tail.
+      // A failed or unresolved invalidation cannot release startup readiness.
+      await transition.clearPromise;
+    } catch (error) {
+      if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+      throw error;
+    }
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    try {
+      // Promise.all may reject on the managed read before sibling storage
+      // reads/clears finish. Those exact strict prerequisites must all succeed
+      // before a read-timeout exception can expose unavailable readiness.
+      if (!transition.prerequisitesPromise) throw authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
+      await transition.prerequisitesPromise;
+    } catch (error) {
+      if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+      throw error;
+    }
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    try {
+      await transition.policyBarrier;
+    } catch (error) {
+      if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+      // A completed native policy-read failure may expose only the existing
+      // protected unavailable state, allowing later fresh policy Retry. A
+      // failed/pending policy write is never classified by this exception.
+      if (error !== transition.managedReadFailure
+        || !['AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE'].includes(error?.code)
+        || managedAuthGatePolicyFailure?.generation !== transition.policyGeneration) throw error;
+    }
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    assertStartupAuthorityIsSignedOut(transition);
+    await initializeAuthGateRevisionPublication();
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    assertStartupAuthorityIsSignedOut(transition);
+    await initializeAuthGateRosterContextPublication(undefined, { readFresh: true });
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    await awaitAuthGateRosterContextStable();
+    if (!startupManagedAuthorityTransitionIsCurrent(transition)) continue;
+    assertStartupAuthorityIsSignedOut(transition);
+    // The retired wake never restores credentials, replays cleanup or resumes
+    // classroom state. The current clear's invalidating fence stays raised.
+    markAuthStateRestored();
+    return;
+  }
 }
 
 function scheduleAuthGateRosterContextReconcile() {
@@ -1070,7 +1337,7 @@ async function awaitAuthGateRevisionPublicationReady() {
   }
 }
 
-async function reserveAuthGateRevisionBlock(storedRevisionCeiling) {
+async function reserveAuthGateRevisionBlock(storedRevisionCeiling, options = {}) {
   const parsedCeiling = Number(storedRevisionCeiling);
   const priorCeiling = Number.isSafeInteger(parsedCeiling) && parsedCeiling >= 0
     ? parsedCeiling
@@ -1083,7 +1350,9 @@ async function reserveAuthGateRevisionBlock(storedRevisionCeiling) {
   // Persist the end of the range, not merely the first emitted value. A crash
   // at any point in this worker's lifetime still forces its successor above
   // every revision this worker was allowed to publish.
-  await durableLocalKv.set({ [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling });
+  const publication = { [AUTH_GATE_REVISION_STORAGE_KEY]: nextCeiling };
+  if (options.startupPublication === true) await writeAuthGateStartupPublication(publication);
+  else await durableLocalKv.set(publication);
   authGateStateRevision = Math.max(authGateStateRevision, nextRevision);
   authGateStateRevisionCeiling = nextCeiling;
   authGateRevisionReady = true;
@@ -1743,9 +2012,13 @@ function dispatchLegacyStudentAuthCleanup() {
   return run;
 }
 
-async function getStoredAuthState(keys) {
-  const local = await rawLocalKv.get(keys);
-  const session = hasSessionStorage() ? await durableSessionKv.get(keys) : {};
+async function getStoredAuthState(keys, options = {}) {
+  const { local, session } = options.startupReadRecovery === true
+    ? await readAuthGateStartupAuthSnapshot(keys)
+    : {
+      local: await rawLocalKv.get(keys),
+      session: hasSessionStorage() ? await durableSessionKv.get(keys) : {},
+    };
   const merged = { ...local, ...session };
   const localAuthorityKeys = [
     STUDENT_AUTH_INVALIDATING_KEY,
@@ -11080,13 +11353,13 @@ function assertAuthGatePolicyGuardCurrent(guard, reason) {
   }
 }
 
-function recordAuthGateRecoveryDiagnostic(stage, cause, elapsedMs = 0) {
+function recordAuthGateRecoveryDiagnostic(stage, cause, elapsedMs = 0, attemptCount = managedAuthGatePolicyRecoveryAttempt) {
   try {
     globalThis.ClassPilotAuthRecoveryDiagnostics?.record({
       stage,
       cause,
       elapsedMs: Math.max(0, Math.round(elapsedMs)),
-      attemptCount: managedAuthGatePolicyRecoveryAttempt,
+      attemptCount,
     });
   } catch {
     // Diagnostics never participate in policy or authentication decisions.
@@ -11171,6 +11444,7 @@ function clearManagedPolicyRecoveryFailure(generation) {
 }
 
 async function ensureManagedAuthGatePolicyAvailable(options = {}) {
+  retryAuthGateStartupPublications(options);
   await authStateRestorePromise;
   if (managedAuthGatePolicyFailure?.generation === managedAuthGatePolicyGeneration) {
     await sharedManagedAuthGatePolicyRevalidation(options);
@@ -11180,6 +11454,7 @@ async function ensureManagedAuthGatePolicyAvailable(options = {}) {
 }
 
 async function sharedManagedAuthGatePolicyRevalidation(options = {}) {
+  retryAuthGateStartupPublications(options);
   await authStateRestorePromise;
   // Never retire this pointer on an RPC deadline: strict auth cleanup or
   // durable policy persistence may still be running in the shared cycle.
@@ -12075,6 +12350,19 @@ async function notifyAuthGateStateToTabs(options = {}) {
   }
 }
 
+function notifyAuthGateAfterManagedPolicyRestore() {
+  const notification = notifyAuthGateStateToTabs({
+    triggerRefresh: false,
+    skipManagedPolicyWait: true,
+  });
+  if (authGateStartupComplete) return notification;
+  // A wake superseded by this policy change awaits its strict policy barrier.
+  // Tab delivery itself awaits auth startup, so it cannot be part of that
+  // barrier during startup. It still waits normally before publishing state.
+  notification.catch(() => {});
+  return Promise.resolve();
+}
+
 function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') {
     if (areaName !== 'managed') return null;
     if (!Object.keys(changes).some((key) => MANAGED_CONFIG_KEYS.includes(key))) return null;
@@ -12126,6 +12414,23 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
         disconnectWebSocket: true,
       });
       authorityAuthClearPromise.catch(() => {});
+    }
+    let startupAuthorityTransition = null;
+    if (!authGateStartupComplete) {
+      const previous = managedAuthGateStartupAuthorityTransition;
+      const clearPromise = authAuthorityChanged ? authorityAuthClearPromise
+        : previous?.authGeneration === studentAuthMutationGeneration ? previous.clearPromise : null;
+      if (clearPromise) {
+        startupAuthorityTransition = {
+          authGeneration: studentAuthMutationGeneration,
+          policyGeneration,
+          clearPromise,
+          policyBarrier,
+          prerequisitesPromise: null,
+          managedReadFailure: null,
+        };
+        managedAuthGateStartupAuthorityTransition = startupAuthorityTransition;
+      }
     }
     // The visit ledger is scoped to both the immutable student binding and
     // the managed policy under which that binding was used. Serialize a clear
@@ -12185,13 +12490,28 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
     // pending promise is installed synchronously, so a login cannot adopt a
     // response under the partial or uncertain authority above.
     const storedPolicyAtChange = durableLocalKv.get([MANAGED_AUTH_GATE_BINDING_KEY, 'config']);
-    const policyRestore = Promise.all([
-      readManagedConfig({ failClosed: true }),
+    const strictPolicyPrerequisites = Promise.all([
       storedPolicyAtChange,
       authorityAuthClearPromise,
       restrictionSsoPolicyClearPromise,
       restrictionAuthPolicyClearPromise,
-    ]).then(async ([currentManagedConfig, persisted]) => {
+      restrictionAuthFenceClearPromise,
+    ]);
+    strictPolicyPrerequisites.catch(() => {});
+    if (startupAuthorityTransition) {
+      startupAuthorityTransition.prerequisitesPromise = strictPolicyPrerequisites;
+    }
+    const managedReadAtChange = readManagedConfig({ failClosed: true }).catch((error) => {
+      if (startupAuthorityTransition
+        && ['AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE'].includes(error?.code)) {
+        startupAuthorityTransition.managedReadFailure = error;
+      }
+      throw error;
+    });
+    const policyRestore = Promise.all([
+      managedReadAtChange,
+      strictPolicyPrerequisites,
+    ]).then(async ([currentManagedConfig, [persisted]]) => {
       if (policyGeneration !== managedAuthGatePolicyGeneration) {
         throw authMutationSuperseded('managed policy reread');
       }
@@ -12229,10 +12549,7 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
       clearManagedPolicyRecoveryFailure(policyGeneration);
       if (fastAuthGateEnabled && !hasStudentAuth()) {
         refreshSharedSignInLoginConfig({ reason: 'managed_policy_change', managedConfigAlreadyApplied: true }).catch(() => {});
-        await notifyAuthGateStateToTabs({
-          triggerRefresh: false,
-          skipManagedPolicyWait: true,
-        });
+        await notifyAuthGateAfterManagedPolicyRestore();
         return currentManagedConfig;
       }
       if (!fastAuthGateEnabled && !hasStudentAuth()) {
@@ -12241,16 +12558,10 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
           managedConfigAlreadyApplied: true,
         });
         await legacyRefresh;
-        await notifyAuthGateStateToTabs({
-          triggerRefresh: false,
-          skipManagedPolicyWait: true,
-        });
+        await notifyAuthGateAfterManagedPolicyRestore();
         return currentManagedConfig;
       }
-      await notifyAuthGateStateToTabs({
-        triggerRefresh: false,
-        skipManagedPolicyWait: true,
-      });
+      await notifyAuthGateAfterManagedPolicyRestore();
       return currentManagedConfig;
     }).catch((error) => {
       if (policyGeneration === managedAuthGatePolicyGeneration) {
@@ -14490,6 +14801,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     if (settled) return;
     settled = true;
     authGateStartupComplete = true;
+    managedAuthGateStartupAuthorityTransition = null;
     resolve();
   };
 });
@@ -14524,34 +14836,43 @@ const authStateRestorePromise = new Promise((resolve) => {
   // Reserve the revision range in parallel with both auth stores and managed
   // policy. This keeps the required durable write off the sequential cold-auth
   // path as much as Chrome's storage implementation permits.
-  const authGateRevisionReservationAtWake = durableLocalKv.get([AUTH_GATE_REVISION_STORAGE_KEY])
-    .then((stored) => reserveAuthGateRevisionBlock(stored[AUTH_GATE_REVISION_STORAGE_KEY]))
+  const authGateRevisionReservationAtWake = initializeAuthGateRevisionPublication()
     .catch((error) => {
       rejectAuthGateRevisionReady(error);
       throw error;
     });
   let workerWakeRestoreGeneration = studentAuthMutationGeneration;
-  const authStored = await getStoredAuthState([
-    'authContextId',
-    'deviceId',
-    'config',
-    'activeStudentId',
-    'activeStudentSessionId',
-    'studentEmail',
-    'studentName',
-    'studentToken',
-    'identitySource',
-    'manualLoginLastSeenAt',
-    'autoRegistrationPaused',
-    'sharedAuthLockedSinceAt',
-    STUDENT_AUTH_INVALIDATING_KEY,
-    STUDENT_AUTH_COMMIT_PENDING_KEY,
-    SHARED_SIGN_IN_CONFIG_CACHE_KEY,
-    MANAGED_AUTH_GATE_BINDING_KEY,
-    STUDENT_SESSION_RECOVERY_STORAGE_KEY,
-    AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY,
-    RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY,
-  ]);
+  let authStored;
+  try {
+    authStored = await getStoredAuthState([
+      'authContextId',
+      'deviceId',
+      'config',
+      'activeStudentId',
+      'activeStudentSessionId',
+      'studentEmail',
+      'studentName',
+      'studentToken',
+      'identitySource',
+      'manualLoginLastSeenAt',
+      'autoRegistrationPaused',
+      'sharedAuthLockedSinceAt',
+      STUDENT_AUTH_INVALIDATING_KEY,
+      STUDENT_AUTH_COMMIT_PENDING_KEY,
+      SHARED_SIGN_IN_CONFIG_CACHE_KEY,
+      MANAGED_AUTH_GATE_BINDING_KEY,
+      STUDENT_SESSION_RECOVERY_STORAGE_KEY,
+      AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY,
+      RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY,
+    ], { startupReadRecovery: true });
+  } catch (error) {
+    if (!error || typeof error !== 'object'
+      || !authGateStartupAuthSnapshotSupersededFailures.has(error)) throw error;
+    authGateStartupSupersessionOwnsReadiness = true;
+    rejectWakePolicyRestore(error);
+    await finishSupersededAuthWakeAtCurrentSignedOutPolicy();
+    return;
+  }
   const storedServerUrl = authStored.config?.serverUrl;
   const fastResolvedServerUrl = isHttpUrl(storedServerUrl)
     ? storedServerUrl
@@ -14735,7 +15056,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     });
   }
   try {
-    await reconcileAuthGateRosterContext(
+    await initializeAuthGateRosterContextPublication(
       authStored[AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY],
     );
     await awaitAuthGateRosterContextStable();
@@ -15144,7 +15465,7 @@ const authStateRestorePromise = new Promise((resolve) => {
   console.warn('[Service Worker] Wake-up error (will retry):', safeDiagnosticError(err));
   if (studentAuthCommitPending) failAuthCommitRecoveryBarrier(err);
 }).finally(() => {
-  if (authGateRevisionReady) markAuthStateRestored();
+  if (authGateRevisionReady && !authGateStartupSupersessionOwnsReadiness) markAuthStateRestored();
   markClassroomStateRestored();
 });
 
@@ -16331,6 +16652,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     checkLicenseStatus('retry-alarm').catch(() => {});
   } else if (alarm.name === LICENSE_CONTROL_CLEANUP_ALARM) {
     handleLicenseControlCleanupAlarm().catch(() => {});
+  } else if (alarm.name === AUTH_GATE_STARTUP_PUBLICATION_RECOVERY_ALARM) {
+    // Start only due, definitively failed publications. Never attach another
+    // waiter to or retire an unresolved Chrome storage/auth operation.
+    retryAuthGateStartupPublications();
   } else if (alarm.name === AUTH_GATE_POLICY_RECOVERY_ALARM) {
     // Do not attach endless alarm waiters to a strict startup/auth mutation.
     if (!authGateStartupComplete || managedAuthGateDirectRevalidationInFlight) {
@@ -24624,6 +24949,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-auth-state') {
+    retryAuthGateStartupPublications({ userInitiated: message.reason === 'user' });
     if (message.revalidateManagedPolicy === true) {
       revalidateManagedAuthGatePolicy(message.managedPolicyFence, {
         userInitiated: message.reason === 'user',
@@ -24667,6 +24993,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'refresh-auth-state') {
+    retryAuthGateStartupPublications({ userInitiated: message.reason === 'user' });
     authStateRestorePromise.then(async () => {
       const userInitiated = message.reason === 'user';
       expireManualAuthIfStaleFailClosed('refresh-auth-state');
