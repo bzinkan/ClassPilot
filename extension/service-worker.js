@@ -492,6 +492,13 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     && (options.commandType === 'close-tab' || options.commandType === 'close-tabs')
     && binding.bindingVersion === 2
   );
+  const preserveScheduledRevision = Boolean(binding.supervisionContextId)
+    && ['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(options.commandType);
+  // These one-shot commands are frozen to their original scheduled owner.
+  // Never acknowledge an old command using a replacement owner's revision.
+  if (preserveScheduledRevision && (!Number.isSafeInteger(binding.controlRevision)
+    || binding.controlRevision < 0)) return false;
+  const preserveCommandRevision = preserveExactTabRevision || preserveScheduledRevision;
   if (preserveExactTabRevision && (
     binding.bindingVersion !== 2
     || binding.schoolId !== authContext.schoolId
@@ -502,14 +509,14 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     error.code = 'STUDENT_BINDING_MISMATCH';
     throw error;
   }
-  if (exactAckNegotiated && !preserveExactTabRevision && currentStudentControlRevision() === null) {
+  if (exactAckNegotiated && !preserveCommandRevision && currentStudentControlRevision() === null) {
     // Exact ACK V2 scopes acknowledgement creation only. An ordinary command
     // that already passed its student/session and classroom-authority checks
     // remains executable while the control-revision watermark is hydrating;
     // no under-bound ACK is created in that interval.
     return false;
   }
-  const ackControlRevision = preserveExactTabRevision
+  const ackControlRevision = preserveCommandRevision
     ? binding.controlRevision
     : exactAckNegotiated
       ? assertCommandAckAuthorityAvailable(authContext)
@@ -5665,6 +5672,11 @@ async function adoptAuthenticatedStudentBindingNow(raw, reason, responseGuard) {
   return binding;
 }
 
+function scheduledContextAuthorityRevision(value) {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 256)
+    : Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+}
+
 function normalizeFabState(rawState = {}, fallbackState = {}) {
   const hasSessionField = Object.prototype.hasOwnProperty.call(rawState, 'teachingSessionId')
     || Object.prototype.hasOwnProperty.call(rawState, 'sessionId');
@@ -5719,6 +5731,8 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     teachingSessionId,
     supervisionContextId,
     activeContexts,
+    contextAuthorityRevision: scheduledContextAuthorityRevision(rawState.contextAuthorityRevision
+      ?? (Object.hasOwn(rawState, 'supervisionContextId') ? null : fallbackState.contextAuthorityRevision)),
     contextSource: rawState.contextSource || fallbackState.contextSource || null,
     contextName: String(rawState.contextName || fallbackState.contextName || '').slice(0, 200),
     activeSessionIds,
@@ -5831,7 +5845,12 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     // previous owner replace the current session set.
     if (priorOwnershipKnown && nextOwnershipKnown) {
       if (nextOwnershipRevision < priorOwnershipRevision) return priorState;
-      if (nextOwnershipRevision === priorOwnershipRevision && sessionSetChanged) return priorState;
+      const scheduledFabRecovery = priorSessionIds.length === 0
+        && nextState.activeContexts.length === 1 && nextState.contextAuthorityRevision !== null
+        && nextState.supervisionContextId === currentClassroomState?.supervisionContextId
+        && nextOwnershipRevision === Number(currentClassroomState?.revision)
+        && hasNegotiatedCapability('scheduledClassroomV1');
+      if (nextOwnershipRevision === priorOwnershipRevision && sessionSetChanged && !scheduledFabRecovery) return priorState;
       if (
         nextOwnershipRevision === priorOwnershipRevision
         && Number(priorContext.revision || 0) > Number(nextState.revision || 0)
@@ -5852,12 +5871,16 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   const bindingChanged = priorContext.binding !== binding;
   const lifecycleEnded = ['session-ended', 'entitlement-inactive']
     .includes(nextState.reason) || nextState.activeContexts.length === 0;
-  const lifecycleChanged = bindingChanged || sessionSetChanged;
+  const scheduledOwnerChanged = Boolean(nextState.supervisionContextId)
+    && priorContext.supervisionContextId === nextState.supervisionContextId
+    && priorContext.contextAuthorityRevision !== nextState.contextAuthorityRevision;
+  const lifecycleChanged = bindingChanged || sessionSetChanged || scheduledOwnerChanged;
   const context = {
     schemaVersion: 1,
     binding,
     teachingSessionId: nextState.teachingSessionId,
     supervisionContextId: nextState.supervisionContextId,
+    contextAuthorityRevision: nextState.contextAuthorityRevision,
     activeContexts: nextState.activeContexts,
     activeSessionIds: nextState.activeSessionIds,
     revision: nextState.revision,
@@ -6069,7 +6092,9 @@ function mutateClassroomOverlayState(operation, options = {}) {
     const state = prior?.binding === binding
       ? prior
       : { schemaVersion: 1, binding, timer: null, poll: null, updatedAt: Date.now() };
+    options.assertAuthority?.();
     const next = await operation(state, binding);
+    options.assertAuthority?.();
     if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
     if (expectedBinding !== fabIdentityBinding()) {
       throw authContextSuperseded('classroom overlay mutation');
@@ -6078,6 +6103,14 @@ function mutateClassroomOverlayState(operation, options = {}) {
     if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
     if (expectedBinding !== fabIdentityBinding()) {
       throw authContextSuperseded('classroom overlay mutation');
+    }
+    try {
+      options.assertAuthority?.();
+    } catch (error) {
+      // Overlay mutations are serialized. If authority changed during the
+      // storage write, restore the prior overlay before another mutation runs.
+      await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: state });
+      throw error;
     }
     scheduleClassroomOverlayExpiry(next);
     return next;
@@ -6100,6 +6133,7 @@ function scheduleClassroomOverlayExpiry(state) {
 
 function persistTimerOverlay(command, executionContext = {}) {
   const action = command.data?.action;
+  const contextAuthorityRevision = currentFabState?.contextAuthorityRevision ?? null;
   return mutateClassroomOverlayState(async (state, binding) => {
     if (!binding || action !== 'start') {
       return { ...state, binding, timer: null, updatedAt: Date.now() };
@@ -6118,18 +6152,23 @@ function persistTimerOverlay(command, executionContext = {}) {
       timer: {
         commandId: executionContext.commandId || null,
         ...commandClassroomContext(command),
+        ...(commandClassroomContext(command)?.supervisionContextId
+          ? { contextAuthorityRevision } : {}),
         endsAt,
         message: String(command.data?.message || '').slice(0, 500),
         receivedAt: Date.now(),
       },
       updatedAt: Date.now(),
     };
-  }, { authContext: executionContext.authContext });
+  }, { authContext: executionContext.authContext,
+    assertAuthority: executionContext.envelope ? () => assertRemoteCommandExecutionContextCurrent(
+      command, executionContext.envelope, executionContext, 'timer overlay write') : null });
 }
 
 function persistPollOverlay(command, executionContext = {}) {
   const action = command.data?.action;
   const pollId = String(command.data?.pollId || '').trim();
+  const contextAuthorityRevision = currentFabState?.contextAuthorityRevision ?? null;
   return mutateClassroomOverlayState(async (state, binding) => {
     if (!binding || action !== 'start') {
       if (pollId && state.poll?.pollId && state.poll.pollId !== pollId) return state;
@@ -6154,6 +6193,8 @@ function persistPollOverlay(command, executionContext = {}) {
         commandId: executionContext.commandId || null,
         pollId,
         ...commandClassroomContext(command),
+        ...(commandClassroomContext(command)?.supervisionContextId
+          ? { contextAuthorityRevision } : {}),
         question: String(command.data?.question || '').slice(0, 1000),
         options: (Array.isArray(command.data?.options) ? command.data.options : [])
           .slice(0, 20)
@@ -6164,7 +6205,9 @@ function persistPollOverlay(command, executionContext = {}) {
       },
       updatedAt: Date.now(),
     };
-  }, { authContext: executionContext.authContext });
+  }, { authContext: executionContext.authContext,
+    assertAuthority: executionContext.envelope ? () => assertRemoteCommandExecutionContextCurrent(
+      command, executionContext.envelope, executionContext, 'poll overlay write') : null });
 }
 
 async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
@@ -6213,6 +6256,13 @@ async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
   }
 }
 
+function classroomOverlayAuthorityIsCurrent(overlay) {
+  if (!RuntimeCore.classroomContext(overlay)) return !currentClassroomState?.supervisionContextId;
+  if (!classroomContextIsCurrent(overlay)) return false;
+  return !overlay.supervisionContextId || Boolean(currentFabState?.contextAuthorityRevision
+    && scheduledContextAuthorityRevision(overlay.contextAuthorityRevision) === currentFabState.contextAuthorityRevision);
+}
+
 function getRestorableClassroomOverlayState(options = {}) {
   const authContext = options.authContext
     || captureAuthenticatedContext('classroom overlay read');
@@ -6244,9 +6294,15 @@ function getRestorableClassroomOverlayState(options = {}) {
         return { timer: null, poll: null };
       }
       const now = Date.now();
-      const sessionIds = activeTeachingSessionIds();
-      const sessionMatches = (overlay) => RuntimeCore.classroomContext(overlay)
-        ? classroomContextIsCurrent(overlay) : !currentClassroomState?.supervisionContextId;
+      // A restriction update can arrive before its FAB snapshot. Do not
+      // destroy an applied overlay while its stable scheduled owner is unknown.
+      if (currentClassroomState?.supervisionContextId
+        && currentFabState?.supervisionContextId === currentClassroomState.supervisionContextId
+        && Number(currentFabState.ownershipRevision || 0) < Number(currentClassroomState.revision || 0)
+        && !RuntimeCore.classroomStateExpiry(currentClassroomState, now).expired) {
+        return { timer: null, poll: null };
+      }
+      const sessionMatches = classroomOverlayAuthorityIsCurrent;
       const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
         ? state.timer
         : null;
@@ -6292,8 +6348,7 @@ async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI
   const now = Date.now();
   const activeSessions = activeTeachingSessionIds();
   const overlayCurrent = expectedFabBinding && storedOverlay?.binding === expectedFabBinding;
-  const sessionMatches = (overlay) => RuntimeCore.classroomContext(overlay)
-    ? classroomContextIsCurrent(overlay) : !currentClassroomState?.supervisionContextId;
+  const sessionMatches = classroomOverlayAuthorityIsCurrent;
   const overlays = {
     timer: overlayCurrent
       && Number(storedOverlay.timer?.endsAt || 0) > now
@@ -19826,11 +19881,19 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
   }
-  if (['timer', 'poll', 'teacher-message', 'messaging-toggle', 'hand-raising-toggle', 'hand-dismissed'].includes(commandType)
+  if (['timer', 'poll', 'student-sign-out', 'teacher-message', 'messaging-toggle', 'hand-raising-toggle', 'hand-dismissed'].includes(commandType)
     && !hasNegotiatedCapability('scheduledClassroomV1')) {
     const error = new Error('Scheduled classroom tools were not negotiated');
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
+  }
+  if (['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
+    const originalRevision = exactStudentBinding({ ...envelope, command }).controlRevision;
+    if (originalRevision === null || originalRevision !== currentStudentControlRevision()) {
+      const error = new Error('Scheduled command belongs to a retired control revision');
+      error.code = 'COMMAND_AUTHORITY_MISMATCH';
+      throw error;
+    }
   }
   return authority;
 }
@@ -19945,6 +20008,11 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       requireFullAuthority,
     });
     assertAuthenticatedContextCurrent(authContext, 'remote-control command');
+    if (commandAuthority(command, envelope).supervisionContextId
+      && ['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
+      commandBinding = { ...commandBinding,
+        supervisionContextId: commandAuthority(command, envelope).supervisionContextId };
+    }
     transientCurrentPageWaypoint = prepareTransientCurrentPageWaypoint(
       command,
       delivery,
@@ -20041,6 +20109,8 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       command.data = {
         ...(command.data || {}),
         ...classroomAuthorityPayload(authority),
+        ...(authority.supervisionContextId && commandBinding.controlRevision !== null
+          ? { studentControlRevision: commandBinding.controlRevision } : {}),
       };
     }
     const classroomState = envelope?.classroomState
@@ -24523,6 +24593,7 @@ async function handleWsMessage(
           try {
             await broadcastToAllTabsForAuth('chat-closed', {
               sessionId: message.sessionId,
+              ...classroomAuthorityPayload(message),
               studentId: message.studentId,
             }, authContext, message);
             assertAuthenticatedContextCurrent(authContext, 'chat close broadcast');

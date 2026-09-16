@@ -6,6 +6,10 @@ Every action names exactly one original authority: `teachingSessionId` or `super
 
 Student chat, hands, poll responses, and durable teacher-message acknowledgements retain the original supervision context and `studentControlRevision`. Timer and poll restoration is scoped to that original context and the exact authenticated browser binding. Expiry and context changes clear overlays; delayed callbacks cannot send as a replacement classroom or student.
 
+Scheduled timer, poll, and sign-out commands require the original `studentControlRevision` before execution and after asynchronous work. Their command acknowledgements preserve that revision, including rejected commands after a same-context ownership change.
+
+Full scheduled FAB snapshots carry `contextAuthorityRevision`, a stable opaque string paired with `supervisionContextId`. Applied timer and poll overlays retain it: ordinary restriction updates and end-time extensions preserve the overlays, while reassignment changes the token and clears them. An initial disabled FAB can hydrate to the current scheduled context without a new control revision once that capability is negotiated.
+
 Screenshot leases can carry `{kind:'supervision_context', supervisionContextId, controlRevision}`. Capture and active-view cadence require current matching authority and stop at their lease or classroom boundary. Screenshot-policy refresh frames accept typed supervision authority without widening the lease.
 
 Live View requests retain the exact student/browser binding, typed classroom authority, and supervision control revision. A signed server negotiation is bounded by the scheduled end. Context or ownership changes retire capture; stale negotiation callbacks cannot replace a newer stream. Server authorization is required for ICE configuration, signaling, and telemetry.

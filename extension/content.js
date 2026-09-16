@@ -166,6 +166,8 @@ function withCurrentStudentMessageContext(message, apply, sendResponse) {
       && response.current === true
       && (!studentClassroomContext(message.data) || (response.activeContexts || response.activeTeachingSessionIds?.map(teachingSessionId => ({ teachingSessionId })) || [])
         .some(value => studentClassroomKey(value) === studentClassroomKey(message.data)))
+      && (!message.data?.supervisionContextId || message.data.studentControlRevision === undefined
+        || message.data.studentControlRevision === response.studentControlRevision)
     ) {
       currentStudentMessageContext = { ...studentMessageContext };
       currentFabAuthorityBinding = response.fabBinding || null;

@@ -48,10 +48,13 @@ try {
     const state = (id, revision) => RuntimeCore.normalizeClassroomState({ schemaVersion: 1, revision,
       supervisionContextId: id, hardExpiresAt: end, scheduledEndAt: end, restrictions: {} });
     const fab = (id, revision) => ({ schemaVersion: 1, revision: 1, ownershipRevision: revision, teachingSessionId: null,
+      contextAuthorityRevision: '0',
       supervisionContextId: id, activeSessionIds: [], activeContexts: [{ supervisionContextId: id }],
       contextSource: 'scheduled_testing', contextName: 'Scheduled MAP', messagingEnabled: true, handRaisingEnabled: true });
     currentClassroomState = state('testing-a', 41);
     observeStudentControlRevision(41, auth, 'fixture');
+    await applyFabSettings({ ownershipRevision: 41, teachingSessionId: null, activeSessionIds: [], activeContexts: [],
+      messagingEnabled: false, handRaisingEnabled: false, supervisionContext: { id: 'testing-a' } }, { authContext: auth });
     await applyFabSettings(fab('testing-a', 41), { authContext: auth });
     const action = captureStudentActionRequest({ studentMessageContext: studentMessageContextFor(auth), fabBinding: fabIdentityBinding(),
       supervisionContextId: 'testing-a', studentControlRevision: 41 });
@@ -128,6 +131,7 @@ try {
     currentClassroomState = RuntimeCore.normalizeClassroomState({ schemaVersion: 1, revision: 43, supervisionContextId: 'testing-c', hardExpiresAt: Date.now() + 60_000, restrictions: {} });
     observeStudentControlRevision(43, auth, 'popup fixture');
     await applyFabSettings({ revision: 1, ownershipRevision: 43, teachingSessionId: null, supervisionContextId: 'testing-c', activeSessionIds: [],
+      contextAuthorityRevision: '0',
       activeContexts: [{ supervisionContextId: 'testing-c' }], contextSource: 'scheduled_testing', messagingEnabled: true, handRaisingEnabled: true }, { authContext: auth });
     await persistPollOverlay({ authority: { supervisionContextId: 'testing-c' }, data: { action: 'start', pollId: 'poll-c', question: 'Ready?', options: ['Yes', 'No'] } }, { authContext: auth });
     return { studentMessageContext: studentMessageContextFor(auth), fabBinding: fabIdentityBinding() };
@@ -165,6 +169,103 @@ try {
   assert.equal(contentPoll.body.supervisionContextId, 'testing-c');
   assert.equal(contentPoll.body.studentControlRevision, 43);
   assert.equal(contentPoll.body.teachingSessionId, undefined);
+  const contentAuthority = await worker.evaluate(async () => {
+    const auth = captureAuthenticatedContext('content revision fixture');
+    const tab = (await chrome.tabs.query({})).find(value => value.url?.startsWith('http://127.0.0.1:'));
+    const message = { type: 'chat-reply', studentMessageContext: studentMessageContextFor(auth),
+      data: { supervisionContextId: 'testing-c', studentControlRevision: 42, message: 'Old owner message' } };
+    const stale = await chrome.tabs.sendMessage(tab.id, message);
+    const current = await chrome.tabs.sendMessage(tab.id, { ...message,
+      data: { ...message.data, studentControlRevision: 43, message: 'Current owner message' } });
+    return { stale, current };
+  });
+  assert.equal(contentAuthority.stale.ignored, true, 'Content rejects a same-context stale delivery after worker validation');
+  assert.equal(contentAuthority.current.success, true);
+  const commands = await worker.evaluate(async () => {
+    const auth = captureAuthenticatedContext('scheduled command revision fixture');
+    const acks = [];
+    scheduleCommandAckFlush = () => {};
+    wsSend = async message => { if (message.type === 'command-ack') acks.push(message); return true; };
+    const invoke = (type, revision, suffix, data = {}) => {
+      const command = { type, authority: { supervisionContextId: 'testing-c' }, data };
+      return handleRemoteControl(command, { type: 'remote-control', commandId: `scheduled-${type}-${suffix}`,
+        studentId: auth.studentId, studentSessionId: auth.studentSessionId,
+        ...(revision === undefined ? {} : { studentControlRevision: revision }), command,
+        deliveryPolicy: 'transient_action', expiresAt: new Date(Date.now() + 30_000).toISOString() });
+    };
+    const before = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    const rejected = [];
+    for (const type of ['timer', 'poll', 'student-sign-out', 'hand-dismissed']) {
+      for (const revision of [undefined, 42]) {
+        rejected.push(await invoke(type, revision, revision ?? 'missing', { action: 'start', seconds: 25,
+          pollId: 'must-not-start', question: 'Stale?', options: ['Yes', 'No'] }));
+      }
+    }
+    const after = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    const valid = await invoke('timer', 43, 'valid', { action: 'start', seconds: 25 });
+    const appliedTimer = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    wsSend = async message => {
+      if (message.type === 'command-ack') {
+        acks.push(message);
+        if (message.commandId === 'scheduled-poll-race' && message.ackState === 'received') {
+          currentClassroomState = { ...currentClassroomState, revision: 44 };
+          observeStudentControlRevision(44, auth, 'same-context ownership change during receipt');
+        }
+      }
+      return true;
+    };
+    const raced = await invoke('poll', 43, 'race', { action: 'start', pollId: 'must-not-race',
+      question: 'Old owner?', options: ['Yes', 'No'] });
+    const afterRace = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    const persistedAcks = (await durableLocalKv.get(COMMAND_ACK_OUTBOX_KEY))[COMMAND_ACK_OUTBOX_KEY];
+    await applyFabSettings({ ...currentFabState, ownershipRevision: 44, contextAuthorityRevision: '0' }, { authContext: auth });
+    const afterRestriction = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    const originalSet = kv.set;
+    let writeRaced;
+    kv.set = async values => {
+      await originalSet.call(kv, values);
+      if (values[CLASSROOM_OVERLAY_STORAGE_KEY]?.timer?.commandId === 'scheduled-timer-write-race') {
+        currentClassroomState = { ...currentClassroomState, revision: 45 };
+        observeStudentControlRevision(45, auth, 'ownership changes during overlay persistence');
+      }
+    };
+    try { writeRaced = await invoke('timer', 44, 'write-race', { action: 'start', seconds: 59 }); }
+    finally { kv.set = originalSet; }
+    currentClassroomState = { ...currentClassroomState, revision: 45, hardExpiresAt: Date.now() + 120_000 };
+    observeStudentControlRevision(45, auth, 'scheduled end extension');
+    await applyFabSettings({ ...currentFabState, ownershipRevision: 45, contextAuthorityRevision: '0' }, { authContext: auth });
+    const afterExtension = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    currentClassroomState = { ...currentClassroomState, revision: 46 };
+    observeStudentControlRevision(46, auth, 'scheduled staff reassignment');
+    await applyFabSettings({ ...currentFabState, ownershipRevision: 46, contextAuthorityRevision: '1' }, { authContext: auth });
+    const afterReassignment = await getRestorableClassroomOverlayState({ authContext: auth, expectedBinding: fabIdentityBinding() });
+    return { before, after, rejected, valid, appliedTimer, raced, afterRace, acks, persistedAcks,
+      afterRestriction, afterExtension, afterReassignment, writeRaced,
+      stillSignedIn: CONFIG.activeStudentId === auth.studentId };
+  });
+  assert.equal(commands.rejected.length, 8);
+  for (const command of commands.rejected) assert.equal(command.rejected, true);
+  assert.equal(commands.stillSignedIn, true, 'Stale sign-out cannot clear the current login');
+  assert.deepEqual(commands.after, commands.before, 'Stale or unbound commands cannot replace overlays');
+  assert.notEqual(commands.valid.rejected, true);
+  assert.equal(commands.appliedTimer.timer.supervisionContextId, 'testing-c');
+  assert.equal(commands.raced.rejected, true, 'A receipt-time ownership change prevents execution');
+  assert.notEqual(commands.afterRace.poll?.pollId, 'must-not-race');
+  assert.deepEqual(commands.afterRestriction, commands.appliedTimer, 'Ordinary restriction revision and temporary FAB lag preserve applied overlays');
+  assert.equal(commands.writeRaced.rejected, true, 'A revision change during storage rejects and rolls back an unbroadcast overlay');
+  assert.deepEqual(commands.afterExtension, commands.appliedTimer, 'Extending the context preserves applied overlays and original deadlines');
+  assert.deepEqual(commands.afterReassignment, { timer: null, poll: null }, 'New assigned staff retires old applied overlays');
+  assert.equal(commands.acks.some(ack => ack.commandId.endsWith('-missing')), false);
+  for (const type of ['timer', 'poll', 'student-sign-out', 'hand-dismissed']) {
+    const ack = commands.acks.find(item => item.commandId === `scheduled-${type}-42`);
+    assert.equal(ack.ackState, 'failed');
+    assert.equal(ack.studentControlRevision, 42);
+  }
+  for (const [collection, expectedStates] of [[commands.acks, ['failed', 'received']], [commands.persistedAcks, ['failed']]]) {
+    const racedAcks = collection.filter(ack => ack.commandId === 'scheduled-poll-race');
+    assert.deepEqual(racedAcks.map(ack => ack.ackState).sort(), expectedStates);
+    for (const ack of racedAcks) assert.equal(ack.studentControlRevision, 43, 'ACK retains the original owner revision');
+  }
   console.log('Scheduled classroom Chrome parity and handoff checks passed.');
 } finally {
   if (browser) await browser.close();
