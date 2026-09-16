@@ -394,15 +394,39 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.8.8 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.8.8.zip` after clean-tag packaging. Earlier archives do not
-contain all of this release's startup recovery corrections and must not be
-submitted for this release. The candidate retains 2.8.7's bounded sign-in recovery
+For the prepared 2.8.9 candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.8.9.zip` after separately authorized clean-tag packaging.
+Earlier archives do not contain this release's scheduled classroom authority
+support and must not be submitted for this release. The candidate retains
+2.8.8's startup recovery corrections, 2.8.7's bounded sign-in recovery
 and safe script lifecycle, plus 2.8.6's portal-first student app
 selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
+
+### Scheduled classroom authority (2.8.9 candidate)
+
+Scheduled testing and scheduled coverage can use student chat, hands, polls,
+timers and authorized classroom controls after the server negotiates
+`scheduledClassroomV1` together with `scopedAuthorityChecksV1`. Each action keeps
+its real `teachingSessionId` or `supervisionContextId`; delayed actions cannot
+transfer to a different classroom, student or staff assignment. Restored timer
+and poll overlays survive ordinary restrictions and end-time extensions, but
+clear when their classroom authority expires or changes.
+
+Activation requires the paired SchoolPilot API/worker deployment and additive
+`classpilot-scheduled-classroom-20260915` migration. Keep
+`CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off` until a separately authorized rollout.
+Live View remains backend-only; the teacher Live View UI stays disabled even
+when the scheduled classroom rollout is enabled. Compatible backend/extension
+support does not expose the feature in the Dashboard.
+
+This candidate adds no Chrome permission or managed-policy key. Preparing the
+version does not authorize tagging, packaging, Store upload, publication or
+capability activation. See [the 2.8.9 candidate gate](../CLASSPILOT_2_8_9_RELEASE.md)
+for release dependencies and verification, and
+[the protocol contract](../SCHEDULED_CLASSROOM_PROTOCOL.md) for wire details.
 
 ### Bounded sign-in recovery (2.8.7)
 

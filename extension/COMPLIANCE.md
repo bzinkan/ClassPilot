@@ -37,7 +37,8 @@ SchoolPilot:
   The 30-second background cadence runs independently of teacher dashboard
   visibility while the exact server-authorized tracking window remains active;
   the five-second cadence requires the exact authorized class view to be
-  visible. SchoolPilot retains only teaching-session-bound thumbnails and
+  visible. SchoolPilot retains only teaching-session-bound or explicitly
+  negotiated scheduled-supervision-bound thumbnails and
   discards student-session/gap pixels on receipt.
 - Student-initiated hand raises, chat messages, poll responses, and sign-in
   events.
@@ -74,12 +75,13 @@ active visible HTTP/HTTPS tab about every five seconds only while an authorized
 teacher or administrator has the exact class view visible. It returns to about
 every 30 seconds when that view is not active but the short-lived
 server-authorized tracking window remains open. The five-second grant is bound
-to the exact student, student session, teaching session, control revision, and
+to the exact student, student session, teaching session or negotiated scheduled
+supervision context, control revision, and
 authentication generation; the extension independently expires it and drops
 overlapping captures rather than queuing them. Each upload carries the exact
-student-session or teaching-session authority and control revision that
+student-session, teaching-session or negotiated supervision authority and control revision that
 authorized the pixels. SchoolPilot discards student-session/gap pixels on
-receipt and retains only teaching-session-bound thumbnails. Capture stops when
+receipt and retains only authorized classroom-bound thumbnails. Capture stops when
 the tracking window closes, the lease expires or is revoked, school tracking
 policy is hard-off or limited safety-only, the student signs out or the session expires/changes, or
 the school license is explicitly denied.
@@ -97,14 +99,26 @@ transition. The current SchoolPilot Safety Center does not issue this command
 for classifier findings. Neither this legacy path nor ordinary capture runs
 in safety-only mode.
 
-Live screen viewing may also be requested by a teacher during an active class
-session. On managed ChromeOS devices, a school Chrome policy can allow silent
+Live View remains backend-only; the teacher Live View UI stays disabled in the
+2.8.9 candidate, including when the scheduled classroom rollout is enabled.
+The retained protocol supports an explicitly authorized active-class request.
+On managed ChromeOS devices, a school Chrome policy can allow silent
 tab capture; otherwise Chrome may show a screen picker. Server-authorized,
 short-lived ICE configuration may route encrypted WebRTC media through
 SchoolPilot TURN relays when a direct connection is unavailable. The extension
-and SchoolPilot servers do not record Live View streams. The authorized teacher
-dashboard can explicitly save a local recording or still image, which the
-school controls.
+and SchoolPilot servers do not record Live View streams. The retained Live View
+implementation supports teacher-initiated local recordings and still images,
+which the school controls; those controls remain unavailable while its UI is disabled.
+
+Scheduled classroom activation requires the paired SchoolPilot API/worker
+deployment and additive `classpilot-scheduled-classroom-20260915` migration.
+Keep `CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off` until a separately authorized
+rollout; the extension must negotiate `scheduledClassroomV1` together with
+`scopedAuthorityChecksV1`. Student chat, hands and poll responses carry their
+original scheduled context and control revision. Timer/poll restoration keeps
+the exact browser binding and staff-assignment authority. Expired or replaced
+authority cannot be reused by a delayed action. This adds no Chrome permission
+or managed-policy key and does not change the retention rules below.
 
 The extension shows visible indicators in the popup and in-page ClassPilot FAB
 so students can see that school-managed monitoring is active.
@@ -282,7 +296,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.8.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.8.9.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
@@ -294,7 +308,11 @@ Before each Chrome Web Store upload:
   of student-session/gap pixels, review-first safety findings,
   managed-device kiosk continuity, school-configured restricted sign-in,
   safety-only after-hours URL/title observations, school website-policy
-  enforcement, and TURN-relayed Live View.
+  enforcement, and the retained TURN-relayed Live View contract. Do not describe
+  the disabled Live View UI as an available feature.
+- Follow `../CLASSPILOT_2_8_9_RELEASE.md` for the current candidate gate.
+  Preparing this version does not authorize packaging, Store upload,
+  publication or scheduled classroom capability activation.
 - Test the exact release package on controlled Google Admin-managed Chromebooks
   across school-hours/calendar transitions, Off/Safety only/Full after-hours modes,
   website block/unblock, worker restart, and student changes. Repeat managed
