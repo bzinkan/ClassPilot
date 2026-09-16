@@ -20,12 +20,13 @@ const functions = [
   'recordAuthGateRecoveryDiagnostic', 'authGateRecoveryError', 'authGateRecoveryFailurePayload',
   'createAuthGateResponseDeadline', 'armManagedPolicyRecovery', 'noteManagedPolicyRecoveryFailure',
   'clearManagedPolicyRecoveryFailure', 'ensureManagedAuthGatePolicyAvailable',
-  'sharedManagedAuthGatePolicyRevalidation', 'awaitManagedAuthGatePolicyStable',
+  'sharedManagedAuthGatePolicyRevalidation', 'trackedManagedAuthGatePolicyRevalidation', 'awaitManagedAuthGatePolicyStable',
   'readManagedConfigOnce', 'readManagedConfig', 'enqueueStudentAuthMutation', 'authMutationSuperseded',
   'assertManagedPolicyRevalidationCurrent',
   'writeAuthGateStartupPublication', 'readAuthGateStartupPublication',
   'armAuthGateStartupPublicationRecovery', 'runAuthGateStartupPublication',
   'beginAuthGateStartupPublication', 'retryAuthGateStartupPublications',
+  'trackStartupNativeOperation', 'startupNativeIntentSatisfied', 'canonicalStorageJson',
 ];
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 const deferred = () => { let resolve, reject; const promise = new Promise((a,b) => { resolve=a; reject=b; }); return {promise,resolve,reject}; };
@@ -47,7 +48,12 @@ function harness() {
     AUTH_GATE_STARTUP_PUBLICATION_RECOVERY_ALARM: 'auth-gate-startup-publication-recovery',
     authGateStartupPublicationOwners: new Map(), authGateStartupPublicationStorageFailures: new WeakSet(),
     authGateStartupAuthSnapshotSupersededFailures: new WeakSet(),
-    managedAuthGateStartupAuthorityTransition: null, authGateStartupSupersessionOwnsReadiness: false,
+    managedAuthGateStartupAuthorityTransition: null,
+    AUTH_GATE_STARTUP_RECOVERABLE_OWNER_KINDS: new Set(['signed_out_clear', 'startup_readiness']),
+    AUTH_GATE_STARTUP_LOOP_ATTEMPT_LIMIT: 8, STUDENT_AUTH_CLEAR_INTENT_KEY: 'clear-intent',
+    startupWakeRecoveryFlags: null, studentSessionRecoveryState: { armed: null, pending: [] },
+    rawLocalKv: null, durableSessionKv: null, CONFIG: {},
+    manualStudentLoginPendingGeneration: 0, studentAuthCommitPending: false,
     SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS: [2000,5000,15000,30000], MANAGED_CONFIG_KEYS: ['schoolId'],
     managedAuthGatePolicyGeneration: 1, managedAuthGatePolicyFailure: null,
     managedAuthGatePolicyRecoveryAttempt: 0, managedAuthGatePolicyUserRetryAt: null,
@@ -343,8 +349,26 @@ function startupPublicationHarness({authenticated=false,interruptedFlag=null}={}
   const earlyStart=source.lastIndexOf('\n  if (',earlyEnd);
   const earlyPublication=source.slice(earlyStart,earlyEnd);
   assert.ok(earlyPublication.includes('markAuthStateRestored();'),'production early-publication block must be found');
-  const finalPublication=source.match(/if \(authGateRevisionReady && !authGateStartupSupersessionOwnsReadiness\) markAuthStateRestored\(\);/g);
+  const finalPublication=source.match(/markClassroomStateRestored\(\);\n  if \(!authGateStartupComplete\) ensureStartupReadinessPublication\(\);/g);
   assert.equal(finalPublication?.length,1,'production final publication must be unique');
+  for (const name of ['ensureStartupReadinessPublication','nudgeStartupReadinessPublication',
+    'publishStartupReadinessWhenVerified','startupPolicyFailureTolerated','assertStartupReadinessSignedOut',
+    'computeStartupSignedOutClearPlan','beginStartupSignedOutClear']) vm.runInContext(functionSource(name),c,{filename:`production:${name}`});
+  Object.assign(c,{
+    markClassroomStateRestored(){},
+    startupWakeRecoveryFlags:Object.freeze({
+      interruptedAuthClear:interruptedFlag==='interruptedAuthClear',
+      interruptedAuthCommit:interruptedFlag==='interruptedAuthCommit',
+      manualAuthTimestampInvalid:interruptedFlag==='manualAuthTimestampInvalid',
+      manualAuthSessionStorageUnavailable:interruptedFlag==='manualAuthSessionStorageUnavailable',
+      clearIntent:null,
+    }),
+    // The controlled durable-cleanup seam stands in for the tracked signed-out clear.
+    clearStudentAuth:()=>cleanup.promise,
+    initializeAuthGateRevisionPublication:async()=>{},
+    initializeAuthGateRosterContextPublication:async()=>{},
+    awaitAuthGateRosterContextStable:async()=>{},
+  });
   // Execute the actual production publication blocks around a controlled
   // durable-cleanup seam. The real gate handler must honor the resulting
   // barrier; the full browser gate separately exercises all wake operations.
@@ -366,7 +390,7 @@ test('unsigned startup with blocked durable cleanup cannot publish readiness or 
   assert.equal('state' in replies[0],false);
   assert.equal(h.context.authGateStartupComplete,false);
   assert.equal(h.refreshes.length,0,'a response deadline must not bypass durable cleanup');
-  h.cleanup.resolve();await h.context.fixtureStartup;await flush();
+  h.cleanup.resolve();await h.context.fixtureStartup;await h.context.authStateRestorePromise;await flush();
   assert.equal(h.context.authGateStartupComplete,true);
   assert.equal(h.refreshes.length,1);
   assert.equal(replies.length,1,'the expired request must not receive a late ready reply');
@@ -429,10 +453,12 @@ function durablePublicationHarness({kind,operation='set',failure='reject',failCo
   const h=harness(), c=h.context, handler=gateHandler(h), pending=deferred();
   const state={}, reads=[], writes=[];
   const revisionReady=deferred(), rosterReady=deferred();
-  let failures=0;
+  let failures=0, reconciling=false;
   const selectedKey=kind==='revision'?'revision-ceiling':'roster-context';
   const applyFailure=async(op,key)=>{
-    if(op!==operation||key!==selectedKey||failures>=failCount) return;
+    // The injected read fault models the owner's own narrow fresh read; the
+    // 2.9.0 reconcile reads (read-before-fail, deadline) bypass it.
+    if(op!==operation||key!==selectedKey||failures>=failCount||(op==='get'&&reconciling)) return;
     failures++;
     if(failure==='pending') await pending.promise;
     else throw new Error('private-native-storage-detail');
@@ -460,6 +486,8 @@ function durablePublicationHarness({kind,operation='set',failure='reject',failCo
     'awaitAuthGateRevisionPublicationReady','awaitAuthGateRosterContextStable']) {
     vm.runInContext(functionSource(name),c,{filename:`production:${name}`});
   }
+  const satisfied=c.startupNativeIntentSatisfied;
+  c.startupNativeIntentSatisfied=async(intended)=>{reconciling=true;try{return await satisfied(intended);}finally{reconciling=false;}};
   // Roster startup receives the wake snapshot. A retry after a rejected write
   // performs its own narrow fresh read; seed that rejection when testing GET.
   if(kind==='roster_context'&&operation==='get') {
@@ -508,21 +536,34 @@ for(const kind of ['revision','roster_context']) {
       assert.equal(JSON.stringify(h.diagnostics).includes('private'),false);
     });
 
-    test(`never-settling ${kind} ${operation} retains one owner through response deadlines and Retry`,async()=>{
+    test(`never-settling ${kind} ${operation} is reconciled at the response deadline and recovers only on Retry`,async()=>{
       const h=durablePublicationHarness({kind,operation,failure:'pending'}),c=h.context,replies=[];
       await h.settle();
       if(kind==='roster_context'&&operation==='get') {c.retryAuthGateStartupPublications({userInitiated:true});await h.settle();}
       assert.equal(h.failures,1);
       const owner=c.authGateStartupPublicationOwners.get(kind),active=owner.inFlight;
       assert.ok(active);
-      const operationsBefore=h.reads.length+h.writes.length;
+      const writesBefore=h.writes.length;
       for(let i=0;i<5;i++)h.handler({type:'refresh-auth-state',reason:'user'},{},value=>replies.push(value));
-      await h.advance(9000);await h.settle();
-      assert.equal(c.authGateStartupComplete,false);assert.equal(owner.inFlight,active);
-      assert.equal(h.reads.length+h.writes.length,operationsBefore,'timed-out replies cannot replay unresolved storage');
+      await h.advance(8999);await h.settle();
+      assert.equal(c.authGateStartupComplete,false);
+      assert.equal(owner.inFlight,active,'an unresolved operation stays owned until the response deadline');
+      assert.equal(h.writes.length,writesBefore,'timed-out replies cannot replay unresolved storage');
+      await h.advance(1);await h.settle();
+      // The deadline reconciles from a fresh read. Nothing landed, so the owner is
+      // now a completed, retryable failure; the native write is never re-issued.
+      assert.equal(c.authGateStartupComplete,false);assert.equal(owner.inFlight,null);
+      assert.equal(owner.failed,true);assert.ok(owner.retryAt>=c.Date.now()+2000);
+      assert.equal(h.writes.length,writesBefore,'a stalled write is never replayed by the deadline');
+      assert.ok(h.diagnostics.some(entry=>entry.stage==='startup'&&entry.cause==='stalled'));
       assert.equal(replies.length,5);assert.ok(replies.every(reply=>reply.success===false&&!('state' in reply)));
-      h.pending.resolve();await h.settle();await c.authStateRestorePromise;
+      h.pending.resolve();await h.settle();
+      assert.equal(c.authGateStartupComplete,false,'a late native result cannot become authority');
+      c.retryAuthGateStartupPublications({userInitiated:true});await h.settle();await c.authStateRestorePromise;
       assert.equal(c.authGateStartupComplete,true);
+      // Retry re-runs the owner read-before-write: a late-landed write is reused,
+      // a lost one is issued once. Never a blind replay of the stalled call.
+      assert.ok(h.writes.length<=writesBefore+1,'explicit Retry re-issues at most one write');
       assert.equal(replies.length,5,'expired RPC callbacks never receive late authority');
     });
   }
@@ -599,7 +640,7 @@ for (const area of ['local', 'session']) {
     assert.equal(JSON.stringify(h.diagnostics).includes('private'), false);
   });
 
-  test(`unresolved initial auth ${area} read retains ownership through repeated response deadlines`, async () => {
+  test(`unresolved initial auth ${area} read fails closed at the response deadline and recovers only on Retry`, async () => {
     const h = authSnapshotHarness(), c = h.context, held = deferred();
     const adapter = area === 'local' ? c.rawLocalKv : c.durableSessionKv;
     const original = adapter.get; let calls = 0, settled = false;
@@ -612,10 +653,16 @@ for (const area of ['local', 'session']) {
       c.createAuthGateResponseDeadline(value => responses.push(value));
       c.retryAuthGateStartupPublications({ userInitiated: true });
     }
-    await h.advance(9000);
+    await h.advance(8999);
     assert.equal(calls, 1); assert.equal(owner.inFlight, active); assert.equal(settled, false);
+    await h.advance(1); await flush();
+    // A read has no intended state to reconcile, so the deadline turns it into a
+    // completed, retryable failure. The late native result is discarded.
+    assert.equal(calls, 1); assert.equal(owner.inFlight, null); assert.equal(owner.failed, true); assert.equal(settled, false);
     assert.ok(responses.every(value => value.errorCode === 'AUTH_GATE_STARTUP_TIMEOUT' && !('state' in value)));
-    held.resolve(); await pending;
+    held.resolve(); await flush(); assert.equal(settled, false, 'a late native read never becomes authority');
+    c.retryAuthGateStartupPublications({ userInitiated: true }); await pending;
+    assert.equal(calls, 2);
     assert.equal(responses.length, 5); assert.equal(c.authGateStartupPublicationOwners.has('auth_snapshot'), false);
   });
 }
@@ -717,7 +764,9 @@ function managedWakeTransitionHarness() {
   };
   for (const name of ['hasSessionStorage', 'readAuthGateStartupAuthSnapshot', 'getStoredAuthState',
     'advanceManagedAuthGatePolicyGeneration', 'startupManagedAuthorityTransitionIsCurrent',
-    'assertStartupAuthorityIsSignedOut', 'finishSupersededAuthWakeAtCurrentSignedOutPolicy',
+    'assertStartupAuthorityIsSignedOut', 'startupPolicyFailureTolerated', 'assertStartupReadinessSignedOut',
+    'computeStartupSignedOutClearPlan', 'beginStartupSignedOutClear', 'ensureStartupReadinessPublication',
+    'nudgeStartupReadinessPublication', 'publishStartupReadinessWhenVerified',
     'notifyAuthGateAfterManagedPolicyRestore', 'handleManagedAuthGateStorageChange']) {
     vm.runInContext(functionSource(name), c);
   }
@@ -737,7 +786,7 @@ function managedWakeTransitionHarness() {
   const wakeStart = source.indexOf('  let authStored;', source.indexOf('// Run immediately on service worker load/wake-up'));
   const wakeEnd = source.indexOf('  const storedServerUrl =', wakeStart);
   assert.ok(wakeStart > 0 && wakeEnd > wakeStart);
-  const finalPublication = source.match(/if \(authGateRevisionReady && !authGateStartupSupersessionOwnsReadiness\) markAuthStateRestored\(\);/)[0];
+  const finalPublication = source.match(/markClassroomStateRestored\(\);\n  if \(!authGateStartupComplete\) ensureStartupReadinessPublication\(\);/)[0];
   vm.runInContext(`globalThis.fixtureWake = (async () => {
     ${source.slice(wakeStart, wakeEnd)}
     oldWakeContinued++;
@@ -772,7 +821,7 @@ test('actual wake retires an obsolete native auth read and opens only current si
   h.clears[0].resolve(); await digestStarted.promise;
   assert.equal(c.authGateStartupComplete, false); assert.equal(c.authGateRosterContextReady, false);
   assert.equal(h.deliveries.length, 0, 'tab delivery must stay behind the durable roster publication');
-  digestReleased.resolve(); await c.fixtureWake;
+  digestReleased.resolve(); await c.fixtureWake; await c.fixtureAuthRestore;
   assert.equal(c.authGateStartupComplete, true); assert.equal(c.authGateRosterContextReady, true);
   assert.equal(c.authGateRevisionReady, true); assert.equal(c.studentAuthInvalidating, true);
   assert.equal(c.oldWakeContinued, 0); assert.equal(c.CONFIG.studentToken, null);
@@ -797,8 +846,17 @@ for (const outcome of ['held', 'rejected']) {
     assert.equal(c.authGateStartupComplete, false); assert.equal(c.authGateRosterContextReady, false);
     assert.equal(c.studentAuthInvalidating, true); assert.equal(c.oldWakeContinued, 0);
     assert.equal(h.clears.length, 1);
-    if (outcome === 'rejected') assert.equal(c.wakeFailures.length, 1);
-    else { h.clears[0].resolve(); await h.settle(); await c.fixtureWake; }
+    // The wake itself never fails on the clear; readiness is what stays closed.
+    // The strict clear is its own tracked owner: rejected, it is the completed,
+    // retryable failure that Retry replays, while readiness keeps waiting on it.
+    assert.equal(c.wakeFailures.length, 0);
+    const readiness = c.authGateStartupPublicationOwners.get('startup_readiness');
+    const clearOwner = c.authGateStartupPublicationOwners.get('signed_out_clear');
+    assert.ok(readiness, 'readiness must be owned by the coordinator');
+    assert.ok(clearOwner, 'the transition clear must be a tracked startup owner');
+    assert.ok(readiness.inFlight, 'readiness waits on the strict clear rather than failing on it');
+    if (outcome === 'rejected') { assert.equal(clearOwner.failed, true); assert.equal(clearOwner.inFlight, null); assert.ok(clearOwner.retryAt > 0); }
+    else { assert.ok(clearOwner.inFlight); h.clears[0].resolve(); await h.settle(); await c.fixtureWake; }
   });
 }
 
@@ -808,7 +866,7 @@ test('a second managed authority transition invalidates the first clear and publ
   h.change({ schoolId: { newValue: 'fixture-second-school' } }); h.acceptPolicy();
   h.clears[0].resolve(); await h.settle();
   assert.equal(c.authGateStartupComplete, false); assert.equal(c.authGateRosterContextReady, false);
-  h.clears[1].resolve(); await h.settle(); await c.fixtureWake;
+  h.clears[1].resolve(); await h.settle(); await c.fixtureWake; await c.fixtureAuthRestore;
   assert.equal(c.authGateStartupComplete, true); assert.equal(c.CONFIG.schoolId, 'fixture-policy-1');
   assert.equal(c.oldWakeContinued, 0); assert.equal(c.wakeFailures.length, 0);
   assert.equal(h.policyWrites.length, 1, 'superseded transition must not persist its old binding');
@@ -817,7 +875,7 @@ test('a second managed authority transition invalidates the first clear and publ
 test('a settled native managed-read timeout permits only unavailable startup after strict cleanup succeeds', async () => {
   const h = managedWakeTransitionHarness(), c = h.context;
   await h.settle(); const transition = h.change(); h.resolveOldRead();
-  h.clears[0].resolve(); await h.advance(3000); await h.settle(); await c.fixtureWake;
+  h.clears[0].resolve(); await h.advance(3000); await h.settle(); await c.fixtureWake; await c.fixtureAuthRestore;
   assert.equal(c.authGateStartupComplete, true); assert.equal(c.studentAuthInvalidating, true);
   assert.equal(c.managedAuthGatePolicyFailure.code, 'AUTH_GATE_POLICY_TIMEOUT');
   assert.equal(c.managedAuthGatePolicyFailure.generation, transition.policyGeneration);
@@ -841,8 +899,10 @@ for (const dependency of ['storedPolicyReadGate', 'ssoClearGate', 'attemptClearG
       if (outcome === 'rejected') gate.reject(new Error('fixture-prerequisite-failed'));
       else gate.resolve();
       await h.settle(); await c.fixtureWake;
+      if (outcome === 'held') await c.fixtureAuthRestore;
       assert.equal(c.authGateStartupComplete, outcome === 'held');
-      assert.equal(c.wakeFailures.length, outcome === 'held' ? 0 : 1);
+      assert.equal(c.wakeFailures.length, 0);
+      if (outcome === 'rejected') assert.equal(c.authGateStartupPublicationOwners.get('startup_readiness').failed, true);
       assert.equal(c.oldWakeContinued, 0);
     }
   });
@@ -856,7 +916,8 @@ test('pending or same-code rejected policy writes never qualify as native read t
   assert.equal(c.authGateRosterContextReady, false);
   write.reject(c.authGateRecoveryError('AUTH_GATE_POLICY_TIMEOUT'));
   await h.settle(); await c.fixtureWake;
-  assert.equal(c.authGateStartupComplete, false); assert.equal(c.wakeFailures.length, 1);
+  assert.equal(c.authGateStartupComplete, false); assert.equal(c.wakeFailures.length, 0);
+  assert.equal(c.authGateStartupPublicationOwners.get('startup_readiness').failed, true);
 });
 
 test('policy-only change completes its strict barrier without waiting for startup or clearing auth', { timeout: 10000 }, async () => {
@@ -869,7 +930,7 @@ test('policy-only change completes its strict barrier without waiting for startu
   h.initialRead.resolve({ config: {} }); await h.settle(); await c.fixtureWake;
   assert.equal(c.oldWakeContinued, 1, 'only the original wake continuation proceeds');
   assert.equal(c.retiredWakePolicies, 0); assert.equal(c.initialReadCalls, 2, 'policy change discards the first native snapshot');
-  assert.equal(c.authGateStartupSupersessionOwnsReadiness, false);
+  assert.equal(h.diagnostics.some(entry => entry.cause === 'superseded_joined'), false, 'a policy-only change does not retire the wake');
   await c.initializeAuthGateRevisionPublication();
   await c.initializeAuthGateRosterContextPublication(undefined, { readFresh: true });
   vm.runInContext('markAuthStateRestored();', c); await h.waitForNotifications();

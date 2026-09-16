@@ -7,19 +7,19 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> The 2.8.9 candidate is being prepared; no packaging, tagging, upload or
+> The 2.9.0 candidate is being prepared; no packaging, tagging, upload or
 > publication is authorized by these instructions. After separate authorization,
-> use only `dist/ClassPilot-v2.8.9.zip` produced from the clean,
+> use only `dist/ClassPilot-v2.9.0.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.8.9.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.9.0.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Earlier archives do not contain this release's scheduled classroom authority
-> support. Retain 2.8.8's startup recovery corrections, 2.8.7's bounded sign-in
-> recovery and safe upgrade handling,
+> Earlier archives do not contain this release's startup recovery correction.
+> Retain 2.8.9's scheduled classroom authority support, 2.8.8's startup recovery
+> corrections, 2.8.7's bounded sign-in recovery and safe upgrade handling,
 > plus 2.8.6's portal-first student app selection and
 > retained-portal behavior, together with 2.8.5's school-calendar, limited
 > after-hours safety, and revisioned website-policy behavior. Earlier archives must not be
-> submitted for this release. Version 2.8.9 also retains the restricted-sign-in
+> submitted for this release. Version 2.9.0 also retains the restricted-sign-in
 > acceptance fix and other previously reviewed behavior.
 > Submit with deferred publishing. Validate that exact package on at least two
 > controlled Chromebooks using the production school policy before submission,
@@ -32,7 +32,8 @@
 > rollout must negotiate `scheduledClassroomV1` with `scopedAuthorityChecksV1`.
 > Live View remains backend-only; the teacher Live View UI stays disabled even
 > when the scheduled classroom rollout is enabled. Candidate checks and release
-> boundaries are in `CLASSPILOT_2_8_9_RELEASE.md`.
+> boundaries are in `CLASSPILOT_2_9_0_RELEASE.md`; the 2.8.9 scheduled classroom
+> gate remains recorded in `CLASSPILOT_2_8_9_RELEASE.md`.
 > The existing paired SchoolPilot deployment must support
 > `restrictionAuthPassThroughV1`, while that capability remains disabled. Keep
 > authentication-policy projection off throughout Chrome Web Store review and
@@ -149,10 +150,10 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.8.9 release artifact
+### 2.3 Build the canonical 2.9.0 release artifact
 
 After separate packaging authorization, start from a clean, tagged, reviewed
-2.8.9 commit at this repository's root.
+2.9.0 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, legacy exact-bound deferred-restriction marker, school-configured
 live and deferred authentication pass-through, independent heartbeat/control/
@@ -168,9 +169,15 @@ It must also include 2.8.7's bounded managed-policy recovery, independent worker
 and frame deadlines, mutation-safe Retry, and versioned page-controller handover.
 Preserve 2.8.8's actionable policy-refresh recovery, owned
 startup-storage retries and fixed support codes without weakening auth fences.
-Version 2.8.9 adds exclusive scheduled supervision authority for student tools,
+Preserve 2.8.9's exclusive scheduled supervision authority for student tools,
 restored overlays and media contracts, with stale ownership and expiry guards.
-An earlier archive is not releasable as 2.8.9.
+Version 2.9.0 adds the startup recovery correction: a completed startup storage
+failure recovers on Retry or bounded backoff once storage returns, a storage
+operation that never reports back is reconciled by a fresh read, managed-policy
+churn is bounded, and authentication cleanup replays in full from the existing
+crash marker. Screens, wording, support codes, permissions and managed-policy
+keys are unchanged from 2.8.9.
+An earlier archive is not releasable as 2.9.0.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -180,7 +187,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.8.9.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.9.0.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -200,7 +207,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.8.9.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.9.0.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -474,7 +481,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.8.9.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.9.0.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.

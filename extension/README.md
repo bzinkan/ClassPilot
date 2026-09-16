@@ -394,18 +394,48 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.8.9 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.8.9.zip` after separately authorized clean-tag packaging.
-Earlier archives do not contain this release's scheduled classroom authority
-support and must not be submitted for this release. The candidate retains
-2.8.8's startup recovery corrections, 2.8.7's bounded sign-in recovery
-and safe script lifecycle, plus 2.8.6's portal-first student app
-selection and 2.8.5's school-calendar,
+For the prepared 2.9.0 candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.9.0.zip` after separately authorized clean-tag packaging.
+Earlier archives do not contain this release's startup recovery correction
+and must not be submitted for this release. The candidate retains 2.8.9's
+scheduled classroom authority support, 2.8.8's startup recovery corrections,
+2.8.7's bounded sign-in recovery and safe script lifecycle, plus 2.8.6's
+portal-first student app selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
-### Scheduled classroom authority (2.8.9 candidate)
+### Startup recovery (2.9.0 candidate)
+
+Version 2.9.0 carries 2.8.9 forward unchanged and corrects startup recovery.
+A completed native storage failure during startup shows the existing actionable
+card with its support code and recovers on Retry, or through bounded backoff,
+once storage works again. A storage operation that never reports back is
+reconciled by a fresh read after 9 seconds, and a write whose callback fails
+after it already committed is reconciled the same way at once, so a landed
+write is never repeated and an explicit Retry is never trapped behind an
+abandoned startup operation. Managed-policy churn during
+startup is bounded; a policy change arriving between the startup snapshot and
+credential restoration joins recovery for the current authority instead of
+stranding the gate; and authentication cleanup is replayed in full from the
+existing crash marker rather than resumed piecemeal. `chrome.alarms` floors
+packed-extension alarms at 30 seconds, so the 2-second and 5-second backoff
+tiers are page-driven and unattended recovery begins at 30 seconds. A
+WebSocket/offscreen disconnect that never completes is not covered; it keeps
+its own fail-private close.
+
+Screens, wording, buttons and support codes are unchanged from 2.8.9. The
+correction adds no Chrome permission, managed-policy key, endpoint, reload or
+update-timing change, or off-device telemetry, and needs no SchoolPilot
+deployment or migration. On-device `authGateDiagnosticsV1` gains the causes
+`reconciled`, `stalled`, `superseded_joined` and `policy_churn` under the same
+20-record and six-field limits. When controller ownership cannot be proved
+during an in-place update, the explicit manual page reload remains the
+fallback; it is not seamless replacement. See
+`../CLASSPILOT_2_9_0_RELEASE.md` for the red-on-old verification gate and the
+managed-Chromebook publication gate.
+
+### Scheduled classroom authority (2.8.9)
 
 Scheduled testing and scheduled coverage can use student chat, hands, polls,
 timers and authorized classroom controls after the server negotiates
@@ -422,10 +452,12 @@ Live View remains backend-only; the teacher Live View UI stays disabled even
 when the scheduled classroom rollout is enabled. Compatible backend/extension
 support does not expose the feature in the Dashboard.
 
-This candidate adds no Chrome permission or managed-policy key. Preparing the
-version does not authorize tagging, packaging, Store upload, publication or
-capability activation. See [the 2.8.9 candidate gate](../CLASSPILOT_2_8_9_RELEASE.md)
-for release dependencies and verification, and
+Version 2.8.9 added no Chrome permission or managed-policy key, and 2.9.0
+carries it forward unchanged. Preparing a version does not authorize tagging,
+packaging, Store upload, publication or capability activation. See
+[the 2.8.9 release gate](../CLASSPILOT_2_8_9_RELEASE.md) for that version's
+dependencies and verification, [the 2.9.0 candidate gate](../CLASSPILOT_2_9_0_RELEASE.md)
+for the current release, and
 [the protocol contract](../SCHEDULED_CLASSROOM_PROTOCOL.md) for wire details.
 
 ### Bounded sign-in recovery (2.8.7)

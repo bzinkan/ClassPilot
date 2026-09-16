@@ -1,0 +1,23 @@
+{
+  "sourceCommit": "37cdfe9eef4c89bf521fc3fb33e31ffc1b182806",
+  "extensionVersion": "2.8.9",
+  "description": "Immutable 2.8.9 runtime scripts and manifest for same-ID cooperative-controller upgrade acceptance and red-on-old startup-recovery gating. Candidate supplies unchanged images/styles and a synthetic managed API fixture; no configuration or credentials included.",
+  "files": {
+    "auth-gate-bootstrap.js": "a1f5c6f94c0a7b5f2d8cbd2b01e10b48f6ab84b9a39f29d53a24155127eada24",
+    "auth-gate-frame.html": "11dd5cfe631f8f76cd393beaf744069d879651b155ba0f42367f4f297858e1a6",
+    "auth-gate-frame.js": "594763daf32ca6a35da30b4b9c74c0adbb65e1ecc310b50eb4659a4ff3d4859e",
+    "auth-gate-transport.js": "f13bae4a2c5f7a33d815d4015f7ce2861bc9b5a99002b1811bc999dd2cac72c1",
+    "auth-recovery-diagnostics.js": "54db4a942cb51e73964648371640928d2b0479693349e18100d05d2d553e8d09",
+    "classroom-runtime-core.js": "a30937a6c273897a8bf754b816192e47e3062f05ee4c44dca5251f962544546e",
+    "config.example.js": "46de9cc74a672ca354f7487dbc059a729ebeb84b2a523fd4fd5a199b118240ea",
+    "content-injection.js": "742ac3b09e1559eb7e8c7bf2a989d05f1694b06f4838a164633289ada4867db1",
+    "content.js": "2d8f28e297b01653fff7be8a15f98add2333883298c9679ee9feb686f9bb3cc6",
+    "manifest.json": "a030695ed9db9a835fd17fe1b17c3d1cdec3fb311044f67d5d5e9dc3080fcea5",
+    "offscreen.js": "6736b3644f99353f6c001bacf0693f4a0971e5e830dafd83e8efa018b657e2c2",
+    "page-lifecycle.js": "c0fac6b5a18b12003a2a0ceed30f1200565d272355881d9ab2575c78dccd66c9",
+    "popup.js": "268d88c9d83ab81f253653027fa4d616261ef6a77146c515b5266759f0cb3165",
+    "school-website-policy.js": "58debc61211064d8282dc78441d9eca759e54ef91ae3653aeb74cd23c41e71a0",
+    "service-worker.js": "ab0c8922bafaa3c30880c8b04a79a8a7bfff4f16480d78b64bc65315e80dd76d"
+  },
+  "archiveSha256": "c815a75422a64bee3f092c003a74bc559c8a3f2379c6a598e05b3d7b09ea0d98"
+}

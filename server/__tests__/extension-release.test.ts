@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -18,8 +18,102 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.8.9");
+    expect(manifest.version).toBe("2.9.0");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
+  });
+
+  it("keeps the 2.8.9 permission, managed-policy and update-timing surface unchanged", () => {
+    const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
+    expect(manifest.permissions).toEqual([
+      "tabs",
+      "activeTab",
+      "storage",
+      "notifications",
+      "alarms",
+      "idle",
+      "webNavigation",
+      "identity",
+      "identity.email",
+      "scripting",
+      "declarativeNetRequest",
+      "tabCapture",
+      "offscreen",
+      "enterprise.deviceAttributes",
+    ]);
+    expect(manifest.optional_permissions).toEqual(["desktopCapture"]);
+    expect(manifest.host_permissions).toEqual(["<all_urls>"]);
+
+    const schema = JSON.parse(readRepoFile("extension/managed_schema.json"));
+    expect(Object.keys(schema.properties ?? {})).toEqual([
+      "serverUrl",
+      "schoolSlug",
+      "schoolId",
+      "enrollmentKey",
+      "fastAuthGateEnabled",
+    ]);
+
+    // No extension source may add an update-check, self-reload, runtime-error
+    // page or beacon path: 2.9.0 changes no reload or update timing and sends
+    // no off-device telemetry.
+    const extensionScripts = readdirSync(resolve(repoRoot, "extension"))
+      .filter((name) => name.endsWith(".js"))
+      .sort();
+    expect(extensionScripts.length).toBeGreaterThan(0);
+    const extensionSource = extensionScripts
+      .map((name) => readRepoFile(`extension/${name}`))
+      .join("\n");
+    for (const forbidden of [
+      "onUpdateAvailable",
+      "runtime.reload(",
+      "requestUpdateCheck",
+      "runtime-error",
+      "sendBeacon",
+    ]) {
+      expect(extensionSource, `${forbidden} must not appear in any extension/*.js source`).not.toContain(forbidden);
+    }
+  });
+
+  it("preserves the 2.8.9 auth-gate screens, wording and support codes", () => {
+    const frameScript = readRepoFile("extension/auth-gate-frame.js");
+    const contentScript = readRepoFile("extension/content.js");
+    for (const text of [
+      "ClassPilot could not reach the live sign-in service. Cached information cannot be used to sign in.",
+      "ClassPilot needs a fresh page",
+      "Reload this page to reconnect to the extension.",
+      "Checking your previous sign-in",
+      "Support code:",
+      "Connecting…",
+      "Checking the live ClassPilot sign-in service…",
+      "ClassPilot can’t connect right now",
+      "Browsing stays locked until ClassPilot reconnects. Check the connection, then try again.",
+    ]) {
+      expect(frameScript, `auth-gate-frame.js must keep: ${text}`).toContain(text);
+    }
+    expect(contentScript).toContain(
+      "ClassPilot could not reach the live sign-in service. No cached information can be used to sign in.",
+    );
+
+    const supportCodes = [
+      "AUTH_GATE_POLICY_TIMEOUT",
+      "AUTH_GATE_POLICY_UNAVAILABLE",
+      "AUTH_GATE_STARTUP_TIMEOUT",
+      "AUTH_GATE_RPC_TIMEOUT",
+      "AUTH_GATE_RPC_UNAVAILABLE",
+      "AUTH_GATE_CONTEXT_INVALIDATED",
+      "AUTH_GATE_SERVER_TIMEOUT",
+      "AUTH_GATE_LOGIN_PENDING",
+      "AUTH_GATE_UNAVAILABLE",
+    ];
+    const supportCodeSet = frameScript.match(/const SUPPORT_CODES = new Set\(\[([\s\S]*?)\]\);/);
+    expect(supportCodeSet, "SUPPORT_CODES set literal should exist in auth-gate-frame.js").not.toBeNull();
+    const declaredCodes = (supportCodeSet?.[1] ?? "")
+      .split(",")
+      .map((entry) => entry.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    expect(declaredCodes).toEqual(supportCodes);
+    for (const code of supportCodes) {
+      expect(frameScript).toContain(`'${code}'`);
+    }
   });
 
   it("installs the fail-closed gate at document_start and keeps classroom UI idle", () => {
@@ -205,14 +299,43 @@ describe("ClassPilot extension release package guards", () => {
     const revalidation = serviceWorker.slice(start, end);
     const clearIndex = revalidation.indexOf("await clearStudentAuth('managed_policy_direct_revalidation'");
     const applyIndex = revalidation.indexOf("applyAuthoritativeManagedAuthGateSnapshot(");
-    const persistIndex = revalidation.indexOf("await durableLocalKv.set({", applyIndex);
+    // 2.9.0 bounds the direct persistence; it still follows the apply.
+    const trackedPersistIndex = revalidation.indexOf("await trackStartupNativeOperation(", applyIndex);
+    const persistIndex = revalidation.indexOf("durableLocalKv.set(revalidatedPersistence)", trackedPersistIndex);
 
     expect(clearIndex).toBeGreaterThan(-1);
     expect(applyIndex).toBeGreaterThan(clearIndex);
-    expect(persistIndex).toBeGreaterThan(applyIndex);
-    expect(serviceWorker).toContain(
-      "const invalidationPersisted = durableLocalKv.set({ [STUDENT_AUTH_INVALIDATING_KEY]: true })",
+    expect(trackedPersistIndex).toBeGreaterThan(applyIndex);
+    expect(persistIndex).toBeGreaterThan(trackedPersistIndex);
+    // The invalidation marker is still written before the clear is enqueued;
+    // it now rides in one tracked durable write together with the clear intent.
+    const clearStart = serviceWorker.indexOf("function clearStudentAuth(reason");
+    const clearEnd = serviceWorker.indexOf("async function clearStudentAuthNow(", clearStart);
+    expect(clearStart).toBeGreaterThan(-1);
+    expect(clearEnd).toBeGreaterThan(clearStart);
+    const clearBody = serviceWorker.slice(clearStart, clearEnd);
+    const generationIndex = clearBody.indexOf("advanceStudentAuthMutationGeneration();");
+    const invalidatingIndex = clearBody.indexOf("studentAuthInvalidating = true;", generationIndex);
+    const writeIndex = clearBody.indexOf("const invalidationWrite = {", invalidatingIndex);
+    const markerIndex = clearBody.indexOf("[STUDENT_AUTH_INVALIDATING_KEY]: true,", writeIndex);
+    const intentIndex = clearBody.indexOf("[STUDENT_AUTH_CLEAR_INTENT_KEY]: clearIntent,", markerIndex);
+    const trackedIndex = clearBody.indexOf(
+      "const invalidationPersisted = trackStartupNativeOperation(",
+      intentIndex,
     );
+    const persistedWriteIndex = clearBody.indexOf(
+      "() => durableLocalKv.set(invalidationWrite),",
+      trackedIndex,
+    );
+    const enqueueIndex = clearBody.indexOf("return enqueueStudentAuthMutation(", persistedWriteIndex);
+    expect(generationIndex).toBeGreaterThan(-1);
+    expect(invalidatingIndex).toBeGreaterThan(generationIndex);
+    expect(writeIndex).toBeGreaterThan(invalidatingIndex);
+    expect(markerIndex).toBeGreaterThan(writeIndex);
+    expect(intentIndex).toBeGreaterThan(markerIndex);
+    expect(trackedIndex).toBeGreaterThan(intentIndex);
+    expect(persistedWriteIndex).toBeGreaterThan(trackedIndex);
+    expect(enqueueIndex).toBeGreaterThan(persistedWriteIndex);
     expect(serviceWorker).toMatch(
       /async function clearStudentAuthNow\([^)]*invalidationPersisted\)[\s\S]*await invalidationPersisted/,
     );
@@ -281,24 +404,38 @@ describe("ClassPilot extension release package guards", () => {
     const end = serviceWorker.indexOf("if (chrome.storage?.onChanged)", start);
     const transition = serviceWorker.slice(start, end);
     const clearIndex = transition.indexOf(
-      "authorityAuthClearPromise = clearStudentAuth('managed_auth_authority_changed'",
+      "const authorityClear = () => clearStudentAuth('managed_auth_authority_changed'",
     );
-    const awaitClearIndex = transition.indexOf("authorityAuthClearPromise,", clearIndex);
+    // 2.9.0: the strict clear begins synchronously, then a startup owner adopts
+    // it so a completed failure is replayed by Retry or the recovery alarm.
+    const clearStartIndex = transition.indexOf("authorityAuthClearPromise = authorityClear();", clearIndex);
+    const clearOwnerIndex = transition.indexOf(
+      "beginAuthGateStartupPublication('signed_out_clear'",
+      clearStartIndex,
+    );
+    const awaitClearIndex = transition.indexOf("authorityAuthClearPromise,", clearOwnerIndex);
     const applyIndex = transition.indexOf(
       "applyAuthoritativeManagedAuthGateSnapshot(",
       awaitClearIndex,
     );
+    const trackedPersistIndex = transition.indexOf(
+      "await trackStartupNativeOperation(",
+      applyIndex,
+    );
     const persistIndex = transition.indexOf(
-      "await durableLocalKv.set(policyPersistence)",
+      "durableLocalKv.set(policyPersistence)",
       applyIndex,
     );
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
     expect(clearIndex).toBeGreaterThan(-1);
-    expect(awaitClearIndex).toBeGreaterThan(clearIndex);
+    expect(clearStartIndex).toBeGreaterThan(clearIndex);
+    expect(clearOwnerIndex).toBeGreaterThan(clearStartIndex);
+    expect(awaitClearIndex).toBeGreaterThan(clearOwnerIndex);
     expect(applyIndex).toBeGreaterThan(awaitClearIndex);
-    expect(persistIndex).toBeGreaterThan(applyIndex);
+    expect(trackedPersistIndex).toBeGreaterThan(applyIndex);
+    expect(persistIndex).toBeGreaterThan(trackedPersistIndex);
     expect(transition).toContain("{ persist: false }");
     expect(serviceWorker).toContain("handleManagedAuthGateStorageChange(changes, areaName);");
   });
@@ -614,7 +751,8 @@ describe("ClassPilot extension release package guards", () => {
     expect(responseBindingGuard).toBeLessThan(classroomResponseApply);
     expect(serviceWorker).toContain("scheduleEventHeartbeat('identity-changed-reconcile')");
     expect(serviceWorker).toContain("await clearStudentMessageState(reason)");
-    expect(serviceWorker).toContain("await reconcileMessageInboxIdentity('worker-wake')");
+    // The wake still awaits the inbox reconcile; 2.9.0 bounds that wait.
+    expect(serviceWorker).toContain("await trackStartupNativeOperation(() => reconcileMessageInboxIdentity('worker-wake'))");
     expect(runtimeCore).toContain("const MAX_MESSAGE_INBOX_ENTRIES = 50;");
     expect(runtimeCore).toContain("const MAX_MESSAGE_DEDUP_IDS = 500;");
     expect(popup).toContain("type: 'get-message-inbox'");

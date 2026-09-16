@@ -100,7 +100,8 @@ for classifier findings. Neither this legacy path nor ordinary capture runs
 in safety-only mode.
 
 Live View remains backend-only; the teacher Live View UI stays disabled in the
-2.8.9 candidate, including when the scheduled classroom rollout is enabled.
+2.9.0 candidate, as in 2.8.9, including when the scheduled classroom rollout is
+enabled.
 The retained protocol supports an explicitly authorized active-class request.
 On managed ChromeOS devices, a school Chrome policy can allow silent
 tab capture; otherwise Chrome may show a screen picker. Server-authorized,
@@ -287,6 +288,14 @@ short operational TTL; safety/evidence content, communications, account/audit
 records, and teacher-downloaded local files follow separate documented or
 contractual policies.
 
+The 2.9.0 startup recovery correction changes only when the existing sign-in
+gate retries after a temporary startup storage failure. It adds no Chrome
+permission, managed-policy key, endpoint or off-device telemetry, and collects
+no additional data. The on-device `authGateDiagnosticsV1` history gains four
+fixed cause values (`reconciled`, `stalled`, `superseded_joined`,
+`policy_churn`) under the same 20-record and six-field limits; records contain
+no identity, credential, URL or configuration value and never leave the device.
+
 ## Release Checklist
 
 Before each Chrome Web Store upload:
@@ -296,7 +305,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.8.9.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.9.0.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release
