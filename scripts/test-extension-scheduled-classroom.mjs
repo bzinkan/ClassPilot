@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +7,29 @@ import { chromium } from 'playwright';
 import { createServer } from 'node:http';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const extension = resolve(root, 'extension');
+const requestedExtension = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH) : resolve(root, 'extension');
+const extension = requestedExtension;
 const profile = await mkdtemp(join(tmpdir(), 'classpilot-scheduled-context-'));
 let browser;
 let server;
 try {
   browser = await chromium.launchPersistentContext(profile, { executablePath: chromium.executablePath(), headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
+    args: ['--enable-automation', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
+  const launchSession = await browser.newCDPSession(browser.pages()[0] || await browser.newPage());
+  try {
+    const { arguments: launchArguments } = await launchSession.send('Browser.getBrowserCommandLine');
+    for (const flag of ['--load-extension', '--disable-extensions-except']) {
+      assert.ok(launchArguments.includes(`${flag}=${requestedExtension}`), `Chrome must launch ${flag} from the requested extension directory`);
+    }
+  } finally {
+    await launchSession.detach();
+  }
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
+  const requestedManifest = JSON.parse(await readFile(resolve(requestedExtension, 'manifest.json'), 'utf8'));
+  const loadedVersion = await worker.evaluate(() => chrome.runtime.getManifest().version);
+  assert.equal(loadedVersion, requestedManifest.version, 'Chrome must load the requested extension manifest');
+  console.log(`Scheduled classroom Chrome loaded ${requestedExtension} (version ${loadedVersion}).`);
   const result = await worker.evaluate(async () => {
     await Promise.all([authStateRestorePromise, classroomStateRestorePromise]);
     await studentAuthMutationTail;
