@@ -8,14 +8,14 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.10.0 release documentation and preserved sign-in guarantees", () => {
-  it("pins every active release instruction to the versioned 2.10.0 artifact", () => {
+describe("2.9.1 release documentation and preserved sign-in guarantees", () => {
+  it("pins every active release instruction to the versioned 2.9.1 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.10.0.zip");
+      expect(source).toContain("ClassPilot-v2.9.1.zip");
       expect(source).not.toContain("ClassPilot-v2.9.0.zip");
       expect(source).not.toContain("ClassPilot-v2.8.9.zip");
       expect(source).not.toContain("ClassPilot-v2.8.8.zip");
@@ -24,13 +24,13 @@ describe("2.10.0 release documentation and preserved sign-in guarantees", () => 
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
     }
     expect(readme).toContain("Earlier archives do not");
-    expect(deployment).toContain("An earlier archive is not releasable as 2.10.0.");
+    expect(deployment).toContain("An earlier archive is not releasable as 2.9.1.");
     expect(deployment).toContain("afterHoursSafetyOnlyV1");
     expect(deployment).toContain("schoolWebsiteBlockEnforcementV1");
   });
 
   it("requires the paired migration and explicit rollout while keeping Live View UI disabled", () => {
-    for (const path of ["DEPLOYMENT.md", "extension/README.md", "extension/COMPLIANCE.md", "CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_10_0_RELEASE.md"]) {
+    for (const path of ["DEPLOYMENT.md", "extension/README.md", "extension/COMPLIANCE.md", "CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_9_1_RELEASE.md"]) {
       const source = read(path);
       expect(source).toContain("classpilot-scheduled-classroom-20260915");
       expect(source).toContain("CLASSPILOT_SCHEDULED_CLASSROOM_MODE=off");
@@ -39,7 +39,7 @@ describe("2.10.0 release documentation and preserved sign-in guarantees", () => 
       expect(source).toContain("Live View remains backend-only");
       expect(source).toMatch(/teacher Live View UI stays disabled/);
     }
-    for (const path of ["CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_10_0_RELEASE.md"]) {
+    for (const path of ["CLASSPILOT_2_8_9_RELEASE.md", "CLASSPILOT_2_9_0_RELEASE.md", "CLASSPILOT_2_9_1_RELEASE.md"]) {
       const candidate = read(path);
       expect(candidate).toContain("This candidate update does not tag, package, upload, publish or activate the rollout.");
       expect(candidate).toMatch(/Recheck the\s+live Store version immediately before any future upload/);

@@ -870,7 +870,7 @@ async function main() {
         await flushStudentChatOutbox();
         const afterReceipt = await kv.get(STUDENT_CHAT_OUTBOX_KEY);
 
-        // 2.10.0: a server cooldown parks the entry without touching the shared API lane.
+        // 2.9.1: a server cooldown parks the entry without touching the shared API lane.
         const apiBackoffBeforeCooldown = apiBackoffUntilMs;
         const cooldownClientMessageId = '18181818-1818-4818-8818-181818181818';
         let cooldownTransmissions = 0;
@@ -900,7 +900,7 @@ async function main() {
         chatBackoffUntilMs = 0;
         await removeDeliveredStudentChatEntry(cooldownClientMessageId, authA);
 
-        // 2.10.0: a paused class is a drop, not a hold, and the device adopts the pause at once.
+        // 2.9.1: a paused class is a drop, not a hold, and the device adopts the pause at once.
         fetchWithBackoff = async () => new Response(JSON.stringify({ error: 'Messaging is paused', code: 'chat_paused', pauseReason: 'teacher' }),
           { status: 403, headers: { 'content-type': 'application/json' } });
         const pausedClientMessageId = '19191919-1919-4919-8919-191919191919';

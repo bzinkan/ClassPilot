@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.10.0");
+    expect(manifest.version).toBe("2.9.1");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -1348,7 +1348,7 @@ describe("ClassPilot extension release package guards", () => {
   });
 });
 
-describe("ClassPilot 2.10.0 class chat controls", () => {
+describe("ClassPilot 2.9.1 class chat controls", () => {
   const serviceWorker = readRepoFile("extension/service-worker.js");
   const content = readRepoFile("extension/content.js");
   const popup = readRepoFile("extension/popup.js");
