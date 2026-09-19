@@ -37,6 +37,23 @@ describe("typed classroom contexts", () => {
     expect(core.classroomContexts({ activeContexts: [{ supervisionContextId: "s" }, { supervisionContextId: "s" }, { teachingSessionId: "s" }, {}] }))
       .toEqual([{ supervisionContextId: "s" }, { teachingSessionId: "s" }]);
   });
+  it("keeps a teacher message's seen acknowledgement through inbox hydration", () => {
+    const seenAckedAt = NOW - 5_000;
+    const normalized = core.normalizeTeacherMessage({
+      id: "teacher-message-seen", message: "Eyes up", teachingSessionId: "session-1", seenAckedAt,
+    }, NOW);
+    expect(normalized.seenAckedAt).toBe(seenAckedAt);
+    expect(core.normalizeTeacherMessage({ id: "teacher-message-unseen", message: "Hi", teachingSessionId: "session-1" }, NOW))
+      .not.toHaveProperty("seenAckedAt");
+    expect(core.normalizeTeacherMessage({ id: "teacher-message-bad", message: "Hi", teachingSessionId: "session-1", seenAckedAt: "later" }, NOW))
+      .not.toHaveProperty("seenAckedAt");
+    const merged = core.mergeTeacherMessageInbox([normalized], [], [
+      { id: "teacher-message-seen", message: "Eyes up", teachingSessionId: "session-1" },
+    ], NOW);
+    expect(merged.addedMessageIds).toEqual([]);
+    expect(merged.messages.find((message: any) => message.id === "teacher-message-seen").seenAckedAt).toBe(seenAckedAt);
+  });
+
   it("retains a message's original classroom scope through inbox hydration", () => {
     const message = core.normalizeTeacherMessage({ id: "reply", message: "Continue testing", supervisionContextId: "s" }, NOW);
     expect(message.supervisionContextId).toBe("s");

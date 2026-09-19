@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.9.0");
+    expect(manifest.version).toBe("2.10.0");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
@@ -786,6 +786,8 @@ describe("ClassPilot extension release package guards", () => {
       "classroomOverlayRestoreV1",
       "liveViewNegotiationV1",
       "domainPreservingRestrictionsV1",
+      "chatPauseV1",
+      "chatSeenAckV1",
     ]) {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
@@ -1267,8 +1269,8 @@ describe("ClassPilot extension release package guards", () => {
     const popup = readRepoFile("extension/popup.js");
     expect(popup).toContain("chrome.storage.local.get(['handRaised', 'handRaisingEnabled'])");
     expect(popup).toContain("updateRaiseHandUI(handRaised, handRaisingEnabled)");
-    expect(popup).toContain("chrome.storage.local.get(['messagingEnabled'])");
-    expect(popup).toContain("updateChatUI(messagingEnabled)");
+    expect(popup).toContain("chrome.storage.local.get(['messagingEnabled', 'messagesPaused', 'pauseReason'])");
+    expect(popup).toContain("updateChatUI(messagingEnabled, messagesPaused, pauseReason)");
     expect(popup).toContain("changes.handRaisingEnabled || changes.messagingEnabled || changes.handRaised");
     expect(popup).toContain("if (!handRaisingEnabled)");
     expect(popup).toContain("if (!messagingEnabled)");
@@ -1343,5 +1345,59 @@ describe("ClassPilot extension release package guards", () => {
       expect(copy).toContain("temporary encrypted stream");
       expect(copy).toContain("classroom communications");
     }
+  });
+});
+
+describe("ClassPilot 2.10.0 class chat controls", () => {
+  const serviceWorker = readRepoFile("extension/service-worker.js");
+  const content = readRepoFile("extension/content.js");
+  const popup = readRepoFile("extension/popup.js");
+  const runtimeCore = readRepoFile("extension/classroom-runtime-core.js");
+
+  it("keeps student sends on their own backoff lane so a chat cooldown never delays other traffic", () => {
+    expect(optionsAround(serviceWorker, "student message")).toContain("backoffLane: 'chat'");
+    expect(serviceWorker).toContain("let chatBackoffUntilMs = 0;");
+    expect(serviceWorker).toContain("if (lane === 'chat') return chatBackoffUntilMs;");
+    expect(serviceWorker).toContain("else if (lane === 'chat') chatBackoffUntilMs = value;");
+    expect(serviceWorker).toContain("const STUDENT_CHAT_COOLDOWN_MAX_MS = 120 * 1000;");
+    expect(serviceWorker).toMatch(/if \(response\.status === 429\) \{\s+const holdMs = studentChatCooldownHoldMs\(data\?\.retryAfterMs, response\);/);
+    expect(serviceWorker).toContain("if (entry.status === 'waiting' && entry.holdUntil > Date.now()) {");
+    expect(serviceWorker).toContain("options.promptly === true && normalizedDelay < 30 * 1000");
+  });
+
+  it("drops a send the server refuses for a paused class and refuses to queue while paused", () => {
+    expect(serviceWorker).toContain("const CHAT_PAUSED_REJECTION_CODES = new Set(['chat_paused', 'CHAT_PAUSED']);");
+    expect(serviceWorker).toContain("return discardPausedStudentChatEntry(attempted, data?.pauseReason, authContext);");
+    expect(serviceWorker).toContain("error.code = 'STUDENT_CHAT_PAUSED';");
+    // The pause is carried by the FAB frame and persisted with it; it never clears the thread.
+    expect(serviceWorker).toMatch(/messagesPaused,\s+pauseReason,\s+handRaised: typeof rawState\.handRaised === 'boolean'/);
+    expect(serviceWorker).toContain("messagesPaused: nextState.messagesPaused === true,");
+    for (const key of ["'messagesPaused',", "'pauseReason',"]) {
+      expect(serviceWorker.split(key).length - 1).toBeGreaterThanOrEqual(2);
+    }
+    // The thread-clear branches are untouched: a pause never erases the conversation.
+    expect(serviceWorker).toMatch(/if \(lifecycleChanged\) \{\s+updates\.fabChatMessages = \[\];\s+updates\.fabChatClosed = lifecycleEnded;/);
+    const pauseAdoption = serviceWorker.slice(serviceWorker.indexOf("async function adoptChatPauseNow"), serviceWorker.indexOf("async function discardPausedStudentChatEntry"));
+    expect(pauseAdoption).not.toContain("fabChatMessages");
+    expect(pauseAdoption).not.toContain("fabChatClosed");
+    expect(content).toContain("if (typeof state.messagesPaused === 'boolean') {");
+    expect(content).toContain("input.disabled = !messagingEnabled || paused;");
+    expect(content).toContain("'Paused during testing' : 'Paused by your teacher'");
+    expect(content).toContain("const STUDENT_SEND_MIN_INTERVAL_MS = 2000;");
+    expect(content).toContain('maxlength="500"');
+    expect(popup).toContain("'Messages are paused during testing.'");
+  });
+
+  it("reports seen once per teacher message and drains acknowledgements the server can never accept", () => {
+    expect(content).toContain("type: 'chat-message-seen',");
+    expect(content).toContain("if (document.visibilityState !== 'visible' || chatClosed) return;");
+    expect(serviceWorker).toContain("if (message.type === 'chat-message-seen') {");
+    expect(serviceWorker).toContain("if (!entry || entry.seenAckedAt) return;");
+    expect(serviceWorker).toContain("}, 'seen', null, authContext);");
+    expect(serviceWorker).toContain("rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered'");
+    expect(serviceWorker).toContain("entries = entries.filter((item) => item.messageId !== ack.messageId || item.status === 'seen');");
+    expect(serviceWorker).toMatch(/const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set\(\[\s+'INVALID_CHAT_ACK',\s+'CHAT_MESSAGE_NOT_FOUND',\s+\]\);/);
+    expect(serviceWorker).toContain("} else if (receipt?.accepted !== true && !chatAckReceiptIsTerminal(receipt)) {");
+    expect(runtimeCore).toContain("seenAckedAt: positiveTimestamp(rawMessage.seenAckedAt)");
   });
 });

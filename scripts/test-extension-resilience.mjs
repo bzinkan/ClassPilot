@@ -1250,6 +1250,31 @@ async function main() {
       const remainingChatAcks = (await kv.get(CHAT_ACK_OUTBOX_KEY))
         [CHAT_ACK_OUTBOX_KEY] || [];
 
+      // 2.10.0: seen is a real acknowledgement that a later delivered ack cannot evict,
+      // and a receipt the server can never accept drains instead of retrying for a day.
+      await sendChatDeliveryAck({ chatMessageId: 'chat-seen-message', ...chatAckBinding }, 'seen', null, chatAckAuthContext);
+      await sendChatDeliveryAck({ chatMessageId: 'chat-seen-message', ...chatAckBinding }, 'delivered', null, chatAckAuthContext);
+      const seenOutbox = ((await kv.get(CHAT_ACK_OUTBOX_KEY))[CHAT_ACK_OUTBOX_KEY] || [])
+        .filter((ack) => ack.messageId === 'chat-seen-message')
+        .map((ack) => ({ ackId: ack.ackId, status: ack.status }));
+      await handleWsMessage(JSON.stringify({
+        type: 'chat-message-ack-receipt',
+        ackId: 'chat:chat-seen-message:seen',
+        messageId: 'chat-seen-message',
+        accepted: false,
+        code: 'INVALID_CHAT_ACK',
+      }));
+      await handleWsMessage(JSON.stringify({
+        type: 'chat-message-ack-receipt',
+        ackId: 'chat:chat-seen-message:delivered',
+        messageId: 'chat-seen-message',
+        accepted: false,
+        code: 'CHAT_ACK_STALE',
+      }));
+      const seenOutboxAfterReceipts = ((await kv.get(CHAT_ACK_OUTBOX_KEY))[CHAT_ACK_OUTBOX_KEY] || [])
+        .filter((ack) => ack.messageId === 'chat-seen-message')
+        .map((ack) => ack.ackId);
+
       const classroomRuntimeBeforeTabTest = classroomRuntimeBackup();
       screenLocked = false;
       lockedUrl = null;
@@ -1565,6 +1590,8 @@ async function main() {
         chatAckHttpIds: chatAckHttpBatch?.acks?.map((ack) => ack.ackId) || [],
         queuedChatAckIds: queuedChatAcks.map((ack) => ack.ackId),
         remainingChatAckIds: remainingChatAcks.map((ack) => ack.ackId),
+        seenOutbox,
+        seenOutboxAfterReceipts,
         exactResult,
         firstStillOpen,
         staleCode,
@@ -1598,6 +1625,15 @@ async function main() {
     assert.ok(protocolResilience.descriptor.capabilities.includes('kioskLaunchTicketV2'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('commandAckReceiptV1'));
     assert.ok(protocolResilience.descriptor.capabilities.includes('classroomOverlayRestoreV1'));
+  assert.ok(protocolResilience.descriptor.capabilities.includes('chatPauseV1'));
+  assert.ok(protocolResilience.descriptor.capabilities.includes('chatSeenAckV1'));
+  assert.deepEqual(protocolResilience.seenOutbox, [
+    { ackId: 'chat:chat-seen-message:seen', status: 'seen' },
+    { ackId: 'chat:chat-seen-message:delivered', status: 'delivered' },
+  ], 'a delivered ack queues beside a seen ack instead of evicting it');
+  assert.deepEqual(protocolResilience.seenOutboxAfterReceipts, ['chat:chat-seen-message:delivered'],
+    'a terminal rejection drains its ack; a stale rejection keeps retrying');
+
     assert.deepEqual(protocolResilience.queuedAckIds, ['durable-ack-command:received']);
     assert.deepEqual(protocolResilience.remainingAckIds, []);
     assert.deepEqual(protocolResilience.ackHttpIds, ['http-fallback-command:completed']);

@@ -34,12 +34,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (namespace === 'local' && changes.connectivityHealthV1) {
       updateStatus();
     }
-    if (namespace === 'local' && (changes.handRaisingEnabled || changes.messagingEnabled || changes.handRaised)) {
+    if (namespace === 'local' && (changes.handRaisingEnabled || changes.messagingEnabled || changes.handRaised
+        || changes.messagesPaused || changes.pauseReason)) {
       if (changes.handRaisingEnabled) handRaisingEnabled = changes.handRaisingEnabled.newValue !== false;
       if (changes.messagingEnabled) messagingEnabled = changes.messagingEnabled.newValue !== false;
       if (changes.handRaised) handRaised = changes.handRaised.newValue === true;
+      if (changes.messagesPaused) messagesPaused = changes.messagesPaused.newValue === true;
+      if (changes.pauseReason) pauseReason = changes.pauseReason.newValue || null;
       updateRaiseHandUI(handRaised, handRaisingEnabled);
-      updateChatUI(messagingEnabled);
+      updateChatUI(messagingEnabled, messagesPaused, pauseReason);
     }
     if ((namespace === 'local' || namespace === 'session') &&
         (changes.studentToken || changes.studentEmail || changes.studentName)) {
@@ -626,25 +629,39 @@ async function sendStudentMessage(messageType = 'message') {
   }
 }
 
+let messagesPaused = false;
+let pauseReason = null;
+
 async function initChatUI() {
-  const stored = await chrome.storage.local.get(['messagingEnabled']);
+  const stored = await chrome.storage.local.get(['messagingEnabled', 'messagesPaused', 'pauseReason']);
   messagingEnabled = stored.messagingEnabled !== false;
-  updateChatUI(messagingEnabled);
+  messagesPaused = stored.messagesPaused === true;
+  pauseReason = stored.pauseReason || null;
+  updateChatUI(messagingEnabled, messagesPaused, pauseReason);
   document.getElementById('send-message-btn')?.addEventListener('click', () => sendStudentMessage('message'));
   document.getElementById('send-question-btn')?.addEventListener('click', () => sendStudentMessage('question'));
 }
 
-function updateChatUI(enabled = true) {
+function updateChatUI(enabled = true, paused = false, reason = null) {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-message-btn');
   const questionBtn = document.getElementById('send-question-btn');
   const disabledMsg = document.getElementById('chat-disabled');
+  const pausedMsg = document.getElementById('chat-paused');
+  const pausedText = document.getElementById('chat-paused-text');
+  const usable = enabled && !paused;
   for (const control of [input, sendBtn, questionBtn]) {
     if (!control) continue;
-    control.disabled = !enabled;
-    control.classList.toggle('hidden', !enabled);
+    control.disabled = !usable;
+    control.classList.toggle('hidden', !usable);
   }
   disabledMsg?.classList.toggle('hidden', enabled);
+  pausedMsg?.classList.toggle('hidden', !(enabled && paused));
+  if (pausedText) {
+    pausedText.textContent = reason === 'testing'
+      ? 'Messages are paused during testing.'
+      : 'Messages are paused by your teacher.';
+  }
 }
 
 function showPrivacyInfo() {

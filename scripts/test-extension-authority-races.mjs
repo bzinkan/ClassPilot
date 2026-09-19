@@ -3202,7 +3202,9 @@ async function main() {
       'fabStateV1',
       'handRaised',
       'handRaisingEnabled',
+      'messagesPaused',
       'messagingEnabled',
+      'pauseReason',
     ]);
     const serializedBridgeResponse = JSON.stringify(bridgeResponses.valid);
     for (const privateValue of bridgeFixture.privateValues) {

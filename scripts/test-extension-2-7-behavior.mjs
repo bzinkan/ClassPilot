@@ -870,6 +870,67 @@ async function main() {
         await flushStudentChatOutbox();
         const afterReceipt = await kv.get(STUDENT_CHAT_OUTBOX_KEY);
 
+        // 2.10.0: a server cooldown parks the entry without touching the shared API lane.
+        const apiBackoffBeforeCooldown = apiBackoffUntilMs;
+        const cooldownClientMessageId = '18181818-1818-4818-8818-181818181818';
+        let cooldownTransmissions = 0;
+        fetchWithBackoff = async (url, init = {}, options = {}) => {
+          cooldownTransmissions += 1;
+          if (options.backoffLane === 'chat') chatBackoffUntilMs = Date.now() + 9000;
+          return new Response(JSON.stringify({ error: 'slow down', code: 'CHAT_COOLDOWN', retryAfterMs: 9000 }),
+            { status: 429, headers: { 'content-type': 'application/json', 'Retry-After': '9' } });
+        };
+        const cooldownSend = await queueAndSendStudentChatMessage({
+          clientMessageId: cooldownClientMessageId,
+          message: 'Please slow me down',
+          sessionId: 'teaching-session-a',
+        });
+        const cooldownEntry = ((await kv.get(STUDENT_CHAT_OUTBOX_KEY))[STUDENT_CHAT_OUTBOX_KEY] || [])
+          .find((entry) => entry.clientMessageId === cooldownClientMessageId);
+        const cooldownState = {
+          send: cooldownSend,
+          status: cooldownEntry?.status,
+          holdsInFuture: Number(cooldownEntry?.holdUntil || 0) > Date.now(),
+          apiLaneUntouched: apiBackoffUntilMs === apiBackoffBeforeCooldown,
+          chatLaneBackedOff: chatBackoffUntilMs > Date.now(),
+        };
+        const transmissionsBeforeHeldFlush = cooldownTransmissions;
+        await flushStudentChatOutbox();
+        cooldownState.heldFlushSkipped = cooldownTransmissions === transmissionsBeforeHeldFlush;
+        chatBackoffUntilMs = 0;
+        await removeDeliveredStudentChatEntry(cooldownClientMessageId, authA);
+
+        // 2.10.0: a paused class is a drop, not a hold, and the device adopts the pause at once.
+        fetchWithBackoff = async () => new Response(JSON.stringify({ error: 'Messaging is paused', code: 'chat_paused', pauseReason: 'teacher' }),
+          { status: 403, headers: { 'content-type': 'application/json' } });
+        const pausedClientMessageId = '19191919-1919-4919-8919-191919191919';
+        const pausedSend = await queueAndSendStudentChatMessage({
+          clientMessageId: pausedClientMessageId,
+          message: 'Am I paused?',
+          sessionId: 'teaching-session-a',
+        });
+        const pausedOutbox = (await kv.get(STUDENT_CHAT_OUTBOX_KEY))[STUDENT_CHAT_OUTBOX_KEY] || [];
+        const pausedStored = await kv.get(['messagesPaused', 'pauseReason']);
+        let refusedWhilePaused = null;
+        try {
+          await queueAndSendStudentChatMessage({
+            clientMessageId: '20202020-2020-4020-8020-202020202020',
+            message: 'Still paused?',
+            sessionId: 'teaching-session-a',
+          });
+        } catch (error) {
+          refusedWhilePaused = { code: error?.code, pauseReason: error?.pauseReason };
+        }
+        const pausedState = {
+          send: pausedSend,
+          outboxEmpty: pausedOutbox.every((entry) => entry.clientMessageId !== pausedClientMessageId),
+          fabPaused: currentFabState?.messagesPaused === true && currentFabState?.pauseReason === 'teacher',
+          stored: pausedStored,
+          refusedWhilePaused,
+        };
+        currentFabState = { ...(currentFabState || {}), messagesPaused: false, pauseReason: null };
+        await kv.set({ messagesPaused: false, pauseReason: null });
+
         fetchWithBackoff = async () => { throw new Error('simulated response loss'); };
         const retiredSessionClientMessageId = '16161616-1616-4616-8616-161616161616';
         const retiredSessionInitialSend = await queueAndSendStudentChatMessage({
@@ -4434,6 +4495,8 @@ async function main() {
           firstSend,
           afterResponseLoss,
           afterReceipt,
+          cooldownState,
+          pausedState,
           retiredSessionInitialSend,
           retiredSessionReplayTransmissions,
           afterRetiredSessionFlush,
@@ -4772,6 +4835,21 @@ async function main() {
     assert.equal(result.afterResponseLoss.studentChatOutboxV1[0].clientMessageId,
       '11111111-1111-4111-8111-111111111111');
     assert.equal(result.afterReceipt.studentChatOutboxV1.length, 0);
+    assert.equal(result.cooldownState.send.status, 'Waiting');
+    assert.equal(result.cooldownState.send.errorCode, 'STUDENT_CHAT_COOLDOWN');
+    assert.equal(result.cooldownState.send.retryAfterMs, 9000);
+    assert.equal(result.cooldownState.status, 'waiting');
+    assert.equal(result.cooldownState.holdsInFuture, true);
+    assert.equal(result.cooldownState.apiLaneUntouched, true, 'a chat 429 must never back off the shared API lane');
+    assert.equal(result.cooldownState.chatLaneBackedOff, true);
+    assert.equal(result.cooldownState.heldFlushSkipped, true, 'a held entry is not retried before its hold expires');
+    assert.equal(result.pausedState.send.status, 'Failed');
+    assert.equal(result.pausedState.send.errorCode, 'STUDENT_CHAT_PAUSED');
+    assert.equal(result.pausedState.send.dropped, true);
+    assert.equal(result.pausedState.outboxEmpty, true, 'a paused-class rejection drops the entry instead of holding it');
+    assert.equal(result.pausedState.fabPaused, true);
+    assert.deepEqual(result.pausedState.stored, { messagesPaused: true, pauseReason: 'teacher' });
+    assert.deepEqual(result.pausedState.refusedWhilePaused, { code: 'STUDENT_CHAT_PAUSED', pauseReason: 'teacher' });
     assert.equal(result.retiredSessionInitialSend.queued, true);
     assert.equal(result.retiredSessionReplayTransmissions, 0);
     assert.equal(result.afterRetiredSessionFlush.studentChatOutboxV1.length, 0);
