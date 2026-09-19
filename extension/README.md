@@ -395,7 +395,7 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    against the unpacked versioned ZIP.
 
 For the prepared 2.9.0 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.10.0.zip` after separately authorized clean-tag packaging.
+`dist/ClassPilot-v2.9.1.zip` after separately authorized clean-tag packaging.
 Earlier archives do not contain this release's startup recovery correction
 and must not be submitted for this release. The candidate retains 2.8.9's
 scheduled classroom authority support, 2.8.8's startup recovery corrections,

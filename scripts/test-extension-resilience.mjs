@@ -1250,7 +1250,7 @@ async function main() {
       const remainingChatAcks = (await kv.get(CHAT_ACK_OUTBOX_KEY))
         [CHAT_ACK_OUTBOX_KEY] || [];
 
-      // 2.10.0: seen is a real acknowledgement that a later delivered ack cannot evict,
+      // 2.9.1: seen is a real acknowledgement that a later delivered ack cannot evict,
       // and a receipt the server can never accept drains instead of retrying for a day.
       await sendChatDeliveryAck({ chatMessageId: 'chat-seen-message', ...chatAckBinding }, 'seen', null, chatAckAuthContext);
       await sendChatDeliveryAck({ chatMessageId: 'chat-seen-message', ...chatAckBinding }, 'delivered', null, chatAckAuthContext);

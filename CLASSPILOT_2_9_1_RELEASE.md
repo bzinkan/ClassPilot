@@ -1,6 +1,6 @@
-# ClassPilot 2.10.0 class chat candidate
+# ClassPilot 2.9.1 class chat candidate
 
-Version 2.10.0 carries 2.9.0 forward unchanged and adds the student side of the
+Version 2.9.1 carries 2.9.0 forward unchanged and adds the student side of the
 class chat redesign: the teacher's soft pause, the server's send cooldown,
 "seen" acknowledgements for teacher messages, and small polish in the chat box.
 No Chrome permission, managed-policy key, endpoint or support code is added or
@@ -14,12 +14,12 @@ versions and Store publication are separate evidence.
 
 This candidate update does not tag, package, upload, publish or activate the rollout.
 The canonical future artifact is
-`dist/ClassPilot-v2.10.0.zip`, produced only by the repository packaging script
+`dist/ClassPilot-v2.9.1.zip`, produced only by the repository packaging script
 from a clean, reviewed, tagged release commit during the authorized release.
 `ClassPilot-v2.9.0.zip` and every earlier artifact, SHA-256 record and release
 note remain retained and unchanged.
 
-Publishing 2.10.0 is a separately authorized step. It stays blocked while NWEA
+Publishing 2.9.1 is a separately authorized step. It stays blocked while NWEA
 testing is in progress and until a managed Chromebook has been observed running
 2.9.0 (see the 2.9.0 operator gate).
 
@@ -34,7 +34,7 @@ Live View remains backend-only and the teacher Live View UI stays disabled.
 Startup recovery, the auth gate, sign-in flows, screenshots, heartbeats and
 every managed-policy key are unchanged from 2.9.0.
 
-## What changes in 2.10.0
+## What changes in 2.9.1
 
 **Pause rides the existing FAB frame.** `normalizeFabState` keeps two new keys,
 `messagesPaused` and `pauseReason` (`teacher` or `testing`); they are persisted
@@ -65,7 +65,7 @@ later `delivered` acknowledgement no longer evicts a `seen` one. Acknowledgement
 receipts with `accepted: false` and a terminal code (`INVALID_CHAT_ACK`,
 `CHAT_MESSAGE_NOT_FOUND`) now drain instead of retrying every 30 s for 24 hours;
 a stale binding stays retryable. A server that predates the seen state rejects
-the ack as invalid, which drains it, so 2.10.0 is safe against an older API.
+the ack as invalid, which drains it, so 2.9.1 is safe against an older API.
 
 **Polish.** Each bubble shows the sender and the time it was sent, the input is
 capped at 500 characters with a counter from 400, and a `Waiting` status joins
@@ -98,7 +98,7 @@ Never replace a prior versioned ZIP with different source bytes.
 operator gate has been recorded on a managed Chromebook and NWEA testing is not
 in progress, and after the SchoolPilot backend carrying the chat pause, seen and
 read state (PRs #479, #480, #483, #484) is deployed. Then, on the exact reviewed
-artifact: one managed Chromebook on an in-place 2.9.0-to-2.10.0 upgrade under the
+artifact: one managed Chromebook on an in-place 2.9.0-to-2.9.1 upgrade under the
 same extension identity; send one message during a paused class and confirm the
 banner, the refusal and that the thread survives; send five messages in quick
 succession and confirm the "Waiting" state clears on its own; open a teacher
