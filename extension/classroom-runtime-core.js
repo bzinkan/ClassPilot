@@ -1623,6 +1623,9 @@
         ?? positiveTimestamp(nowValue)
         ?? Date.now(),
       read: rawMessage?.read === true,
+      ...(positiveTimestamp(rawMessage?.seenAckedAt)
+        ? { seenAckedAt: positiveTimestamp(rawMessage.seenAckedAt) }
+        : {}),
       ...(boundedString(rawMessage?.commandId, MAX_MESSAGE_ID_LENGTH)
         ? { commandId: boundedString(rawMessage.commandId, MAX_MESSAGE_ID_LENGTH) }
         : {}),

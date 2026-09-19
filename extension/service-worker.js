@@ -338,6 +338,8 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'classroomOverlayRestoreV1',
   'liveViewNegotiationV1',
   'domainPreservingRestrictionsV1',
+  'chatPauseV1',
+  'chatSeenAckV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'scheduledClassroomV1',
@@ -824,6 +826,9 @@ const MAX_REGISTRATION_RETRIES = 5;
 let apiBackoffUntilMs = 0;
 let heartbeatBackoffUntilMs = 0;
 let screenshotBackoffUntilMs = 0;
+// Student chat has its own lane: a chat cooldown must never delay heartbeats,
+// acknowledgements or settings reads that share the general API lane.
+let chatBackoffUntilMs = 0;
 let heartbeatInFlight = false;
 let lastHeartbeatDispatchAt = 0;
 let screenshotCaptureInFlight = false;
@@ -1632,12 +1637,14 @@ function calculateRetryDelayMs(response, attempt) {
 function requestBackoffUntil(lane) {
   if (lane === 'heartbeat') return heartbeatBackoffUntilMs;
   if (lane === 'screenshot') return screenshotBackoffUntilMs;
+  if (lane === 'chat') return chatBackoffUntilMs;
   return apiBackoffUntilMs;
 }
 
 function setRequestBackoffUntil(lane, value) {
   if (lane === 'heartbeat') heartbeatBackoffUntilMs = value;
   else if (lane === 'screenshot') screenshotBackoffUntilMs = value;
+  else if (lane === 'chat') chatBackoffUntilMs = value;
   else apiBackoffUntilMs = value;
 }
 
@@ -1765,6 +1772,8 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'handRaised',
   'messagingEnabled',
   'handRaisingEnabled',
+  'messagesPaused',
+  'pauseReason',
   'fabChatMessages',
   'fabChatClosed',
   'tabSnapshotV1',
@@ -6049,6 +6058,15 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     || currentClassroomState?.supervisionContextId === supervisionContextId
       && RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expired));
   if (scheduledUnavailable) activeContexts.length = 0;
+  // Soft pause: the thread stays visible, new student sends are refused. A
+  // server that predates the pause simply never sets it.
+  const messagesPaused = scheduledUnavailable ? false : typeof rawState.messagesPaused === 'boolean'
+    ? rawState.messagesPaused
+    : fallbackState.messagesPaused === true;
+  const pauseReason = !messagesPaused ? null
+    : rawState.pauseReason === 'testing' || rawState.pauseReason === 'teacher' ? rawState.pauseReason
+      : fallbackState.pauseReason === 'testing' || fallbackState.pauseReason === 'teacher' ? fallbackState.pauseReason
+        : 'teacher';
   return {
     schemaVersion: 1,
     revision,
@@ -6073,6 +6091,8 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     handRaisingEnabled: scheduledUnavailable ? false : typeof rawState.handRaisingEnabled === 'boolean'
       ? rawState.handRaisingEnabled
       : fallbackState.handRaisingEnabled !== false,
+    messagesPaused,
+    pauseReason,
     handRaised: typeof rawState.handRaised === 'boolean'
       ? rawState.handRaised
       : fallbackState.handRaised === true,
@@ -6110,6 +6130,8 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
     handRaised: false,
     messagingEnabled: false,
     handRaisingEnabled: false,
+    messagesPaused: false,
+    pauseReason: null,
   });
   await notifyStudentMessageStateCleared(reason);
   broadcastToAllTabs('fab-state', {
@@ -6120,6 +6142,8 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
     messagingEnabled: false,
     handRaisingEnabled: false,
     handRaised: false,
+    messagesPaused: false,
+    pauseReason: null,
     reason,
   });
   broadcastToAllTabs('timer', { action: 'stop', reason });
@@ -6225,6 +6249,8 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     messagingEnabled: nextState.messagingEnabled,
     handRaisingEnabled: nextState.handRaisingEnabled,
     handRaised: nextState.handRaised,
+    messagesPaused: nextState.messagesPaused === true,
+    pauseReason: nextState.messagesPaused === true ? nextState.pauseReason : null,
     fabActiveSessionIds: nextState.activeSessionIds,
     fabActiveHands: nextState.activeHands,
     fabSessions: nextState.sessions,
@@ -7715,6 +7741,19 @@ function commandAckReceiptIsDrainable(receipt, requireDisposition = false) {
   return TERMINAL_COMMAND_ACK_RECEIPT_CODES.has(String(receipt?.code || '').trim());
 }
 
+// A chat acknowledgement the server can never accept (malformed, or for a
+// message it does not know) must leave the outbox instead of being re-sent
+// every 30 seconds for 24 hours. A stale binding or authority stays retryable.
+const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set([
+  'INVALID_CHAT_ACK',
+  'CHAT_MESSAGE_NOT_FOUND',
+]);
+
+function chatAckReceiptIsTerminal(receipt) {
+  return receipt?.accepted === false
+    && TERMINAL_CHAT_ACK_RECEIPT_CODES.has(String(receipt?.code || '').trim());
+}
+
 function acceptedAckReceiptIds(receipts, entries, authContext, kind = 'command') {
   const storedByAckId = new Map((Array.isArray(entries) ? entries : [])
     .filter((entry) => entry?.ackId)
@@ -7725,7 +7764,7 @@ function acceptedAckReceiptIds(receipts, entries, authContext, kind = 'command')
   for (const receipt of Array.isArray(receipts) ? receipts : []) {
     if (kind === 'command') {
       if (!commandAckReceiptIsDrainable(receipt, requireExact)) continue;
-    } else if (receipt?.accepted !== true) {
+    } else if (receipt?.accepted !== true && !chatAckReceiptIsTerminal(receipt)) {
       continue;
     }
     const ackId = String(receipt.ackId || '').trim();
@@ -8004,8 +8043,8 @@ function enqueueChatAck(rawAck, authContext) {
     chatMessageId: String(rawAck.messageId).slice(0, 256),
     sessionId: rawAck.sessionId ? String(rawAck.sessionId).slice(0, 256) : undefined,
     ...classroomAuthorityPayload(rawAck),
-    deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
-    status: rawAck.deliveryStatus === 'failed' ? 'failed' : 'delivered',
+    deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
+    status: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
     errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
     bindingVersion: 2,
     schoolId: authContext.schoolId || undefined,
@@ -8026,6 +8065,9 @@ function enqueueChatAck(rawAck, authContext) {
       : [];
     entries = entries.filter((item) => item.ackId !== ack.ackId);
     if (ack.status === 'delivered') {
+      // Seen proves delivery; a later delivered ack must not erase it.
+      entries = entries.filter((item) => item.messageId !== ack.messageId || item.status === 'seen');
+    } else if (ack.status === 'seen') {
       entries = entries.filter((item) => item.messageId !== ack.messageId);
     }
     entries.push(ack);
@@ -8223,7 +8265,7 @@ function normalizeStudentChatEntry(raw = {}) {
   const context = RuntimeCore.classroomContext(raw);
   const binding = String(raw.binding || '').trim();
   if (!clientMessageId || !message || !context || !binding) return null;
-  const status = ['sending', 'retrying', 'failed'].includes(raw.status)
+  const status = ['sending', 'retrying', 'waiting', 'failed'].includes(raw.status)
     ? raw.status
     : 'sending';
   return {
@@ -8240,6 +8282,8 @@ function normalizeStudentChatEntry(raw = {}) {
     lastAttemptAt: Number(raw.lastAttemptAt || 0),
     attempts: Math.max(0, Number(raw.attempts || 0)),
     status,
+    // Server cooldown: the entry waits out retryAfterMs instead of retrying into the same window.
+    holdUntil: status === 'waiting' ? Math.max(0, Number(raw.holdUntil || 0)) : 0,
     errorCode: raw.errorCode ? String(raw.errorCode).slice(0, 80) : null,
   };
 }
@@ -8264,6 +8308,8 @@ async function notifyStudentChatStatus(entry, status, details = {}, authContext 
     status,
     duplicate: details.duplicate === true,
     errorCode: details.errorCode || null,
+    retryAfterMs: Number.isFinite(Number(details.retryAfterMs)) && Number(details.retryAfterMs) > 0 ? Number(details.retryAfterMs) : null,
+    pauseReason: details.pauseReason === 'testing' || details.pauseReason === 'teacher' ? details.pauseReason : null,
     updatedAt: Date.now(),
   };
   // Status updates contain no message body or identity. Content scripts can
@@ -8285,8 +8331,25 @@ async function notifyStudentChatStatus(entry, status, details = {}, authContext 
   return update;
 }
 
-function scheduleStudentChatFlush(delayMs = STUDENT_CHAT_RETRY_DELAYS_MS[0]) {
-  const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+let studentChatFlushTimer = null;
+let studentChatFlushTimerAt = 0;
+
+function scheduleStudentChatFlush(delayMs = STUDENT_CHAT_RETRY_DELAYS_MS[0], options = {}) {
+  const normalizedDelay = Math.max(1000, Number(delayMs || 0));
+  const when = Date.now() + normalizedDelay;
+  // A packed extension's alarms fire no sooner than 30 s. A server cooldown
+  // shorter than that keeps an in-memory timer too, so the wait the student is
+  // told is the wait they get; the alarm stays as the durable fallback.
+  if (options.promptly === true && normalizedDelay < 30 * 1000
+    && (!studentChatFlushTimer || studentChatFlushTimerAt > when)) {
+    if (studentChatFlushTimer) clearTimeout(studentChatFlushTimer);
+    studentChatFlushTimerAt = when;
+    studentChatFlushTimer = setTimeout(() => {
+      studentChatFlushTimer = null;
+      studentChatFlushTimerAt = 0;
+      flushStudentChatOutbox().catch(() => {});
+    }, normalizedDelay);
+  }
   chrome.alarms.get(STUDENT_CHAT_FLUSH_ALARM, (existing) => {
     if (
       !existing
@@ -8478,6 +8541,57 @@ function studentChatRetryDelay(attempts) {
   )];
 }
 
+// The server refuses a send into a paused class with one of these codes. The
+// message can never be delivered, so it is dropped rather than held for the
+// 30-minute outbox window, and the device adopts the pause at once.
+const CHAT_PAUSED_REJECTION_CODES = new Set(['chat_paused', 'CHAT_PAUSED']);
+const STUDENT_CHAT_COOLDOWN_MIN_MS = 1000;
+const STUDENT_CHAT_COOLDOWN_MAX_MS = 120 * 1000;
+
+function studentChatCooldownHoldMs(retryAfterMs, response) {
+  const fromBody = Number(retryAfterMs);
+  const value = Number.isFinite(fromBody) && fromBody > 0
+    ? fromBody
+    : parseRetryAfterMs(response) || STUDENT_CHAT_RETRY_DELAYS_MS[0];
+  return Math.min(STUDENT_CHAT_COOLDOWN_MAX_MS, Math.max(STUDENT_CHAT_COOLDOWN_MIN_MS, Math.round(value)));
+}
+
+async function adoptChatPauseNow(pauseReason, authContext) {
+  const reason = pauseReason === 'testing' ? 'testing' : 'teacher';
+  if (!currentFabState || currentFabState.messagesPaused === true) return;
+  currentFabState = { ...currentFabState, messagesPaused: true, pauseReason: reason };
+  await kv.set({ messagesPaused: true, pauseReason: reason });
+  assertAuthenticatedContextCurrent(authContext, 'chat pause adoption');
+  await broadcastToAllTabsForAuth(
+    'fab-state',
+    { ...currentFabState, reason: 'chat-paused' },
+    authContext,
+    browserPolicyEnvelopeForAuth(authContext),
+  ).catch((error) => {
+    if (isAuthContextCancellation(error)) throw error;
+  });
+}
+
+async function discardPausedStudentChatEntry(entry, pauseReason, authContext) {
+  const reason = pauseReason === 'testing' ? 'testing' : 'teacher';
+  await removeDeliveredStudentChatEntry(entry.clientMessageId, authContext);
+  assertAuthenticatedContextCurrent(authContext, 'paused student message removal');
+  await adoptChatPauseNow(reason, authContext);
+  await notifyStudentChatStatus(entry, 'Failed', {
+    errorCode: 'STUDENT_CHAT_PAUSED',
+    pauseReason: reason,
+  }, authContext);
+  return {
+    success: false,
+    queued: false,
+    dropped: true,
+    clientMessageId: entry.clientMessageId,
+    status: 'Failed',
+    errorCode: 'STUDENT_CHAT_PAUSED',
+    pauseReason: reason,
+  };
+}
+
 function scheduleStudentChatExpiry(entries, nowValue = Date.now()) {
   const expiries = (Array.isArray(entries) ? entries : [])
     .map((entry) => Number(entry?.queuedAt || 0) + STUDENT_CHAT_MAX_AGE_MS + 1)
@@ -8551,6 +8665,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
         context: 'student message',
         maxAttempts: 1,
         respectGlobalBackoff: false,
+        backoffLane: 'chat',
       },
     );
     assertAuthenticatedContextCurrent(authContext, 'student message response');
@@ -8577,7 +8692,32 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
       };
     }
 
-    const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    const rejectionCode = String(data?.code || '').trim();
+    if (response.status === 403 && CHAT_PAUSED_REJECTION_CODES.has(rejectionCode)) {
+      return discardPausedStudentChatEntry(attempted, data?.pauseReason, authContext);
+    }
+    if (response.status === 429) {
+      const holdMs = studentChatCooldownHoldMs(data?.retryAfterMs, response);
+      const waiting = await updateStudentChatEntry(attempted.clientMessageId, {
+        status: 'waiting',
+        errorCode: 'STUDENT_CHAT_COOLDOWN',
+        holdUntil: Date.now() + holdMs,
+      }, authContext);
+      await notifyStudentChatStatus(waiting, 'Waiting', {
+        errorCode: 'STUDENT_CHAT_COOLDOWN',
+        retryAfterMs: holdMs,
+      }, authContext);
+      scheduleStudentChatFlush(holdMs, { promptly: true });
+      return {
+        success: true,
+        queued: true,
+        clientMessageId: attempted.clientMessageId,
+        status: 'Waiting',
+        errorCode: 'STUDENT_CHAT_COOLDOWN',
+        retryAfterMs: holdMs,
+      };
+    }
+    const retryable = response.status === 408 || response.status >= 500;
     const errorCode = retryable ? 'STUDENT_CHAT_RETRY_SCHEDULED' : 'STUDENT_CHAT_REJECTED';
     const status = retryable ? 'retrying' : 'failed';
     const updated = await updateStudentChatEntry(attempted.clientMessageId, {
@@ -8701,6 +8841,12 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     error.code = 'STUDENT_CHAT_SESSION_REQUIRED';
     throw error;
   }
+  if (currentFabState?.messagesPaused === true) {
+    const error = new Error('Messaging is paused right now');
+    error.code = 'STUDENT_CHAT_PAUSED';
+    error.pauseReason = currentFabState.pauseReason === 'testing' ? 'testing' : 'teacher';
+    throw error;
+  }
   if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
     if (raw.supervisionContextId) throw new Error('Scheduled classroom messaging requires durable chat support');
     return sendLegacyStudentChatMessage(raw, authContext, requestedSessionId);
@@ -8759,12 +8905,18 @@ async function flushStudentChatOutbox() {
       const entries = await compactStudentChatOutbox(authContext);
       assertAuthenticatedContextCurrent(authContext, 'student message retry');
       if (!entries) return;
+      let earliestHold = 0;
       for (const entry of entries) {
         assertAuthenticatedContextCurrent(authContext, 'student message retry');
         if (entry.status === 'failed') continue;
+        if (entry.status === 'waiting' && entry.holdUntil > Date.now()) {
+          earliestHold = earliestHold ? Math.min(earliestHold, entry.holdUntil) : entry.holdUntil;
+          continue;
+        }
         const result = await deliverStudentChatEntry(entry, authContext);
         if (result?.queued) break;
       }
+      if (earliestHold) scheduleStudentChatFlush(earliestHold - Date.now(), { promptly: true });
     } catch (error) {
       if (!isAuthContextCancellation(error)) {
         scheduleStudentChatFlush(STUDENT_CHAT_RETRY_DELAYS_MS[0]);
@@ -8965,6 +9117,8 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
       updates.handRaised = false;
       updates.messagingEnabled = false;
       updates.handRaisingEnabled = false;
+      updates.messagesPaused = false;
+      updates.pauseReason = null;
       alarmsToClear.push(CLASSROOM_OVERLAY_EXPIRY_ALARM);
       currentFabState = null;
     }
@@ -9249,6 +9403,47 @@ function getCurrentMessageInbox(options = {}) {
     assertMessageInboxOperationCurrent(options, 'message-inbox-read');
     return identity.messages;
   });
+}
+
+// A teacher message was on screen in an open, visible chat. Acknowledged once
+// per message across every tab: the inbox entry remembers it durably.
+async function markTeacherMessageSeen(message, actionRequest) {
+  const authContext = actionRequest.authContext;
+  const messageId = String(message?.messageId || message?.chatMessageId || '').trim().slice(0, 256);
+  if (!messageId) return { acked: false };
+  const options = {
+    authContext,
+    expectedBinding: monitoringEventAuthBindingForContext(authContext),
+  };
+  let firstSeen = false;
+  await enqueueMessageInboxMutation(async () => {
+    assertMessageInboxOperationCurrent(options, 'chat-message-seen');
+    const identity = await reconcileMessageInboxIdentityNow('chat-message-seen', options);
+    assertMessageInboxOperationCurrent(options, 'chat-message-seen');
+    if (!identity.binding) return;
+    const entry = identity.messages.find((item) => item?.id === messageId);
+    if (!entry || entry.seenAckedAt) return;
+    firstSeen = true;
+    const seenAckedAt = Date.now();
+    const messages = identity.messages.map((item) => (
+      item?.id === messageId ? { ...item, read: true, seenAckedAt } : item
+    ));
+    await setMessageInboxStorageFenced(
+      { [MESSAGE_INBOX_STORAGE_KEY]: messages },
+      options,
+      'chat-message-seen',
+    );
+  });
+  if (!firstSeen) return { acked: false };
+  assertStudentActionRequestCurrent(actionRequest, 'chat message seen acknowledgement');
+  await sendChatDeliveryAck({
+    chatMessageId: messageId,
+    sessionId: actionRequest.sessionId,
+    ...classroomAuthorityPayload(actionRequest),
+    studentId: authContext.studentId,
+    studentSessionId: authContext.studentSessionId,
+  }, 'seen', null, authContext);
+  return { acked: true };
 }
 
 function markCurrentMessageInboxRead(options = {}) {
@@ -9571,7 +9766,7 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
 }
 
 function persistFabChatStateForRequest(message, actionRequest) {
-  const allowedStatuses = new Set(['Sending', 'Retrying', 'Delivered', 'Failed']);
+  const allowedStatuses = new Set(['Sending', 'Retrying', 'Delivered', 'Failed', 'Waiting']);
   const messages = (Array.isArray(message?.messages) ? message.messages : [])
     .slice(-50)
     .map((entry) => ({
@@ -9584,6 +9779,7 @@ function persistFabChatStateForRequest(message, actionRequest) {
       fromName: String(entry?.fromName || '').slice(0, 100) || null,
       time: Number.isFinite(Number(entry?.time)) ? Number(entry.time) : Date.now(),
       status: allowedStatuses.has(entry?.status) ? entry.status : null,
+      seenAt: Number.isFinite(Number(entry?.seenAt)) && Number(entry.seenAt) > 0 ? Number(entry.seenAt) : null,
     }))
     .filter((entry) => entry.text && RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(actionRequest));
   const options = {
@@ -25241,6 +25437,8 @@ async function getStudentSessionUiState(message = {}) {
     'handRaised',
     'messagingEnabled',
     'handRaisingEnabled',
+    'messagesPaused',
+    'pauseReason',
     'fabChatMessages',
     'fabChatClosed',
     FAB_STATE_STORAGE_KEY,
@@ -25458,6 +25656,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((messages) => {
         assertStudentActionRequestCurrent(actionRequest, 'message inbox read completion');
         sendResponse({ success: true, messages });
+      })
+      .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
+    return true;
+  }
+
+  if (message.type === 'chat-message-seen') {
+    let actionRequest;
+    try {
+      actionRequest = captureStudentActionRequest(message, 'chat message seen');
+    } catch {
+      sendResponse({ success: false, error: 'Messages unavailable' });
+      return true;
+    }
+    classroomStateRestorePromise
+      .then(() => {
+        assertStudentActionRequestCurrent(actionRequest, 'chat message seen');
+        return markTeacherMessageSeen(message, actionRequest);
+      })
+      .then((result) => {
+        assertStudentActionRequestCurrent(actionRequest, 'chat message seen completion');
+        sendResponse({ success: true, ...result });
       })
       .catch((error) => sendResponse({ success: false, error: error?.message || 'Messages unavailable' }));
     return true;
@@ -25902,6 +26121,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         success: false,
         error: error?.message || 'Message could not be queued',
         errorCode: error?.code || 'STUDENT_CHAT_FAILED',
+        ...(error?.pauseReason ? { pauseReason: error.pauseReason } : {}),
       });
     });
 

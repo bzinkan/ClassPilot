@@ -360,12 +360,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         item.sender === 'student' && item.clientMessageId === clientMessageId
       );
       if (chatMessage) {
-        chatMessage.status = ['Sending', 'Retrying', 'Delivered', 'Failed'].includes(update.status)
+        chatMessage.status = ['Sending', 'Retrying', 'Waiting', 'Delivered', 'Failed'].includes(update.status)
           ? update.status
           : chatMessage.status;
         if (update.messageId) chatMessage.id = update.messageId;
         persistFabChatState();
         renderChatMessages();
+      }
+      if (update.status === 'Waiting' && update.retryAfterMs) {
+        showFabNotification(`Slow down! You can send again in ${Math.ceil(update.retryAfterMs / 1000)}s`, true);
+      }
+      if (update.errorCode === 'STUDENT_CHAT_PAUSED' && !messagesPaused) {
+        messagesPaused = true;
+        pauseReason = update.pauseReason === 'testing' ? 'testing' : 'teacher';
+        updateFabChatControls();
+        showFabNotification(`${chatPauseCopy()}.`, true);
       }
     }, sendResponse);
   }
@@ -426,6 +435,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const chatBox = document.getElementById('classpilot-fab-message-box');
       if (!chatBox?.classList.contains('classpilot-fab-message-box-open')) showMessageBox();
       renderChatMessages();
+      reportTeacherMessagesSeen();
     }, sendResponse);
   }
 
@@ -534,7 +544,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Messaging toggle (enable/disable messaging)
   if (message.type === 'messaging-toggle') {
     return withCurrentStudentMessageContext(message, () => {
-      applyFabState({ messagingEnabled: message.data.enabled, reason: 'messaging-toggle' });
+      applyFabState({
+        messagingEnabled: message.data.enabled,
+        ...(typeof message.data.messagesPaused === 'boolean'
+          ? { messagesPaused: message.data.messagesPaused, pauseReason: message.data.pauseReason }
+          : {}),
+        reason: 'messaging-toggle',
+      });
     }, sendResponse);
   }
 
@@ -4196,6 +4212,12 @@ let messagingEnabled = true;
 let handRaisingEnabled = true;
 let chatMessages = []; // { sender: 'student'|'teacher', text: string, time: number }
 let chatClosed = false; // Set when teacher closes chat — prevents re-opening old conversation
+let messagesPaused = false; // Soft pause: thread stays visible, new sends are refused
+let pauseReason = null; // 'teacher' | 'testing' while paused
+let lastStudentSendAt = 0;
+const STUDENT_SEND_MIN_INTERVAL_MS = 2000;
+const CHAT_MESSAGE_MAX_CHARS = 500;
+const CHAT_COUNTER_FROM_CHARS = 400;
 const FAB_CHAT_MESSAGES_KEY = 'fabChatMessages';
 const FAB_CHAT_CLOSED_KEY = 'fabChatClosed';
 const FAB_STATE_KEY = 'fabStateV1';
@@ -4207,6 +4229,8 @@ const FAB_STORAGE_KEYS = [
   'handRaised',
   'messagingEnabled',
   'handRaisingEnabled',
+  'messagesPaused',
+  'pauseReason',
   FAB_CHAT_MESSAGES_KEY,
   FAB_CHAT_CLOSED_KEY,
   FAB_STATE_KEY,
@@ -4255,6 +4279,8 @@ function hydrateFabStateFromStorage(stored, expectedFabBinding) {
     handRaised = false;
     messagingEnabled = false;
     handRaisingEnabled = false;
+    messagesPaused = false;
+    pauseReason = null;
     chatMessages = [];
     chatClosed = true;
     currentFabContext = null;
@@ -4262,6 +4288,8 @@ function hydrateFabStateFromStorage(stored, expectedFabBinding) {
     handRaised = stored.handRaised === true;
     messagingEnabled = stored.messagingEnabled !== false;
     handRaisingEnabled = stored.handRaisingEnabled !== false;
+    messagesPaused = stored.messagesPaused === true;
+    pauseReason = messagesPaused ? (stored.pauseReason === 'testing' ? 'testing' : 'teacher') : null;
     chatMessages = Array.isArray(stored[FAB_CHAT_MESSAGES_KEY])
       ? stored[FAB_CHAT_MESSAGES_KEY]
       : [];
@@ -4294,11 +4322,61 @@ function persistFabChatState() {
   });
 }
 
+function chatPauseCopy() {
+  return pauseReason === 'testing' ? 'Paused during testing' : 'Paused by your teacher';
+}
+
 function updateFabChatControls() {
   const input = document.getElementById('classpilot-fab-chat-input');
   const sendButton = document.getElementById('classpilot-fab-chat-send-btn');
-  if (input) input.disabled = !messagingEnabled;
-  if (sendButton) sendButton.disabled = !messagingEnabled;
+  const paused = messagingEnabled && messagesPaused;
+  if (input) {
+    input.disabled = !messagingEnabled || paused;
+    input.placeholder = paused ? chatPauseCopy() : 'Type a message...';
+  }
+  if (sendButton) sendButton.disabled = !messagingEnabled || paused;
+  const banner = document.getElementById('classpilot-fab-chat-pause');
+  if (banner) {
+    banner.textContent = paused ? chatPauseCopy() : '';
+    banner.classList.toggle('classpilot-fab-chat-pause-visible', paused);
+  }
+  updateChatCounter();
+}
+
+function updateChatCounter() {
+  const input = document.getElementById('classpilot-fab-chat-input');
+  const counter = document.getElementById('classpilot-fab-chat-counter');
+  if (!input || !counter) return;
+  const length = input.value.length;
+  counter.textContent = length >= CHAT_COUNTER_FROM_CHARS ? `${length}/${CHAT_MESSAGE_MAX_CHARS}` : '';
+  counter.classList.toggle('classpilot-fab-chat-counter-limit', length >= CHAT_MESSAGE_MAX_CHARS);
+}
+
+// A teacher message counts as seen once it has been on screen in an open chat
+// on a visible tab. Reported once per message; the worker dedups across tabs.
+function reportTeacherMessagesSeen() {
+  const messageBox = document.getElementById('classpilot-fab-message-box');
+  if (!messageBox?.classList.contains('classpilot-fab-message-box-open')) return;
+  if (document.visibilityState !== 'visible' || chatClosed) return;
+  const actionContext = captureStudentActionContext();
+  if (!actionContext) return;
+  let changed = false;
+  for (const entry of chatMessages) {
+    if (entry.sender !== 'teacher' || !entry.id || entry.seenAt) continue;
+    entry.seenAt = Date.now();
+    changed = true;
+    try {
+      chrome.runtime.sendMessage({
+        type: 'chat-message-seen',
+        messageId: entry.id,
+        chatMessageId: entry.id,
+        ...studentActionAuthorityPayload(actionContext),
+      }, () => { void chrome.runtime.lastError; });
+    } catch {
+      // The worker owns the durable acknowledgement; a torn-down runtime is not retried here.
+    }
+  }
+  if (changed) persistFabChatState();
 }
 
 function applyFabState(state = {}) {
@@ -4342,6 +4420,10 @@ function applyFabState(state = {}) {
   }
   if (typeof state.handRaisingEnabled === 'boolean') {
     handRaisingEnabled = state.handRaisingEnabled;
+  }
+  if (typeof state.messagesPaused === 'boolean') {
+    messagesPaused = state.messagesPaused;
+    pauseReason = messagesPaused ? (state.pauseReason === 'testing' ? 'testing' : 'teacher') : null;
   }
   if (typeof state.handRaised === 'boolean') {
     handRaised = state.handRaised;
@@ -4437,8 +4519,10 @@ function createFloatingActionButton() {
         <button class="classpilot-fab-message-close" id="classpilot-fab-message-close">×</button>
       </div>
       <div class="classpilot-fab-chat-messages" id="classpilot-fab-chat-messages"></div>
+      <div class="classpilot-fab-chat-pause" id="classpilot-fab-chat-pause"></div>
       <div class="classpilot-fab-chat-input-area">
-        <input type="text" class="classpilot-fab-chat-input" id="classpilot-fab-chat-input" placeholder="Type a message..." />
+        <input type="text" class="classpilot-fab-chat-input" id="classpilot-fab-chat-input" placeholder="Type a message..." maxlength="500" />
+        <span class="classpilot-fab-chat-counter" id="classpilot-fab-chat-counter"></span>
         <button class="classpilot-fab-chat-send-btn" id="classpilot-fab-chat-send-btn">➤</button>
       </div>
     </div>
@@ -4509,6 +4593,13 @@ function createFloatingActionButton() {
       sendMessage();
     }
   });
+  lifecycle.listen(document.getElementById('classpilot-fab-chat-input'), 'input', () => {
+    updateChatCounter();
+  });
+  // Returning to the tab with the chat open counts the visible teacher messages as seen.
+  lifecycle.listen(document, 'visibilitychange', () => {
+    if (document.visibilityState === 'visible') reportTeacherMessagesSeen();
+  });
 
   // Prevent clicks on message box from closing it
   lifecycle.listen(document.getElementById('classpilot-fab-message-box'), 'click', (e) => {
@@ -4556,6 +4647,7 @@ function showMessageBox() {
   renderChatMessages();
   updateFabChatControls();
   document.getElementById('classpilot-fab-chat-input')?.focus();
+  reportTeacherMessagesSeen();
 }
 
 function hideMessageBox() {
@@ -4698,10 +4790,23 @@ function sendMessage() {
     showFabNotification('Messaging is currently disabled by your teacher.', true);
     return;
   }
+  if (messagesPaused) {
+    showFabNotification(`${chatPauseCopy()}.`, true);
+    return;
+  }
 
   if (!message) {
     return;
   }
+
+  // A local send interval keeps a mashed Enter key from ever reaching the
+  // server's cooldown.
+  const sinceLastSend = Date.now() - lastStudentSendAt;
+  if (sinceLastSend < STUDENT_SEND_MIN_INTERVAL_MS) {
+    showFabNotification(`Slow down! You can send again in ${Math.ceil((STUDENT_SEND_MIN_INTERVAL_MS - sinceLastSend) / 1000)}s`, true);
+    return;
+  }
+  lastStudentSendAt = Date.now();
 
   const actionContext = captureStudentActionContext();
   if (!actionContext) {
@@ -4759,7 +4864,14 @@ function sendMessage() {
         if (optimistic) optimistic.status = 'Failed';
         persistFabChatState();
         renderChatMessages();
-        showFabNotification('Could not send message. Please try again.', true);
+        if (response?.errorCode === 'STUDENT_CHAT_PAUSED') {
+          messagesPaused = true;
+          pauseReason = response.pauseReason === 'testing' ? 'testing' : 'teacher';
+          updateFabChatControls();
+          showFabNotification(`${chatPauseCopy()}.`, true);
+        } else {
+          showFabNotification('Could not send message. Please try again.', true);
+        }
       }
     });
   } catch (e) {
@@ -4781,14 +4893,20 @@ function renderChatMessages() {
     return;
   }
 
+  const escapeHtml = (value) => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   container.innerHTML = chatMessages.map(msg => {
     const isStudent = msg.sender === 'student';
     const bubbleClass = isStudent ? 'classpilot-chat-bubble-student' : 'classpilot-chat-bubble-teacher';
-    const text = msg.text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const deliveryStatus = isStudent && ['Sending', 'Retrying', 'Delivered', 'Failed'].includes(msg.status)
+    const text = escapeHtml(msg.text);
+    const deliveryStatus = isStudent && ['Sending', 'Retrying', 'Waiting', 'Delivered', 'Failed'].includes(msg.status)
       ? `<span class="classpilot-chat-delivery-status">${msg.status}</span>`
       : '';
-    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}${deliveryStatus}</div>`;
+    const sentAt = Number.isFinite(Number(msg.time)) && Number(msg.time) > 0
+      ? new Date(Number(msg.time)).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : '';
+    const sender = isStudent ? 'You' : escapeHtml(msg.fromName || 'Teacher');
+    const meta = `<span class="classpilot-chat-meta">${sender}${sentAt ? ` · ${sentAt}` : ''}</span>`;
+    return `<div class="classpilot-chat-bubble ${bubbleClass}">${text}${meta}${deliveryStatus}</div>`;
   }).join('');
 
   container.scrollTop = container.scrollHeight;
@@ -5088,6 +5206,38 @@ function addFabStyles() {
       line-height: 1.2;
       opacity: 0.82;
       text-align: right;
+    }
+
+    .classpilot-chat-meta {
+      display: block;
+      margin-top: 3px;
+      font-size: 10px;
+      line-height: 1.2;
+      opacity: 0.72;
+    }
+
+    .classpilot-fab-chat-pause {
+      display: none;
+      padding: 6px 10px;
+      font-size: 11px;
+      color: #92400e;
+      background: #fffbeb;
+      border-top: 1px solid #fde68a;
+    }
+
+    .classpilot-fab-chat-pause-visible {
+      display: block;
+    }
+
+    .classpilot-fab-chat-counter {
+      align-self: center;
+      font-size: 10px;
+      color: #6b7280;
+      min-width: 0;
+    }
+
+    .classpilot-fab-chat-counter-limit {
+      color: #dc2626;
     }
 
     .classpilot-chat-bubble-teacher {
