@@ -18,7 +18,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '2.9.1';
+const expectedPreparedReleaseVersion = '2.9.3';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -139,6 +139,7 @@ function runPackagedTests() {
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
     'test-extension-scheduled-classroom.mjs',
+    'test-extension-class-tools.mjs',
     'test-extension-2-7-behavior.mjs',
     'test-extension-offscreen-identity.mjs',
     'test-extension-popup-identity.mjs',

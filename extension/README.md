@@ -394,9 +394,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.9.0 candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.9.1.zip` after separately authorized clean-tag packaging.
-Earlier archives do not contain this release's startup recovery correction
+For the prepared 2.9.3 Class tools candidate, the canonical artifact name will be
+`dist/ClassPilot-v2.9.3.zip` after separately authorized clean-tag packaging.
+Earlier archives do not contain the 2.9.3 timer placement correction
 and must not be submitted for this release. The candidate retains 2.8.9's
 scheduled classroom authority support, 2.8.8's startup recovery corrections,
 2.8.7's bounded sign-in recovery and safe script lifecycle, plus 2.8.6's
