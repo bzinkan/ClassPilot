@@ -309,6 +309,7 @@ const manualStudentLoginSuccessfulResponseFailures = new Set();
 
 const CLIENT_PROTOCOL_VERSION = 3;
 const EXTENSION_CAPABILITIES = Object.freeze([
+  'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'classroomStateV1',
   'fabStateRevisionV1',
   'exactTabCloseV1',
@@ -342,6 +343,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'chatSeenAckV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
@@ -495,7 +497,7 @@ async function sendCommandAck(commandId, ackState, options = {}) {
     && binding.bindingVersion === 2
   );
   const preserveScheduledRevision = Boolean(binding.supervisionContextId)
-    && ['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(options.commandType);
+    && ['timer', 'poll', 'lesson-activity', 'student-sign-out', 'hand-dismissed'].includes(options.commandType);
   // These one-shot commands are frozen to their original scheduled owner.
   // Never acknowledge an old command using a replacement owner's revision.
   if (preserveScheduledRevision && (!Number.isSafeInteger(binding.controlRevision)
@@ -2096,6 +2098,7 @@ const DIAGNOSTIC_LABEL_ALLOWLIST = new Set([
   'end',
   'fab-state',
   'fab-state-sync',
+  'lesson-activity',
   'hand-dismissed',
   'hand-raising-toggle',
   'ice',
@@ -6067,12 +6070,23 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     : rawState.pauseReason === 'testing' || rawState.pauseReason === 'teacher' ? rawState.pauseReason
       : fallbackState.pauseReason === 'testing' || fallbackState.pauseReason === 'teacher' ? fallbackState.pauseReason
         : 'teacher';
+  const rawTools = rawState.classTools;
+  const toolCapabilities = Array.isArray(rawTools?.capabilities) ? rawTools.capabilities.filter(name => hasNegotiatedCapability(name)
+    && ['helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1'].includes(name)) : [];
+  const classTools = !scheduledUnavailable && rawTools && Number.isSafeInteger(rawTools.revision) && rawTools.revision >= 0 ? {
+    ...rawTools, capabilities: toolCapabilities,
+    help: toolCapabilities.includes('helpRequestsV1') ? rawTools.help : null,
+    questions: toolCapabilities.includes('questionParkingV1') ? rawTools.questions : [],
+    timer: toolCapabilities.includes('timerControlsV1') ? rawTools.timer : null,
+    activity: toolCapabilities.includes('lessonActivitiesV1') ? rawTools.activity : null,
+  } : null;
   return {
     schemaVersion: 1,
     revision,
     lifecycleRevision: revision,
     ownershipRevision,
     ownershipRevisionKnown: hasOwnershipRevision || fallbackState.ownershipRevisionKnown === true,
+    classTools,
     studentId: String(rawState.studentId || fallbackState.studentId || '').trim() || null,
     studentSessionId: String(
       rawState.studentSessionId || fallbackState.studentSessionId || ''
@@ -6230,6 +6244,10 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     && priorContext.supervisionContextId === nextState.supervisionContextId
     && priorContext.contextAuthorityRevision !== nextState.contextAuthorityRevision;
   const lifecycleChanged = bindingChanged || sessionSetChanged || scheduledOwnerChanged;
+  if (lifecycleEnded) nextState.classTools = null;
+  else if (!lifecycleChanged && nextState.classTools && priorState.classTools
+    && JSON.stringify(nextState.classTools.capabilities) === JSON.stringify(priorState.classTools.capabilities)
+    && Number(nextState.classTools.revision) < Number(priorState.classTools.revision)) nextState.classTools = priorState.classTools;
   const context = {
     schemaVersion: 1,
     binding,
@@ -6478,7 +6496,7 @@ function mutateClassroomOverlayState(operation, options = {}) {
 function scheduleClassroomOverlayExpiry(state) {
   chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
   const candidates = [
-    state?.timer?.endsAt ? Number(state.timer.endsAt) + 5000 : null,
+    state?.timer?.pausedRemainingMs ? Number(state.timer.expiresAt) : state?.timer?.endsAt ? Number(state.timer.endsAt) + 5000 : null,
     state?.poll?.expiresAt ? Number(state.poll.expiresAt) : null,
   ].filter((value) => Number.isFinite(value) && value > Date.now());
   if (candidates.length > 0) {
@@ -6492,15 +6510,21 @@ function persistTimerOverlay(command, executionContext = {}) {
   const action = command.data?.action;
   const contextAuthorityRevision = currentFabState?.contextAuthorityRevision ?? null;
   return mutateClassroomOverlayState(async (state, binding) => {
-    if (!binding || action !== 'start') {
+    if (!binding) return { ...state, binding, timer: null, updatedAt: Date.now() };
+    if (command.data?.timerId && state.timer?.timerId === command.data.timerId && Number(command.data.revision) <= Number(state.timer.revision)) return state;
+    if (action === 'stop') {
+      if (command.data?.timerId && state.timer?.timerId && command.data.timerId !== state.timer.timerId) return state;
       return { ...state, binding, timer: null, updatedAt: Date.now() };
     }
+    if (action !== 'start' && !hasNegotiatedCapability('timerControlsV1')) throw new Error('Enhanced timer controls were not negotiated');
     const seconds = Math.max(0, Number(command.data?.seconds || 0));
     const endsAt = Math.min(overlayExpiresAt(
-      command.data?.endsAt ?? command.data?.endAt,
+      command.data?.deadline ?? command.data?.endsAt ?? command.data?.endAt,
       Date.now() + seconds * 1000
     ), RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expiresAt || Number.MAX_SAFE_INTEGER);
-    if (!Number.isFinite(endsAt) || endsAt <= Date.now()) {
+    const pausedRemainingMs = command.data?.pausedRemainingMs;
+    const paused = Number.isFinite(pausedRemainingMs) && pausedRemainingMs > 0 && pausedRemainingMs <= 3600000;
+    if (!paused && (!Number.isFinite(endsAt) || endsAt <= Date.now())) {
       throw new Error('Timer end time is missing or expired');
     }
     return {
@@ -6511,7 +6535,10 @@ function persistTimerOverlay(command, executionContext = {}) {
         ...commandClassroomContext(command),
         ...(commandClassroomContext(command)?.supervisionContextId
           ? { contextAuthorityRevision } : {}),
-        endsAt,
+        endsAt: paused ? null : endsAt,
+        pausedRemainingMs: paused ? pausedRemainingMs : null,
+        timerId: command.data?.timerId || null, revision: Number(command.data?.revision || 0),
+        expiresAt: overlayExpiresAt(command.data?.timerExpiresAt, endsAt),
         message: String(command.data?.message || '').slice(0, 500),
         receivedAt: Date.now(),
       },
@@ -6552,6 +6579,7 @@ function persistPollOverlay(command, executionContext = {}) {
         ...commandClassroomContext(command),
         ...(commandClassroomContext(command)?.supervisionContextId
           ? { contextAuthorityRevision } : {}),
+        purpose: command.data?.purpose || 'poll', responseType: command.data?.responseType || 'choice',
         question: String(command.data?.question || '').slice(0, 1000),
         options: (Array.isArray(command.data?.options) ? command.data.options : [])
           .slice(0, 20)
@@ -6660,7 +6688,7 @@ function getRestorableClassroomOverlayState(options = {}) {
         return { timer: null, poll: null };
       }
       const sessionMatches = classroomOverlayAuthorityIsCurrent;
-      const timer = state.timer && Number(state.timer.endsAt) > now && sessionMatches(state.timer)
+      const timer = state.timer && (Number(state.timer.endsAt) > now || state.timer.pausedRemainingMs > 0 && state.timer.expiresAt > now) && sessionMatches(state.timer)
         ? state.timer
         : null;
       const poll = state.poll && Number(state.poll.expiresAt) > now && sessionMatches(state.poll)
@@ -6708,7 +6736,7 @@ async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI
   const sessionMatches = classroomOverlayAuthorityIsCurrent;
   const overlays = {
     timer: overlayCurrent
-      && Number(storedOverlay.timer?.endsAt || 0) > now
+      && (Number(storedOverlay.timer?.endsAt || 0) > now || storedOverlay.timer?.pausedRemainingMs > 0 && storedOverlay.timer.expiresAt > now)
       && sessionMatches(storedOverlay.timer)
       ? storedOverlay.timer
       : null,
@@ -6759,7 +6787,7 @@ async function expireClassroomOverlays(options = {}) {
   let pollExpired = false;
   await mutateClassroomOverlayState(async (state) => {
     const now = Date.now();
-    timerExpired = Boolean(state.timer && Number(state.timer.endsAt) + 5000 <= now);
+    timerExpired = Boolean(state.timer && (state.timer.pausedRemainingMs == null && Number(state.timer.endsAt) + 5000 <= now || state.timer.expiresAt && Number(state.timer.expiresAt) <= now));
     pollExpired = Boolean(state.poll && Number(state.poll.expiresAt) <= now);
     return {
       ...state,
@@ -6806,7 +6834,7 @@ function markPollResponsePersisted(pollId, selectedOption, authContext = null) {
       },
       updatedAt: Date.now(),
     };
-  });
+  }, { authContext });
 }
 
 async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expectedAuthContext) {
@@ -20446,6 +20474,7 @@ const AUTHORITY_BOUND_COMMAND_TYPES = new Set([
   'limit-tabs',
   'attention-mode',
   'timer',
+  'lesson-activity',
   'poll',
   'student-sign-out',
   'messaging-toggle',
@@ -20528,13 +20557,13 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
   }
-  if (['timer', 'poll', 'student-sign-out', 'teacher-message', 'messaging-toggle', 'hand-raising-toggle', 'hand-dismissed'].includes(commandType)
+  if (['timer', 'poll', 'lesson-activity', 'student-sign-out', 'teacher-message', 'messaging-toggle', 'hand-raising-toggle', 'hand-dismissed'].includes(commandType)
     && !hasNegotiatedCapability('scheduledClassroomV1')) {
     const error = new Error('Scheduled classroom tools were not negotiated');
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
   }
-  if (['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
+  if (['timer', 'poll', 'lesson-activity', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
     const originalRevision = exactStudentBinding({ ...envelope, command }).controlRevision;
     if (originalRevision === null || originalRevision !== currentStudentControlRevision()) {
       const error = new Error('Scheduled command belongs to a retired control revision');
@@ -20656,7 +20685,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     });
     assertAuthenticatedContextCurrent(authContext, 'remote-control command');
     if (commandAuthority(command, envelope).supervisionContextId
-      && ['timer', 'poll', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
+      && ['timer', 'poll', 'lesson-activity', 'student-sign-out', 'hand-dismissed'].includes(commandType)) {
       commandBinding = { ...commandBinding,
         supervisionContextId: commandAuthority(command, envelope).supervisionContextId };
     }
@@ -21723,6 +21752,13 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
 
       case 'timer':
+        if (command.data?.timerId && hasNegotiatedCapability('timerControlsV1')) {
+          // Revisioned timers render from the full FAB snapshot. Late commands
+          // cannot resurrect a stopped timer or rewind pause/resume state.
+          result.timerId = command.data.timerId;
+          result.revision = command.data.revision;
+          break;
+        }
         const timerAction = command.data.action;
         const timerSeconds = command.data.seconds;
         const timerMessage = command.data.message || '';
@@ -21731,6 +21767,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const timerEndsAt = timerState?.timer?.endsAt || null;
 
         await broadcastCommandUi('timer', {
+          ...timerState?.timer,
           action: timerAction,
           seconds: timerSeconds,
           message: timerMessage,
@@ -21751,6 +21788,13 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         result.message = timerMessage;
         result.endsAt = timerEndsAt;
         console.log('Timer:', safeDiagnosticLabel(timerAction), timerSeconds, 'seconds');
+        break;
+
+      case 'lesson-activity':
+        if (!hasNegotiatedCapability('lessonActivitiesV1')) throw new Error('Lesson activities were not negotiated');
+        // The full exact-bound snapshot follows this command; never overwrite newer progress here.
+        result.activityId = command.data.activityId;
+        result.revision = command.data.revision;
         break;
 
       case 'poll':
@@ -21786,6 +21830,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           pollId,
           question: pollQuestion,
           options: pollOptions,
+          purpose: pollState?.poll?.purpose, responseType: pollState?.poll?.responseType,
           expiresAt: pollState?.poll?.expiresAt || null,
           ...classroomAuthorityPayload(pollState?.poll),
         });
@@ -25938,9 +25983,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === 'class-tools-action') {
+    (async () => {
+      const request = captureStudentActionRequest(message, 'Class tools submission');
+      const actions = {
+        'help-request': ['helpRequestsV1', 'POST', 'help'],
+        'help-withdraw': ['helpRequestsV1', 'DELETE', 'help'],
+        question: ['questionParkingV1', 'POST', 'questions'],
+        progress: ['lessonActivitiesV1', 'PUT', 'progress'],
+      };
+      const action = actions[message.action];
+      if (!action || !hasNegotiatedCapability(action[0]) || !currentFabState?.classTools?.capabilities?.includes(action[0])) throw new Error('This classroom tool is unavailable. Reconnect or update ClassPilot.');
+      assertStudentActionRequestCurrent(request, 'Class tools transmission');
+      const response = await fetchWithBackoff(`${request.authContext.serverOrigin}/api/classpilot/student/class-tools/${action[2]}`, {
+        method: action[1], headers: buildDeviceAuthHeaders(request.authContext), signal: request.authContext.signal,
+        body: JSON.stringify({ ...classroomAuthorityPayload(request), data: message.data }),
+      }, { context: 'Class tools submission', maxAttempts: 1, respectGlobalBackoff: false });
+      assertStudentActionRequestCurrent(request, 'Class tools response');
+      const data = await response.json().catch(() => ({}));
+      assertStudentActionRequestCurrent(request, 'Class tools response body');
+      if (!response.ok) throw buildResponseError(response, data, 'Could not save. Refresh and try again.');
+      return data;
+    })().then(data => sendResponse({ success: true, data })).catch(error => sendResponse({ success: false, error: error?.message || 'Could not save' }));
+    return true;
+  }
+
   // Handle poll response from content script
   if (message.type === 'poll-response') {
-    const { pollId, selectedOption } = message;
+    const { pollId, selectedOption, textResponse } = message;
     console.log('[Poll] Response received');
 
     (async () => {
@@ -25958,8 +26028,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ) {
         throw new Error('This poll is no longer active for the signed-in student');
       }
-      const option = Number(selectedOption);
-      if (!Number.isSafeInteger(option) || option < 0 || option >= overlays.poll.options.length) {
+      const isText = overlays.poll.responseType === 'short_text';
+      const option = isText ? null : Number(selectedOption);
+      const answer = isText ? String(textResponse || '').trim() : null;
+      if (isText && (!hasNegotiatedCapability('exitTicketsV1') || !answer || answer.length > 500)) throw new Error('Enter a response of up to 500 characters');
+      if (!isText && (!Number.isSafeInteger(option) || option < 0 || option >= overlays.poll.options.length)) {
         throw new Error('Invalid poll option');
       }
       assertStudentActionRequestCurrent(actionRequest, 'poll response transmission');
@@ -25971,7 +26044,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           studentId: actionRequest.authContext.studentId,
           studentSessionId: actionRequest.authContext.studentSessionId,
           ...classroomAuthorityPayload(actionRequest),
-          selectedOption: option,
+          ...(isText ? { textResponse: answer } : { selectedOption: option }),
         }),
         signal: actionRequest.authContext.signal,
       }, {

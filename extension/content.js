@@ -26,6 +26,10 @@ let timerAutoHideTimeout = null;
 let activeTimerIdentity = null;
 let activePollId = null;
 let activePollTeachingSessionId = null;
+let studentTools = null;
+let studentToolsTimerKey = '';
+let studentToolsExpiry = null;
+let questionSubmission = null;
 const pollCompletionTimeouts = new Set();
 const respondedPollIds = new Set(); // prevent re-showing polls already answered
 const seenChatMsgIds = new Set(); // dedup chat-reply messages
@@ -283,6 +287,7 @@ function clearStudentBoundUiForIdentityTransition() {
   messagingEnabled = false;
   handRaisingEnabled = false;
   currentFabContext = null;
+  clearStudentTools();
   fabExpanded = false;
   for (const id of [
     'classpilot-attention-overlay',
@@ -511,6 +516,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           message.data.options,
           message.data.teachingSessionId,
           message.data.supervisionContextId,
+          message.data.responseType,
+          message.data.purpose,
         );
       } else if (message.data.action === 'close') {
         hidePollOverlay();
@@ -853,7 +860,7 @@ function applyClassroomUiSnapshot(snapshot = {}) {
     }
     const poll = snapshot.overlays?.poll;
     if (poll && !poll.response && poll.expiresAt > Date.now()) {
-      showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId, poll.supervisionContextId);
+      showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId, poll.supervisionContextId, poll.responseType, poll.purpose);
     } else if (!poll) {
       hidePollOverlay();
     }
@@ -3755,7 +3762,7 @@ function addTimerStyles() {
 // POLL OVERLAY
 // ============================================
 
-function showPollOverlay(pollId, question, options, teachingSessionId = null, supervisionContextId = null) {
+function showPollOverlay(pollId, question, options, teachingSessionId = null, supervisionContextId = null, responseType = 'choice', purpose = 'poll') {
   // Skip if student already responded to this poll
   if (respondedPollIds.has(pollId)) {
     return;
@@ -3770,7 +3777,7 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null, su
     existing.remove();
   }
 
-  const optionsHtml = options.map((option, index) => `
+  const optionsHtml = responseType === 'short_text' ? '<label for="classpilot-exit-answer">Your response (up to 500 characters)</label><textarea id="classpilot-exit-answer" maxlength="500" rows="4" style="width:100%;color:#0f172a;background:white;border:1px solid #94a3b8;border-radius:8px;padding:12px"></textarea><button class="classpilot-poll-option" id="classpilot-exit-submit">Submit response</button>' : options.map((option, index) => `
     <button class="classpilot-poll-option" data-index="${index}">
       <span class="classpilot-poll-option-letter">${String.fromCharCode(65 + index)}</span>
       <span class="classpilot-poll-option-text">${escapeHtml(option)}</span>
@@ -3783,7 +3790,7 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null, su
     <div class="classpilot-poll-content">
       <div class="classpilot-poll-header">
         <div class="classpilot-poll-icon">📊</div>
-        <h2 class="classpilot-poll-title">Quick Poll</h2>
+        <h2 class="classpilot-poll-title">${purpose === 'exit_ticket' ? 'Exit ticket' : purpose === 'volunteer' ? 'Would you like to participate?' : 'Quick Poll'}</h2>
       </div>
       <div class="classpilot-poll-body">
         <p class="classpilot-poll-question">${escapeHtml(question)}</p>
@@ -3800,13 +3807,15 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null, su
   // Add click handlers to options
   overlay.querySelectorAll('.classpilot-poll-option').forEach(button => {
     lifecycle.listen(button, 'click', () => {
-      const selectedIndex = parseInt(button.dataset.index, 10);
-      submitPollResponse(pollId, selectedIndex, button);
+      const textResponse = responseType === 'short_text' ? document.getElementById('classpilot-exit-answer')?.value.trim() : undefined;
+      if (responseType === 'short_text' && !textResponse) return;
+      const selectedIndex = responseType === 'short_text' ? null : parseInt(button.dataset.index, 10);
+      submitPollResponse(pollId, selectedIndex, button, textResponse);
     });
   });
 }
 
-function submitPollResponse(pollId, selectedIndex, button) {
+function submitPollResponse(pollId, selectedIndex, button, textResponse) {
   if (button.dataset.submitting === 'true') return;
   const actionContext = captureStudentActionContext(activePollTeachingSessionId);
   if (!actionContext || pollId !== activePollId) return;
@@ -3835,7 +3844,7 @@ function submitPollResponse(pollId, selectedIndex, button) {
   chrome.runtime.sendMessage({
     type: 'poll-response',
     pollId: pollId,
-    selectedOption: selectedIndex,
+    ...(textResponse !== undefined ? { textResponse } : { selectedOption: selectedIndex }),
     ...studentActionAuthorityPayload(actionContext),
   }, (response) => {
     if (!studentActionContextIsCurrent(actionContext) || activePollId !== pollId) return;
@@ -4393,7 +4402,8 @@ function applyFabState(state = {}) {
   const bindingChanged = Boolean(priorContext?.binding && nextContext?.binding
     && priorContext.binding !== nextContext.binding);
   const sessionSetChanged = Boolean(priorContext)
-    && JSON.stringify(priorSessions) !== JSON.stringify(nextContexts.map(studentClassroomKey).sort());
+    && (JSON.stringify(priorSessions) !== JSON.stringify(nextContexts.map(studentClassroomKey).sort())
+      || priorContext.contextAuthorityRevision !== nextContext?.contextAuthorityRevision);
   const sessionEnded = reason === 'session-ended'
     || (Boolean(nextContext) && nextContexts.length === 0);
 
@@ -4430,12 +4440,14 @@ function applyFabState(state = {}) {
   }
 
   if (bindingChanged || sessionSetChanged) {
+    clearStudentTools();
     respondedPollIds.clear();
     chatMessages = [];
     chatClosed = sessionEnded;
     persistFabChatState();
     renderChatMessages();
   } else if (sessionEnded && (chatMessages.length > 0 || !chatClosed)) {
+    clearStudentTools();
     chatMessages = [];
     chatClosed = true;
     persistFabChatState();
@@ -4451,9 +4463,133 @@ function applyFabState(state = {}) {
     closeFabMenu();
   }
 
+  applyStudentTools(sessionEnded ? null : state.classTools);
   updateFabHandState();
   updateFabMessageState();
   updateFabChatControls();
+}
+
+function clearStudentTools() {
+  studentTools = null;
+  studentToolsTimerKey = '';
+  questionSubmission = null;
+  if (studentToolsExpiry) clearTimeout(studentToolsExpiry);
+  studentToolsExpiry = null;
+  document.getElementById('classpilot-tools-panel')?.remove();
+  const button = document.getElementById('classpilot-fab-tools');
+  if (button) button.hidden = true;
+}
+
+function applyStudentTools(snapshot) {
+  if (isPassPilotKioskPage()) return clearStudentTools();
+  if (!snapshot) { if (studentTools?.capabilities?.includes('timerControlsV1')) stopTimerOverlay(); clearStudentTools(); return; }
+  if (studentTools && JSON.stringify(snapshot.capabilities) === JSON.stringify(studentTools.capabilities) && Number(snapshot.revision) < Number(studentTools.revision)) return;
+  if (studentTools?.capabilities?.includes('timerControlsV1') && !snapshot.capabilities?.includes('timerControlsV1')) { stopTimerOverlay(); studentToolsTimerKey = ''; }
+  studentTools = snapshot;
+  const button = document.getElementById('classpilot-fab-tools');
+  if (button) { button.hidden = !snapshot.capabilities?.length; button.querySelector('.classpilot-fab-label').textContent = snapshot.help?.status === 'acknowledged' ? "You're on my list" : 'Class tools'; }
+  const timerKey = JSON.stringify(snapshot.timer);
+  if (snapshot.capabilities?.includes('timerControlsV1') && timerKey !== studentToolsTimerKey) {
+    studentToolsTimerKey = timerKey;
+    const timer = snapshot.timer;
+    if (timer && Date.parse(timer.expiresAt) > Date.now()) {
+      startTimerOverlay(null, timer.message, timer.deadline || Date.now() + timer.pausedRemainingMs);
+      if (timer.pausedRemainingMs != null) {
+        if (timerInterval) clearInterval(timerInterval);
+        timerInterval = null;
+        const seconds = Math.ceil(timer.pausedRemainingMs / 1000);
+        const display = document.querySelector('#classpilot-timer-overlay .classpilot-timer-display');
+        if (display) display.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')} · Paused`;
+      }
+    } else stopTimerOverlay();
+  }
+  if (studentToolsExpiry) clearTimeout(studentToolsExpiry);
+  const expiry = Math.min(...[snapshot.activity?.expiresAt, snapshot.timer?.expiresAt].map(value => Date.parse(value || '')).filter(value => value > Date.now()));
+  if (Number.isFinite(expiry)) studentToolsExpiry = setTimeout(() => {
+    if (!studentTools) return;
+    if (Date.parse(studentTools.timer?.expiresAt || '') <= Date.now()) { studentTools.timer = null; studentToolsTimerKey = ''; stopTimerOverlay(); }
+    if (Date.parse(studentTools.activity?.expiresAt || '') <= Date.now()) studentTools.activity = null;
+    renderStudentTools();
+  }, Math.min(2147483647, expiry - Date.now() + 25));
+  renderStudentTools();
+}
+
+function submitStudentTool(action, data, button, onSuccess) {
+  const context = captureStudentActionContext();
+  if (!context || button.disabled) return;
+  button.disabled = true;
+  const status = document.getElementById('classpilot-tools-status');
+  if (status) status.textContent = 'Saving…';
+  chrome.runtime.sendMessage({ type: 'class-tools-action', action, data, ...studentActionAuthorityPayload(context) }, response => {
+    if (!studentActionContextIsCurrent(context)) return;
+    const error = chrome.runtime.lastError?.message || response?.error;
+    button.disabled = false;
+    if (error || !response?.success) renderStudentTools();
+    const currentStatus = document.getElementById('classpilot-tools-status');
+    if (currentStatus) currentStatus.textContent = error || (response?.success ? 'Saved' : 'Could not save. Try again.');
+    if (!error && response?.success) onSuccess?.(response.data);
+  });
+}
+
+function renderStudentTools() {
+  const panel = document.getElementById('classpilot-tools-panel');
+  if (!panel || !studentTools) return;
+  const drafts = Object.fromEntries([...panel.querySelectorAll('[data-tool-draft]')].map(node => [node.id, node.value]));
+  const focused = panel.contains(document.activeElement) ? document.activeElement.id : null;
+  const selection = focused ? [document.activeElement.selectionStart, document.activeElement.selectionEnd] : null;
+  const capable = name => studentTools.capabilities?.includes(name);
+  const activity = Date.parse(studentTools.activity?.expiresAt || '') > Date.now() ? studentTools.activity : null;
+  const help = studentTools.help;
+  panel.innerHTML = `<header style="display:flex;justify-content:space-between;align-items:center"><strong style="font-size:18px">Class tools</strong><button id="classpilot-tools-close" aria-label="Close Class tools">×</button></header><p id="classpilot-tools-status" role="status"></p>
+    ${capable('helpRequestsV1') ? `<section><h3>Help now</h3><p>${help?.status === 'acknowledged' ? "You're on my list. Your teacher has seen your request." : help ? 'Waiting for your teacher. Editing keeps your place.' : 'Only your teacher can see your request.'}</p><label for="classpilot-help-kind">What do you need?</label><select id="classpilot-help-kind" data-tool-draft><option value="assignment">Assignment question</option><option value="blocked_website">Blocked website</option><option value="technical">Technical problem</option></select><label for="classpilot-help-text">Optional explanation</label><textarea id="classpilot-help-text" data-tool-draft maxlength="500" rows="2"></textarea><button id="classpilot-help-send" ${handRaisingEnabled ? '' : 'disabled'}>${help ? 'Update request' : 'Ask for help'}</button>${help ? '<button id="classpilot-help-withdraw">Withdraw request</button>' : ''}</section>` : ''}
+    ${activity && capable('lessonActivitiesV1') ? `<section><h3>${escapeHtml(activity.title)}</h3><p style="white-space:pre-wrap">${escapeHtml(activity.instructions)}</p><div id="classpilot-lesson-links"></div><div id="classpilot-lesson-checklist"></div><label for="classpilot-work-status">My work status</label><select id="classpilot-work-status"><option value="not_reported" disabled>Not reported</option><option value="working">Working</option><option value="stuck">Stuck</option><option value="ready_for_review">Ready for review</option><option value="finished">Finished</option></select><p>Choosing Stuck does not send a help request.</p></section>` : ''}
+    ${capable('questionParkingV1') ? '<section><h3>Questions for later</h3><label for="classpilot-question-text">A nonurgent question (up to 500 characters)</label><textarea id="classpilot-question-text" data-tool-draft maxlength="500" rows="2"></textarea><button id="classpilot-question-send">Send question</button><div id="classpilot-my-questions"></div></section>' : ''}`;
+  const listen = (id, event, fn) => { const node = document.getElementById(id); if (node) node.addEventListener(event, fn); };
+  listen('classpilot-tools-close', 'click', () => { panel.remove(); document.getElementById('classpilot-fab-tools')?.focus(); });
+  const kind = document.getElementById('classpilot-help-kind'); if (kind) kind.value = help?.category || 'assignment';
+  const explanation = document.getElementById('classpilot-help-text'); if (explanation) explanation.value = help?.explanation || '';
+  listen('classpilot-help-send', 'click', e => submitStudentTool('help-request', { category: kind.value, explanation: explanation.value }, e.currentTarget));
+  listen('classpilot-help-withdraw', 'click', e => submitStudentTool('help-withdraw', {}, e.currentTarget));
+  listen('classpilot-question-send', 'click', e => {
+    const input = document.getElementById('classpilot-question-text'); const question = input.value.trim(); if (!question) return;
+    if (questionSubmission?.question !== question) questionSubmission = { question, clientRequestId: crypto.randomUUID() };
+    submitStudentTool('question', questionSubmission, e.currentTarget, () => { const current = document.getElementById('classpilot-question-text'); if (current?.value.trim() === question) current.value = ''; if (questionSubmission?.question === question) questionSubmission = null; });
+  });
+  const questions = document.getElementById('classpilot-my-questions');
+  for (const question of studentTools.questions || []) if (questions) {
+    const row = document.createElement('p'); row.textContent = `${question.question} — ${question.answer || (question.resolvedAt ? 'Resolved' : 'Waiting for an answer')}`; questions.append(row);
+  }
+  if (activity) {
+    for (const resource of activity.resources || []) {
+      try { const url = new URL(resource.url); if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) continue;
+        const link = document.createElement('a'); link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = resource.title; document.getElementById('classpilot-lesson-links')?.append(link);
+      } catch { /* Invalid resource URLs are never navigable. */ }
+    }
+    for (const item of activity.checklist || []) {
+      const label = document.createElement('label'); const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.id = `classpilot-checklist-${item.id}`; checkbox.checked = activity.progress.completedItemIds.includes(item.id); checkbox.setAttribute('aria-label', item.text);
+      checkbox.addEventListener('change', () => { const completed = new Set(activity.progress.completedItemIds); if (checkbox.checked) completed.add(item.id); else completed.delete(item.id); submitStudentTool('progress', { activityId: activity.activityId, expectedRevision: activity.progress.revision, completedItemIds: [...completed] }, checkbox); });
+      label.append(checkbox, document.createTextNode(item.text)); document.getElementById('classpilot-lesson-checklist')?.append(label);
+    }
+    const status = document.getElementById('classpilot-work-status');
+    if (status) { status.value = activity.progress.status; status.addEventListener('change', () => submitStudentTool('progress', { activityId: activity.activityId, expectedRevision: activity.progress.revision, status: status.value }, status)); }
+  }
+  for (const [id, value] of Object.entries(drafts)) { const node = document.getElementById(id); if (node) node.value = value; }
+  if (focused) { const node = document.getElementById(focused); node?.focus(); if (node?.setSelectionRange && selection?.[0] != null) node.setSelectionRange(...selection); }
+}
+
+function openStudentTools() {
+  if (!studentTools || isPassPilotKioskPage()) return;
+  hideMessageBox(); closeFabMenu();
+  document.getElementById('classpilot-tools-panel')?.remove();
+  if (!document.getElementById('classpilot-tools-styles')) {
+    const style = document.createElement('style'); style.id = 'classpilot-tools-styles';
+    style.textContent = '#classpilot-tools-panel{position:fixed;right:24px;bottom:90px;width:min(380px,calc(100vw - 32px));max-height:calc(100vh - 120px);overflow:auto;z-index:2147483645;background:#fff;color:#0f172a;padding:20px;border:1px solid #cbd5e1;border-radius:16px;box-shadow:0 12px 40px #0003;font:14px/1.5 system-ui;box-sizing:border-box}#classpilot-tools-panel section{border-top:1px solid #e2e8f0;margin-top:16px;padding-top:12px}#classpilot-tools-panel h3{font-size:16px;margin:0 0 8px}#classpilot-tools-panel label,#classpilot-tools-panel a{display:block;margin:8px 0}#classpilot-tools-panel textarea,#classpilot-tools-panel select{display:block;box-sizing:border-box;width:100%;padding:8px;background:white;color:#0f172a;border:1px solid #94a3b8;border-radius:6px}#classpilot-tools-panel button{padding:7px 10px;margin:8px 8px 0 0;background:#0f172a;color:white;border:0;border-radius:6px;cursor:pointer}#classpilot-tools-panel :disabled{opacity:.5}#classpilot-tools-panel :focus-visible{outline:3px solid #2563eb;outline-offset:2px}#classpilot-tools-panel a{color:#1d4ed8}#classpilot-tools-panel input[type=checkbox]{margin-right:8px}';
+    lifecycle.ownNode(document.head.appendChild(style));
+  }
+  const panel = document.createElement('aside'); panel.id = 'classpilot-tools-panel'; panel.setAttribute('aria-label', 'Class tools');
+  lifecycle.ownNode(document.body.appendChild(panel));
+  lifecycle.listen(panel, 'keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); panel.remove(); document.getElementById('classpilot-fab-tools')?.focus(); } });
+  renderStudentTools(); document.getElementById('classpilot-tools-close')?.focus();
 }
 
 function createFloatingActionButton() {
@@ -4505,6 +4641,10 @@ function createFloatingActionButton() {
         <span class="classpilot-fab-icon">✋</span>
         <span class="classpilot-fab-label">Raise Hand</span>
       </button>
+      <button class="classpilot-fab-item" id="classpilot-fab-tools" title="Class tools" hidden>
+        <span class="classpilot-fab-icon" aria-hidden="true">☷</span>
+        <span class="classpilot-fab-label">Class tools</span>
+      </button>
       <button class="classpilot-fab-item classpilot-fab-signout" id="classpilot-fab-signout" title="Log out">
         <span class="classpilot-fab-icon">⎋</span>
         <span class="classpilot-fab-label">Log out</span>
@@ -4541,6 +4681,7 @@ function createFloatingActionButton() {
   });
 
   // Raise Hand button
+  lifecycle.listen(document.getElementById('classpilot-fab-tools'), 'click', e => { e.stopPropagation(); openStudentTools(); });
   lifecycle.listen(document.getElementById('classpilot-fab-hand'), 'click', (e) => {
     e.stopPropagation();
     if (!handRaisingEnabled) {
