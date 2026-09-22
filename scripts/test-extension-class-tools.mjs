@@ -107,6 +107,12 @@ try {
   await page.getByText('1:30 · Paused', {exact:true}).waitFor();
   await page.reload();
   await page.getByText('1:30 · Paused', {exact:true}).waitFor();
+  assert.equal(await page.evaluate(() => {
+    const timer = document.querySelector('#classpilot-timer-overlay').getBoundingClientRect();
+    const launcher = document.querySelector('#classpilot-fab-main').getBoundingClientRect();
+    return timer.left < launcher.right && timer.right > launcher.left
+      && timer.top < launcher.bottom && timer.bottom > launcher.top;
+  }), false, 'A restored timer must leave the student launcher visible and reachable');
   await page.locator('#classpilot-fab-main').click(); await page.locator('#classpilot-fab-tools').click();
   await page.getByText('Practice fractions',{exact:true}).waitFor();
   await worker.evaluate(async () => {

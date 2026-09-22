@@ -3690,9 +3690,10 @@ function addTimerStyles() {
   style.textContent = `
     #classpilot-timer-overlay {
       position: fixed;
-      bottom: 20px;
+      top: 20px;
       right: 20px;
       z-index: 2147483646;
+      pointer-events: none;
       animation: classpilot-timer-in 0.3s ease-out;
     }
 
