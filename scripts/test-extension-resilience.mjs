@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +39,7 @@ function attachWorkerErrorCapture(worker, errors) {
   });
 }
 
-function launchTestContext(executablePath) {
+function launchTestContext(executablePath, fixture) {
   return chromium.launchPersistentContext(profilePath, {
     executablePath,
     headless: true,
@@ -45,7 +47,8 @@ function launchTestContext(executablePath) {
       // Install the guard before the extension starts: synthetic authority
       // fixtures must never fall through an unmocked fetch to a live backend.
       '--no-proxy-server',
-      '--host-resolver-rules=MAP *.localhost 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost',
+      `--host-resolver-rules=MAP lock.localhost:443 127.0.0.1:${fixture.httpsPort}, MAP *.localhost 127.0.0.1, MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost`,
+      '--ignore-certificate-errors',
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
@@ -70,7 +73,25 @@ async function startNavigationFixtureServer() {
     server.close();
     throw new Error('Navigation fixture server did not expose a TCP port');
   }
-  return { server, port: address.port };
+  const keyPath = join(profilePath, 'fixture-key.pem');
+  const certPath = join(profilePath, 'fixture-cert.pem');
+  const openssl = process.env.CLASSPILOT_OPENSSL_PATH || (
+    process.platform === 'win32' && existsSync('C:/Program Files/Git/usr/bin/openssl.exe')
+      ? 'C:/Program Files/Git/usr/bin/openssl.exe' : 'openssl'
+  );
+  execFileSync(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=lock.localhost', '-keyout', keyPath, '-out', certPath], {
+    windowsHide: true, stdio: 'ignore',
+  });
+  const httpsServer = createHttpsServer({ key: readFileSync(keyPath), cert: readFileSync(certPath) }, (_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>ClassPilot lock fixture</title>');
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    httpsServer.once('error', rejectListen);
+    httpsServer.listen(0, '127.0.0.1', resolveListen);
+  });
+  return { server, port: address.port, httpsServer, httpsPort: httpsServer.address().port };
 }
 
 async function waitForRestoredRevision(worker, expectedRevision) {
@@ -183,11 +204,13 @@ async function main() {
 
   let context;
   let navigationFixtureServer;
+  let navigationFixtureHttpsServer;
   const serviceWorkerErrors = [];
   try {
     const fixture = await startNavigationFixtureServer();
     navigationFixtureServer = fixture.server;
-    context = await launchTestContext(executablePath);
+    navigationFixtureHttpsServer = fixture.httpsServer;
+    context = await launchTestContext(executablePath, fixture);
 
     let worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
@@ -690,7 +713,7 @@ async function main() {
     // binding. Ordinary MV3 suspension is covered separately and keeps this
     // session storage intact.
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     const restored = await worker.evaluate(async ({ now }) => {
@@ -1741,7 +1764,10 @@ async function main() {
 
     const tabUrl = (host, path) => `http://${host}.localhost:${fixture.port}${path}`;
     const reconciliationUrls = {
-      lock: 'https://example.com/classpilot-resilience-assignment',
+      // External DNS is deliberately blocked for this browser. Serve the
+      // lock target locally so a network error cannot replace it between
+      // reconciliation and the final tab inventory assertion.
+      lock: 'https://lock.localhost/classpilot-resilience-assignment',
       outsideOne: tabUrl('outside', '/one'),
       outsideActive: tabUrl('outside', '/active'),
       otherTwo: tabUrl('other', '/two'),
@@ -1784,7 +1810,7 @@ async function main() {
           screenLock: {
             active: true,
             url: urls.lock,
-            domain: 'example.com',
+            domain: 'lock.localhost',
           },
         },
       });
@@ -1797,7 +1823,7 @@ async function main() {
         // deterministic invariant is that every remaining web tab is on the
         // locked domain, not that exactly one remains.
         return webUrls.length >= 1 && webUrls.every((url) =>
-          new URL(url).hostname === 'example.com'
+          new URL(url).hostname === 'lock.localhost'
         );
       });
       await drainTabPolicyMutations();
@@ -1856,7 +1882,7 @@ async function main() {
       `lock reconciliation result: ${JSON.stringify(existingTabReconciliation.afterLock)}`,
     );
     assert.ok(existingTabReconciliation.afterLock.web.every((url) =>
-      new URL(url).hostname === 'example.com'
+      new URL(url).hostname === 'lock.localhost'
     ));
     assert.ok(existingTabReconciliation.afterLock.web.includes(reconciliationUrls.lock));
     assert.ok(existingTabReconciliation.afterFlightPath.internal.length >= 1);
@@ -2236,7 +2262,7 @@ async function main() {
     assert.deepEqual(corruptSchoolPolicySetup.ruleIds, [1000, 2000]);
 
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     const corruptSchoolPolicyRestore = await worker.evaluate(async () => {
@@ -2260,7 +2286,7 @@ async function main() {
       await chrome.storage.local.remove('globalBlockedDomains');
     });
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     const missingSchoolPolicyRestore = await worker.evaluate(async () => {
@@ -2330,7 +2356,7 @@ async function main() {
     assert.equal(initialInbox.stored.messageInboxAuthBindingV1.includes('message-inbox-session-a'), false);
 
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     await worker.evaluate(async () => {
@@ -7183,7 +7209,7 @@ async function main() {
     assert.equal(completedAuthClear.config.studentToken, undefined);
 
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     await worker.evaluate(async () => classroomStateRestorePromise);
@@ -7236,7 +7262,7 @@ async function main() {
     }, { now: Date.now() });
 
     await context.close();
-    context = await launchTestContext(executablePath);
+    context = await launchTestContext(executablePath, fixture);
     worker = await waitForInitialWorker(context);
     attachWorkerErrorCapture(worker, serviceWorkerErrors);
     const interruptedDeadline = Date.now() + 10_000;
@@ -7288,6 +7314,9 @@ async function main() {
     console.log('Verified restart/tab restore, connectivity and screenshot diagnostics, canonical entitlement revocation cleanup, transient-command expiry, durable ACK receipts, school-policy close/tab-limit authority isolation, opaque exact-tab close/stale rejection, revisioned FAB lifecycle, binding-scoped timer/poll restoration, ordered MV3 WebSocket lifetime, completed/interrupted auth-clear restart safety, best-effort tab failure safety, explicit-null reconciliation, expiry retry, missing/corrupt school-policy preservation, DNR/revision safety, oversized-list failure, auth-bound event outbox isolation, and restart-safe identity-bound teacher-message dedup.');
   } finally {
     await context?.close();
+    if (navigationFixtureHttpsServer) {
+      await new Promise((resolveClose) => navigationFixtureHttpsServer.close(resolveClose));
+    }
     if (navigationFixtureServer) {
       await new Promise((resolveClose) => navigationFixtureServer.close(resolveClose));
     }
