@@ -8,6 +8,9 @@ import { resolve } from 'node:path';
 const source = readFileSync(process.env.CLASSPILOT_EXTENSION_PATH
   ? resolve(process.env.CLASSPILOT_EXTENSION_PATH, 'page-lifecycle.js')
   : new URL('../extension/page-lifecycle.js', import.meta.url), 'utf8');
+const supportSource = readFileSync(process.env.CLASSPILOT_EXTENSION_PATH
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH, 'auth-recovery-diagnostics.js')
+  : new URL('../extension/auth-recovery-diagnostics.js', import.meta.url), 'utf8');
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const event = () => {
   const listeners = new Set();
@@ -30,6 +33,7 @@ function fixture() {
       return new Promise((resolve, reject) => { pending.push(resolve); options.signal.addEventListener('abort', () => reject({ errorCode: 'AUTH_GATE_REQUEST_CANCELLED' }), { once: true }); });
     } },
   });
+  vm.runInContext(supportSource, context);
   vm.runInContext(source, context);
   return { context, api: context.ClassPilotPageLifecycle, setVersion: value => { version = value; }, messages, pending, observers, onMessage, onChanged, transportCalls };
 }
@@ -133,4 +137,20 @@ test('disposal releases its own reload proof and preserves another owner proof',
   f.context.bootstrapController = {};
   f.context.__classpilotPageReloadProof = { bootstrap: f.context.bootstrapController };
   next.controller.dispose(); assert.equal(f.context.__classpilotPageReloadProof, undefined);
+});
+
+test('the callback lifecycle bridge preserves sanitized failure support without auth proof', async () => {
+  const f = fixture();
+  f.context.ClassPilotAuthGateTransport.sendMessage = async () => { throw {
+    errorCode: 'AUTH_GATE_STARTUP_TIMEOUT', retryAt: 5000,
+    supportDetails: { extensionVersion: '2.9.4', startupPhase: 'auth_snapshot', restoreOutcome: 'failed',
+      failureClass: 'STORAGE_IO_ERROR', attemptCount: 1, retryInMs: 2000, pending: false, studentToken: 'private-token' },
+    state: { authRequired: false },
+  }; };
+  const start = f.api.begin('bootstrap');
+  const response = await new Promise(resolve => start.scope.chrome.runtime.sendMessage({ type: 'get-auth-state' }, resolve));
+  assert.equal(response.supportDetails.failureClass, 'STORAGE_IO_ERROR');
+  assert.equal(JSON.stringify(response).includes('private'), false);
+  assert.equal('state' in response, false);
+  start.controller.dispose();
 });

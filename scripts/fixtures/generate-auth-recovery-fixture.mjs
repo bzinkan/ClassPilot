@@ -1,6 +1,6 @@
 // Reproducible generator for scripts/fixtures/auth-recovery-<version>.json(.gz).
 //
-//   node scripts/fixtures/generate-auth-recovery-fixture.mjs <git-ref> [repo-path] [--verify-only]
+//   node scripts/fixtures/generate-auth-recovery-fixture.mjs <git-ref> [repo-path] [--verify-only] [--fixture-key=<key>]
 //
 // The archive is the exact byte recipe used by the existing 2.8.7 fixture:
 //   files    = `git show <ref>:extension/<name>` for FILES (sorted), with every
@@ -27,6 +27,10 @@ const FILES = Object.freeze([
 ]);
 const args = process.argv.slice(2).filter((value) => !value.startsWith('--'));
 const verifyOnly = process.argv.includes('--verify-only');
+const fixtureKeyArgument = process.argv.find((value) => value.startsWith('--fixture-key='))?.slice('--fixture-key='.length);
+if (fixtureKeyArgument && !/^[a-z0-9][a-z0-9.-]*$/.test(fixtureKeyArgument)) {
+  throw new Error('Invalid immutable fixture key');
+}
 const ref = args[0];
 if (!ref) {
   console.error('usage: generate-auth-recovery-fixture.mjs <git-ref> [repo-path] [--verify-only]');
@@ -42,16 +46,19 @@ for (const name of FILES) {
   files[name] = git('show', `${sourceCommit}:extension/${name}`).toString('utf8').replace(/\r?\n/g, '\r\n');
 }
 const extensionVersion = JSON.parse(files['manifest.json']).version;
+const fixtureKey = fixtureKeyArgument || extensionVersion;
 const archive = gzipSync(JSON.stringify({ files }), { level: 9 });
 const receipt = {
   sourceCommit,
   extensionVersion,
-  description: `Immutable ${extensionVersion} runtime scripts and manifest for same-ID cooperative-controller upgrade acceptance and red-on-old startup-recovery gating. Candidate supplies unchanged images/styles and a synthetic managed API fixture; no configuration or credentials included.`,
+  description: fixtureKeyArgument
+    ? `Immutable unsubmitted PR candidate ${fixtureKey} (manifest ${extensionVersion}), not a published release. Baseline for startup-recovery review regressions. Candidate supplies images/styles and a synthetic managed API fixture; no configuration or credentials included.`
+    : `Immutable ${extensionVersion} runtime scripts and manifest for same-ID cooperative-controller upgrade acceptance and red-on-old startup-recovery gating. Candidate supplies unchanged images/styles and a synthetic managed API fixture; no configuration or credentials included.`,
   files: Object.fromEntries(FILES.map((name) => [name, sha256(files[name])])),
   archiveSha256: sha256(archive),
 };
-const receiptPath = join(fixturesDir, `auth-recovery-${extensionVersion}.json`);
-const archivePath = join(fixturesDir, `auth-recovery-${extensionVersion}.json.gz`);
+const receiptPath = join(fixturesDir, `auth-recovery-${fixtureKey}.json`);
+const archivePath = join(fixturesDir, `auth-recovery-${fixtureKey}.json.gz`);
 
 if (verifyOnly) {
   if (!existsSync(receiptPath) || !existsSync(archivePath)) {
@@ -68,6 +75,12 @@ if (verifyOnly) {
   process.exit(matches ? 0 : 1);
 }
 
+if (existsSync(receiptPath)) {
+  const existing = JSON.parse(readFileSync(receiptPath, 'utf8'));
+  if (existing.sourceCommit !== sourceCommit || existing.archiveSha256 !== receipt.archiveSha256) {
+    throw new Error(`Refusing to replace immutable fixture ${fixtureKey}; choose a new key`);
+  }
+}
 writeFileSync(archivePath, archive);
 writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
 console.log(JSON.stringify({ extensionVersion, sourceCommit, archiveSha256: receipt.archiveSha256, receiptPath, archivePath }));

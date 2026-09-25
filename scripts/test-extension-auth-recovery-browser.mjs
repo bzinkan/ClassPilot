@@ -10,8 +10,10 @@ import { chromium } from 'playwright';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Case table. `expectedRedOnBase` records whether the case must FAIL against
-// unmodified v2.8.9 sources; scripts/test-extension-recovery-red-on-old.mjs
-// proves every red case trips on the old worker before trusting a green run.
+// unmodified released sources: `true` means v2.8.9 (the 2.9.0 correction), a
+// version string names the immutable scripts/fixtures snapshot it must trip on
+// (2.9.4's cases trip on v2.9.3). scripts/test-extension-recovery-red-on-old.mjs
+// proves every red case trips on that old worker before trusting a green run.
 export const RECOVERY_CASES = Object.freeze({
   'existing': { expectedRedOnBase: false },
   'policy-change': { expectedRedOnBase: false },
@@ -32,6 +34,17 @@ export const RECOVERY_CASES = Object.freeze({
   'post-snapshot-supersession': { expectedRedOnBase: true },
   'competing-login': { expectedRedOnBase: true },
   'held-ops-concurrency': { expectedRedOnBase: true },
+  // 2.9.3 left a wake that failed or parked before its policy barrier settled
+  // unrecoverable (readiness waited on that barrier forever); 2.9.4 recovers.
+  'wake-failure-before-policy': { expectedRedOnBase: '2.9.3' },
+  'wake-parked-before-policy': { expectedRedOnBase: '2.9.3' },
+  'wake-partial-auth-clear': { expectedRedOnBase: 'pr116-16320c6', expectedFailure: '[regression:partial-auth]' },
+  'wake-no-migration-replay': { expectedRedOnBase: 'pr116-16320c6', expectedFailure: '[regression:migration-replay]' },
+  'wake-held-composite-no-takeover': { expectedRedOnBase: 'pr116-16320c6', expectedFailure: '[regression:composite-takeover]' },
+  'server-signout-fresh-login-binding': { expectedRedOnBase: false },
+  'server-signout-during-startup-recovery': { expectedRedOnBase: false },
+  'blocked-screen-diagnostics': { expectedRedOnBase: 'pr116-16320c6', expectedFailure: '[regression:on-screen-details]' },
+  'blocked-fallback-diagnostics': { expectedRedOnBase: false },
   'recovered-startup-obsolete-school': { expectedRedOnBase: false },
   'worker-suspension-preserves-classroom': { expectedRedOnBase: false },
 });
@@ -74,9 +87,60 @@ async function fixtureServer() {
         response.end(JSON.stringify({ sharedSignInEnabled: true, loginMethod: 'name_pin', schoolId: 'recovery-school', passpilotKioskAvailable: false }));
       } else if (url.pathname.endsWith('/login-roster')) {
         state.rosterRequests += 1;
-        response.end(JSON.stringify({ loginMethod: 'name_pin', grades: [], students: [], refreshAfterMs: 30_000 }));
+        if (state.revokedRecoveryToken && request.headers.authorization === `ClassPilot-Recovery ${state.revokedRecoveryToken}`) {
+          state.revokedRosterRequests = (state.revokedRosterRequests || 0) + 1;
+        }
+        const students = state.allowFreshLogin
+          ? [{ id: 'student-fresh-fixture', name: 'Fresh Fixture', hasPin: true }]
+          : [];
+        const revocable = state.revocableSession;
+        if (revocable && (!revocable.active || request.headers.authorization === `ClassPilot-Recovery ${revocable.recoveryToken}`)) {
+          students.unshift({ id: revocable.studentId, name: 'Revoked Fixture', hasPin: true,
+            ...(revocable.active ? { reclaimable: true } : {}) });
+        }
+        response.end(JSON.stringify({ loginMethod: 'name_pin', grades: [], students, refreshAfterMs: 30_000 }));
+      } else if (url.pathname.endsWith('/student-login') && state.allowFreshLogin) {
+        let body = '';
+        request.on('data', (chunk) => { body += chunk; });
+        request.on('end', () => {
+          state.studentLoginRequests += 1;
+          (state.loginAuthorizationHeaders ||= []).push(request.headers.authorization || null);
+          const payload = JSON.parse(body);
+          if (payload.studentId !== 'student-fresh-fixture' || payload.pin !== '1234') {
+            response.statusCode = 401;
+            response.end(JSON.stringify({ error: 'Invalid PIN', code: 'PIN_MISMATCH' }));
+            return;
+          }
+          const ordinal = state.studentLoginRequests;
+          response.end(JSON.stringify({
+            studentToken: `fresh-fixture-token-${ordinal}`, studentSessionId: `login-fresh-fixture-${ordinal}`,
+            student: { id: 'student-fresh-fixture', firstName: 'Fresh', lastName: 'Fixture', email: 'fresh@example.test', schoolId: 'recovery-school' },
+            schoolId: 'recovery-school', sessionRecovery: { token: String(ordinal).repeat(43) },
+            planStatus: 'active', manualExpiresInSeconds: 300,
+          }));
+        });
+      } else if (url.pathname.endsWith('/sign-out')) {
+        // The synthetic API confirms only the pre-2.7.3 upgrade sign-out that
+        // the legacy local-credential purge issues (the production API does);
+        // every other sign-out keeps its 404 so existing cases are unchanged.
+        let body = '';
+        request.on('data', (chunk) => { body += chunk; });
+        request.on('end', () => {
+          let reason = null;
+          try { reason = JSON.parse(body).reason; } catch { /* malformed */ }
+          state.signOutRequests = (state.signOutRequests || 0) + 1;
+          if (reason === 'legacy_local_auth_upgrade') {
+            state.legacySignOutRequests = (state.legacySignOutRequests || 0) + 1;
+            response.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          (state.unknownApiPaths ||= []).push(url.pathname);
+          response.statusCode = 404;
+          response.end(JSON.stringify({ error: 'fixture_route_unavailable' }));
+        });
       } else {
         if (url.pathname.endsWith('/student-login')) state.studentLoginRequests += 1;
+        (state.unknownApiPaths ||= []).push(url.pathname);
         response.statusCode = 404;
         response.end(JSON.stringify({ error: 'fixture_route_unavailable' }));
       }
@@ -198,11 +262,17 @@ for (const areaName of ['local','session']) {
       const keys = method === 'set' ? Object.keys(value || {})
         : typeof value === 'string' ? [value] : Array.isArray(value) ? [...value] : Object.keys(value || {});
       for (const key of keys) fixture.writeAttempts[key] = (fixture.writeAttempts[key] || 0) + 1;
-      const entry = { area: areaName, method, keys, at: Date.now(), fault: null };
+      const entry = { area: areaName, method, keys, at: Date.now(), fault: null,
+        // The legacy fixture seeds only studentToken among the old auth keys.
+        // Its migration removes exactly that key; strict clear removes the
+        // complete auth-key set. Match the native call shape, not JS stacks
+        // whose async depth differs between Chrome releases.
+        legacyMigration: areaName === 'local' && method === 'remove' && keys.length === 1 && keys[0] === 'studentToken' };
       fixture.writeLog.push(entry);
       if (fixture.writeLog.length > 2000) fixture.writeLog.shift();
       const matching = fixture.writeFaults.filter((target) => target.area === areaName && target.method === method
         && keys.includes(target.key)
+        && (target.keyCount === undefined || keys.length === target.keyCount)
         && (target.requireKeys || []).every((required) => keys.includes(required))
         && !(target.excludeKeys || []).some((excluded) => keys.includes(excluded)));
       for (const target of matching) target.matchedAttempts += 1;
@@ -470,6 +540,12 @@ async function pageFixture(worker, page, operation, payload = null) {
           callbacks.forEach(({callback}) => callback({fastAuthGateEnabled:false,serverUrl:'https://obsolete.invalid'}));
           return callbacks.length;
         }
+        if (operation === 'deny-clipboard') {
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true, value: { writeText: async () => { throw new DOMException('Denied by fixture', 'NotAllowedError'); } },
+          });
+          return true;
+        }
         return {
           reads: fixture.reads,
           heldCallbacks: fixture.callbacks.length,
@@ -631,6 +707,9 @@ async function workerAuthSummary(worker) {
     startup: authGateStartupComplete, studentToken: CONFIG.studentToken, schoolId: CONFIG.schoolId, enrollmentKey: CONFIG.enrollmentKey,
     generation: managedAuthGatePolicyGeneration, invalidating: studentAuthInvalidating,
     pendingMutations: studentAuthMutationPendingCount, loginsPending: manualStudentLoginRequestsPending,
+    serverUrl: CONFIG.serverUrl, loginPhase: sharedSignInLoginConfig?.phase ?? null,
+    loginError: sharedSignInLoginConfig?.errorCode ?? sharedSignInLoginConfig?.error ?? null,
+    legacyCleanupPending: Boolean(legacyStudentAuthCleanupAuthority),
   }));
 }
 async function driveStartupSupersession(worker, pages, newValue = 'fixture-enrollment-rotated') {
@@ -1525,6 +1604,428 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   assert.equal(fixture.state.studentLoginRequests, 0);
   console.log('PASS held startup write: 3 tabs, user retries, polls and the alarm coalesce until the deadline; one re-run recovers', JSON.stringify({ unavailableMs }));
 });
+
+// --- 2.9.4: wake failure / abandonment before the policy barrier -------------
+// A pre-2.7.3 local credential makes the wake's snapshot continuation purge it
+// through native storage. Faulting that purge fails (or parks) the wake before
+// its policy barrier settles. 2.9.3 then left readiness waiting on that barrier
+// forever, in flight, so neither Retry nor the recovery alarm could re-run it.
+const legacyCredentialSeed = (origin) => ({ local: {
+  studentToken: 'legacy-local-credential', deviceId: 'device-legacy-fixture',
+  config: { serverUrl: origin, schoolId: 'recovery-school', schoolSlug: 'recovery-school', enrollmentKey: 'fixture-enrollment' },
+} });
+async function readyAfterWakeRecovery(page, worker, label, timeout, fixture = null) {
+  // Unattended when the frame's own backoff re-polls in time; otherwise the
+  // card's Retry (what a student does) must open the sign-in form.
+  try { return { frame: await waitForPhase(page, 'ready', timeout), retried: false }; }
+  catch { /* the startup card is showing */ }
+  const card = await waitForPhase(page, 'unavailable', 5_000);
+  console.log(`[${label} card]`, JSON.stringify({ supportCode: await frameSupportCode(card), fixture: fixture?.state, auth: await workerAuthSummary(worker) }));
+  await clickRetry(card);
+  return { frame: await expectReady(page, 15_000, worker, label, 'Retry after readiness recovery must show the sign-in form'), retried: true };
+}
+async function assertWakeRecovered({ page, worker, probe, fixture, target, label, timeout }) {
+  const { frame, retried } = await readyAfterWakeRecovery(page, worker, label, timeout, fixture);
+  await assertProtected(page);
+  assert.equal((await faultTarget(worker, target)).faultedAttempts, 1, 'fixture must fault the legacy credential purge exactly once');
+  const diagnostics = await readDiagnostics(worker);
+  const failure = diagnostics.find((entry) => entry.stage === 'startup' && entry.cause === 'wake_failed');
+  assert.ok(failure, `expected a startup/wake_failed diagnostic (${JSON.stringify(diagnostics)})`);
+  assert.equal(failure.detail, 'legacy_auth_cleanup', 'the diagnostic names the startup step');
+  const record = await storedValue(worker, 'session', 'authGateWakeFailureV1');
+  assert.equal(record?.cause, 'wake_failed'); assert.equal(record?.step, 'legacy_auth_cleanup');
+  assert.equal(typeof record?.error, 'string');
+  assert.equal(await storedValue(worker, 'local', 'studentToken'), undefined, 'the legacy local credential is purged by the recovery clear');
+  const auth = await workerAuthSummary(worker);
+  assert.equal(auth.startup, true); assert.equal(auth.studentToken, null);
+  assert.equal(auth.schoolId, 'recovery-school', 'readiness applies the managed policy the failed wake never applied');
+  const summary = await writeFault(worker, 'summary');
+  assert.ok(summary.authClears.length >= 1, `readiness must run the signed-out clear (${JSON.stringify(summary.authClears)})`);
+  assert.equal(fixture.state.studentLoginRequests, 0);
+  const owners = await startupOwners(worker);
+  assert.ok(owners.find((owner) => owner.kind === 'startup_readiness')?.settled, `the readiness owner must settle (${JSON.stringify(owners)})`);
+  const { response } = await gateProbe(probe);
+  assert.equal(response?.success, true, `the gate must answer after recovery (${JSON.stringify(response)})`);
+  return { frame, retried, failure, record, diagnostics, summary };
+}
+
+await withBrowser({ caseName: 'wake-failure-before-policy', authReadMode: 'never', seed: legacyCredentialSeed }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-failure-before-policy');
+  await waitForHeldWakeAuthRead(worker);
+  const target = await writeFault(worker, 'arm', { key: 'studentToken', method: 'remove', mode: 'reject-before-commit' });
+  assert.equal(await releaseWakeAuthRead(worker), 1, 'fixture must actually hold the wake auth snapshot read');
+  const { retried, failure, record, summary } = await assertWakeRecovered({ page, worker, probe, fixture, target, label: 'wake-failure-before-policy', timeout: 20_000 });
+  console.log('PASS wake failure before policy: readiness recovered from durable markers and applied policy', JSON.stringify({ retried, failure, record, authClears: summary.authClears }));
+});
+
+await withBrowser({ caseName: 'wake-parked-before-policy', authReadMode: 'never', seed: legacyCredentialSeed }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-parked-before-policy');
+  await waitForHeldWakeAuthRead(worker);
+  // The purge's native callback never runs. 2.9.4 bounds it: the fresh verify
+  // read still sees the credential, so the wake fails instead of parking.
+  const target = await writeFault(worker, 'arm', { key: 'studentToken', method: 'remove', mode: 'never' });
+  assert.equal(await releaseWakeAuthRead(worker), 1, 'fixture must actually hold the wake auth snapshot read');
+  await waitForHeldWrite(worker, 'studentToken');
+  const { retried, failure, record, diagnostics, summary } = await assertWakeRecovered({ page, worker, probe, fixture, target, label: 'wake-parked-before-policy', timeout: 30_000 });
+  assert.ok(diagnostics.some((entry) => entry.stage === 'startup' && entry.cause === 'stalled'), `expected a startup/stalled diagnostic (${JSON.stringify(diagnostics)})`);
+  assert.ok(summary.held.some((held) => held.key === 'studentToken' && !held.committed), 'the parked native purge stays held; it is never replayed');
+  console.log('PASS wake parked before policy: the bounded purge failed the wake and readiness recovered', JSON.stringify({ retried, failure, record, held: summary.held }));
+});
+
+// A complete browser-session credential tuple can still fail while restoring
+// its local auth-context ID. Remaining CONFIG fields are not proof that the
+// restoration completed. These cases use the real wake, restoration, policy
+// and readiness pipeline; only native storage and an existing mutation tail
+// are faulted. No policy-revalidation implementation is substituted.
+const browserSessionCredentialSeed = (origin, { withContext = false } = {}) => ({
+  local: {
+    deviceId: 'device-wake-fixture', autoRegistrationPaused: true,
+    config: { serverUrl: origin, deviceId: 'device-wake-fixture', schoolId: 'recovery-school', schoolSlug: 'recovery-school', enrollmentKey: 'fixture-enrollment' },
+  },
+  session: {
+    ...(withContext ? { authContextId: 'auth_wake_fixture' } : {}),
+    studentToken: 'wake-session-token', activeStudentId: 'student-wake-fixture', activeStudentSessionId: 'login-wake-fixture',
+    studentEmail: 'wake@example.test', studentName: 'Wake Fixture', identitySource: 'chrome_profile', registered: true,
+  },
+});
+
+async function waitUntilWorker(worker, predicate, timeout, failureMessage) {
+  const until = Date.now() + timeout;
+  while (Date.now() < until) {
+    if (await worker.evaluate(predicate)) return;
+    await sleep(50);
+  }
+  assert.fail(failureMessage);
+}
+
+await withBrowser({ caseName: 'wake-partial-auth-clear', authReadMode: 'never', seed: browserSessionCredentialSeed, quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-partial-auth-clear');
+  await waitForHeldWakeAuthRead(worker);
+  const target = await writeFault(worker, 'arm', { area: 'session', key: 'authContextId', mode: 'reject-before-commit' });
+  assert.equal(await releaseWakeAuthRead(worker), 1);
+  try {
+    await waitUntilWorker(worker, () => authGateStartupComplete, 20_000,
+      '[regression:partial-auth] failed restoration must recover to verified signed-out readiness');
+  } catch (error) { await dumpStartupState(worker, 'wake-partial-auth-clear'); throw error; }
+  assert.equal((await faultTarget(worker, target)).faultedAttempts, 1, 'the context-ID persistence must actually fail');
+  const recovered = await worker.evaluate(() => ({
+    authenticated: hasStudentAuth(), token: CONFIG.studentToken, contextId: CONFIG.authContextId,
+    paused: CONFIG.autoRegistrationPaused, clears: __managedRecoveryFixture.authClears,
+  }));
+  assert.equal(recovered.authenticated, false,
+    `[regression:partial-auth] failed context-ID restoration must not publish authenticated readiness (${JSON.stringify(recovered)})`);
+  assert.equal(recovered.token, null, '[regression:partial-auth] failed restoration must clear the partial bearer');
+  assert.equal(recovered.contextId, null);
+  assert.equal(recovered.paused, true, 'recovery must require a deliberate fresh sign-in');
+  assert.ok(recovered.clears.length >= 1, 'failed restoration must run verified local authentication cleanup');
+  assert.equal(await storedValue(worker, 'session', 'studentToken'), undefined);
+  assert.equal(await storedValue(worker, 'local', 'studentAuthInvalidatingV1'), undefined);
+  await expectReady(page, 15_000, worker, 'wake-partial-auth-clear', '[regression:partial-auth] verified cleanup must display fresh sign-in');
+  await assertProtected(page);
+  const { response } = await gateProbe(probe);
+  assert.equal(response?.success, true);
+  assert.equal(fixture.state.studentLoginRequests, 0, 'recovery must never replay a login');
+  fixture.state.allowFreshLogin = true;
+  const login = await rpc(probe, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+  assert.equal(login?.success, true, `fresh credentialed sign-in must succeed after recovery (${JSON.stringify(login)})`);
+  await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  assert.equal(fixture.state.studentLoginRequests, 1);
+  const newAuth = await worker.evaluate(() => ({
+    authenticated: hasStudentAuth(), token: CONFIG.studentToken, contextId: CONFIG.authContextId,
+    sessionId: CONFIG.activeStudentSessionId, recovery: studentSessionRecoveryState.armed?.token,
+  }));
+  assert.equal(newAuth.authenticated, true);
+  assert.equal(newAuth.token, 'fresh-fixture-token-1');
+  assert.equal(newAuth.sessionId, 'login-fresh-fixture-1');
+  assert.equal(newAuth.recovery, '1'.repeat(43));
+  assert.equal(await storedValue(worker, 'local', 'studentToken'), undefined, 'the new bearer remains browser-session scoped');
+  console.log('PASS failed auth-context restoration clears partial credentials, then a fresh PIN login commits a new session');
+});
+
+await withBrowser({ caseName: 'wake-no-migration-replay', authReadMode: 'never', seed: legacyCredentialSeed }, async ({ context, worker, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-no-migration-replay');
+  await waitForHeldWakeAuthRead(worker);
+  const target = await writeFault(worker, 'arm', {
+    key: 'studentToken', method: 'remove', keyCount: 1, mode: 'reject-before-commit',
+  });
+  // If recovery incorrectly calls getStoredAuthState again, this second native
+  // migration purge never invokes its callback. The verified auth-clear path
+  // is allowed to remove the same credential through its own idempotent write.
+  await writeFault(worker, 'arm', {
+    key: 'studentToken', method: 'remove', keyCount: 1, mode: 'never',
+  });
+  assert.equal(await releaseWakeAuthRead(worker), 1);
+  await waitUntilWorker(worker, () => authGateStartupComplete
+    || __managedRecoveryFixture.writeLog.filter((entry) => entry.legacyMigration).length > 1,
+  20_000, '[regression:migration-replay] failed wake must recover without repeating credential migration');
+  const summary = await writeFault(worker, 'summary');
+  assert.equal(summary.writeLog.filter((entry) => entry.legacyMigration).length, 1,
+    '[regression:migration-replay] recovery must not invoke a second legacy credential migration');
+  assert.equal((await faultTarget(worker, target)).faultedAttempts, 1);
+  await expectReady(page, 15_000, worker, 'wake-no-migration-replay', '[regression:migration-replay] dedicated policy recovery must show fresh sign-in');
+  assert.equal(await storedValue(worker, 'local', 'studentToken'), undefined);
+  assert.equal((await workerAuthSummary(worker)).studentToken, null);
+  await assertProtected(page);
+  console.log('PASS recovery clears old credentials without replaying legacy migration or parking on its second callback');
+});
+
+await withBrowser({ caseName: 'wake-held-composite-no-takeover', authReadMode: 'never', seed: (origin) => browserSessionCredentialSeed(origin, { withContext: true }), quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-held-composite-no-takeover');
+  await waitForHeldWakeAuthRead(worker);
+  const before = await worker.evaluate(() => {
+    // cleanupRetiredExactBoundStorage must await this legitimate prior cleanup
+    // owner. Holding the tail exercises the actual composite and auth queue.
+    retiredExactBoundStorageCleanupMutation = new Promise((resolve) => { globalThis.__releasePriorExactCleanup = resolve; });
+    return { generation: studentAuthMutationGeneration, policyGeneration: managedAuthGatePolicyGeneration };
+  });
+  assert.equal(await releaseWakeAuthRead(worker), 1);
+  await waitUntilWorker(worker, () => CONFIG.authContextId === 'auth_wake_fixture', 6_000,
+    'the held composite must belong to the real credential-restoration attempt');
+  // Crossing both the former composite 9s deadline and the global 30s watchdog
+  // must leave the owner pending. Retry may report a timeout, never take over.
+  const started = Date.now();
+  const reply = gateProbe(probe);
+  while (Date.now() - started < 32_000) {
+    const current = await worker.evaluate(() => ({
+      startup: authGateStartupComplete, pending: studentAuthMutationPendingCount,
+      generation: studentAuthMutationGeneration, clears: __managedRecoveryFixture.authClears.length,
+    }));
+    assert.equal(current.startup, false,
+      '[regression:composite-takeover] a deadline must not publish readiness over an unsettled authentication composite');
+    assert.equal(current.generation, before.generation,
+      '[regression:composite-takeover] a deadline must not retire an unsettled authentication mutation');
+    assert.equal(current.clears, 0,
+      '[regression:composite-takeover] Retry/watchdog must not enqueue cleanup behind abandoned composite work');
+    assert.ok(current.pending >= 1, '[regression:composite-takeover] the original authentication mutation must remain owned');
+    await sleep(250);
+  }
+  assertStartupGateFailure(await reply, 'held authentication composite');
+  await assertProtected(page);
+  const retry = await rpc(probe, { type: 'refresh-auth-state', reason: 'user' });
+  assert.equal(retry?.success, false, 'explicit Retry must report the still-pending startup');
+  await worker.evaluate(() => globalThis.__releasePriorExactCleanup());
+  await waitUntilWorker(worker, () => authGateStartupComplete, 15_000,
+    'the original wake must finish when its composite actually completes');
+  const finished = await worker.evaluate(() => ({
+    authenticated: hasStudentAuth(), contextId: CONFIG.authContextId,
+    generation: studentAuthMutationGeneration, clears: __managedRecoveryFixture.authClears.length,
+  }));
+  assert.equal(finished.authenticated, true, 'successful original restoration preserves the saved session');
+  assert.equal(finished.contextId, 'auth_wake_fixture');
+  assert.equal(finished.generation, before.generation);
+  assert.equal(finished.clears, 0);
+  assert.equal(fixture.state.studentLoginRequests, 0);
+  console.log('PASS a held authentication composite retains ownership through the 30s watchdog and explicit Retry');
+});
+
+await withBrowser({ caseName: 'server-signout-fresh-login-binding', quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=server-signout-fresh-login-binding');
+  await waitForPhase(page, 'ready');
+  fixture.state.allowFreshLogin = true;
+  const loginRequest = { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } };
+  const first = await rpc(probe, loginRequest);
+  assert.equal(first?.success, true, JSON.stringify(first));
+  const ended = await worker.evaluate(async () => {
+    const auth = captureAuthenticatedContext('teacher sign-out compatibility fixture');
+    const recovery = studentSessionRecoveryState.armed;
+    globalThis.__endedFixtureAuth = auth;
+    globalThis.__endedFixtureRecovery = recovery;
+    // Same production entry point/options used by an exact-bound teacher
+    // student-sign-out command. The separate SchoolPilot database regression
+    // proves the server transaction; this case proves local clear/adoption.
+    await clearStudentAuth('teacher-sign-out', {
+      notifyBackend: false, serverSessionEnded: true, pauseAutoRegistration: true,
+      expectedAuthContext: auth,
+    });
+    return {
+      authenticated: hasStudentAuth(), paused: CONFIG.autoRegistrationPaused,
+      armed: studentSessionRecoveryState.armed,
+      pendingForEnded: studentSessionRecoveryState.pending.some((record) => record.authContextId === auth.authContextId),
+    };
+  });
+  assert.equal(ended.authenticated, false);
+  assert.equal(ended.paused, true, 'teacher sign-out must not silently re-register the Chrome profile');
+  assert.equal(ended.armed, null, 'a correlated ended session must not retain a Resume capability');
+  assert.equal(ended.pendingForEnded, false);
+  await waitForPhase(page, 'ready');
+  await assertProtected(page);
+  assert.equal(fixture.state.studentLoginRequests, 1, 'sign-out must wait for fresh student credentials');
+  const second = await rpc(probe, loginRequest);
+  assert.equal(second?.success, true, JSON.stringify(second));
+  const latest = await worker.evaluate(async () => {
+    const before = captureAuthenticatedContext('newer login compatibility fixture');
+    let staleClearCode = null;
+    try {
+      await clearStudentAuth('late-teacher-sign-out', {
+        notifyBackend: false, serverSessionEnded: true, pauseAutoRegistration: true,
+        expectedAuthContext: globalThis.__endedFixtureAuth,
+      });
+    } catch (error) { staleClearCode = error?.code; }
+    const staleRecoveryApplied = await applyStudentSessionRecoveryReleaseOutcome(
+      globalThis.__endedFixtureRecovery, { outcome: 'released', retryAfterMs: 0 },
+    );
+    const acceptsEndedBinding = acceptsCurrentStudentBinding({
+      studentId: globalThis.__endedFixtureAuth.studentId,
+      studentSessionId: globalThis.__endedFixtureAuth.studentSessionId,
+    }, 'late server sign-out compatibility fixture');
+    let stillCurrent = true;
+    try { assertAuthenticatedContextCurrent(before, 'after late sign-out callbacks'); }
+    catch { stillCurrent = false; }
+    return {
+      staleClearCode, staleRecoveryApplied, acceptsEndedBinding,
+      stillCurrent, authenticated: hasStudentAuth(),
+      sessionId: CONFIG.activeStudentSessionId, token: CONFIG.studentToken,
+      recoveryToken: studentSessionRecoveryState.armed?.token,
+    };
+  });
+  assert.equal(latest.staleClearCode, 'AUTH_CONTEXT_SUPERSEDED');
+  assert.equal(latest.staleRecoveryApplied, false, 'late cleanup of the ended capability must be inert');
+  assert.equal(latest.acceptsEndedBinding, false, 'an old exact-bound sign-out message cannot target the new session');
+  assert.equal(latest.stillCurrent, true);
+  assert.equal(latest.authenticated, true);
+  assert.equal(latest.sessionId, 'login-fresh-fixture-2');
+  assert.equal(latest.token, 'fresh-fixture-token-2');
+  assert.equal(latest.recoveryToken, '2'.repeat(43));
+  await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  console.log('PASS exact teacher sign-out requires fresh login; retired binding and recovery callbacks cannot clear the new session');
+});
+
+await withBrowser({ caseName: 'server-signout-during-startup-recovery', authReadMode: 'never', quietNetwork: true, seed: (origin) => {
+  const seed = browserSessionCredentialSeed(origin, { withContext: true });
+  seed.session.identitySource = 'manual_pin';
+  seed.session.manualLoginLastSeenAt = Date.now();
+  seed.local.studentSessionRecoveryV1 = {
+    schemaVersion: 1, pending: [], armed: {
+      state: 'armed', generation: 'recovery_wake_fixture', serverOrigin: origin,
+      schoolId: 'recovery-school', token: 'R'.repeat(43), authContextId: 'auth_wake_fixture', createdAt: Date.now(),
+    },
+  };
+  return seed;
+} }, async ({ context, worker, probe, fixture }) => {
+  fixture.state.revocableSession = { studentId: 'student-wake-fixture', recoveryToken: 'R'.repeat(43), active: true };
+  const beforeRevocation = await fetch(`${fixture.origin}/api/extension/login-roster`, {
+    headers: { Authorization: `ClassPilot-Recovery ${'R'.repeat(43)}` },
+  }).then((response) => response.json());
+  assert.equal(beforeRevocation.students[0]?.reclaimable, true, 'the server fixture must start with a valid exact recovery capability');
+  const page = await openGatedPage(context, fixture, 'case=server-signout-during-startup-recovery');
+  await waitForHeldWakeAuthRead(worker);
+  // Restoration activates the saved exact context, then its real retired-data
+  // cleanup fails. Hold the later strict clear at its native durable config
+  // write so the server sign-out arrives during recovery, before publication.
+  const restoreFault = await writeFault(worker, 'arm', { key: 'schoolSettings', method: 'remove', mode: 'reject-before-commit' });
+  const recoveryHold = await writeFault(worker, 'arm', { key: 'config', requireKeys: ['autoRegistrationPaused'], mode: 'never' });
+  assert.equal(await releaseWakeAuthRead(worker), 1);
+  await waitForHeldWrite(worker, 'config');
+  assert.equal((await faultTarget(worker, restoreFault)).faultedAttempts, 1, 'the real saved-auth cleanup must fail');
+  const pending = await worker.evaluate(() => ({
+    startup: authGateStartupComplete, phase: startupFailedWakeRecovery?.phase,
+    invalidating: studentAuthInvalidating, pending: studentAuthMutationPendingCount,
+    generation: studentAuthMutationGeneration, clears: __managedRecoveryFixture.authClears.length,
+  }));
+  assert.equal(pending.startup, false); assert.equal(pending.phase, 'recovery_clear');
+  assert.equal(pending.invalidating, true); assert.ok(pending.pending > 0);
+
+  // Model the already-committed PR502 server result: the old capability no
+  // longer grants a reclaimable roster entry. Deliver its real device command
+  // too; the production handler must respect the in-progress local auth fence.
+  // SchoolPilot's separate local-DB tests prove the authoritative transaction.
+  fixture.state.revokedRecoveryToken = 'R'.repeat(43);
+  fixture.state.revocableSession.active = false;
+  fixture.state.allowFreshLogin = true;
+  const delivery = await worker.evaluate(async () => {
+    const result = await handleRemoteControl({
+      type: 'student-sign-out', data: { reason: 'teacher-sign-out' },
+      authority: { teachingSessionId: 'class-signout-fixture', supervisionContextId: null },
+    }, {
+      commandId: 'teacher-signout-during-recovery', studentId: 'student-wake-fixture',
+      studentSessionId: 'login-wake-fixture',
+      authority: { teachingSessionId: 'class-signout-fixture', supervisionContextId: null },
+    });
+    return {
+      result, startup: authGateStartupComplete, generation: studentAuthMutationGeneration,
+      clears: __managedRecoveryFixture.authClears.length, authenticated: hasStudentAuth(),
+    };
+  });
+  assert.equal(delivery.result?.rejected, true, 'a late teacher command must respect the existing recovery fence');
+  assert.equal(delivery.startup, false); assert.equal(delivery.authenticated, false);
+  assert.equal(delivery.generation, pending.generation, 'the old command must not replace the recovery owner');
+  assert.equal(delivery.clears, pending.clears, 'the old command must not enqueue a competing auth clear');
+  assert.equal((await faultTarget(worker, recoveryHold)).matchedAttempts, 1);
+  await assertProtected(page);
+  assert.equal(fixture.state.studentLoginRequests, 0, 'server sign-out must never trigger a login replay');
+
+  assert.equal((await writeFault(worker, 'release', { key: 'config', commit: true })).length, 1);
+  await expectReady(page, 15_000, worker, 'server-signout-during-startup-recovery', 'server sign-out during recovery must converge to fresh sign-in');
+  await assertProtected(page);
+  const recovered = await worker.evaluate(() => ({
+    authenticated: hasStudentAuth(), token: CONFIG.studentToken, paused: CONFIG.autoRegistrationPaused,
+  }));
+  assert.equal(recovered.authenticated, false); assert.equal(recovered.token, null); assert.equal(recovered.paused, true);
+  const roster = await rpc(probe, { type: 'get-login-roster', gradeLevel: '' });
+  assert.equal(roster?.success, true, JSON.stringify(roster));
+  assert.ok(fixture.state.revokedRosterRequests > 0, 'the worker must present the old capability to the server for verification');
+  assert.ok(!roster.recoveryGrantId, 'a revoked old capability must not mint a Resume grant');
+  assert.ok(roster.students.some((student) => student.id === 'student-wake-fixture'), 'teacher sign-out makes the old student available for a fresh login');
+  assert.ok(roster.students.every((student) => student.reclaimable !== true), 'the ended server session must not be offered as resumable');
+  const login = await rpc(probe, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+  assert.equal(login?.success, true, JSON.stringify(login));
+  assert.equal(fixture.state.studentLoginRequests, 1);
+  assert.deepEqual(fixture.state.loginAuthorizationHeaders, [null], 'fresh PIN must not reuse revoked recovery authorization');
+  const current = await worker.evaluate(() => ({
+    session: CONFIG.activeStudentSessionId, token: CONFIG.studentToken,
+    armed: studentSessionRecoveryState.armed?.token,
+  }));
+  assert.equal(current.session, 'login-fresh-fixture-1'); assert.equal(current.token, 'fresh-fixture-token-1');
+  assert.equal(current.armed, '1'.repeat(43));
+  await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  console.log('PASS teacher sign-out during failed startup cleanup retains protection and permits only a fresh credentialed session');
+});
+
+for (const bootstrapOnly of [false, true]) {
+  const caseName = bootstrapOnly ? 'blocked-fallback-diagnostics' : 'blocked-screen-diagnostics';
+  await withBrowser({ caseName, bootstrapOnly, authReadMode: 'never' }, async ({ context, worker, fixture }) => {
+    const page = await openGatedPage(context, fixture, `case=${caseName}`);
+    await waitForHeldWakeAuthRead(worker);
+    let surface;
+    if (bootstrapOnly) {
+      await page.locator('#classpilot-auth-support-code').waitFor({ timeout: 14_000 });
+      surface = page;
+    } else surface = await waitForPhase(page, 'unavailable', 14_000);
+    assert.equal(await surface.locator('#classpilot-auth-it-summary').count(), 1,
+      '[regression:on-screen-details] a blocked startup must offer Details for IT without worker DevTools');
+    await surface.locator('#classpilot-auth-it-summary').focus();
+    await surface.locator('#classpilot-auth-it-summary').press('Enter');
+    assert.equal(await surface.locator('#classpilot-auth-it-details').getAttribute('open'), '');
+    const diagnosticText = await surface.locator('#classpilot-auth-it-text').inputValue();
+    assert.match(diagnosticText, new RegExp(`ClassPilot ${candidateVersion.replaceAll('.', '\\.')}`));
+    assert.match(diagnosticText, /Support code: AUTH_GATE_(STARTUP_TIMEOUT|UNAVAILABLE)/);
+    assert.match(diagnosticText, /Startup step: auth_snapshot/);
+    assert.match(diagnosticText, /Operation pending: yes/);
+    for (const forbidden of ['fixture-enrollment', 'recovery-school', fixture.origin, 'studentToken', 'authContextId']) {
+      assert.ok(!diagnosticText.includes(forbidden), `diagnostics must omit ${forbidden}`);
+    }
+    assert.equal(await surface.locator('#classpilot-auth-it-text').getAttribute('readonly'), '');
+    // A managed restriction/iframe policy can deny clipboard access. Exercise
+    // the real user-gesture button and require a selectable local fallback.
+    if (bootstrapOnly) await pageFixture(worker, page, 'deny-clipboard');
+    else await surface.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true, value: { writeText: async () => { throw new DOMException('Denied by fixture', 'NotAllowedError'); } },
+      });
+    });
+    await surface.locator('#classpilot-auth-copy-diagnostics').click({ timeout: 2_000 });
+    assert.equal(await surface.locator('#classpilot-auth-copy-status').textContent(), 'Select and copy the details above.');
+    const selection = await surface.evaluate(() => {
+      const text = document.getElementById('classpilot-auth-it-text');
+      return { focused: document.activeElement === text, start: text.selectionStart, end: text.selectionEnd, length: text.value.length };
+    });
+    assert.equal(selection.focused, true, 'the protected screen must allow focus on its diagnostic text');
+    assert.equal(selection.start, 0); assert.equal(selection.end, selection.length);
+    await assertProtected(page);
+    assert.equal(fixture.state.studentLoginRequests, 0);
+    console.log(`PASS ${caseName}: blocked startup exposes sanitized details and clipboard-denial selection without unlocking browsing`);
+  });
+}
 
 await withBrowser({ caseName: 'recovered-startup-obsolete-school', seed: (origin) => {
   const now = Date.now();

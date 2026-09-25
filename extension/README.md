@@ -394,16 +394,61 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.9.3 Class tools candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.9.3.zip` after separately authorized clean-tag packaging.
-Earlier archives do not contain the 2.9.3 timer placement correction
-and must not be submitted for this release. The candidate retains 2.8.9's
+For the prepared 2.9.4 worker wake recovery candidate, the canonical artifact
+name will be `dist/ClassPilot-v2.9.4.zip` after separately authorized clean-tag
+packaging. Earlier archives do not contain the 2.9.4 worker wake recovery
+correction and must not be submitted for this release. The candidate retains
+2.9.2's Class tools with 2.9.3's timer placement correction, 2.9.1's class chat
+controls, 2.9.0's startup recovery, 2.8.9's
 scheduled classroom authority support, 2.8.8's startup recovery corrections,
 2.8.7's bounded sign-in recovery and safe script lifecycle, plus 2.8.6's
 portal-first student app selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
+
+### Worker wake recovery (2.9.4 candidate)
+
+Version 2.9.4 is an unsubmitted startup-recovery correction. On September 25,
+2026 a managed Chromebook showed `AUTH_GATE_STARTUP_TIMEOUT` and a sanitized
+wake error. A full session restart did not resolve the device; its exact
+trigger remains unconfirmed. A dangling policy barrier was reproduced on
+v2.9.3, but that is not proof of the affected device's exact cause.
+
+A completed current-owner failure now fences partial authentication and
+settles the failed wake's policy barrier. Recovery verifies strict local
+cleanup, fresh managed policy, and durable readiness publication before
+offering fresh sign-in. It pauses automatic registration and preserves valid
+recovery capabilities. The policy recovery phase never replays credential
+migration, and only verified restoration may release authenticated startup.
+Concurrent Retry/alarm work joins the existing owner with bounded backoff.
+
+The RPC response remains bounded at nine seconds. The 30-second wake watchdog
+records diagnostics when no tracked startup owner already exists; it never
+abandons a running mutation or unlocks the page. Whole authentication operations retain queue ownership until
+settled. Native operations keep their existing safe intent reconciliation.
+
+The blocked screen adds **Details for IT** and **Copy diagnostics**, also in
+the fallback when the secure frame is unavailable. Existing failure responses
+carry optional sanitized `supportDetails` without waiting on storage. The
+first causal failure remains visible through later timeouts; worker absence
+reports only known transport evidence. Text stays selectable if clipboard
+access is denied. Existing primary support codes remain compatible.
+
+On-device `authGateDiagnosticsV1` remains limited to 20 records. Steps and error
+classes use explicit allowlists; no student/device identities, credentials,
+PINs, URLs, raw exceptions, or stacks are copied or transmitted. The correction
+adds no Chrome permission, managed-policy key, endpoint, reload or update-timing
+change, or off-device telemetry. SchoolPilot #502 remains server-authoritative:
+teacher sign-out ends an offline session, and neither its old bearer nor its
+revoked recovery capability can resume it. Fresh credentials may create a new
+session; delayed old-session work cannot clear the new login.
+
+See `../CLASSPILOT_2_9_4_RELEASE.md` for the v2.9.3 and unsubmitted
+`pr116-16320c6` regression baselines and the managed-Chromebook publication
+gate. Earlier local 2.9.4 packages from `16320c6` are superseded test artifacts,
+not submission candidates. Managed-device acceptance remains required; manual
+reload when controller ownership cannot be proved is not seamless replacement.
 
 ### Startup recovery (2.9.0 candidate)
 
@@ -456,7 +501,7 @@ Version 2.8.9 added no Chrome permission or managed-policy key, and 2.9.0
 carries it forward unchanged. Preparing a version does not authorize tagging,
 packaging, Store upload, publication or capability activation. See
 [the 2.8.9 release gate](../CLASSPILOT_2_8_9_RELEASE.md) for that version's
-dependencies and verification, [the 2.9.0 candidate gate](../CLASSPILOT_2_9_0_RELEASE.md)
+dependencies and verification, [the 2.9.4 candidate gate](../CLASSPILOT_2_9_4_RELEASE.md)
 for the current release, and
 [the protocol contract](../SCHEDULED_CLASSROOM_PROTOCOL.md) for wire details.
 
@@ -502,7 +547,7 @@ Chrome may isolate an obsolete controller's execution context during an
 in-place update. When ownership cannot be proved, the safe fallback requires
 an explicit page reload. Automated upgrade evidence must record whether that
 fallback was used, rather than claiming seamless replacement. See
-`../CLASSPILOT_2_8_8_RELEASE.md` for current validation and publication gates.
+`../CLASSPILOT_2_9_4_RELEASE.md` for current validation and publication gates.
 
 ### Publish Through Chrome Web Store
 

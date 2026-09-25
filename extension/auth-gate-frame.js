@@ -44,6 +44,7 @@
   let parentPolicyRecovery = null;
   let parentPolicyReplyTimer = null;
   let lastFailureSupportCode = null;
+  let lastFailureSupportDetails = null;
   const SUPPORT_CODES = new Set([
     'AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE', 'AUTH_GATE_STARTUP_TIMEOUT',
     'AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_RPC_UNAVAILABLE', 'AUTH_GATE_CONTEXT_INVALIDATED',
@@ -97,6 +98,7 @@
     render({
       phase: 'unavailable', authRequired: true,
       errorCode: error?.code || error?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+      supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(error?.supportDetails) || null,
       retryAt: Number(error?.retryAt) || Date.now() + nextRetryDelay(),
       loginConfirmationPending: manualLoginUncertain,
     });
@@ -202,6 +204,7 @@
             <div class="classpilot-auth-error" id="classpilot-auth-error" role="alert" aria-live="assertive"></div>
             ${body}
             ${lastFailureSupportCode ? `<p id="classpilot-auth-support-code" style="margin:12px 0 0;font-size:12px;line-height:1.5;color:#526174;user-select:text;overflow-wrap:anywhere">Support code: <code>${lastFailureSupportCode}</code></p>` : ''}
+            ${lastFailureSupportCode ? '<div id="classpilot-auth-support-details"></div>' : ''}
             <div class="classpilot-auth-footnote">${icon('shield')}<span>Shared Chromebook sign-in</span></div>
           </div>
         </div>
@@ -267,14 +270,18 @@
         <div class="classpilot-auth-retry-status" id="classpilot-auth-retry-status" aria-live="polite">Retry checks the existing sign-in. Browsing stays protected.</div>
       `;
     }
+    const startupFailure = state.errorCode === 'AUTH_GATE_STARTUP_TIMEOUT';
     const retryAt = Number(state.retryAt);
     const retryMessage = Number.isFinite(retryAt) && retryAt > Date.now()
       ? 'ClassPilot will retry automatically. You can also retry now.'
-      : 'Use Retry now after checking the Chromebook’s connection.';
+      : startupFailure ? 'Retry now, or share Details for IT with your school.'
+        : 'Use Retry now after checking the Chromebook’s connection.';
     return `
       <div class="classpilot-auth-state-card" role="status">
         <span class="classpilot-auth-state-icon">${icon('shield')}</span>
-        <span><strong>Your browsing is still protected</strong>ClassPilot could not reach the live sign-in service. Cached information cannot be used to sign in.</span>
+        <span><strong>Your browsing is still protected</strong>${startupFailure
+          ? 'ClassPilot has not finished preparing sign-in on this Chromebook.'
+          : 'ClassPilot could not reach the live sign-in service. Cached information cannot be used to sign in.'}</span>
       </div>
       <button class="classpilot-auth-retry" id="classpilot-auth-retry" type="button">Retry now</button>
       <div class="classpilot-auth-retry-status" id="classpilot-auth-retry-status" aria-live="polite">${escapeHtml(retryMessage)}</div>
@@ -345,12 +352,22 @@
   }
 
   function render(state = {}) {
+    const support = globalThis.ClassPilotAuthSupportDetails;
+    const presentation = support?.capture(root);
+    renderState(state);
+    if (lastFailureSupportCode) support?.mount(
+      document.getElementById('classpilot-auth-support-details'),
+      lastFailureSupportDetails, lastFailureSupportCode, presentation,
+    );
+  }
+
+  function renderState(state = {}) {
     if (manualLoginPending && authGatePhase(state) !== 'authenticated') {
       manualLoginUncertain = true;
       clearCredentials();
       if (authGatePhase(state) !== 'setup_required') {
         state = { phase: 'unavailable', authRequired: true, errorCode: state.errorCode,
-          retryAt: state.retryAt, loginConfirmationPending: true };
+          retryAt: state.retryAt, supportDetails: state.supportDetails, loginConfirmationPending: true };
       }
     }
     clearTimers();
@@ -368,9 +385,15 @@
     rosterSnapshot = null;
 
     const phase = authGatePhase(state);
-    if (phase === 'ready' || phase === 'authenticated') lastFailureSupportCode = null;
+    if (phase === 'ready' || phase === 'authenticated') {
+      lastFailureSupportCode = null;
+      lastFailureSupportDetails = null;
+    }
     else if (phase === 'unavailable') {
       lastFailureSupportCode = SUPPORT_CODES.has(state.errorCode) ? state.errorCode : 'AUTH_GATE_UNAVAILABLE';
+      lastFailureSupportDetails = globalThis.ClassPilotAuthSupportDetails?.retainFirstFailure(
+        lastFailureSupportDetails, state.supportDetails, lastFailureSupportCode,
+      ) || null;
     }
     root.dataset.classpilotAuthPhase = phase;
     currentState = { ...state, phase };
@@ -400,8 +423,10 @@
 
     if (phase === 'unavailable') {
       root.innerHTML = shell(
-        'ClassPilot can’t connect right now',
-        'Browsing stays locked until ClassPilot reconnects. Check the connection, then try again.',
+        state.errorCode === 'AUTH_GATE_STARTUP_TIMEOUT' ? 'ClassPilot is still starting' : 'ClassPilot can’t connect right now',
+        state.errorCode === 'AUTH_GATE_STARTUP_TIMEOUT'
+          ? 'ClassPilot could not finish starting on this Chromebook. Browsing stays protected while it retries.'
+          : 'Browsing stays locked until ClassPilot reconnects. Check the connection, then try again.',
         unavailableMarkup(state),
       );
       document.getElementById('classpilot-auth-retry')?.addEventListener('click', () => requestRefresh(true));
@@ -535,7 +560,8 @@
       retryButton.textContent = 'Connecting…';
       retryButton.setAttribute('aria-busy', 'true');
     }
-    if (retryStatus) retryStatus.textContent = 'Checking the live ClassPilot sign-in service…';
+    if (retryStatus) retryStatus.textContent = lastFailureSupportCode === 'AUTH_GATE_STARTUP_TIMEOUT'
+      ? 'Checking ClassPilot startup on this Chromebook…' : 'Checking the live ClassPilot sign-in service…';
 
     cancelStateRequest();
     if (parentPolicyRecovery) {
@@ -1130,7 +1156,7 @@
   function installFocusTrap(preferredSelector) {
     const panel = document.querySelector('.classpilot-auth-panel');
     if (!panel) return;
-    const focusableSelector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const focusableSelector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [href], [tabindex]:not([tabindex="-1"])';
     panel.addEventListener('keydown', (event) => {
       if (event.key !== 'Tab') return;
       const focusable = Array.from(panel.querySelectorAll(focusableSelector))
@@ -1151,6 +1177,7 @@
       }
     });
     requestAnimationFrame(() => {
+      if (document.activeElement?.closest('#classpilot-auth-it-details')) return;
       const preferred = preferredSelector ? document.querySelector(preferredSelector) : null;
       (preferred && !preferred.disabled ? preferred : panel).focus({ preventScroll: true });
     });
@@ -1183,6 +1210,7 @@
     const retryAt = Number(value?.retryAt);
     parentPolicyRecovery = {
       errorCode: SUPPORT_CODES.has(value?.errorCode) ? value.errorCode : 'AUTH_GATE_UNAVAILABLE',
+      supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(value?.supportDetails) || null,
       retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
         ? Math.min(retryAt, Date.now() + 300000) : Date.now() + 2000,
     };
@@ -1267,6 +1295,7 @@
       const retryAt = Number(failure.retryAt);
       transportFailure({
         code: SUPPORT_CODES.has(failure.code) ? failure.code : 'AUTH_GATE_UNAVAILABLE',
+        supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(failure.supportDetails) || null,
         retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
           ? Math.min(retryAt, Date.now() + 300000) : null,
       });

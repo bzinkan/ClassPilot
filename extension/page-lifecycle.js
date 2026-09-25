@@ -145,7 +145,8 @@
         if (active) callback(response);
       }, error => {
         if (active) callback({ success: false, error: 'ClassPilot could not connect. Please try again.',
-          errorCode: error?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: error?.retryAt ?? null });
+          errorCode: error?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: error?.retryAt ?? null,
+          supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(error?.supportDetails) || null });
       });
       return undefined;
     }
