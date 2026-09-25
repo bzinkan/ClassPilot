@@ -127,12 +127,23 @@
     return lines.join('\n');
   }
 
+  // A repaint replaces controls while a native clipboard promise may still
+  // be pending. Transfer ownership only through a presentation captured from
+  // this module's own mounted details block, without trusting mutable DOM text.
+  const supportCopyOwners = new WeakMap();
+  const supportPresentationCopyOwners = new WeakMap();
+
   function captureSupportPresentation(container) {
     const details = container?.querySelector('#classpilot-auth-it-details');
     const active = details?.ownerDocument.activeElement;
-    return { open: details?.open === true,
+    const presentation = { open: details?.open === true,
       focusId: details?.contains(active) ? active.id : null,
-      selectionStart: active?.selectionStart, selectionEnd: active?.selectionEnd };
+      selectionStart: active?.selectionStart, selectionEnd: active?.selectionEnd,
+      selectionWasFull: active?.selectionStart === 0
+        && active?.selectionEnd === active?.value?.length };
+    const copyOwner = supportCopyOwners.get(details);
+    if (copyOwner) supportPresentationCopyOwners.set(presentation, copyOwner);
+    return presentation;
   }
 
   function mountSupportDetails(container, value, code, presentation = {}) {
@@ -163,17 +174,31 @@
     status.id = 'classpilot-auth-copy-status';
     status.setAttribute('role', 'status');
     status.style.cssText = 'display:block!important;margin-top:5px!important';
+    const copyOwner = supportPresentationCopyOwners.get(presentation)
+      || { generation: 0, status: '' };
+    copyOwner.target = { details, text, status, formattedText };
+    supportCopyOwners.set(details, copyOwner);
+    status.textContent = copyOwner.status;
+    const finishCopy = (generation, denied) => {
+      const target = copyOwner.target;
+      if (generation !== copyOwner.generation || !target?.details.isConnected) return;
+      copyOwner.status = denied ? 'Select and copy the details above.' : 'Diagnostics copied.';
+      if (denied) {
+        target.details.open = true;
+        target.text.value = target.formattedText;
+        target.text.focus(); target.text.select();
+      }
+      target.status.textContent = copyOwner.status;
+    };
     const copy = async () => {
+      const generation = ++copyOwner.generation;
       try {
         const clipboard = doc.defaultView?.navigator?.clipboard;
         if (!clipboard?.writeText) throw new Error('Clipboard unavailable');
         await clipboard.writeText(formattedText);
-        if (details.isConnected) status.textContent = 'Diagnostics copied.';
+        finishCopy(generation, false);
       } catch {
-        if (!details.isConnected) return;
-        text.value = formattedText;
-        text.focus(); text.select();
-        status.textContent = 'Select and copy the details above.';
+        finishCopy(generation, true);
       }
     };
     button.addEventListener('click', copy);
@@ -183,7 +208,9 @@
       const control = [summary, text, button].find(item => item.id === presentation.focusId);
       control?.focus({ preventScroll: true });
       if (control === text && Number.isInteger(presentation.selectionStart)) {
-        text.setSelectionRange(presentation.selectionStart, presentation.selectionEnd);
+        if (copyOwner.status === 'Select and copy the details above.'
+          && presentation.selectionWasFull) text.select();
+        else text.setSelectionRange(presentation.selectionStart, presentation.selectionEnd);
       }
     }
     return { details, summary, text, button, copy,

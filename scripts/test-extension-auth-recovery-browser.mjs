@@ -1727,6 +1727,9 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   // the in-flight owner. Nothing may re-issue the write.
   const earlyRetries = probe.evaluate(() => Promise.all([1, 2].map(() => new Promise((done) => chrome.runtime.sendMessage(
     { type: 'refresh-auth-state', reason: 'user' }, (response) => { void chrome.runtime.lastError; done(response || null); })))));
+  // Observe teardown rejection immediately without replacing the original
+  // promise: its explicit await below still fails if the retry itself fails.
+  earlyRetries.catch(() => {});
   await worker.evaluate(() => {
     chrome.alarms.create('auth-gate-startup-publication-recovery', { when: Date.now() });
     retryAuthGateStartupPublications({ userInitiated: true });
@@ -1755,6 +1758,7 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   // owner. The replayed clear re-issues the removal exactly once and recovers.
   const lateRetries = probe.evaluate(() => Promise.all([1, 2].map(() => new Promise((done) => chrome.runtime.sendMessage(
     { type: 'refresh-auth-state', reason: 'user' }, (response) => { void chrome.runtime.lastError; done(response || null); })))));
+  lateRetries.catch(() => {});
   await clickRetry(frames[0]).catch(() => {});
   await worker.evaluate(() => { chrome.alarms.create('auth-gate-startup-publication-recovery', { when: Date.now() }); });
   await Promise.all(pages.map((page) => expectReady(page, 15_000, worker, 'held-ops-concurrency', 'recovery must follow exactly one re-run of the lost clear')));
@@ -2400,6 +2404,18 @@ for (const bootstrapOnly of [false, true]) {
   const caseName = bootstrapOnly ? 'blocked-fallback-diagnostics' : 'blocked-screen-diagnostics';
   await withBrowser({ caseName, bootstrapOnly, authReadMode: 'never' }, async ({ context, worker, fixture }) => {
     const page = await openGatedPage(context, fixture, `case=${caseName}`);
+    // Chrome 120 can paint the emulated viewport beyond the native window's
+    // client-area hit region. Leave room for browser chrome so a real pointer
+    // can reach the low copy button; keep the tested page viewport unchanged.
+    const inputSession = await context.newCDPSession(page);
+    try {
+      const { windowId, bounds } = await inputSession.send('Browser.getWindowForTarget');
+      await inputSession.send('Browser.setWindowBounds', { windowId, bounds: {
+        width: Math.max(bounds.width, 1500), height: Math.max(bounds.height, 1000),
+      } });
+    } finally { await inputSession.detach(); }
+    assert.deepEqual(await page.evaluate(() => ({ width: innerWidth, height: innerHeight })),
+      { width: 1366, height: 768 }, 'native input sizing must preserve the tested viewport');
     await waitForHeldWakeAuthRead(worker);
     let surface;
     if (bootstrapOnly) {
@@ -2428,7 +2444,11 @@ for (const bootstrapOnly of [false, true]) {
         configurable: true, value: { writeText: async () => { throw new DOMException('Denied by fixture', 'NotAllowedError'); } },
       });
     });
+    await surface.locator('#classpilot-auth-copy-diagnostics').scrollIntoViewIfNeeded();
     await surface.locator('#classpilot-auth-copy-diagnostics').click({ timeout: 2_000 });
+    // Click dispatch does not await the native clipboard promise.
+    await surface.waitForFunction(() => document.getElementById('classpilot-auth-copy-status')?.textContent
+      === 'Select and copy the details above.', null, { timeout: 2_000 });
     assert.equal(await surface.locator('#classpilot-auth-copy-status').textContent(), 'Select and copy the details above.');
     const selection = await surface.evaluate(() => {
       const text = document.getElementById('classpilot-auth-it-text');

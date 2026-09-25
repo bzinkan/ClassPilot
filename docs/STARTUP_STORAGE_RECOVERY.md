@@ -34,6 +34,10 @@ The minimum is a compatibility boundary, not a recommendation to keep managed
 devices on an old browser or a promise that every future Chrome release has
 already been tested.
 
+The operator reports a mixed fleet: affected Chromebooks on 133, most devices
+on 152, and possibly one or two on 120 (not yet confirmed). Compatibility does
+not depend on resolving the older devices' ChromeOS update issue.
+
 Sources: [Chrome 120 alarms](https://developer.chrome.com/blog/chrome-120-beta-whats-new-for-extensions),
 [tab capture stream restrictions](https://developer.chrome.com/docs/extensions/reference/api/tabCapture),
 [offscreen documents](https://developer.chrome.com/docs/extensions/reference/api/offscreen).
@@ -82,6 +86,10 @@ the existing optional sanitized support field. It never displays raw storage
 errors, data, identities, tokens, or URLs. Unknown worker state stays absent
 when only a page transport timeout is known. The first causal failure remains
 visible. Copy diagnostics retains its selectable-text fallback.
+Copy status and pending clipboard operations follow the currently displayed
+sanitized details through repaints. A newer copy supersedes an older callback;
+after recovery removes the details, stale callbacks cannot recreate them or
+take focus from sign-in.
 
 SchoolPilot #502's server-authoritative sign-out contract is unchanged. An
 asleep or unreachable Chromebook does not prevent teacher sign-out on the
@@ -92,8 +100,12 @@ failure and a generic authentication rejection do not prove server sign-out.
 ## Validation and release boundary
 
 The compatibility matrix runs all candidate behavior and package tests
-on pinned Chrome for Testing 120.0.6099.109 and 133.0.6943.141, with the main CI
-job covering current Playwright Chromium. Historical 2.8.x upgrade fixtures
+on pinned Chrome for Testing 120.0.6099.109, 133.0.6943.141, and 152.0.7977.82.
+A fourth lane resolves Google's latest stable Chrome build on each CI run;
+the main job also covers the repository's Playwright Chromium. This checks
+the minimum, the reported affected version, the school's newer version, and
+forward compatibility as stable Chrome advances. It cannot guarantee an
+untested future release. Historical 2.8.x upgrade fixtures
 and all red-on-old proofs remain in that default job: their old storage
 prerequisites and newer debugger-based upgrade mechanism are not valid on
 Chrome 120. Compatibility jobs explicitly report those four historical

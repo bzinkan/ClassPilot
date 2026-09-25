@@ -151,6 +151,7 @@ try {
           studentToken:'private-token'}}},{id:'fixture-extension'});
     });
     assert.equal(await frame.locator('#classpilot-auth-it-details').evaluate(node=>node.open), true);
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(), 'Diagnostics copied.');
     assert.equal(await frame.evaluate(()=>document.activeElement.id), 'classpilot-auth-it-text');
     assert.equal(await frame.locator('#classpilot-auth-it-text').evaluate(node=>node.selectionEnd), 12);
     assert.equal((await frame.locator('#classpilot-auth-it-text').inputValue()).includes('private'), false);
@@ -159,10 +160,68 @@ try {
     await click(frame, '#classpilot-auth-copy-diagnostics');
     assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(), 'Select and copy the details above.');
     assert.equal(await frame.evaluate(()=>document.activeElement.id), 'classpilot-auth-it-text');
+    await frame.evaluate(() => fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{
+      phase:'unavailable',authRequired:true,revision:21,errorCode:'AUTH_GATE_STARTUP_TIMEOUT',
+      supportDetails:{extensionVersion:'2.9.5',startupPhase:'recovery_policy',failureClass:'AUTH_GATE_UNAVAILABLE',pending:true},
+    }},{id:'fixture-extension'}));
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(), 'Select and copy the details above.');
+    assert.equal(await frame.locator('#classpilot-auth-it-details').evaluate(node=>node.open), true);
+    assert.deepEqual(await frame.locator('#classpilot-auth-it-text').evaluate(node=>({
+      focused:document.activeElement===node,full:node.selectionStart===0&&node.selectionEnd===node.value.length,
+    })),{focused:true,full:true});
+    await frame.evaluate(() => Object.defineProperty(navigator,'clipboard',{configurable:true,
+      value:{writeText:async value=>{fixture.healedCopy=value;}}}));
+    await click(frame,'#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(),'Diagnostics copied.');
+    assert.equal(await frame.evaluate(()=>fixture.healedCopy),await frame.locator('#classpilot-auth-it-text').inputValue());
     await frame.evaluate(()=>{fixture.stateMode='normal';fixture.state.revision=30;});
     await click(frame,'#classpilot-auth-retry');
     assert.equal(await phase(frame),'ready');
     assert.equal(await frame.locator('#classpilot-auth-it-details').count(),0);
+  });
+  await scenario('pending clipboard denial follows repaint; newer copy and ready form retire old callbacks', 'initial-failure', async (_page, frame) => {
+    await click(frame,'#classpilot-auth-it-summary');
+    await frame.evaluate(() => {
+      fixture.clipboardFlights=[];
+      Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:value=>new Promise((resolve,reject)=>{
+        fixture.clipboardFlights.push({value,resolve,reject});
+      })}});
+      fixture.originalSupport=document.getElementById('classpilot-auth-it-details');
+    });
+    await click(frame,'#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.evaluate(()=>fixture.clipboardFlights.length),1);
+    await frame.evaluate(() => {
+      fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'unavailable',authRequired:true,
+        revision:20,errorCode:'AUTH_GATE_STARTUP_TIMEOUT',supportDetails:{extensionVersion:'2.9.5',
+          startupPhase:'recovery_clear',failureClass:'AUTH_GATE_UNAVAILABLE',pending:true},
+      }},{id:'fixture-extension'});
+      fixture.clipboardFlights[0].reject(new DOMException('Denied after repaint','NotAllowedError'));
+    });
+    assert.equal(await frame.evaluate(()=>fixture.originalSupport.isConnected),false);
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(),'Select and copy the details above.');
+    assert.deepEqual(await frame.locator('#classpilot-auth-it-text').evaluate(node=>({
+      focused:document.activeElement===node,full:node.selectionStart===0&&node.selectionEnd===node.value.length,
+      open:document.getElementById('classpilot-auth-it-details').open,
+    })),{focused:true,full:true,open:true});
+    await click(frame,'#classpilot-auth-copy-diagnostics');
+    await frame.locator('#classpilot-auth-copy-diagnostics').focus();
+    await click(frame,'#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.evaluate(()=>fixture.clipboardFlights.length),3);
+    await frame.evaluate(()=>fixture.clipboardFlights[2].resolve());
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(),'Diagnostics copied.');
+    await frame.evaluate(()=>fixture.clipboardFlights[1].reject(new Error('Late superseded denial')));
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(),'Diagnostics copied.');
+    assert.equal(await frame.evaluate(()=>document.activeElement.id),'classpilot-auth-copy-diagnostics');
+    await click(frame,'#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.evaluate(()=>fixture.clipboardFlights.length),4);
+    await frame.evaluate(()=>fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{
+      ...fixture.state,phase:'ready',authRequired:true,revision:40,
+    }},{id:'fixture-extension'}));
+    await frame.locator('#classpilot-auth-email').focus();
+    await frame.evaluate(()=>fixture.clipboardFlights[3].reject(new Error('Late retired presentation denial')));
+    assert.equal(await phase(frame),'ready');
+    assert.equal(await frame.locator('#classpilot-auth-it-details').count(),0);
+    assert.equal(await frame.evaluate(()=>document.activeElement.id),'classpilot-auth-email');
   });
   await scenario('a silent worker exposes only local connection evidence in IT details', 'missing', async (page, frame) => {
     await page.clock.runFor(10_010);
@@ -199,6 +258,23 @@ try {
       await page.evaluate(()=>{document.querySelector('#classpilot-auth-it-text').value='private-host-page-injection';});
       await page.locator('#classpilot-auth-copy-diagnostics').click({force:true});
       assert.equal(await page.evaluate(()=>bootstrapFixture.copied),original,'the host page cannot replace the copied diagnostic snapshot');
+      await page.evaluate(()=>{
+        Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:()=>new Promise((_resolve,reject)=>{
+          bootstrapFixture.rejectClipboard=reject;
+        })}});
+        bootstrapFixture.oldSupport=document.getElementById('classpilot-auth-it-details');
+      });
+      await page.locator('#classpilot-auth-copy-diagnostics').click({force:true});
+      await page.locator('.classpilot-auth-bootstrap-retry').click({force:true});
+      assert.equal(await page.evaluate(()=>bootstrapFixture.oldSupport.isConnected),false);
+      await page.evaluate(()=>bootstrapFixture.rejectClipboard(new Error('Denied after bootstrap repaint')));
+      assert.equal(await page.locator('#classpilot-auth-copy-status').textContent(),'Select and copy the details above.');
+      assert.deepEqual(await page.locator('#classpilot-auth-it-text').evaluate(node=>({
+        focused:document.activeElement===node,full:node.selectionStart===0&&node.selectionEnd===node.value.length,
+        open:document.getElementById('classpilot-auth-it-details').open,privateText:node.value.includes('private-host-page-injection'),
+      })),{focused:true,full:true,open:true,privateText:false});
+      await page.locator('.classpilot-auth-bootstrap-retry').click({force:true});
+      assert.equal(await page.locator('#classpilot-auth-copy-status').textContent(),'Select and copy the details above.');
       assert.equal(await page.evaluate(()=>bootstrapFixture.clicks),0);
       await assert.rejects(page.locator('#page-action').click({timeout:250}));
       await page.evaluate(()=>{bootstrapFixture.mode='hold';});
