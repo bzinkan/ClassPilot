@@ -1164,6 +1164,38 @@ test('support details are synchronous and preserve the first failure while clean
   await completeFailedWakeRecovery(h);
 });
 
+test('recovered startup details cannot reappear in later RPC or server failures', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.chrome.runtime.getManifest = () => ({ version: '2.9.4' });
+  c.DIAGNOSTIC_CODE_ALLOWLIST = new Set(['STORAGE_IO_ERROR', 'AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_SERVER_TIMEOUT']);
+  c.SENTRY_EXCEPTION_TYPE_ALLOWLIST = new Set(['Error']);
+  vm.runInContext(functionSource('safeDiagnosticError'), c);
+  vm.runInContext(readFileSync(new URL('../extension/auth-recovery-diagnostics.js', import.meta.url), 'utf8'), c);
+  c.workerWakeStep = 'auth_context_persist';
+  c.failWorkerWake(Object.assign(new Error('fixture-original-storage-failure'), { code: 'STORAGE_IO_ERROR' }));
+  c.settleWorkerWake(); c.ensureStartupReadinessPublication(); await h.settle();
+  await completeFailedWakeRecovery(h);
+  assert.equal(c.authGateStartupComplete, true);
+
+  const replies = [];
+  c.createAuthGateResponseDeadline(value => replies.push(value));
+  await h.advance(9000);
+  const serverReply = c.createAuthGateResponseDeadline(value => replies.push(value));
+  serverReply.fail(c.authGateRecoveryError('AUTH_GATE_SERVER_TIMEOUT'));
+  assert.equal(replies.length, 2);
+  for (const [index, code] of ['AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_SERVER_TIMEOUT'].entries()) {
+    const response = replies[index], details = response.supportDetails;
+    assert.equal(response.errorCode, code);
+    assert.equal(details.failureClass, code, 'support must identify the current failure');
+    assert.equal(details.extensionVersion, '2.9.4');
+    assert.equal(details.timestamp, 9000);
+    assert.equal(details.startupPhase, 'unknown');
+    for (const key of ['firstFailure', 'elapsedMs', 'restoreOutcome', 'attemptCount', 'retryInMs', 'pending']) {
+      assert.equal(Object.hasOwn(details, key), false, `completed startup must not leak stale ${key}`);
+    }
+  }
+});
+
 test('a startup legacy credential purge that never reports back is reconciled at the deadline instead of parking the wake', async () => {
   const h = authSnapshotHarness(), c = h.context;
   c.localState.studentToken = 'private-legacy-credential';

@@ -12303,6 +12303,15 @@ function authGateRecoveryFailurePayload(error) {
 
 function getAuthGateSupportDetails(error = null) {
   try {
+    if (authGateStartupComplete) {
+      // A later request failure belongs to its own operation. Completed
+      // startup history must not reappear after the gate has recovered.
+      return globalThis.ClassPilotAuthSupportDetails?.sanitize({
+        extensionVersion: chrome.runtime.getManifest().version,
+        timestamp: Date.now(),
+        failureClass: safeDiagnosticError(error),
+      });
+    }
     const owners = [...authGateStartupPublicationOwners.values()].filter(owner => !owner.settled);
     const retryTimes = owners.filter(owner => owner.failed && !owner.inFlight).map(owner => owner.retryAt);
     const recovery = startupFailedWakeRecovery;
