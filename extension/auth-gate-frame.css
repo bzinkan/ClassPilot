@@ -482,6 +482,11 @@ select:disabled {
   stroke-width: 2;
 }
 
+/* Expanded support text must remain readable while the sign-in card scrolls. */
+#classpilot-auth-support-details ~ .classpilot-auth-footnote {
+  position: static;
+}
+
 @media (max-width: 900px) {
   #classpilot-auth-gate {
     place-items: start center;

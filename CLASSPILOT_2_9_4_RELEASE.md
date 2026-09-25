@@ -1,72 +1,98 @@
 # ClassPilot 2.9.4 worker wake recovery candidate
 
-Version 2.9.4 carries 2.9.3 forward unchanged and adds one correction: worker
-wake recovery. When the extension's service-worker wake fails or is abandoned
-before its managed-policy barrier settles, startup readiness now recovers on
-its own instead of waiting on that barrier forever. No Chrome permission,
-managed-policy key, endpoint, screen, wording, button or support code is added
-or changed.
+Version 2.9.4 is an unsubmitted correction to worker startup recovery. A
+completed failure cannot strand startup on its own policy barrier or release
+partially restored authentication. Recovery verifies a local signed-out state
+and current managed policy before offering fresh sign-in. The blocked screen
+also provides **Details for IT** and **Copy diagnostics** without DevTools.
+There is no new Chrome permission, managed-policy key, endpoint, or off-device
+extension telemetry. Existing primary support codes remain compatible.
 
 ## What was observed
 
 On September 25, 2026 a managed Chromebook running 2.9.3 showed the startup
 card ("ClassPilot can't connect right now", support code
-`AUTH_GATE_STARTUP_TIMEOUT`) and Retry never cleared it. Its service-worker
-console showed the extension update event followed by `Wake-up error` from the
-wake's own failure handler: the wake had failed, and the 2.9.0 readiness owner
-was left in flight awaiting the failed wake's policy barrier. Retry and the
-recovery alarm re-run only owners that have failed, so nothing could re-run it,
-and the frame's polling kept the worker alive so the wake never re-ran. The
-device recovered only when its Chrome session ended. The failed wake's error
-was sanitized to `Error`, so the log could not name the step or the cause.
+`AUTH_GATE_STARTUP_TIMEOUT`). The console showed `Wake-up error` and repeated
+timeouts. The operator reported that a full session restart did not resolve
+the device. Its exact trigger remains unconfirmed: the original exception was
+reduced to `Error`, and these local failures are not sent to AWS.
+
+An independent reproduction on v2.9.3 showed that a completed restoration
+failure can leave the wake's managed-policy promise unresolved. That mechanism
+is consistent with the symptom, but is not proof of the device's exact cause.
+Review of the first unsubmitted 2.9.4 candidate (`16320c6`) then reproduced two
+additional defects: partially adopted authentication could release the gate,
+and policy recovery could repeat unbounded credential migration. This candidate
+corrects those paths as well.
 
 ## What 2.9.4 changes
 
-- A wake that fails retires its own policy barrier before the tracked
-  coordinator owns readiness.
-- Startup readiness for a retired wake derives the recovery flags from the
-  durable crash markers with one bounded read, applies managed policy once
-  through the same bounded direct revalidation a managed change uses, replays
-  the signed-out clear and publishes readiness. A verified authenticated
-  startup is never cleared by this recovery; a completed marker-read failure
-  stays protected and retryable.
-- A wake that neither finishes nor fails within 30 seconds is retired the same
-  way by a wake watchdog.
-- The remaining unbounded startup storage operations are bounded like every
-  other startup storage operation (2.9.0's reconcile by a fresh read after
-  9 seconds): the pre-2.7.3 local credential purge, manual-context persistence
-  and retired-storage cleanup during credential adoption, and the monitoring
-  redaction restore.
-- Diagnostics: on-device `authGateDiagnosticsV1` gains the causes `wake_failed`
-  and `wake_abandoned`, each with an optional seventh field, `detail`, naming
-  the startup step (a fixed identifier such as `auth_snapshot`, never data);
-  `chrome.storage.session` gains `authGateWakeFailureV1` (step, cause,
-  sanitized failure class, elapsed time); native storage failures are logged as
-  `STORAGE_QUOTA_EXCEEDED`, `STORAGE_IO_ERROR`, `STORAGE_CONTEXT_INVALIDATED`
-  or `STORAGE_FAILED`, never as the native message. The same 20-record limit
-  applies, and there is still no off-device telemetry.
+- Restoration has an explicit outcome. Only completed, verified restoration
+  may follow the healthy authenticated path; remaining in-memory credentials
+  and absent crash markers cannot substitute for that proof.
+- A completed current-owner failure settles its policy barrier, fences partial
+  authentication, and runs strict local clear, fresh managed-policy
+  application/persistence, then revision/roster/readiness publication. Recovery
+  pauses automatic registration and requires fresh credentials while preserving
+  valid exact-bound recovery capabilities.
+- Recovery's policy phase reads only native non-authentication configuration
+  and binding data. It never calls credential migration. Completed phases are
+  retained across retries; concurrent Retry/alarm work joins the current owner.
+- The nine-second RPC deadline reports failure without cancelling underlying
+  authentication work. The 30-second wake watchdog is diagnostic only when
+  no tracked startup owner already exists: elapsed time never authorizes
+  recovery takeover or unlocks browsing. Composite operations retain ownership until they settle; individual
+  native operations retain existing safe intent reconciliation and backoff.
+- Existing failure responses carry optional allowlisted `supportDetails`
+  directly from worker memory. The secure frame and fallback preserve them and
+  provide selectable/copyable support text. The first causal error survives
+  later timeout reports. Worker absence displays only known local evidence.
+- `authGateDiagnosticsV1` remains a 20-record on-device buffer. Startup step and
+  native storage failure classes contain fixed identifiers only; no student or
+  device identifiers, PINs, credentials, URLs, storage values, raw messages, or
+  stacks appear in support details. Clipboard denial has a manual-copy fallback.
+
+## SchoolPilot #502 compatibility
+
+SchoolPilot #502 ends a teacher-targeted student session even when its device
+is asleep, has no realtime snapshot, or cannot receive a command frame. Its
+merge is verified; production deployment is a separate operational check.
+The extension retains existing exact-bound sign-out and heartbeat rejection
+handling, with no new protocol capability. Local startup failure or a generic
+401/403 does not invent proof that the server session ended. A server-ended
+session's bearer/recovery capability cannot resume it; fresh credentials may
+create a new session. Late cleanup and replies cannot clear a newer login.
 
 ## Verification gate
 
-`npm run test:extension:red-on-old` now proves the two new browser cases
-(`wake-failure-before-policy` and `wake-parked-before-policy`) trip against the
-immutable v2.9.3 snapshot (`scripts/fixtures/auth-recovery-2.9.3.json.gz`,
-verified by its receipt) before they are trusted green on the candidate; the
-2.9.0 cases keep tripping against v2.8.9. The VM recovery suite adds the wake
-failure, watchdog, derived-flags and bounded-purge cases.
+`npm run test:extension:red-on-old` retains the immutable v2.9.3 regressions and
+historical v2.8.9 coverage. The separate `pr116-16320c6` fixture records the
+unsubmitted PR candidate, not a published version. Its correction cases must
+fail on their declared regression assertion before passing on repaired code;
+spawn errors and process timeouts do not count as proof.
+
+Required checks: `npm run check`, `npm test`, `npm run build`,
+`npm run test:extension:chrome` (including red-on-old), package byte comparison
+and `npm run test:extension:package`, and `git diff --check`. Cross-repository
+validation uses non-production SchoolPilot code containing #502. Managed-device
+acceptance remains a separate release gate: fresh session, same-ID upgrade,
+teacher sign-out while offline, and the affected Chromebook when available.
 
 ## Release handling
 
-This candidate update does not tag, package, upload, publish or activate the rollout.
+This candidate update does not tag, upload, publish or activate the rollout.
+Local packages produced for integration verification are test candidates only.
 The canonical future artifact is `dist/ClassPilot-v2.9.4.zip`, produced only by
 the repository packaging script from a clean, reviewed, tagged release commit
 during the authorized release. `ClassPilot-v2.9.3.zip` and every earlier
 artifact, SHA-256 record and release note remain retained and unchanged.
-Recheck the live Store version immediately before any future upload; installed
+Earlier local 2.9.4 test packages from `16320c6` are superseded and must not be
+submitted. Retain them only as labeled review evidence. Recheck the live Store
+version immediately before any future upload; installed
 Chromebook versions and Store publication are separate evidence. Submit with
-deferred publishing, then observe the previously affected Chromebook through a
-fresh managed session on 2.9.4 with `authGateDiagnosticsV1` and
-`authGateWakeFailureV1` captured before publishing. When controller ownership
+deferred publishing only after managed acceptance and final review. Use the
+on-screen support details during validation without requiring DevTools.
+When controller ownership
 cannot be proved during an in-place update, the explicit manual page reload
 remains the fallback; it is not seamless replacement.
 

@@ -638,8 +638,7 @@ const SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS = Object.freeze([2000, 5000, 15000, 
 const AUTH_GATE_REQUEST_TIMEOUT_MS = 5000;
 const AUTH_GATE_POLICY_READ_TIMEOUT_MS = 3000;
 const AUTH_GATE_RPC_RESPONSE_TIMEOUT_MS = 9000;
-// A worker wake that neither finishes nor fails within this bound is treated
-// as abandoned: startup readiness is then owned by the tracked coordinator.
+// Report a slow wake without cancelling its native work or authentication queue.
 const AUTH_GATE_WAKE_WATCHDOG_MS = 30000;
 const AUTH_GATE_WAKE_FAILURE_STORAGE_KEY = 'authGateWakeFailureV1';
 const AUTH_GATE_POLICY_RECOVERY_ALARM = 'auth-gate-policy-recovery';
@@ -887,7 +886,9 @@ let authGateRosterContextMutationTail = Promise.resolve();
 const authGateStartupPublicationOwners = new Map();
 // Owners whose non-storage failures stay retryable instead of settling the
 // owner. Readiness is thereby either published or actionable, never lost.
-const AUTH_GATE_STARTUP_RECOVERABLE_OWNER_KINDS = new Set(['signed_out_clear', 'startup_readiness']);
+const AUTH_GATE_STARTUP_RECOVERABLE_OWNER_KINDS = new Set([
+  'signed_out_clear', 'startup_readiness', 'failed_wake_clear', 'failed_wake_policy',
+]);
 const authGateStartupPublicationStorageFailures = new WeakSet();
 // Supersessions raised anywhere between the startup snapshot read and
 // credential adoption. The wake retires into readiness recovery for them.
@@ -912,7 +913,12 @@ let workerWakeStartedAt = 0;
 let workerWakeSettled = false;
 let workerWakeRetired = false;
 let workerWakeManagedPolicyApplied = false;
-let startupManagedPolicyRecoveryAttempted = false;
+let workerWakeAuthRestoreOutcome = 'pending';
+let workerWakeAuthGeneration = 0;
+let workerWakePolicyGeneration = 0;
+let workerWakePolicyBarrier = null;
+let startupFailedWakeRecovery = null;
+let workerWakeFirstFailure = null;
 let retireWorkerWakePolicyRestore = null;
 let manualStudentLoginRequestsPending = 0;
 let authoritativeManagedSchoolPolicyScope = null;
@@ -1324,43 +1330,181 @@ function assertStartupReadinessSignedOut(isCurrent) {
   }
 }
 
-async function deriveStartupWakeRecoveryFlags() {
-  // Readiness recovery for a wake that failed or was abandoned before it could
-  // publish its own snapshot flags (2.9.4). Only the durable recovery markers
-  // and the manual-identity freshness fields are read; no credential is ever
-  // adopted here.
-  const localKeys = [
-    STUDENT_AUTH_INVALIDATING_KEY,
-    STUDENT_AUTH_COMMIT_PENDING_KEY,
-    STUDENT_AUTH_CLEAR_INTENT_KEY,
-  ];
-  const sessionKeys = ['identitySource', 'manualLoginLastSeenAt'];
-  let local;
-  let session = {};
-  try {
-    local = await trackStartupNativeOperation(() => rawLocalKv.get(localKeys));
-    if (hasSessionStorage()) {
-      session = await trackStartupNativeOperation(() => durableSessionKv.get(sessionKeys));
-    }
-  } catch (_error) {
-    throw authGateRecoveryError(
-      'AUTH_GATE_UNAVAILABLE',
-      Date.now() + SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[0],
-    );
+function failedWakeRecoveryIsCurrent(recovery) {
+  return startupFailedWakeRecovery === recovery
+    && managedAuthGateStartupAuthorityTransition === recovery.transition
+    && managedAuthGatePolicyRestorePromise === recovery.policyBarrier
+    && managedAuthGatePolicyGeneration === recovery.policyGeneration
+    && studentAuthMutationGeneration === recovery.authGeneration;
+}
+
+function retireFailedWakeRecovery(recovery) {
+  recovery.phase = 'superseded';
+  recovery.rejectPolicy(authMutationSuperseded('failed worker wake recovery'));
+  // Retirement only withdraws publication authority. An in-flight clear keeps
+  // its original authentication-queue slot until all its child work settles.
+}
+
+async function recoverFailedWakePolicy(recovery) {
+  await recovery.clearPromise;
+  if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+  recovery.phase = 'recovery_policy_read';
+  // Recovery must not re-enter getStoredAuthState: that would repeat the
+  // migration/credential adoption that failed. These are read-only, non-auth
+  // prerequisites, and each managed attempt is a fresh bounded native read.
+  const [managedConfig, stored] = await Promise.all([
+    readManagedConfigOnce({ failClosed: true }),
+    trackStartupNativeOperation(() => rawLocalKv.get([
+      'config', 'deviceId', MANAGED_AUTH_GATE_BINDING_KEY,
+    ])),
+  ]);
+  if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+  CONFIG = { ...CONFIG, ...persistedNonAuthConfig(stored.config || {}) };
+  if (typeof stored.deviceId === 'string' && stored.deviceId.trim()) CONFIG.deviceId = stored.deviceId;
+  const applied = applyAuthoritativeManagedAuthGateSnapshot(
+    managedConfig, stored[MANAGED_AUTH_GATE_BINDING_KEY], false, { persist: false },
+  );
+  recovery.phase = 'recovery_policy_persist';
+  const values = {
+    config: persistedNonAuthConfig(CONFIG),
+    [MANAGED_AUTH_GATE_BINDING_KEY]: applied.persistedDescriptor,
+  };
+  await trackStartupNativeOperation(
+    () => durableLocalKv.set(values), { area: 'local', present: values },
+  );
+  if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+  managedConfigReadGeneration = recovery.policyGeneration;
+  managedConfigReadPromise = Promise.resolve(managedConfig);
+  clearManagedPolicyRecoveryFailure(recovery.policyGeneration);
+  workerWakeManagedPolicyApplied = true;
+  recovery.phase = 'recovery_publication';
+  recovery.resolvePolicy(managedConfig);
+}
+
+function beginFailedWorkerWakeRecovery() {
+  if (startupFailedWakeRecovery) return startupFailedWakeRecovery;
+  // A completed failure from a retired authentication generation cannot clear
+  // the newer identity. Its current transition already owns startup recovery.
+  if (workerWakeAuthGeneration !== studentAuthMutationGeneration
+    || workerWakePolicyGeneration !== managedAuthGatePolicyGeneration
+    || workerWakePolicyBarrier !== managedAuthGatePolicyRestorePromise) {
+    workerWakeAuthRestoreOutcome = 'superseded';
+    return null;
   }
-  const identitySource = typeof session?.identitySource === 'string'
-    ? session.identitySource
-    : CONFIG.identitySource || null;
-  const manualIdentity = isManualIdentitySource(identitySource);
-  const clearIntent = local?.[STUDENT_AUTH_CLEAR_INTENT_KEY];
-  return Object.freeze({
-    interruptedAuthClear: local?.[STUDENT_AUTH_INVALIDATING_KEY] === true,
-    interruptedAuthCommit: local?.[STUDENT_AUTH_COMMIT_PENDING_KEY] === true,
-    manualAuthTimestampInvalid: manualIdentity
-      && !isManualLoginTimestampFresh(session?.manualLoginLastSeenAt ?? CONFIG.manualLoginLastSeenAt),
-    manualAuthSessionStorageUnavailable: manualIdentity && !hasSessionStorage(),
-    clearIntent: clearIntent && typeof clearIntent === 'object' ? clearIntent : null,
+  const recovery = { phase: 'recovery_clear', authGeneration: studentAuthMutationGeneration };
+  recovery.policyGeneration = advanceManagedAuthGatePolicyGeneration();
+  recovery.policyBarrier = new Promise((resolve, reject) => {
+    recovery.resolvePolicy = resolve;
+    recovery.rejectPolicy = reject;
   });
+  recovery.policyBarrier.catch(() => {});
+  recovery.transition = {
+    authGeneration: recovery.authGeneration,
+    policyGeneration: recovery.policyGeneration,
+    policyBarrier: recovery.policyBarrier,
+    clearPromise: null,
+    prerequisitesPromise: null,
+    managedReadFailure: null,
+  };
+  startupFailedWakeRecovery = recovery;
+  managedAuthGatePolicyRestorePromise = recovery.policyBarrier;
+  managedAuthGateStartupAuthorityTransition = recovery.transition;
+  const clear = () => {
+    const currentTransition = managedAuthGateStartupAuthorityTransition;
+    const inheritedClear = recovery.clearPromise
+      && currentTransition?.clearPromise === recovery.clearPromise
+      && startupManagedAuthorityTransitionIsCurrent(currentTransition);
+    if (!failedWakeRecoveryIsCurrent(recovery) && !inheritedClear) {
+      retireFailedWakeRecovery(recovery); return Promise.resolve();
+    }
+    recovery.phase = 'recovery_clear';
+    // Raise the fence synchronously, before any asynchronous recovery read.
+    // No local failure is evidence that the server ended this exact session.
+    const pending = clearStudentAuth('worker_wake_restore_failed', {
+      notifyBackend: false, notifyAuthGateTabs: false, pauseAutoRegistration: true,
+      preserveRecoveryForGate: true, disconnectWebSocket: true,
+    });
+    recovery.authGeneration = studentAuthMutationGeneration;
+    recovery.transition.authGeneration = recovery.authGeneration;
+    if (inheritedClear) currentTransition.authGeneration = recovery.authGeneration;
+    return pending;
+  };
+  let firstClear;
+  try { firstClear = clear(); } catch (error) { firstClear = Promise.reject(error); }
+  firstClear.catch(() => {});
+  recovery.clearPromise = beginAuthGateStartupPublication('failed_wake_clear', () => {
+    if (firstClear) { const pending = firstClear; firstClear = null; return pending; }
+    return clear();
+  });
+  recovery.transition.clearPromise = recovery.clearPromise;
+  recovery.transition.prerequisitesPromise = beginAuthGateStartupPublication('failed_wake_policy', async () => {
+    if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+    try { await recoverFailedWakePolicy(recovery); }
+    catch (error) {
+      if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+      throw error;
+    }
+  });
+  return recovery;
+}
+
+function retryFailedWakePolicyTransition(transition) {
+  // A managed onChanged transition may supersede failed-wake recovery and
+  // then fail its own policy persistence. Keep that startup repair on the
+  // non-auth path: ordinary direct revalidation includes credential migration.
+  if (!startupManagedAuthorityTransitionIsCurrent(transition)) {
+    return Promise.reject(authMutationSuperseded('failed wake policy retry'));
+  }
+  const recovery = {
+    phase: 'recovery_policy_read',
+    authGeneration: studentAuthMutationGeneration,
+    policyGeneration: advanceManagedAuthGatePolicyGeneration(),
+    clearPromise: transition.clearPromise,
+  };
+  recovery.policyBarrier = new Promise((resolve, reject) => {
+    recovery.resolvePolicy = resolve;
+    recovery.rejectPolicy = reject;
+  });
+  recovery.policyBarrier.catch(() => {});
+  recovery.transition = {
+    authGeneration: recovery.authGeneration,
+    policyGeneration: recovery.policyGeneration,
+    policyBarrier: recovery.policyBarrier,
+    clearPromise: recovery.clearPromise,
+    prerequisitesPromise: null,
+    managedReadFailure: null,
+  };
+  startupFailedWakeRecovery = recovery;
+  managedAuthGatePolicyRestorePromise = recovery.policyBarrier;
+  managedAuthGateStartupAuthorityTransition = recovery.transition;
+  const run = (async () => {
+    await recovery.clearPromise;
+    // onChanged settles this aggregate only after every original child has
+    // settled. Never bypass a sibling cleanup because another child rejected.
+    const prerequisitesSucceeded = await transition.prerequisitesPromise.then(
+      () => true, () => false,
+    );
+    if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+    if (!prerequisitesSucceeded && transition.policyPrerequisitesVerified !== true) {
+      recovery.phase = 'recovery_policy_cleanup';
+      await clearRestrictionSsoVisitState();
+      if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+      await clearRestrictionAuthAttemptState();
+      if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+      await clearRestrictionAuthPolicyFenceState();
+      if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+    }
+    recovery.transition.policyPrerequisitesVerified = true;
+    await recoverFailedWakePolicy(recovery);
+  })().catch(error => {
+    if (!failedWakeRecoveryIsCurrent(recovery)) { retireFailedWakeRecovery(recovery); return; }
+    recovery.transition.policyRecoveryRequired = true;
+    recovery.rejectPolicy(error);
+    throw error;
+  });
+  recovery.transition.prerequisitesPromise = run;
+  run.catch(() => {});
+  return run;
 }
 
 function computeStartupSignedOutClearPlan() {
@@ -1442,6 +1586,10 @@ async function publishStartupReadinessWhenVerified() {
       && policyBarrier === managedAuthGatePolicyRestorePromise
       && transition === managedAuthGateStartupAuthorityTransition;
     if (transition?.policyRecoveryRequired) {
+      if (startupFailedWakeRecovery) {
+        await retryFailedWakePolicyTransition(transition);
+        continue;
+      }
       // The transition's own policy barrier failed (a completed read or
       // persist failure). Replace it with one fresh, bounded managed
       // revalidation; its newer generation re-enters this loop against the
@@ -1476,47 +1624,18 @@ async function publishStartupReadinessWhenVerified() {
     }
     if (!isCurrent()) continue;
     if (!transition && !startupWakeRecoveryFlags) {
-      if (!workerWakeRetired) {
-        // The wake is still restoring its own snapshot, so whether a strict
-        // clear is required is unknown. Stay protected and retryable.
-        throw authGateRecoveryError(
-          'AUTH_GATE_UNAVAILABLE',
-          Date.now() + SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[0],
-        );
-      }
-      // The wake failed or was abandoned before its snapshot restoration
-      // (2.9.4). Derive the recovery flags from the durable markers with one
-      // bounded read; a completed read failure stays protected and retryable.
-      const derived = await deriveStartupWakeRecoveryFlags();
-      if (!isCurrent()) continue;
-      if (!startupWakeRecoveryFlags) startupWakeRecoveryFlags = derived;
-    }
-    if (!transition && workerWakeRetired && !workerWakeManagedPolicyApplied
-      && !startupManagedPolicyRecoveryAttempted) {
-      // The retired wake never applied managed policy. Apply it once from
-      // readiness through the same bounded direct revalidation a managed
-      // change uses; its newer generation re-enters this loop against the
-      // fresh barrier. A failed policy read stays tolerated exactly as the
-      // wake's own failed read would be (per-request policy Retry).
-      startupManagedPolicyRecoveryAttempted = true;
-      trackedManagedAuthGatePolicyRevalidation().catch(() => {});
-      await managedAuthGatePolicyRestorePromise.catch(() => {});
-      continue;
-    }
-    if (!transition && workerWakeRetired && !authGateRosterContextReady) {
-      // The retired wake never published its roster context. Publish it before
-      // the recovery clear or release, in the wake's own order: the clear's
-      // unpaused tail refreshes the login configuration against a stable
-      // roster context and would otherwise wait on this owner forever.
-      await initializeAuthGateRosterContextPublication(undefined, { readFresh: true });
-      if (!isCurrent()) continue;
-      await awaitAuthGateRosterContextStable();
-      if (!isCurrent()) continue;
+      // Only a completed restoration or an explicitly owned strict recovery
+      // may establish readiness. Durable marker reads alone prove neither.
+      throw authGateRecoveryError(
+        'AUTH_GATE_UNAVAILABLE',
+        Date.now() + SHARED_SIGN_IN_CONFIG_RETRY_DELAYS_MS[0],
+      );
     }
     if (!transition && !computeStartupSignedOutClearPlan()) {
       // The wake's verified authenticated release: the snapshot restored a
       // committed authentication with no interrupted marker. If the wake ended
       // before its own fast release, publish from that same proof.
+      if (workerWakeAuthRestoreOutcome !== 'verified') throw authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
       await initializeAuthGateRevisionPublication();
       if (!isCurrent()) continue;
       markAuthStateRestored();
@@ -2484,6 +2603,9 @@ async function getStoredAuthState(keys, options = {}) {
   const boundedDuringStartup = options.startupReadRecovery === true
     ? (run, intended = null) => trackStartupNativeOperation(run, intended)
     : (run) => run();
+  if (options.startupReadRecovery === true && legacyLocalAuthKeys.length > 0) {
+    workerWakeStep = 'legacy_auth_cleanup';
+  }
   let capturedLegacyCleanup = false;
   if (legacyLocalAuthKeys.includes('studentToken')) {
     let cleanupSource = local;
@@ -12168,13 +12290,37 @@ function authGateRecoveryFailurePayload(error) {
     'AUTH_GATE_STARTUP_TIMEOUT', 'AUTH_GATE_RPC_TIMEOUT',
     'AUTH_GATE_LOGIN_PENDING', 'AUTH_GATE_UNAVAILABLE',
   ]);
+  const supportDetails = getAuthGateSupportDetails(error);
   return {
     success: false,
     errorCode: allowedCodes.has(error?.code) ? error.code
       : error?.code === 'AUTH_GATE_TIMEOUT' ? 'AUTH_GATE_SERVER_TIMEOUT'
       : managedAuthGatePolicyFailure?.code || 'AUTH_GATE_UNAVAILABLE',
     retryAt: Math.max(Date.now() + 2000, Number(error?.retryAt || managedAuthGatePolicyFailure?.retryAt || 0)),
+    ...(supportDetails ? { supportDetails } : {}),
   };
+}
+
+function getAuthGateSupportDetails(error = null) {
+  try {
+    const owners = [...authGateStartupPublicationOwners.values()].filter(owner => !owner.settled);
+    const retryTimes = owners.filter(owner => owner.failed && !owner.inFlight).map(owner => owner.retryAt);
+    const recovery = startupFailedWakeRecovery;
+    const startupPhase = !authGateStartupComplete && recovery && recovery.phase !== 'superseded'
+      ? recovery.phase : workerWakeStep;
+    return globalThis.ClassPilotAuthSupportDetails?.sanitize({
+      extensionVersion: chrome.runtime.getManifest().version,
+      timestamp: Date.now(),
+      elapsedMs: workerWakeStartedAt > 0 ? Math.max(0, Date.now() - workerWakeStartedAt) : 0,
+      startupPhase,
+      restoreOutcome: workerWakeAuthRestoreOutcome,
+      failureClass: workerWakeFirstFailure?.failureClass || (error ? safeDiagnosticError(error) : 'pending'),
+      attemptCount: Math.max(1, ...owners.map(owner => owner.attempts)),
+      retryInMs: retryTimes.length ? Math.max(0, Math.min(...retryTimes) - Date.now()) : 0,
+      pending: !authGateStartupComplete && (owners.some(owner => Boolean(owner.inFlight)) || !workerWakeSettled),
+      ...(workerWakeFirstFailure ? { firstFailure: workerWakeFirstFailure } : {}),
+    });
+  } catch { return undefined; }
 }
 
 function createAuthGateResponseDeadline(sendResponse, stage = 'message_transport') {
@@ -13247,7 +13393,15 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
             initialClear = null;
             return started;
           }
-          return authorityClear();
+          const currentTransition = managedAuthGateStartupAuthorityTransition;
+          if (currentTransition?.clearPromise !== authorityAuthClearPromise
+            || !startupManagedAuthorityTransitionIsCurrent(currentTransition)) return Promise.resolve();
+          const pending = authorityClear();
+          // A retry reserves a fresh auth generation for this same strict
+          // clear. Keep its current (possibly inherited) transition's proof
+          // aligned without rebasing a superseded clear onto newer authority.
+          currentTransition.authGeneration = studentAuthMutationGeneration;
+          return pending;
         });
       }
     }
@@ -13331,13 +13485,17 @@ function handleManagedAuthGateStorageChange(changes = {}, areaName = 'managed') 
     const storedPolicyAtChange = trackStartupNativeOperation(
       () => durableLocalKv.get([MANAGED_AUTH_GATE_BINDING_KEY, 'config']),
     );
-    const strictPolicyPrerequisites = Promise.all([
+    const strictPolicyPrerequisites = Promise.allSettled([
       storedPolicyAtChange,
       authorityAuthClearPromise,
       restrictionSsoPolicyClearPromise,
       restrictionAuthPolicyClearPromise,
       restrictionAuthFenceClearPromise,
-    ]);
+    ]).then(results => {
+      const failure = results.find(result => result.status === 'rejected');
+      if (failure) throw failure.reason;
+      return results.map(result => result.value);
+    });
     strictPolicyPrerequisites.catch(() => {});
     if (startupAuthorityTransition) {
       startupAuthorityTransition.prerequisitesPromise = strictPolicyPrerequisites;
@@ -13640,20 +13798,20 @@ function restoreWorkerWakeAuthState(stored, resolvedServerUrl, restoreGeneration
     ) {
       if (!CONFIG.authContextId) {
         CONFIG.authContextId = generateAuthContextId();
-        await trackStartupNativeOperation(
-          () => setManualAuthState({ authContextId: CONFIG.authContextId }),
-        );
+        workerWakeStep = 'auth_context_persist';
+        await setManualAuthState({ authContextId: CONFIG.authContextId });
         assertCurrent();
       }
       studentAuthInvalidating = false;
       activateAuthenticatedContext(CONFIG.authContextId);
       const restoredAuthContext = captureAuthenticatedContext('worker wake storage adoption');
-      // Bounded (2.9.4): this queued adoption must never park the auth
-      // mutation queue, or a later startup clear could not run behind it.
-      await trackStartupNativeOperation(() => cleanupRetiredExactBoundStorage(
+      // Composite authentication work retains its queue slot until every
+      // child settles; an RPC deadline cannot cancel its native side effects.
+      workerWakeStep = 'retired_storage_cleanup';
+      await cleanupRetiredExactBoundStorage(
         restoredAuthContext,
         'worker wake storage adoption',
-      ));
+      );
       assertCurrent();
       if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
     }
@@ -15684,11 +15842,18 @@ function recordWorkerWakeFailure(cause, error) {
 
 function failWorkerWake(error) {
   console.warn('[Service Worker] Wake-up error:', safeDiagnosticError(error), { step: workerWakeStep });
+  if (!workerWakeFirstFailure) workerWakeFirstFailure = Object.freeze({
+    startupPhase: workerWakeStep, failureClass: safeDiagnosticError(error), timestamp: Date.now(),
+  });
   if (!workerWakeRetired && !authGateStartupComplete) {
     workerWakeRetired = true;
     recordWorkerWakeFailure('wake_failed', error);
   }
   if (typeof retireWorkerWakePolicyRestore === 'function') retireWorkerWakePolicyRestore(error);
+  if (!authGateStartupComplete) {
+    workerWakeAuthRestoreOutcome = 'failed';
+    beginFailedWorkerWakeRecovery();
+  }
   if (studentAuthCommitPending) failAuthCommitRecoveryBarrier(error);
 }
 
@@ -15701,14 +15866,10 @@ function armWorkerWakeWatchdog() {
     if (workerWakeSettled || workerWakeRetired || authGateStartupComplete) return;
     if (managedAuthGateStartupAuthorityTransition) return;
     if (authGateStartupPublicationOwners.has('startup_readiness')) return;
-    // The wake neither finished nor failed within the bound: treat it as
-    // abandoned. Readiness recovery derives the durable recovery flags itself,
-    // and any later continuation of this wake is superseded by that recovery.
-    workerWakeRetired = true;
+    // A slow native/composite operation still owns its continuation. Report
+    // its phase, but never retire it, release its queue or start a second clear.
     const error = authGateRecoveryError('AUTH_GATE_UNAVAILABLE');
-    recordWorkerWakeFailure('wake_abandoned', error);
-    if (typeof retireWorkerWakePolicyRestore === 'function') retireWorkerWakePolicyRestore(error);
-    ensureStartupReadinessPublication();
+    recordWorkerWakeFailure('stalled', error);
   }, AUTH_GATE_WAKE_WATCHDOG_MS);
 }
 
@@ -15747,6 +15908,7 @@ const authStateRestorePromise = new Promise((resolve) => {
   // allowed to create a notification; failures retain a durable retry alarm.
   authBoundNotificationCleanupPromise = ensureAuthBoundNotificationInventory({ force: true });
   const wakePolicyGeneration = advanceManagedAuthGatePolicyGeneration();
+  workerWakePolicyGeneration = wakePolicyGeneration;
   let resolveWakePolicyRestore;
   let rejectWakePolicyRestore;
   let wakePolicyRestoreSettled = false;
@@ -15755,8 +15917,9 @@ const authStateRestorePromise = new Promise((resolve) => {
     rejectWakePolicyRestore = (error) => { wakePolicyRestoreSettled = true; reject(error); };
   });
   managedAuthGatePolicyRestorePromise = wakePolicyRestore;
+  workerWakePolicyBarrier = wakePolicyRestore;
   wakePolicyRestore.catch(() => {});
-  // A wake that fails or is abandoned before settling this barrier must never
+  // A wake with a completed failure before settling this barrier must never
   // leave startup readiness waiting on it (2.9.4).
   retireWorkerWakePolicyRestore = (error) => {
     if (wakePolicyRestoreSettled) return false;
@@ -15781,6 +15944,7 @@ const authStateRestorePromise = new Promise((resolve) => {
       throw error;
     });
   let workerWakeRestoreGeneration = studentAuthMutationGeneration;
+  workerWakeAuthGeneration = workerWakeRestoreGeneration;
   let authStored;
   workerWakeStep = 'auth_snapshot';
   try {
@@ -15813,6 +15977,7 @@ const authStateRestorePromise = new Promise((resolve) => {
     // is published by the tracked coordinator against the current transition;
     // the retired wake never restores credentials or resumes classroom state.
     rejectWakePolicyRestore(error);
+    workerWakeAuthRestoreOutcome = 'superseded';
     recordAuthGateRecoveryDiagnostic('startup', 'superseded_joined');
     ensureStartupReadinessPublication();
     return;
@@ -15837,12 +16002,14 @@ const authStateRestorePromise = new Promise((resolve) => {
       workerWakeRestoreGeneration,
       { persistConfig: false },
     );
+    workerWakeAuthRestoreOutcome = 'verified';
   } catch (error) {
     if (!error || typeof error !== 'object'
       || !authGateStartupAuthSnapshotSupersededFailures.has(error)) throw error;
     // A managed authority change landed between the startup snapshot and this
     // queued restoration. Retire the wake; readiness joins the current authority.
     rejectWakePolicyRestore(error);
+    workerWakeAuthRestoreOutcome = 'superseded';
     recordAuthGateRecoveryDiagnostic('startup', 'superseded_joined');
     ensureStartupReadinessPublication();
     return;
@@ -15944,6 +16111,7 @@ const authStateRestorePromise = new Promise((resolve) => {
         disconnectWebSocket: false,
       }).catch(() => {});
       workerWakeRestoreGeneration = studentAuthMutationGeneration;
+      workerWakeAuthGeneration = workerWakeRestoreGeneration;
     }
     if (notifyAfter) {
       workerWakeRestrictionSsoCleanup
@@ -16010,10 +16178,10 @@ const authStateRestorePromise = new Promise((resolve) => {
     const monitoringAuthContext = captureAuthenticatedContext(
       'worker monitoring redaction restore',
     );
-    await trackStartupNativeOperation(() => restoreRestrictionAuthMonitoringRedaction(
+    await restoreRestrictionAuthMonitoringRedaction(
       authStored[RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY],
       monitoringAuthContext,
-    ));
+    );
   } else {
     restrictionAuthAttemptScopeDigest = null;
     restrictionAuthAttemptState = null;

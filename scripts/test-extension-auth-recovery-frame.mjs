@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { chromium } from 'playwright';
 import { resolve } from 'node:path';
@@ -8,13 +8,31 @@ import { fileURLToPath } from 'node:url';
 const nonce = 'a'.repeat(64);
 const extensionRoot = process.env.CLASSPILOT_EXTENSION_PATH || fileURLToPath(new URL('../extension/', import.meta.url));
 const extensionVersion=JSON.parse(readFileSync(resolve(extensionRoot,'manifest.json'),'utf8')).version;
-const files = new Map(['auth-gate-transport.js','auth-gate-frame.js','page-lifecycle.js','auth-gate-bootstrap.js','content.js']
+const supportFixture = { extensionVersion, timestamp: 1790343901622, elapsedMs: 9000, startupPhase: 'recovery_clear', restoreOutcome: 'failed',
+  failureClass: 'AUTH_GATE_UNAVAILABLE', attemptCount: 2, retryInMs: 2000, pending: true,
+  firstFailure: { startupPhase: 'auth_snapshot', failureClass: 'STORAGE_IO_ERROR', timestamp: 1000 } };
+const files = new Map(['auth-recovery-diagnostics.js','auth-gate-transport.js','auth-gate-frame.js','auth-gate-frame.css','page-lifecycle.js','auth-gate-bootstrap.js','content.js']
   .map(name => [name, readFileSync(resolve(extensionRoot, name), 'utf8')]));
 const server = createServer((request, response) => {
   const url = new URL(request.url, 'http://fixture.invalid');
   const name = url.pathname.slice(1);
-  if (files.has(name)) { response.writeHead(200, { 'content-type': 'text/javascript' }); response.end(files.get(name)); return; }
+  if (files.has(name)) { response.writeHead(200, { 'content-type': name.endsWith('.css') ? 'text/css' : 'text/javascript' }); response.end(files.get(name)); return; }
   response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  if (url.pathname === '/bootstrap-support') {
+    response.end(`<!doctype html><html><body><input id="page-draft"><button id="page-action">Underlying page</button><script>
+      window.bootstrapFixture = { calls:0, clicks:0, mode:'failure', support:${JSON.stringify(supportFixture)} };
+      document.querySelector('#page-action').onclick=()=>bootstrapFixture.clicks++;
+      const eventSource=()=>({addListener(){},removeListener(){}});
+      window.chrome={runtime:{id:'fixture-extension',getManifest:()=>({version:${JSON.stringify(extensionVersion)}}),
+        onMessage:eventSource(),sendMessage(message,callback){bootstrapFixture.calls++;
+          if(bootstrapFixture.mode==='hold')return;
+          if(bootstrapFixture.mode==='ready'){callback?.({success:true,state:{phase:'authenticated',authRequired:false,revision:30}});return;}
+          callback?.({success:false,errorCode:'AUTH_GATE_STARTUP_TIMEOUT',retryAt:Date.now()+2000,supportDetails:bootstrapFixture.support});}},
+        storage:{onChanged:eventSource(),managed:{get:(_keys,callback)=>callback({fastAuthGateEnabled:true})}}};
+      </script><script src="/auth-recovery-diagnostics.js"></script><script src="/auth-gate-transport.js"></script>
+      <script src="/page-lifecycle.js"></script><script src="/auth-gate-bootstrap.js"></script></body></html>`);
+    return;
+  }
   if (url.pathname === '/real-parent') {
     response.end(`<!doctype html><html><body><input id="page-draft" value="protected draft"><script>
       window.parentFixture = { reloadCalls:0, messages:[] };
@@ -30,12 +48,12 @@ const server = createServer((request, response) => {
           callback?.({success:false});
         } }, storage: { onChanged:eventSource(), managed:{get:(_keys,callback)=>callback({})},
           local:{get:(_keys,callback)=>callback({})}, session:{get:(_keys,callback)=>callback({})} } };
-      </script><script src="/auth-gate-transport.js"></script><script src="/page-lifecycle.js"></script>
+      </script><script src="/auth-recovery-diagnostics.js"></script><script src="/auth-gate-transport.js"></script><script src="/page-lifecycle.js"></script>
       <script src="/auth-gate-bootstrap.js"></script><script src="/content.js"></script></body></html>`);
     return;
   }
   if (url.pathname === '/frame') {
-    response.end(`<!doctype html><html><body><div id="classpilot-auth-gate"></div><script>
+    response.end(`<!doctype html><html><head><link rel="stylesheet" href="/auth-gate-frame.css"></head><body><div id="classpilot-auth-gate"></div><script>
       const scenario = new URL(location.href).searchParams.get('scenario');
       window.fixture = {
         calls: [], stateCallbacks: [], rosterCallbacks: [], diagnostics: [],
@@ -44,7 +62,7 @@ const server = createServer((request, response) => {
         state: { phase:'ready', authRequired:true, loginMethod:scenario === 'roster' ? 'name_pin' : 'email_id', revision:5, rosterContextGeneration:1 },
       };
       window.ClassPilotAuthRecoveryDiagnostics = { record: event => fixture.diagnostics.push(event) };
-      window.chrome = {runtime:{ id:'fixture-extension', lastError:null, onMessage:{addListener(fn){fixture.broadcast=fn;}}, sendMessage(message, callback){
+      window.chrome = {runtime:{ id:'fixture-extension', getManifest:()=>({version:${JSON.stringify(extensionVersion)}}), lastError:null, onMessage:{addListener(fn){fixture.broadcast=fn;}}, sendMessage(message, callback){
         fixture.calls.push({type:message.type,reason:message.reason});
         if(message.type==='manual-student-login'){fixture.manualCallback=callback;fixture.stateMode='pending';return;}
         if(message.type==='get-login-roster'){
@@ -59,12 +77,12 @@ const server = createServer((request, response) => {
         }
         callback({success:false});
       }}};
-      </script><script src="/auth-gate-transport.js"></script><script src="/auth-gate-frame.js"></script></body></html>`);
+      </script><script src="/auth-recovery-diagnostics.js"></script><script src="/auth-gate-transport.js"></script><script src="/auth-gate-frame.js"></script></body></html>`);
     return;
   }
-  response.end(`<!doctype html><html><body><iframe id="gate" src="/frame?scenario=${encodeURIComponent(url.searchParams.get('scenario') || 'normal')}#${nonce}"></iframe><script>
+  response.end(`<!doctype html><html><body style="margin:0"><iframe id="gate" style="width:100vw;height:100vh;border:0;display:block" src="/frame?scenario=${encodeURIComponent(url.searchParams.get('scenario') || 'normal')}#${nonce}"></iframe><script>
     window.messages=[];addEventListener('message',event=>messages.push(event.data));
-    document.getElementById('gate').addEventListener('load',()=>document.getElementById('gate').contentWindow.postMessage({type:'CLASSPILOT_AUTH_FRAME_INIT',nonce:'${nonce}',${url.searchParams.get('scenario')?.startsWith('initial-failure')?`initialFailure:{code:${JSON.stringify(url.searchParams.get('scenario')==='initial-failure-invalid'?'private-token@example.invalid <img src=x>':'AUTH_GATE_STARTUP_TIMEOUT')},retryAt:Date.now()+2000},`:''}},location.origin));
+    document.getElementById('gate').addEventListener('load',()=>document.getElementById('gate').contentWindow.postMessage({type:'CLASSPILOT_AUTH_FRAME_INIT',nonce:'${nonce}',${url.searchParams.get('scenario')?.startsWith('initial-failure')?`initialFailure:{code:${JSON.stringify(url.searchParams.get('scenario')==='initial-failure-invalid'?'private-token@example.invalid <img src=x>':'AUTH_GATE_STARTUP_TIMEOUT')},retryAt:Date.now()+2000,supportDetails:${JSON.stringify(supportFixture)}},`:''}},location.origin));
   </script></body></html>`);
 });
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -89,6 +107,14 @@ async function scenario(name, mode, run) {
 }
 const phase = frame => frame.locator('#classpilot-auth-gate').getAttribute('data-classpilot-auth-phase');
 const click = (frame, selector) => frame.locator(selector).evaluate(element => element.click());
+async function supportScreenshot(page, name) {
+  const directory = process.env.CLASSPILOT_AUTH_RECOVERY_SCREENSHOT_DIR;
+  if (!directory) return;
+  mkdirSync(directory, { recursive:true });
+  const path=resolve(directory, name+'.png');
+  await page.screenshot({path});
+  console.log(`Support screenshot: ${path}`);
+}
 async function submit(frame) {
   await frame.evaluate(() => {
     document.getElementById('classpilot-auth-email').value = 'student@example.invalid';
@@ -97,6 +123,97 @@ async function submit(frame) {
   });
 }
 try {
+  await scenario('IT details survive parent handover and retry repaint; copy is bounded and can fall back to selection', 'initial-failure', async (page, frame) => {
+    await page.setViewportSize({width:800,height:600});
+    assert.equal(await frame.locator('#classpilot-auth-title').textContent(), 'ClassPilot is still starting');
+    await click(frame, '#classpilot-auth-it-summary');
+    await frame.locator('#classpilot-auth-copy-diagnostics').scrollIntoViewIfNeeded();
+    const supportLayout=await frame.locator('#classpilot-auth-it-details').evaluate(node=>({
+      overflow:node.scrollWidth>node.clientWidth,
+      footerPosition:getComputedStyle(document.querySelector('.classpilot-auth-footnote')).position,
+    }));
+    assert.deepEqual(supportLayout,{overflow:false,footerPosition:'static'});
+    await supportScreenshot(page, 'classpilot-support-secure-frame-800x600');
+    const text = await frame.locator('#classpilot-auth-it-text').inputValue();
+    assert.match(text, /First failure: auth_snapshot \/ STORAGE_IO_ERROR/);
+    await frame.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable:true,
+      value:{writeText:async text=>{fixture.copied=text;}} }));
+    await click(frame, '#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.evaluate(() => fixture.copied), text);
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(), 'Diagnostics copied.');
+    await frame.locator('#classpilot-auth-it-text').focus();
+    await frame.evaluate(() => {
+      document.querySelector('#classpilot-auth-it-text').setSelectionRange(0, 12);
+      fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'unavailable',authRequired:true,revision:20,
+        errorCode:'AUTH_GATE_STARTUP_TIMEOUT',supportDetails:{extensionVersion:'2.9.4',startupPhase:'recovery_clear',
+          restoreOutcome:'failed',failureClass:'AUTH_GATE_UNAVAILABLE',attemptCount:3,pending:true,
+          firstFailure:{startupPhase:'auth_snapshot',failureClass:'STORAGE_IO_ERROR',timestamp:1000,message:'private-token'},
+          studentToken:'private-token'}}},{id:'fixture-extension'});
+    });
+    assert.equal(await frame.locator('#classpilot-auth-it-details').evaluate(node=>node.open), true);
+    assert.equal(await frame.evaluate(()=>document.activeElement.id), 'classpilot-auth-it-text');
+    assert.equal(await frame.locator('#classpilot-auth-it-text').evaluate(node=>node.selectionEnd), 12);
+    assert.equal((await frame.locator('#classpilot-auth-it-text').inputValue()).includes('private'), false);
+    await frame.evaluate(() => Object.defineProperty(navigator, 'clipboard', { configurable:true,
+      value:{writeText:async()=>{throw new Error('denied');}} }));
+    await click(frame, '#classpilot-auth-copy-diagnostics');
+    assert.equal(await frame.locator('#classpilot-auth-copy-status').textContent(), 'Select and copy the details above.');
+    assert.equal(await frame.evaluate(()=>document.activeElement.id), 'classpilot-auth-it-text');
+    await frame.evaluate(()=>{fixture.stateMode='normal';fixture.state.revision=30;});
+    await click(frame,'#classpilot-auth-retry');
+    assert.equal(await phase(frame),'ready');
+    assert.equal(await frame.locator('#classpilot-auth-it-details').count(),0);
+  });
+  await scenario('a silent worker exposes only local connection evidence in IT details', 'missing', async (page, frame) => {
+    await page.clock.runFor(10_010);
+    const text=await frame.locator('#classpilot-auth-it-text').inputValue();
+    assert.match(text,/Startup step: worker_unavailable/);
+    assert.match(text,/AUTH_GATE_RPC_TIMEOUT/);
+    assert.match(text,/Page request elapsed: 10000 ms/);
+    assert.doesNotMatch(text,/Restore:|Recovery attempt:|Operation pending:|Retry in:/);
+    assert.equal(text.includes('First failure:'),false);
+  });
+  {
+    const page=await browser.newPage({viewport:{width:800,height:600}});
+    try {
+      await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });
+      await page.clock.pauseAt(new Date('2030-01-01T00:00:01Z'));
+      await page.goto(`${origin}/bootstrap-support`);
+      await page.locator('#classpilot-auth-it-summary').waitFor();
+      await page.locator('#classpilot-auth-it-summary').click({force:true});
+      await page.locator('#classpilot-auth-copy-diagnostics').scrollIntoViewIfNeeded();
+      const fallbackLayout=await page.locator('.classpilot-auth-panel').evaluate(node=>({
+        top:node.getBoundingClientRect().top,bottom:node.getBoundingClientRect().bottom,
+        viewport:innerHeight,overflow:node.scrollWidth>node.clientWidth,
+      }));
+      assert.ok(fallbackLayout.top>=0&&fallbackLayout.bottom<=fallbackLayout.viewport);
+      assert.equal(fallbackLayout.overflow,false);
+      await supportScreenshot(page, 'classpilot-support-bootstrap-800x600');
+      assert.equal(await page.locator('#classpilot-auth-it-details').evaluate(node=>node.open),true);
+      assert.match(await page.locator('#classpilot-auth-it-text').inputValue(),/STORAGE_IO_ERROR/);
+      await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{bootstrapFixture.copied=value;}}}));
+      await page.locator('#classpilot-auth-copy-diagnostics').click({force:true});
+      assert.match(await page.evaluate(()=>bootstrapFixture.copied),/First failure: auth_snapshot \/ STORAGE_IO_ERROR/);
+      assert.equal(await page.locator('#classpilot-auth-copy-status').textContent(),'Diagnostics copied.');
+      const original=await page.evaluate(()=>bootstrapFixture.copied);
+      await page.evaluate(()=>{document.querySelector('#classpilot-auth-it-text').value='private-host-page-injection';});
+      await page.locator('#classpilot-auth-copy-diagnostics').click({force:true});
+      assert.equal(await page.evaluate(()=>bootstrapFixture.copied),original,'the host page cannot replace the copied diagnostic snapshot');
+      assert.equal(await page.evaluate(()=>bootstrapFixture.clicks),0);
+      await assert.rejects(page.locator('#page-action').click({timeout:250}));
+      await page.evaluate(()=>{bootstrapFixture.mode='hold';});
+      await page.locator('.classpilot-auth-bootstrap-retry').click({force:true});
+      await page.clock.runFor(10_010);
+      const timedOut=await page.locator('#classpilot-auth-it-text').inputValue();
+      assert.match(timedOut,/Startup step: worker_unavailable/);
+      assert.match(timedOut,/First failure: auth_snapshot \/ STORAGE_IO_ERROR/);
+      assert.doesNotMatch(timedOut,/Restore:|Recovery attempt:|Operation pending:|Retry in:/);
+      await page.evaluate(()=>{bootstrapFixture.mode='ready';});
+      await page.locator('.classpilot-auth-bootstrap-retry').click({force:true});
+      assert.equal(await page.locator('#classpilot-auth-it-details').count(),0);
+      passed++;console.log('PASS bootstrap fallback exposes copyable support while the underlying page stays protected');
+    } finally {await page.close();}
+  }
   await scenario('a bounded parent startup failure is visible immediately without a second worker deadline','initial-failure',async(page,frame)=>{
     assert.equal(await phase(frame),'unavailable');
     assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_STARTUP_TIMEOUT');
@@ -105,9 +222,17 @@ try {
     assert.equal(await frame.evaluate(()=>fixture.calls.length),1);
     assert.equal(await frame.locator('#classpilot-auth-support-code').textContent(),'Support code: AUTH_GATE_STARTUP_TIMEOUT');
     await page.clock.runFor(10_010);assert.equal(await phase(frame),'unavailable');
+    const timedOut=await frame.locator('#classpilot-auth-it-text').inputValue();
+    assert.match(timedOut,/Startup step: worker_unavailable/);
+    assert.match(timedOut,/First failure: auth_snapshot \/ STORAGE_IO_ERROR/);
+    assert.doesNotMatch(timedOut,/Restore:|Recovery attempt:|Operation pending:|Retry in:/);
     await frame.evaluate(()=>{fixture.stateMode='normal';});
     await click(frame,'#classpilot-auth-retry');assert.equal(await phase(frame),'ready');
     assert.equal(await frame.locator('#classpilot-auth-support-code').count(),0);
+    await frame.evaluate(()=>fixture.broadcast({type:'CLASSPILOT_AUTH_REQUIRED',state:{phase:'unavailable',authRequired:true,
+      revision:30,errorCode:'AUTH_GATE_RPC_TIMEOUT'}},{id:'fixture-extension'}));
+    assert.equal((await frame.locator('#classpilot-auth-it-text').inputValue()).includes('First failure:'),false,
+      'successful recovery clears the previous first failure');
   });
   await scenario('unknown initial failure is redacted and ordinary retry respects the supplied bounded backoff','initial-failure-invalid',async(page,frame)=>{
     assert.equal(await phase(frame),'unavailable');

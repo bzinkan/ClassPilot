@@ -12,7 +12,7 @@
     'AUTH_GATE_UNAVAILABLE',
   ]);
 
-  function failure(code, retryAt) {
+  function failure(code, retryAt, supportDetails) {
     const safeCode = FAILURE_CODES.has(code) ? code : 'AUTH_GATE_RPC_UNAVAILABLE';
     const error = new Error(safeCode);
     error.code = safeCode;
@@ -21,6 +21,8 @@
     error.retryAt = Number.isFinite(hintedRetry) && hintedRetry >= Date.now()
       ? Math.min(hintedRetry, Date.now() + 5 * 60_000)
       : Date.now() + 2_000;
+    const support = globalThis.ClassPilotAuthSupportDetails;
+    error.supportDetails = support?.sanitize(supportDetails) || support?.fallback(safeCode) || null;
     return error;
   }
 
@@ -48,6 +50,11 @@
         if (timer !== null) clearTimeout(timer);
         options.signal?.removeEventListener('abort', onAbort);
         if (error) {
+          if (error.supportDetails?.startupPhase === 'worker_unavailable') {
+            error.supportDetails = globalThis.ClassPilotAuthSupportDetails?.sanitize({
+              ...error.supportDetails, timestamp: Date.now(), elapsedMs: Math.max(0, Date.now() - startedAt),
+            }) || error.supportDetails;
+          }
           if (error.code !== 'AUTH_GATE_REQUEST_CANCELLED') {
             try {
               globalThis.ClassPilotAuthRecoveryDiagnostics?.record({
@@ -75,7 +82,7 @@
           if (runtimeError) { finish(runtimeFailure(runtimeError)); return; }
           if (!response || typeof response !== 'object') { finish(failure('AUTH_GATE_RPC_UNAVAILABLE')); return; }
           if (response.success === false && FAILURE_CODES.has(response.errorCode)) {
-            finish(failure(response.errorCode, response.retryAt)); return;
+            finish(failure(response.errorCode, response.retryAt, response.supportDetails)); return;
           }
           finish(null, response);
         });

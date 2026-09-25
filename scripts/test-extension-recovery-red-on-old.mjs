@@ -2,9 +2,12 @@
 //
 // Every case tagged `expectedRedOnBase` in
 // scripts/test-extension-auth-recovery-browser.mjs is run against UNMODIFIED
-// released sources and must exit NON-ZERO. `true` selects the immutable v2.8.9
+// baseline sources and must exit NON-ZERO. `true` selects the immutable v2.8.9
 // snapshot (the 2.9.0 correction); a version string selects that released
-// snapshot (the 2.9.4 wake-recovery cases trip on v2.9.3). Each snapshot
+// snapshot (the 2.9.4 wake-recovery cases trip on v2.9.3). The explicitly named
+// pr116-16320c6 baseline is an unsubmitted 2.9.4 candidate, not a release.
+// Review regressions also require their declared assertion failure marker.
+// Each snapshot
 // (scripts/fixtures/auth-recovery-<version>.json.gz, verified by its receipt)
 // is laid over the candidate's non-script assets. Unless `--old-only` is
 // passed, the same case then runs against the candidate
@@ -53,7 +56,7 @@ function materializeBase(version) {
   }
   rmSync(join(extensionPath, 'config.js'), { force: true });
   const manifest = JSON.parse(readFileSync(join(extensionPath, 'manifest.json'), 'utf8'));
-  assert.equal(manifest.version, version);
+  assert.equal(manifest.version, receipt.extensionVersion);
   return { version, root, extensionPath, sourceCommit: receipt.sourceCommit, archiveSha256: receipt.archiveSha256 };
 }
 
@@ -68,13 +71,13 @@ function runCase(caseName, extensionPath) {
     || (result.signal ? `terminated by ${result.signal}` : null)
     || (result.error ? String(result.error.message) : null);
   const passLine = output.match(/^PASS .*$/m)?.[0] || null;
-  return { status: result.status, signal: result.signal, ms: Date.now() - startedAt, trip: trip ? trip.slice(0, 220) : null, passLine, output };
+  return { status: result.status, signal: result.signal, executionError: Boolean(result.error), ms: Date.now() - startedAt, trip: trip ? trip.slice(0, 220) : null, passLine, output };
 }
 
 const table = loadCaseTable();
 const redCases = Object.entries(table)
   .filter(([name, spec]) => spec.expectedRedOnBase && (onlyCases.length === 0 || onlyCases.includes(name)))
-  .map(([name, spec]) => ({ name, base: spec.expectedRedOnBase === true ? BASE_VERSION : String(spec.expectedRedOnBase) }));
+  .map(([name, spec]) => ({ name, base: spec.expectedRedOnBase === true ? BASE_VERSION : String(spec.expectedRedOnBase), expectedFailure: spec.expectedFailure || null }));
 assert.ok(redCases.length > 0, 'no expectedRedOnBase cases selected');
 const bases = new Map();
 for (const version of new Set(redCases.map((entry) => entry.base))) bases.set(version, materializeBase(version));
@@ -87,14 +90,15 @@ const rows = [];
 let failures = 0;
 const suiteStarted = Date.now();
 try {
-  for (const { name: caseName, base: baseVersion } of redCases) {
+  for (const { name: caseName, base: baseVersion, expectedFailure } of redCases) {
     const base = bases.get(baseVersion);
     const old = runCase(caseName, base.extensionPath);
-    const oldOk = old.status !== 0;
-    const row = { case: caseName, base: baseVersion, old: oldOk ? 'RED (expected)' : 'GREEN (UNEXPECTED)', oldMs: old.ms, oldTrip: old.trip, candidate: 'skipped', candidateMs: null, candidateTrip: null };
+    const oldOk = Number.isInteger(old.status) && old.status !== 0 && !old.signal && !old.executionError
+      && (!expectedFailure || (old.trip && old.trip.includes(expectedFailure)));
+    const row = { case: caseName, base: baseVersion, old: oldOk ? 'RED (expected)' : old.status === 0 ? 'GREEN (UNEXPECTED)' : 'INVALID FAILURE', oldMs: old.ms, oldTrip: old.trip, candidate: 'skipped', candidateMs: null, candidateTrip: null };
     if (!oldOk) {
       failures += 1;
-      console.log(`--- ${caseName}: unexpectedly GREEN on ${baseVersion}; last output lines:\n${old.output.trim().split('\n').slice(-25).join('\n')}`);
+      console.log(`--- ${caseName}: missing expected regression failure on ${baseVersion}${expectedFailure ? ` (${expectedFailure})` : ''}; last output lines:\n${old.output.trim().split('\n').slice(-25).join('\n')}`);
     } else if (!old.trip) {
       console.log(`--- ${caseName}: red on ${baseVersion} but no assertion message found; last output lines:\n${old.output.trim().split('\n').slice(-25).join('\n')}`);
     }
@@ -129,4 +133,4 @@ if (failures > 0) {
   console.error(`Red-on-old gate FAILED: ${failures} case(s) did not behave as expected.`);
   process.exit(1);
 }
-console.log(`Red-on-old gate passed: every expected-red case trips on its released base${oldOnly ? '' : ' and passes on the candidate'}.`);
+console.log(`Red-on-old gate passed: every expected-red case trips on its immutable base${oldOnly ? '' : ' and passes on the candidate'}.`);

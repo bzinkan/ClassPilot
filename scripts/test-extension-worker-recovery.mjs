@@ -28,7 +28,9 @@ const functions = [
   'beginAuthGateStartupPublication', 'retryAuthGateStartupPublications',
   'trackStartupNativeOperation', 'startupNativeIntentSatisfied', 'canonicalStorageJson',
   // 2.9.4 worker wake failure/abandonment recovery.
-  'deriveStartupWakeRecoveryFlags', 'failWorkerWake', 'recordWorkerWakeFailure', 'settleWorkerWake',
+  'failedWakeRecoveryIsCurrent', 'retireFailedWakeRecovery', 'recoverFailedWakePolicy', 'beginFailedWorkerWakeRecovery',
+  'retryFailedWakePolicyTransition',
+  'getAuthGateSupportDetails', 'failWorkerWake', 'recordWorkerWakeFailure', 'settleWorkerWake',
   'armWorkerWakeWatchdog', 'hasSessionStorage', 'isManualIdentitySource', 'isManualLoginTimestampFresh',
 ];
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
@@ -39,7 +41,7 @@ function harness() {
   const runtime = { onMessage: { addListener(handler) { context.handler = handler; } } };
   Object.defineProperty(runtime, 'lastError', { get() { lastErrorReads++; return runtime.testError; } });
   const context = vm.createContext({
-    console: { warn() {}, log() {} }, AbortController,
+    console: { warn() {}, log() {} }, AbortController, queueMicrotask,
     Date: class extends Date { static now() { return now; } },
     setTimeout(fn, delay) { const id=++serial; timers.set(id,{fn,at:now+delay}); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -52,7 +54,7 @@ function harness() {
     authGateStartupPublicationOwners: new Map(), authGateStartupPublicationStorageFailures: new WeakSet(),
     authGateStartupAuthSnapshotSupersededFailures: new WeakSet(),
     managedAuthGateStartupAuthorityTransition: null,
-    AUTH_GATE_STARTUP_RECOVERABLE_OWNER_KINDS: new Set(['signed_out_clear', 'startup_readiness']),
+    AUTH_GATE_STARTUP_RECOVERABLE_OWNER_KINDS: new Set(['signed_out_clear', 'startup_readiness', 'failed_wake_clear', 'failed_wake_policy']),
     AUTH_GATE_STARTUP_LOOP_ATTEMPT_LIMIT: 8, STUDENT_AUTH_CLEAR_INTENT_KEY: 'clear-intent',
     startupWakeRecoveryFlags: null, studentSessionRecoveryState: { armed: null, pending: [] },
     rawLocalKv: null, durableSessionKv: null, CONFIG: {},
@@ -68,7 +70,9 @@ function harness() {
     safeDiagnosticError: () => ({name:'Error'}),
     // 2.9.4 worker wake bookkeeping (production defaults).
     workerWakeStep: 'start', workerWakeStartedAt: 0, workerWakeSettled: false, workerWakeRetired: false,
-    workerWakeManagedPolicyApplied: false, startupManagedPolicyRecoveryAttempted: false,
+    workerWakeManagedPolicyApplied: false, workerWakeAuthRestoreOutcome: 'pending', workerWakeAuthGeneration: 0,
+    workerWakePolicyGeneration: 1, workerWakePolicyBarrier: null,
+    startupFailedWakeRecovery: null, workerWakeFirstFailure: null,
     retireWorkerWakePolicyRestore: null, AUTH_GATE_WAKE_WATCHDOG_MS: 30000,
     AUTH_GATE_WAKE_FAILURE_STORAGE_KEY: 'wake-failure', authGateRosterContextReady: false,
     MANUAL_LOGIN_STALE_MS: 5 * 60 * 1000, MANUAL_LOGIN_FUTURE_SKEW_MS: 1000,
@@ -342,6 +346,7 @@ function startupPublicationHarness({authenticated=false,interruptedFlag=null}={}
   const h=harness(), c=h.context, handler=gateHandler(h), cleanup=deferred(), refreshes=[];
   Object.assign(c,{
     authGateStartupComplete:false,authGateRevisionReady:true,
+    workerWakeAuthRestoreOutcome:'verified',
     interruptedAuthClear:false,interruptedAuthCommit:false,
     manualAuthTimestampInvalid:false,manualAuthSessionStorageUnavailable:false,
     hasStudentAuth:()=>authenticated,fixtureDurableCleanup:cleanup.promise,
@@ -713,7 +718,7 @@ test('errors after the native prefix do not replay migration or masquerade as re
 // Execute the real native snapshot, wake supersession hook, managed-change
 // producer, strict prerequisites and numeric publication owners together.
 // Only Chrome storage and already-covered auth/ledger cleanup bodies are seams.
-function managedWakeTransitionHarness() {
+function managedWakeTransitionHarness({ startWake = true } = {}) {
   const h = durablePublicationHarness({ autoStart: false, failCount: 0 }), c = h.context;
   const initialRead = deferred(), clears = [], deliveries = [], policyWrites = [], notificationRuns = [];
   const baseRead = c.rawLocalKv.get, baseWrite = c.durableLocalKv.set;
@@ -800,7 +805,7 @@ function managedWakeTransitionHarness() {
   const finalPublication = source.match(/markClassroomStateRestored\(\);\n  if \(!authGateStartupComplete\) ensureStartupReadinessPublication\(\);/)[0];
   // The production wake failure path (2.9.4): a failed wake records its step
   // and retires its policy barrier before the coordinator owns readiness.
-  vm.runInContext(`globalThis.fixtureWake = (async () => {
+  if (startWake) vm.runInContext(`globalThis.fixtureWake = (async () => {
     ${source.slice(wakeStart, wakeEnd)}
     oldWakeContinued++;
   })().catch(error => { wakeFailures.push(error); failWorkerWake(error); }).finally(() => { settleWorkerWake(); ${finalPublication} });`, c);
@@ -820,139 +825,343 @@ function managedWakeTransitionHarness() {
   };
 }
 
-// 2.9.4: a wake that fails or is abandoned before its policy barrier settles.
-// 2.9.3 left the readiness owner waiting on that barrier forever (in flight,
-// so neither Retry nor the recovery alarm could re-run it).
-function retiredWakeFixture(c) {
-  const wakeBarrier = deferred(); wakeBarrier.promise.catch(() => {});
-  const counters = { barrierRetired: 0, policyRevalidations: 0 };
-  c.managedAuthGatePolicyRestorePromise = wakeBarrier.promise;
-  c.retireWorkerWakePolicyRestore = (error) => { counters.barrierRetired++; wakeBarrier.reject(error); return true; };
-  c.runManagedAuthGatePolicyRevalidation = () => {
-    counters.policyRevalidations++; c.managedAuthGatePolicyGeneration++;
-    const barrier = Promise.resolve({ schoolId: 'fixture-recovered-school' });
-    c.managedAuthGatePolicyRestorePromise = barrier;
-    return barrier;
-  };
+// Exercise failed-wake recovery with the real policy phase and publication owners.
+function failedWakeHarness(options = {}) {
+  const h = managedWakeTransitionHarness(options), c = h.context;
+  const barrier = deferred(); barrier.promise.catch(() => {});
+  c.managedAuthGatePolicyRestorePromise = barrier.promise;
+  c.workerWakePolicyBarrier = barrier.promise;
+  c.workerWakePolicyGeneration = c.managedAuthGatePolicyGeneration;
+  c.workerWakeAuthGeneration = c.studentAuthMutationGeneration;
+  c.retireWorkerWakePolicyRestore = error => { barrier.reject(error); return true; };
   c.captureLegacyStudentAuthCleanupAuthority = () => false;
   c.dispatchLegacyStudentAuthCleanup = async () => true;
-  return counters;
+  c.safeDiagnosticError = error => error?.code === 'STORAGE_IO_ERROR' ? error.code : 'Error';
+  return h;
 }
 
-test('a wake that fails before its policy barrier settles retires that barrier and readiness recovers from durable markers', { timeout: 10000 }, async () => {
-  const h = managedWakeTransitionHarness(), c = h.context, counters = retiredWakeFixture(c);
-  // The pre-2.7.3 legacy credential purge rejects and the fresh verify read
-  // still sees the credential, so the wake fails at its snapshot step.
+async function completeFailedWakeRecovery(h) {
+  h.clears.at(-1).resolve(); await h.settle();
+  assert.ok(h.managedCallbacks.length > 0, 'recovery owns a fresh native managed read');
+  h.acceptPolicy(); await h.settle();
+  await h.context.fixtureAuthRestore;
+}
+
+test('completed legacy migration failure recovers without entering a second migration', async () => {
+  const h = failedWakeHarness(), c = h.context;
   h.state.studentToken = 'private-legacy-credential';
-  const purgeFailure = new Error('private-native-remove-rejected');
-  c.rawLocalKv.remove = async () => { throw purgeFailure; };
-  h.resolveOldRead();
-  await h.settle();
-  assert.equal(c.wakeFailures.length, 1); assert.equal(c.wakeFailures[0], purgeFailure);
-  assert.equal(counters.barrierRetired, 1, 'the failed wake must reject its own policy barrier');
-  assert.equal(c.retiredWakePolicies, 0, 'a plain failure is not a supersession');
-  assert.ok(h.diagnostics.some((entry) => entry.stage === 'startup' && entry.cause === 'wake_failed' && entry.detail === 'auth_snapshot'),
-    `expected startup/wake_failed@auth_snapshot (${JSON.stringify(h.diagnostics)})`);
-  assert.equal(JSON.stringify(h.diagnostics).includes('private'), false);
-  // Readiness derived the flags itself, applied policy once and started the
-  // signed-out clear instead of waiting on the dead wake.
-  assert.deepEqual({ ...c.startupWakeRecoveryFlags }, { interruptedAuthClear: false, interruptedAuthCommit: false,
-    manualAuthTimestampInvalid: false, manualAuthSessionStorageUnavailable: false, clearIntent: null });
-  assert.equal(counters.policyRevalidations, 1);
+  let purges = 0;
+  c.rawLocalKv.remove = async () => {
+    purges++;
+    if (purges > 1) return new Promise(() => {});
+    throw Object.assign(new Error('private-native-remove-rejected'), { code: 'STORAGE_IO_ERROR' });
+  };
+  h.resolveOldRead(); await h.settle();
+  assert.equal(c.workerWakeAuthRestoreOutcome, 'failed');
+  assert.equal(c.studentAuthInvalidating, true);
   assert.equal(h.clears.length, 1);
-  assert.equal(c.authGateStartupComplete, false);
-  const readiness = c.authGateStartupPublicationOwners.get('startup_readiness');
-  assert.ok(readiness?.inFlight, 'readiness waits on its own clear, not on the wake');
-  h.clears[0].resolve(); await h.settle(); await c.fixtureAuthRestore;
+  assert.equal(h.managedCallbacks.length, 0, 'policy work waits for the strict clear');
+  assert.equal(c.workerWakeFirstFailure.failureClass, 'STORAGE_IO_ERROR');
+  assert.equal(c.workerWakeFirstFailure.startupPhase, 'legacy_auth_cleanup');
+  await completeFailedWakeRecovery(h);
   assert.equal(c.authGateStartupComplete, true);
-  assert.equal(readiness.settled, true);
-  assert.ok(h.writes.includes('revision-ceiling') && h.writes.includes('roster-context'));
-  assert.equal(c.oldWakeContinued, 0, 'the failed wake never continues into adoption');
-});
-
-test('an abandoned wake is retired by the watchdog and readiness recovers on its own', { timeout: 10000 }, async () => {
-  const h = managedWakeTransitionHarness(), c = h.context, counters = retiredWakeFixture(c);
-  c.workerWakeStartedAt = c.Date.now(); c.armWorkerWakeWatchdog();
-  // The native auth snapshot read never reports back. 2.9.0 fails that owner
-  // retryably at the deadline, but the wake itself stays parked on it and no
-  // readiness owner exists for Retry or the recovery alarm to re-run.
-  await h.settle(); await h.advance(9000); await h.settle();
-  assert.equal(c.authGateStartupPublicationOwners.get('auth_snapshot')?.failed, true);
-  assert.equal(c.authGateStartupPublicationOwners.has('startup_readiness'), false);
-  await h.advance(20999); await h.settle();
-  assert.equal(c.authGateStartupPublicationOwners.has('startup_readiness'), false, 'the watchdog must not fire early');
-  assert.equal(counters.barrierRetired, 0);
-  await h.advance(1); await h.settle();
-  assert.equal(counters.barrierRetired, 1, 'the watchdog retires the parked wake\'s policy barrier');
-  assert.ok(h.diagnostics.some((entry) => entry.stage === 'startup' && entry.cause === 'wake_abandoned' && entry.detail === 'auth_snapshot'),
-    `expected startup/wake_abandoned@auth_snapshot (${JSON.stringify(h.diagnostics)})`);
-  assert.equal(c.authGateStartupPublicationOwners.has('startup_readiness'), true);
-  assert.equal(counters.policyRevalidations, 1);
-  assert.equal(h.clears.length, 1);
-  h.clears[0].resolve(); await h.settle(); await c.fixtureAuthRestore;
-  assert.equal(c.authGateStartupComplete, true);
-  // A late snapshot result and an explicit Retry re-run the retired snapshot
-  // owner against the recovery's newer authority: it is superseded, never adopted.
-  h.resolveOldRead(); c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  assert.equal(purges, 1, 'policy recovery must never repeat getStoredAuthState migration');
+  assert.equal(c.CONFIG.studentToken, null);
   assert.equal(c.oldWakeContinued, 0);
-  assert.equal(c.retiredWakePolicies, 1, 'the parked wake retires through its supersession path');
-  assert.equal(c.wakeFailures.length, 0);
-  assert.equal(c.authGateStartupComplete, true);
+  assert.equal(h.policyWrites.length, 1);
 });
 
-// Readiness after a retired wake: the durable markers decide the clear.
-function retiredWakeReadinessHarness({ markers = {}, session = {}, readFailures = 0 } = {}) {
-  const h = startupPublicationHarness({ authenticated: false }), c = h.context, reads = [], clears = [];
-  let failures = 0;
+function installActualAuthRestore(h, { missingContext = true, pending = false } = {}) {
+  const c = h.context, held = deferred(), stored = {
+    config: { serverUrl: 'https://fixture.invalid', schoolId: 'fixture-school' },
+    deviceId: 'fixture-device', studentToken: 'private-token', activeStudentId: 'fixture-student',
+    activeStudentSessionId: 'fixture-session', identitySource: 'manual_pin', manualLoginLastSeenAt: 1,
+    ...(missingContext ? {} : { authContextId: 'auth_fixture' }),
+  };
   Object.assign(c, {
-    startupWakeRecoveryFlags: null, workerWakeRetired: true, workerWakeManagedPolicyApplied: true,
-    STUDENT_AUTH_INVALIDATING_KEY: 'invalidating', STUDENT_AUTH_COMMIT_PENDING_KEY: 'commit-pending',
-    rawLocalKv: { async get(keys) {
-      reads.push([...keys]);
-      if (failures < readFailures) { failures++; throw new Error('private-native-read-failed'); }
-      return { ...markers };
-    } },
-    durableSessionKv: { async get() { return { ...session }; } },
-    clearStudentAuth(reason, options) { clears.push({ reason, options }); return h.cleanup.promise; },
+    sharedAuthLockedSinceAt: 0, trackingState: 'off', TRACKING_STATES: { OFF: 'off' },
+    generateAuthContextId: () => 'auth_uncommitted',
+    setManualAuthState: () => pending ? held.promise : Promise.reject(new Error('fixture-write-rejected')),
+    activateAuthenticatedContext() {}, captureAuthenticatedContext: () => ({ id: 'fixture' }),
+    cleanupRetiredExactBoundStorage: () => pending ? held.promise : Promise.reject(new Error('fixture-cleanup-rejected')),
   });
-  c.chrome.storage.session = {};
-  return { ...h, reads, clears };
+  for (const name of ['restoreWorkerWakeAuthState', 'assertAuthMutationCurrent', 'hasStudentAuth']) {
+    vm.runInContext(functionSource(name), c);
+  }
+  return { stored, held };
 }
 
-test('readiness derives the recovery flags from durable markers when the wake retired before its snapshot', async () => {
-  const h = retiredWakeReadinessHarness({ markers: { invalidating: true, 'clear-intent': { reason: 'fixture-clear', notifyBackend: true } } }), c = h.context;
-  h.cleanup.resolve(); await c.fixtureStartup; await flush(); await c.authStateRestorePromise; await flush();
-  assert.deepEqual(h.reads, [['invalidating', 'commit-pending', 'clear-intent']]);
-  assert.equal(c.startupWakeRecoveryFlags.interruptedAuthClear, true);
-  assert.equal(c.startupWakeRecoveryFlags.clearIntent.reason, 'fixture-clear');
+for (const missingContext of [true, false]) test(`failed partial auth adoption requires a strict clear (missing context: ${missingContext})`, async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  const { stored } = installActualAuthRestore(h, { missingContext });
+  c.workerWakeStep = 'auth_restore';
+  await assert.rejects(c.restoreWorkerWakeAuthState(stored, 'https://fixture.invalid', 0, { persistConfig: false }), /fixture-/);
+  assert.equal(c.hasStudentAuth(), true, 'the fixture must leave the actual partial-adoption condition');
+  c.failWorkerWake(new Error('fixture-restoration-failed')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  assert.equal(c.workerWakeFirstFailure.startupPhase, missingContext ? 'auth_context_persist' : 'retired_storage_cleanup');
+  assert.equal(c.hasStudentAuth(), false, 'completed failure fences partial credentials synchronously');
+  assert.equal(c.authGateStartupComplete, false);
+  await completeFailedWakeRecovery(h);
+  assert.equal(c.authGateStartupComplete, true);
+  assert.equal(c.CONFIG.studentToken, null);
+  assert.equal(c.CONFIG.authContextId, null);
   assert.equal(h.clears.length, 1);
-  assert.equal(h.clears[0].reason, 'fixture-clear');
-  assert.equal(h.clears[0].options.notifyBackend, false, 'a replayed clear never upgrades to a backend notification');
+});
+
+test('a completed post-policy failure before readiness also requires fresh sign-in', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.workerWakeManagedPolicyApplied = true;
+  c.workerWakeAuthRestoreOutcome = 'verified';
+  c.workerWakeStep = 'monitoring_redaction';
+  c.CONFIG.studentToken = 'private-restored-token';
+  c.failWorkerWake(new Error('fixture-redaction-failed')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  assert.equal(c.studentAuthInvalidating, true); assert.equal(h.clears.length, 1);
+  await completeFailedWakeRecovery(h);
+  assert.equal(c.CONFIG.studentToken, null); assert.equal(c.authGateStartupComplete, true);
+});
+
+for (const missingContext of [true, false]) test(`a composite auth operation remains owned beyond both deadlines (missing context: ${missingContext})`, async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  const { stored, held } = installActualAuthRestore(h, { missingContext, pending: true });
+  let settled = false;
+  const restore = c.restoreWorkerWakeAuthState(stored, 'https://fixture.invalid', 0, { persistConfig: false });
+  restore.then(() => { settled = true; }, () => { settled = true; });
+  c.workerWakeStep = 'auth_restore'; c.armWorkerWakeWatchdog();
+  await h.settle(); await h.advance(120000); await h.settle();
+  assert.equal(settled, false); assert.equal(c.studentAuthMutationPendingCount, 1);
+  assert.equal(c.workerWakeRetired, false); assert.equal(h.clears.length, 0);
+  assert.equal(c.startupFailedWakeRecovery, null); assert.equal(c.authGateStartupComplete, false);
+  assert.ok(h.diagnostics.some(item => item.cause === 'stalled'));
+  held.resolve(); await restore;
+  assert.equal(c.studentAuthMutationPendingCount, 0);
+});
+
+test('policy-only supersession prevents an old failed wake clearing the current authority', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.managedAuthGatePolicyGeneration++;
+  c.managedAuthGatePolicyRestorePromise = Promise.resolve();
+  c.failWorkerWake(new Error('fixture-obsolete-wake'));
+  assert.equal(c.workerWakeAuthRestoreOutcome, 'superseded');
+  assert.equal(c.startupFailedWakeRecovery, null); assert.equal(h.clears.length, 0);
+});
+
+test('failed recovery policy persistence retries its own phase without repeating cleanup', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  const write = c.durableLocalKv.set; let rejected = false;
+  c.durableLocalKv.set = async values => {
+    if ('managed-binding' in values && !rejected) { rejected = true; throw new Error('fixture-policy-write'); }
+    return write(values);
+  };
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  h.clears[0].resolve(); await h.settle(); h.acceptPolicy(); await h.settle();
+  assert.equal(c.authGateStartupComplete, false);
+  const owner = c.authGateStartupPublicationOwners.get('failed_wake_policy');
+  assert.equal(owner.failed, true);
+  c.retryAuthGateStartupPublications({ userInitiated: true }); c.retryAuthGateStartupPublications({ userInitiated: true });
+  await h.settle(); h.acceptPolicy(); await h.settle(); await c.fixtureAuthRestore;
+  assert.equal(h.clears.length, 1); assert.equal(c.authGateStartupComplete, true);
+  assert.equal(c.workerWakeFirstFailure.startupPhase, 'start');
+});
+
+test('failed-wake policy repair stays non-auth after onChanged supersession and repeated write failures', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  vm.runInContext(functionSource('runManagedAuthGatePolicyRevalidation'), c);
+  let migrationEntries = 0, policyFailures = 2, ssoClears = 0;
+  c.getStoredAuthState = () => { migrationEntries++; return new Promise(() => {}); };
+  c.clearRestrictionSsoVisitState = async () => { ssoClears++; };
+  const write = c.durableLocalKv.set;
+  c.durableLocalKv.set = async values => {
+    if ('managed-binding' in values && policyFailures-- > 0) throw new Error('fixture-policy-write');
+    return write(values);
+  };
+  c.failWorkerWake(Object.assign(new Error('fixture-original-native-failure'), { code: 'STORAGE_IO_ERROR' }));
+  c.settleWorkerWake(); c.ensureStartupReadinessPublication(); await h.settle();
+  h.change({ fastAuthGateEnabled: { newValue: true } }); await h.settle();
+  h.acceptPolicy(); h.clears[0].resolve(); await h.settle();
+  assert.equal(c.managedAuthGateStartupAuthorityTransition.policyRecoveryRequired, true);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+    h.acceptPolicy(); await h.settle();
+    assert.equal(migrationEntries, 0, 'startup repair must never invoke credential migration');
+    assert.equal(h.clears.length, 1, 'verified strict auth clear must not be repeated');
+    assert.equal(ssoClears, 1, 'policy persistence retry must retain completed cleanup proof');
+  }
+  await c.fixtureAuthRestore;
+  assert.equal(c.authGateStartupComplete, true);
+  assert.equal(c.managedAuthGateDirectRevalidationInFlight, null);
+  assert.equal(c.workerWakeFirstFailure.failureClass, 'STORAGE_IO_ERROR');
+});
+
+test('a rejected managed prerequisite cannot bypass a sibling cleanup still running after failed wake', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context, held = deferred();
+  let attempts = 0;
+  c.clearRestrictionSsoVisitState = async () => {
+    if (++attempts === 1) throw new Error('fixture-first-ledger-clear');
+  };
+  c.clearRestrictionAuthAttemptState = () => held.promise;
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  await h.settle(); h.change({ fastAuthGateEnabled: { newValue: true } }); await h.settle();
+  h.acceptPolicy(); h.clears[0].resolve(); await h.settle();
+  await h.advance(30000); c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  assert.equal(c.authGateStartupComplete, false);
+  assert.equal(h.policyWrites.length, 0);
+  assert.equal(attempts, 1, 'no cleanup replay while a sibling still owns child work');
+  held.resolve(); await h.settle();
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  h.acceptPolicy(); await h.settle(); await c.fixtureAuthRestore;
+  assert.equal(attempts, 2);
   assert.equal(c.authGateStartupComplete, true);
 });
 
-test('a failed marker read stays a retryable readiness failure and an explicit Retry derives the flags', async () => {
-  const h = retiredWakeReadinessHarness({ markers: { 'commit-pending': true }, readFailures: 1 }), c = h.context;
-  h.cleanup.resolve(); await c.fixtureStartup; await flush(); await h.advance(0);
-  const owner = c.authGateStartupPublicationOwners.get('startup_readiness');
-  assert.equal(owner.failed, true); assert.ok(owner.retryAt >= c.Date.now() + 2000);
-  assert.equal(c.authGateStartupComplete, false); assert.equal(c.startupWakeRecoveryFlags, null);
-  assert.equal(JSON.stringify(h.diagnostics).includes('private'), false);
-  c.retryAuthGateStartupPublications({ userInitiated: true }); await flush(); await c.authStateRestorePromise; await flush();
-  assert.equal(h.reads.length, 2);
-  assert.equal(c.startupWakeRecoveryFlags.interruptedAuthCommit, true);
-  assert.equal(h.clears.length, 1); assert.equal(h.clears[0].reason, 'interrupted-auth-commit');
+test('a retried authority clear retains its generation proof for failed-wake policy repair', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  const write = c.durableLocalKv.set; let rejectPolicy = true;
+  c.durableLocalKv.set = async values => {
+    if ('managed-binding' in values && rejectPolicy) {
+      rejectPolicy = false; throw new Error('fixture-policy-write');
+    }
+    return write(values);
+  };
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  await h.settle(); h.change(); await h.settle(); h.acceptPolicy();
+  h.clears[0].resolve(); h.clears[1].reject(new Error('fixture-authority-clear')); await h.settle();
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  h.clears[2].resolve(); await h.settle();
+  assert.equal(c.managedAuthGateStartupAuthorityTransition.authGeneration, c.studentAuthMutationGeneration);
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  h.acceptPolicy(); await h.settle(); await c.fixtureAuthRestore;
   assert.equal(c.authGateStartupComplete, true);
+  assert.equal(h.clears.length, 3);
 });
 
-test('a retired wake that had already adopted authentication is released without a clear', async () => {
-  const h = retiredWakeReadinessHarness(), c = h.context;
-  // The wake adopted credentials, then failed before its own fast release.
-  c.hasStudentAuth = () => true;
-  h.cleanup.resolve(); await c.fixtureStartup; await flush(); await c.authStateRestorePromise; await flush();
-  assert.equal(h.reads.length, 1);
-  assert.equal(h.clears.length, 0, 'a verified authenticated startup is never cleared by recovery');
+test('a rejected authority clear cannot rebase its retry onto newer authentication', async () => {
+  const h = managedWakeTransitionHarness({ startWake: false }), c = h.context;
+  h.change(); await h.settle(); h.acceptPolicy();
+  h.clears[0].reject(new Error('fixture-old-authority-clear')); await h.settle();
+  c.studentAuthMutationGeneration++;
+  c.CONFIG.studentToken = 'private-newer-credential';
+  const newerGeneration = c.studentAuthMutationGeneration;
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  assert.equal(h.clears.length, 1, 'the stale clear must not reserve a replacement auth mutation');
+  assert.equal(c.studentAuthMutationGeneration, newerGeneration);
+  assert.equal(c.CONFIG.studentToken, 'private-newer-credential');
+  assert.equal(c.authGateStartupComplete, false, 'the obsolete clear is not readiness proof');
+});
+
+test('a policy-only transition must complete its inherited rejected failed-wake clear', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  await h.settle();
+  h.change({ fastAuthGateEnabled: { newValue: true } }); await h.settle(); h.acceptPolicy();
+  h.clears[0].reject(new Error('fixture-first-strict-clear')); await h.settle();
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  assert.equal(h.clears.length, 2, 'the exact inherited strict clear must retry rather than retire as a no-op');
+  assert.equal(c.authGateStartupComplete, false);
+  assert.equal(c.managedAuthGateStartupAuthorityTransition.authGeneration, c.studentAuthMutationGeneration);
+  h.clears[1].resolve(); await h.settle(); await c.fixtureAuthRestore;
   assert.equal(c.authGateStartupComplete, true);
+  assert.equal(h.policyWrites.length, 1);
+});
+
+test('a late obsolete recovery policy callback cannot publish over a newer managed transition', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context, callback = deferred();
+  let firstWrite = true;
+  c.durableLocalKv.set = async values => {
+    if (!('managed-binding' in values)) { Object.assign(h.state, values); return; }
+    h.policyWrites.push(values);
+    // Model a landed native write with a delayed callback, then a newer write.
+    Object.assign(h.state, values);
+    if (firstWrite) { firstWrite = false; await callback.promise; }
+  };
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  h.clears[0].resolve(); await h.settle(); h.acceptPolicy(); await h.settle();
+  const obsolete = c.startupFailedWakeRecovery;
+  h.change({ fastAuthGateEnabled: { newValue: true } }); await h.settle(); h.acceptPolicy(); await h.settle();
+  await h.advance(31000); await h.settle(); await c.fixtureAuthRestore;
+  assert.equal(obsolete.phase, 'superseded');
+  assert.equal(c.CONFIG.schoolId, 'fixture-policy-1');
+  assert.equal(h.state['managed-binding'].schoolId, 'fixture-policy-1');
+  callback.resolve(); await h.settle();
+  assert.equal(c.CONFIG.schoolId, 'fixture-policy-1');
+  assert.equal(h.state['managed-binding'].schoolId, 'fixture-policy-1');
+  assert.equal(c.authGateStartupComplete, true);
+  assert.equal(h.policyWrites.length, 2);
+});
+
+test('page-initiated managed revalidation joins failed-startup recovery before normal policy proof', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  vm.runInContext(functionSource('revalidateManagedAuthGatePolicy'), c);
+  let directRuns = 0, replied = false;
+  c.runManagedAuthGatePolicyRevalidation = async () => {
+    directRuns++;
+    return { state: { phase: 'ready', authRequired: true }, managedPolicyGeneration: 99 };
+  };
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  const request = c.revalidateManagedAuthGatePolicy(7, { userInitiated: true });
+  request.then(() => { replied = true; });
+  await h.advance(31000); await h.settle();
+  assert.equal(directRuns, 0, 'the page RPC cannot enter generic credential-bearing revalidation during startup');
+  assert.equal(replied, false);
+  await completeFailedWakeRecovery(h);
+  const response = await request;
+  assert.equal(directRuns, 1, 'normal post-startup policy proof remains fresh');
+  assert.equal(response.managedPolicyFence, 7);
+});
+
+test('a newer policy owns recovery while an older strict clear still retains its queue work', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  await h.settle();
+  const obsolete = c.startupFailedWakeRecovery;
+  const change = h.change(); await h.settle(); h.acceptPolicy();
+  assert.equal(h.clears.length, 2);
+  h.clears[1].resolve(); await h.settle();
+  assert.equal(c.authGateStartupComplete, false, 'pending old child work is not cancelled by policy supersession');
+  h.clears[0].resolve(); await h.settle();
+  c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+  await change; await c.fixtureAuthRestore;
+  assert.equal(obsolete.phase, 'superseded');
+  assert.equal(c.CONFIG.schoolId, 'fixture-policy-0');
+  assert.equal(h.policyWrites.length, 1, 'the obsolete recovery may not persist its own policy');
+});
+
+test('persistent recovery policy failure stays protected and retries never repeat the clear', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.failWorkerWake(new Error('fixture-wake')); c.settleWorkerWake(); c.ensureStartupReadinessPublication();
+  h.clears[0].resolve(); await h.settle();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    c.chrome.runtime.testError = { message: 'fixture-private-native-failure' };
+    h.acceptPolicy(); delete c.chrome.runtime.testError; await h.settle();
+    assert.equal(c.authGateStartupComplete, false);
+    assert.equal(h.clears.length, 1);
+    const count = h.managedCallbacks.length;
+    for (let i = 0; i < 5; i++) c.retryAuthGateStartupPublications();
+    await h.settle(); assert.equal(h.managedCallbacks.length, count);
+    c.retryAuthGateStartupPublications({ userInitiated: true });
+    c.retryAuthGateStartupPublications({ userInitiated: true }); await h.settle();
+    assert.equal(h.managedCallbacks.length, count + 1);
+  }
+  h.acceptPolicy(); await h.settle(); await c.fixtureAuthRestore;
+  assert.equal(c.authGateStartupComplete, true); assert.equal(h.clears.length, 1);
+});
+
+test('support details are synchronous and preserve the first failure while cleanup is pending', async () => {
+  const h = failedWakeHarness({ startWake: false }), c = h.context;
+  c.chrome.runtime.getManifest = () => ({ version: '2.9.4' });
+  vm.runInContext(readFileSync(new URL('../extension/auth-recovery-diagnostics.js', import.meta.url), 'utf8'), c);
+  c.workerWakeStep = 'auth_restore';
+  c.failWorkerWake(Object.assign(new Error('private token student school'), { code: 'STORAGE_IO_ERROR' }));
+  c.settleWorkerWake(); c.ensureStartupReadinessPublication(); await h.settle();
+  await h.advance(9000);
+  const reply = c.authGateRecoveryFailurePayload(c.authGateRecoveryError('AUTH_GATE_STARTUP_TIMEOUT'));
+  assert.equal(reply.supportDetails.startupPhase, 'recovery_clear');
+  assert.equal(reply.supportDetails.failureClass, 'STORAGE_IO_ERROR');
+  assert.equal(reply.supportDetails.pending, true);
+  assert.equal(reply.supportDetails.firstFailure.startupPhase, 'auth_restore');
+  assert.equal(reply.supportDetails.firstFailure.failureClass, 'STORAGE_IO_ERROR');
+  assert.equal(JSON.stringify(reply).includes('private'), false);
+  assert.equal(c.authGateStartupComplete, false);
+  await completeFailedWakeRecovery(h);
 });
 
 test('a startup legacy credential purge that never reports back is reconciled at the deadline instead of parking the wake', async () => {

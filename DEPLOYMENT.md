@@ -7,8 +7,9 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> The 2.9.4 candidate is being prepared; no packaging, tagging, upload or
-> publication is authorized by these instructions. After separate authorization,
+> The 2.9.4 candidate is unsubmitted. Local packages may be used for integration
+> verification; these instructions do not authorize tagging, upload or publication.
+> After separate release authorization,
 > use only `dist/ClassPilot-v2.9.4.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
 > `dist/ClassPilot-v2.9.4.zip.sha256` record, commit SHA, CI evidence, and exact
@@ -32,7 +33,7 @@
 > rollout must negotiate `scheduledClassroomV1` with `scopedAuthorityChecksV1`.
 > Live View remains backend-only; the teacher Live View UI stays disabled even
 > when the scheduled classroom rollout is enabled. Candidate checks and release
-> boundaries are in `CLASSPILOT_2_9_0_RELEASE.md`; the 2.8.9 scheduled classroom
+> boundaries are in `CLASSPILOT_2_9_4_RELEASE.md`; the 2.8.9 scheduled classroom
 > gate remains recorded in `CLASSPILOT_2_8_9_RELEASE.md`.
 > The existing paired SchoolPilot deployment must support
 > `restrictionAuthPassThroughV1`, while that capability remains disabled. Keep
@@ -150,10 +151,10 @@ Recommended design:
 - Monitor or screen icon
 - Simple and clear at small sizes
 
-### 2.3 Build the canonical 2.9.0 release artifact
+### 2.3 Build the canonical 2.9.4 release artifact
 
 After separate packaging authorization, start from a clean, tagged, reviewed
-2.9.0 commit at this repository's root.
+2.9.4 commit at this repository's root.
 The reviewed source must contain the auth-gate presence foundation, Kiosk mode
 presentation, legacy exact-bound deferred-restriction marker, school-configured
 live and deferred authentication pass-through, independent heartbeat/control/
@@ -177,10 +178,15 @@ operation that never reports back is reconciled by a fresh read, managed-policy
 churn is bounded, and authentication cleanup replays in full from the existing
 crash marker. Screens, wording, support codes, permissions and managed-policy
 keys are unchanged from 2.8.9.
-2.9.4 adds worker wake recovery: a wake that fails or is abandoned before its
-managed-policy barrier settles no longer strands startup readiness; readiness
-recovers from the durable crash markers, applies managed policy and opens the
-gate. An earlier archive is not releasable as 2.9.4.
+2.9.4 corrects completed worker-wake failures: recovery verifies strict local
+sign-out, fresh managed policy, and durable readiness before fresh sign-in.
+It never treats partially restored credentials as authentication proof or
+replays credential migration. A pending wake's 30-second indicator is
+diagnostic only, and a response deadline cannot abandon an authentication
+mutation. The blocked screen adds Details for IT and Copy diagnostics while
+keeping existing support codes and permissions. SchoolPilot #502's offline
+teacher sign-out remains authoritative; its merge does not prove deployment.
+Earlier local 2.9.4 packages from PR commit `16320c6` are superseded. An earlier archive is not releasable as 2.9.4.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash

@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 
 const extensionRoot = process.env.CLASSPILOT_EXTENSION_PATH || fileURLToPath(new URL('../extension/', import.meta.url));
 const source = readFileSync(resolve(extensionRoot, 'auth-gate-transport.js'), 'utf8');
+const supportSource = readFileSync(resolve(extensionRoot, 'auth-recovery-diagnostics.js'), 'utf8');
 function fixture(send = () => {}) {
   let now = 1_000, id = 0;
   const timers = new Map(), diagnostics = [];
-  const runtime = { lastError: null, sendMessage: send };
+  const runtime = { lastError: null, sendMessage: send, getManifest: () => ({ version: '2.9.4' }) };
   const context = vm.createContext({
     chrome: { runtime }, AbortController,
     Date: class extends Date { static now() { return now; } },
@@ -18,6 +19,7 @@ function fixture(send = () => {}) {
     clearTimeout(key) { timers.delete(key); },
     ClassPilotAuthRecoveryDiagnostics: { record(event) { diagnostics.push(event); } },
   });
+  vm.runInContext(supportSource, context);
   vm.runInContext(source, context);
   return {
     send: context.ClassPilotAuthGateTransport.sendMessage, runtime, diagnostics, timers,
@@ -41,6 +43,12 @@ test('missing callback settles at ten seconds; late success cannot replace failu
   await f.advance(9999); assert.equal(outcome, undefined);
   await f.advance(1); await pending;
   assert.equal(outcome.code, 'AUTH_GATE_RPC_TIMEOUT');
+  assert.equal(outcome.supportDetails.startupPhase, 'worker_unavailable');
+  assert.equal(outcome.supportDetails.extensionVersion, '2.9.4');
+  assert.equal(outcome.supportDetails.elapsedMs, 10_000, 'the transport knows only its own elapsed request time');
+  for (const key of ['restoreOutcome', 'attemptCount', 'retryInMs', 'pending', 'firstFailure']) {
+    assert.equal(key in outcome.supportDetails, false, `${key} is unknown without a worker reply`);
+  }
   callback({ success: true, state: { authRequired: false } });
   await Promise.resolve(); assert.equal(outcome.code, 'AUTH_GATE_RPC_TIMEOUT');
   assert.equal(f.timers.size, 0); assert.equal(f.diagnostics.length, 1);
@@ -108,4 +116,18 @@ test('already aborted controller never sends a runtime message', async () => {
   const f = fixture(() => { calls += 1; }), controller = new AbortController(); controller.abort();
   await assert.rejects(f.send({ type: 'manual-student-login' }, { signal: controller.signal }), error => error.code === 'AUTH_GATE_REQUEST_CANCELLED');
   assert.equal(calls, 0);
+});
+
+test('worker support details retain the first native failure without carrying arbitrary response data', async () => {
+  const f = fixture((_message, callback) => callback({ success: false, errorCode: 'AUTH_GATE_STARTUP_TIMEOUT',
+    supportDetails: { extensionVersion: '2.9.4', startupPhase: 'recovery_clear', restoreOutcome: 'failed',
+      failureClass: 'AUTH_GATE_UNAVAILABLE', attemptCount: 2, pending: true, retryInMs: 2000,
+      firstFailure: { startupPhase: 'auth_snapshot', failureClass: 'STORAGE_IO_ERROR', timestamp: 1000,
+        message: 'private-student-details' }, studentToken: 'private-student-token' } }));
+  await assert.rejects(f.send({ type: 'get-auth-state' }), error => {
+    assert.equal(error.supportDetails.startupPhase, 'recovery_clear');
+    assert.equal(error.supportDetails.firstFailure.failureClass, 'STORAGE_IO_ERROR');
+    assert.equal(JSON.stringify(error).includes('private'), false);
+    return error.code === 'AUTH_GATE_STARTUP_TIMEOUT';
+  });
 });

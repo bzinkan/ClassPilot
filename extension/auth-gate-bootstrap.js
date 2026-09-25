@@ -59,6 +59,8 @@
   let bootstrapRecoveryButton = null;
   let bootstrapSupportCodeElement = null;
   let lastFailureSupportCode = null;
+  let lastFailureSupportDetails = null;
+  let bootstrapSupportDetails = null;
   const SUPPORT_CODES = new Set([
     'AUTH_GATE_POLICY_TIMEOUT', 'AUTH_GATE_POLICY_UNAVAILABLE', 'AUTH_GATE_STARTUP_TIMEOUT',
     'AUTH_GATE_RPC_TIMEOUT', 'AUTH_GATE_RPC_UNAVAILABLE', 'AUTH_GATE_CONTEXT_INVALIDATED',
@@ -105,6 +107,16 @@
   const blockBehindGate = (event) => {
     if (!active) return;
     const gate = gateRoot?.isConnected ? gateRoot : null;
+    if (!gateOwnedByContent && bootstrapSupportDetails?.owns(event.target)) {
+      event.stopImmediatePropagation();
+      if (event.target === bootstrapSupportDetails.button) {
+        if (event.type === 'click' || (event.type === 'keydown' && ['Enter', ' '].includes(event.key))) {
+          event.preventDefault();
+          if (event.isTrusted) void bootstrapSupportDetails.copy();
+        }
+      }
+      return;
+    }
     if (!gateOwnedByContent && event.target === bootstrapSupportCodeElement && bootstrapSupportCodeElement?.isConnected) {
       event.stopImmediatePropagation();
       return;
@@ -146,6 +158,10 @@
   const containFocus = (event) => {
     if (!active) return;
     const gate = gateRoot?.isConnected ? gateRoot : null;
+    if (!gateOwnedByContent && bootstrapSupportDetails?.owns(event.target)) {
+      event.stopImmediatePropagation();
+      return;
+    }
     if (!gateOwnedByContent && event.target === bootstrapSupportCodeElement && bootstrapSupportCodeElement?.isConnected) {
       event.stopImmediatePropagation();
       return;
@@ -572,10 +588,20 @@
       }
     }
     const unavailable = state.phase === 'unavailable';
-    if (state.phase === 'ready' || state.phase === 'authenticated') lastFailureSupportCode = null;
-    else if (unavailable) lastFailureSupportCode = SUPPORT_CODES.has(state.errorCode) ? state.errorCode : 'AUTH_GATE_UNAVAILABLE';
+    const presentation = globalThis.ClassPilotAuthSupportDetails?.capture(gate);
+    if (state.phase === 'ready' || state.phase === 'authenticated') {
+      lastFailureSupportCode = null;
+      lastFailureSupportDetails = null;
+    } else if (unavailable) {
+      lastFailureSupportCode = SUPPORT_CODES.has(state.errorCode) ? state.errorCode : 'AUTH_GATE_UNAVAILABLE';
+      lastFailureSupportDetails = globalThis.ClassPilotAuthSupportDetails?.retainFirstFailure(
+        lastFailureSupportDetails, state.supportDetails, lastFailureSupportCode,
+      ) || null;
+    }
+    const startupFailure = unavailable && state.errorCode === 'AUTH_GATE_STARTUP_TIMEOUT';
     bootstrapRecoveryButton = null;
     bootstrapSupportCodeElement = null;
+    bootstrapSupportDetails = null;
     gate.innerHTML = `
       <style>
         html.classpilot-auth-locked,
@@ -607,13 +633,15 @@
         #classpilot-auth-gate .classpilot-auth-panel {
           width: min(760px, 100%) !important;
           min-height: 350px !important;
+          max-height: calc(100dvh - 48px) !important;
+          overflow: auto !important;
           padding: 48px !important;
           border: 1px solid rgba(216, 222, 232, 0.8) !important;
           border-radius: 28px !important;
           background: #ffffff !important;
           box-shadow: 0 25px 70px rgba(15, 23, 42, 0.35) !important;
           display: flex !important;
-          align-items: center !important;
+          align-items: flex-start !important;
           justify-content: center !important;
           text-align: center !important;
           outline: none !important;
@@ -705,20 +733,25 @@
             </span>
             <span>ClassPilot</span>
           </div>
-          <h1 id="classpilot-auth-title">${unavailable ? 'ClassPilot can’t connect right now' : 'Connecting to ClassPilot…'}</h1>
-          <p id="classpilot-auth-subtitle">${unavailable ? 'Browsing stays locked. Retry the school connection. If this page cannot reconnect to the extension, use your browser’s Reload button.' : 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'}</p>
+          <h1 id="classpilot-auth-title">${startupFailure ? 'ClassPilot is still starting' : unavailable ? 'ClassPilot can’t connect right now' : 'Connecting to ClassPilot…'}</h1>
+          <p id="classpilot-auth-subtitle">${startupFailure ? 'ClassPilot could not finish starting on this Chromebook. Browsing stays protected while it retries.' : unavailable ? 'Browsing stays locked. Retry the school connection. If this page cannot reconnect to the extension, use your browser’s Reload button.' : 'Checking your school’s sign-in settings. Browsing will stay locked until ClassPilot is ready.'}</p>
           ${unavailable ? '<button type="button" class="classpilot-auth-bootstrap-retry">Retry now</button>' : '<div class="classpilot-auth-spinner" aria-hidden="true"></div>'}
           ${lastFailureSupportCode ? `<p id="classpilot-auth-support-code" style="font-size:12px!important;line-height:1.5!important;overflow-wrap:anywhere!important">Support code: <code tabindex="0" style="user-select:text!important">${lastFailureSupportCode}</code></p>` : ''}
+          ${lastFailureSupportCode ? '<div id="classpilot-auth-support-details"></div>' : ''}
         </div>
       </div>
     `;
     bootstrapRecoveryButton = gate.querySelector('.classpilot-auth-bootstrap-retry');
     bootstrapSupportCodeElement = gate.querySelector('#classpilot-auth-support-code code');
+    if (lastFailureSupportCode) bootstrapSupportDetails = globalThis.ClassPilotAuthSupportDetails?.mount(
+      gate.querySelector('#classpilot-auth-support-details'),
+      lastFailureSupportDetails, lastFailureSupportCode, presentation,
+    );
 
     quarantinePageSurfaces();
     recordLoadingPaint();
     requestAnimationFrame(() => {
-      if (active && gate?.isConnected) {
+      if (active && gate?.isConnected && !bootstrapSupportDetails?.owns(document.activeElement)) {
         gate.querySelector('.classpilot-auth-panel')?.focus({ preventScroll: true });
       }
     });
@@ -744,6 +777,8 @@
     bootstrapRecoveryButton = null;
     bootstrapSupportCodeElement = null;
     lastFailureSupportCode = null;
+    bootstrapSupportDetails = null;
+    lastFailureSupportDetails = null;
     if (localAuthStateRetryTimer !== null) clearTimeout(localAuthStateRetryTimer);
     localAuthStateRetryTimer = null;
     stateRequestGeneration += 1;
@@ -796,6 +831,7 @@
     const retryAt = Number(response?.retryAt);
     return {
       errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+      supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(response?.supportDetails) || null,
       retryAt: Number.isFinite(retryAt) && retryAt > Date.now()
         ? Math.min(retryAt, Date.now() + 300000) : Date.now() + delays[Math.min(attempt, delays.length - 1)],
     };

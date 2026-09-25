@@ -69,7 +69,7 @@ describe("2.9.4 release documentation and preserved sign-in guarantees", () => {
     }
   });
 
-  it("documents the 2.9.4 worker wake recovery as a correction only", () => {
+  it("documents the unsubmitted 2.9.4 correction without claiming an incident cure", () => {
     const candidate = read("CLASSPILOT_2_9_4_RELEASE.md");
     const readme = read("extension/README.md");
 
@@ -78,18 +78,22 @@ describe("2.9.4 release documentation and preserved sign-in guarantees", () => {
     expect(candidate).toContain("Submit with");
     expect(candidate).toContain("deferred publishing");
     expect(candidate).toContain("ClassPilot-v2.9.4.zip");
-    expect(candidate).toContain("This candidate update does not tag, package, upload, publish or activate the rollout.");
-    expect(candidate).toMatch(/Recheck the\s+live Store version immediately before any future upload/);
+    expect(candidate).toContain("This candidate update does not tag, upload, publish or activate the rollout.");
+    expect(candidate).toMatch(/Recheck the\s+live Store\s+version immediately before any future upload/);
     for (const source of [candidate, readme]) {
       expect(source).toContain("authGateDiagnosticsV1");
-      for (const cause of ["wake_failed", "wake_abandoned"]) {
-        expect(source).toContain(`\`${cause}\``);
-      }
-      expect(source).toContain("`authGateWakeFailureV1`");
-      expect(source).toMatch(/30 seconds/);
+      expect(source).toContain("supportDetails");
+      expect(source).toContain("Details for IT");
+      expect(source).toContain("Copy diagnostics");
+      expect(source).toContain("remains unconfirmed");
+      expect(source).toMatch(/restart did not resolve/);
+      expect(source).toContain("pr116-16320c6");
+      expect(source).toContain("SchoolPilot #502");
+      expect(source).toMatch(/30[- ]seconds?/);
       expect(source).toMatch(/no (new )?Chrome permission/i);
       expect(source).toMatch(/managed-policy key/);
-      expect(source).toMatch(/never cleared by this recovery/);
+      expect(source).toMatch(/fresh (sign-in|credentials)/);
+      expect(source).not.toContain("device recovered only when its Chrome session ended");
       // Manual reload is the fallback; it must never be described as seamless.
       expect(source).toMatch(/not seamless replacement/);
     }

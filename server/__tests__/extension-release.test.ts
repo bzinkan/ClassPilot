@@ -22,36 +22,41 @@ describe("ClassPilot extension release package guards", () => {
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
 
-  it("2.9.4: a failed or abandoned worker wake never strands startup readiness", () => {
+  it("2.9.4: completed failures recover without migration replay or timeout takeover", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     const sliceFunction = (name: string) => {
       const start = serviceWorker.indexOf(name);
       expect(start, `${name} should exist`).toBeGreaterThan(-1);
       const rest = serviceWorker.slice(start + name.length);
-      const end = rest.search(/\n(?:async )?function /);
-      return rest.slice(0, end === -1 ? undefined : end);
+      const end = rest.search(/\n\}/);
+      return rest.slice(0, end === -1 ? undefined : end + 2);
     };
-    // The wake's failure path retires its policy barrier before the tracked
-    // coordinator owns readiness; the watchdog retires an abandoned wake.
+    // A completed failure settles the wake barrier. A timeout cannot retire
+    // authentication work whose child continuations are still running.
     const wakeCatch = serviceWorker.indexOf("})().catch(err => {");
     const wakeFinally = serviceWorker.indexOf("}).finally(() => {", wakeCatch);
     expect(wakeCatch).toBeGreaterThan(-1);
     expect(serviceWorker.slice(wakeCatch, wakeFinally)).toContain("failWorkerWake(err);");
     expect(serviceWorker).toContain("retireWorkerWakePolicyRestore = (error) => {");
     expect(serviceWorker).toContain("const AUTH_GATE_WAKE_WATCHDOG_MS = 30000;");
-    expect(sliceFunction("function armWorkerWakeWatchdog()")).toContain("ensureStartupReadinessPublication();");
-    // Readiness derives the flags itself and applies policy once for a retired wake.
+    const watchdog = sliceFunction("function armWorkerWakeWatchdog()");
+    expect(watchdog).toContain("recordWorkerWakeFailure('stalled'");
+    expect(watchdog).not.toContain("ensureStartupReadinessPublication(");
+    expect(watchdog).not.toContain("retireWorkerWakePolicyRestore(");
+    expect(watchdog).not.toContain("workerWakeRetired = true");
     const readiness = sliceFunction("async function publishStartupReadinessWhenVerified(");
-    expect(readiness).toContain("const derived = await deriveStartupWakeRecoveryFlags();");
-    expect(readiness).toContain("trackedManagedAuthGatePolicyRevalidation().catch(() => {});");
+    expect(readiness).toContain("workerWakeAuthRestoreOutcome !== 'verified'");
+    const recoveryPolicy = sliceFunction("async function recoverFailedWakePolicy(");
+    expect(recoveryPolicy).toContain("rawLocalKv.get(");
+    expect(recoveryPolicy).not.toContain("getStoredAuthState(");
+    expect(recoveryPolicy).not.toContain("trackedManagedAuthGatePolicyRevalidation(");
     // The legacy purge is bounded during startup; a routine read keeps the plain call.
     const stored = sliceFunction("async function getStoredAuthState(");
     expect(stored).toContain("const boundedDuringStartup = options.startupReadRecovery === true");
     expect(stored).toContain("() => rawLocalKv.remove(legacyLocalAuthKeys),");
     // Diagnostics name the step and the storage failure class, never the native message.
-    expect(serviceWorker).toContain("recordAuthGateRecoveryDiagnostic('startup', cause, elapsed, 1, workerWakeStep);");
     expect(serviceWorker).toContain("error.code = classifyNativeStorageFailure(runtimeError.message);");
-    expect(readRepoFile("extension/auth-recovery-diagnostics.js")).toContain("'wake_failed', 'wake_abandoned'");
+    expect(serviceWorker).toContain("supportDetails");
   });
 
   it("keeps the 2.8.9 permission, managed-policy and update-timing surface unchanged", () => {
@@ -105,7 +110,7 @@ describe("ClassPilot extension release package guards", () => {
     }
   });
 
-  it("preserves the 2.8.9 auth-gate screens, wording and support codes", () => {
+  it("preserves primary support codes and adds local support details", () => {
     const frameScript = readRepoFile("extension/auth-gate-frame.js");
     const contentScript = readRepoFile("extension/content.js");
     for (const text of [
@@ -124,6 +129,9 @@ describe("ClassPilot extension release package guards", () => {
     expect(contentScript).toContain(
       "ClassPilot could not reach the live sign-in service. No cached information can be used to sign in.",
     );
+    const diagnostics = readRepoFile("extension/auth-recovery-diagnostics.js");
+    expect(diagnostics).toContain("Details for IT");
+    expect(diagnostics).toContain("Copy diagnostics");
 
     const supportCodes = [
       "AUTH_GATE_POLICY_TIMEOUT",

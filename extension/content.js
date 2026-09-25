@@ -597,7 +597,8 @@ function requestAuthGateState() {
     if (chrome.runtime.lastError || !response?.success || !response.state) {
       if (authGateActive || globalThis.__classpilotAuthGateBootstrap?.active) {
         showAuthGate({ ...(authGateCurrentState || {}), phase: 'unavailable', authRequired: true,
-          errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: response?.retryAt ?? null });
+          errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE', retryAt: response?.retryAt ?? null,
+          supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(response?.supportDetails) || null });
       }
       return;
     }
@@ -642,7 +643,8 @@ function notifyAuthGatePolicyRecovery() {
 }
 
 function showAuthGatePolicyFailure(failure) {
-  authGateManagedPolicyFailure = { errorCode: failure.errorCode, retryAt: failure.retryAt };
+  authGateManagedPolicyFailure = { errorCode: failure.errorCode, retryAt: failure.retryAt,
+    supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(failure.supportDetails) || null };
   authGatePolicyRecoveryFrameLatched = true;
   showAuthGate({
     ...authGateManagedPolicyFailure, phase: 'unavailable', authRequired: true,
@@ -693,6 +695,7 @@ function requestAuthGateManagedPolicyRevalidation(fence, userInitiated = false) 
       const hintedRetryAt = Number(response?.retryAt);
       const failure = {
         errorCode: response?.errorCode || 'AUTH_GATE_RPC_UNAVAILABLE',
+        supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(response?.supportDetails) || null,
         retryAt: Number.isFinite(hintedRetryAt) && hintedRetryAt > Date.now()
           ? Math.min(hintedRetryAt, Date.now() + 300000) : Date.now() + delay,
       };
@@ -1593,6 +1596,7 @@ function beginSecureAuthGateFrameVerification() {
         ? { initialFailure: {
           code: authGateCurrentState.errorCode,
           retryAt: authGateCurrentState.retryAt,
+          supportDetails: globalThis.ClassPilotAuthSupportDetails?.sanitize(authGateCurrentState.supportDetails) || null,
         } } : {}),
     }, AUTH_GATE_FRAME_ORIGIN);
   } catch (_error) {
