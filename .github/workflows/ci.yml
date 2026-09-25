@@ -7,7 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,5 +34,44 @@ jobs:
           REDIS_URL: ${{ secrets.REDIS_URL }}
       - run: npm run test:extension:chrome
       - run: npm run build
+      - run: bash extension/package-extension.sh
+      - run: npm run test:extension:package
+
+  chrome-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Historical fixtures require newer native storage/debugger APIs. The
+      # default job retains their upgrade cases and all red-on-old proofs.
+      CLASSPILOT_COMPATIBILITY_RUN: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        chrome: ['120.0.6099.109', '133.0.6943.141', '152.0.7977.82', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Install the exact compatibility browser
+        env:
+          CHROME_VERSION: ${{ matrix.chrome }}
+        run: |
+          if [ "$CHROME_VERSION" = "stable" ]; then
+            curl --fail --location --retry 3 "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json" --output "$RUNNER_TEMP/chrome-channels.json"
+            CHROME_VERSION="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).channels.Stable.version" "$RUNNER_TEMP/chrome-channels.json")"
+          fi
+          [[ "$CHROME_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          curl --fail --location --retry 3 "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" --output "$RUNNER_TEMP/chrome-compat.zip"
+          unzip -q "$RUNNER_TEMP/chrome-compat.zip" -d "$RUNNER_TEMP/chrome-compat"
+          CHROME_PATH="$RUNNER_TEMP/chrome-compat/chrome-linux64/chrome"
+          "$CHROME_PATH" --version | tee "$RUNNER_TEMP/chrome-version.txt"
+          grep -F "$CHROME_VERSION" "$RUNNER_TEMP/chrome-version.txt"
+          echo "CLASSPILOT_CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+          echo "CLASSPILOT_EXPECT_CHROME_MAJOR=${CHROME_VERSION%%.*}" >> "$GITHUB_ENV"
+      - run: npm run test:extension:chrome:behavior
       - run: bash extension/package-extension.sh
       - run: npm run test:extension:package

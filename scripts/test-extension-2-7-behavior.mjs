@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
@@ -234,12 +235,14 @@ async function main() {
       executablePath,
       headless: true,
       args: [
+        '--headless=new',
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
       ],
     });
     const worker = context.serviceWorkers()[0]
       || await context.waitForEvent('serviceworker', { timeout: 10_000 });
+    await waitForExtensionWorkerDeclarations(worker);
     if (DEBUG_BEHAVIOR_PROGRESS) {
       worker.on('console', (message) => {
         if (message.text().startsWith('[Behavior progress]')) {
@@ -2117,6 +2120,18 @@ async function main() {
         captureAndSendScreenshot = captureBeforeLeaseAdoption;
         progress('capability adoption complete');
 
+        // Background requests share fetchWithBackoff. Route fixture responses
+        // by operation context, preserving wrong-URL/malformed-body failures
+        // for the intended upload instead of treating unrelated traffic as it.
+        const fixtureFetchForContext = (requestContext, respond) => async (
+          url, init = {}, retryOptions = {},
+        ) => {
+          if (retryOptions.context !== requestContext) {
+            return new Response('{}', { status: 200 });
+          }
+          return respond(url, init, retryOptions);
+        };
+
         let releaseLeaseRenewalCapture;
         let leaseRenewalCaptureStarted;
         const leaseRenewalCaptureGate = new Promise((resolveGate) => {
@@ -2127,10 +2142,10 @@ async function main() {
         });
         let leaseRenewalCaptureCalls = 0;
         let leaseRenewalUploads = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           leaseRenewalUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // This lane runs at whatever wall-clock time it is started, so a
@@ -2183,10 +2198,10 @@ async function main() {
         });
         let policyGenerationCaptureCalls = 0;
         const policyGenerationUploads = [];
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           policyGenerationUploads.push(JSON.parse(String(init.body || '{}')));
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // This lane runs at whatever wall-clock time it is started, so a
@@ -2236,14 +2251,17 @@ async function main() {
           await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
         }
 
-        let ambientUpload = null;
-        fetchWithBackoff = async (url, init = {}) => {
-          ambientUpload = {
+        // Fetch entry precedes the prior capture's persistence and finally.
+        // Wait for actual completion before replacing its upload observer.
+        await drainScreenshotCaptureLane('ambient screenshot upload');
+        let observedAmbientUpload = null;
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (url, init = {}) => {
+          observedAmbientUpload = {
             url: String(url),
             body: JSON.parse(String(init.body || '{}')),
           };
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         await captureAndSendScreenshot({
@@ -2260,6 +2278,7 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
+        const ambientUpload = observedAmbientUpload;
 
         // Wall tiles carry a downscaled variant, not the captured frame. The
         // other screenshot fixtures use short undecodable stubs that
@@ -2287,6 +2306,9 @@ async function main() {
         };
         // Decoding the uploaded data URL is the proof that it still renders.
         const measureDataUrl = async (candidate) => {
+          if (typeof candidate !== 'string' || !candidate.startsWith('data:image/')) {
+            throw new Error('Thumbnail fixture upload must contain an image data URL');
+          }
           const blob = await (await fetch(candidate)).blob();
           const bitmap = await createImageBitmap(blob);
           const measured = {
@@ -2313,10 +2335,10 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         };
         let thumbnailUploadBody = null;
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           thumbnailUploadBody = JSON.parse(String(init.body || '{}'));
           return new Response('{}', { status: 200 });
-        };
+        });
         trackingState = TRACKING_STATES.ACTIVE;
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
@@ -2325,26 +2347,28 @@ async function main() {
           reason: 'thumbnail-downscale-fixture',
           ...thumbnailFixture,
         });
+        const completedThumbnailUploadBody = thumbnailUploadBody;
         const thumbnailUpload = {
           source: await measureDataUrl(thumbnailSourceDataUrl),
-          uploaded: thumbnailUploadBody
-            ? await measureDataUrl(thumbnailUploadBody.screenshot)
+          uploaded: completedThumbnailUploadBody
+            ? await measureDataUrl(completedThumbnailUploadBody.screenshot)
             : null,
-          differsFromSource: Boolean(thumbnailUploadBody)
-            && thumbnailUploadBody.screenshot !== thumbnailSourceDataUrl,
+          differsFromSource: Boolean(completedThumbnailUploadBody)
+            && completedThumbnailUploadBody.screenshot !== thumbnailSourceDataUrl,
           // Re-encoding happens after capturedAt is fixed, so the server's
           // |capturedAt - timestamp| fence must still see one instant.
-          capturedAtMatchesTimestamp: Boolean(thumbnailUploadBody)
-            && Date.parse(thumbnailUploadBody.capturedAt) === thumbnailUploadBody.timestamp,
+          capturedAtMatchesTimestamp: Boolean(completedThumbnailUploadBody)
+            && Date.parse(completedThumbnailUploadBody.capturedAt)
+              === completedThumbnailUploadBody.timestamp,
         };
 
         // A Chrome regression in the encode path must degrade to today's
         // full-resolution upload, never to a dropped frame.
         let failOpenUploadBody = null;
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           failOpenUploadBody = JSON.parse(String(init.body || '{}'));
           return new Response('{}', { status: 200 });
-        };
+        });
         const originalCreateImageBitmap = globalThis.createImageBitmap;
         let thumbnailEncodeReached = false;
         try {
@@ -2376,7 +2400,7 @@ async function main() {
         const staleUploadReady = new Promise((resolveReady) => {
           staleUploadStarted = resolveReady;
         });
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           staleUploadStarted();
           await staleUploadDenialGate;
           return new Response(JSON.stringify({
@@ -2392,7 +2416,7 @@ async function main() {
             status: 409,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const staleUploadDenialPromise = captureAndSendScreenshot({
@@ -2444,13 +2468,13 @@ async function main() {
         scheduleEventHeartbeat = (heartbeatReason) => {
           screenshotAuthorityHeartbeatReasons.push(heartbeatReason);
         };
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           code: 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED',
         }), {
           status: 409,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const heartbeatRequiredCaptureResult = await captureAndSendScreenshot({
@@ -2470,7 +2494,7 @@ async function main() {
         const heartbeatRequiredLeaseRetained = ambientScreenshotAllowed(authB);
 
         let pausedUnobservedUploadAttempts = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           pausedUnobservedUploadAttempts += 1;
           return new Response(JSON.stringify({
             ok: false,
@@ -2485,7 +2509,7 @@ async function main() {
             status: 409,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         const pausedUnobservedFixture = {
           queryActiveTab: async () => [{
             id: 7016,
@@ -2526,7 +2550,7 @@ async function main() {
         const delayedAuthorizationAllowScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
         const delayedAuthorizationAllowStartedAt = Date.now();
         let authorizationDeniedUploadAttempts = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           authorizationDeniedUploadAttempts += 1;
           return new Response(JSON.stringify({
             ok: false,
@@ -2535,7 +2559,7 @@ async function main() {
             status: 404,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const authorizationDeniedCaptureResult = await captureAndSendScreenshot({
@@ -2583,13 +2607,13 @@ async function main() {
         });
         captureAndSendScreenshot = captureBeforeAuthorizationRestore;
 
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           code: 'SCREENSHOT_STORE_UNAVAILABLE',
         }), {
           status: 503,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const screenshotServiceUnavailableResult = await captureAndSendScreenshot({
@@ -2639,13 +2663,13 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         };
         const rapidCadenceUploadOptions = [];
-        fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, _init, retryOptions = {}) => {
           rapidCadenceUploadOptions.push({ maxAttempts: retryOptions.maxAttempts });
           return new Response('{}', {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         const rapidClockBase = originalDateNow();
         let rapidClockNow = rapidClockBase;
         Date.now = () => rapidClockNow;
@@ -2773,13 +2797,13 @@ async function main() {
             scope: licenseScopeForAuthContext(authContext),
           });
         };
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           planStatus: 'screenshot-payment-required',
         }), {
           status: 402,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // Screenshot 429s now use an independent lane. Clear that lane between
@@ -2830,10 +2854,10 @@ async function main() {
 
         let ambientActivationRaceUploads = 0;
         let ambientActivationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientActivationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientActivationRaceResult = await captureAndSendScreenshot({
@@ -2859,10 +2883,10 @@ async function main() {
 
         let ambientNavigationRaceUploads = 0;
         let ambientNavigationQueryCount = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientNavigationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientNavigationRaceResult = await captureAndSendScreenshot({
@@ -2887,10 +2911,10 @@ async function main() {
 
         let ambientNavigationBounceUploads = 0;
         let ambientNavigationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientNavigationBounceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientNavigationBounceResult = await captureAndSendScreenshot({
@@ -2922,13 +2946,13 @@ async function main() {
         });
 
         let safetyUpload = null;
-        fetchWithBackoff = async (url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async (url, init = {}) => {
           safetyUpload = {
             url: String(url),
             body: JSON.parse(String(init.body || '{}')),
           };
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyResult = await captureSafetyEvidence({
           requestId: 'evidence-request-1',
           tabRef: 'tab_exact_1',
@@ -2962,10 +2986,10 @@ async function main() {
 
         let safetyActivationRaceUploads = 0;
         let safetyActivationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyActivationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyActivationRaceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-activation-race',
           tabRef: 'tab_exact_activation_race',
@@ -3004,10 +3028,10 @@ async function main() {
 
         let safetyNavigationRaceUploads = 0;
         let safetyNavigationGetCount = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyNavigationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyNavigationRaceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-navigation-race',
           tabRef: 'tab_exact_navigation_race',
@@ -3045,10 +3069,10 @@ async function main() {
 
         let safetyNavigationBounceUploads = 0;
         let safetyNavigationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyNavigationBounceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyNavigationBounceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-navigation-bounce',
           tabRef: 'tab_exact_navigation_bounce',
@@ -3102,10 +3126,10 @@ async function main() {
         const safetyCaptureReady = new Promise((resolveReady) => {
           safetyCaptureStarted = resolveReady;
         });
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyRacePromise = captureSafetyEvidence({
           requestId: 'evidence-request-race',
           tabRef: 'tab_exact_race',
@@ -3744,11 +3768,21 @@ async function main() {
           commandType: 'teacher-message',
           outcome: 'applied',
         });
-        let httpAckRequest = null;
+        let capturedHttpAckRequest = null;
+        let httpAckCaptureActive = true;
         fetchWithBackoff = async (url, init = {}) => {
-          httpAckRequest = {
+          const body = JSON.parse(String(init.body || '{}'));
+          // Other worker lanes share this fetch helper and can run while the
+          // ACK awaits storage. Only this command receives the synthetic
+          // receipt/revision change. Match its body, so a wrong endpoint still
+          // reaches the URL assertion instead of being hidden by URL routing.
+          if (!httpAckCaptureActive || !Array.isArray(body.acks)
+            || !body.acks.some(ack => ack.commandId === 'http-idempotent-command')) {
+            return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          capturedHttpAckRequest = {
             url: String(url),
-            body: JSON.parse(String(init.body || '{}')),
+            body,
           };
           // A later classroom revision is not an authentication transition.
           // The server-applied ACK captured at revision 41 must still drain
@@ -3770,6 +3804,8 @@ async function main() {
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         };
         await flushCommandAckOutbox({ forceHttp: true });
+        httpAckCaptureActive = false;
+        const httpAckRequest = capturedHttpAckRequest;
         const afterHttpAckReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         const commandAckRetentionBase = Date.now();
         const commandAckRetentionBinding = monitoringEventAuthBindingForContext(authB);
@@ -4262,7 +4298,62 @@ async function main() {
 
         const raceStorageKey = '__classpilotAuthContextRaceProbe';
         await kv.remove(raceStorageKey);
-        const raceStartedAt = performance.now();
+        // Exercise real native cleanup once before measuring the 10,000 fence
+        // races. Each identity installation retires authority twice; dispatching
+        // hundreds of thousands of already-empty alarm IPCs measures browser
+        // scheduling rather than the authentication fences under stress here.
+        const raceCleanupAlarmNames = [
+          LICENSE_STATUS_RETRY_ALARM,
+          LICENSE_CONTROL_CLEANUP_ALARM,
+          CLASSROOM_STATE_RECONCILE_ALARM,
+          SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM,
+          'screenshot-observation-lease-expiry',
+          'heartbeat',
+        ];
+        const raceCleanupAlarmSet = new Set(raceCleanupAlarmNames);
+        const readRaceCleanupAlarms = async () => (await chrome.alarms.getAll())
+          .filter((alarm) => raceCleanupAlarmSet.has(alarm.name))
+          .map((alarm) => alarm.name)
+          .sort();
+        const waitForNativeRaceAlarmCleanup = async (label) => {
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            const remaining = await readRaceCleanupAlarms();
+            if (remaining.length === 0) return;
+            if (Date.now() >= deadline) {
+              throw new Error(`${label} left native alarms: ${remaining.join(', ')}`);
+            }
+            // Heartbeat clearing is dispatched from the native get callback.
+            await new Promise((resolveCleanup) => setTimeout(resolveCleanup, 10));
+          }
+        };
+        const nativeCleanupAuthA = installIdentity('race-native-alarm-cleanup-a');
+        await waitForNativeRaceAlarmCleanup('Race preflight initial cleanup');
+        const nativeAlarmWhen = Date.now() + 5 * 60_000;
+        for (const name of raceCleanupAlarmNames) {
+          await chrome.alarms.create(name, { when: nativeAlarmWhen });
+        }
+        const seededNativeCleanupAlarms = await readRaceCleanupAlarms();
+        if (seededNativeCleanupAlarms.length !== raceCleanupAlarmNames.length) {
+          throw new Error('Race preflight could not seed every native cleanup alarm');
+        }
+        const nativeCleanupAuthB = installIdentity('race-native-alarm-cleanup-b');
+        if (!nativeCleanupAuthA.signal.aborted) {
+          throw new Error('Race native alarm cleanup did not abort context A');
+        }
+        assertAuthenticatedContextCurrent(nativeCleanupAuthB, 'race native alarm cleanup B');
+        await waitForNativeRaceAlarmCleanup('Race preflight authority transition');
+        if (!await ensureAuthBoundNotificationInventory({ force: true })) {
+          throw new Error('Race preflight could not reconcile native notification cleanup');
+        }
+        await drainScreenshotCaptureLane('Race preflight');
+        if (
+          activeLiveViewContext || wsTransportIdentity || activeScreenshotCadence
+          || heartbeatIntervalId || eventHeartbeatTimer || screenshotScheduled
+        ) {
+          throw new Error('Race preflight retained background authority work');
+        }
+
         let raceTransmissionCount = 0;
         let racePersistenceCount = 0;
         let raceSupersededOperations = 0;
@@ -4271,6 +4362,11 @@ async function main() {
         const racePersistenceSamples = [];
         const fetchBeforeRace = fetchWithBackoff;
         const kvSetBeforeRace = kv.set;
+        const alarmGetBeforeRace = chrome.alarms.get;
+        const alarmClearBeforeRace = chrome.alarms.clear;
+        const emptyAlarmClearCalls = {};
+        let emptyHeartbeatGetCalls = 0;
+        let raceElapsedMs = 0;
         try {
           fetchWithBackoff = async (url, init = {}, retryOptions) => {
             if (String(url).endsWith('/__auth-context-race-probe')) {
@@ -4301,7 +4397,33 @@ async function main() {
             }
             return kvSetBeforeRace(value);
           };
+          // Only the names proven empty above are absorbed. Every other alarm
+          // call remains native; the real identity/abort/fence functions remain
+          // untouched. Verify these names are still empty after restoring APIs.
+          chrome.alarms.get = function (name, callback) {
+            if (name !== 'heartbeat') {
+              return alarmGetBeforeRace.apply(chrome.alarms, arguments);
+            }
+            emptyHeartbeatGetCalls += 1;
+            if (typeof callback === 'function') {
+              queueMicrotask(() => callback(undefined));
+              return undefined;
+            }
+            return Promise.resolve(undefined);
+          };
+          chrome.alarms.clear = function (name, callback) {
+            if (!raceCleanupAlarmSet.has(name)) {
+              return alarmClearBeforeRace.apply(chrome.alarms, arguments);
+            }
+            emptyAlarmClearCalls[name] = (emptyAlarmClearCalls[name] || 0) + 1;
+            if (typeof callback === 'function') {
+              queueMicrotask(() => callback(false));
+              return undefined;
+            }
+            return Promise.resolve(false);
+          };
 
+          const raceStartedAt = performance.now();
           for (let iteration = 0; iteration < raceIterations; iteration += 1) {
             const authA = installIdentity(`race-a-${iteration}`);
             const payloadA = Object.freeze({
@@ -4375,9 +4497,18 @@ async function main() {
             }
             assertAuthenticatedContextCurrent(authB, `release-race:${iteration}:context-b`);
           }
+          raceElapsedMs = performance.now() - raceStartedAt;
         } finally {
           fetchWithBackoff = fetchBeforeRace;
           kv.set = kvSetBeforeRace;
+          chrome.alarms.get = alarmGetBeforeRace;
+          chrome.alarms.clear = alarmClearBeforeRace;
+        }
+        const remainingNativeCleanupAlarms = await readRaceCleanupAlarms();
+        if (remainingNativeCleanupAlarms.length > 0) {
+          throw new Error(
+            `Race loop recreated absorbed alarms: ${remainingNativeCleanupAlarms.join(', ')}`,
+          );
         }
         const persistedRaceProbe = await kv.get(raceStorageKey);
         const authContextRace = {
@@ -4389,7 +4520,11 @@ async function main() {
           transmissionSamples: raceTransmissionSamples,
           persistenceSamples: racePersistenceSamples,
           persistedValue: persistedRaceProbe[raceStorageKey],
-          elapsedMs: performance.now() - raceStartedAt,
+          seededNativeCleanupAlarms,
+          remainingNativeCleanupAlarms,
+          emptyAlarmClearCalls,
+          emptyHeartbeatGetCalls,
+          elapsedMs: raceElapsedMs,
         };
 
         advanceStudentAuthMutationGeneration();
@@ -5099,6 +5234,7 @@ async function main() {
       codeShapedLabel: 'unknown',
     });
     assert.deepEqual(result.sensitiveCleanupConsole, ['[Auth] Failed cleanup: Error']);
+    assert.ok(result.ambientUpload, 'the ambient screenshot fixture must upload its captured frame');
     assert.equal(result.ambientUpload.url.endsWith('/api/classpilot/device/screenshot'), true);
     assert.equal(result.ambientUpload.body.clientProtocolVersion, 3);
     assert.ok(result.thumbnailUpload.uploaded,
@@ -5283,6 +5419,7 @@ async function main() {
       ack.commandId === 'legacy-receipt-command'));
     assert.equal(result.afterLegacyReceiptMatched.commandAckOutboxV1.some((ack) =>
       ack.commandId === 'legacy-receipt-command'), false);
+    assert.ok(result.httpAckRequest, 'the forced HTTP flush must send the intended command acknowledgement');
     assert.equal(
       result.httpAckRequest.url.endsWith('/api/classpilot/device/command-acks'),
       true,
@@ -5396,6 +5533,24 @@ async function main() {
     assert.deepEqual(result.authContextRace.transmissionSamples, []);
     assert.deepEqual(result.authContextRace.persistenceSamples, []);
     assert.equal(result.authContextRace.persistedValue, undefined);
+    assert.deepEqual(result.authContextRace.seededNativeCleanupAlarms, [
+      'classroom-state-reconcile',
+      'heartbeat',
+      'license-control-cleanup',
+      'license-status-retry',
+      'screenshot-active-view-cadence-expiry',
+      'screenshot-observation-lease-expiry',
+    ]);
+    assert.deepEqual(result.authContextRace.remainingNativeCleanupAlarms, []);
+    assert.ok(result.authContextRace.emptyHeartbeatGetCalls > 0);
+    for (const name of result.authContextRace.seededNativeCleanupAlarms) {
+      if (name !== 'heartbeat') {
+        assert.ok(
+          result.authContextRace.emptyAlarmClearCalls[name] > 0,
+          `race loop did not exercise the verified-empty ${name} cleanup`,
+        );
+      }
+    }
     assert.ok(
       result.authContextRace.elapsedMs < 20_000,
       `10,000 auth-context race iterations took ${result.authContextRace.elapsedMs.toFixed(0)} ms`,
@@ -5456,9 +5611,13 @@ async function main() {
     assert.equal(contentMessageEpochRace.callbackBeforeClearModalCount, 1);
     assert.equal(contentMessageEpochRace.callbackBeforeClearFinalModalCount, 0);
 
+    const isolatedAlarmIpcCount = Object.values(result.authContextRace.emptyAlarmClearCalls)
+      .reduce((sum, count) => sum + count, result.authContextRace.emptyHeartbeatGetCalls);
     console.log(
       `ClassPilot 2.7 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
-      + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms.`,
+      + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms; `
+      + `${result.authContextRace.seededNativeCleanupAlarms.length} native alarm cleanups verified, `
+      + `${isolatedAlarmIpcCount} verified-empty alarm IPCs isolated.`,
     );
   } finally {
     if (context) await context.close();

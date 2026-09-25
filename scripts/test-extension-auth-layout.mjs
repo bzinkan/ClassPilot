@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
@@ -42,7 +43,8 @@ async function startFixtureServer() {
 }
 
 async function waitForWorker(context) {
-  return context.serviceWorkers()[0] || context.waitForEvent('serviceworker', { timeout: 10_000 });
+  const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 10_000 });
+  return waitForExtensionWorkerDeclarations(worker);
 }
 
 async function waitForTabId(worker, url) {
@@ -904,6 +906,7 @@ async function main() {
       headless: true,
       viewport: { width: 1366, height: 600 },
       args: [
+        '--headless=new',
         `--disable-extensions-except=${fixtureExtensionPath}`,
         `--load-extension=${fixtureExtensionPath}`,
       ],

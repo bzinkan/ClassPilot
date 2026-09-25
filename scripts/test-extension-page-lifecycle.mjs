@@ -17,7 +17,7 @@ test('real page scripts preserve same-version UI, retire callbacks, and rehydrat
   assert.ok(executablePath, 'A local Chromium binary is required');
   const server = createServer((_request, response) => { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<!doctype html><html><body><input id="page-draft" value="unsaved page work"></body></html>'); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const browser = await chromium.launch({ executablePath, headless: true });
+  const browser = await chromium.launch({ executablePath, headless: true, args: ['--headless=new'] });
   try {
     const page = await browser.newPage();
     const errors = [];

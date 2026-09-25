@@ -209,7 +209,7 @@ this pass-through. An active authentication tab is not counted as a compliant
 destination and is not navigated or pulled out of focus mid-login.
 
 The extension keeps only the visited authentication host names and a SHA-256
-digest scoped to the immutable local binding in trusted extension storage. It
+digest scoped to the immutable local binding in local extension storage. It
 does not store SSO URLs, query strings, credentials, or the raw student,
 session, school, or device tuple in that record. The record is cleared on
 sign-out or any student, session, school, device, server-origin, managed-policy,
@@ -394,9 +394,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.9.4 worker wake recovery candidate, the canonical artifact
-name will be `dist/ClassPilot-v2.9.4.zip` after separately authorized clean-tag
-packaging. Earlier archives do not contain the 2.9.4 worker wake recovery
+For the prepared 2.9.5 Chrome compatibility candidate, the canonical artifact
+name will be `dist/ClassPilot-v2.9.5.zip` after separately authorized clean-tag
+packaging. Earlier archives do not contain the Chrome 120+ storage compatibility
 correction and must not be submitted for this release. The candidate retains
 2.9.2's Class tools with 2.9.3's timer placement correction, 2.9.1's class chat
 controls, 2.9.0's startup recovery, 2.8.9's
@@ -407,13 +407,25 @@ limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
-### Worker wake recovery (2.9.4 candidate)
+### Chrome 120+ compatibility (2.9.5 candidate)
 
-Version 2.9.4 is an unsubmitted startup-recovery correction. On September 25,
+The minimum Chrome version is 120, preserving the existing 30-second alarm
+cadence and offscreen capture behavior. Durable recovery capabilities now use
+extension-private IndexedDB on all supported versions. This removes the
+Chrome 140 local-storage access-control dependency that prevented startup on
+the reported Chrome 133 device. Migration commits before verified legacy
+cleanup; failed or pending storage keeps browsing protected. No permissions
+are added. See [the compatibility and validation notes](../docs/STARTUP_STORAGE_RECOVERY.md).
+
+### Worker wake recovery (2.9.4 history)
+
+Version 2.9.4 introduced startup recovery and diagnostics. On September 25,
 2026 a managed Chromebook showed `AUTH_GATE_STARTUP_TIMEOUT` and a sanitized
-wake error. A full session restart did not resolve the device; its exact
-trigger remains unconfirmed. A dangling policy barrier was reproduced on
-v2.9.3, but that is not proof of the affected device's exact cause.
+wake error. A full session restart did not resolve the device. Later 2.9.4
+diagnostics and the browser version exposed the Chrome 133 storage API
+incompatibility addressed above; resolution on that device remains unconfirmed.
+A dangling policy barrier was reproduced on v2.9.3, but that is not proof of
+the affected device's exact cause.
 
 A completed current-owner failure now fences partial authentication and
 settles the failed wake's policy barrier. Recovery verifies strict local

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
@@ -192,12 +193,14 @@ async function main() {
       executablePath,
       headless: true,
       args: [
+        '--headless=new',
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
       ],
     });
     const worker = context.serviceWorkers()[0]
       || await context.waitForEvent('serviceworker', { timeout: 10_000 });
+    await waitForExtensionWorkerDeclarations(worker);
     const result = await worker.evaluate(async () => {
       await authStateRestorePromise.catch(() => {});
       await classroomStateRestorePromise.catch(() => {});
@@ -275,9 +278,10 @@ async function main() {
         'auth_recovery_old',
       );
       const armedAfterDelayedOldClear = studentSessionRecoveryState.armed;
-      const persistedRecovery = (await chrome.storage.local.get(
-        STUDENT_SESSION_RECOVERY_STORAGE_KEY,
-      ))[STUDENT_SESSION_RECOVERY_STORAGE_KEY];
+      const persistedRecovery = await getPrivateStudentSessionRecoveryStore().load();
+      if ((await chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY))[STUDENT_SESSION_RECOVERY_STORAGE_KEY] !== undefined) {
+        throw new Error('Recovery capability leaked into content-readable local storage');
+      }
       const persistedArmedKeys = Object.keys(persistedRecovery?.armed || {}).sort();
       await enqueueStudentSessionRecoveryMutation(() => persistStudentSessionRecoveryState(
         emptyStudentSessionRecoveryState(),

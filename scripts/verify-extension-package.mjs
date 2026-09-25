@@ -18,7 +18,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '2.9.4';
+const expectedPreparedReleaseVersion = '2.9.5';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -138,6 +138,7 @@ function runPackagedTests() {
   for (const script of [
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
+    'test-extension-browser-api.mjs',
     'test-extension-scheduled-classroom.mjs',
     'test-extension-class-tools.mjs',
     'test-extension-2-7-behavior.mjs',
@@ -146,7 +147,9 @@ function runPackagedTests() {
     'test-extension-auth-layout.mjs',
     'test-extension-auth-startup.mjs',
     'test-extension-portal-first.mjs',
+    'test-extension-auth-frame-verification.mjs',
     'test-extension-worker-recovery.mjs',
+    'test-extension-protected-storage.mjs',
     'test-extension-auth-diagnostics.mjs',
     'test-extension-auth-gate-transport.mjs',
     'test-page-lifecycle.mjs',

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const requestedExtension = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
@@ -14,8 +15,8 @@ const profile = await mkdtemp(join(tmpdir(), 'classpilot-scheduled-context-'));
 let browser;
 let server;
 try {
-  browser = await chromium.launchPersistentContext(profile, { executablePath: chromium.executablePath(), headless: true,
-    args: ['--enable-automation', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
+  browser = await chromium.launchPersistentContext(profile, { executablePath: process.env.CLASSPILOT_CHROME_PATH || chromium.executablePath(), headless: true,
+    args: ['--headless=new', '--enable-automation', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   const launchSession = await browser.newCDPSession(browser.pages()[0] || await browser.newPage());
   try {
     const { arguments: launchArguments } = await launchSession.send('Browser.getBrowserCommandLine');
@@ -26,6 +27,7 @@ try {
     await launchSession.detach();
   }
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
+  await waitForExtensionWorkerDeclarations(worker);
   const requestedManifest = JSON.parse(await readFile(resolve(requestedExtension, 'manifest.json'), 'utf8'));
   const loadedVersion = await worker.evaluate(() => chrome.runtime.getManifest().version);
   assert.equal(loadedVersion, requestedManifest.version, 'Chrome must load the requested extension manifest');

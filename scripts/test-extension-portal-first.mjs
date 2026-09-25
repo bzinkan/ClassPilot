@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { extensionWorkerDeclarationsReady, waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 // Real extension worker, Chrome navigation and DNR; identity-provider pages
 // and the API are controlled fixtures. No real student/provider credentials.
@@ -240,7 +241,8 @@ async function proveCommittedLoginWorkerCrash(context, worker, fixture, kind, wo
   const restoredWorker = await until(async () => {
     for (const candidate of [...context.serviceWorkers()].reverse()) {
       if (candidate.url() !== workerUrl) continue;
-      if (await candidate.evaluate(() => globalThis.portalFixturePausedAfterCommit !== true).catch(() => false)) return candidate;
+      if (await extensionWorkerDeclarationsReady(candidate)
+        && await candidate.evaluate(() => globalThis.portalFixturePausedAfterCommit !== true).catch(() => false)) return candidate;
     }
     return null;
   }, 'new worker after committed login crash');
@@ -295,7 +297,7 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     proxy = await navigationProxy(profilePath, documents);
     const launch = () => chromium.launchPersistentContext(profilePath, {
       executablePath, headless: true, viewport: { width: 1200, height: 800 },
-      args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
+      args: ['--headless=new', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
         `--proxy-server=${proxy.address}`, '--ignore-certificate-errors'],
     });
     context = await launch();
@@ -304,6 +306,7 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     console.log(`${kind}: browser ${browserVersion.product}`);
     await versionSession.detach();
     worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    await waitForExtensionWorkerDeclarations(worker);
     await worker.evaluate(async ({ serverUrl, fixtureSchool }) => {
       await chrome.storage.local.set({ config: { serverUrl, schoolId: fixtureSchool,
         schoolSlug: fixtureSchool, enrollmentKey: 'fixture-enrollment-key' } });
@@ -312,6 +315,7 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     await context.close();
     context = await launch();
     worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    await waitForExtensionWorkerDeclarations(worker);
     worker.on('console', message => {
       if (['warning', 'error'].includes(message.type())) workerMessages.push(message.text().slice(0, 500));
     });

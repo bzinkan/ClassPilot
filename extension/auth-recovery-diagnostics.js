@@ -36,10 +36,17 @@
   const FAILURE_CLASSES = new Set([
     ...SUPPORT_CODES, 'AUTH_GATE_TIMEOUT', 'AUTH_MUTATION_SUPERSEDED',
     'STORAGE_QUOTA_EXCEEDED', 'STORAGE_IO_ERROR', 'STORAGE_CONTEXT_INVALIDATED', 'STORAGE_FAILED',
+    'RECOVERY_STORE_UNAVAILABLE', 'RECOVERY_STORE_READ_FAILED',
+    'RECOVERY_STORE_WRITE_FAILED', 'RECOVERY_STORE_MIGRATION_FAILED',
     'AbortError', 'DOMException', 'Error', 'NetworkError', 'NotAllowedError', 'NotFoundError',
     'OperationError', 'QuotaExceededError', 'SecurityError', 'TimeoutError', 'TypeError', 'pending',
   ]);
   const RESTORE_OUTCOMES = new Set(['pending', 'verified', 'failed', 'superseded']);
+  const STORAGE_ACCESS_PHASES = new Set(['opening', 'reading', 'migrating', 'purging', 'writing', 'ready', 'failed']);
+  const STORAGE_ACCESS_FAILURES = new Set([
+    'RECOVERY_STORE_UNAVAILABLE', 'RECOVERY_STORE_READ_FAILED',
+    'RECOVERY_STORE_WRITE_FAILED', 'RECOVERY_STORE_MIGRATION_FAILED',
+  ]);
   const boundedNumber = (value, maximum, fallback = 0) => typeof value === 'number' && Number.isFinite(value)
     ? Math.min(maximum, Math.max(0, Math.floor(value))) : fallback;
   const safeVersion = value => typeof value === 'string' && /^(?:\d{1,5}(?:\.\d{1,5}){0,3}|unknown)$/.test(value)
@@ -47,6 +54,12 @@
 
   function sanitizeSupportDetails(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const access = value.storageAccess;
+    const storageAccess = access && typeof access === 'object' && !Array.isArray(access)
+      && STORAGE_ACCESS_PHASES.has(access.phase)
+      ? { phase: access.phase, attemptCount: boundedNumber(access.attemptCount, 100),
+        ...(STORAGE_ACCESS_FAILURES.has(access.failureClass) ? { failureClass: access.failureClass } : {}) }
+      : null;
     const first = value.firstFailure;
     const firstFailure = first && typeof first === 'object'
       && SUPPORT_STEPS.has(first.startupPhase) && FAILURE_CLASSES.has(first.failureClass)
@@ -68,6 +81,7 @@
         ? { retryInMs: boundedNumber(value.retryInMs, 300_000) } : {}),
       ...(typeof value.pending === 'boolean' ? { pending: value.pending } : {}),
       ...(firstFailure ? { firstFailure } : {}),
+      ...(storageAccess ? { storageAccess } : {}),
     };
   }
 
@@ -104,16 +118,32 @@
       `First failure: ${details.firstFailure.startupPhase} / ${details.firstFailure.failureClass}`,
       `First failure time: ${new Date(details.firstFailure.timestamp).toISOString()}`,
     );
+    if (details.storageAccess) lines.push(
+      `Private recovery storage: ${details.storageAccess.phase}`,
+      `Private recovery storage attempt: ${details.storageAccess.attemptCount}`,
+      ...(details.storageAccess.failureClass ? [`Private recovery storage failure: ${details.storageAccess.failureClass}`] : []),
+    );
     if (details.startupPhase === 'worker_unavailable') lines.push('Worker details unavailable; this is the page connection status.');
     return lines.join('\n');
   }
 
+  // A repaint replaces controls while a native clipboard promise may still
+  // be pending. Transfer ownership only through a presentation captured from
+  // this module's own mounted details block, without trusting mutable DOM text.
+  const supportCopyOwners = new WeakMap();
+  const supportPresentationCopyOwners = new WeakMap();
+
   function captureSupportPresentation(container) {
     const details = container?.querySelector('#classpilot-auth-it-details');
     const active = details?.ownerDocument.activeElement;
-    return { open: details?.open === true,
+    const presentation = { open: details?.open === true,
       focusId: details?.contains(active) ? active.id : null,
-      selectionStart: active?.selectionStart, selectionEnd: active?.selectionEnd };
+      selectionStart: active?.selectionStart, selectionEnd: active?.selectionEnd,
+      selectionWasFull: active?.selectionStart === 0
+        && active?.selectionEnd === active?.value?.length };
+    const copyOwner = supportCopyOwners.get(details);
+    if (copyOwner) supportPresentationCopyOwners.set(presentation, copyOwner);
+    return presentation;
   }
 
   function mountSupportDetails(container, value, code, presentation = {}) {
@@ -144,17 +174,31 @@
     status.id = 'classpilot-auth-copy-status';
     status.setAttribute('role', 'status');
     status.style.cssText = 'display:block!important;margin-top:5px!important';
+    const copyOwner = supportPresentationCopyOwners.get(presentation)
+      || { generation: 0, status: '' };
+    copyOwner.target = { details, text, status, formattedText };
+    supportCopyOwners.set(details, copyOwner);
+    status.textContent = copyOwner.status;
+    const finishCopy = (generation, denied) => {
+      const target = copyOwner.target;
+      if (generation !== copyOwner.generation || !target?.details.isConnected) return;
+      copyOwner.status = denied ? 'Select and copy the details above.' : 'Diagnostics copied.';
+      if (denied) {
+        target.details.open = true;
+        target.text.value = target.formattedText;
+        target.text.focus(); target.text.select();
+      }
+      target.status.textContent = copyOwner.status;
+    };
     const copy = async () => {
+      const generation = ++copyOwner.generation;
       try {
         const clipboard = doc.defaultView?.navigator?.clipboard;
         if (!clipboard?.writeText) throw new Error('Clipboard unavailable');
         await clipboard.writeText(formattedText);
-        if (details.isConnected) status.textContent = 'Diagnostics copied.';
+        finishCopy(generation, false);
       } catch {
-        if (!details.isConnected) return;
-        text.value = formattedText;
-        text.focus(); text.select();
-        status.textContent = 'Select and copy the details above.';
+        finishCopy(generation, true);
       }
     };
     button.addEventListener('click', copy);
@@ -164,7 +208,9 @@
       const control = [summary, text, button].find(item => item.id === presentation.focusId);
       control?.focus({ preventScroll: true });
       if (control === text && Number.isInteger(presentation.selectionStart)) {
-        text.setSelectionRange(presentation.selectionStart, presentation.selectionEnd);
+        if (copyOwner.status === 'Select and copy the details above.'
+          && presentation.selectionWasFull) text.select();
+        else text.setSelectionRange(presentation.selectionStart, presentation.selectionEnd);
       }
     }
     return { details, summary, text, button, copy,

@@ -41,8 +41,12 @@ const git = (...gitArgs) => execFileSync('git', ['-C', repo, ...gitArgs], { maxB
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 
 const sourceCommit = git('rev-parse', `${ref}^{commit}`).toString('utf8').trim();
+// Keep old receipts byte-identical while capturing the private store in newer
+// immutable fixtures. An old worker does not import this later module.
+const sourceFiles = git('ls-tree', '--name-only', `${sourceCommit}:extension`).toString('utf8').split(/\r?\n/);
+const runtimeFiles = [...FILES, ...(sourceFiles.includes('private-recovery-store.js') ? ['private-recovery-store.js'] : [])].sort();
 const files = {};
-for (const name of FILES) {
+for (const name of runtimeFiles) {
   files[name] = git('show', `${sourceCommit}:extension/${name}`).toString('utf8').replace(/\r?\n/g, '\r\n');
 }
 const extensionVersion = JSON.parse(files['manifest.json']).version;
@@ -54,7 +58,7 @@ const receipt = {
   description: fixtureKeyArgument
     ? `Immutable unsubmitted PR candidate ${fixtureKey} (manifest ${extensionVersion}), not a published release. Baseline for startup-recovery review regressions. Candidate supplies images/styles and a synthetic managed API fixture; no configuration or credentials included.`
     : `Immutable ${extensionVersion} runtime scripts and manifest for same-ID cooperative-controller upgrade acceptance and red-on-old startup-recovery gating. Candidate supplies unchanged images/styles and a synthetic managed API fixture; no configuration or credentials included.`,
-  files: Object.fromEntries(FILES.map((name) => [name, sha256(files[name])])),
+  files: Object.fromEntries(runtimeFiles.map((name) => [name, sha256(files[name])])),
   archiveSha256: sha256(archive),
 };
 const receiptPath = join(fixturesDir, `auth-recovery-${fixtureKey}.json`);
