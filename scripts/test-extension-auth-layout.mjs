@@ -904,6 +904,7 @@ async function main() {
       headless: true,
       viewport: { width: 1366, height: 600 },
       args: [
+        '--headless=new',
         `--disable-extensions-except=${fixtureExtensionPath}`,
         `--load-extension=${fixtureExtensionPath}`,
       ],

@@ -47,6 +47,11 @@ export const RECOVERY_CASES = Object.freeze({
   'blocked-fallback-diagnostics': { expectedRedOnBase: false },
   'recovered-startup-obsolete-school': { expectedRedOnBase: false },
   'worker-suspension-preserves-classroom': { expectedRedOnBase: false },
+  'protected-storage-retry': { expectedRedOnBase: '2.9.4', expectedFailure: '[regression:protected-storage-retry]' },
+  'protected-storage-persistent': { expectedRedOnBase: false },
+  'private-vault-browser-restart': { expectedRedOnBase: '2.9.4', expectedFailure: '[regression:private-vault]' },
+  'private-vault-migration-crash': { expectedRedOnBase: false },
+  'private-vault-write-failure': { expectedRedOnBase: false },
 });
 if (process.argv.includes('--list-cases')) {
   console.log(JSON.stringify(RECOVERY_CASES));
@@ -154,7 +159,7 @@ async function fixtureServer() {
   return { state, server, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
-function installManagedFixture(extensionPath, origin, mode, { pagePolicyMode = 'ready', bootstrapOnly = false, authReadMode='ready',authReadArea='local', seed=null, quietNetwork=false } = {}) {
+function installManagedFixture(extensionPath, origin, mode, { pagePolicyMode = 'ready', bootstrapOnly = false, authReadMode='ready',authReadArea='local', seed=null, quietNetwork=false, protectedStorageFault=null } = {}) {
   // Exercise the packaged managed path under Chromium. Only the enterprise API
   // is simulated: do not accidentally pass via the loopback/unpacked bypass.
   writeFileSync(join(extensionPath, 'config.js'), `
@@ -174,6 +179,7 @@ globalThis.__managedRecoveryFixture = {
 if (globalThis.__managedRecoveryFixture.seed) {
   const fixtureSeed = globalThis.__managedRecoveryFixture.seed;
   const waitingReads = [];
+  const nativeSeedGet = chrome.storage.local.get.bind(chrome.storage.local);
   for (const areaName of ['local','session']) {
     const area = chrome.storage[areaName];
     if (!area) continue;
@@ -187,10 +193,14 @@ if (globalThis.__managedRecoveryFixture.seed) {
   const nativeLocalSet = chrome.storage.local.set.bind(chrome.storage.local);
   const nativeSessionSet = chrome.storage.session?.set?.bind(chrome.storage.session);
   const finishSeed = () => { globalThis.__managedRecoveryFixture.seeded = true; waitingReads.splice(0).forEach((run) => run()); };
-  nativeLocalSet(fixtureSeed.local || {}, () => {
+  nativeSeedGet('__classpilotFixtureSeeded', stored => {
+    void chrome.runtime.lastError;
+    if (stored.__classpilotFixtureSeeded) { finishSeed(); return; }
+    nativeLocalSet({ ...(fixtureSeed.local || {}), __classpilotFixtureSeeded:true }, () => {
     void chrome.runtime.lastError;
     if (nativeSessionSet && fixtureSeed.session && Object.keys(fixtureSeed.session).length > 0) nativeSessionSet(fixtureSeed.session, () => { void chrome.runtime.lastError; finishSeed(); });
     else finishSeed();
+    });
   });
 }
 // Per-key native write fault injection for chrome.storage.{local,session}.{set,remove}.
@@ -428,6 +438,65 @@ Object.defineProperty(globalThis, 'ClassPilotContentInjection', {
 `);
   const manifestPath = join(extensionPath, 'manifest.json');
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (protectedStorageFault) {
+    // This entry point changes only Chrome API delivery. The production worker
+    // is imported byte-for-byte, including its early storage restriction call.
+    writeFileSync(join(extensionPath, 'protected-storage-fixture.js'), `
+globalThis.__protectedStorageFixture = {
+  mode:${JSON.stringify(protectedStorageFault.mode)}, holdPurge:${protectedStorageFault.holdPurge === true},
+  calls:[], failures:0, purges:0, completedPurges:0, heldPurges:[], secured:false,
+  capabilityWritesBeforeSecure:0,
+  failVaultWrites:${protectedStorageFault.vaultFailure === true}, vaultWriteFailures:0,
+};
+(() => {
+  const fixture=globalThis.__protectedStorageFixture;
+  const area=chrome.storage.local;
+  const nativeAccess=area.setAccessLevel?.bind(area);
+  const nativeRemove=area.remove.bind(area);
+  const nativeSet=area.set.bind(area);
+  const nativeGet=area.get.bind(area);
+  const nativePut=IDBObjectStore.prototype.put;
+  IDBObjectStore.prototype.put=function(value,...args){
+    if(this.name==='recovery'&&fixture.failVaultWrites){fixture.vaultWriteFailures++;throw new DOMException('FIXTURE_PRIVATE_WRITE_FAILED','UnknownError');}
+    return nativePut.call(this,value,...args);
+  };
+  const failCallback=callback=>{
+    const descriptor=Object.getOwnPropertyDescriptor(chrome.runtime,'lastError');
+    Object.defineProperty(chrome.runtime,'lastError',{configurable:true,get:()=>({message:${JSON.stringify(protectedStorageFault.message || 'FIXTURE_PROTECTED_STORAGE_ACCESS_REJECTED')}})});
+    try { callback(); } finally {
+      if(descriptor)Object.defineProperty(chrome.runtime,'lastError',descriptor);else delete chrome.runtime.lastError;
+    }
+  };
+  area.setAccessLevel=(options,callback)=>{
+    fixture.calls.push({accessLevel:options.accessLevel,configImported:Boolean(globalThis.__managedRecoveryFixture),
+      completedPurges:fixture.completedPurges,at:Date.now()});
+    const fail=fixture.mode==='persistent'||(fixture.mode==='once'&&fixture.failures===0);
+    if(fail){fixture.failures++;queueMicrotask(()=>failCallback(callback));return;}
+    if(!nativeAccess){queueMicrotask(()=>failCallback(callback));return;}
+    return nativeAccess(options,()=>{fixture.secured=!chrome.runtime.lastError;callback();});
+  };
+  area.remove=(keys,...rest)=>{
+    if(keys==='studentSessionRecoveryV1'||(Array.isArray(keys)&&keys.length===1&&keys[0]==='studentSessionRecoveryV1')){
+      fixture.purges++;
+      const run=()=>nativeRemove(keys,()=>{fixture.completedPurges++;rest[0]?.();});
+      if(fixture.holdPurge){nativeGet('__classpilotFixtureSkipPurgeHold',stored=>{
+        void chrome.runtime.lastError;
+        if(stored.__classpilotFixtureSkipPurgeHold)run();else fixture.heldPurges.push(run);
+      });return;}
+      return run();
+    }
+    return nativeRemove(keys,...rest);
+  };
+  area.set=(values,...rest)=>{
+    if(Object.hasOwn(values||{},'studentSessionRecoveryV1')&&!fixture.secured)fixture.capabilityWritesBeforeSecure++;
+    return nativeSet(values,...rest);
+  };
+  fixture.releasePurges=()=>{fixture.holdPurge=false;const queued=fixture.heldPurges.splice(0);queued.forEach(run=>run());return queued.length;};
+})();
+importScripts('service-worker.js');
+`);
+    manifest.background.service_worker = 'protected-storage-fixture.js';
+  }
   manifest.content_scripts[0].js.unshift('managed-recovery-fixture.js');
   if (bootstrapOnly) manifest.content_scripts = manifest.content_scripts.filter(entry => !entry.js.includes('content.js'));
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
@@ -439,7 +508,7 @@ function executable() {
   return candidates.find((candidate) => candidate && existsSync(candidate));
 }
 
-async function withBrowser({ legacyVersion = false, previousVersion=false, snapshotVersion=null, seed=null, quietNetwork=false, mode = 'ready', caseName = 'existing', pagePolicyMode = 'ready', bootstrapOnly = false, authReadMode='ready',authReadArea='local' }, run) {
+async function withBrowser({ legacyVersion = false, previousVersion=false, snapshotVersion=null, seed=null, quietNetwork=false, mode = 'ready', caseName = 'existing', pagePolicyMode = 'ready', bootstrapOnly = false, authReadMode='ready',authReadArea='local', protectedStorageFault=null }, run) {
   if (selectedCase && selectedCase !== caseName) return;
   const root = mkdtempSync(join(tmpdir(), 'classpilot-recovery-browser-'));
   const extensionPath = join(root, 'extension');
@@ -453,20 +522,32 @@ async function withBrowser({ legacyVersion = false, previousVersion=false, snaps
     if (previousVersion) for(const [name,source] of Object.entries(previous.files))writeFileSync(join(extensionPath,name),source);
     if (snapshotVersion) for (const [name, source] of Object.entries(snapshots[snapshotVersion].files)) writeFileSync(join(extensionPath, name), source);
     const resolvedSeed = typeof seed === 'function' ? seed(fixture.origin) : seed;
-    installManagedFixture(extensionPath, fixture.origin, mode, { pagePolicyMode, bootstrapOnly,authReadMode,authReadArea, seed: resolvedSeed, quietNetwork });
+    installManagedFixture(extensionPath, fixture.origin, mode, { pagePolicyMode, bootstrapOnly,authReadMode,authReadArea, seed: resolvedSeed, quietNetwork, protectedStorageFault });
     const executablePath = executable();
     assert.ok(executablePath, 'Install Playwright Chromium before running the recovery browser gate');
-    context = await chromium.launchPersistentContext(profile, {
+    const launchOptions = {
       executablePath, headless: true, viewport: { width: 1366, height: 768 },
-      args: ['--enable-unsafe-extension-debugging', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
-    });
+      args: ['--headless=new', '--enable-unsafe-extension-debugging', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
+    };
+    context = await chromium.launchPersistentContext(profile, launchOptions);
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
     const extensionId = new URL(worker.url()).host;
     const probe = await context.newPage();
     await probe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
+    await waitUntilWorker(worker,()=>typeof isExplicitUnmanagedDevelopmentRuntime==='function',5000,
+      `managed fixture failed to initialize in ${worker.url()}`);
     assert.equal(await worker.evaluate(() => isExplicitUnmanagedDevelopmentRuntime()), false);
     assert.equal(await worker.evaluate(() => isExplicitUnmanagedDevelopmentServer(CONFIG.serverUrl)), false);
-    await run({ context, worker, probe, extensionId, extensionPath, fixture });
+    const restart = async (beforeLaunch = null) => {
+      await context.close();
+      await beforeLaunch?.(extensionPath);
+      context=await chromium.launchPersistentContext(profile,launchOptions);
+      const nextWorker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
+      const nextProbe=await context.newPage();
+      await nextProbe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
+      return {context,worker:nextWorker,probe:nextProbe,extensionId,extensionPath,fixture,restart};
+    };
+    await run({ context, worker, probe, extensionId, extensionPath, fixture, restart });
   } finally {
     await context?.close();
     await new Promise((done) => fixture.server.close(done));
@@ -1697,6 +1778,170 @@ async function waitUntilWorker(worker, predicate, timeout, failureMessage) {
   }
   assert.fail(failureMessage);
 }
+
+async function protectedStorageSummary(worker) {
+  return worker.evaluate(() => {
+    const fixture=__protectedStorageFixture;
+    return { calls:fixture.calls,failures:fixture.failures,purges:fixture.purges,
+      completedPurges:fixture.completedPurges,heldPurges:fixture.heldPurges.length,
+      secured:fixture.secured,capabilityWritesBeforeSecure:fixture.capabilityWritesBeforeSecure };
+  });
+}
+
+async function readPrivateRecoveryRecord() {
+  const db=await new Promise((resolve,reject)=>{
+    const request=indexedDB.open('classpilot-private-recovery-v1');
+    request.onupgradeneeded=()=>request.transaction.abort();
+    request.onerror=()=>request.error?.name==='AbortError'?resolve(null):reject(request.error);
+    request.onsuccess=()=>resolve(request.result);
+  });
+  if(!db)return null;
+  try{return await new Promise((resolve,reject)=>{
+    const request=db.transaction('recovery').objectStore('recovery').get('student-session-recovery');
+    request.onsuccess=()=>resolve(request.result??null);request.onerror=()=>reject(request.error);
+  });}finally{db.close();}
+}
+
+async function assertRecoveryCapabilityPrivate(worker,page) {
+  const visibility=await worker.evaluate(async url=>{
+    const tab=(await chrome.tabs.query({})).find(item=>item.url===url);
+    const [{result}]=await chrome.scripting.executeScript({target:{tabId:tab.id},world:'ISOLATED',func:async()=>{
+      const names=(await indexedDB.databases()).map(item=>item.name);
+      let local=null;try{local=(await chrome.storage.local.get('studentSessionRecoveryV1')).studentSessionRecoveryV1??null;}catch{}
+      return {pageOrigin:location.origin,privateDatabaseVisible:names.includes('classpilot-private-recovery-v1'),legacy:local};
+    }});
+    return result;
+  },page.url());
+  assert.equal(visibility.pageOrigin,new URL(page.url()).origin);
+  assert.equal(visibility.privateDatabaseVisible,false,'isolated content must use the page origin, never the private extension vault');
+  assert.equal(visibility.legacy,null,'recovery capabilities must never remain in content-readable local storage');
+  assert.equal((await page.evaluate(()=>indexedDB.databases())).some(item=>item.name==='classpilot-private-recovery-v1'),false);
+}
+
+async function freshLoginAfterStorageRecovery({worker,probe,page,fixture}) {
+  assert.equal((await workerAuthSummary(worker)).studentToken,null,'storage recovery cannot invent authentication');
+  await assertProtected(page);
+  await assertRecoveryCapabilityPrivate(worker,page);
+  fixture.state.allowFreshLogin=true;
+  const ordinal=fixture.state.studentLoginRequests+1;
+  const login=await rpc(probe,{type:'manual-student-login',payload:{mode:'pin',studentId:'student-fresh-fixture',pin:'1234'}});
+  assert.equal(login?.success,true,`fresh PIN sign-in after private-storage recovery (${JSON.stringify(login)})`);
+  await page.locator('#classpilot-auth-gate').waitFor({state:'detached',timeout:8000});
+  assert.equal(fixture.state.studentLoginRequests,ordinal);
+  assert.equal(await worker.evaluate(()=>studentSessionRecoveryState.armed?.token),String(ordinal).repeat(43));
+  const persisted=await worker.evaluate(readPrivateRecoveryRecord);
+  assert.equal(persisted?.state?.armed?.token,String(ordinal).repeat(43),'new recovery capability is committed to extension-origin IndexedDB');
+  assert.equal(await storedValue(worker,'local','studentSessionRecoveryV1'),undefined);
+  await assertRecoveryCapabilityPrivate(worker,page);
+}
+
+for(const persistent of [false,true])await withBrowser({caseName:persistent?'protected-storage-persistent':'protected-storage-retry',quietNetwork:true,
+  protectedStorageFault:{mode:persistent?'persistent':'once',message:'This StorageArea is not available for setting access level'}},async({context,worker,probe,fixture})=>{
+  const page=await openGatedPage(context,fixture,'case=optional-local-restriction');
+  await waitUntilWorker(worker,()=>authGateStartupComplete,16_000,
+    '[regression:protected-storage-retry] optional local restriction failure must not block private-vault startup');
+  await expectReady(page,12_000,worker,'optional-local-restriction','private-vault compatibility must show fresh sign-in');
+  const observed=await protectedStorageSummary(worker);
+  assert.equal(observed.calls[0].configImported,false,'modern local restriction remains early defense in depth');
+  assert.equal(observed.calls[0].accessLevel,'TRUSTED_CONTEXTS');
+  assert.ok(observed.failures>=1,'fixture must deliver the native unsupported-area callback');
+  assert.equal(fixture.state.studentLoginRequests,0);
+  await freshLoginAfterStorageRecovery({worker,probe,page,fixture});
+  console.log(`PASS ${persistent?'persistent':'initial'} optional local-access failure uses private IndexedDB and fresh credentials`);
+});
+
+await withBrowser({caseName:'private-vault-browser-restart',quietNetwork:true},async(initial)=>{
+  let {context,worker,probe,fixture}=initial;
+  let page=await openGatedPage(context,fixture,'case=private-vault-browser-restart');
+  await waitUntilWorker(worker,()=>authGateStartupComplete,16_000,
+    '[regression:private-vault] the native browser must reach sign-in without local access-level support');
+  assert.ok((await worker.evaluate(readPrivateRecoveryRecord))?.migrated,
+    '[regression:private-vault] startup must commit a private recovery record');
+  await expectReady(page,12_000,worker,'private-vault-browser-restart','fresh sign-in before restart');
+  await freshLoginAfterStorageRecovery({worker,probe,page,fixture});
+  const durableBefore=await worker.evaluate(readPrivateRecoveryRecord);
+  ({context,worker,probe}=await initial.restart());
+  page=await openGatedPage(context,fixture,'case=private-vault-after-browser-restart');
+  await expectReady(page,16_000,worker,'private-vault-browser-restart','browser restart must require fresh sign-in');
+  const durableAfter=await worker.evaluate(readPrivateRecoveryRecord);
+  const capabilities=[durableAfter.state.armed,...durableAfter.state.pending].filter(Boolean);
+  assert.ok(capabilities.some(record=>record.token===durableBefore.state.armed.token),'exact recovery capability survives full browser restart');
+  assert.equal((await workerAuthSummary(worker)).studentToken,null,'manual session bearer must not survive full browser restart');
+  assert.equal(fixture.state.studentLoginRequests,1,'browser restart cannot replay credentials');
+  await freshLoginAfterStorageRecovery({worker,probe,page,fixture});
+  console.log('PASS native browser private-vault origin isolation, durable full-browser restart, and fresh PIN requirement');
+});
+
+await withBrowser({caseName:'private-vault-write-failure',quietNetwork:true,
+  protectedStorageFault:{mode:'ready',vaultFailure:true}},async({context,worker,probe,fixture})=>{
+  const page=await openGatedPage(context,fixture,'case=private-vault-write-failure');
+  const frame=await waitForPhase(page,'unavailable',12_000);
+  await assertProtected(page);
+  assert.ok(await worker.evaluate(()=>__protectedStorageFixture.vaultWriteFailures>0));
+  assert.equal(await worker.evaluate(readPrivateRecoveryRecord),null,'failed transaction must not publish a migration marker');
+  const details=await frame.locator('#classpilot-auth-it-text').inputValue();
+  assert.match(details,/RECOVERY_STORE_MIGRATION_FAILED/);
+  assert.equal(details.includes('FIXTURE_PRIVATE_WRITE_FAILED'),false);
+  const retry=await rpc(probe,{type:'refresh-auth-state',reason:'user'});
+  assert.equal(retry?.success,false);
+  assert.equal((await workerAuthSummary(worker)).studentToken,null);
+  assert.equal(fixture.state.studentLoginRequests,0);
+  await worker.evaluate(()=>{__protectedStorageFixture.failVaultWrites=false;});
+  await rpc(probe,{type:'refresh-auth-state',reason:'user'});
+  await expectReady(page,15_000,worker,'private-vault-write-failure','healed native IndexedDB writes must recover');
+  await freshLoginAfterStorageRecovery({worker,probe,page,fixture});
+  console.log('PASS native IDB write failure remains blocked and diagnostic; transaction recovery requires fresh credentials');
+});
+
+const migrationSeed=origin=>({local:{deviceId:'migration-device',autoRegistrationPaused:true,
+  config:{serverUrl:origin,deviceId:'migration-device',schoolId:'recovery-school',schoolSlug:'recovery-school',enrollmentKey:'fixture-enrollment'},
+  studentSessionRecoveryV1:{schemaVersion:1,pending:[],armed:{state:'armed',generation:'recovery_migration_fixture',serverOrigin:origin,
+    schoolId:'recovery-school',token:'M'.repeat(43),authContextId:'auth_migration_fixture',createdAt:Date.now()}}}});
+await withBrowser({caseName:'private-vault-migration-crash',quietNetwork:true,seed:migrationSeed,
+  protectedStorageFault:{mode:'ready',holdPurge:true}},async(initial)=>{
+  let {context,worker,probe,fixture}=initial;
+  await waitUntilWorker(worker,()=>__protectedStorageFixture.heldPurges.length>=1,8000,'legacy cleanup must be reached');
+  const committed=await worker.evaluate(readPrivateRecoveryRecord);
+  assert.equal(committed?.migrated,true);
+  assert.equal(committed?.state?.armed?.token,'M'.repeat(43),'IDB transaction commits legacy capability before local removal');
+  assert.equal((await storedValue(worker,'local','studentSessionRecoveryV1')).armed.token,'M'.repeat(43));
+  assert.equal((await workerAuthSummary(worker)).startup,false,'pending legacy cleanup cannot release loaded recovery authority');
+  fixture.state.revocableSession={studentId:'student-migration-fixture',recoveryToken:'M'.repeat(43),active:false};
+  fixture.state.revokedRecoveryToken='M'.repeat(43);
+  const command=await worker.evaluate(()=>handleRemoteControl({type:'student-sign-out',data:{reason:'teacher-sign-out'},
+    authority:{teachingSessionId:'migration-class',supervisionContextId:null}},
+    {commandId:'migration-signout',studentId:'student-migration-fixture',studentSessionId:'login-migration-fixture',
+      authority:{teachingSessionId:'migration-class',supervisionContextId:null}}));
+  assert.equal(command?.rejected,true,'server sign-out while migration owns startup cannot acquire local authentication authority');
+  await worker.evaluate(()=>chrome.storage.local.set({__classpilotFixtureSkipPurgeHold:true}));
+  ({context,worker,probe}=await initial.restart());
+  let page=await openGatedPage(context,fixture,'case=migration-after-crash');
+  await expectReady(page,16_000,worker,'private-vault-migration-crash','committed migration must retry only legacy cleanup after restart');
+  assert.equal(await storedValue(worker,'local','studentSessionRecoveryV1'),undefined);
+  const migrated=await worker.evaluate(readPrivateRecoveryRecord);
+  assert.ok([migrated.state.armed,...migrated.state.pending].filter(Boolean).some(record=>record.token==='M'.repeat(43)));
+  const roster=await rpc(probe,{type:'get-login-roster',gradeLevel:''});
+  assert.equal(roster?.success,true);
+  assert.ok(fixture.state.revokedRosterRequests>0,'the migrated capability must still be verified by the server');
+  assert.ok(!roster.recoveryGrantId);
+  assert.ok(roster.students.every(student=>student.reclaimable!==true),'a server-ended session cannot become resumable through migration');
+  await worker.evaluate(async legacy=>{
+    await persistStudentSessionRecoveryState(emptyStudentSessionRecoveryState());
+    await chrome.storage.local.set({studentSessionRecoveryV1:legacy});
+  },migrationSeed(fixture.origin).local.studentSessionRecoveryV1);
+  ({context,worker,probe}=await initial.restart());
+  page=await openGatedPage(context,fixture,'case=migration-tombstone');
+  await expectReady(page,16_000,worker,'private-vault-migration-crash','empty private record must suppress stale legacy reimport');
+  const empty=await worker.evaluate(readPrivateRecoveryRecord);
+  assert.equal(empty.migrated,true);assert.equal(empty.state.armed,null);assert.deepEqual(empty.state.pending,[]);
+  assert.equal(await storedValue(worker,'local','studentSessionRecoveryV1'),undefined);
+  await freshLoginAfterStorageRecovery({worker,probe,page,fixture});
+  const staleApplied=await worker.evaluate(record=>applyStudentSessionRecoveryReleaseOutcome(record,{outcome:'released',retryAfterMs:0}),committed.state.armed);
+  assert.equal(staleApplied,false,'late release of migrated authority must not clear a newer login');
+  assert.equal(await worker.evaluate(()=>CONFIG.studentToken),'fresh-fixture-token-1');
+  assert.deepEqual(fixture.state.loginAuthorizationHeaders,[null],'fresh PIN does not reuse the revoked legacy capability');
+  console.log('PASS commit-before-delete migration, crash cleanup retry, and durable empty tombstone prevent legacy resurrection');
+});
 
 await withBrowser({ caseName: 'wake-partial-auth-clear', authReadMode: 'never', seed: browserSessionCredentialSeed, quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
   const page = await openGatedPage(context, fixture, 'case=wake-partial-auth-clear');

@@ -192,6 +192,7 @@ async function main() {
       executablePath,
       headless: true,
       args: [
+        '--headless=new',
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
       ],
@@ -275,9 +276,10 @@ async function main() {
         'auth_recovery_old',
       );
       const armedAfterDelayedOldClear = studentSessionRecoveryState.armed;
-      const persistedRecovery = (await chrome.storage.local.get(
-        STUDENT_SESSION_RECOVERY_STORAGE_KEY,
-      ))[STUDENT_SESSION_RECOVERY_STORAGE_KEY];
+      const persistedRecovery = await getPrivateStudentSessionRecoveryStore().load();
+      if ((await chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY))[STUDENT_SESSION_RECOVERY_STORAGE_KEY] !== undefined) {
+        throw new Error('Recovery capability leaked into content-readable local storage');
+      }
       const persistedArmedKeys = Object.keys(persistedRecovery?.armed || {}).sort();
       await enqueueStudentSessionRecoveryMutation(() => persistStudentSessionRecoveryState(
         emptyStudentSessionRecoveryState(),

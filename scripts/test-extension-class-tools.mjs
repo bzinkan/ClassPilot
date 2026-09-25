@@ -14,8 +14,8 @@ const profile = await mkdtemp(join(tmpdir(), 'classpilot-class-tools-'));
 let browser;
 let server;
 try {
-  browser = await chromium.launchPersistentContext(profile, { executablePath: chromium.executablePath(), headless: true,
-    args: ['--enable-automation', '--no-proxy-server', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
+  browser = await chromium.launchPersistentContext(profile, { executablePath: process.env.CLASSPILOT_CHROME_PATH || chromium.executablePath(), headless: true,
+    args: ['--headless=new', '--enable-automation', '--no-proxy-server', '--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1, EXCLUDE localhost', `--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   const launchSession = await browser.newCDPSession(browser.pages()[0] || await browser.newPage());
   try {
     const { arguments: launchArguments } = await launchSession.send('Browser.getBrowserCommandLine');

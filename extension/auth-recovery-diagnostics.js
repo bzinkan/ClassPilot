@@ -36,10 +36,17 @@
   const FAILURE_CLASSES = new Set([
     ...SUPPORT_CODES, 'AUTH_GATE_TIMEOUT', 'AUTH_MUTATION_SUPERSEDED',
     'STORAGE_QUOTA_EXCEEDED', 'STORAGE_IO_ERROR', 'STORAGE_CONTEXT_INVALIDATED', 'STORAGE_FAILED',
+    'RECOVERY_STORE_UNAVAILABLE', 'RECOVERY_STORE_READ_FAILED',
+    'RECOVERY_STORE_WRITE_FAILED', 'RECOVERY_STORE_MIGRATION_FAILED',
     'AbortError', 'DOMException', 'Error', 'NetworkError', 'NotAllowedError', 'NotFoundError',
     'OperationError', 'QuotaExceededError', 'SecurityError', 'TimeoutError', 'TypeError', 'pending',
   ]);
   const RESTORE_OUTCOMES = new Set(['pending', 'verified', 'failed', 'superseded']);
+  const STORAGE_ACCESS_PHASES = new Set(['opening', 'reading', 'migrating', 'purging', 'writing', 'ready', 'failed']);
+  const STORAGE_ACCESS_FAILURES = new Set([
+    'RECOVERY_STORE_UNAVAILABLE', 'RECOVERY_STORE_READ_FAILED',
+    'RECOVERY_STORE_WRITE_FAILED', 'RECOVERY_STORE_MIGRATION_FAILED',
+  ]);
   const boundedNumber = (value, maximum, fallback = 0) => typeof value === 'number' && Number.isFinite(value)
     ? Math.min(maximum, Math.max(0, Math.floor(value))) : fallback;
   const safeVersion = value => typeof value === 'string' && /^(?:\d{1,5}(?:\.\d{1,5}){0,3}|unknown)$/.test(value)
@@ -47,6 +54,12 @@
 
   function sanitizeSupportDetails(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const access = value.storageAccess;
+    const storageAccess = access && typeof access === 'object' && !Array.isArray(access)
+      && STORAGE_ACCESS_PHASES.has(access.phase)
+      ? { phase: access.phase, attemptCount: boundedNumber(access.attemptCount, 100),
+        ...(STORAGE_ACCESS_FAILURES.has(access.failureClass) ? { failureClass: access.failureClass } : {}) }
+      : null;
     const first = value.firstFailure;
     const firstFailure = first && typeof first === 'object'
       && SUPPORT_STEPS.has(first.startupPhase) && FAILURE_CLASSES.has(first.failureClass)
@@ -68,6 +81,7 @@
         ? { retryInMs: boundedNumber(value.retryInMs, 300_000) } : {}),
       ...(typeof value.pending === 'boolean' ? { pending: value.pending } : {}),
       ...(firstFailure ? { firstFailure } : {}),
+      ...(storageAccess ? { storageAccess } : {}),
     };
   }
 
@@ -103,6 +117,11 @@
     if (details.firstFailure) lines.push(
       `First failure: ${details.firstFailure.startupPhase} / ${details.firstFailure.failureClass}`,
       `First failure time: ${new Date(details.firstFailure.timestamp).toISOString()}`,
+    );
+    if (details.storageAccess) lines.push(
+      `Private recovery storage: ${details.storageAccess.phase}`,
+      `Private recovery storage attempt: ${details.storageAccess.attemptCount}`,
+      ...(details.storageAccess.failureClass ? [`Private recovery storage failure: ${details.storageAccess.failureClass}`] : []),
     );
     if (details.startupPhase === 'worker_unavailable') lines.push('Worker details unavailable; this is the page connection status.');
     return lines.join('\n');

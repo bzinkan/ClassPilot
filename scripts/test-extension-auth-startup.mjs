@@ -393,6 +393,7 @@ function launchContext(executablePath, profilePath, extensionPath) {
     hasTouch: true,
     viewport: { width: 1366, height: 768 },
     args: [
+      '--headless=new',
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
     ],
@@ -2930,6 +2931,7 @@ async function main() {
     );
 
     const committedManualStorage = await worker.evaluate(async () => ({
+      recovery: await getPrivateStudentSessionRecoveryStore().load(),
       local: await chrome.storage.local.get([
         'studentToken',
         'activeStudentId',
@@ -2953,9 +2955,10 @@ async function main() {
     assert.equal(committedManualStorage.session.activeStudentId, 'student-1');
     assert.equal(committedManualStorage.session.activeStudentSessionId, 'fixture-session');
     assert.equal(
-      committedManualStorage.local.studentSessionRecoveryV1?.armed?.token,
+      committedManualStorage.recovery?.armed?.token,
       'R'.repeat(43),
     );
+    assert.equal(committedManualStorage.local.studentSessionRecoveryV1, undefined);
 
     const releasesBeforeOrdinaryTabClose = fixture.state.sessionReleaseRequests;
     const ordinaryTab = await context.newPage();

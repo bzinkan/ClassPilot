@@ -165,3 +165,40 @@ test('later missing-worker replies retain only the first known causal failure un
   assert.equal(JSON.stringify(repeated).includes('private'), false);
   assert.equal('firstFailure' in api.retainFirstFailure(null, null, 'AUTH_GATE_RPC_TIMEOUT'), false);
 });
+
+test('protected storage failures survive support handoffs without disclosing native errors', () => {
+  const api = support();
+  for (const failureClass of ['RECOVERY_STORE_UNAVAILABLE', 'RECOVERY_STORE_READ_FAILED', 'RECOVERY_STORE_WRITE_FAILED', 'RECOVERY_STORE_MIGRATION_FAILED']) {
+    const secret = 'private@example.test https://private.test/bearer-token';
+    let details = api.sanitize({ extensionVersion: '2.9.4', startupPhase: 'recovery_clear',
+      failureClass, firstFailure: { startupPhase: 'session_recovery', failureClass, timestamp: 1000 },
+      storageAccess: { phase: 'failed', attemptCount: 2, failureClass, message: secret, promise: secret },
+      message: secret });
+    // Every transport/frame/bootstrap handoff applies the same sanitizer.
+    for (let handoff = 0; handoff < 5; handoff++) details = api.sanitize(details);
+    const text = api.format(details, 'AUTH_GATE_STARTUP_TIMEOUT');
+    assert.equal(details.failureClass, failureClass);
+    assert.equal(details.firstFailure.failureClass, failureClass);
+    assert.deepEqual(Object.keys(details.storageAccess).sort(), ['attemptCount', 'failureClass', 'phase']);
+    assert.match(text, /Private recovery storage: failed/);
+    assert.match(text, /Private recovery storage attempt: 2/);
+    assert.ok(text.includes(`Private recovery storage failure: ${failureClass}`));
+    assert.equal(text.includes('update Chrome/ChromeOS'), false);
+    assert.equal(text.includes('private'), false);
+    const absent = api.retainFirstFailure(details, null, 'AUTH_GATE_RPC_TIMEOUT');
+    assert.equal('storageAccess' in absent, false, 'an unreachable worker cannot inherit old access status');
+    assert.equal(absent.firstFailure.failureClass, failureClass);
+  }
+});
+
+test('protected storage details reject invented phases and omit unknown worker state', () => {
+  const api = support();
+  assert.equal('storageAccess' in api.sanitize({ storageAccess: { phase: 'student-name', attemptCount: 1 } }), false);
+  assert.equal('storageAccess' in api.fallback('AUTH_GATE_RPC_TIMEOUT'), false);
+  for (const phase of ['opening', 'reading', 'migrating', 'purging', 'writing', 'ready', 'failed']) {
+    const value = api.sanitize({ storageAccess: { phase, attemptCount: 1e9, failureClass: 'raw-native-error' } });
+    assert.equal(value.storageAccess.phase, phase);
+    assert.equal(value.storageAccess.attemptCount, 100);
+    assert.equal('failureClass' in value.storageAccess, false);
+  }
+});

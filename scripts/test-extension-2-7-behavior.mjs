@@ -234,6 +234,7 @@ async function main() {
       executablePath,
       headless: true,
       args: [
+        '--headless=new',
         `--disable-extensions-except=${extensionPath}`,
         `--load-extension=${extensionPath}`,
       ],

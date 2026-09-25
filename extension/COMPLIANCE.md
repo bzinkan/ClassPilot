@@ -223,7 +223,7 @@ student app selection, and later sign-in starts a new bounded attempt.
 The extension preserves an authentication tab or popup during
 tab-limit reconciliation without counting it as destination-compliant.
 
-The trusted local record contains only an opaque binding digest, revision
+The local record contains only an opaque binding digest, revision
 numbers, provider id, bounded timestamps, and active tab id. Student-observed
 redirect paths, query strings, fragments, tokens, cookies, and credentials are
 not stored in classroom state, monitoring outboxes, or logs. Monitoring metadata
@@ -305,7 +305,7 @@ Before each Chrome Web Store upload:
 - Bump `extension/manifest.json`, run every source gate, then build only through
   `./extension/package-extension.sh` from the repository root.
 - Upload only the generated versioned artifact (for this release,
-  `dist/ClassPilot-v2.9.4.zip`); never assemble a ZIP manually or treat the
+  `dist/ClassPilot-v2.9.5.zip`); never assemble a ZIP manually or treat the
   unversioned compatibility copy as release evidence.
 - Confirm `manifest.json` and `managed_schema.json` are at the zip root.
 - Confirm the zip does not contain `.env`, source control files, old release

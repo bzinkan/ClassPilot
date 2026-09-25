@@ -1,35 +1,28 @@
 // ClassPilot - Service Worker
 // Handles background heartbeat sending and tab monitoring
 
-// Recovery capabilities live in storage.local so cleanup survives a browser
-// restart, but content scripts must never be able to read that storage area.
-// Dispatch this restriction before imports or any asynchronous startup work.
+// Modern Chrome can additionally restrict local storage to trusted contexts.
+// Chrome 133 cannot; durable recovery authority lives in extension-origin
+// IndexedDB on every supported version. Never purge legacy recovery here:
+// migration must commit its private copy before removing the old record.
 function restrictLocalStorageToTrustedContexts(storageArea, runtimeApi) {
-  return new Promise((resolve, reject) => {
-    const purgeRecovery = () => storageArea?.remove?.('studentSessionRecoveryV1', () => {
-      void runtimeApi?.lastError;
-    });
-    if (!storageArea?.setAccessLevel) {
-      purgeRecovery();
-      reject(new Error('Trusted-only extension storage is unavailable'));
+  return new Promise(resolve => {
+    if (typeof storageArea?.setAccessLevel !== 'function') {
+      resolve(false);
       return;
     }
-    storageArea.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }, () => {
-      if (runtimeApi?.lastError) {
-        purgeRecovery();
-        reject(new Error('Trusted-only extension storage could not be enabled'));
-        return;
-      }
-      resolve();
-    });
+    try {
+      storageArea.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }, () => {
+        const nativeError = runtimeApi?.lastError;
+        resolve(!nativeError);
+      });
+    } catch {
+      resolve(false);
+    }
   });
 }
 
-const trustedLocalStorageAccessPromise = restrictLocalStorageToTrustedContexts(
-  chrome.storage?.local,
-  chrome.runtime,
-);
-trustedLocalStorageAccessPromise.catch(() => {});
+restrictLocalStorageToTrustedContexts(chrome.storage?.local, chrome.runtime).catch(() => {});
 
 try {
   importScripts('config.js');
@@ -37,6 +30,7 @@ try {
   console.info('[Config] No config.js override loaded; using managed policy or defaults');
 }
 importScripts('classroom-runtime-core.js');
+importScripts('private-recovery-store.js');
 importScripts('school-website-policy.js');
 importScripts('auth-recovery-diagnostics.js');
 importScripts('content-injection.js');
@@ -60,7 +54,9 @@ const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
   'AUTH_CONTEXT_INCOMPLETE',
   'AUTH_CONTEXT_SUPERSEDED',
   'AUTH_GATE_INVALID_POLICY_FENCE',
+  'AUTH_GATE_STARTUP_TIMEOUT',
   'AUTH_GATE_TIMEOUT',
+  'AUTH_GATE_UNAVAILABLE',
   'AUTH_MUTATION_SUPERSEDED',
   'CLASSROOM_STATE_INVALID',
   'COMMAND_ACK_AUTHORITY_UNAVAILABLE',
@@ -77,6 +73,10 @@ const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
   'SCREENSHOT_PAUSED_UNOBSERVED',
   'STALE_TAB_SNAPSHOT',
   'STORAGE_CONTEXT_INVALIDATED',
+  'RECOVERY_STORE_UNAVAILABLE',
+  'RECOVERY_STORE_READ_FAILED',
+  'RECOVERY_STORE_WRITE_FAILED',
+  'RECOVERY_STORE_MIGRATION_FAILED',
   'STORAGE_FAILED',
   'STORAGE_IO_ERROR',
   'STORAGE_QUOTA_EXCEEDED',
@@ -2908,13 +2908,13 @@ function installStudentSessionRecoveryState(state) {
   return studentSessionRecoveryState;
 }
 
-async function scheduleStudentSessionRecoveryAlarm() {
-  const pending = studentSessionRecoveryState.pending || [];
+async function scheduleStudentSessionRecoveryAlarm(state = studentSessionRecoveryState) {
+  const pending = state.pending || [];
   if (pending.length === 0) {
     await chrome.alarms.clear(STUDENT_SESSION_RECOVERY_ALARM).catch(() => false);
     return;
   }
-  const reservedGenerations = recoveryGenerationsReservedForGate();
+  const reservedGenerations = recoveryGenerationsReservedForGate(state);
   const nextBoundary = pending.reduce((earliest, record) => Math.min(
     earliest,
     reservedGenerations.has(record.generation) ? record.discardAt : record.nextAttemptAt,
@@ -2926,24 +2926,39 @@ async function scheduleStudentSessionRecoveryAlarm() {
   });
 }
 
-async function ensureStudentSessionRecoveryLoaded(rawState) {
-  await trustedLocalStorageAccessPromise;
+let privateStudentSessionRecoveryStore = null;
+
+function getPrivateStudentSessionRecoveryStore() {
+  if (privateStudentSessionRecoveryStore) return privateStudentSessionRecoveryStore;
+  if (typeof globalThis.ClassPilotPrivateRecoveryStore?.create !== 'function') {
+    const error = new Error('Private recovery storage is unavailable');
+    error.code = 'RECOVERY_STORE_UNAVAILABLE';
+    throw error;
+  }
+  privateStudentSessionRecoveryStore = globalThis.ClassPilotPrivateRecoveryStore.create({
+    indexedDB: globalThis.indexedDB,
+    normalize: normalizeStudentSessionRecoveryState,
+    readLegacy: async () => (await rawLocalKv.get([STUDENT_SESSION_RECOVERY_STORAGE_KEY]))[
+      STUDENT_SESSION_RECOVERY_STORAGE_KEY
+    ],
+    removeLegacy: async () => {
+      await rawLocalKv.remove(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
+      const stored = await rawLocalKv.get([STUDENT_SESSION_RECOVERY_STORAGE_KEY]);
+      if (Object.prototype.hasOwnProperty.call(stored, STUDENT_SESSION_RECOVERY_STORAGE_KEY)) {
+        throw new Error('Legacy recovery cleanup did not complete');
+      }
+    },
+  });
+  return privateStudentSessionRecoveryStore;
+}
+
+async function ensureStudentSessionRecoveryLoaded() {
   if (studentSessionRecoveryLoaded) return studentSessionRecoveryState;
   if (studentSessionRecoveryLoadPromise) return studentSessionRecoveryLoadPromise;
   const run = (async () => {
-    const raw = rawState === undefined
-      ? (await durableLocalKv.get([STUDENT_SESSION_RECOVERY_STORAGE_KEY]))[
-        STUDENT_SESSION_RECOVERY_STORAGE_KEY
-      ]
-      : rawState;
-    const normalized = normalizeStudentSessionRecoveryState(raw);
+    const normalized = await getPrivateStudentSessionRecoveryStore().load();
     installStudentSessionRecoveryState(normalized);
-    if (studentSessionRecoveryStateHasRecords(normalized)) {
-      await durableLocalKv.set({ [STUDENT_SESSION_RECOVERY_STORAGE_KEY]: normalized });
-    } else if (raw !== undefined) {
-      await durableLocalKv.remove(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
-    }
-    await scheduleStudentSessionRecoveryAlarm();
+    await scheduleStudentSessionRecoveryAlarm(normalized);
     return studentSessionRecoveryState;
   })();
   studentSessionRecoveryLoadPromise = run.finally(() => {
@@ -2965,14 +2980,9 @@ function enqueueStudentSessionRecoveryMutation(mutation) {
 }
 
 async function persistStudentSessionRecoveryState(nextState) {
-  const normalized = normalizeStudentSessionRecoveryState(nextState);
-  if (studentSessionRecoveryStateHasRecords(normalized)) {
-    await durableLocalKv.set({ [STUDENT_SESSION_RECOVERY_STORAGE_KEY]: normalized });
-  } else {
-    await durableLocalKv.remove(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
-  }
+  const normalized = await getPrivateStudentSessionRecoveryStore().persist(nextState);
   installStudentSessionRecoveryState(normalized);
-  await scheduleStudentSessionRecoveryAlarm();
+  await scheduleStudentSessionRecoveryAlarm(normalized);
   return studentSessionRecoveryState;
 }
 
@@ -3380,7 +3390,7 @@ async function prepareStudentSessionRecoveryForGate(options = {}) {
 }
 
 async function reconcileStudentSessionRecoveryAtWorkerWake(authStored, options = {}) {
-  await ensureStudentSessionRecoveryLoaded(authStored?.[STUDENT_SESSION_RECOVERY_STORAGE_KEY]);
+  await ensureStudentSessionRecoveryLoaded();
   const armed = studentSessionRecoveryState.armed;
   const storedAuthContextId = normalizeStudentSessionRecoveryOpaqueId(
     authStored?.authContextId,
@@ -12328,6 +12338,9 @@ function getAuthGateSupportDetails(error = null) {
       retryInMs: retryTimes.length ? Math.max(0, Math.min(...retryTimes) - Date.now()) : 0,
       pending: !authGateStartupComplete && (owners.some(owner => Boolean(owner.inFlight)) || !workerWakeSettled),
       ...(workerWakeFirstFailure ? { firstFailure: workerWakeFirstFailure } : {}),
+      ...(typeof privateStudentSessionRecoveryStore !== 'undefined' && privateStudentSessionRecoveryStore ? {
+        storageAccess: privateStudentSessionRecoveryStore.getStatus(),
+      } : {}),
     });
   } catch { return undefined; }
 }
@@ -15975,7 +15988,6 @@ const authStateRestorePromise = new Promise((resolve) => {
       STUDENT_AUTH_CLEAR_INTENT_KEY,
       SHARED_SIGN_IN_CONFIG_CACHE_KEY,
       MANAGED_AUTH_GATE_BINDING_KEY,
-      STUDENT_SESSION_RECOVERY_STORAGE_KEY,
       AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY,
       RESTRICTION_AUTH_ATTEMPT_STORAGE_KEY,
     ], { startupReadRecovery: true });
@@ -25942,8 +25954,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false });
       return true;
     }
-    trustedLocalStorageAccessPromise
-      .then(() => persistContentAuthGateTiming(message.timing))
+    persistContentAuthGateTiming(message.timing)
       .then(
         () => sendResponse({ success: true }),
         () => sendResponse({ success: false }),

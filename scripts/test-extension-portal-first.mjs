@@ -295,7 +295,7 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     proxy = await navigationProxy(profilePath, documents);
     const launch = () => chromium.launchPersistentContext(profilePath, {
       executablePath, headless: true, viewport: { width: 1200, height: 800 },
-      args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
+      args: ['--headless=new', `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
         `--proxy-server=${proxy.address}`, '--ignore-certificate-errors'],
     });
     context = await launch();

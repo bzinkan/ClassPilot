@@ -90,7 +90,7 @@ const origin = `http://127.0.0.1:${server.address().port}`;
 const configured = process.env.CLASSPILOT_CHROME_PATH;
 const executablePath = [configured, chromium.executablePath(), 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'].find(path => path && existsSync(path));
 if (!executablePath) throw new Error('A Chromium executable is required for auth recovery frame tests');
-const browser = await chromium.launch({ executablePath, headless: true, args: ['--disable-background-networking'] });
+const browser = await chromium.launch({ executablePath, headless: true, args: ['--headless=new', '--disable-background-networking'] });
 let passed = 0;
 async function scenario(name, mode, run) {
   const page = await browser.newPage();

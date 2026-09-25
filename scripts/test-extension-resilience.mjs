@@ -30,7 +30,23 @@ function chromeExecutable() {
 }
 
 async function waitForInitialWorker(context) {
-  return context.serviceWorkers()[0] || context.waitForEvent('serviceworker', { timeout: 10_000 });
+  const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker',{timeout:10_000});
+  // Older Chromium exposes the CDP worker target before its entry script has
+  // executed. Wait for production declarations before installing probe helpers.
+  const deadline=Date.now()+5000;
+  while(Date.now()<deadline&&await worker.evaluate(()=>typeof restrictLocalStorageToTrustedContexts!=='function')) {
+    await new Promise(resolve=>setTimeout(resolve,25));
+  }
+  assert.equal(await worker.evaluate(()=>typeof restrictLocalStorageToTrustedContexts),'function',
+    'the production worker entry script must execute before resilience probes');
+  await worker.evaluate(()=>{globalThis.__readPrivateRecoveryState=async()=>{
+    const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('classpilot-private-recovery-v1');
+      req.onupgradeneeded=()=>req.transaction.abort();req.onerror=()=>req.error?.name==='AbortError'?resolve(null):reject(req.error);req.onsuccess=()=>resolve(req.result);});
+    if(!db)return null;
+    try{return await new Promise((resolve,reject)=>{const req=db.transaction('recovery').objectStore('recovery').get('student-session-recovery');
+      req.onsuccess=()=>resolve(req.result?.state??null);req.onerror=()=>reject(req.error);});}finally{db.close();}
+  };});
+  return worker;
 }
 
 function attachWorkerErrorCapture(worker, errors) {
@@ -44,6 +60,7 @@ function launchTestContext(executablePath, fixture) {
     executablePath,
     headless: true,
     args: [
+      '--headless=new',
       // Install the guard before the extension starts: synthetic authority
       // fixtures must never fall through an unmocked fetch to a live backend.
       '--no-proxy-server',
@@ -149,7 +166,7 @@ async function main() {
     );
   }
   const trustedAccessDispatchIndex = serviceWorkerSource.indexOf(
-    'const trustedLocalStorageAccessPromise = restrictLocalStorageToTrustedContexts(',
+    'restrictLocalStorageToTrustedContexts(chrome.storage?.local, chrome.runtime).catch(() => {});',
   );
   assert.ok(trustedAccessDispatchIndex >= 0);
   assert.ok(trustedAccessDispatchIndex < serviceWorkerSource.indexOf("importScripts('config.js')"));
@@ -227,82 +244,45 @@ async function main() {
         },
       };
       let rejected = false;
+      let secured = null;
       try {
-        await restrictLocalStorageToTrustedContexts(fakeStorage, {
+        secured = await restrictLocalStorageToTrustedContexts(fakeStorage, {
           lastError: { message: 'simulated access-level failure' },
         });
       } catch {
         rejected = true;
       }
-      return { order, rejected };
+      return { order, rejected, secured };
     });
     assert.deepEqual(trustedAccessFailure.order, [
       'access:TRUSTED_CONTEXTS',
-      'remove:studentSessionRecoveryV1',
     ]);
-    assert.equal(trustedAccessFailure.rejected, true);
+    assert.equal(trustedAccessFailure.rejected, false);
+    assert.equal(trustedAccessFailure.secured, false);
     const trustedRecoveryStorage = await worker.evaluate(async ({ fixturePort }) => {
-      await trustedLocalStorageAccessPromise;
-      // The worker wake owns recovery-state normalization. Let its one-time
-      // loader claim the production key before installing this deliberately
-      // malformed privacy probe; otherwise Linux can race the probe write with
-      // the expected malformed-state cleanup and produce a false null result.
-      await ensureStudentSessionRecoveryLoaded();
-      const marker = 'trusted-recovery-storage-marker';
-      await chrome.storage.local.set({
-        [STUDENT_SESSION_RECOVERY_STORAGE_KEY]: { marker },
-      });
-      // Keep the probe in place while the rest of worker-wake reconciliation
-      // drains so this test still covers the original startup interleaving.
       await authStateRestorePromise;
-      await studentSessionRecoveryMutationTail;
-      const tab = await chrome.tabs.create({
-        url: `http://storage-privacy.localhost:${fixturePort}/recovery-storage`,
-        active: false,
-      });
+      await ensureStudentSessionRecoveryLoaded();
+      const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('classpilot-private-recovery-v1');req.onerror=()=>reject(req.error);req.onsuccess=()=>resolve(req.result);});
+      const marker='trusted-recovery-storage-marker';
+      await new Promise((resolve,reject)=>{const tx=db.transaction('recovery','readwrite');tx.objectStore('recovery').put({marker},'privacy-probe');tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
+      const tab=await chrome.tabs.create({url:`http://storage-privacy.localhost:${fixturePort}/recovery-storage`,active:false});
       try {
-        const deadline = Date.now() + 5_000;
-        while (Date.now() < deadline) {
-          const current = await chrome.tabs.get(tab.id);
-          if (current.status === 'complete') break;
-          await new Promise((resolvePoll) => setTimeout(resolvePoll, 25));
-        }
-        const workerValue = await chrome.storage.local.get(
-          STUDENT_SESSION_RECOVERY_STORAGE_KEY,
-        );
-        const [contentResult] = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          world: 'ISOLATED',
-          func: async () => {
-            try {
-              const stored = await chrome.storage.local.get('studentSessionRecoveryV1');
-              return {
-                readable: true,
-                marker: stored.studentSessionRecoveryV1?.marker || null,
-              };
-            } catch {
-              return { readable: false, marker: null };
-            }
-          },
-        });
-        return {
-          workerMarker: workerValue[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.marker || null,
-          contentReadable: contentResult?.result?.readable === true,
-          contentMarker: contentResult?.result?.marker || null,
-        };
-      } finally {
-        await chrome.storage.local.remove(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
-        await chrome.tabs.remove(tab.id).catch(() => {});
+        const deadline=Date.now()+5000;
+        while(Date.now()<deadline){if((await chrome.tabs.get(tab.id)).status==='complete')break;await new Promise(resolve=>setTimeout(resolve,25));}
+        const workerMarker=await new Promise((resolve,reject)=>{const req=db.transaction('recovery').objectStore('recovery').get('privacy-probe');req.onsuccess=()=>resolve(req.result?.marker);req.onerror=()=>reject(req.error);});
+        const [content]=await chrome.scripting.executeScript({target:{tabId:tab.id},world:'ISOLATED',func:async()=>({
+          readable:(await indexedDB.databases()).some(db=>db.name==='classpilot-private-recovery-v1'),marker:null,
+        })});
+        return {workerMarker,contentReadable:content.result.readable,contentMarker:content.result.marker};
+      }finally{
+        await new Promise((resolve,reject)=>{const tx=db.transaction('recovery','readwrite');tx.objectStore('recovery').delete('privacy-probe');tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
+        db.close();await chrome.tabs.remove(tab.id).catch(()=>{});
       }
     }, { fixturePort: fixture.port });
     assert.equal(trustedRecoveryStorage.workerMarker, 'trusted-recovery-storage-marker');
     assert.equal(trustedRecoveryStorage.contentMarker, null);
-    // Chrome versions differ on whether an untrusted get rejects or returns
-    // an empty object; neither result may expose the recovery capability.
-    assert.equal(
-      trustedRecoveryStorage.contentReadable && Boolean(trustedRecoveryStorage.contentMarker),
-      false,
-    );
+    assert.equal(trustedRecoveryStorage.contentReadable, false,
+      'an isolated content script must not see the extension-origin database');
     const initialNow = Date.now();
     const initial = await worker.evaluate(async ({ now }) => {
       await authStateRestorePromise.catch(() => {});
@@ -3997,7 +3977,7 @@ async function main() {
       }
       const originalFetchWithBackoff = fetchWithBackoff;
       const originalFetch = globalThis.fetch;
-      const originalDurableSet = durableLocalKv.set;
+      const originalRecoveryPut = IDBObjectStore.prototype.put;
       let exactReleaseRequests = 0;
       fetchWithBackoff = async (url) => {
         if (String(url).endsWith('/api/extension/student-login')) {
@@ -4021,11 +4001,11 @@ async function main() {
         }
         return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
       };
-      durableLocalKv.set = async (value) => {
-        if (Object.prototype.hasOwnProperty.call(value || {}, STUDENT_SESSION_RECOVERY_STORAGE_KEY)) {
-          throw new Error('simulated recovery persistence failure');
+      IDBObjectStore.prototype.put = function(value,...args) {
+        if(this.name==='recovery'&&value?.state?.armed?.token==='S'.repeat(43)) {
+          throw new DOMException('simulated recovery persistence failure','UnknownError');
         }
-        return originalDurableSet(value);
+        return originalRecoveryPut.call(this,value,...args);
       };
       CONFIG.serverUrl = 'https://school-pilot.net';
       CONFIG.schoolId = 'manual-school';
@@ -4048,7 +4028,7 @@ async function main() {
       } catch (error) {
         loginError = error?.message || String(error);
       } finally {
-        durableLocalKv.set = originalDurableSet;
+        IDBObjectStore.prototype.put = originalRecoveryPut;
         globalThis.fetch = originalFetch;
         fetchWithBackoff = originalFetchWithBackoff;
       }
@@ -4075,7 +4055,7 @@ async function main() {
       };
     });
     assert.equal(recoveryPersistenceFailure.exactReleaseRequests, 1);
-    assert.match(recoveryPersistenceFailure.loginError || '', /simulated recovery persistence failure/);
+    assert.match(recoveryPersistenceFailure.loginError || '', /RECOVERY_STORE_WRITE_FAILED|Private recovery storage|private recovery|recovery store/i);
     assert.equal(recoveryPersistenceFailure.hasAuth, false);
     assert.equal(recoveryPersistenceFailure.local.studentSessionRecoveryV1, undefined);
     assert.equal(recoveryPersistenceFailure.local.studentToken, undefined);
@@ -4186,11 +4166,11 @@ async function main() {
             || session.activeStudentId
             || session.activeStudentSessionId
           ),
-          hasRecoveryState: Boolean(local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]),
+          hasRecoveryState: Boolean((await __readPrivateRecoveryState())?.armed || (await __readPrivateRecoveryState())?.pending?.length),
           pendingAttemptCount:
-            local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.pending?.[0]?.attemptCount ?? null,
+            (await __readPrivateRecoveryState())?.pending?.[0]?.attemptCount ?? null,
           pendingRetryDelayMs: Math.max(0, Number(
-            local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.pending?.[0]?.nextAttemptAt || 0,
+            (await __readPrivateRecoveryState())?.pending?.[0]?.nextAttemptAt || 0,
           ) - Date.now()),
         };
       };
@@ -4751,9 +4731,7 @@ async function main() {
           await studentSessionRecoveryFlushPromise;
         }
         const after503 = studentSessionRecoveryState.pending[0] || null;
-        const durableAfter503 = (await durableLocalKv.get([
-          STUDENT_SESSION_RECOVERY_STORAGE_KEY,
-        ]))[STUDENT_SESSION_RECOVERY_STORAGE_KEY];
+        const durableAfter503 = await __readPrivateRecoveryState();
         const exactAuthorityAfter503 = matchingStudentSessionRecoveryRecord();
         const reservedAfter503 = recoveryGenerationsReservedForGate();
 
@@ -4763,7 +4741,8 @@ async function main() {
         studentSessionRecoveryLoaded = false;
         studentSessionRecoveryLoadPromise = null;
         studentSessionRecoveryState = emptyStudentSessionRecoveryState();
-        await ensureStudentSessionRecoveryLoaded(durableAfter503);
+        privateStudentSessionRecoveryStore = null;
+        await ensureStudentSessionRecoveryLoaded();
         const afterWake = studentSessionRecoveryState.pending[0] || null;
         await flushStudentSessionRecovery({
           maxRecords: 1,
@@ -5207,7 +5186,7 @@ async function main() {
           newRecoverySurvivedDelayedCleanup: recoveryAfterDelayedCleanup.armed?.token
             === newRecoveryToken,
           persistedRecoveryToken:
-            local[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.armed?.token || null,
+            (await __readPrivateRecoveryState())?.armed?.token || null,
           session,
         };
       } finally {
@@ -5481,7 +5460,7 @@ async function main() {
           await studentSessionRecoveryFlushPromise.catch(() => {});
         }
         const pendingRecovery = matchingStudentSessionRecoveryRecord();
-        const persisted = await chrome.storage.local.get(STUDENT_SESSION_RECOVERY_STORAGE_KEY);
+        const persisted = await __readPrivateRecoveryState();
         const roster = pendingRecovery
           ? await fetchLoginRosterNetworkForGate({
             gradeLevel: '5',
@@ -5495,7 +5474,7 @@ async function main() {
           hasStudentAuth: hasStudentAuth(),
           autoRegistrationPaused: CONFIG.autoRegistrationPaused === true,
           pendingRecovery: pendingRecovery?.state === 'pending',
-          recoveryPersisted: persisted[STUDENT_SESSION_RECOVERY_STORAGE_KEY]?.pending?.some(
+          recoveryPersisted: persisted?.pending?.some(
             (record) => record.token === recoveryToken,
           ) === true,
           releaseRequests: releaseRequests.get(activeCase) || 0,
