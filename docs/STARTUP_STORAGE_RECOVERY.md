@@ -14,6 +14,13 @@ cleanup awaited the same rejected promise. This is a confirmed compatibility
 defect consistent with the device evidence; acceptance on the affected
 Chromebook remains required to establish that no additional failure exists.
 
+Native Chrome 120 testing also exposed a recovery-frame navigation defect.
+Changing only the frame URL fragment can preserve the failed document and its
+captured nonce, leaving policy Retry unable to reconnect to a healthy worker.
+Each frame instance now has a distinct query parameter as well as its nonce
+fragment, forcing a fresh document while retaining the existing source and
+nonce checks. The regression verifies replacement of the actual document.
+
 Sources: [Chrome 133 storage implementation](https://github.com/chromium/chromium/blob/133.0.6943.132/extensions/browser/api/storage/storage_api.cc),
 [Chrome 140 storage implementation](https://github.com/chromium/chromium/blob/140.0.7339.80/extensions/browser/api/storage/storage_api.cc).
 

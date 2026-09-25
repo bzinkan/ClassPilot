@@ -179,7 +179,13 @@ globalThis.__managedRecoveryFixture = {
   seed:${JSON.stringify(seed)}, seeded:false,
   writeFaults:[], writeAttempts:{}, writeLog:[], heldWrites:[], lastErrorDelivery:null, faultDeliveryFailed:false,
   monitoringEvents:[], authClears:[], diagnostics:[], readinessCapture:null,
+  nativeErrors:[],
 };
+for (const eventType of ['error', 'unhandledrejection']) addEventListener(eventType, event => {
+  __managedRecoveryFixture.nativeErrors.push({ type:eventType, message:event.message || event.reason?.message || null,
+    stack:event.error?.stack || event.reason?.stack || null });
+  if (__managedRecoveryFixture.nativeErrors.length > 50) __managedRecoveryFixture.nativeErrors.shift();
+});
 // Optional pre-wake persisted state. Every native read is held until the seed
 // has landed so the worker's first wake observes exactly this stored state.
 if (globalThis.__managedRecoveryFixture.seed) {
@@ -332,6 +338,10 @@ for (const [name, list, describe] of [
     // enqueueMonitoringEvent resolves true only when an event was actually
     // emitted (it returns false without an authenticated student).
     if (name === 'enqueueMonitoringEvent' && result && typeof result.then === 'function') result.then((emitted) => { entry.emitted = emitted === true; }, () => { entry.emitted = false; });
+    if (name === 'clearStudentAuth' && result && typeof result.then === 'function') result.then(
+      () => { entry.completed = true; },
+      error => { entry.completed = false; entry.error = error?.message; entry.code = error?.code; entry.stack = error?.stack; },
+    );
     return result;
   };
 }
@@ -346,14 +356,17 @@ if (${JSON.stringify(quietNetwork === true)}) {
 }
 const fixtureAuthArea=chrome.storage[${JSON.stringify(authReadArea)}];
 const fixtureNativeAuthGet=fixtureAuthArea.get.bind(fixtureAuthArea);
-fixtureAuthArea.get=(keys,callback)=>{
+fixtureAuthArea.get=(...args)=>{
+  const [keys]=args;
   const fixture=globalThis.__managedRecoveryFixture;
   const wakeSnapshot=Array.isArray(keys)&&keys.includes('authContextId')&&keys.includes('studentToken')&&keys.includes('autoRegistrationPaused')&&keys.includes('manualLoginLastSeenAt');
-  if(!wakeSnapshot)return fixtureNativeAuthGet(keys,callback);
+  // Preserve Chrome's callback and Promise overloads exactly. Older native
+  // bindings reject get(keys, undefined) instead of treating it as get(keys).
+  if(!wakeSnapshot)return fixtureNativeAuthGet(...args);
   fixture.authReads++;
   if(fixture.authReadMode==='reject-once'&&fixture.authReadFailures===0){fixture.authReadFailures++;throw new Error('FIXTURE_NATIVE_AUTH_READ_FAILED');}
-  if(fixture.authReadMode==='never'){fixture.authCallbacks.push(()=>fixtureNativeAuthGet(keys,callback));return;}
-  return fixtureNativeAuthGet(keys,callback);
+  if(fixture.authReadMode==='never'){fixture.authCallbacks.push(()=>fixtureNativeAuthGet(...args));return;}
+  return fixtureNativeAuthGet(...args);
 };
 const fixtureNativeStorageListener = chrome.storage.onChanged.addListener.bind(chrome.storage.onChanged);
 chrome.storage.onChanged.addListener = listener => {
@@ -412,7 +425,7 @@ Object.defineProperty(globalThis, 'ClassPilotContentInjection', {
 (() => {
   const fixture = globalThis.__managedPageFixture = {
     mode:${JSON.stringify(pagePolicyMode)}, reads:0, callbacks:[], listeners:[], messages:[],
-    holdAcknowledgements:false, acknowledgements:[],
+    holdAcknowledgements:false, acknowledgements:[], responses:[],
     policy:{fastAuthGateEnabled:true,serverUrl:${JSON.stringify(origin)}}
   };
   const addListener = chrome.storage.onChanged.addListener.bind(chrome.storage.onChanged);
@@ -431,9 +444,13 @@ Object.defineProperty(globalThis, 'ClassPilotContentInjection', {
       if(fixture.messages.length>4000) fixture.messages.shift();
     }
     const callback = rest.at(-1);
-    if (message?.revalidateManagedPolicy === true && typeof callback==='function') {
+    if (typeof callback==='function') {
       rest[rest.length-1] = response => {
-        if((fixture.holdAcknowledgements===true||fixture.holdAcknowledgements===caller) && response?.success===true) {
+        if (['get-auth-state','refresh-auth-state'].includes(message?.type)) fixture.responses.push({type:message?.type,caller,at:Date.now(),success:response?.success,
+          phase:response?.state?.phase,revision:response?.state?.revision,errorCode:response?.errorCode,
+          fence:response?.managedPolicyFence});
+        if(fixture.responses.length>100)fixture.responses.shift();
+        if(message?.revalidateManagedPolicy === true && (fixture.holdAcknowledgements===true||fixture.holdAcknowledgements===caller) && response?.success===true) {
           fixture.acknowledgements.push(() => callback(response));
         } else callback(response);
       };
@@ -872,6 +889,9 @@ await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixtu
   const started = Date.now();
   await managedChange(worker, pages, {enrollmentKey:{oldValue:'fixture-enrollment',newValue:'fixture-enrollment-updated'}});
   const frames = await Promise.all(pages.map(page => waitForPhase(page, 'unavailable', 5_500)));
+  await Promise.all(frames.map(frame => frame.evaluate(() => {
+    window.__fixturePolicyRecoveryDocument = { hash: location.hash, timeOrigin: performance.timeOrigin };
+  })));
   const unavailableMs = Date.now() - started;
   assert.ok(unavailableMs >= 2_800 && unavailableMs < 5_500, 'managed change must reach actionable failure after the3sread ceiling');
   const failedRead = await worker.evaluate(() => ({reads:__managedRecoveryFixture.reads,generation:managedAuthGatePolicyGeneration}));
@@ -925,7 +945,39 @@ await withBrowser({ caseName: 'policy-change' }, async ({ context, worker, fixtu
   });
   assert.ok(released.expired >= 1);
   assert.equal(released.active, 1);
-  await Promise.all(pages.map(page => waitForPhase(page, 'ready')));
+  try { await Promise.all(pages.map(page => waitForPhase(page, 'ready'))); }
+  catch (error) {
+    await dumpStartupState(worker, 'policy-change recovered-read');
+    console.log('Policy clear diagnostics', JSON.stringify(await worker.evaluate(() => ({
+      clears: __managedRecoveryFixture.authClears, errors: __managedRecoveryFixture.nativeErrors,
+      messages: __managedRecoveryFixture.messages.slice(-20), support: getAuthGateSupportDetails(),
+      gate: getAuthGateState(), policyFailure: managedAuthGatePolicyFailure,
+    }))));
+    console.log('Policy recovered-read page diagnostics', JSON.stringify(await Promise.all(pages.map(async page => ({
+      controller: await pageFixture(worker, page, 'summary'),
+      responses: await worker.evaluate(async url => {
+        const tab=(await chrome.tabs.query({})).find(item=>item.url===url);
+        const [{result}]=await chrome.scripting.executeScript({target:{tabId:tab.id},func:()=>({responses:__managedPageFixture.responses.slice(-15),
+          bootstrapState:globalThis.__classpilotAuthGateBootstrap?.lastState})});
+        return result;
+      },page.url()),
+      frames: await Promise.all(page.frames().filter(frame => frame.url().includes('auth-gate-frame.html'))
+        .map(frame => frame.evaluate(() => ({ phase: document.querySelector('#classpilot-auth-gate')?.dataset.classpilotAuthPhase,
+          support: document.querySelector('#classpilot-auth-support-code')?.textContent, visibility: document.visibilityState,
+          originalDocument:window.__fixturePolicyRecoveryDocument,hash:location.hash,timeOrigin:performance.timeOrigin })).catch(() => ({ detached: true })))),
+    })))));
+    const sameDocuments = await Promise.all(frames.map(frame => frame.evaluate(() => Boolean(
+      window.__fixturePolicyRecoveryDocument && window.__fixturePolicyRecoveryDocument.hash !== location.hash,
+    )).catch(() => false)));
+    assert.equal(sameDocuments.some(Boolean), false,
+      '[regression:auth-frame-document] a rotated fragment retained the failure-only extension document');
+    throw error;
+  }
+  for (const page of pages) {
+    const recoveredFrame = await waitForPhase(page, 'ready');
+    assert.equal(await recoveredFrame.evaluate(() => window.__fixturePolicyRecoveryDocument), undefined,
+      '[regression:auth-frame-document] retiring a failure-only policy frame must create a new extension document, not only change its fragment');
+  }
   assert.equal(await worker.evaluate(() => CONFIG.schoolId), 'recovery-school');
   const after = await Promise.all(pages.map(page => pageFixture(worker, page, 'summary')));
   const policyRequests = after.reduce((sum,item,index)=>sum+item.policyRequests.length-before[index].policyRequests.length,0);
@@ -1058,6 +1110,15 @@ for(const authReadArea of ['local','session'])await withBrowser({caseName:'auth-
   const start=await worker.evaluate(()=>({failures:__managedRecoveryFixture.authReadFailures,reads:__managedRecoveryFixture.authReads}));
   assert.equal(start.failures,1,'actual initial native auth snapshot read must reject');
   const reply=await rpc(probe,{type:'refresh-auth-state',reason:'user'});
+  if (!reply?.success) {
+    await dumpStartupState(worker, `auth-read-retry ${authReadArea}`);
+    console.log('Auth-read retry messages', JSON.stringify(await worker.evaluate(() => ({
+      messages: __managedRecoveryFixture.messages.slice(-15), reads: __managedRecoveryFixture.authReads,
+      callbacks: __managedRecoveryFixture.authCallbacks.length, diagnostics: __managedRecoveryFixture.diagnostics.slice(-15),
+      nativeErrors: __managedRecoveryFixture.nativeErrors, listeners: chrome.runtime.onMessage.hasListeners(),
+      activeState: self.registration.active?.state, workerState: self.serviceWorker?.state,
+    }))));
+  }
   assert.equal(reply?.success,true,`completed ${authReadArea} read failure poisoned startup: ${reply?.errorCode||reply?.code}`);
   await waitForPhase(page,'ready');await assertProtected(page);
   const current=await worker.evaluate(()=>({startup:authGateStartupComplete,roster:authGateRosterContextReady,revision:authGateRevisionReady,

@@ -2239,6 +2239,9 @@ async function main() {
           await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
         }
 
+        // Fetch entry precedes the prior capture's persistence and finally.
+        // Wait for actual completion before replacing its upload observer.
+        await drainScreenshotCaptureLane('ambient screenshot upload');
         let ambientUpload = null;
         fetchWithBackoff = async (url, init = {}) => {
           ambientUpload = {
@@ -4277,7 +4280,62 @@ async function main() {
 
         const raceStorageKey = '__classpilotAuthContextRaceProbe';
         await kv.remove(raceStorageKey);
-        const raceStartedAt = performance.now();
+        // Exercise real native cleanup once before measuring the 10,000 fence
+        // races. Each identity installation retires authority twice; dispatching
+        // hundreds of thousands of already-empty alarm IPCs measures browser
+        // scheduling rather than the authentication fences under stress here.
+        const raceCleanupAlarmNames = [
+          LICENSE_STATUS_RETRY_ALARM,
+          LICENSE_CONTROL_CLEANUP_ALARM,
+          CLASSROOM_STATE_RECONCILE_ALARM,
+          SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM,
+          'screenshot-observation-lease-expiry',
+          'heartbeat',
+        ];
+        const raceCleanupAlarmSet = new Set(raceCleanupAlarmNames);
+        const readRaceCleanupAlarms = async () => (await chrome.alarms.getAll())
+          .filter((alarm) => raceCleanupAlarmSet.has(alarm.name))
+          .map((alarm) => alarm.name)
+          .sort();
+        const waitForNativeRaceAlarmCleanup = async (label) => {
+          const deadline = Date.now() + 5_000;
+          while (true) {
+            const remaining = await readRaceCleanupAlarms();
+            if (remaining.length === 0) return;
+            if (Date.now() >= deadline) {
+              throw new Error(`${label} left native alarms: ${remaining.join(', ')}`);
+            }
+            // Heartbeat clearing is dispatched from the native get callback.
+            await new Promise((resolveCleanup) => setTimeout(resolveCleanup, 10));
+          }
+        };
+        const nativeCleanupAuthA = installIdentity('race-native-alarm-cleanup-a');
+        await waitForNativeRaceAlarmCleanup('Race preflight initial cleanup');
+        const nativeAlarmWhen = Date.now() + 5 * 60_000;
+        for (const name of raceCleanupAlarmNames) {
+          await chrome.alarms.create(name, { when: nativeAlarmWhen });
+        }
+        const seededNativeCleanupAlarms = await readRaceCleanupAlarms();
+        if (seededNativeCleanupAlarms.length !== raceCleanupAlarmNames.length) {
+          throw new Error('Race preflight could not seed every native cleanup alarm');
+        }
+        const nativeCleanupAuthB = installIdentity('race-native-alarm-cleanup-b');
+        if (!nativeCleanupAuthA.signal.aborted) {
+          throw new Error('Race native alarm cleanup did not abort context A');
+        }
+        assertAuthenticatedContextCurrent(nativeCleanupAuthB, 'race native alarm cleanup B');
+        await waitForNativeRaceAlarmCleanup('Race preflight authority transition');
+        if (!await ensureAuthBoundNotificationInventory({ force: true })) {
+          throw new Error('Race preflight could not reconcile native notification cleanup');
+        }
+        await drainScreenshotCaptureLane('Race preflight');
+        if (
+          activeLiveViewContext || wsTransportIdentity || activeScreenshotCadence
+          || heartbeatIntervalId || eventHeartbeatTimer || screenshotScheduled
+        ) {
+          throw new Error('Race preflight retained background authority work');
+        }
+
         let raceTransmissionCount = 0;
         let racePersistenceCount = 0;
         let raceSupersededOperations = 0;
@@ -4286,6 +4344,11 @@ async function main() {
         const racePersistenceSamples = [];
         const fetchBeforeRace = fetchWithBackoff;
         const kvSetBeforeRace = kv.set;
+        const alarmGetBeforeRace = chrome.alarms.get;
+        const alarmClearBeforeRace = chrome.alarms.clear;
+        const emptyAlarmClearCalls = {};
+        let emptyHeartbeatGetCalls = 0;
+        let raceElapsedMs = 0;
         try {
           fetchWithBackoff = async (url, init = {}, retryOptions) => {
             if (String(url).endsWith('/__auth-context-race-probe')) {
@@ -4316,7 +4379,33 @@ async function main() {
             }
             return kvSetBeforeRace(value);
           };
+          // Only the names proven empty above are absorbed. Every other alarm
+          // call remains native; the real identity/abort/fence functions remain
+          // untouched. Verify these names are still empty after restoring APIs.
+          chrome.alarms.get = function (name, callback) {
+            if (name !== 'heartbeat') {
+              return alarmGetBeforeRace.apply(chrome.alarms, arguments);
+            }
+            emptyHeartbeatGetCalls += 1;
+            if (typeof callback === 'function') {
+              queueMicrotask(() => callback(undefined));
+              return undefined;
+            }
+            return Promise.resolve(undefined);
+          };
+          chrome.alarms.clear = function (name, callback) {
+            if (!raceCleanupAlarmSet.has(name)) {
+              return alarmClearBeforeRace.apply(chrome.alarms, arguments);
+            }
+            emptyAlarmClearCalls[name] = (emptyAlarmClearCalls[name] || 0) + 1;
+            if (typeof callback === 'function') {
+              queueMicrotask(() => callback(false));
+              return undefined;
+            }
+            return Promise.resolve(false);
+          };
 
+          const raceStartedAt = performance.now();
           for (let iteration = 0; iteration < raceIterations; iteration += 1) {
             const authA = installIdentity(`race-a-${iteration}`);
             const payloadA = Object.freeze({
@@ -4390,9 +4479,18 @@ async function main() {
             }
             assertAuthenticatedContextCurrent(authB, `release-race:${iteration}:context-b`);
           }
+          raceElapsedMs = performance.now() - raceStartedAt;
         } finally {
           fetchWithBackoff = fetchBeforeRace;
           kv.set = kvSetBeforeRace;
+          chrome.alarms.get = alarmGetBeforeRace;
+          chrome.alarms.clear = alarmClearBeforeRace;
+        }
+        const remainingNativeCleanupAlarms = await readRaceCleanupAlarms();
+        if (remainingNativeCleanupAlarms.length > 0) {
+          throw new Error(
+            `Race loop recreated absorbed alarms: ${remainingNativeCleanupAlarms.join(', ')}`,
+          );
         }
         const persistedRaceProbe = await kv.get(raceStorageKey);
         const authContextRace = {
@@ -4404,7 +4502,11 @@ async function main() {
           transmissionSamples: raceTransmissionSamples,
           persistenceSamples: racePersistenceSamples,
           persistedValue: persistedRaceProbe[raceStorageKey],
-          elapsedMs: performance.now() - raceStartedAt,
+          seededNativeCleanupAlarms,
+          remainingNativeCleanupAlarms,
+          emptyAlarmClearCalls,
+          emptyHeartbeatGetCalls,
+          elapsedMs: raceElapsedMs,
         };
 
         advanceStudentAuthMutationGeneration();
@@ -5114,6 +5216,7 @@ async function main() {
       codeShapedLabel: 'unknown',
     });
     assert.deepEqual(result.sensitiveCleanupConsole, ['[Auth] Failed cleanup: Error']);
+    assert.ok(result.ambientUpload, 'the ambient screenshot fixture must upload its captured frame');
     assert.equal(result.ambientUpload.url.endsWith('/api/classpilot/device/screenshot'), true);
     assert.equal(result.ambientUpload.body.clientProtocolVersion, 3);
     assert.ok(result.thumbnailUpload.uploaded,
@@ -5412,6 +5515,24 @@ async function main() {
     assert.deepEqual(result.authContextRace.transmissionSamples, []);
     assert.deepEqual(result.authContextRace.persistenceSamples, []);
     assert.equal(result.authContextRace.persistedValue, undefined);
+    assert.deepEqual(result.authContextRace.seededNativeCleanupAlarms, [
+      'classroom-state-reconcile',
+      'heartbeat',
+      'license-control-cleanup',
+      'license-status-retry',
+      'screenshot-active-view-cadence-expiry',
+      'screenshot-observation-lease-expiry',
+    ]);
+    assert.deepEqual(result.authContextRace.remainingNativeCleanupAlarms, []);
+    assert.ok(result.authContextRace.emptyHeartbeatGetCalls > 0);
+    for (const name of result.authContextRace.seededNativeCleanupAlarms) {
+      if (name !== 'heartbeat') {
+        assert.ok(
+          result.authContextRace.emptyAlarmClearCalls[name] > 0,
+          `race loop did not exercise the verified-empty ${name} cleanup`,
+        );
+      }
+    }
     assert.ok(
       result.authContextRace.elapsedMs < 20_000,
       `10,000 auth-context race iterations took ${result.authContextRace.elapsedMs.toFixed(0)} ms`,
@@ -5472,9 +5593,13 @@ async function main() {
     assert.equal(contentMessageEpochRace.callbackBeforeClearModalCount, 1);
     assert.equal(contentMessageEpochRace.callbackBeforeClearFinalModalCount, 0);
 
+    const isolatedAlarmIpcCount = Object.values(result.authContextRace.emptyAlarmClearCalls)
+      .reduce((sum, count) => sum + count, result.authContextRace.emptyHeartbeatGetCalls);
     console.log(
       `ClassPilot 2.7 capability behavior test passed; ${AUTH_CONTEXT_RACE_ITERATIONS.toLocaleString()} `
-      + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms.`,
+      + `forced A→B races completed in ${result.authContextRace.elapsedMs.toFixed(0)} ms; `
+      + `${result.authContextRace.seededNativeCleanupAlarms.length} native alarm cleanups verified, `
+      + `${isolatedAlarmIpcCount} verified-empty alarm IPCs isolated.`,
     );
   } finally {
     if (context) await context.close();

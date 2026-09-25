@@ -1516,7 +1516,12 @@ function createAuthGateFrameNonce() {
 }
 
 function secureAuthGateFrameUrl(nonce) {
-  return `${chrome.runtime.getURL('auth-gate-frame.html')}#${encodeURIComponent(nonce)}`;
+  const url = new URL(chrome.runtime.getURL('auth-gate-frame.html'));
+  // A fragment-only change can retain the old document and its captured nonce.
+  // Each recovery instance must load a new document before it can be trusted.
+  url.searchParams.set('instance', nonce);
+  url.hash = nonce;
+  return url.href;
 }
 
 function clearSecureAuthGateFrameRecovery() {
