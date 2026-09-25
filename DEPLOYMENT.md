@@ -7,13 +7,13 @@
 > `docs/CLASSPILOT_2_7_1_RELEASE.md` runbooks. This repository publishes only the
 > ClassPilot Chrome extension. There are no production default credentials.
 >
-> The 2.9.3 candidate is being prepared; no packaging, tagging, upload or
+> The 2.9.4 candidate is being prepared; no packaging, tagging, upload or
 > publication is authorized by these instructions. After separate authorization,
-> use only `dist/ClassPilot-v2.9.3.zip` produced from the clean,
+> use only `dist/ClassPilot-v2.9.4.zip` produced from the clean,
 > tagged, reviewed commit by `./extension/package-extension.sh`. The matching
-> `dist/ClassPilot-v2.9.3.zip.sha256` record, commit SHA, CI evidence, and exact
+> `dist/ClassPilot-v2.9.4.zip.sha256` record, commit SHA, CI evidence, and exact
 > uploaded archive must be retained. Never create or upload a ZIP manually.
-> Earlier archives do not contain the 2.9.3 timer placement correction.
+> Earlier archives do not contain the 2.9.4 worker wake recovery correction.
 > Retain 2.8.9's scheduled classroom authority support, 2.8.8's startup recovery
 > corrections, 2.8.7's bounded sign-in recovery and safe upgrade handling,
 > plus 2.8.6's portal-first student app selection and
@@ -177,7 +177,10 @@ operation that never reports back is reconciled by a fresh read, managed-policy
 churn is bounded, and authentication cleanup replays in full from the existing
 crash marker. Screens, wording, support codes, permissions and managed-policy
 keys are unchanged from 2.8.9.
-An earlier archive is not releasable as 2.9.3.
+2.9.4 adds worker wake recovery: a wake that fails or is abandoned before its
+managed-policy barrier settles no longer strands startup readiness; readiness
+recovers from the durable crash markers, applies managed policy and opens the
+gate. An earlier archive is not releasable as 2.9.4.
 Run the complete source gates first, then build and verify the canonical archive:
 
 ```bash
@@ -187,7 +190,7 @@ npm run test:extension:chrome
 npm run build
 ./extension/package-extension.sh
 npm run test:extension:package
-node scripts/verify-extension-package.mjs dist/ClassPilot-v2.9.3.zip --verify-only
+node scripts/verify-extension-package.mjs dist/ClassPilot-v2.9.4.zip --verify-only
 ```
 
 Confirm the generated SHA-256 record matches the exact archive being uploaded.
@@ -207,7 +210,7 @@ archive with Explorer, PowerShell, or `zip` directly.
    - Or specific OUs (e.g., Grade 10, Class 3A)
 5. Click the **+** (Add) button in the bottom right
 6. Choose **Upload private app**
-7. Upload the retained `dist/ClassPilot-v2.9.3.zip` whose SHA-256 was verified
+7. Upload the retained `dist/ClassPilot-v2.9.4.zip` whose SHA-256 was verified
 8. Fill in the details:
    - **Name**: ClassPilot
    - **Description**: Privacy-aware classroom monitoring extension
@@ -481,7 +484,7 @@ To update the extension after changes:
 2. Tag the clean ClassPilot release commit and confirm the live Store version.
 3. Run the complete gates and `./extension/package-extension.sh` from the
    repository root.
-4. Verify and retain `dist/ClassPilot-v2.9.3.zip`, its SHA-256, source/ZIP byte
+4. Verify and retain `dist/ClassPilot-v2.9.4.zip`, its SHA-256, source/ZIP byte
    comparison, and unpacked integration evidence.
 5. Validate that exact archive on at least two controlled Chromebooks using the
    production school configuration, then submit it with deferred publishing.

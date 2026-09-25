@@ -18,8 +18,40 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.9.3");
+    expect(manifest.version).toBe("2.9.4");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
+  });
+
+  it("2.9.4: a failed or abandoned worker wake never strands startup readiness", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const sliceFunction = (name: string) => {
+      const start = serviceWorker.indexOf(name);
+      expect(start, `${name} should exist`).toBeGreaterThan(-1);
+      const rest = serviceWorker.slice(start + name.length);
+      const end = rest.search(/\n(?:async )?function /);
+      return rest.slice(0, end === -1 ? undefined : end);
+    };
+    // The wake's failure path retires its policy barrier before the tracked
+    // coordinator owns readiness; the watchdog retires an abandoned wake.
+    const wakeCatch = serviceWorker.indexOf("})().catch(err => {");
+    const wakeFinally = serviceWorker.indexOf("}).finally(() => {", wakeCatch);
+    expect(wakeCatch).toBeGreaterThan(-1);
+    expect(serviceWorker.slice(wakeCatch, wakeFinally)).toContain("failWorkerWake(err);");
+    expect(serviceWorker).toContain("retireWorkerWakePolicyRestore = (error) => {");
+    expect(serviceWorker).toContain("const AUTH_GATE_WAKE_WATCHDOG_MS = 30000;");
+    expect(sliceFunction("function armWorkerWakeWatchdog()")).toContain("ensureStartupReadinessPublication();");
+    // Readiness derives the flags itself and applies policy once for a retired wake.
+    const readiness = sliceFunction("async function publishStartupReadinessWhenVerified(");
+    expect(readiness).toContain("const derived = await deriveStartupWakeRecoveryFlags();");
+    expect(readiness).toContain("trackedManagedAuthGatePolicyRevalidation().catch(() => {});");
+    // The legacy purge is bounded during startup; a routine read keeps the plain call.
+    const stored = sliceFunction("async function getStoredAuthState(");
+    expect(stored).toContain("const boundedDuringStartup = options.startupReadRecovery === true");
+    expect(stored).toContain("() => rawLocalKv.remove(legacyLocalAuthKeys),");
+    // Diagnostics name the step and the storage failure class, never the native message.
+    expect(serviceWorker).toContain("recordAuthGateRecoveryDiagnostic('startup', cause, elapsed, 1, workerWakeStep);");
+    expect(serviceWorker).toContain("error.code = classifyNativeStorageFailure(runtimeError.message);");
+    expect(readRepoFile("extension/auth-recovery-diagnostics.js")).toContain("'wake_failed', 'wake_abandoned'");
   });
 
   it("keeps the 2.8.9 permission, managed-policy and update-timing surface unchanged", () => {

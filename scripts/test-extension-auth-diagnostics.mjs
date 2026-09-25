@@ -80,3 +80,20 @@ test('session history is sanitized before merging and failures retain memory evi
   assert.equal(recorder.snapshot().length, 2);
   assert.equal(JSON.stringify(persisted).includes('secret'), false);
 });
+
+test('2.9.4 wake diagnostics carry an optional fixed step name and nothing else', () => {
+  let timestamp = 1_000;
+  const recorder = factory().createRecorder({ version: '2.9.4', now: () => timestamp });
+  const secret = 'student@example.test https://private.test/token';
+  assert.equal(recorder.record({ stage: 'startup', cause: 'wake_failed', detail: 'auth_snapshot', message: secret }), true);
+  timestamp += 60_000;
+  assert.equal(recorder.record({ stage: 'startup', cause: 'wake_abandoned', detail: `Not a step ${secret}` }), true);
+  const [failed, abandoned] = recorder.snapshot();
+  assert.equal(failed.cause, 'wake_failed');
+  assert.equal(failed.detail, 'auth_snapshot');
+  assert.deepEqual(Object.keys(failed).sort(), ['attemptCount', 'cause', 'detail', 'elapsedMs', 'extensionVersion', 'stage', 'timestamp']);
+  assert.equal(abandoned.cause, 'wake_abandoned');
+  assert.equal('detail' in abandoned, false, 'a detail that is not a fixed step name is dropped');
+  assert.equal(JSON.stringify(recorder.snapshot()).includes('secret'), false);
+  assert.equal(JSON.stringify(recorder.snapshot()).includes('private.test'), false);
+});

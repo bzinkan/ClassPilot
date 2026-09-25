@@ -394,16 +394,50 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.9.3 Class tools candidate, the canonical artifact name will be
-`dist/ClassPilot-v2.9.3.zip` after separately authorized clean-tag packaging.
-Earlier archives do not contain the 2.9.3 timer placement correction
-and must not be submitted for this release. The candidate retains 2.8.9's
+For the prepared 2.9.4 worker wake recovery candidate, the canonical artifact
+name will be `dist/ClassPilot-v2.9.4.zip` after separately authorized clean-tag
+packaging. Earlier archives do not contain the 2.9.4 worker wake recovery
+correction and must not be submitted for this release. The candidate retains
+2.9.2's Class tools with 2.9.3's timer placement correction, 2.9.1's class chat
+controls, 2.9.0's startup recovery, 2.8.9's
 scheduled classroom authority support, 2.8.8's startup recovery corrections,
 2.8.7's bounded sign-in recovery and safe script lifecycle, plus 2.8.6's
 portal-first student app selection and 2.8.5's school-calendar,
 limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
+
+### Worker wake recovery (2.9.4 candidate)
+
+Version 2.9.4 carries 2.9.3 forward unchanged and corrects one gap in the 2.9.0
+startup recovery, observed on a managed Chromebook on September 25, 2026: a
+worker wake that failed before its managed-policy barrier settled left startup
+readiness waiting on that barrier forever, in flight, so the card's Retry and
+the recovery alarm had nothing to re-run, and the device stayed on the startup
+card until its Chrome session ended. A wake that fails now retires its own
+policy barrier; startup readiness then derives the recovery flags from the
+durable crash markers with one bounded read, applies managed policy through
+the same bounded direct revalidation a managed change uses, replays the
+signed-out clear and publishes readiness. A wake that neither finishes nor
+fails within 30 seconds is retired the same way by a wake watchdog, and the
+remaining unbounded startup storage operations (the pre-2.7.3 local credential
+purge, manual-context persistence and retired-storage cleanup during
+credential adoption, and the monitoring redaction restore) are bounded like
+every other startup storage operation. A verified authenticated startup is
+never cleared by this recovery.
+
+On-device `authGateDiagnosticsV1` gains the causes `wake_failed` and
+`wake_abandoned`, each with an optional seventh field, `detail`, naming the
+startup step (a fixed identifier such as `auth_snapshot`, never data), and
+`chrome.storage.session` gains `authGateWakeFailureV1` with the step, the cause
+and the sanitized failure class. Native storage failures are classified in
+worker logs as `STORAGE_QUOTA_EXCEEDED`, `STORAGE_IO_ERROR`,
+`STORAGE_CONTEXT_INVALIDATED` or `STORAGE_FAILED`; the native message itself is
+never logged or transmitted. Screens, wording, buttons and support codes are
+unchanged. The correction adds no Chrome permission, managed-policy key,
+endpoint, reload or update-timing change, or off-device telemetry, and needs no
+SchoolPilot deployment or migration. See `../CLASSPILOT_2_9_4_RELEASE.md` for
+the red-on-2.9.3 verification gate and the managed-Chromebook publication gate.
 
 ### Startup recovery (2.9.0 candidate)
 

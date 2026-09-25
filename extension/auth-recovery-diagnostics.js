@@ -4,7 +4,7 @@
   const KEY = 'authGateDiagnosticsV1';
   const LIMIT = 20;
   const STAGES = new Set(['policy_read', 'startup', 'message_transport', 'server_request', 'login_config', 'roster', 'login_mutation', 'script_recovery']);
-  const CAUSES = new Set(['timeout', 'channel_closed', 'context_invalidated', 'http_failure', 'network_failure', 'invalid_payload', 'internal', 'recovered', 'reload_required', 'reconciled', 'stalled', 'superseded_joined', 'policy_churn']);
+  const CAUSES = new Set(['timeout', 'channel_closed', 'context_invalidated', 'http_failure', 'network_failure', 'invalid_payload', 'internal', 'recovered', 'reload_required', 'reconciled', 'stalled', 'superseded_joined', 'policy_churn', 'wake_failed', 'wake_abandoned']);
   const STAGE_ALIASES = Object.freeze({
     runtime_rpc: 'message_transport', frame_state: 'message_transport', frame_refresh: 'message_transport',
     bootstrap_rpc: 'message_transport', content_rpc: 'message_transport', frame_roster: 'roster',
@@ -42,6 +42,9 @@
         cause: value.cause,
         elapsedMs: Math.min(60_000, Math.max(0, Math.round(Number(value.elapsedMs) || 0))),
         attemptCount: Math.min(100, Math.max(1, Math.floor(Number(value.attemptCount) || 1))),
+        // Optional seventh field (2.9.4): a fixed startup step name, never data.
+        ...(typeof value.detail === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(value.detail)
+          ? { detail: value.detail } : {}),
       };
     }
 

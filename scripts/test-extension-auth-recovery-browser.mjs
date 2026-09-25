@@ -10,8 +10,10 @@ import { chromium } from 'playwright';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Case table. `expectedRedOnBase` records whether the case must FAIL against
-// unmodified v2.8.9 sources; scripts/test-extension-recovery-red-on-old.mjs
-// proves every red case trips on the old worker before trusting a green run.
+// unmodified released sources: `true` means v2.8.9 (the 2.9.0 correction), a
+// version string names the immutable scripts/fixtures snapshot it must trip on
+// (2.9.4's cases trip on v2.9.3). scripts/test-extension-recovery-red-on-old.mjs
+// proves every red case trips on that old worker before trusting a green run.
 export const RECOVERY_CASES = Object.freeze({
   'existing': { expectedRedOnBase: false },
   'policy-change': { expectedRedOnBase: false },
@@ -32,6 +34,10 @@ export const RECOVERY_CASES = Object.freeze({
   'post-snapshot-supersession': { expectedRedOnBase: true },
   'competing-login': { expectedRedOnBase: true },
   'held-ops-concurrency': { expectedRedOnBase: true },
+  // 2.9.3 left a wake that failed or parked before its policy barrier settled
+  // unrecoverable (readiness waited on that barrier forever); 2.9.4 recovers.
+  'wake-failure-before-policy': { expectedRedOnBase: '2.9.3' },
+  'wake-parked-before-policy': { expectedRedOnBase: '2.9.3' },
   'recovered-startup-obsolete-school': { expectedRedOnBase: false },
   'worker-suspension-preserves-classroom': { expectedRedOnBase: false },
 });
@@ -75,8 +81,28 @@ async function fixtureServer() {
       } else if (url.pathname.endsWith('/login-roster')) {
         state.rosterRequests += 1;
         response.end(JSON.stringify({ loginMethod: 'name_pin', grades: [], students: [], refreshAfterMs: 30_000 }));
+      } else if (url.pathname.endsWith('/sign-out')) {
+        // The synthetic API confirms only the pre-2.7.3 upgrade sign-out that
+        // the legacy local-credential purge issues (the production API does);
+        // every other sign-out keeps its 404 so existing cases are unchanged.
+        let body = '';
+        request.on('data', (chunk) => { body += chunk; });
+        request.on('end', () => {
+          let reason = null;
+          try { reason = JSON.parse(body).reason; } catch { /* malformed */ }
+          state.signOutRequests = (state.signOutRequests || 0) + 1;
+          if (reason === 'legacy_local_auth_upgrade') {
+            state.legacySignOutRequests = (state.legacySignOutRequests || 0) + 1;
+            response.end(JSON.stringify({ ok: true }));
+            return;
+          }
+          (state.unknownApiPaths ||= []).push(url.pathname);
+          response.statusCode = 404;
+          response.end(JSON.stringify({ error: 'fixture_route_unavailable' }));
+        });
       } else {
         if (url.pathname.endsWith('/student-login')) state.studentLoginRequests += 1;
+        (state.unknownApiPaths ||= []).push(url.pathname);
         response.statusCode = 404;
         response.end(JSON.stringify({ error: 'fixture_route_unavailable' }));
       }
@@ -631,6 +657,9 @@ async function workerAuthSummary(worker) {
     startup: authGateStartupComplete, studentToken: CONFIG.studentToken, schoolId: CONFIG.schoolId, enrollmentKey: CONFIG.enrollmentKey,
     generation: managedAuthGatePolicyGeneration, invalidating: studentAuthInvalidating,
     pendingMutations: studentAuthMutationPendingCount, loginsPending: manualStudentLoginRequestsPending,
+    serverUrl: CONFIG.serverUrl, loginPhase: sharedSignInLoginConfig?.phase ?? null,
+    loginError: sharedSignInLoginConfig?.errorCode ?? sharedSignInLoginConfig?.error ?? null,
+    legacyCleanupPending: Boolean(legacyStudentAuthCleanupAuthority),
   }));
 }
 async function driveStartupSupersession(worker, pages, newValue = 'fixture-enrollment-rotated') {
@@ -1524,6 +1553,73 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   assert.equal(await storedValue(worker, 'local', 'studentAuthInvalidatingV1'), undefined, 'a late stale callback cannot resurrect the crash marker');
   assert.equal(fixture.state.studentLoginRequests, 0);
   console.log('PASS held startup write: 3 tabs, user retries, polls and the alarm coalesce until the deadline; one re-run recovers', JSON.stringify({ unavailableMs }));
+});
+
+// --- 2.9.4: wake failure / abandonment before the policy barrier -------------
+// A pre-2.7.3 local credential makes the wake's snapshot continuation purge it
+// through native storage. Faulting that purge fails (or parks) the wake before
+// its policy barrier settles. 2.9.3 then left readiness waiting on that barrier
+// forever, in flight, so neither Retry nor the recovery alarm could re-run it.
+const legacyCredentialSeed = (origin) => ({ local: {
+  studentToken: 'legacy-local-credential', deviceId: 'device-legacy-fixture',
+  config: { serverUrl: origin, schoolId: 'recovery-school', schoolSlug: 'recovery-school', enrollmentKey: 'fixture-enrollment' },
+} });
+async function readyAfterWakeRecovery(page, worker, label, timeout, fixture = null) {
+  // Unattended when the frame's own backoff re-polls in time; otherwise the
+  // card's Retry (what a student does) must open the sign-in form.
+  try { return { frame: await waitForPhase(page, 'ready', timeout), retried: false }; }
+  catch { /* the startup card is showing */ }
+  const card = await waitForPhase(page, 'unavailable', 5_000);
+  console.log(`[${label} card]`, JSON.stringify({ supportCode: await frameSupportCode(card), fixture: fixture?.state, auth: await workerAuthSummary(worker) }));
+  await clickRetry(card);
+  return { frame: await expectReady(page, 15_000, worker, label, 'Retry after readiness recovery must show the sign-in form'), retried: true };
+}
+async function assertWakeRecovered({ page, worker, probe, fixture, target, label, timeout }) {
+  const { frame, retried } = await readyAfterWakeRecovery(page, worker, label, timeout, fixture);
+  await assertProtected(page);
+  assert.equal((await faultTarget(worker, target)).faultedAttempts, 1, 'fixture must fault the legacy credential purge exactly once');
+  const diagnostics = await readDiagnostics(worker);
+  const failure = diagnostics.find((entry) => entry.stage === 'startup' && entry.cause === 'wake_failed');
+  assert.ok(failure, `expected a startup/wake_failed diagnostic (${JSON.stringify(diagnostics)})`);
+  assert.equal(failure.detail, 'auth_snapshot', 'the diagnostic names the startup step');
+  const record = await storedValue(worker, 'session', 'authGateWakeFailureV1');
+  assert.equal(record?.cause, 'wake_failed'); assert.equal(record?.step, 'auth_snapshot');
+  assert.equal(typeof record?.error, 'string');
+  assert.equal(await storedValue(worker, 'local', 'studentToken'), undefined, 'the legacy local credential is purged by the recovery clear');
+  const auth = await workerAuthSummary(worker);
+  assert.equal(auth.startup, true); assert.equal(auth.studentToken, null);
+  assert.equal(auth.schoolId, 'recovery-school', 'readiness applies the managed policy the failed wake never applied');
+  const summary = await writeFault(worker, 'summary');
+  assert.ok(summary.authClears.length >= 1, `readiness must run the signed-out clear (${JSON.stringify(summary.authClears)})`);
+  assert.equal(fixture.state.studentLoginRequests, 0);
+  const owners = await startupOwners(worker);
+  assert.ok(owners.find((owner) => owner.kind === 'startup_readiness')?.settled, `the readiness owner must settle (${JSON.stringify(owners)})`);
+  const { response } = await gateProbe(probe);
+  assert.equal(response?.success, true, `the gate must answer after recovery (${JSON.stringify(response)})`);
+  return { frame, retried, failure, record, diagnostics, summary };
+}
+
+await withBrowser({ caseName: 'wake-failure-before-policy', authReadMode: 'never', seed: legacyCredentialSeed }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-failure-before-policy');
+  await waitForHeldWakeAuthRead(worker);
+  const target = await writeFault(worker, 'arm', { key: 'studentToken', method: 'remove', mode: 'reject-before-commit' });
+  assert.equal(await releaseWakeAuthRead(worker), 1, 'fixture must actually hold the wake auth snapshot read');
+  const { retried, failure, record, summary } = await assertWakeRecovered({ page, worker, probe, fixture, target, label: 'wake-failure-before-policy', timeout: 20_000 });
+  console.log('PASS wake failure before policy: readiness recovered from durable markers and applied policy', JSON.stringify({ retried, failure, record, authClears: summary.authClears }));
+});
+
+await withBrowser({ caseName: 'wake-parked-before-policy', authReadMode: 'never', seed: legacyCredentialSeed }, async ({ context, worker, probe, fixture }) => {
+  const page = await openGatedPage(context, fixture, 'case=wake-parked-before-policy');
+  await waitForHeldWakeAuthRead(worker);
+  // The purge's native callback never runs. 2.9.4 bounds it: the fresh verify
+  // read still sees the credential, so the wake fails instead of parking.
+  const target = await writeFault(worker, 'arm', { key: 'studentToken', method: 'remove', mode: 'never' });
+  assert.equal(await releaseWakeAuthRead(worker), 1, 'fixture must actually hold the wake auth snapshot read');
+  await waitForHeldWrite(worker, 'studentToken');
+  const { retried, failure, record, diagnostics, summary } = await assertWakeRecovered({ page, worker, probe, fixture, target, label: 'wake-parked-before-policy', timeout: 30_000 });
+  assert.ok(diagnostics.some((entry) => entry.stage === 'startup' && entry.cause === 'stalled'), `expected a startup/stalled diagnostic (${JSON.stringify(diagnostics)})`);
+  assert.ok(summary.held.some((held) => held.key === 'studentToken' && !held.committed), 'the parked native purge stays held; it is never replayed');
+  console.log('PASS wake parked before policy: the bounded purge failed the wake and readiness recovered', JSON.stringify({ retried, failure, record, held: summary.held }));
 });
 
 await withBrowser({ caseName: 'recovered-startup-obsolete-school', seed: (origin) => {

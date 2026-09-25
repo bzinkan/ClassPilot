@@ -8,14 +8,15 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.9.3 release documentation and preserved sign-in guarantees", () => {
-  it("pins every active release instruction to the versioned 2.9.3 artifact", () => {
+describe("2.9.4 release documentation and preserved sign-in guarantees", () => {
+  it("pins every active release instruction to the versioned 2.9.4 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.9.3.zip");
+      expect(source).toContain("ClassPilot-v2.9.4.zip");
+      expect(source).not.toContain("ClassPilot-v2.9.3.zip");
       expect(source).not.toContain("ClassPilot-v2.9.0.zip");
       expect(source).not.toContain("ClassPilot-v2.8.9.zip");
       expect(source).not.toContain("ClassPilot-v2.8.8.zip");
@@ -24,7 +25,7 @@ describe("2.9.3 release documentation and preserved sign-in guarantees", () => {
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
     }
     expect(readme).toContain("Earlier archives do not");
-    expect(deployment).toContain("An earlier archive is not releasable as 2.9.3.");
+    expect(deployment).toContain("An earlier archive is not releasable as 2.9.4.");
     expect(deployment).toContain("afterHoursSafetyOnlyV1");
     expect(deployment).toContain("schoolWebsiteBlockEnforcementV1");
   });
@@ -63,6 +64,32 @@ describe("2.9.3 release documentation and preserved sign-in guarantees", () => {
       expect(source).toMatch(/chrome\.alarms[\s\S]*30 seconds/);
       expect(source).toMatch(/no (new )?Chrome permission/i);
       expect(source).toMatch(/managed-policy key/);
+      // Manual reload is the fallback; it must never be described as seamless.
+      expect(source).toMatch(/not seamless replacement/);
+    }
+  });
+
+  it("documents the 2.9.4 worker wake recovery as a correction only", () => {
+    const candidate = read("CLASSPILOT_2_9_4_RELEASE.md");
+    const readme = read("extension/README.md");
+
+    expect(candidate).toContain("npm run test:extension:red-on-old");
+    expect(candidate).toContain("v2.9.3");
+    expect(candidate).toContain("Submit with");
+    expect(candidate).toContain("deferred publishing");
+    expect(candidate).toContain("ClassPilot-v2.9.4.zip");
+    expect(candidate).toContain("This candidate update does not tag, package, upload, publish or activate the rollout.");
+    expect(candidate).toMatch(/Recheck the\s+live Store version immediately before any future upload/);
+    for (const source of [candidate, readme]) {
+      expect(source).toContain("authGateDiagnosticsV1");
+      for (const cause of ["wake_failed", "wake_abandoned"]) {
+        expect(source).toContain(`\`${cause}\``);
+      }
+      expect(source).toContain("`authGateWakeFailureV1`");
+      expect(source).toMatch(/30 seconds/);
+      expect(source).toMatch(/no (new )?Chrome permission/i);
+      expect(source).toMatch(/managed-policy key/);
+      expect(source).toMatch(/never cleared by this recovery/);
       // Manual reload is the fallback; it must never be described as seamless.
       expect(source).toMatch(/not seamless replacement/);
     }
