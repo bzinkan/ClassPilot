@@ -156,6 +156,14 @@ test('a frame leaving after verification requires a new bounded handshake', () =
   assert.equal(h.context.released, false);
 });
 
+test('a new load in the existing frame must verify again even when its URL retains the nonce', () => {
+  const h = harness(); h.start(); h.handshake(); h.advance(11_000);
+  h.context.beginSecureAuthGateFrameVerification(); h.advance(10_000);
+  assert.equal(h.context.authGateSecureFrameFailed, true);
+  assert.equal(h.context.released, false);
+  assert.equal(h.diagnostics.at(-1).elapsedMs, 10_000);
+});
+
 test('a late READY cannot revive a document whose script-recovery budget already failed', () => {
   const h = harness(); h.start(); h.advance(10_000);
   h.send('CLASSPILOT_AUTH_FRAME_READY');
