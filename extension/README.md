@@ -71,11 +71,21 @@ panel, reducing accidental launches on shared Chromebooks.
 
 ### Authorized active-class preview cadence (2.8.0)
 
-When SchoolPilot and the extension negotiate
+Administrators and IT staff with school administrator access can also observe
+an active scheduled class while its teacher is signed out. With the additional
+`screenshotReadOnlyObservationV1` capability negotiated, its screenshots update
+about every five seconds while that view is visible. This uses a bounded
+student-session screenshot lease and grants no classroom commands or teacher
+ownership. SchoolPilot revalidates the frozen class window and roster before
+retaining or displaying each frame. Extensions 2.9.2 and 2.9.3 can display these
+previews using their ordinary roughly 30-second cadence with the updated API.
+Installing the candidate alone does not enable the new server capability.
+
+For live classes and supervision, when SchoolPilot and the extension negotiate
 `screenshotActiveObservationCadenceV1`, SchoolPilot may grant a short-lived
-five-second capture cadence only for the exact teaching session currently
+five-second capture cadence only for the exact classroom context currently
 visible to an authorized teacher or administrator. The cadence is fenced to
-the current student, student session, teaching session, control revision, and
+the current student, student session, classroom context, control revision, and
 authentication generation. Closing or changing that class view, changing any
 binding, or reaching the local lease deadline immediately returns capture to
 the ordinary 30-second tracking-window cadence.
@@ -631,7 +641,7 @@ During full monitoring:
 - Timestamps of activity
 - Favicon URL of the active tab, and of each open HTTP/HTTPS tab in the tab snapshot (https-only, limited to origin and path, and capped at 512 characters)
 - Heartbeat, connection, and device health state
-- Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only teaching-session-bound thumbnails and discards student-session/gap pixels on receipt
+- Tracking-window JPEG screenshot thumbnails of the active visible HTTP/HTTPS tab; SchoolPilot retains only authorized class/supervision-bound thumbnails, including current frozen scheduled occurrences observed before the teacher connects, and discards unrelated gap pixels
 
 Current Safety Center findings require administrator review and do not
 automatically close tabs or request safety-evidence screenshots. Explicit
@@ -654,7 +664,7 @@ observations; **Full** retains normal monitoring behavior.
 - **Tab titles and URLs are collected automatically** - No student action required
 - Heartbeat sends data every 10 seconds
 - In negotiated tracking-window mode, active-tab thumbnails are captured about every 5 seconds only while an authorized teacher or administrator has the exact class view visible; otherwise capture remains about every 30 seconds while school-managed monitoring is active inside the server-authorized tracking window
-- Every upload is bound to the exact current student or teaching session and control revision. SchoolPilot discards gap/student-session pixels on receipt and retains only class-bound thumbnails
+- Every upload is bound to the exact current student/session and control revision. SchoolPilot revalidates the current class/supervision authority or frozen scheduled observation before retaining thumbnails; unrelated gap pixels are discarded
 - Capture stops when school tracking policy is hard-off or limited safety-only, after sign-out/session expiry or an authentication/explicit license denial, or when the short-lived tracking-window lease expires or is revoked
 - The older observation-lease capability remains available for mixed-version rollout; a server-selected legacy screenshot mode remains an explicit fallback
 - Teacher sees current tab and URL history in real-time

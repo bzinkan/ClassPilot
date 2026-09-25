@@ -331,6 +331,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'studentChatIdempotencyV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotActiveObservationCadenceV1',
+  'screenshotReadOnlyObservationV1',
   'screenshotObservationLeaseV1',
   'safetyEvidenceCaptureV1',
   'liveViewIceServersV1',
@@ -360,6 +361,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'restrictionPortalFirstV1',
   'screenshotTrackingWindowLeaseV1',
   'screenshotActiveObservationCadenceV1',
+  'screenshotReadOnlyObservationV1',
   'screenshotObservationLeaseV1',
   'managedDeviceContinuityV1',
 ]);
@@ -10379,6 +10381,9 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
   const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => (
     advertised.has(name)
     && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
+    && (name !== 'screenshotReadOnlyObservationV1'
+      || (advertised.has('screenshotTrackingWindowLeaseV1')
+        && advertised.has('screenshotActiveObservationCadenceV1')))
   ));
   negotiatedProtocolState = Object.freeze({
     scope: authContextProtocolScope(context),
@@ -10485,7 +10490,8 @@ function normalizeScreenshotCaptureCadence(rawPolicy, context, options, policy) 
     policy?.mode !== 'tracking_window_lease'
     || policy.valid !== true
     || policy.captureAllowed !== true
-    || !['teaching_session', 'supervision_context'].includes(policy.authority?.kind)
+    || (!['teaching_session', 'supervision_context'].includes(policy.authority?.kind)
+      && !readOnlyScreenshotCadenceAuthorityIsCurrent(policy.authority, context))
     || policy.authority?.kind === 'supervision_context' && !hasNegotiatedCapability('scheduledClassroomV1', context)
     || !hasNegotiatedCapability('screenshotActiveObservationCadenceV1', context)
   ) return background;
@@ -10551,6 +10557,23 @@ function screenshotTrackingAuthorityMatchesCurrentState(authority = screenshotPo
   );
 }
 
+// An observation lease grants faster screenshot capture, never classroom
+// ownership. Keep this separate from command and Live View authority checks.
+function readOnlyScreenshotCadenceAuthorityIsCurrent(authority, context) {
+  return authority?.kind === 'student_session'
+    && hasNegotiatedCapability('screenshotReadOnlyObservationV1', context)
+    && hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', context)
+    && hasNegotiatedCapability('screenshotActiveObservationCadenceV1', context)
+    && Number.isSafeInteger(authority.controlRevision)
+    && authority.controlRevision >= 0
+    && authority.controlRevision === currentStudentControlRevision();
+}
+
+function screenshotCadenceAuthorityMatchesCurrentState(context) {
+  return screenshotTrackingAuthorityMatchesCurrentState()
+    || readOnlyScreenshotCadenceAuthorityIsCurrent(screenshotPolicyState.authority, context);
+}
+
 function activeObservationScreenshotCadenceAllowed(context, nowValue = Date.now()) {
   try {
     assertAuthenticatedContextCurrent(context, 'active observation screenshot cadence');
@@ -10560,8 +10583,7 @@ function activeObservationScreenshotCadenceAllowed(context, nowValue = Date.now(
   const cadence = screenshotPolicyState.captureCadence;
   return ambientScreenshotAllowed(context, nowValue)
     && screenshotPolicyState.mode === 'tracking_window_lease'
-    && ['teaching_session', 'supervision_context'].includes(screenshotPolicyState.authority?.kind)
-    && screenshotTrackingAuthorityMatchesCurrentState()
+    && screenshotCadenceAuthorityMatchesCurrentState(context)
     && cadence?.mode === 'active_view'
     && cadence.intervalSeconds === 5
     && Number(cadence.expiresAt || 0) > nowValue;
@@ -10660,7 +10682,7 @@ function startActiveScreenshotCadence(context) {
           if (
             activeScreenshotCadence !== renewedCadence
             || !activeObservationScreenshotCadenceAllowed(context)
-            || !screenshotTrackingAuthorityMatchesCurrentState()
+            || !screenshotCadenceAuthorityMatchesCurrentState(context)
           ) throw authContextSuperseded('active observation screenshot cadence renewal');
         },
       }).catch(() => {});
@@ -10703,7 +10725,7 @@ function startActiveScreenshotCadence(context) {
         activeScreenshotCadence !== cadence
         || cadence.policyGeneration !== screenshotPolicyGeneration
         || cadence.authorityScope !== screenshotPolicyState.authorityScope
-        || RuntimeCore.classroomContextKey(cadence) !== RuntimeCore.classroomContextKey(currentClassroomState)
+        || !screenshotCadenceAuthorityMatchesCurrentState(context)
         || cadence.controlRevision !== currentStudentControlRevision()
         || !activeObservationScreenshotCadenceAllowed(context)
       ) throw authContextSuperseded('active observation screenshot cadence scheduling');
@@ -24719,9 +24741,8 @@ async function handleOffscreenMessage(message) {
       cadence.authContextId !== authContext.authContextId
       || cadence.policyGeneration !== screenshotPolicyGeneration
       || cadence.authorityScope !== screenshotPolicyState.authorityScope
-      || RuntimeCore.classroomContextKey(cadence) !== RuntimeCore.classroomContextKey(currentClassroomState)
       || cadence.controlRevision !== currentStudentControlRevision()
-      || !screenshotTrackingAuthorityMatchesCurrentState()
+      || !screenshotCadenceAuthorityMatchesCurrentState(authContext)
       || activeScreenshotCadence !== cadence
       || !activeObservationScreenshotCadenceAllowed(authContext)
     ) return { success: true, ignored: true };
@@ -25388,7 +25409,11 @@ async function handleWsMessage(
         if (
           message.reason !== 'observation_changed'
           // This hint only triggers a fresh authorized heartbeat. It grants no lease.
-          || !classroomStateContextIsCurrent(message)
+          || (!classroomStateContextIsCurrent(message)
+            && !(hasNegotiatedCapability('screenshotReadOnlyObservationV1', authContext)
+              && hasNegotiatedCapability('screenshotTrackingWindowLeaseV1', authContext)
+              && typeof message.teachingSessionId === 'string' && message.teachingSessionId.trim()
+              && !message.supervisionContextId))
         ) return;
         scheduleEventHeartbeat('screenshot-policy-refresh');
         return;

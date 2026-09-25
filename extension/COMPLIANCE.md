@@ -38,8 +38,11 @@ SchoolPilot:
   visibility while the exact server-authorized tracking window remains active;
   the five-second cadence requires the exact authorized class view to be
   visible. SchoolPilot retains only teaching-session-bound or explicitly
-  negotiated scheduled-supervision-bound thumbnails and
-  discards student-session/gap pixels on receipt.
+  negotiated scheduled-supervision-bound thumbnails. For administrator Observe
+  of a currently running frozen schedule whose teacher is signed out, the
+  server may bind student-session uploads to that exact reporting occurrence
+  after revalidating its lifetime, roster, and control revision. Other
+  student-session/gap pixels are discarded on receipt.
 - Student-initiated hand raises, chat messages, poll responses, and sign-in
   events.
 - Runtime diagnostics with PII and URLs scrubbed before Sentry submission.
@@ -80,8 +83,14 @@ supervision context, control revision, and
 authentication generation; the extension independently expires it and drops
 overlapping captures rather than queuing them. Each upload carries the exact
 student-session, teaching-session or negotiated supervision authority and control revision that
-authorized the pixels. SchoolPilot discards student-session/gap pixels on
-receipt and retains only authorized classroom-bound thumbnails. Capture stops when
+authorized the pixels. Under the separately negotiated
+`screenshotReadOnlyObservationV1` capability, a student-session lease may grant
+the same five-second cadence for administrator Observe before the scheduled
+teacher connects. It never creates classroom control authority. The server
+retains those uploads only under a currently authorized frozen reporting
+occurrence; unrelated student-session/gap pixels remain discarded. Extensions
+2.9.2 and 2.9.3 retain the ordinary roughly 30-second cadence for this case.
+Capture stops when
 the tracking window closes, the lease expires or is revoked, school tracking
 policy is hard-off or limited safety-only, the student signs out or the session expires/changes, or
 the school license is explicitly denied.
