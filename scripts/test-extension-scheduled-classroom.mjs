@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const requestedExtension = String(process.env.CLASSPILOT_EXTENSION_PATH || '').trim()
@@ -26,6 +27,7 @@ try {
     await launchSession.detach();
   }
   const worker = browser.serviceWorkers()[0] || await browser.waitForEvent('serviceworker');
+  await waitForExtensionWorkerDeclarations(worker);
   const requestedManifest = JSON.parse(await readFile(resolve(requestedExtension, 'manifest.json'), 'utf8'));
   const loadedVersion = await worker.evaluate(() => chrome.runtime.getManifest().version);
   assert.equal(loadedVersion, requestedManifest.version, 'Chrome must load the requested extension manifest');

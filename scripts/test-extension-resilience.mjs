@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
@@ -31,14 +32,7 @@ function chromeExecutable() {
 
 async function waitForInitialWorker(context) {
   const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker',{timeout:10_000});
-  // Older Chromium exposes the CDP worker target before its entry script has
-  // executed. Wait for production declarations before installing probe helpers.
-  const deadline=Date.now()+5000;
-  while(Date.now()<deadline&&await worker.evaluate(()=>typeof restrictLocalStorageToTrustedContexts!=='function')) {
-    await new Promise(resolve=>setTimeout(resolve,25));
-  }
-  assert.equal(await worker.evaluate(()=>typeof restrictLocalStorageToTrustedContexts),'function',
-    'the production worker entry script must execute before resilience probes');
+  await waitForExtensionWorkerDeclarations(worker);
   await worker.evaluate(()=>{globalThis.__readPrivateRecoveryState=async()=>{
     const db=await new Promise((resolve,reject)=>{const req=indexedDB.open('classpilot-private-recovery-v1');
       req.onupgradeneeded=()=>req.transaction.abort();req.onerror=()=>req.error?.name==='AbortError'?resolve(null):reject(req.error);req.onsuccess=()=>resolve(req.result);});

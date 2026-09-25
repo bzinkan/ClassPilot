@@ -7,6 +7,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { chromium } from 'playwright';
+import { extensionWorkerDeclarationsReady, waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Case table. `expectedRedOnBase` records whether the case must FAIL against
@@ -531,11 +532,10 @@ async function withBrowser({ legacyVersion = false, previousVersion=false, snaps
     };
     context = await chromium.launchPersistentContext(profile, launchOptions);
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    await waitForExtensionWorkerDeclarations(worker);
     const extensionId = new URL(worker.url()).host;
     const probe = await context.newPage();
     await probe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
-    await waitUntilWorker(worker,()=>typeof isExplicitUnmanagedDevelopmentRuntime==='function',5000,
-      `managed fixture failed to initialize in ${worker.url()}`);
     assert.equal(await worker.evaluate(() => isExplicitUnmanagedDevelopmentRuntime()), false);
     assert.equal(await worker.evaluate(() => isExplicitUnmanagedDevelopmentServer(CONFIG.serverUrl)), false);
     const restart = async (beforeLaunch = null) => {
@@ -543,6 +543,7 @@ async function withBrowser({ legacyVersion = false, previousVersion=false, snaps
       await beforeLaunch?.(extensionPath);
       context=await chromium.launchPersistentContext(profile,launchOptions);
       const nextWorker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker');
+      await waitForExtensionWorkerDeclarations(nextWorker);
       const nextProbe=await context.newPage();
       await nextProbe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
       return {context,worker:nextWorker,probe:nextProbe,extensionId,extensionPath,fixture,restart};
@@ -593,7 +594,7 @@ async function waitForWorkerVersion(context, extensionId, version, timeout = 15_
       if (new URL(worker.url()).host !== extensionId) continue;
       const currentVersion = await worker.evaluate(() => chrome.runtime.getManifest().version).catch(() => null);
       if (currentVersion) observed.add(currentVersion);
-      if (currentVersion === version) return worker;
+      if (currentVersion === version && await extensionWorkerDeclarationsReady(worker)) return worker;
     }
     await new Promise(done => setTimeout(done, 100));
   }
@@ -2398,7 +2399,7 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
   const wakeDeadline = Date.now() + 10_000;
   while (!woken && Date.now() < wakeDeadline) {
     for (const candidate of [...context.serviceWorkers()].reverse()) {
-      try { if (await candidate.evaluate(() => chrome.runtime.id)) { woken = candidate; break; } } catch { /* a stopped worker can linger in the snapshot */ }
+      if (await extensionWorkerDeclarationsReady(candidate)) { woken = candidate; break; }
     }
     if (!woken) await sleep(50);
   }
