@@ -40,6 +40,10 @@ jobs:
   chrome-compatibility:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Historical fixtures require newer native storage/debugger APIs. The
+      # default job retains their upgrade cases and all red-on-old proofs.
+      CLASSPILOT_COMPATIBILITY_RUN: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +66,6 @@ jobs:
           "$CHROME_PATH" --version | tee "$RUNNER_TEMP/chrome-version.txt"
           grep -F "$CHROME_VERSION" "$RUNNER_TEMP/chrome-version.txt"
           echo "CLASSPILOT_CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
-      - run: npm run test:extension:chrome
+      - run: npm run test:extension:chrome:behavior
       - run: bash extension/package-extension.sh
       - run: npm run test:extension:package

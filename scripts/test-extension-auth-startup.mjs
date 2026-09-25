@@ -471,16 +471,20 @@ async function stopExtensionWorker(context, page, extensionId) {
     let consecutiveStoppedChecks = 0;
     const stopDeadline = Date.now() + 5_000;
     while (Date.now() < stopDeadline) {
-      for (const version of relevant()) {
-        if (version.runningStatus !== 'stopped') {
+      const currentVersions = relevant();
+      for (const version of currentVersions) {
+        if (version.runningStatus === 'running') {
           await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId }).catch(() => {});
         }
       }
-      await cdp.send('ServiceWorker.stopAllWorkers');
+      // Let native starting/stopping transitions finish before another stop.
+      // A per-version stop already targets this worker; do not also queue a
+      // global stop against the same in-progress transition.
+      if (currentVersions.length === 0) await cdp.send('ServiceWorker.stopAllWorkers');
       await new Promise((resolvePoll) => setTimeout(resolvePoll, 50));
       // Chrome can retire the worker target between waitForLiveWorker() and
       // ServiceWorker.enable(), or before emitting the final version update.
-      // A missing/non-evaluable extension Worker is direct evidence that the
+      // A missing native extension worker target is direct evidence that the
       // cold-start precondition is already satisfied; do not require a stale
       // CDP version record to transition after its target has disappeared.
       const relevantVersions = relevant();
@@ -493,7 +497,7 @@ async function stopExtensionWorker(context, page, extensionId) {
         return { closedCount: discoveredCount, stopped: true };
       }
     }
-    return {
+    const failure = {
       closedCount: discoveredCount,
       stopped: false,
       versions: relevant().map((version) => ({
@@ -501,6 +505,8 @@ async function stopExtensionWorker(context, page, extensionId) {
         runningStatus: version.runningStatus,
       })),
     };
+    console.error('Native worker stop did not complete:', JSON.stringify(failure));
+    return failure;
   } finally {
     await cdp.send('ServiceWorker.disable').catch(() => {});
     await cdp.detach();
@@ -1351,15 +1357,17 @@ async function assertUnderlyingPageLocked(page, options = {}) {
   const before = await page.evaluate(() => ({
     host: { ...window.__underlyingInput },
     control: { ...window.__underlyingControlInput },
+    eventLogLength: window.__underlyingEventLog.length,
   }));
   await page.mouse.click(30, 30);
   await page.keyboard.press('A');
   await page.mouse.wheel(0, 200);
   if (page.touchscreen) await page.touchscreen.tap(30, 30);
-  const after = await page.evaluate(() => ({
+  const after = await page.evaluate((priorEventCount) => ({
     host: { ...window.__underlyingInput },
     control: { ...window.__underlyingControlInput },
     eventLog: window.__underlyingEventLog.slice(-12),
+    newEventLog: window.__underlyingEventLog.slice(priorEventCount),
     hitTarget: (() => {
       const element = document.elementFromPoint(30, 30);
       return element?.id || element?.tagName || null;
@@ -1379,10 +1387,15 @@ async function assertUnderlyingPageLocked(page, options = {}) {
         zIndex: style.zIndex,
       };
     })(),
-  }));
+  }), before.eventLogLength);
   assert.deepEqual(after.control, before.control, `gate leaked input to the underlying control: ${JSON.stringify(after)}`);
   if (options.requireNoHostCapture !== false) {
     assert.deepEqual(after.host, before.host, `loading gate leaked input to the host window: ${JSON.stringify(after)}`);
+  } else {
+    assert.equal(after.host.keys, before.host.keys, `relocked gate leaked keyboard input: ${JSON.stringify(after)}`);
+    assert.ok(after.newEventLog.every(event => (
+      !['click', 'wheel', 'touchstart'].includes(event.type) || event.target === 'classpilot-auth-gate'
+    )), `relocked pointer input reached a page target: ${JSON.stringify(after)}`);
   }
 }
 
@@ -1392,6 +1405,10 @@ async function requestLiveRefresh(worker) {
     // already-applied snapshot. A direct low-level refresh would incorrectly
     // reread enterprise storage in this explicitly unmanaged browser fixture.
     await ensureManagedAuthGatePolicyAvailable({ userInitiated: true });
+    // A ready UI can be painted before its tracked request finishes persisting
+    // and broadcasting. Force intentionally joins pending production work, so
+    // drain that owner before asking for the fixture's newly configured reply.
+    while (sharedSignInConfigPromise) await sharedSignInConfigPromise;
     await refreshSharedSignInLoginConfig({
       force: true,
       reason: 'chromium_test',
@@ -5533,7 +5550,11 @@ async function main() {
             `${scenario.label} delayed prechange normal response`,
             { allowedPhases: ['loading', 'ready', 'setup_required', 'unavailable'] },
           );
-          await assertUnderlyingPageLocked(corruptPage);
+          // This document was previously unlocked. Its existing MAIN-world
+          // capture listeners precede blockers reinstalled during relock and
+          // can observe pointer events on the gate. Keep keyboard, page-target,
+          // underlying-control and the quarantine assertions above strict.
+          await assertUnderlyingPageLocked(corruptPage, { requireNoHostCapture: false });
         }
         await evaluateInAuthGateWorld(
           managedFenceWorld,

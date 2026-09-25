@@ -3747,11 +3747,21 @@ async function main() {
           commandType: 'teacher-message',
           outcome: 'applied',
         });
-        let httpAckRequest = null;
+        let capturedHttpAckRequest = null;
+        let httpAckCaptureActive = true;
         fetchWithBackoff = async (url, init = {}) => {
-          httpAckRequest = {
+          const body = JSON.parse(String(init.body || '{}'));
+          // Other worker lanes share this fetch helper and can run while the
+          // ACK awaits storage. Only this command receives the synthetic
+          // receipt/revision change. Match its body, so a wrong endpoint still
+          // reaches the URL assertion instead of being hidden by URL routing.
+          if (!httpAckCaptureActive || !Array.isArray(body.acks)
+            || !body.acks.some(ack => ack.commandId === 'http-idempotent-command')) {
+            return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+          }
+          capturedHttpAckRequest = {
             url: String(url),
-            body: JSON.parse(String(init.body || '{}')),
+            body,
           };
           // A later classroom revision is not an authentication transition.
           // The server-applied ACK captured at revision 41 must still drain
@@ -3773,6 +3783,8 @@ async function main() {
           }), { status: 200, headers: { 'content-type': 'application/json' } });
         };
         await flushCommandAckOutbox({ forceHttp: true });
+        httpAckCaptureActive = false;
+        const httpAckRequest = capturedHttpAckRequest;
         const afterHttpAckReceipt = await kv.get(COMMAND_ACK_OUTBOX_KEY);
         const commandAckRetentionBase = Date.now();
         const commandAckRetentionBinding = monitoringEventAuthBindingForContext(authB);
@@ -5286,6 +5298,7 @@ async function main() {
       ack.commandId === 'legacy-receipt-command'));
     assert.equal(result.afterLegacyReceiptMatched.commandAckOutboxV1.some((ack) =>
       ack.commandId === 'legacy-receipt-command'), false);
+    assert.ok(result.httpAckRequest, 'the forced HTTP flush must send the intended command acknowledgement');
     assert.equal(
       result.httpAckRequest.url.endsWith('/api/classpilot/device/command-acks'),
       true,

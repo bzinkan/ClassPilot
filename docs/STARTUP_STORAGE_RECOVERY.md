@@ -84,9 +84,15 @@ failure and a generic authentication rejection do not prove server sign-out.
 
 ## Validation and release boundary
 
-The compatibility matrix runs the complete extension suite and package suite
+The compatibility matrix runs all candidate behavior and package tests
 on pinned Chrome for Testing 120.0.6099.109 and 133.0.6943.141, with the main CI
-job covering current Playwright Chromium. Tests cover native IndexedDB,
+job covering current Playwright Chromium. Historical 2.8.x upgrade fixtures
+and all red-on-old proofs remain in that default job: their old storage
+prerequisites and newer debugger-based upgrade mechanism are not valid on
+Chrome 120. Compatibility jobs explicitly report those four historical
+exclusions and instead test a native same-ID 2.9.4-to-candidate reload.
+All current-candidate startup and recovery scenarios remain included on every
+browser. Tests cover native IndexedDB,
 migration, browser and worker restarts, privacy isolation, pending and failed
 storage, retry ownership, diagnostics, and existing server authority races.
 The immutable 2.9.4 fixture is commit

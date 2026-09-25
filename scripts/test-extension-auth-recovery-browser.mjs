@@ -20,9 +20,11 @@ export const RECOVERY_CASES = Object.freeze({
   'policy-change': { expectedRedOnBase: false },
   'cold-bootstrap': { expectedRedOnBase: false },
   'asymmetric-ack': { expectedRedOnBase: false },
-  'upgrade-2.8.7': { expectedRedOnBase: false },
-  'upgrade-2.8.8': { expectedRedOnBase: false },
-  'upgrade-2.8.9': { expectedRedOnBase: false },
+  'upgrade-2.8.6': { expectedRedOnBase: false, historicalUpgrade: true },
+  'upgrade-2.8.7': { expectedRedOnBase: false, historicalUpgrade: true },
+  'upgrade-2.8.8': { expectedRedOnBase: false, historicalUpgrade: true },
+  'upgrade-2.8.9': { expectedRedOnBase: false, historicalUpgrade: true },
+  'upgrade-2.9.4-native-reload': { expectedRedOnBase: false },
   'auth-read-retry': { expectedRedOnBase: false },
   // 2.8.9 retains an unresolved read forever; 2.9.0 reconciles it at the deadline.
   'auth-read-pending': { expectedRedOnBase: true },
@@ -62,6 +64,9 @@ const sourceRoot = resolve(process.env.CLASSPILOT_EXTENSION_PATH || join(repoRoo
 const candidateVersion = JSON.parse(readFileSync(join(sourceRoot, 'manifest.json'), 'utf8')).version;
 const selectedCase = process.env.CLASSPILOT_AUTH_RECOVERY_CASE || '';
 assert.ok(['', ...Object.keys(RECOVERY_CASES)].includes(selectedCase), 'unknown recovery case selector');
+const compatibilityRun = process.env.CLASSPILOT_COMPATIBILITY_RUN === '1';
+const completedBrowserCases = [];
+const skippedHistoricalUpgrades = [];
 const sourceFiles=readdirSync(sourceRoot).filter(name=>(name.endsWith('.js')&&name!=='config.js')||name==='manifest.json'||name==='auth-gate-frame.html').sort();
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const sourceHashes=Object.fromEntries(sourceFiles.map(name=>[name,sha256(readFileSync(join(sourceRoot,name)))]));
@@ -79,7 +84,7 @@ function loadSnapshot(version) {
 }
 const legacy = loadSnapshot('2.8.6');
 const previous = loadSnapshot('2.8.7');
-const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9') };
+const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9'), '2.9.4': loadSnapshot('2.9.4') };
 
 async function fixtureServer() {
   const state = { configRequests: 0, rosterRequests: 0, studentLoginRequests: 0, pageLoads: 0 };
@@ -511,6 +516,11 @@ function executable() {
 
 async function withBrowser({ legacyVersion = false, previousVersion=false, snapshotVersion=null, seed=null, quietNetwork=false, mode = 'ready', caseName = 'existing', pagePolicyMode = 'ready', bootstrapOnly = false, authReadMode='ready',authReadArea='local', protectedStorageFault=null }, run) {
   if (selectedCase && selectedCase !== caseName) return;
+  if (compatibilityRun && RECOVERY_CASES[caseName]?.historicalUpgrade) {
+    skippedHistoricalUpgrades.push(caseName);
+    console.log(`NOT RUN ${caseName}: historical upgrade requires the modern-engine legacy gate; candidate compatibility cases still run.`);
+    return;
+  }
   const root = mkdtempSync(join(tmpdir(), 'classpilot-recovery-browser-'));
   const extensionPath = join(root, 'extension');
   const profile = join(root, 'profile');
@@ -549,6 +559,7 @@ async function withBrowser({ legacyVersion = false, previousVersion=false, snaps
       return {context,worker:nextWorker,probe:nextProbe,extensionId,extensionPath,fixture,restart};
     };
     await run({ context, worker, probe, extensionId, extensionPath, fixture, restart });
+    completedBrowserCases.push(caseName);
   } finally {
     await context?.close();
     await new Promise((done) => fixture.server.close(done));
@@ -1206,7 +1217,7 @@ await withBrowser({ mode: 'never' }, async ({ worker, probe }) => {
   console.log('PASS live coalesced Retry/read superseded by managed onChanged', JSON.stringify(supersededRead));
 });
 
-await withBrowser({ legacyVersion: true }, async ({ context, worker, probe, extensionId, extensionPath, fixture }) => {
+await withBrowser({ caseName: 'upgrade-2.8.6', legacyVersion: true }, async ({ context, worker, probe, extensionId, extensionPath, fixture }) => {
   assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version), '2.8.6');
   const page = await context.newPage();
   await page.goto(`${fixture.origin}/classroom`);
@@ -1944,6 +1955,81 @@ await withBrowser({caseName:'private-vault-migration-crash',quietNetwork:true,se
   console.log('PASS commit-before-delete migration, crash cleanup retry, and durable empty tombstone prevent legacy resurrection');
 });
 
+await withBrowser({ caseName: 'upgrade-2.9.4-native-reload', snapshotVersion: '2.9.4', quietNetwork: true },
+  async ({ context, worker, extensionId, extensionPath, fixture }) => {
+    assert.notEqual(candidateVersion, '2.9.4', 'the native upgrade needs a newer candidate');
+    assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version), '2.9.4');
+    const browserMajor = await worker.evaluate(() => Number(navigator.userAgent.match(/Chrome\/(\d+)/)?.[1]));
+    assert.ok(Number.isInteger(browserMajor));
+    // A native reload converts a command-line installation to an unpacked
+    // development installation on newer Chrome. Enable the normal developer
+    // setting in this disposable profile, as a person testing unpacked code
+    // would, so Chrome does not disable the extension during that transition.
+    const extensionsPage = await context.newPage();
+    await extensionsPage.goto('chrome://extensions/');
+    const developerMode = extensionsPage.locator('#devMode');
+    if (!await developerMode.evaluate(toggle => toggle.checked)) await developerMode.click();
+    assert.equal(await developerMode.evaluate(toggle => toggle.checked), true);
+    await extensionsPage.close();
+    const page = await openGatedPage(context, fixture, 'case=native-294-upgrade');
+    // The released worker itself fails before140 because local storage access
+    // levels are unavailable. Do not patch its auth functions or wait for
+    // successful restoration before exercising the real installed upgrade.
+    if (browserMajor < 140) {
+      await waitForPhase(page, 'unavailable', 15_000, '2.9.4');
+      assert.equal(await worker.evaluate(() => authGateStartupComplete), false);
+      const storageFailure = await worker.evaluate(() => trustedLocalStorageAccessPromise.then(
+        () => null, error => error?.message,
+      ));
+      assert.ok(['Trusted-only extension storage is unavailable',
+        'Trusted-only extension storage could not be enabled'].includes(storageFailure),
+        'released startup must be blocked by the actual unavailable local access-level API');
+    } else {
+      await waitForPhase(page, 'ready', 15_000, '2.9.4');
+    }
+    await assertProtected(page);
+    assert.equal(fixture.state.studentLoginRequests, 0);
+    const loadsBefore = fixture.state.pageLoads;
+    cpSync(sourceRoot, extensionPath, { recursive: true });
+    installManagedFixture(extensionPath, fixture.origin, 'ready', { quietNetwork: true });
+    // runtime.reload exists at the supported floor; unlike the CDP Extensions
+    // domain, it does not require a recent testing engine. Same path preserves
+    // the extension identity and native profile stores across this upgrade.
+    await worker.evaluate(() => chrome.runtime.reload()).catch(error => {
+      assert.match(error.message, /(?:closed|destroyed|invalidated)/i,
+        'native extension reload must execute rather than fail silently');
+    });
+    const updated = await waitForWorkerVersion(context, extensionId, candidateVersion);
+    assert.equal(new URL(updated.url()).host, extensionId);
+    await assertProtected(page);
+    const probe = await context.newPage();
+    await probe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
+    const refreshed = await rpc(probe, { type: 'refresh-auth-state', reason: 'user' });
+    assert.equal(refreshed?.success, true, `candidate startup after native reload: ${JSON.stringify(refreshed)}`);
+    let pageRecovery = 'cooperative';
+    try { await waitForPhase(page, 'ready', 15_000); }
+    catch (error) {
+      const outcomes = await updated.evaluate(async url => {
+        const tab = (await chrome.tabs.query({})).find(item => item.url === url);
+        return __managedRecoveryFixture.pageOutcomes.filter(item => item.tabId === tab?.id)
+          .map(({ status, reason }) => ({ status, reason }));
+      }, page.url());
+      assert.equal(outcomes.at(-1)?.status, 'manual_reload_required',
+        `native upgrade requires an explicit safe ownership fallback: ${JSON.stringify(outcomes)}; ${error.message}`);
+      assert.ok(['ownership_unproven', 'legacy_requires_update_authorization'].includes(outcomes.at(-1)?.reason));
+      await assertProtected(page);
+      assert.equal(fixture.state.pageLoads, loadsBefore, 'unknown old owner must not authorize automatic navigation');
+      pageRecovery = 'manual_ownership_fallback';
+      await page.reload();
+      await waitForPhase(page, 'ready');
+    }
+    await assertProtected(page);
+    assert.ok(fixture.state.pageLoads <= loadsBefore + 1, 'upgrade must not enter a reload loop');
+    assert.equal(fixture.state.studentLoginRequests, 0, 'upgrade cannot replay credentials');
+    await freshLoginAfterStorageRecovery({ worker: updated, probe, page, fixture });
+    console.log(`PASS native same-ID2.9.4→${candidateVersion} upgrade onChrome${browserMajor} (${browserMajor < 140 ? 'released startup blocked' : 'released startup ready'}, ${pageRecovery}), private vault and fresh PIN`);
+  });
+
 await withBrowser({ caseName: 'wake-partial-auth-clear', authReadMode: 'never', seed: browserSessionCredentialSeed, quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
   const page = await openGatedPage(context, fixture, 'case=wake-partial-auth-clear');
   await waitForHeldWakeAuthRead(worker);
@@ -2434,4 +2520,8 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
 
 for(const name of sourceFiles)assert.equal(sha256(readFileSync(join(sourceRoot,name))),sourceHashes[name],`source changed during test: ${name}`);
 console.log('Verified immutable production source inventory',JSON.stringify({version:candidateVersion,files:sourceHashes}));
-console.log('ClassPilot managed-mode recovery and legacy upgrade browser gate passed.');
+if (compatibilityRun) {
+  console.log(`ClassPilot recovery compatibility gate: ${completedBrowserCases.length} browser scenarios passed; historical upgrades not run: ${skippedHistoricalUpgrades.join(', ') || 'none selected'}.`);
+} else {
+  console.log('ClassPilot managed-mode recovery and legacy upgrade browser gate passed.');
+}
