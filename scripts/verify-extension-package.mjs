@@ -147,6 +147,7 @@ function runPackagedTests() {
     'test-extension-auth-layout.mjs',
     'test-extension-auth-startup.mjs',
     'test-extension-portal-first.mjs',
+    'test-extension-auth-frame-verification.mjs',
     'test-extension-worker-recovery.mjs',
     'test-extension-protected-storage.mjs',
     'test-extension-auth-diagnostics.mjs',

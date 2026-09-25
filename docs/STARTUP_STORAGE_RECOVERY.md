@@ -21,6 +21,12 @@ Each frame instance now has a distinct query parameter as well as its nonce
 fragment, forcing a fresh document while retaining the existing source and
 nonce checks. The regression verifies replacement of the actual document.
 
+Frame script verification is separate from policy readiness. A responsive,
+nonce-verified frame can wait for current policy without exhausting the
+10-second script-load deadline. New documents still receive a bounded
+verification window; policy fences continue to prevent credential display
+or browsing release until current authority is confirmed.
+
 Sources: [Chrome 133 storage implementation](https://github.com/chromium/chromium/blob/133.0.6943.132/extensions/browser/api/storage/storage_api.cc),
 [Chrome 140 storage implementation](https://github.com/chromium/chromium/blob/140.0.7339.80/extensions/browser/api/storage/storage_api.cc).
 

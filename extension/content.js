@@ -50,6 +50,7 @@ let authGateTrustedRoot = null;
 let authGateTrustedPhase = 'loading';
 let authGateSecureFallback = null;
 let authGateSecureFrameNonce = '';
+let authGateSecureFrameVerifiedNonce = '';
 let authGateSecureFrameReady = false;
 let authGateSecureFrameTrusted = false;
 let authGateSecureFramePendingPhase = 'loading';
@@ -1323,6 +1324,7 @@ function recoverTrustedAuthGateHost() {
     authGateSecureFrame = null;
     authGateSecureFallback = null;
     authGateSecureFrameNonce = '';
+    authGateSecureFrameVerifiedNonce = '';
     authGateSecureFrameReady = false;
     authGateSecureFrameTrusted = false;
     authGateSecureFramePendingPhase = 'loading';
@@ -1398,6 +1400,7 @@ function ensureSecureAuthGateFrame(gate) {
     authGateSecureFrame = null;
     authGateSecureFallback = null;
     authGateSecureFrameNonce = '';
+    authGateSecureFrameVerifiedNonce = '';
     authGateSecureFrameReady = false;
     authGateSecureFrameTrusted = false;
     authGateSecureFramePendingPhase = 'loading';
@@ -1538,7 +1541,8 @@ function startSecureAuthGateFrameRecoveryWindow() {
   authGateSecureFrameRecoveryAttempts = 1;
   authGateSecureFrameDeadlineTimer = setTimeout(() => {
     authGateSecureFrameDeadlineTimer = null;
-    if (!authGateActive || authGateSecureFrameTrusted) return;
+    if (!authGateActive || authGateSecureFrameTrusted ||
+        authGateSecureFrameVerifiedNonce === authGateSecureFrameNonce) return;
     authGateSecureFrameFailed = true;
     clearSecureAuthGateFrameRecovery();
     paintSecureAuthGateFrameFailure();
@@ -1588,7 +1592,9 @@ function markSecureAuthGateFrameUntrusted() {
 
 function beginSecureAuthGateFrameVerification() {
   if (authGateSecureFrameFailed || !authGateSecureFrame?.contentWindow || !authGateSecureFrameNonce) return;
+  authGateSecureFrameVerifiedNonce = '';
   markSecureAuthGateFrameUntrusted();
+  startSecureAuthGateFrameRecoveryWindow();
   try {
     authGateSecureFrame.contentWindow.postMessage({
       type: 'CLASSPILOT_AUTH_FRAME_INIT',
@@ -1610,15 +1616,19 @@ function beginSecureAuthGateFrameVerification() {
   clearSecureAuthGateFrameRecovery();
   authGateSecureFrameRecoveryTimer = setTimeout(() => {
     authGateSecureFrameRecoveryTimer = null;
-    if (!authGateSecureFrameTrusted) resetSecureAuthGateFrame();
+    if (!authGateSecureFrameTrusted && authGateSecureFrameVerifiedNonce !== authGateSecureFrameNonce) {
+      resetSecureAuthGateFrame();
+    }
   }, 300);
 }
 
 function resetSecureAuthGateFrame() {
   if (authGateSecureFrameFailed || !authGateSecureFrame?.isConnected) return;
   authGateSecureFrameRecoveryAttempts += 1;
+  authGateSecureFrameVerifiedNonce = '';
   markSecureAuthGateFrameUntrusted();
   authGateSecureFrameNonce = createAuthGateFrameNonce();
+  startSecureAuthGateFrameRecoveryWindow();
   authGateSecureFrame.src = secureAuthGateFrameUrl(authGateSecureFrameNonce);
 }
 
@@ -1679,6 +1689,13 @@ lifecycle.listen(window, 'message', (event) => {
     return;
   }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_READY') {
+    if (authGateSecureFrameFailed) return;
+    // A nonce-bound document is responsive even while policy authority is
+    // pending. End only its script-load budget; the policy checks below still
+    // prevent credential presentation or release until the current fence ends.
+    authGateSecureFrameVerifiedNonce = authGateSecureFrameNonce;
+    clearSecureAuthGateFrameRecovery();
+    clearSecureAuthGateFrameRecoveryWindow();
     authGateSecureFrameReady = true;
     notifyAuthGatePolicyRecovery();
     applyTrustedAuthGateFramePhase(authGateSecureFramePendingPhase);
@@ -1704,6 +1721,7 @@ lifecycle.listen(window, 'message', (event) => {
     return;
   }
   if (event.data.type === 'CLASSPILOT_AUTH_FRAME_LEAVING') {
+    authGateSecureFrameVerifiedNonce = '';
     markSecureAuthGateFrameUntrusted();
     startSecureAuthGateFrameRecoveryWindow();
     clearSecureAuthGateFrameRecovery();
@@ -1734,6 +1752,7 @@ function removeAuthGate() {
   authGateSecureFrame = null;
   authGateSecureFallback = null;
   authGateSecureFrameNonce = '';
+  authGateSecureFrameVerifiedNonce = '';
   authGateSecureFrameReady = false;
   authGateSecureFrameTrusted = false;
   authGateSecureFramePendingPhase = 'loading';

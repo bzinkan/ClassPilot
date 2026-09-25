@@ -1722,6 +1722,43 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   await waitForHeldWrite(worker, 'studentAuthInvalidatingV1');
   const heldAt = Date.now();
   const configRequests = fixture.state.configRequests;
+  await worker.evaluate(faultTargetId => {
+    globalThis.__heldConfigDispatches = [];
+    globalThis.__heldOwnerFailure = null;
+    const nativeDiagnostic = recordAuthGateRecoveryDiagnostic;
+    recordAuthGateRecoveryDiagnostic = function (...args) {
+      const result = Reflect.apply(nativeDiagnostic, this, args);
+      const owner = authGateStartupPublicationOwners.get('signed_out_clear');
+      if (args[0] === 'startup' && owner?.failed && !owner.settled && !owner.inFlight && !globalThis.__heldOwnerFailure) {
+        const failure = {
+          at: Date.now(), kind: owner.kind, attempts: owner.attempts, retryAt: owner.retryAt,
+          matchedAttempts: __managedRecoveryFixture.writeFaults.find(candidate => candidate.id === faultTargetId)?.matchedAttempts,
+          markerRead: false, marker: null,
+        };
+        globalThis.__heldOwnerFailure = failure;
+        chrome.storage.local.get('studentAuthInvalidatingV1', stored => {
+          const error = chrome.runtime.lastError;
+          failure.marker = error ? null : stored.studentAuthInvalidatingV1;
+          failure.markerRead = true;
+        });
+      }
+      return result;
+    };
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = function (...args) {
+      const input = args[0];
+      const url = typeof input === 'string' ? input : input?.url || String(input);
+      if (new URL(url).pathname.endsWith('/login-config')) {
+        const owner = authGateStartupPublicationOwners.get('signed_out_clear');
+        globalThis.__heldConfigDispatches.push({
+          startup: authGateStartupComplete,
+          pendingMutations: studentAuthMutationPendingCount,
+          clear: owner ? { settled: owner.settled, failed: owner.failed, inFlight: Boolean(owner.inFlight), attempts: owner.attempts } : null,
+        });
+      }
+      return Reflect.apply(nativeFetch, this, args);
+    };
+  }, target);
   // Phase 1: while the native write is unresolved (inside its 9s reconcile
   // window) user retries, page polls and the recovery alarm all coalesce on
   // the in-flight owner. Nothing may re-issue the write.
@@ -1737,22 +1774,47 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   await sleep(1_500);
   assert.equal((await faultTarget(worker, target)).matchedAttempts, 1, 'user retries, page polls and the recovery alarm must never re-issue an unresolved native write');
   assert.equal((await workerAuthSummary(worker)).startup, false);
+  assert.equal(fixture.state.configRequests, configRequests, 'no login-config traffic while the native startup write is unresolved');
+  assert.deepEqual(await worker.evaluate(() => globalThis.__heldConfigDispatches), [], 'no login-config dispatch while the native startup write is unresolved');
   // Phase 2: the deadline reconciles the uncommitted hold as lost. Startup is
   // then a completed, retryable owner failure behind the watchdog card. Observe
   // the owner directly: the page-driven backoff re-runs it about 2s later.
-  const frames = await Promise.all(pages.map((page) => waitForPhase(page, 'unavailable', 12_000)));
+  const frameStates = await Promise.all(pages.map(async page => {
+    const frame = await waitForPhase(page, 'unavailable', 12_000);
+    return { frame, code: await frameSupportCode(frame) };
+  }));
+  const frames = frameStates.map(({ frame }) => frame);
   const failedAt = Date.now();
-  let failedOwners = [];
-  while (failedOwners.length === 0 && Date.now() - failedAt < 3_000) { failedOwners = await failedStartupOwners(worker); if (failedOwners.length === 0) await sleep(50); }
-  const unavailableMs = Date.now() - heldAt;
-  assert.ok(failedOwners.some((owner) => owner.kind === 'signed_out_clear' && Number(owner.retryAt) > 0), `the lost hold must settle as a completed, retryable clear-owner failure (${JSON.stringify(failedOwners)})`);
+  let failure = null;
+  // Observe the actual transition: slow multi-tab probes can outlive the 2s
+  // backoff and miss the failed state after the owner has already recovered.
+  while (!failure?.markerRead && Date.now() - failedAt < 3_000) {
+    failure = await worker.evaluate(() => globalThis.__heldOwnerFailure);
+    if (!failure?.markerRead) await sleep(50);
+  }
+  const unavailableMs = Number(failure?.at) - heldAt;
+  assert.ok(failure?.kind === 'signed_out_clear' && Number(failure.retryAt) > 0, `the lost hold must settle as a completed, retryable clear-owner failure (${JSON.stringify(failure)})`);
   assert.ok(unavailableMs >= 8_500 && unavailableMs <= 16_500, `the hold must be given ~9s before being declared lost (${unavailableMs}ms)`);
-  for (const frame of frames) assert.ok(STARTUP_GATE_CODES.includes(await frameSupportCode(frame)), 'every tab shows the startup gate card');
+  for (const { code } of frameStates) assert.ok(STARTUP_GATE_CODES.includes(code), 'every tab shows the startup gate card');
   for (const reply of await earlyRetries) assert.notEqual(reply?.success, true, 'user retries must not report success while the write is unresolved');
-  assert.equal((await faultTarget(worker, target)).matchedAttempts, 1, 'the deadline itself never re-issues the write');
-  assert.equal(await storedValue(worker, 'local', 'studentAuthInvalidatingV1'), true, 'a lost removal leaves the crash marker in place');
+  assert.equal(failure.matchedAttempts, 1, 'the deadline itself never re-issues the write');
+  assert.equal(failure.marker, true, 'a lost removal leaves the crash marker in place');
   for (const page of pages) await assertProtected(page);
-  assert.equal(fixture.state.configRequests, configRequests, 'no login-config traffic while startup is unresolved');
+  // The page backoff may complete the clear while these protection probes
+  // run. The managed-policy continuation can then fetch config before the
+  // final roster/readiness publication. Assert at dispatch, not against a
+  // late cumulative request count that also includes that legal recovery.
+  const assertConfigDispatchesAfterClear = async () => {
+    const dispatches = await worker.evaluate(() => globalThis.__heldConfigDispatches);
+    for (const dispatch of dispatches) {
+      assert.equal(dispatch.clear?.settled, true, `login-config must wait for the strict startup clear (${JSON.stringify(dispatch)})`);
+      assert.equal(dispatch.clear.failed, false);
+      assert.equal(dispatch.clear.inFlight, false);
+      assert.equal(dispatch.pendingMutations, 0, `login-config must wait for authentication mutations (${JSON.stringify(dispatch)})`);
+    }
+    return dispatches;
+  };
+  await assertConfigDispatchesAfterClear();
   // Phase 3: three tabs, two more user retries, a Retry click, the page-timer
   // backoff and the recovery alarm all coalesce on one re-run of the failed
   // owner. The replayed clear re-issues the removal exactly once and recovers.
@@ -1782,6 +1844,7 @@ await withBrowser({ caseName: 'held-ops-concurrency', authReadMode: 'never' }, a
   }
   assert.equal(await storedValue(worker, 'local', 'studentAuthInvalidatingV1'), undefined, 'a late stale callback cannot resurrect the crash marker');
   assert.equal(fixture.state.studentLoginRequests, 0);
+  assert.ok((await assertConfigDispatchesAfterClear()).length > 0, 'the native dispatch observer must witness config recovery');
   console.log('PASS held startup write: 3 tabs, user retries, polls and the alarm coalesce until the deadline; one re-run recovers', JSON.stringify({ unavailableMs }));
 });
 
