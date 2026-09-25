@@ -1594,10 +1594,20 @@ await withBrowser({ caseName: 'abandoned-then-newer-policy', authReadMode: 'neve
   await waitForHeldWrite(worker, 'managedAuthGateBindingV1');
   const firstGeneration = (await workerAuthSummary(worker)).generation;
   await managedChange(worker, [page], { enrollmentKey: { oldValue: 'fixture-enrollment-rotated-1', newValue: 'fixture-enrollment-rotated-2' } });
+  const readinessDeadline = Date.now() + 14_000;
   await expectReady(page, 14_000, worker, 'abandoned-then-newer-policy', 'a newer managed policy must let readiness join the current transition while the abandoned first policy write is unresolved');
   await assertProtected(page);
+  // A frame can display ready before the current policy's follow-up config
+  // request completes. Compare the stale callback against a settled, fresh
+  // baseline so legitimate loading-to-ready progress cannot look like an
+  // authority change caused by that callback. Keep the original ceiling.
+  await waitUntilWorker(worker, () => CONFIG.enrollmentKey === 'fixture-enrollment-rotated-2'
+    && sharedSignInLoginConfig.phase === 'ready' && !sharedSignInConfigPromise
+    && !managedAuthGateDirectRevalidationInFlight && studentAuthMutationPendingCount === 0,
+  Math.max(1, readinessDeadline - Date.now()), 'the current managed policy and login configuration must settle before releasing the stale write');
   const current = await workerAuthSummary(worker);
   assert.equal(current.startup, true);
+  assert.equal(current.loginPhase, 'ready');
   assert.ok(current.generation > firstGeneration, 'newer policy must own a newer generation');
   assert.equal(current.enrollmentKey, 'fixture-enrollment-rotated-2');
   assert.equal((await storedValue(worker, 'local', 'config'))?.enrollmentKey, 'fixture-enrollment-rotated-2');
@@ -1656,8 +1666,20 @@ await withBrowser({ caseName: 'post-snapshot-supersession', authReadMode: 'never
   assert.equal(capture.pendingMutations, 0, `readiness must not publish while the durable clear is still queued (${JSON.stringify(capture)})`);
   assert.equal(capture.markerRead, false, 'readiness must not publish before the crash marker is removed');
   assert.equal(capture.studentToken, null, 'the superseded snapshot must never be adopted');
-  const auth = await workerAuthSummary(worker);
-  assert.equal(auth.studentToken, null); assert.equal(auth.enrollmentKey, 'fixture-enrollment-rotated'); assert.equal(auth.pendingMutations, 0);
+  // Readiness above is an exact publication boundary. A newly loaded frame
+  // may then acknowledge its policy fence, queuing a fresh signed-out clear.
+  // Keep authority assertions strict while that later operation settles.
+  const settleDeadline = Date.now() + 5_000;
+  let auth;
+  do {
+    auth = await workerAuthSummary(worker);
+    assert.equal(auth.startup, true);
+    assert.equal(auth.studentToken, null);
+    assert.equal(auth.enrollmentKey, 'fixture-enrollment-rotated');
+    if (auth.pendingMutations === 0 || Date.now() >= settleDeadline) break;
+    await sleep(25);
+  } while (true);
+  assert.equal(auth.pendingMutations, 0, `post-readiness policy acknowledgement must settle (${JSON.stringify(auth)})`);
   const diagnostics = await readDiagnostics(worker);
   assert.ok(diagnostics.some((entry) => entry.stage === 'startup' && entry.cause === 'superseded_joined'), `expected a startup/superseded_joined diagnostic (${JSON.stringify(diagnostics)})`);
   assert.equal(fixture.state.studentLoginRequests, 0);

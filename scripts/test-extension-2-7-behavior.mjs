@@ -2120,6 +2120,18 @@ async function main() {
         captureAndSendScreenshot = captureBeforeLeaseAdoption;
         progress('capability adoption complete');
 
+        // Background requests share fetchWithBackoff. Route fixture responses
+        // by operation context, preserving wrong-URL/malformed-body failures
+        // for the intended upload instead of treating unrelated traffic as it.
+        const fixtureFetchForContext = (requestContext, respond) => async (
+          url, init = {}, retryOptions = {},
+        ) => {
+          if (retryOptions.context !== requestContext) {
+            return new Response('{}', { status: 200 });
+          }
+          return respond(url, init, retryOptions);
+        };
+
         let releaseLeaseRenewalCapture;
         let leaseRenewalCaptureStarted;
         const leaseRenewalCaptureGate = new Promise((resolveGate) => {
@@ -2130,10 +2142,10 @@ async function main() {
         });
         let leaseRenewalCaptureCalls = 0;
         let leaseRenewalUploads = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           leaseRenewalUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // This lane runs at whatever wall-clock time it is started, so a
@@ -2186,10 +2198,10 @@ async function main() {
         });
         let policyGenerationCaptureCalls = 0;
         const policyGenerationUploads = [];
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           policyGenerationUploads.push(JSON.parse(String(init.body || '{}')));
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // This lane runs at whatever wall-clock time it is started, so a
@@ -2242,14 +2254,14 @@ async function main() {
         // Fetch entry precedes the prior capture's persistence and finally.
         // Wait for actual completion before replacing its upload observer.
         await drainScreenshotCaptureLane('ambient screenshot upload');
-        let ambientUpload = null;
-        fetchWithBackoff = async (url, init = {}) => {
-          ambientUpload = {
+        let observedAmbientUpload = null;
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (url, init = {}) => {
+          observedAmbientUpload = {
             url: String(url),
             body: JSON.parse(String(init.body || '{}')),
           };
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         await captureAndSendScreenshot({
@@ -2266,6 +2278,7 @@ async function main() {
           subscribeTabActivation: () => () => {},
           subscribeTabUpdate: () => () => {},
         });
+        const ambientUpload = observedAmbientUpload;
 
         // Wall tiles carry a downscaled variant, not the captured frame. The
         // other screenshot fixtures use short undecodable stubs that
@@ -2293,6 +2306,9 @@ async function main() {
         };
         // Decoding the uploaded data URL is the proof that it still renders.
         const measureDataUrl = async (candidate) => {
+          if (typeof candidate !== 'string' || !candidate.startsWith('data:image/')) {
+            throw new Error('Thumbnail fixture upload must contain an image data URL');
+          }
           const blob = await (await fetch(candidate)).blob();
           const bitmap = await createImageBitmap(blob);
           const measured = {
@@ -2319,10 +2335,10 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         };
         let thumbnailUploadBody = null;
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           thumbnailUploadBody = JSON.parse(String(init.body || '{}'));
           return new Response('{}', { status: 200 });
-        };
+        });
         trackingState = TRACKING_STATES.ACTIVE;
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
@@ -2331,26 +2347,28 @@ async function main() {
           reason: 'thumbnail-downscale-fixture',
           ...thumbnailFixture,
         });
+        const completedThumbnailUploadBody = thumbnailUploadBody;
         const thumbnailUpload = {
           source: await measureDataUrl(thumbnailSourceDataUrl),
-          uploaded: thumbnailUploadBody
-            ? await measureDataUrl(thumbnailUploadBody.screenshot)
+          uploaded: completedThumbnailUploadBody
+            ? await measureDataUrl(completedThumbnailUploadBody.screenshot)
             : null,
-          differsFromSource: Boolean(thumbnailUploadBody)
-            && thumbnailUploadBody.screenshot !== thumbnailSourceDataUrl,
+          differsFromSource: Boolean(completedThumbnailUploadBody)
+            && completedThumbnailUploadBody.screenshot !== thumbnailSourceDataUrl,
           // Re-encoding happens after capturedAt is fixed, so the server's
           // |capturedAt - timestamp| fence must still see one instant.
-          capturedAtMatchesTimestamp: Boolean(thumbnailUploadBody)
-            && Date.parse(thumbnailUploadBody.capturedAt) === thumbnailUploadBody.timestamp,
+          capturedAtMatchesTimestamp: Boolean(completedThumbnailUploadBody)
+            && Date.parse(completedThumbnailUploadBody.capturedAt)
+              === completedThumbnailUploadBody.timestamp,
         };
 
         // A Chrome regression in the encode path must degrade to today's
         // full-resolution upload, never to a dropped frame.
         let failOpenUploadBody = null;
-        fetchWithBackoff = async (_url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, init = {}) => {
           failOpenUploadBody = JSON.parse(String(init.body || '{}'));
           return new Response('{}', { status: 200 });
-        };
+        });
         const originalCreateImageBitmap = globalThis.createImageBitmap;
         let thumbnailEncodeReached = false;
         try {
@@ -2382,7 +2400,7 @@ async function main() {
         const staleUploadReady = new Promise((resolveReady) => {
           staleUploadStarted = resolveReady;
         });
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           staleUploadStarted();
           await staleUploadDenialGate;
           return new Response(JSON.stringify({
@@ -2398,7 +2416,7 @@ async function main() {
             status: 409,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const staleUploadDenialPromise = captureAndSendScreenshot({
@@ -2450,13 +2468,13 @@ async function main() {
         scheduleEventHeartbeat = (heartbeatReason) => {
           screenshotAuthorityHeartbeatReasons.push(heartbeatReason);
         };
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           code: 'SCREENSHOT_CAPABILITY_HEARTBEAT_REQUIRED',
         }), {
           status: 409,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const heartbeatRequiredCaptureResult = await captureAndSendScreenshot({
@@ -2476,7 +2494,7 @@ async function main() {
         const heartbeatRequiredLeaseRetained = ambientScreenshotAllowed(authB);
 
         let pausedUnobservedUploadAttempts = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           pausedUnobservedUploadAttempts += 1;
           return new Response(JSON.stringify({
             ok: false,
@@ -2491,7 +2509,7 @@ async function main() {
             status: 409,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         const pausedUnobservedFixture = {
           queryActiveTab: async () => [{
             id: 7016,
@@ -2532,7 +2550,7 @@ async function main() {
         const delayedAuthorizationAllowScreenshotGeneration = reserveScreenshotPolicyRequestGeneration();
         const delayedAuthorizationAllowStartedAt = Date.now();
         let authorizationDeniedUploadAttempts = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           authorizationDeniedUploadAttempts += 1;
           return new Response(JSON.stringify({
             ok: false,
@@ -2541,7 +2559,7 @@ async function main() {
             status: 404,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const authorizationDeniedCaptureResult = await captureAndSendScreenshot({
@@ -2589,13 +2607,13 @@ async function main() {
         });
         captureAndSendScreenshot = captureBeforeAuthorizationRestore;
 
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           code: 'SCREENSHOT_STORE_UNAVAILABLE',
         }), {
           status: 503,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const screenshotServiceUnavailableResult = await captureAndSendScreenshot({
@@ -2645,13 +2663,13 @@ async function main() {
           subscribeTabUpdate: () => () => {},
         };
         const rapidCadenceUploadOptions = [];
-        fetchWithBackoff = async (_url, _init, retryOptions = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async (_url, _init, retryOptions = {}) => {
           rapidCadenceUploadOptions.push({ maxAttempts: retryOptions.maxAttempts });
           return new Response('{}', {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });
-        };
+        });
         const rapidClockBase = originalDateNow();
         let rapidClockNow = rapidClockBase;
         Date.now = () => rapidClockNow;
@@ -2779,13 +2797,13 @@ async function main() {
             scope: licenseScopeForAuthContext(authContext),
           });
         };
-        fetchWithBackoff = async () => new Response(JSON.stringify({
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => new Response(JSON.stringify({
           ok: false,
           planStatus: 'screenshot-payment-required',
         }), {
           status: 402,
           headers: { 'content-type': 'application/json' },
-        });
+        }));
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         // Screenshot 429s now use an independent lane. Clear that lane between
@@ -2836,10 +2854,10 @@ async function main() {
 
         let ambientActivationRaceUploads = 0;
         let ambientActivationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientActivationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientActivationRaceResult = await captureAndSendScreenshot({
@@ -2865,10 +2883,10 @@ async function main() {
 
         let ambientNavigationRaceUploads = 0;
         let ambientNavigationQueryCount = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientNavigationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientNavigationRaceResult = await captureAndSendScreenshot({
@@ -2893,10 +2911,10 @@ async function main() {
 
         let ambientNavigationBounceUploads = 0;
         let ambientNavigationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('screenshot upload', async () => {
           ambientNavigationBounceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         lastScreenshotAttemptAt = 0;
         lastScreenshotPixelsAt = 0;
         const ambientNavigationBounceResult = await captureAndSendScreenshot({
@@ -2928,13 +2946,13 @@ async function main() {
         });
 
         let safetyUpload = null;
-        fetchWithBackoff = async (url, init = {}) => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async (url, init = {}) => {
           safetyUpload = {
             url: String(url),
             body: JSON.parse(String(init.body || '{}')),
           };
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyResult = await captureSafetyEvidence({
           requestId: 'evidence-request-1',
           tabRef: 'tab_exact_1',
@@ -2968,10 +2986,10 @@ async function main() {
 
         let safetyActivationRaceUploads = 0;
         let safetyActivationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyActivationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyActivationRaceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-activation-race',
           tabRef: 'tab_exact_activation_race',
@@ -3010,10 +3028,10 @@ async function main() {
 
         let safetyNavigationRaceUploads = 0;
         let safetyNavigationGetCount = 0;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyNavigationRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyNavigationRaceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-navigation-race',
           tabRef: 'tab_exact_navigation_race',
@@ -3051,10 +3069,10 @@ async function main() {
 
         let safetyNavigationBounceUploads = 0;
         let safetyNavigationListener = null;
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyNavigationBounceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyNavigationBounceResult = await captureSafetyEvidence({
           requestId: 'evidence-request-navigation-bounce',
           tabRef: 'tab_exact_navigation_bounce',
@@ -3108,10 +3126,10 @@ async function main() {
         const safetyCaptureReady = new Promise((resolveReady) => {
           safetyCaptureStarted = resolveReady;
         });
-        fetchWithBackoff = async () => {
+        fetchWithBackoff = fixtureFetchForContext('safety evidence upload', async () => {
           safetyRaceUploads += 1;
           return new Response('{}', { status: 200 });
-        };
+        });
         const safetyRacePromise = captureSafetyEvidence({
           requestId: 'evidence-request-race',
           tabRef: 'tab_exact_race',
