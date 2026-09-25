@@ -92,6 +92,8 @@ try {
   const origin = `http://127.0.0.1:${server.address().port}`;
   await page.goto(origin);
   const result = await boundedApiCheck(worker.evaluate(async targetUrl => {
+    const workerDeadline = Date.now() + 5_000;
+    while (!globalThis.apiSmokeReady && Date.now() < workerDeadline) await new Promise(done => setTimeout(done, 20));
     if (!globalThis.apiSmokeReady) throw new Error('API fixture worker did not initialize');
     const alarmName = 'classpilot-api-smoke-half-minute';
     await chrome.alarms.create(alarmName, { periodInMinutes: 0.5 });

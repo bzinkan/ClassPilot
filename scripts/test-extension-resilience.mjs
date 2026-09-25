@@ -1777,9 +1777,20 @@ async function main() {
         }
       };
 
-      await chrome.tabs.create({ url: 'chrome://version/', active: false });
-      await chrome.tabs.create({ url: urls.outsideOne, active: true });
-      await chrome.tabs.create({ url: urls.otherTwo, active: false });
+      // Earlier exact-tab fixtures may close the last browser window. Give
+      // this scenario an explicit native window, then let its creation events
+      // finish under the existing policy before applying the new lock. On
+      // older Chrome, tabs.create resolves before onCreated policy work runs.
+      const reconciliationWindow = await chrome.windows.create({
+        url: 'chrome://version/', focused: true,
+      });
+      const windowId = reconciliationWindow.id;
+      await chrome.tabs.create({ windowId, url: urls.outsideOne, active: true });
+      await chrome.tabs.create({ windowId, url: urls.otherTwo, active: false });
+      await waitForTabState((tabs) => tabs.some((tab) => (
+        tab.windowId === windowId && tab.url === 'chrome://version/' && tab.status === 'complete'
+      )));
+      await drainTabPolicyMutations();
       await applyClassroomState({
         schemaVersion: 1,
         revision: 46,
@@ -1817,9 +1828,10 @@ async function main() {
         hardExpiresAt: now + 60 * 60 * 1000,
         restrictions: {},
       });
-      await chrome.tabs.create({ url: urls.flightAllowed, active: false });
-      await chrome.tabs.create({ url: urls.outsideActive, active: true });
-      await chrome.tabs.create({ url: urls.otherRemove, active: false });
+      await chrome.tabs.create({ windowId, url: urls.flightAllowed, active: false });
+      await chrome.tabs.create({ windowId, url: urls.outsideActive, active: true });
+      await chrome.tabs.create({ windowId, url: urls.otherRemove, active: false });
+      await drainTabPolicyMutations();
       await applyClassroomState({
         schemaVersion: 1,
         revision: 48,

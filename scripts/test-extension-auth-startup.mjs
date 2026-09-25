@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { extensionWorkerDeclarationsReady, waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
@@ -401,7 +402,8 @@ function launchContext(executablePath, profilePath, extensionPath) {
 }
 
 async function waitForWorker(context) {
-  return context.serviceWorkers()[0] || context.waitForEvent('serviceworker', { timeout: 10_000 });
+  const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 10_000 });
+  return waitForExtensionWorkerDeclarations(worker);
 }
 
 async function preparePageForWorkerStop(page) {
@@ -420,7 +422,7 @@ async function waitForLiveWorker(context) {
   while (Date.now() < deadline) {
     for (const candidate of [...context.serviceWorkers()].reverse()) {
       try {
-        if (await candidate.evaluate(() => chrome.runtime.id)) return candidate;
+        if (await extensionWorkerDeclarationsReady(candidate)) return candidate;
       } catch {
         // A stopped Playwright Worker can remain in the snapshot briefly.
       }
