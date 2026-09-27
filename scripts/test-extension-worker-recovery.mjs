@@ -1374,3 +1374,25 @@ test('signed-out startup continuation rejects credential material and every pend
   c.studentAuthMutationPendingCount = 1; h.acceptPolicy(); h.resolveOldRead(); h.clears[0].resolve();
   await h.settle(); await c.fixtureWake;
 });
+
+test('roster, sign-in and kiosk launch accept extension pages and refuse web-page content scripts', () => {
+  const id = 'iggbfegfcjkfieoemeoifmfnapepalca';
+  const context = vm.createContext({ chrome: { runtime: { id, getURL: (path) => `chrome-extension://${id}/${path}` } } });
+  vm.runInContext(functionSource('trustedExtensionPageSender'), context, { filename: 'production:trustedExtensionPageSender' });
+  const trusted = (sender) => context.trustedExtensionPageSender(sender);
+  const nonce = 'a'.repeat(64);
+  const frameUrl = `chrome-extension://${id}/auth-gate-frame.html?instance=${nonce}#${nonce}`;
+  assert.equal(trusted({ id, url: frameUrl, tab: { id: 7 }, frameId: 3 }), true, 'the sign-in frame inside a gated tab');
+  assert.equal(trusted({ id, url: `chrome-extension://${id}/popup.html` }), true, 'a top-level extension page');
+  for (const sender of [
+    { id, url: 'https://classroom.example.test/assignments', tab: { id: 7 }, frameId: 0 },
+    { id, url: 'http://127.0.0.1:8080/classroom', tab: { id: 7 }, frameId: 2 },
+    { id, url: `https://evil.example.test/chrome-extension://${id}/auth-gate-frame.html`, tab: { id: 7 }, frameId: 0 },
+    { id, url: `chrome-extension://${id}evil/auth-gate-frame.html` },
+    { id: 'abcdefghijklmnopabcdefghijklmnop', url: frameUrl },
+    { id },
+    { id, url: null },
+    null,
+    undefined,
+  ]) assert.equal(trusted(sender), false, JSON.stringify(sender));
+});

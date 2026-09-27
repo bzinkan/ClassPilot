@@ -394,11 +394,11 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-For the prepared 2.9.5 Chrome compatibility candidate, the canonical artifact
-name will be `dist/ClassPilot-v2.9.5.zip` after separately authorized clean-tag
-packaging. Earlier archives do not contain the Chrome 120+ storage compatibility
-correction and must not be submitted for this release. The candidate retains
-2.9.2's Class tools with 2.9.3's timer placement correction, 2.9.1's class chat
+For the prepared 2.9.6 sign-in roster isolation candidate, the canonical artifact
+name will be `dist/ClassPilot-v2.9.6.zip` after separately authorized clean-tag
+packaging. Earlier archives do not contain the roster isolation correction and
+must not be submitted for this release. The candidate retains 2.9.5's Chrome 120+
+storage compatibility, 2.9.2's Class tools with 2.9.3's timer placement correction, 2.9.1's class chat
 controls, 2.9.0's startup recovery, 2.8.9's
 scheduled classroom authority support, 2.8.8's startup recovery corrections,
 2.8.7's bounded sign-in recovery and safe script lifecycle, plus 2.8.6's
@@ -407,7 +407,18 @@ limited after-hours safety, and revisioned website-policy behavior.
 `dist/classpilot-extension.zip` is only the compatibility copy produced by the
 same script.
 
-### Chrome 120+ compatibility (2.9.5 candidate)
+### Sign-in roster isolation (2.9.6 candidate)
+
+Grade rosters and sign-in reach students only through the sign-in frame, an
+extension page the web page cannot read. 2.9.5 still carried a retired in-page
+sign-in form in the web-page content script. Its roster refresh ran on page
+focus, visibility and network events, and wrote student names into any
+page-owned elements that carried that form's IDs. 2.9.6 removes that code. The
+service worker now answers roster, sign-in and kiosk launch requests only from
+extension pages, never from content scripts. The sign-in frame, its wording and
+permissions are unchanged. See [the release notes](../CLASSPILOT_2_9_6_RELEASE.md).
+
+### Chrome 120+ compatibility (2.9.5)
 
 The minimum Chrome version is 120, preserving the existing 30-second alarm
 cadence and offscreen capture behavior. Durable recovery capabilities now use

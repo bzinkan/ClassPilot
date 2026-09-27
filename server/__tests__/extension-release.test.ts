@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.9.5");
+    expect(manifest.version).toBe("2.9.6");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
@@ -113,7 +113,6 @@ describe("ClassPilot extension release package guards", () => {
 
   it("preserves primary support codes and adds local support details", () => {
     const frameScript = readRepoFile("extension/auth-gate-frame.js");
-    const contentScript = readRepoFile("extension/content.js");
     for (const text of [
       "ClassPilot could not reach the live sign-in service. Cached information cannot be used to sign in.",
       "ClassPilot needs a fresh page",
@@ -127,9 +126,6 @@ describe("ClassPilot extension release package guards", () => {
     ]) {
       expect(frameScript, `auth-gate-frame.js must keep: ${text}`).toContain(text);
     }
-    expect(contentScript).toContain(
-      "ClassPilot could not reach the live sign-in service. No cached information can be used to sign in.",
-    );
     const diagnostics = readRepoFile("extension/auth-recovery-diagnostics.js");
     expect(diagnostics).toContain("Details for IT");
     expect(diagnostics).toContain("Copy diagnostics");
@@ -518,11 +514,13 @@ describe("ClassPilot extension release package guards", () => {
   it("launches the PassPilot kiosk from the auth gate and never paints the gate over it", () => {
     const serviceWorker = readRepoFile("extension/service-worker.js");
     const contentScript = readRepoFile("extension/content.js");
+    const frameScript = readRepoFile("extension/auth-gate-frame.js");
     expect(serviceWorker).toContain("function kioskLaunchUrl");
     expect(serviceWorker).toContain("launch=gate");
     expect(serviceWorker).toContain("if (isKioskGateUrl(tab.url || '')) {");
     expect(contentScript).toContain("state.kioskOrigin");
-    expect(contentScript).toContain("classpilot-auth-kiosk-launch");
+    expect(frameScript).toContain("classpilot-auth-kiosk-launch");
+    expect(frameScript).toContain("type: 'request-kiosk-launch'");
     expect(contentScript).toContain("window.location.pathname.startsWith('/passpilot/kiosk/')");
   });
 
