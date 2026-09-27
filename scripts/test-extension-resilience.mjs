@@ -134,31 +134,31 @@ async function main() {
     resolve(extensionPath, 'auth-gate-frame.js'),
     'utf8',
   );
-  const legacyAuthGateSource = readFileSync(
+  const contentScriptSource = readFileSync(
     resolve(extensionPath, 'content.js'),
     'utf8',
   );
   const neutralActiveSessionCopy =
     'This Chromebook or student already has an active ClassPilot session. ClassPilot is refreshing available names.';
-  for (const [label, authGateSource] of [
-    ['secure auth frame', authGateFrameSource],
-    ['legacy auth fallback', legacyAuthGateSource],
-  ]) {
-    assert.match(
-      authGateSource,
-      /recoveryGrantId:\s*(?:rosterSnapshot|authGateRosterSnapshot)\.recoveryGrantId/,
-      `${label} does not bind login to its successful roster snapshot`,
-    );
-    assert.ok(
-      authGateSource.includes(neutralActiveSessionCopy),
-      `${label} does not use neutral active-session conflict copy`,
-    );
-    assert.match(
-      authGateSource,
-      /forceRefresh:\s*true,\s*forceRecovery:\s*true,\s*background:\s*true/,
-      `${label} does not request one bounded recovery/roster refresh after a 409`,
-    );
-  }
+  assert.match(
+    authGateFrameSource,
+    /recoveryGrantId:\s*rosterSnapshot\.recoveryGrantId/,
+    'secure auth frame does not bind login to its successful roster snapshot',
+  );
+  assert.ok(
+    authGateFrameSource.includes(neutralActiveSessionCopy),
+    'secure auth frame does not use neutral active-session conflict copy',
+  );
+  assert.match(
+    authGateFrameSource,
+    /forceRefresh:\s*true,\s*forceRecovery:\s*true,\s*background:\s*true/,
+    'secure auth frame does not request one bounded recovery/roster refresh after a 409',
+  );
+  assert.doesNotMatch(
+    contentScriptSource,
+    /get-login-roster|manual-student-login|request-kiosk-launch|classpilot-auth-(?:grade|student|pin)\b/,
+    'web-page content scripts must never load the roster, sign in, launch the kiosk, or look up sign-in controls',
+  );
   const trustedAccessDispatchIndex = serviceWorkerSource.indexOf(
     'restrictLocalStorageToTrustedContexts(chrome.storage?.local, chrome.runtime).catch(() => {});',
   );

@@ -8,14 +8,15 @@ function read(path: string) {
   return readFileSync(resolve(repoRoot, path), "utf8").replace(/\r\n?/g, "\n");
 }
 
-describe("2.9.5 release documentation and preserved sign-in guarantees", () => {
-  it("pins every active release instruction to the versioned 2.9.5 artifact", () => {
+describe("2.9.6 release documentation and preserved sign-in guarantees", () => {
+  it("pins every active release instruction to the versioned 2.9.6 artifact", () => {
     const readme = read("extension/README.md");
     const compliance = read("extension/COMPLIANCE.md");
     const deployment = read("DEPLOYMENT.md");
 
     for (const source of [readme, compliance, deployment]) {
-      expect(source).toContain("ClassPilot-v2.9.5.zip");
+      expect(source).toContain("ClassPilot-v2.9.6.zip");
+      expect(source).not.toContain("ClassPilot-v2.9.5.zip");
       expect(source).not.toContain("ClassPilot-v2.9.3.zip");
       expect(source).not.toContain("ClassPilot-v2.9.0.zip");
       expect(source).not.toContain("ClassPilot-v2.8.9.zip");
@@ -25,9 +26,23 @@ describe("2.9.5 release documentation and preserved sign-in guarantees", () => {
       expect(source).not.toContain("ClassPilot-v2.8.2.zip");
     }
     expect(readme).toContain("Earlier archives do not");
-    expect(deployment).toContain("An earlier archive is not releasable as 2.9.5.");
+    expect(deployment).toContain("An earlier archive is not releasable as 2.9.6.");
     expect(deployment).toContain("afterHoursSafetyOnlyV1");
     expect(deployment).toContain("schoolWebsiteBlockEnforcementV1");
+  });
+
+  it("documents the 2.9.6 roster isolation with its red-on-old proof and no overclaim", () => {
+    const candidate = read("CLASSPILOT_2_9_6_RELEASE.md");
+    const readme = read("extension/README.md");
+
+    expect(candidate).toContain("npm run test:extension:red-on-old");
+    expect(candidate).toContain("page-dom-roster-isolation");
+    expect(candidate).toContain("auth-recovery-2.9.5.json");
+    expect(candidate).toContain("ClassPilot-v2.9.6.zip");
+    expect(candidate).toContain("deferred publishing");
+    expect(candidate).toContain("There is no evidence that any site used it.");
+    expect(candidate).toMatch(/no new Chrome\s+permission/);
+    expect(readme).toContain("CLASSPILOT_2_9_6_RELEASE.md");
   });
 
   it("requires the paired migration and explicit rollout while keeping Live View UI disabled", () => {

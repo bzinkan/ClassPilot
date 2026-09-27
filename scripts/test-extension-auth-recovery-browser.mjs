@@ -55,6 +55,10 @@ export const RECOVERY_CASES = Object.freeze({
   'private-vault-browser-restart': { expectedRedOnBase: '2.9.4', expectedFailure: '[regression:private-vault]' },
   'private-vault-migration-crash': { expectedRedOnBase: false },
   'private-vault-write-failure': { expectedRedOnBase: false },
+  // 2.9.5 still ran the retired in-page sign-in form's roster refresh on page
+  // lifecycle events, writing student names into page-owned elements that
+  // carried the form's IDs; 2.9.6 removes it and refuses web-page senders.
+  'page-dom-roster-isolation': { expectedRedOnBase: '2.9.5', expectedFailure: '[regression:page-roster-isolation]' },
 });
 if (process.argv.includes('--list-cases')) {
   console.log(JSON.stringify(RECOVERY_CASES));
@@ -2682,6 +2686,75 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
   // scope change (null -> supervision context) as an authority change and
   // clears overlays; the contract under test only covers classroom state.
   console.log('PASS ordinary worker suspension preserves supervision-context classroom state without any clear', JSON.stringify({ authContextId: live.authContextId, outcome: live.outcome, overlayTimerAfterWake: restored.timer, overlayRecordAfterWake: restored.overlay }));
+});
+
+await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true }, async ({ context, worker, fixture }) => {
+  fixture.state.allowFreshLogin = true;
+  const page = await openGatedPage(context, fixture, 'case=page-dom-roster-isolation');
+  const frame = await expectReady(page, 12_000, worker, 'page-dom-roster-isolation', 'a signed-out page must show fresh sign-in');
+  await page.bringToFront();
+  // Page-owned elements carrying the retired in-page form's IDs. The page
+  // itself creates them; nothing in the extension may populate them.
+  await page.evaluate(() => {
+    const decoy = document.createElement('div');
+    decoy.id = 'page-owned-decoy';
+    decoy.innerHTML = '<select id="classpilot-auth-grade"><option value="9" selected>9</option></select>'
+      + '<div id="classpilot-auth-roster-status"></div>'
+      + '<select id="classpilot-auth-student"><option value="">decoy</option></select>'
+      + '<button id="classpilot-auth-pin-submit" type="button">decoy</button>'
+      + '<button id="classpilot-auth-roster-refresh" type="button">decoy</button>';
+    document.body.appendChild(decoy);
+    window.dispatchEvent(new Event('focus'));
+    window.dispatchEvent(new PageTransitionEvent('pageshow'));
+    window.dispatchEvent(new Event('online'));
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  const decoyText = () => page.evaluate(() => document.getElementById('page-owned-decoy')?.textContent || '');
+  let observed = '';
+  for (const until = Date.now() + 4_000; Date.now() < until && !observed.includes('Fresh Fixture');) {
+    observed = await decoyText();
+    await sleep(100);
+  }
+  assert.ok(!observed.includes('Fresh Fixture'),
+    `[regression:page-roster-isolation] roster names reached page-owned DOM (${JSON.stringify(observed)})`);
+
+  const fromWebPage = await worker.evaluate(async (url) => {
+    const tab = (await chrome.tabs.query({})).find((item) => item.url === url);
+    if (!tab?.id) throw new Error('FIXTURE_PAGE_MISSING');
+    const send = async (request) => {
+      const [injection] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        world: 'ISOLATED',
+        func: (message) => new Promise((done) => chrome.runtime.sendMessage(message, (response) => {
+          done(chrome.runtime.lastError ? { channelClosed: true } : (response ?? null));
+        })),
+        args: [request],
+      });
+      return injection?.result ?? null;
+    };
+    return {
+      roster: await send({ type: 'get-login-roster', gradeLevel: '9' }),
+      login: await send({ type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } }),
+      kiosk: await send({ type: 'request-kiosk-launch' }),
+    };
+  }, page.url());
+  assert.equal(fromWebPage.roster?.success, false,
+    `[regression:page-roster-isolation] a web-page content script received the roster (${JSON.stringify(fromWebPage.roster)})`);
+  assert.equal(fromWebPage.roster?.students, undefined);
+  assert.equal(fromWebPage.login?.success, false, `a web-page content script must not sign in (${JSON.stringify(fromWebPage.login)})`);
+  assert.equal(fixture.state.studentLoginRequests, 0, 'a web-page content script must not reach student login');
+  assert.equal(fromWebPage.kiosk?.success, false, 'a web-page content script must not mint a kiosk launch');
+  assert.equal((await workerAuthSummary(worker)).studentToken, null);
+
+  const roster = await rpc(frame, { type: 'get-login-roster', gradeLevel: '' });
+  assert.equal(roster?.success, true, `the sign-in frame must still load the roster (${JSON.stringify(roster)})`);
+  assert.ok(roster.students.some((student) => student.name === 'Fresh Fixture'));
+  const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+  assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
+  await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  assert.equal(fixture.state.studentLoginRequests, 1);
+  assert.ok(!(await decoyText()).includes('Fresh Fixture'), 'roster names must never reach page-owned DOM');
+  console.log('PASS page-owned DOM never receives roster names; roster, login and kiosk launch refuse web-page content scripts; the sign-in frame still signs in');
 });
 
 for(const name of sourceFiles)assert.equal(sha256(readFileSync(join(sourceRoot,name))),sourceHashes[name],`source changed during test: ${name}`);

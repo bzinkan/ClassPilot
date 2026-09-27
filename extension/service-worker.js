@@ -3647,6 +3647,15 @@ function loginAuthorizationHeader(grant) {
     : `ClassPilot-Recovery ${grant.token}`;
 }
 
+// Roster names, sign-in and kiosk launch tickets are served only to extension
+// pages such as the sign-in frame. A content script shares its renderer with
+// the web page it runs in, so it is never an acceptable sender for them.
+function trustedExtensionPageSender(sender) {
+  return sender?.id === chrome.runtime.id
+    && typeof sender.url === 'string'
+    && sender.url.startsWith(chrome.runtime.getURL(''));
+}
+
 function trustedStudentAuthGatePresenceSource(sender, message) {
   if (
     sender?.id !== chrome.runtime.id
@@ -26213,6 +26222,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'request-kiosk-launch') {
+    if (!trustedExtensionPageSender(sender)) {
+      sendResponse({ success: false, error: 'PassPilot kiosk is unavailable' });
+      return true;
+    }
     let responseGuard;
     authStateRestorePromise
       .then(() => awaitManagedAuthGatePolicyStable())
@@ -26313,6 +26326,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'get-login-roster') {
+    if (!trustedExtensionPageSender(sender)) {
+      sendResponse({ success: false, error: 'Could not load the classroom roster.' });
+      return true;
+    }
     ensureManagedAuthGatePolicyAvailable().then(() => fetchLoginRosterForGate({
       gradeLevel: message.gradeLevel,
       forceRefresh: message.forceRefresh === true,
@@ -26322,6 +26339,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'manual-student-login') {
+    if (!trustedExtensionPageSender(sender)) {
+      sendResponse({ success: false, error: 'Invalid student credentials' });
+      return true;
+    }
     manualStudentLoginRequestsPending += 1;
     manualStudentLogin(message.payload || {})
       .then((data) => sendResponse(data))
