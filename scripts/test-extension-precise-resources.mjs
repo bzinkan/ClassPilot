@@ -128,8 +128,10 @@ try {
     const savedExpiry = currentClassroomState.hardExpiresAt;
     const originalUpdate = chrome.declarativeNetRequest.updateDynamicRules;
     chrome.declarativeNetRequest.updateDynamicRules = async () => { throw new Error('synthetic atomic installation failure'); };
+    const rejectedState = snapshot([resources.find(resource => resource.provider === 'google_docs')]);
+    const ackStart = acknowledgements.length;
     let installationFailed = false;
-    try { await install(snapshot([resources.find(resource => resource.provider === 'google_docs')])); }
+    try { await install(rejectedState); }
     catch { installationFailed = true; }
     chrome.declarativeNetRequest.updateDynamicRules = originalUpdate;
     require(installationFailed, 'installation failure unexpectedly applied');
@@ -137,7 +139,10 @@ try {
     require(currentClassroomState.hardExpiresAt === savedExpiry, 'failed installation extended old expiry');
     require(JSON.stringify(await chrome.declarativeNetRequest.getDynamicRules()) === savedRules, 'atomic failure changed rules');
     require(JSON.stringify(await kv.get([CLASSROOM_STATE_STORAGE_KEY])) === savedStorage, 'atomic failure changed persisted policy');
-    require(acknowledgements.at(-1)?.outcome === 'failed', 'installation failure acknowledged success');
+    const failedAcks = acknowledgements.slice(ackStart).filter(value => value.type === 'classroom-state-ack'
+      && value.appliedRevision === rejectedState.revision);
+    require(failedAcks.length > 0 && failedAcks.every(value => value.outcome === 'failed'),
+      `installation failure did not acknowledge its exact revision failed: ${JSON.stringify({ connected: wsConnected, outcome: lastClassroomStateOutcome, failedAcks, messages: acknowledgements.slice(-3) })}`);
     const saved = persistedClassroomStateSnapshot(currentClassroomState);
     require(saved.schemaVersion === 2 && saved.precisePersistenceVersion === 1, 'precise persistence lacks downgrade fence');
     require(RuntimeCore.normalizePersistedClassroomState(saved).restrictions.flightPath.resources.length === 1,
