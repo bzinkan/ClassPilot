@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
@@ -21,6 +22,125 @@ function loadRuntimeCore() {
 
 const core = loadRuntimeCore();
 const NOW = Date.parse("2026-08-13T16:00:00.000Z");
+
+const preciseBytes = readFileSync(resolve(__dirname, "fixtures/restriction-resource-matcher-cases.json"));
+const preciseCases = JSON.parse(preciseBytes.toString("utf8"));
+const preciseState = (restrictions: Record<string, unknown>) => core.normalizeClassroomState({
+  schemaVersion: 1, revision: 1, teachingSessionId: "precise-session",
+  hardExpiresAt: NOW + 60_000, restrictions,
+}, NOW);
+
+describe("normative precise resource contract", () => {
+  it("pins the server fixture bytes and passes every identity, match, validation and budget row", () => {
+    expect(createHash("sha256").update(preciseBytes).digest("hex"))
+      .toBe("4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243");
+    for (const row of preciseCases.identity)
+      expect(core.extractRestrictionResourceIdentity(row.url), row.name).toEqual(row.expect);
+    for (const row of preciseCases.match)
+      expect(core.isUrlAllowedByResource(row.url, preciseCases.resources[row.resource]), row.name).toBe(row.allowed);
+    for (const row of preciseCases.validate.filter((row: any) => !row.serverOnly))
+      expect(Boolean(core.validateAllowedResource(row.value)), row.name).toBe(row.valid);
+    for (const row of preciseCases.ruleCount)
+      expect(core.restrictionResourceRuleCount(preciseCases.resources[row.resource]), row.name).toBe(row.expect);
+  });
+
+  it("allows resource-only paths and rejects the whole state when any entry is invalid", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ flightPath: { active: true, allowedDomains: [], resources: [video] } });
+    expect(core.restrictionLandingUrl(state)).toBe(video.canonicalUrl);
+    const plan = core.planClassroomTabReconciliation(state, [{ id: 1, url: "https://www.youtube.com/", active: true }],
+      { foregroundTabId: 1 });
+    expect(plan.updates).toEqual([{ tabId: 1, url: video.canonicalUrl }]);
+    const invalid = [video, { ...video, resourceId: "bad" }];
+    expect(() => preciseState({ flightPath: { active: true, allowedDomains: ["youtube.com"], resources: invalid } }))
+      .toThrow(/resources/);
+    expect(() => preciseState({ flightPath: { active: false, resources: [video] } })).toThrow();
+    expect(() => preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: { ...video, extra: true } } }))
+      .toThrow();
+    expect(() => preciseState({ screenLock: { active: true, url: "https://www.youtube.com/", resource: video } })).toThrow();
+    expect(() => preciseState({ flightPath: { active: true, resources: [video, video] } })).toThrow();
+  });
+
+  it("installs only anchored case-sensitive main-frame shapes within the existing range", () => {
+    for (const [name, resource] of Object.entries(preciseCases.resources) as Array<[string, any]>) {
+      if (resource.type === "website" || !core.validateAllowedResource(resource)) continue;
+      const state = preciseState({ screenLock: { active: true, url: core.canonicalUrlForResource(resource), resource } });
+      const rules = core.buildDnrRules({ classroomState: state }, ["classroom"], NOW);
+      expect(rules[0]).toMatchObject({ id: 1, priority: 500, action: { type: "block" } });
+      expect(rules.some((rule: any) => rule.id === 2)).toBe(false);
+      for (const rule of rules.slice(1)) {
+        expect(rule.priority).toBe(500);
+        expect(core.isRuleInRange(rule.id, "classroom")).toBe(true);
+        expect(rule.condition.resourceTypes).toEqual(["main_frame"]);
+        expect(rule.condition.isUrlFilterCaseSensitive).toBe(true);
+        const expression = new RegExp(rule.condition.regexFilter);
+        expect(rule.condition.regexFilter.startsWith("^https://")).toBe(true);
+        for (const row of preciseCases.match.filter((row: any) => row.resource === name)) {
+          let browserUrl: string;
+          try { browserUrl = new URL(row.url).toString(); } catch { continue; }
+          if (expression.test(browserUrl)) expect(core.isUrlAllowedByResource(browserUrl, resource), row.name).toBe(true);
+        }
+      }
+      expect(rules.slice(1).some((rule: any) => new RegExp(rule.condition.regexFilter).test(state.restrictions.screenLock.url)))
+        .toBe(true);
+      const fallback = core.restrictionResourceRegexes(resource, true);
+      expect(fallback.some((expression: string) => new RegExp(expression).test(state.restrictions.screenLock.url))).toBe(true);
+      for (const row of preciseCases.match.filter((row: any) => row.resource === name && !row.allowed))
+        expect(fallback.some((expression: string) => new RegExp(expression).test(row.url)), row.name).toBe(false);
+    }
+  });
+
+  it("fits a maximal 200-video path and rejects overflow before installing rules", () => {
+    const template = preciseCases.resources.youtubeVideo;
+    const resources = Array.from({ length: 200 }, (_, index) => {
+      const resourceId = `v${String(index).padStart(10, "0")}`;
+      return { ...template, resourceId, canonicalUrl: `https://www.youtube.com/watch?v=${resourceId}` };
+    });
+    const state = preciseState({ flightPath: { active: true, allowedDomains: [], resources } });
+    const rules = core.buildDnrRules({ classroomState: state }, ["classroom"], NOW);
+    expect(rules).toHaveLength(401);
+    expect(rules.slice(1).every((rule: any) => rule.priority === 2 && core.isRuleInRange(rule.id, "classroom"))).toBe(true);
+    expect(() => preciseState({ flightPath: { active: true, resources: [...resources, resources[0]] } })).toThrow();
+    state.authPassThrough = { profiles: [{ hostRules: Array.from({ length: 801 }, (_, i) => ({ hostname: `idp${i}.example.org`, includeSubdomains: false })) }] };
+    expect(() => core.buildDnrRules({ classroomState: state, restrictionAuthPassThrough: true }, ["classroom", "restrictionSso"], NOW))
+      .toThrow(/regex budget/);
+  });
+
+  it("reconciles by exact resource rather than a matching provider host", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: video } });
+    expect(core.isRestrictionDestinationUrl(state, "https://www.youtube.com/watch?v=AAAAAAAAAAA")).toBe(false);
+    expect(core.isRestrictionDestinationUrl(state, video.canonicalUrl)).toBe(true);
+    const plan = core.planClassroomTabReconciliation(state, [
+      { id: 1, url: "https://www.youtube.com/watch?v=AAAAAAAAAAA", active: true },
+      { id: 2, url: video.canonicalUrl },
+    ], { foregroundTabId: 1 });
+    expect(plan.removeTabIds).toContain(1);
+    expect(plan.activateTabId).toBe(2);
+    expect(plan.updates).toEqual([]);
+  });
+
+  it("keeps teacher and school blocks above a precise Waypoint and restricts temporary allows", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: video },
+      blockList: { active: true, blockedDomains: ["youtube.com"] },
+      temporaryAllows: [{ domain: "youtube.com", expiresAt: NOW + 10_000 }] });
+    const policy = { classroomState: state, globalBlockedDomains: [] };
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "teacher" });
+    expect(core.decideNavigation(video.canonicalUrl, { ...policy, globalBlockedDomains: ["youtube.com"] }, NOW))
+      .toEqual({ allowed: false, source: "school" });
+    state.restrictions.attentionMode.active = true;
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "attention_mode" });
+    state.restrictions.attentionMode.active = false;
+    state.restrictions.blockList.active = false;
+    expect(core.decideNavigation("https://www.youtube.com/watch?v=AAAAAAAAAAA", policy, NOW))
+      .toEqual({ allowed: false, source: "resource" });
+    state.restrictions.screenLock.active = false;
+    state.restrictions.blockList.active = true;
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: true, source: "temporary" });
+    expect(core.buildDnrRules(policy, ["teacher"], NOW)[0].priority).toBe(800);
+  });
+});
 
 describe("typed classroom contexts", () => {
   it("keeps teaching and supervision namespaces distinct and rejects ambiguous authority", () => {

@@ -138,6 +138,8 @@ function runPackagedTests() {
   for (const script of [
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
+    'test-extension-precise-resources.mjs',
+    'test-extension-precise-downgrade.mjs',
     'test-extension-browser-api.mjs',
     'test-extension-scheduled-classroom.mjs',
     'test-extension-class-tools.mjs',

@@ -1,6 +1,330 @@
 (function attachClassPilotRuntimeCore(root) {
   'use strict';
 
+  // Normative SchoolPilot matcher port; only its server-only PSL check is omitted.
+  const PROVIDERS = new Set(['youtube', 'google_docs', 'google_slides', 'google_sheets', 'google_forms', 'google_drive']);
+  const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+  const GOOGLE_FILE_ID = /^[A-Za-z0-9_-]{20,128}$/;
+  const YOUTUBE_HOSTS = new Set(['youtube.com', 'm.youtube.com', 'youtube-nocookie.com']);
+  const YOUTUBE_PAGE_PATH = /^\/(?:shorts|live)\/([A-Za-z0-9_-]{11})(\/.*)?$/;
+  const YOUTUBE_PLAYER_PATH = /^\/(?:embed|v)\/([A-Za-z0-9_-]{11})\/?$/;
+  const YOUTU_BE_PATH = /^\/([A-Za-z0-9_-]{11})\/?$/;
+  // An embedded player link identifies one video only with these parameters;
+  // list, playlist and listType (or anything else) let it play other videos.
+  const YOUTUBE_PLAYER_PARAMETERS = new Set([
+    'autoplay', 'cc_lang_pref', 'cc_load_policy', 'color', 'controls', 'disablekb', 'enablejsapi',
+    'end', 'feature', 'fs', 'hl', 'iv_load_policy', 'loop', 'modestbranding', 'mute', 'origin',
+    'playsinline', 'rel', 'si', 'start', 't', 'widget_referrer',
+  ]);
+  // The raw value of an allowlisted player parameter: no separators or escapes.
+  const YOUTUBE_PLAYER_VALUE = /^[A-Za-z0-9._:/-]*$/;
+  const YOUTUBE_RESERVED_IDS = new Set(['videoseries', 'live_stream']);
+  // A path tail below a section prefix or after a provider id (the server's
+  // RESTRICTION_PATH_TAIL_PATTERN): no ';', encoded separator or dot, overlong
+  // UTF-8, fullwidth dot or slash, or malformed escape.
+  const RESTRICTION_PATH_TAIL = new RegExp('^(?:/(?:[^?#%;]|%(?:[013-46-9abdfABDF][0-9a-fA-F]|2[0-46-9a-dA-D]|5[0-9abd-fABD-F]|[Cc][2-9a-fA-F]'
+    + '|[Ee][1-9a-eA-E]|[Ee]0%[AaBb][0-9a-fA-F]|[Ee][Ff]%(?:[0-9ac-fAC-F][0-9a-fA-F]|[Bb][0-9abd-fABD-F]'
+    + '|[Bb][Cc]%(?:[0-79ac-fAC-F][0-9a-fA-F]|8[0-9a-dA-D]|[Bb][0-9abd-fABD-F]))))*)?$');
+  const DOCS_PATH = /^\/(?:u\/[0-9]{1,2}\/)?(document|presentation|spreadsheets|forms)\/(?:u\/[0-9]{1,2}\/)?d\/(e\/)?([A-Za-z0-9_-]{20,128})(\/.*)?$/;
+  const DRIVE_FILE_PATH = /^\/(?:u\/[0-9]{1,2}\/)?file\/(?:u\/[0-9]{1,2}\/)?d\/([A-Za-z0-9_-]{20,128})(\/.*)?$/;
+  const DRIVE_ID_PATH = /^\/(?:u\/[0-9]{1,2}\/)?(?:open|uc)$/;
+  const HOSTNAME_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+  const DOCS_KIND_PROVIDER = { document: 'google_docs', presentation: 'google_slides', spreadsheets: 'google_sheets', forms: 'google_forms' };
+  const PROVIDER_DOCS_KIND = { google_docs: 'document', google_slides: 'presentation', google_sheets: 'spreadsheets', google_forms: 'forms' };
+
+  function isPlainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function hasExactKeys(value, keys) {
+    const actual = Object.keys(value);
+    return actual.length === keys.length && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+  }
+
+  function restrictionMatchHostname(hostname) {
+    let host = String(hostname || '').toLowerCase();
+    if (host.endsWith('.')) host = host.slice(0, -1);
+    if (host.startsWith('www.')) host = host.slice(4);
+    return host;
+  }
+
+  function syntacticallyCanonicalHostname(value) {
+    if (typeof value !== 'string' || !value || value.length > 253) return false;
+    if (restrictionMatchHostname(value) !== value) return false;
+    const labels = value.split('.');
+    if (labels.length < 2 || labels.some((label) => !HOSTNAME_LABEL.test(label))) return false;
+    return !/^[0-9]+$/.test(labels[labels.length - 1]);
+  }
+
+  function providerHostname(provider) {
+    if (provider === 'youtube') return 'youtube.com';
+    if (provider === 'google_drive') return 'drive.google.com';
+    return 'docs.google.com';
+  }
+
+  function youtubeVideoId(value) {
+    return typeof value === 'string' && YOUTUBE_ID.test(value) && !YOUTUBE_RESERVED_IDS.has(value) ? value : null;
+  }
+
+  function validResourceId(provider, resourceId) {
+    if (typeof resourceId !== 'string') return false;
+    if (provider === 'youtube') return youtubeVideoId(resourceId) !== null;
+    if (provider === 'google_drive') return GOOGLE_FILE_ID.test(resourceId);
+    return GOOGLE_FILE_ID.test(resourceId.startsWith('e/') ? resourceId.slice(2) : resourceId);
+  }
+
+  function canonicalRestrictionResourceUrl(provider, resourceId) {
+    if (provider === 'youtube') return `https://www.youtube.com/watch?v=${resourceId}`;
+    if (provider === 'google_drive') return `https://drive.google.com/file/d/${resourceId}/view`;
+    const kind = PROVIDER_DOCS_KIND[provider];
+    if (provider === 'google_forms') return `https://docs.google.com/forms/d/${resourceId}/viewform`;
+    if (resourceId.startsWith('e/')) {
+      return `https://docs.google.com/${kind}/d/${resourceId}/${provider === 'google_sheets' ? 'pubhtml' : 'pub'}`;
+    }
+    return `https://docs.google.com/${kind}/d/${resourceId}/edit`;
+  }
+
+  function safePathTail(tail) {
+    return RESTRICTION_PATH_TAIL.test(tail ?? '');
+  }
+
+  function validSectionPathPrefix(value) {
+    if (typeof value !== 'string' || value.length < 2 || value.length > 512) return false;
+    if (!value.startsWith('/') || value.endsWith('/') || value.includes('//') || /[?#\\\s]/.test(value)) return false;
+    if (!RESTRICTION_PATH_TAIL.test(value)) return false;
+    try {
+      return new URL(`https://example.com${value}`).pathname === value;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Structural validation of a delivered entry (the server also applies the public-suffix list). */
+  function isValidRestrictionResource(value) {
+    if (!isPlainObject(value) || !syntacticallyCanonicalHostname(value.hostname)) return false;
+    if (value.type === 'website') {
+      return hasExactKeys(value, ['type', 'hostname', 'includeSubdomains']) && value.includeSubdomains === true;
+    }
+    if (value.type === 'section') {
+      return hasExactKeys(value, ['type', 'hostname', 'includeSubdomains', 'pathPrefix'])
+        && value.includeSubdomains === false
+        && validSectionPathPrefix(value.pathPrefix);
+    }
+    if (value.type === 'resource') {
+      return hasExactKeys(value, ['type', 'hostname', 'includeSubdomains', 'provider', 'resourceId', 'canonicalUrl'])
+        && value.includeSubdomains === false
+        && PROVIDERS.has(value.provider)
+        && validResourceId(value.provider, value.resourceId)
+        && value.hostname === providerHostname(value.provider)
+        && value.canonicalUrl === canonicalRestrictionResourceUrl(value.provider, value.resourceId);
+    }
+    return false;
+  }
+
+  function youtubeHostVideoId(parsed) {
+    if (parsed.pathname === '/watch') {
+      const ids = parsed.searchParams.getAll('v');
+      return ids.length === 1 ? youtubeVideoId(ids[0]) : null;
+    }
+    const player = YOUTUBE_PLAYER_PATH.exec(parsed.pathname);
+    if (player) return youtubePlayerQueryHarmless(parsed.search) ? youtubeVideoId(player[1]) : null;
+    const page = YOUTUBE_PAGE_PATH.exec(parsed.pathname);
+    return page && safePathTail(page[2]) ? youtubeVideoId(page[1]) : null;
+  }
+
+  // Every raw name[=value] segment of a player link's query is allowlisted.
+  function youtubePlayerQueryHarmless(search) {
+    if (search === '') return true;
+    return search.slice(1).split('&').every((segment) => {
+      if (segment === '') return true;
+      const separator = segment.indexOf('=');
+      const name = separator === -1 ? segment : segment.slice(0, separator);
+      const value = separator === -1 ? '' : segment.slice(separator + 1);
+      return YOUTUBE_PLAYER_PARAMETERS.has(name) && YOUTUBE_PLAYER_VALUE.test(value);
+    });
+  }
+
+  function identityFromParsedUrl(parsed) {
+    const host = restrictionMatchHostname(parsed.hostname);
+    if (YOUTUBE_HOSTS.has(host)) {
+      const id = youtubeHostVideoId(parsed);
+      return id ? { provider: 'youtube', resourceId: id } : null;
+    }
+    if (host === 'youtu.be') {
+      const id = youtubeVideoId(YOUTU_BE_PATH.exec(parsed.pathname)?.[1]);
+      return id ? { provider: 'youtube', resourceId: id } : null;
+    }
+    if (host === 'docs.google.com') {
+      const match = DOCS_PATH.exec(parsed.pathname);
+      return match && safePathTail(match[4])
+        ? { provider: DOCS_KIND_PROVIDER[match[1]], resourceId: `${match[2] || ''}${match[3]}` }
+        : null;
+    }
+    if (host === 'drive.google.com') {
+      const file = DRIVE_FILE_PATH.exec(parsed.pathname);
+      if (file) return safePathTail(file[2]) ? { provider: 'google_drive', resourceId: file[1] } : null;
+      if (DRIVE_ID_PATH.test(parsed.pathname)) {
+        const ids = parsed.searchParams.getAll('id');
+        return ids.length === 1 && GOOGLE_FILE_ID.test(ids[0]) ? { provider: 'google_drive', resourceId: ids[0] } : null;
+      }
+    }
+    return null;
+  }
+
+  function extractRestrictionResourceIdentity(url) {
+    if (typeof url !== 'string' || url.length > 8192) return null;
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return null;
+    }
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port) return null;
+    return identityFromParsedUrl(parsed);
+  }
+
+  function isUrlAllowedByRestrictionResource(url, resource) {
+    if (!isValidRestrictionResource(resource) || typeof url !== 'string') return false;
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return false;
+    }
+    if (parsed.username || parsed.password) return false;
+    const host = restrictionMatchHostname(parsed.hostname);
+    if (resource.type === 'website') {
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+      return host === resource.hostname || host.endsWith(`.${resource.hostname}`);
+    }
+    if (parsed.protocol !== 'https:' || parsed.port) return false;
+    if (resource.type === 'section') {
+      return host === resource.hostname
+        && (parsed.pathname === resource.pathPrefix || parsed.pathname.startsWith(`${resource.pathPrefix}/`))
+        && safePathTail(parsed.pathname.slice(resource.pathPrefix.length));
+    }
+    const identity = identityFromParsedUrl(parsed);
+    return !!identity && identity.provider === resource.provider && identity.resourceId === resource.resourceId;
+  }
+
+  function preciseRestrictionError(message, code = 'PRECISE_RESTRICTION_INVALID') {
+    return Object.assign(new Error(message), { code });
+  }
+
+  function restrictionResourceIdentityKey(resource) {
+    if (resource.type === 'website') return `website:${resource.hostname}`;
+    if (resource.type === 'section') return `section:${resource.hostname}${resource.pathPrefix}`;
+    return `resource:${resource.provider}:${resource.resourceId}`;
+  }
+
+  function restrictionResourceRuleCount(resource) {
+    return resource.type === 'website' ? 0 : resource.type === 'resource' && resource.provider === 'youtube' ? 2 : 1;
+  }
+
+  function validateAllowedResourceList(value) {
+    if (!Array.isArray(value) || value.length > 200) return null;
+    const result = [], seen = new Set();
+    for (const entry of value) {
+      if (!isValidRestrictionResource(entry)) return null;
+      const key = restrictionResourceIdentityKey(entry);
+      if (seen.has(key)) return null;
+      seen.add(key);
+      result.push({ ...entry });
+    }
+    if (result.reduce((sum, entry) => sum + restrictionResourceRuleCount(entry), 0) > 997
+      || new TextEncoder().encode(JSON.stringify(result)).length > 49152) return null;
+    return result;
+  }
+
+  function canonicalUrlForResource(resource) {
+    return resource.type === 'resource' ? resource.canonicalUrl
+      : `https://${resource.hostname}${resource.type === 'section' ? resource.pathPrefix : ''}`;
+  }
+
+  function hasPreciseRestrictions(state) {
+    return Boolean(state?.restrictions?.screenLock?.resource
+      || state?.restrictions?.flightPath?.resources?.length);
+  }
+
+  function restrictionLandingUrl(state) {
+    const restrictions = state?.restrictions ?? emptyRestrictions();
+    if (restrictions.screenLock?.active) return restrictions.screenLock.url;
+    if (!restrictions.flightPath?.active) return null;
+    const domain = restrictions.flightPath.allowedDomains?.[0];
+    return domain ? `https://${domain}` : restrictions.flightPath.resources?.[0]
+      ? canonicalUrlForResource(restrictions.flightPath.resources[0]) : null;
+  }
+
+  function decideNavigation(url, policy, nowValue = Date.now()) {
+    const state = policy?.classroomState;
+    const restrictions = state?.restrictions ?? emptyRestrictions();
+    const host = normalizeDomain(url);
+    if (!isHttpTab({ url }) || !host) return { allowed: true, source: null };
+    if (restrictions.attentionMode?.active) return { allowed: false, source: 'attention_mode' };
+    const matches = domains => (domains || []).some(domain => isHostWithinDomain(host, normalizeDomain(domain)));
+    if (matches(policy?.globalBlockedDomains)) return { allowed: false, source: 'school' };
+    const restricted = restrictions.screenLock?.active || restrictions.flightPath?.active;
+    const temporary = normalizeTemporaryAllows(restrictions.temporaryAllows, timestampMs(nowValue) ?? Date.now());
+    const temporarilyAllowed = temporary.some(item => isHostWithinDomain(host, item.domain));
+    if (!restricted && temporarilyAllowed) return { allowed: true, source: 'temporary' };
+    if (restrictions.blockList?.active && matches(restrictions.blockList.blockedDomains))
+      return { allowed: false, source: 'teacher' };
+    if (restricted && ((policy?.restrictionAuthPassThrough === true && state?.authPassThrough
+      && authPassThroughProfileForUrl(state.authPassThrough, url))
+      || (policy?.restrictionSsoPassThrough === true && state?.deliveryContext?.lateSignInRestrictionSso === true
+        && isRestrictionSsoTab({ url })))) return { allowed: true, source: 'authentication' };
+    if (restrictions.screenLock?.active) return {
+      allowed: isRestrictionDestinationUrl(state, url),
+      source: restrictions.screenLock.resource ? 'resource' : 'screen_lock',
+    };
+    if (temporarilyAllowed) return { allowed: true, source: 'temporary' };
+    if (restrictions.flightPath?.active) return {
+      allowed: isRestrictionDestinationUrl(state, url),
+      source: restrictions.flightPath.resources?.length ? 'resource' : 'flight_path',
+    };
+    return { allowed: true, source: null };
+  }
+
+  function restrictionResourceRegexes(resource, narrow = false) {
+    if (!isValidRestrictionResource(resource)) throw preciseRestrictionError('Invalid DNR resource');
+    if (resource.type === 'website') return [];
+    const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tail = narrow ? '(?:/[^?#%;]*)?' : RESTRICTION_PATH_TAIL.source.slice(1, -1);
+    const suffix = '(?:[?#].*)?$';
+    if (resource.type === 'section')
+      return [`^https://(?:www\\.)?${escape(resource.hostname)}${escape(resource.pathPrefix)}${tail}${suffix}`];
+    const id = escape(resource.resourceId);
+    if (resource.provider === 'youtube') {
+      const host = '(?:(?:www\\.)?(?:m\\.)?youtube\\.com|(?:www\\.)?youtube-nocookie\\.com)';
+      // P excludes raw and percent-encoded v keys; the allowed id occurs once.
+      const other = '(?:[^v%&#=][^&#]*|v[^=&#][^&#]*|%(?:[^7&#][^&#]*|7(?:[^6&#][^&#]*)?)?|=[^&#]*)?';
+      const parameter = `(?:(?:${[...YOUTUBE_PLAYER_PARAMETERS].join('|')})(?:=[A-Za-z0-9._:/-]*)?)?`;
+      const page = `^https://${host}/(?:(?:shorts|live)/${id}${tail}(?:[?#].*)?$|watch\\?(?:${other}&)*v=${id}(?:&${other})*(?:#.*)?$)`;
+      const narrowPage = `^https://(?:www\\.)?youtube\\.com/watch\\?v=${id}(?:&(?:t|start|list|feature|si)=[A-Za-z0-9._~-]*)*(?:#.*)?$`;
+      const short = `(?:www\\.)?youtu\\.be/${id}/?(?:[?#].*)?`;
+      const player = `${host}/(?:embed|v)/${id}/?(?:\\?${parameter}(?:&${parameter})*)?(?:#.*)?`;
+      return [narrow ? narrowPage : page, `^https://(?:${short}${narrow ? '' : `|${player}`})$`];
+    }
+    // Long opaque IDs and account/host alternatives can exceed Chrome's
+    // compiled RE2 memory limit. The canonical landing with an optional query
+    // is a narrower fallback; it never admits a different document or file.
+    if (narrow)
+      return [`^${escape(canonicalUrlForResource(resource))}(?:[?#].*)?$`];
+    const account = '(?:u/[0-9]{1,2}/)?';
+    if (resource.provider === 'google_drive')
+      return [`^https://(?:www\\.)?drive\\.google\\.com/${account}file/${account}d/${id}${tail}${suffix}`];
+    return [`^https://(?:www\\.)?docs\\.google\\.com/${account}${PROVIDER_DOCS_KIND[resource.provider]}/${account}d/${id}${tail}${suffix}`];
+  }
+
+  function preciseDnrRules(resources, priority) {
+    const parsed = validateAllowedResourceList(resources);
+    if (!parsed) throw preciseRestrictionError('Invalid precise DNR resource list');
+    return parsed.flatMap(resource => restrictionResourceRegexes(resource)).map((regexFilter, index) => ({
+      id: DNR_RANGES.classroom[0] + 2 + index, priority, action: { type: 'allow' },
+      condition: { resourceTypes: ['main_frame'], regexFilter, isUrlFilterCaseSensitive: true },
+    }));
+  }
+
   const CLASSROOM_STATE_SCHEMA_VERSION = 1;
   const CLASSROOM_STATE_MAX_LIFETIME_MS = 12 * 60 * 60 * 1000;
   const MAX_RULE_ENTRIES = 1000;
@@ -61,6 +385,7 @@
   ]);
 
   const POLICY_SOURCES = new Set([
+    'resource',
     'school',
     'teacher',
     'flight_path',
@@ -581,6 +906,15 @@
     const rawBlockList = raw.blockList ?? raw.block_list ?? {};
     const rawAttention = raw.attentionMode ?? raw.attention_mode ?? {};
 
+    const hasResources = Object.prototype.hasOwnProperty.call(rawFlightPath, 'resources');
+    const hasResource = Object.prototype.hasOwnProperty.call(rawScreenLock, 'resource');
+    const resources = hasResources ? validateAllowedResourceList(rawFlightPath.resources) : [];
+    if (!resources || (hasResources && (rawFlightPath.active !== true || !resources.length)))
+      throw preciseRestrictionError('Flight Path resources must be a nonempty, valid active list');
+    const resource = hasResource ? rawScreenLock.resource : null;
+    if (hasResource && (rawScreenLock.active !== true || !isValidRestrictionResource(resource)
+      || resource.type === 'website')) throw preciseRestrictionError('Waypoint resource is invalid');
+
     const screenUrl = boundedString(rawScreenLock.url ?? rawScreenLock.lockedUrl ?? raw.lockedUrl, 2048) || null;
     const screenDomain = normalizeDomain(
       rawScreenLock.domain ?? rawScreenLock.lockedDomain ?? raw.lockedDomain ?? screenUrl
@@ -602,17 +936,22 @@
     const tabLimit = Number.isSafeInteger(parsedTabLimit) && parsedTabLimit > 0
       ? Math.min(parsedTabLimit, 1000)
       : null;
-    const flightActive = Boolean(rawFlightPath.active ?? raw.flightPathActive ?? flightDomains.length > 0);
+    const flightActive = Boolean(rawFlightPath.active ?? raw.flightPathActive ?? (flightDomains.length + resources.length > 0));
     const screenActive = Boolean(rawScreenLock.active ?? raw.screenLocked ?? screenDomain);
     const blockActive = Boolean(rawBlockList.active ?? blockedDomains.length > 0);
-    if (flightActive && flightDomains.length === 0) {
-      throw new Error('active Flight Path requires at least one valid domain');
+    if (flightActive && flightDomains.length + resources.length === 0) {
+      throw new Error('active Flight Path requires at least one valid domain or resource');
     }
     if (screenActive && !screenDomain) {
       throw new Error('active screen lock requires a valid domain');
     }
+    const canonicalResourceUrl = resource ? canonicalUrlForResource(resource) : null;
+    const alternateSectionUrl = resource?.type === 'section'
+      ? `https://www.${resource.hostname}${resource.pathPrefix}` : null;
+    if (resource && screenUrl !== canonicalResourceUrl && screenUrl !== alternateSectionUrl)
+      throw preciseRestrictionError('Waypoint URL does not equal the reviewed resource target');
     const safeScreenUrl = screenActive
-      ? safeRestrictionTarget(screenUrl || `https://${screenDomain}`, screenDomain)
+      ? resource ? screenUrl : safeRestrictionTarget(screenUrl || `https://${screenDomain}`, screenDomain)
       : screenUrl;
     if (screenActive && !safeScreenUrl) {
       throw new Error('active screen lock requires a safe HTTPS URL without query or fragment data');
@@ -626,10 +965,12 @@
         active: screenActive && Boolean(screenDomain),
         url: safeScreenUrl,
         domain: screenDomain,
+        ...(resource ? { resource: { ...resource } } : {}),
       },
       flightPath: {
-        active: flightActive && flightDomains.length > 0,
+        active: flightActive && flightDomains.length + resources.length > 0,
         allowedDomains: flightDomains,
+        ...(hasResources ? { resources } : {}),
         name: boundedString(rawFlightPath.name ?? rawFlightPath.flightPathName ?? raw.activeFlightPathName, 200) || null,
       },
       blockList: {
@@ -742,6 +1083,23 @@
     };
   }
 
+  function normalizePersistedClassroomState(rawState, nowValue = Date.now()) {
+    let wireState = rawState;
+    if (rawState?.schemaVersion === 2) {
+      if (rawState.precisePersistenceVersion !== 1 || !hasPreciseRestrictions(rawState))
+        throw preciseRestrictionError('Unsupported persisted precise restriction');
+      wireState = { ...rawState, schemaVersion: 1 };
+      delete wireState.precisePersistenceVersion;
+    }
+    const normalized = normalizeClassroomState(wireState, nowValue);
+    // Delivery validation must see the persisted SSO digest before the normal
+    // wire normalizer removes private provenance. This helper is storage-only;
+    // applyClassroomState validates the digest and normalizes the wire again.
+    return { ...normalized, ...(wireState.deliveryContext ? {
+      deliveryContext: { ...wireState.deliveryContext },
+    } : {}) };
+  }
+
   function classroomContext(value) {
     if (!value || typeof value !== 'object') return null;
     const teachingSessionId = boundedString(value.teachingSessionId ?? value.sessionId, 256) || null;
@@ -839,12 +1197,25 @@
         const screenLockDomains = classroom.screenLock?.active
           ? normalizeDomainList([classroom.screenLock.domain], 'screen lock domains')
           : [];
+        const preciseWaypoint = classroom.screenLock?.active && classroom.screenLock.resource;
+        const preciseEntries = classroom.flightPath?.active ? classroom.flightPath.resources || [] : [];
+        if (preciseEntries.length && !validateAllowedResourceList(preciseEntries))
+          throw preciseRestrictionError('Invalid Flight Path DNR list');
         const allowed = screenLockDomains.length > 0
           ? screenLockDomains
           : classroom.flightPath?.active
             ? normalizeDomainList(classroom.flightPath.allowedDomains, 'Flight Path domains')
             : [];
-        if (allowed.length > 0) {
+        if (preciseWaypoint) {
+          rules.push({ id: DNR_RANGES.classroom[0], priority: 500, action: { type: 'block' },
+            condition: { resourceTypes: ['main_frame'] } });
+          rules.push(...preciseDnrRules([preciseWaypoint], 500));
+        } else if (preciseEntries.length && !classroom.screenLock?.active) {
+          const hosts = [...new Set([...allowed, ...preciseEntries.filter(entry => entry.type === 'website').map(entry => entry.hostname)])];
+          rules.push({ id: DNR_RANGES.classroom[0], priority: 1, action: { type: 'block' },
+            condition: { resourceTypes: ['main_frame'], ...(hosts.length ? { excludedRequestDomains: hosts } : {}) } });
+          rules.push(...preciseDnrRules(preciseEntries, 2));
+        } else if (allowed.length > 0) {
           const screenLockPriority = screenLockDomains.length > 0 ? 500 : 1;
           rules.push({
             id: DNR_RANGES.classroom[0],
@@ -980,6 +1351,10 @@
       }
     }
 
+    if (rules.filter(rule => rule.condition.regexFilter).length > 800)
+      throw preciseRestrictionError('DNR regex budget exceeded', 'DNR_REGEX_BUDGET_EXCEEDED');
+    if (rules.some(rule => rule.id < DNR_RANGES.classroom[1] && !isRuleInRange(rule.id, 'classroom')))
+      throw preciseRestrictionError('DNR classroom rule ID budget exceeded');
     return rules;
   }
 
@@ -1049,6 +1424,7 @@
   function safeRestrictionTarget(rawUrl, rawDomain, options = {}) {
     const domain = normalizeDomain(rawDomain || rawUrl);
     if (!domain) return null;
+    if (options.resource) return isUrlAllowedByRestrictionResource(rawUrl, options.resource) ? rawUrl : null;
     try {
       const parsed = new URL(rawUrl);
       if (parsed.protocol === 'https:'
@@ -1071,6 +1447,8 @@
     if (!state || typeof urlValue !== 'string') return false;
     const restrictions = state.restrictions ?? emptyRestrictions();
     if (restrictions.screenLock?.active) {
+      if (restrictions.screenLock.resource)
+        return isUrlAllowedByRestrictionResource(urlValue, restrictions.screenLock.resource);
       if (!isHttpTab({ url: urlValue })) return false;
       return isHostWithinDomain(
         normalizeDomain(urlValue),
@@ -1079,9 +1457,10 @@
     }
     const host = normalizeDomain(urlValue);
     return Boolean(host && restrictions.flightPath?.active
-      && restrictions.flightPath.allowedDomains.some((domain) => (
+      && (restrictions.flightPath.allowedDomains.some((domain) => (
         isHostWithinDomain(host, normalizeDomain(domain))
-      )));
+      )) || (restrictions.flightPath.resources || []).some(resource =>
+        isUrlAllowedByRestrictionResource(urlValue, resource))));
   }
 
   function preferredRestrictionTabId(state, tabs, foregroundTabId) {
@@ -1092,8 +1471,7 @@
       const lockedDomain = normalizeDomain(
         restrictions.screenLock.domain || restrictions.screenLock.url
       );
-      const compliant = tabs.filter((tab) =>
-        isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
+      const compliant = tabs.filter((tab) => isRestrictionDestinationUrl(state, tabUrl(tab)));
       if (foreground && compliant.some((tab) => tab.id === foreground.id)) return foreground.id;
       if (compliant[0]) return compliant[0].id;
       if (foreground && !isProtectedInternalTab(foreground)) return foreground.id;
@@ -1105,8 +1483,7 @@
         restrictions.flightPath.allowedDomains,
         'Flight Path domains'
       );
-      const isAllowed = (tab) => isHttpTab(tab) && allowedDomains.some((allowed) =>
-        isHostWithinDomain(normalizeDomain(tabUrl(tab)), allowed));
+      const isAllowed = (tab) => isRestrictionDestinationUrl(state, tabUrl(tab));
       if (foreground && isAllowed(foreground)) return foreground.id;
       const allowed = tabs.find(isAllowed);
       if (allowed) return allowed.id;
@@ -1312,27 +1689,15 @@
       && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
       const destinationTabs = tabs.filter((tab) => {
         if (!isHttpTab(tab) || isAuthenticationTab(tab)) return false;
-        const host = normalizeDomain(tabUrl(tab));
-        if (restrictions.screenLock?.active) {
-          const domain = normalizeDomain(
-            restrictions.screenLock.domain || restrictions.screenLock.url
-          );
-          return Boolean(host && isHostWithinDomain(host, domain));
-        }
-        return restrictions.flightPath?.active && restrictions.flightPath.allowedDomains.some((domain) => (
-          host && isHostWithinDomain(host, normalizeDomain(domain))
-        ));
+        return isRestrictionDestinationUrl(state, tabUrl(tab));
       });
       const destinationUrl = restrictions.screenLock?.active
         ? safeRestrictionTarget(
             restrictions.screenLock.url,
             restrictions.screenLock.domain,
-            { allowTransientCurrentPage: options.transientCurrentPage === true },
+            { allowTransientCurrentPage: options.transientCurrentPage === true, resource: restrictions.screenLock.resource },
           )
-        : `https://${normalizeDomainList(
-            restrictions.flightPath.allowedDomains,
-            'Flight Path domains',
-          )[0]}`;
+        : restrictionLandingUrl(state);
       const nonDestinationTabs = tabs.filter((tab) => (
         !isProtectedInternalTab(tab)
         && !isAuthenticationTab(tab)
@@ -1361,7 +1726,7 @@
       const destinationUrl = safeRestrictionTarget(
         restrictions.screenLock.url,
         restrictions.screenLock.domain,
-        { allowTransientCurrentPage: options.transientCurrentPage === true },
+        { allowTransientCurrentPage: options.transientCurrentPage === true, resource: restrictions.screenLock.resource },
       );
       const targetUrl = coldSsoStart ? coldSsoStartUrl : destinationUrl;
       if (!targetUrl) throw new Error('screen lock requires a safe navigation target');
@@ -1374,8 +1739,7 @@
       // A cold deferred restriction starts authentication even when an old
       // destination tab happens to remain open from before sign-in. Only a
       // binding-scoped recorded SSO visit turns a later reconciliation warm.
-      const compliant = coldSsoStart ? [] : controllable.filter((tab) =>
-        isHttpTab(tab) && isHostWithinDomain(normalizeDomain(tabUrl(tab)), lockedDomain));
+      const compliant = coldSsoStart ? [] : controllable.filter((tab) => isRestrictionDestinationUrl(state, tabUrl(tab)));
       let preservedTabId = null;
       if (compliant.length > 0) {
         // A tab already on the locked domain must never be navigated or
@@ -1418,21 +1782,19 @@
         restrictions.flightPath.allowedDomains,
         'Flight Path domains'
       );
-      if (allowedDomains.length === 0) throw new Error('active Flight Path requires at least one domain');
+      if (allowedDomains.length + (restrictions.flightPath.resources?.length || 0) === 0)
+        throw new Error('active Flight Path requires at least one domain or resource');
       const firstUrl = coldSsoStart
         ? coldSsoStartUrl
-        : `https://${allowedDomains[0]}`;
+        : restrictionLandingUrl(state);
       const httpTabs = tabs.filter((tab) => (
         isHttpTab(tab) && !(mayProtectAuthenticationTab && isAuthenticationTab(tab))
       ));
       const allowed = coldSsoStart ? [] : httpTabs.filter((tab) => {
-        const domain = normalizeDomain(tabUrl(tab));
-        return domain && allowedDomains.some((allowedDomain) =>
-          isHostWithinDomain(domain, allowedDomain));
+        return isRestrictionDestinationUrl(state, tabUrl(tab));
       });
       const disallowed = httpTabs.filter((tab) => {
-        const domain = normalizeDomain(tabUrl(tab));
-        return !domain || !allowedDomains.some((allowed) => isHostWithinDomain(domain, allowed));
+        return !isRestrictionDestinationUrl(state, tabUrl(tab));
       });
       const foregroundAllowed = allowed.find((tab) => tab.id === foregroundTabId);
       const foregroundDisallowed = disallowed.find((tab) => tab.id === foregroundTabId);
@@ -1717,6 +2079,18 @@
     normalizeDomainList,
     normalizeTemporaryAllows,
     normalizeClassroomState,
+    normalizePersistedClassroomState,
+    isValidRestrictionResource,
+    validateAllowedResource: value => isValidRestrictionResource(value) ? { ...value } : null,
+    validateAllowedResourceList,
+    extractRestrictionResourceIdentity,
+    isUrlAllowedByResource: isUrlAllowedByRestrictionResource,
+    canonicalUrlForResource,
+    restrictionResourceRuleCount,
+    restrictionResourceRegexes,
+    hasPreciseRestrictions,
+    restrictionLandingUrl,
+    decideNavigation,
     classroomContext,
     classroomContextKey,
     classroomContexts,
