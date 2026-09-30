@@ -27,13 +27,16 @@ try {
   const result = await worker.evaluate(async () => {
     await authStateRestorePromise.catch(() => {}); await classroomStateRestorePromise.catch(() => {});
     await studentAuthMutationTail.catch(() => {});
+    const wakeDeadline = Date.now() + 15_000;
+    while (!workerWakeSettled && Date.now() < wakeDeadline) await new Promise(done => setTimeout(done, 25));
+    if (!workerWakeSettled) throw new Error('Synthetic transport setup requires completed production worker wake');
     CONFIG.autoRegistrationPaused = true;
     if (chromeProfileRegistrationInFlight) await chromeProfileRegistrationInFlight.catch(() => {});
     advanceStudentAuthMutationGeneration();
     fetchWithBackoff = async () => new Response('{}', { status: 503 });
     sendHeartbeat = async () => {}; connectWebSocket = async () => {}; scheduleEventHeartbeat = () => {};
-    if (wsConnectInFlight) await wsConnectInFlight.catch(() => {});
     recoverOffscreenWebSocketStatus = async () => true;
+    if (wsConnectInFlight) await wsConnectInFlight.catch(() => {});
     enqueueMonitoringEvent = async () => {};
     // Exercise native Focus independently of legacy tab reconciliation. The
     // shared policy/DNR tests separately verify navigation reconciliation.
@@ -211,6 +214,29 @@ try {
     await wait(() => oldSettled === heldCalls, 'late A native callbacks did not settle');
     await wait(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id === second.id, 'late A native callback displaced B permanently');
     require(focusAssignment === replacementRecord && !acks.slice(ackStart).some(ack => ack.focusStatus?.assignmentId === authFocus.assignmentId), 'late callback relabeled/retired replacement B');
+    // A real activation event during the final exact-tab lookup must survive
+    // its coalescing timer firing while the same assignment is still running.
+    const nativeGet = chrome.tabs.get.bind(chrome.tabs);
+    let releaseFinalLookup;
+    let lookupCount = 0;
+    let finalLookupHeld = false;
+    chrome.tabs.get = async id => {
+      const found = await nativeGet(id);
+      if (id === second.id && ++lookupCount === 2) {
+        finalLookupHeld = true;
+        await new Promise(done => { releaseFinalLookup = done; });
+      }
+      return found;
+    };
+    queueFocusMaintenance();
+    await wait(() => finalLookupHeld, 'same-assignment final native lookup was not held');
+    await chrome.tabs.update(first.id, { active: true });
+    await new Promise(done => setTimeout(done, 2100));
+    require(focusMaintenanceRunning && focusMaintenanceTimer === null, 'event timer did not fire during held lookup');
+    releaseFinalLookup(); chrome.tabs.get = nativeGet;
+    await wait(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id === second.id,
+      'same-assignment event was lost after in-flight maintenance');
+    require(focusAssignment === replacementRecord, 'same-assignment upkeep changed identity');
     // Native precise same-tab history changes preserve exact identity while
     // allowed, then a forbidden SPA navigation retires only Focus.
     await install(state({ active: false }, { flightPath: { active: false, allowedDomains: [] } }));
@@ -303,7 +329,7 @@ try {
     require(!focusAssignment && focusStatus.state === 'inactive', 'sign-out retained Focus');
     return { exactDuplicates: true, persistentAcrossSnapshots: true, honestPendingAck: true, attention: true,
       capabilityWithdrawalAndBareStop: true, lateCleanupAndReplacement: true, transientBringForward: true,
-      approvedAuthPopup: true, timedOutAndLateNativeActivation: true, nativePreciseSpaAndBack: true,
+      approvedAuthPopup: true, timedOutAndLateNativeActivation: true, inFlightSameAssignmentEvent: true, nativePreciseSpaAndBack: true,
       private21stReceipt: true, protectedRestoreAndSessionLoss: true, canonicalCommandAck: true,
       authorityLossAndExpiry: true, entitlementAndSignOut: true, acknowledgements: acks.length };
   });

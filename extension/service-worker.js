@@ -18816,6 +18816,7 @@ let focusAssignment = null;
 let focusStatus = { state: 'inactive' };
 let focusMaintenanceTimer = null;
 let focusMaintenanceRunning = false;
+let focusMaintenanceEvents = 0;
 const retiredFocusTabRefs = new Set();
 
 function focusError(code, message = 'Exact Focus target is unavailable') {
@@ -19053,7 +19054,9 @@ async function maintainFocus(record, authContext) {
 }
 
 function queueFocusMaintenance(record = focusAssignment) {
-  if (!record || record !== focusAssignment || focusMaintenanceTimer) return;
+  if (!record || record !== focusAssignment) return;
+  focusMaintenanceEvents++;
+  if (focusMaintenanceTimer) return;
   let authContext;
   try { authContext = captureAuthenticatedContext('Focus maintenance'); } catch { return; }
   const delay = Math.max(0, FOCUS_MAINTENANCE_MS - (Date.now() - record.lastAttemptAt));
@@ -19061,13 +19064,16 @@ function queueFocusMaintenance(record = focusAssignment) {
     focusMaintenanceTimer = null;
     if (record !== focusAssignment || focusMaintenanceRunning) return;
     focusMaintenanceRunning = true;
+    const observedEvents = focusMaintenanceEvents;
     enqueueStudentAuthMutation(async () => {
       await authStateRestorePromise; await classroomStateRestorePromise;
       return enqueueClassroomStateOperation(() => maintainFocus(record, authContext));
     }).catch(() => {}).finally(() => {
       focusMaintenanceRunning = false;
-      // An event for B during A's bounded operation must not be lost.
-      if (focusAssignment && focusAssignment !== record) queueFocusMaintenance(focusAssignment);
+      // Events for the same assignment and for replacement B during A's
+      // bounded operation must survive an already-fired coalescing timer.
+      if (focusAssignment && (focusAssignment !== record || focusMaintenanceEvents !== observedEvents))
+        queueFocusMaintenance(focusAssignment);
     });
   }, delay);
 }
@@ -19135,7 +19141,7 @@ chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url || ch
 
 async function applyBareFocusCleanup(command, envelope, authContext) {
   if (command?.type !== 'stop-focus'
-    || envelope.classroomState || command.classroomState || command.data.classroomState
+    || envelope.classroomState || command.classroomState || command.data?.classroomState
     || !hasNegotiatedCapability('scopedAuthorityChecksV1', authContext)) throw focusError('FOCUS_RESTRICTION_INVALID');
   RuntimeCore.normalizeStopFocusData(command.data);
   const binding = assertCurrentStudentBinding(envelope, 'Focus cleanup', { authContext, requireFullAuthority: true });
