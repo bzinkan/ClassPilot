@@ -325,6 +325,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'preciseRestrictionResourcesV1',
   'restrictionPortalFirstV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
@@ -347,6 +348,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'chatSeenAckV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'preciseRestrictionResourcesV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
   'afterHoursSafetyOnlyV1',
@@ -437,6 +439,10 @@ const COMMAND_DIAGNOSTIC_MESSAGES = Object.freeze({
   TAB_CLOSE_CAPABILITY_REQUIRED: 'A ClassPilot update is required for this action.',
   UNSUPPORTED_CLASSROOM_STATE_SCHEMA: 'This classroom command is not supported.',
   CLASSROOM_STATE_INVALID: 'The classroom command could not be applied.',
+  PRECISE_RESTRICTION_INVALID: 'The precise restriction could not be applied.',
+  PRECISE_RESTRICTION_NOT_NEGOTIATED: 'A ClassPilot update is required for this restriction.',
+  DNR_REGEX_BUDGET_EXCEEDED: 'The restriction exceeds the browser rule budget.',
+  DNR_REGEX_UNSUPPORTED: 'The browser cannot install this restriction safely.',
   COMMAND_FAILED: 'Command could not be completed.',
 });
 const COMMAND_DIAGNOSTIC_TEXT_ALLOWLIST = new Set([
@@ -16477,7 +16483,7 @@ const authStateRestorePromise = new Promise((resolve) => {
         restoreAuthContext,
       );
       if (!awaitingAuthPolicy) {
-        await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], {
+        await applyClassroomState(RuntimeCore.normalizePersistedClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY]), {
           force: true,
           reason: 'worker_wake',
           trustedPersistedRestrictionSso: true,
@@ -16686,6 +16692,40 @@ async function safeNotify(opts) {
 // Each feature owns a half-open ID range, so changing teacher controls cannot
 // erase school policy or unrelated extension rules.
 let dynamicRuleCompositionTail = Promise.resolve();
+const supportedRestrictionRegexes = new Map();
+
+async function preflightPreciseDnrRules(addRules, existingRules, requestedRanges) {
+  if (!RuntimeCore.hasPreciseRestrictions(runtimeClassroomStateForRules())) return addRules;
+  const remaining = existingRules.filter(rule => !requestedRanges.some(range => RuntimeCore.isRuleInRange(rule.id, range)));
+  if ([...remaining, ...addRules].filter(rule => rule.condition?.regexFilter).length > 800)
+    throw Object.assign(new Error('DNR regex budget exceeded'), { code: 'DNR_REGEX_BUDGET_EXCEEDED' });
+  if (typeof chrome.declarativeNetRequest.isRegexSupported !== 'function')
+    throw Object.assign(new Error('DNR regex validation is unavailable'), { code: 'DNR_REGEX_UNSUPPORTED' });
+  const resources = lockedResource ? [lockedResource] : flightPathResources;
+  const narrowShapes = resources.flatMap(resource => RuntimeCore.restrictionResourceRegexes(resource, true));
+  const check = (regex, isCaseSensitive) => {
+    const key = `${isCaseSensitive}:${regex}`;
+    if (!supportedRestrictionRegexes.has(key)) {
+      if (supportedRestrictionRegexes.size >= 1000) supportedRestrictionRegexes.delete(supportedRestrictionRegexes.keys().next().value);
+      const promise = boundedClassroomOperation(chrome.declarativeNetRequest.isRegexSupported({
+        regex, isCaseSensitive, requireCapturing: false,
+      }), CLASSROOM_DNR_OPERATION_TIMEOUT_MS, 'Restriction regex validation');
+      supportedRestrictionRegexes.set(key, promise);
+      promise.catch(() => supportedRestrictionRegexes.delete(key));
+    }
+    return supportedRestrictionRegexes.get(key);
+  };
+  return Promise.all(addRules.map(async rule => {
+    const expression = rule.condition?.regexFilter;
+    if (!expression) return rule;
+    const sensitive = rule.condition.isUrlFilterCaseSensitive === true;
+    if ((await check(expression, sensitive))?.isSupported === true) return rule;
+    const fallback = RuntimeCore.isRuleInRange(rule.id, 'classroom') ? narrowShapes[rule.id - 3] : null;
+    if (!fallback || fallback === expression || (await check(fallback, sensitive))?.isSupported !== true)
+      throw Object.assign(new Error('DNR cannot install a safe restriction shape'), { code: 'DNR_REGEX_UNSUPPORTED' });
+    return { ...rule, condition: { ...rule.condition, regexFilter: fallback } };
+  }));
+}
 
 function runtimeClassroomStateForRules() {
   return {
@@ -16696,8 +16736,10 @@ function runtimeClassroomStateForRules() {
       deliveryContext: { lateSignInRestrictionSso: true },
     } : {}),
     restrictions: {
-      screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain },
-      flightPath: { active: allowedDomains.length > 0, allowedDomains },
+      screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain,
+        ...(lockedResource ? { resource: lockedResource } : {}) },
+      flightPath: { active: flightPathIsActive(), allowedDomains,
+        ...(flightPathResources.length ? { resources: flightPathResources } : {}) },
       blockList: { active: teacherBlockedDomains.length > 0, blockedDomains: teacherBlockedDomains },
       attentionMode: { active: attentionModeActive },
       temporaryAllows: temporaryAllowedDomains,
@@ -16712,7 +16754,7 @@ function composeDynamicRules(rangeNames, options = {}) {
   const run = async () => {
     // Validate and build before changing Chrome state. Oversized or malformed
     // lists therefore leave the previous complete ruleset intact.
-    const addRules = RuntimeCore.buildDnrRules({
+    let addRules = RuntimeCore.buildDnrRules({
       classroomState: runtimeClassroomStateForRules(),
       restrictionSsoPassThrough: restrictionSsoPassThroughActive,
       restrictionAuthPassThrough: restrictionAuthPassThroughActive,
@@ -16725,6 +16767,7 @@ function composeDynamicRules(rangeNames, options = {}) {
       CLASSROOM_DNR_OPERATION_TIMEOUT_MS,
       'Classroom DNR inventory',
     );
+    addRules = await preflightPreciseDnrRules(addRules, existingRules, requestedRanges);
     const removeRuleIds = existingRules
       .filter((rule) => requestedRanges.some((range) => RuntimeCore.isRuleInRange(rule.id, range)))
       .map((rule) => rule.id);
@@ -18664,6 +18707,8 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
 let screenLocked = false;
 let lockedUrl = null;
 let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
+let lockedResource = null;
+let flightPathResources = [];
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
@@ -18676,7 +18721,7 @@ function screenLockIsActive() {
 }
 
 function flightPathIsActive() {
-  return allowedDomains.length > 0;
+  return allowedDomains.length + flightPathResources.length > 0;
 }
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let globalBlockedDomainsStateTrusted = false;
@@ -18732,6 +18777,12 @@ let lastClassroomStateOutcome = 'pending';
 function persistedClassroomStateSnapshot(state) {
   if (!state || typeof state !== 'object') return state;
   const persisted = JSON.parse(JSON.stringify(state));
+  if (RuntimeCore.hasPreciseRestrictions(state)) {
+    // Storage-only marker: old cores refuse schema 2 instead of restoring a
+    // resource as permission for the whole provider website. Wire stays v1.
+    persisted.schemaVersion = 2;
+    persisted.precisePersistenceVersion = 1;
+  }
   // Authentication start URLs may contain district routing hints or opaque
   // IdP query values. Profiles, host fences, and provider URLs are runtime-only
   // authority and must never enter chrome.storage.local/session. Dynamic DNR
@@ -18897,6 +18948,8 @@ function classroomRuntimeBackup() {
     screenLocked,
     lockedUrl,
     lockedDomain,
+    lockedResource: lockedResource ? { ...lockedResource } : null,
+    flightPathResources: flightPathResources.map(resource => ({ ...resource })),
     allowedDomains: [...allowedDomains],
     activeFlightPathName,
     currentMaxTabs,
@@ -18915,6 +18968,8 @@ function restoreClassroomRuntimeBackup(backup) {
   screenLocked = backup.screenLocked;
   lockedUrl = backup.lockedUrl;
   lockedDomain = backup.lockedDomain;
+  lockedResource = backup.lockedResource;
+  flightPathResources = backup.flightPathResources;
   allowedDomains = backup.allowedDomains;
   activeFlightPathName = backup.activeFlightPathName;
   currentMaxTabs = backup.currentMaxTabs;
@@ -19041,7 +19096,7 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
     authContext,
     { trustedPersistedRestrictionSso: true },
   );
-  const normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+  const normalized = RuntimeCore.normalizePersistedClassroomState(prepared, Date.now());
   if (normalized?.deliveryContext?.lateSignInRestrictionSso === true) {
     normalized.deliveryContext.bindingDigest = restrictionSsoBinding;
   }
@@ -19072,7 +19127,9 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
   screenLocked = Boolean(restrictions.screenLock.active);
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
+  lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
+  flightPathResources = restrictions.flightPath.active ? (restrictions.flightPath.resources || []).map(resource => ({ ...resource })) : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
   teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
@@ -19170,10 +19227,12 @@ function classroomRestrictionsFromRuntime() {
       active: screenLocked,
       url: lockedUrl,
       domain: lockedDomain,
+      ...(lockedResource ? { resource: lockedResource } : {}),
     },
     flightPath: {
-      active: allowedDomains.length > 0,
+      active: flightPathIsActive(),
       allowedDomains,
+      ...(flightPathResources.length ? { resources: flightPathResources } : {}),
       name: activeFlightPathName,
     },
     blockList: {
@@ -19239,9 +19298,11 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   const backup = classroomRuntimeBackup();
   screenLocked = Boolean(restrictions.screenLock.active);
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
+  flightPathResources = restrictions.flightPath.active ? (restrictions.flightPath.resources || []).map(resource => ({ ...resource })) : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
+  lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
   teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
   temporaryAllowedDomains = restrictions.temporaryAllows.map((item) => ({ ...item }));
@@ -19261,7 +19322,9 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   } catch (error) {
     if (!isAuthContextCancellation(error) && classroomRuntimeIsOwnedBy(runtimeOwner)) {
       restoreClassroomRuntimeBackup(backup);
-      classroomRuntimeOwner = null;
+      // The caller still owns this attempt and must report failed adoption.
+      // Clearing ownership here misclassifies a native installation error as
+      // retired authority and can scrub the previously valid persisted policy.
     }
     throw error;
   }
@@ -19320,7 +19383,9 @@ async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
+  lockedResource = null;
   allowedDomains = [];
+  flightPathResources = [];
   activeFlightPathName = null;
   teacherMaxTabs = null;
   currentMaxTabs = effectiveTabLimit();
@@ -19854,6 +19919,14 @@ async function applyClassroomStateNow(rawState, options = {}) {
     );
     assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (RuntimeCore.hasPreciseRestrictions(normalized)
+      && options.trustedPersistedRestrictionSso !== true) {
+      if (!authContext || !hasNegotiatedCapability('preciseRestrictionResourcesV1', authContext)) {
+        throw Object.assign(new Error('Precise restrictions were not negotiated'), { code: 'PRECISE_RESTRICTION_NOT_NEGOTIATED' });
+      }
+      const preciseBinding = assertCurrentStudentBinding(authorityEnvelope, 'precise restriction delivery', { authContext });
+      assertBindingMatchesAuthContext(preciseBinding, authContext, 'precise restriction delivery', { requireFullAuthority: true });
+    }
     if (options.trustedPortalFirstLogin === true
       && normalized.deliveryContext?.portalFirstOnLogin === true) {
       if (!restrictionAuthPassThroughForState(normalized)) {
@@ -20336,7 +20409,9 @@ async function checkClassroomStateExpiryNow(options = {}) {
     screenLocked = false;
     lockedUrl = null;
     lockedDomain = null;
+    lockedResource = null;
     allowedDomains = [];
+    flightPathResources = [];
     activeFlightPathName = null;
     teacherMaxTabs = null;
     currentMaxTabs = effectiveTabLimit();
@@ -20762,7 +20837,7 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   // A clear replayed from the crash marker must not emit a second
   // restriction_state_cleared event when nothing was left to clear.
   const hadTeacherSessionState = Boolean(
-    screenLocked || lockedUrl || lockedDomain || allowedDomains.length > 0
+    screenLocked || lockedUrl || lockedDomain || flightPathIsActive()
     || activeFlightPathName || teacherMaxTabs != null
     || teacherBlockedDomains.length > 0 || activeBlockListName
     || temporaryAllowedDomains.length > 0 || attentionModeActive
@@ -20776,7 +20851,9 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
+  lockedResource = null;
   allowedDomains = [];
+  flightPathResources = [];
   activeFlightPathName = null;
   teacherMaxTabs = null;
   currentMaxTabs = effectiveTabLimit();
@@ -21194,6 +21271,8 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     // active on the device.
     const isClassroomStatefulCommand = STATEFUL_COMMAND_TYPES.has(commandType)
       && authority?.kind !== 'school_policy';
+    if (!classroomState && (Object.hasOwn(command.data || {}, 'resource') || Object.hasOwn(command.data || {}, 'resources')))
+      throw Object.assign(new Error('Precise commands require an authoritative classroom state'), { code: 'PRECISE_RESTRICTION_INVALID' });
     let application = null;
     let result;
     let deferredCommandSideEffect = null;
@@ -21727,6 +21806,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
 
         lockedUrl = urlToLock;
+        lockedResource = null;
         lockedDomain = extractDomain(lockedUrl);
         if (!lockedDomain) {
           throw new Error('Could not determine locked domain');
@@ -21857,14 +21937,16 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
       case 'unlock-screen':
         {
         const screenOnly = command.data.screenOnly === true || command.screenOnly === true;
-        const preserveFlightPath = screenOnly && allowedDomains.length > 0;
+        const preserveFlightPath = screenOnly && flightPathIsActive();
         const removedTransientCurrentPage = transientCurrentPageRestrictionActive;
         screenLocked = false;
         lockedUrl = null;
         lockedDomain = null;
+        lockedResource = null;
         transientCurrentPageRestrictionActive = false;
         if (!screenOnly) {
-          allowedDomains = []; // Legacy full unlock clears all lock state
+          allowedDomains = [];
+          flightPathResources = []; // Legacy full unlock clears all lock state
           activeFlightPathName = null;
           restrictionSsoPassThroughActive = false;
           restrictionAuthPassThroughActive = false;
@@ -21928,13 +22010,15 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           }
 
           allowedDomains = RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'Flight Path domains');
+          flightPathResources = [];
           activeFlightPathName = command.data.flightPathName || null;
         }
         // Applying a Flight Path replaces the foreground screen lock while
         // establishing its own independent browsing restriction.
         screenLocked = false;
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
-        lockedDomain = null; // Clear single domain when applying Flight Path
+        lockedDomain = null;
+        lockedResource = null; // Clear single domain when applying Flight Path
         restrictionSsoPassThroughActive = false;
         restrictionAuthPassThroughActive = false;
         activeAuthPassThroughPolicy = null;
@@ -21959,7 +22043,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Use the same foreground-aware reconciliation as revisioned state so
         // an allowed page in another window is preserved and focused.
-        if (allowedDomains.length > 0) {
+        if (flightPathIsActive()) {
           await reconcileClassroomStateTabsBestEffort({
             restrictions: classroomRestrictionsFromRuntime(),
           }, {
@@ -21985,7 +22069,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
         
       case 'remove-flight-path':
-        allowedDomains = []; // Clear all flight path domains
+        allowedDomains = [];
+        flightPathResources = []; // Clear all flight path domains
         activeFlightPathName = null; // Clear Flight Path name
         if (!screenLocked) {
           restrictionSsoPassThroughActive = false;
@@ -23383,7 +23468,7 @@ function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   return blockedBy(globalBlockedDomains) || blockedBy(teacherBlockedDomains);
 }
 
-// Prevent navigation when screen is locked (domain-based blocking)
+// One policy decision for network, SPA, history and prerender navigations.
 async function handleBeforeNavigateForPolicy(details) {
   if (details.frameId !== 0) return;
   let eventAuthContext;
@@ -23447,99 +23532,27 @@ async function handleBeforeNavigateForPolicy(details) {
       }
 
       const policy = {
-        attentionModeActive,
+        classroomState: runtimeClassroomStateForRules(),
         globalBlockedDomains: [...globalBlockedDomains],
-        screenLocked,
-        lockedDomain,
-        lockedUrl,
-        temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
-        teacherBlockedDomains: [...teacherBlockedDomains],
-        allowedDomains: [...allowedDomains],
-        restrictionSsoPassThroughActive,
-        restrictionAuthPassThroughActive,
-        authPassThrough: activeAuthPassThroughPolicy,
+        restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+        restrictionAuthPassThrough: restrictionAuthPassThroughActive,
       };
-      let policySource = null;
-      let notification = null;
-      let action = 'back';
-
-      if (policy.attentionModeActive) {
-        policySource = 'attention_mode';
-      } else if (policy.globalBlockedDomains.some((domain) => {
-        const normalized = domain.replace(/^www\./, '');
-        return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-      })) {
-        policySource = 'school';
-        notification = {
-          title: 'Website Blocked',
-          message: `Access to ${targetDomain} is blocked by your school.`,
-          priority: 2,
-        };
-      } else if ((
-        policy.restrictionAuthPassThroughActive
-          && RuntimeCore.authPassThroughProfileForUrl(policy.authPassThrough, details.url)
-      ) || (
-        policy.restrictionSsoPassThroughActive
-          && normalizedRestrictionSsoHost(details.url)
-      )) {
-        const teacherBlocked = policy.teacherBlockedDomains.some((domain) => {
-          const normalized = domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        });
-        if (!teacherBlocked) return;
-        policySource = 'teacher';
-        notification = {
-          title: 'Website Blocked',
-          message: `Access to ${targetDomain} is blocked by your teacher.`,
-          priority: 2,
-        };
-      } else if (policy.screenLocked) {
-        if (policy.lockedDomain && isOnSameDomain(details.url, policy.lockedDomain)) return;
-        policySource = 'screen_lock';
-        action = policy.lockedUrl ? 'locked_url' : 'back';
-        notification = {
-          title: 'Navigation Blocked',
-          message: policy.lockedDomain
-            ? `You can only browse within ${policy.lockedDomain}`
-            : 'Your screen is locked by your teacher.',
-          priority: 2,
-        };
-      } else {
-        const temporarilyAllowed = policy.temporaryAllowedDomains.some((item) => {
-          const normalized = item.domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        });
-        if (temporarilyAllowed) return;
-        if (policy.teacherBlockedDomains.some((domain) => {
-          const normalized = domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        })) {
-          policySource = 'teacher';
-          notification = {
-            title: 'Website Blocked',
-            message: `Access to ${targetDomain} is blocked by your teacher.`,
-            priority: 2,
-          };
-        } else if (
-          policy.allowedDomains.length > 0
-          && !policy.allowedDomains.some((domain) => isOnSameDomain(details.url, domain))
-        ) {
-          policySource = 'flight_path';
-          action = policy.lockedUrl ? 'locked_url' : 'back';
-          notification = {
-            title: 'Navigation Blocked',
-            message: `You can only access: ${policy.allowedDomains.join(', ')}`,
-            priority: 1,
-          };
-        }
-      }
-
+      const decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
+      if (decision.allowed) return;
+      const policySource = decision.source;
+      const precise = RuntimeCore.hasPreciseRestrictions(policy.classroomState);
+      const landing = RuntimeCore.restrictionLandingUrl(policy.classroomState);
+      const target = precise
+        ? landing && RuntimeCore.decideNavigation(landing, policy, Date.now()).allowed ? landing : null
+        : policySource === 'screen_lock' ? lockedUrl : null;
+      const notification = { title: 'Navigation Blocked',
+        message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
       if (!policySource) return;
       await recordNavigationBlockedForAuth(eventAuthContext, details.url, policySource);
-      if (action === 'locked_url') {
+      if (target) {
         await updateTabForAuth(
           details.tabId,
-          { url: policy.lockedUrl },
+          { url: target },
           eventAuthContext,
           'navigation policy redirect',
         );
@@ -23564,6 +23577,9 @@ async function handleBeforeNavigateForPolicy(details) {
   }
 }
 chrome.webNavigation.onBeforeNavigate.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onHistoryStateUpdated.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onCommitted.addListener(handleBeforeNavigateForPolicy);
 
 // Track navigation commits for instant URL updates (fires immediately when navigation commits)
 chrome.webNavigation.onCommitted.addListener(async (details) => {
@@ -23614,8 +23630,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 function restrictionDestinationTab(tab) {
   const url = tab?.pendingUrl || tab?.url || '';
   if (!/^https?:\/\//i.test(url) || restrictionAuthenticationTab(tab)) return false;
-  if (screenLocked && lockedUrl) return restrictionAuthDestinationMatches(url);
-  return allowedDomains.some((domain) => isOnSameDomain(url, domain));
+  return RuntimeCore.isRestrictionDestinationUrl(runtimeClassroomStateForRules(), url);
 }
 
 function restrictionSsoTabLimitPreserveIds(tabs, options = {}) {
@@ -23691,16 +23706,24 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   let removalTarget = null;
   let evaluatedMaxTabs = null;
   let activeAuthPopupPlaceholder = false;
+  const createdUrl = policyTab.pendingUrl || policyTab.url || '';
+  const navigationDecision = RuntimeCore.decideNavigation(createdUrl, {
+    classroomState: runtimeClassroomStateForRules(), globalBlockedDomains: [...globalBlockedDomains],
+    restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+    restrictionAuthPassThrough: restrictionAuthPassThroughActive,
+  });
   if (policy.attentionModeActive) {
     policySource = 'attention_mode';
+  } else if (/^https?:\/\//i.test(createdUrl) && !navigationDecision.allowed) {
+    policySource = navigationDecision.source;
+    notification = { title: policySource === 'screen_lock' ? 'Waypoint Set' : 'Navigation Blocked',
+      message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
   } else if (policy.screenLocked && policy.lockedDomain) {
     // Lenient on-domain lock: a new tab already destined for the locked
     // domain (e.g. a middle-clicked link) is allowed; DNR and the
     // navigation listener keep it fenced afterward. Anything else —
     // chrome://newtab, about:blank, off-domain — is removed.
-    const createdUrl = policyTab.pendingUrl || policyTab.url || '';
-    const onLockedDomain = /^https?:\/\//i.test(createdUrl)
-      && isOnSameDomain(createdUrl, policy.lockedDomain);
+    const onLockedDomain = RuntimeCore.isRestrictionDestinationUrl(runtimeClassroomStateForRules(), createdUrl);
     const onRestrictionSso = (
       policy.restrictionSsoPassThroughActive || policy.restrictionAuthPassThroughActive
     ) && restrictionAuthenticationUrlAllowed(createdUrl);
@@ -23735,14 +23758,8 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
     evaluatedMaxTabs = inventoryMaxTabs;
     if (inventoryMaxTabs && tabs.length > inventoryMaxTabs) {
       const otherTabs = tabs.filter((candidate) => candidate.id !== policyTab.id);
-      const existingCompliant = policy.screenLocked && policy.lockedDomain
-        ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-          && isOnSameDomain(candidate.pendingUrl || candidate.url || '', policy.lockedDomain))
-        : policy.allowedDomains.length > 0
-          ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-            && policy.allowedDomains.some((domain) => (
-              isOnSameDomain(candidate.pendingUrl || candidate.url || '', domain)
-            )))
+      const existingCompliant = policy.screenLocked || flightPathIsActive()
+        ? otherTabs.find(restrictionDestinationTab)
           : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
             candidate.pendingUrl || candidate.url || ''
           ));

@@ -35,9 +35,18 @@ try {
   await worker.evaluate(async () => {
     await Promise.all([authStateRestorePromise, classroomStateRestorePromise]);
     await studentAuthMutationTail;
+    CONFIG.autoRegistrationPaused = true;
+    // Storage restoration precedes the remaining production wake work. Let
+    // that exact wake and registration settle before installing fixture auth.
+    const wakeDeadline = Date.now() + 20_000;
+    while (!workerWakeSettled && Date.now() < wakeDeadline) await new Promise(done => setTimeout(done, 20));
+    if (!workerWakeSettled) throw new Error('Production worker wake did not settle before the class-tools fixture');
+    if (chromeProfileRegistrationInFlight) await chromeProfileRegistrationInFlight.catch(() => {});
     scheduleHeartbeat(null);
     sendHeartbeat = async () => {};
     connectWebSocket = async () => {};
+    recoverOffscreenWebSocketStatus = async () => true;
+    if (wsConnectInFlight) await wsConnectInFlight.catch(() => {});
     wsSend = async () => true;
     advanceStudentAuthMutationGeneration();
     Object.assign(CONFIG, { serverUrl: 'http://127.0.0.1:49177', schoolId: 'school-fixture', deviceId: 'device-fixture',
@@ -47,12 +56,15 @@ try {
     studentAuthCommitPending = false;
     activateAuthenticatedContext(generateAuthContextId());
     const auth = captureAuthenticatedContext('scheduled fixture');
+    globalThis.__toolsFixtureAuth = auth;
     licenseActive = true;
     trackingState = TRACKING_STATES.ACTIVE;
     adoptLicenseState(true, 'active', auth);
     schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
     schoolSettingsScope = schoolPolicyScopeForAuthContext(auth);
     schoolSettingsFetchedAt = Date.now();
+    await kv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope,
+      [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
 
     const capabilities = ['scopedAuthorityChecksV1', 'scheduledClassroomV1', 'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1'];
     adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: capabilities }, auth);
@@ -201,6 +213,18 @@ try {
   assert.equal(finalTools.state.contextAuthorityRevision, '1', 'Subsequent tools responses must retain the fixture server\'s current owner');
   assert.equal(finalTools.state.classTools.capabilities.includes('lessonActivitiesV1'), false);
   console.log('Class tools Chrome checks passed: exact submissions, help acknowledgement, checklist/status independence, pushed-question races, short-text exit tickets, pause/reload, reordered snapshots, owner change, mixed capabilities, unrelated background acknowledgement.');
+} catch (error) {
+  const worker = browser?.serviceWorkers()[0];
+  if (worker) console.error('Class tools fixture auth diagnostics', JSON.stringify(await worker.evaluate(() => ({
+    wakeSettled: workerWakeSettled, authGeneration: studentAuthMutationGeneration, activeGeneration: activeAuthContextGeneration,
+    hasAuth: hasStudentAuth(), invalidating: studentAuthInvalidating, commitPending: studentAuthCommitPending,
+    matches: Object.fromEntries(['authContextId','schoolId','deviceId','studentToken'].map(key=>[key,globalThis.__toolsFixtureAuth?.[key]===CONFIG[key]])),
+    studentMatches: globalThis.__toolsFixtureAuth?.studentId===CONFIG.activeStudentId,
+    sessionMatches: globalThis.__toolsFixtureAuth?.studentSessionId===CONFIG.activeStudentSessionId,
+    originMatches: globalThis.__toolsFixtureAuth?.serverOrigin===normalizedServerOrigin(CONFIG.serverUrl),
+    signalAborted: globalThis.__toolsFixtureAuth?.signal.aborted,
+  })).catch(() => ({ diagnosticUnavailable: true }))));
+  throw error;
 } finally {
   await browser?.close();
   if (server) await new Promise(done => server.close(done));
