@@ -140,6 +140,7 @@ function runPackagedTests() {
     'test-extension-authority-races.mjs',
     'test-extension-precise-resources.mjs',
     'test-extension-precise-downgrade.mjs',
+    'test-extension-focus.mjs',
     'test-extension-browser-api.mjs',
     'test-extension-scheduled-classroom.mjs',
     'test-extension-class-tools.mjs',

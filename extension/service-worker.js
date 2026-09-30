@@ -87,6 +87,8 @@ const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
   'TAB_CLOSE_CAPABILITY_REQUIRED',
   'TAB_CLOSE_FAILED',
   'TAB_REF_NOT_FOUND',
+  'STALE_TAB_REF', 'TAB_ACTIVATE_CAPABILITY_REQUIRED', 'FOCUS_CAPABILITY_REQUIRED',
+  'FOCUS_RESTRICTION_INVALID', 'FOCUS_TAB_OFF_POLICY', 'FOCUS_SESSION_STORAGE_REQUIRED',
   'TAB_SNAPSHOT_REVISION_REQUIRED',
   'TAB_TARGET_REQUIRED',
   'TAB_URL_NOT_FOUND',
@@ -346,8 +348,10 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'domainPreservingRestrictionsV1',
   'chatPauseV1',
   'chatSeenAckV1',
+  'focusTabV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'focusTabV1',
   'preciseRestrictionResourcesV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
@@ -440,6 +444,12 @@ const COMMAND_DIAGNOSTIC_MESSAGES = Object.freeze({
   UNSUPPORTED_CLASSROOM_STATE_SCHEMA: 'This classroom command is not supported.',
   CLASSROOM_STATE_INVALID: 'The classroom command could not be applied.',
   PRECISE_RESTRICTION_INVALID: 'The precise restriction could not be applied.',
+  STALE_TAB_REF: 'Refresh the selected tab before trying again.',
+  TAB_ACTIVATE_CAPABILITY_REQUIRED: 'A ClassPilot update is required to bring this tab forward.',
+  FOCUS_CAPABILITY_REQUIRED: 'A ClassPilot update is required for Focus.',
+  FOCUS_RESTRICTION_INVALID: 'The Focus restriction could not be applied.',
+  FOCUS_TAB_OFF_POLICY: 'The selected tab is outside classroom policy.',
+  FOCUS_SESSION_STORAGE_REQUIRED: 'Protected browser-session storage is unavailable.',
   PRECISE_RESTRICTION_NOT_NEGOTIATED: 'A ClassPilot update is required for this restriction.',
   DNR_REGEX_BUDGET_EXCEEDED: 'The restriction exceeds the browser rule budget.',
   DNR_REGEX_UNSUPPORTED: 'The browser cannot install this restriction safely.',
@@ -1992,6 +2002,8 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'fabChatMessages',
   'fabChatClosed',
   'tabSnapshotV1',
+  'focusTabRefsV1',
+  'focusAssignmentV1',
   'monitoringEventOutboxV1',
   'monitoringEventOutboxDropped',
   'monitoringEventOutboxAuthBindingV1',
@@ -5024,6 +5036,12 @@ function adoptLicenseState(active, planStatus, authContext, options = {}) {
     ? Number(options.verifiedAt)
     : Date.now();
   licenseRefreshState = licenseActive ? 'active' : 'denied';
+  if (!licenseActive && typeof focusAssignment !== 'undefined' && focusAssignment) {
+    const retired = focusAssignment;
+    // Status cannot remain active while canonical entitlement is denied.
+    focusStatus = { state: 'inactive' };
+    enqueueClassroomStateOperation(() => retireFocus(retired, null, authContext, { retireAssignment: true })).catch(() => {});
+  }
   return scope;
 }
 
@@ -6547,6 +6565,11 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   await kv.set(updates);
   assertCurrent();
   currentFabState = nextState;
+  if (focusAssignment && (lifecycleEnded || scheduledOwnerChanged
+    || focusAssignment.scopeKey !== focusScopeKey(nextState))) {
+    await retireFocus(focusAssignment, null, authContext, { retireAssignment: true });
+    assertCurrent();
+  }
   const authorityEnvelope = options.authorityEnvelope || rawFabState;
   const broadcastSource = (() => {
     if (!authContext) return authorityEnvelope;
@@ -7448,13 +7471,16 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
     const bindingMatches = prior?.binding === binding;
     const priorById = new Map((bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
       .map((entry) => [entry.tabId, entry]));
+    const focusRefs = hasSessionStorage() ? await focusRefRegistry(authContext) : null;
+    const receiptById = new Map((focusRefs?.entries || []).map(entry => [entry.tabId, entry]));
     const faviconByTabId = new Map();
     const localEntries = tabs.map((tab) => {
       const metadata = restrictionSafeMonitoringMetadata(tab);
       faviconByTabId.set(tab.id, snapshotFaviconUrl(metadata.favicon));
       return {
         tabId: tab.id,
-        tabRef: priorById.get(tab.id)?.tabRef || generateOpaqueTabRef(),
+        tabRef: [priorById.get(tab.id)?.tabRef, receiptById.get(tab.id)?.tabRef]
+          .find(ref => ref && !retiredFocusTabRefs.has(ref)) || generateOpaqueTabRef(),
         url: String(metadata.url || '').slice(0, 512),
         title: String(metadata.title || 'Untitled').slice(0, 512),
       };
@@ -10174,6 +10200,10 @@ function abortActiveAuthContext() {
   lastKnownTabsAuthBinding = null;
   currentTabSnapshotRevision = 0;
   cameraActiveTabs.clear();
+  focusAssignment = null;
+  focusStatus = { state: 'inactive' };
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
   cameraActive = false;
   // Teacher-broadcast viewing state is student authority, not a school-global
   // transport flag. Do not let a new identity send a leave for the retired
@@ -14769,6 +14799,17 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
   const snapshot = data.classroomState;
   await classroomStateRestorePromise;
   assertCurrent();
+  if (data.focusCleanup) {
+    if (snapshot) throw focusError('FOCUS_RESTRICTION_INVALID');
+    const cleanup = data.focusCleanup;
+    observeExactStudentControlRevision(cleanup, authContext, 'Focus cleanup revision');
+    const result = await enqueueClassroomStateOperation(() => applyBareFocusCleanup(cleanup.command, cleanup, authContext));
+    assertCurrent();
+    await sendCommandAck(getCommandIdFromMessage(cleanup, cleanup.command), 'completed', {
+      authContext, binding: exactStudentBinding(cleanup), commandType: 'stop-focus', result,
+      outcome: 'applied', deliveryPolicy: 'persistent_control', expiresAt: cleanup.command.expiresAt });
+    return;
+  }
   const storedBinding = await getStoredAuthState([CLASSROOM_STATE_STUDENT_BINDING_KEY]);
   assertCurrent();
   const boundStudentId = storedBinding[CLASSROOM_STATE_STUDENT_BINDING_KEY] || null;
@@ -17473,6 +17514,7 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
       classroomStateOutcome: heartbeatClassroomAckIsCurrent
         ? lastClassroomStateOutcome
         : 'pending',
+      focusStatus: publicFocusStatus(),
       restrictionAuthState: restrictionAuthTelemetryState(),
       classroomStateSessionId: currentClassroomState?.teachingSessionId || undefined,
       classroomStateSupervisionContextId: currentClassroomState?.supervisionContextId || undefined,
@@ -18748,6 +18790,7 @@ const CLASSROOM_DNR_OPERATION_TIMEOUT_MS = 5000;
 const CLASSROOM_STATE_EXPIRY_RETRY_MS = 15 * 1000;
 const CLASSROOM_STATE_SYNC_INTERVAL_MS = 30 * 1000;
 const STATEFUL_COMMAND_TYPES = new Set([
+  'focus-tab', 'stop-focus',
   'lock-screen',
   'unlock-screen',
   'apply-flight-path',
@@ -18759,11 +18802,363 @@ const STATEFUL_COMMAND_TYPES = new Set([
   'attention-mode',
 ]);
 const AUTHORITY_BOUND_TAB_COMMAND_TYPES = new Set([
+  'activate-tab',
   'open-tab',
   'close-tab',
   'close-tabs',
   'limit-tabs',
 ]);
+// Session-only browser identities are never reconstructible from URL or title.
+const FOCUS_REFS_KEY = 'focusTabRefsV1';
+const FOCUS_ASSIGNMENT_KEY = 'focusAssignmentV1';
+const FOCUS_MAINTENANCE_MS = 2000;
+let focusAssignment = null;
+let focusStatus = { state: 'inactive' };
+let focusMaintenanceTimer = null;
+let focusMaintenanceRunning = false;
+const retiredFocusTabRefs = new Set();
+
+function focusError(code, message = 'Exact Focus target is unavailable') {
+  return Object.assign(new Error(message), { code });
+}
+
+function focusScopeKey(state) {
+  return RuntimeCore.classroomContextKey(state);
+}
+
+function focusNavigationDecision(state, tab) {
+  const url = tab?.pendingUrl || tab?.url || '';
+  // The general navigation planner preserves protected browser pages. They
+  // are never eligible exact web targets for activation or persistent Focus.
+  if (!isHttpUrl(url)) return { allowed: false, source: 'unsupported_tab' };
+  return RuntimeCore.decideNavigation(url, {
+    classroomState: state, globalBlockedDomains: [...globalBlockedDomains],
+    restrictionAuthPassThrough: restrictionAuthPassThroughForState(state),
+    restrictionSsoPassThrough: restrictionSsoPassThroughForState(state),
+  });
+}
+
+async function focusRefRegistry(authContext) {
+  if (!hasSessionStorage()) throw focusError('FOCUS_SESSION_STORAGE_REQUIRED');
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference storage');
+  const stored = (await durableSessionKv.get(FOCUS_REFS_KEY))[FOCUS_REFS_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference storage');
+  return stored?.version === 1 && stored.binding === authContextProtocolScope(authContext)
+    ? stored : { version: 1, binding: authContextProtocolScope(authContext), entries: [], retiredAssignments: [] };
+}
+
+async function persistFocusRegistry(registry, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference persistence');
+  await durableSessionKv.set({ [FOCUS_REFS_KEY]: registry });
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference persistence');
+}
+
+async function createFocusOpenReceipt(tab, snapshot, authContext) {
+  const registry = await focusRefRegistry(authContext);
+  const exact = await chrome.tabs.get(tab.id);
+  assertAuthenticatedContextCurrent(authContext, 'open receipt browser validation');
+  if (!Number.isInteger(exact?.id) || exact.id !== tab.id) throw focusError('STALE_TAB_REF');
+  const known = snapshot.localEntries.find(entry => entry.tabId === tab.id)
+    || registry.entries.find(entry => entry.tabId === tab.id);
+  const tabRef = known?.tabRef || generateOpaqueTabRef();
+  if (retiredFocusTabRefs.has(tabRef)) throw focusError('STALE_TAB_REF');
+  const receipt = { tabRef, tabId: tab.id, receiptRevision: snapshot.revision };
+  registry.entries = [...registry.entries.filter(entry => entry.tabId !== tab.id), receipt].slice(-1000);
+  await persistFocusRegistry(registry, authContext);
+  return { tabReceiptVersion: 1, tabRef, tabSnapshotRevision: snapshot.revision };
+}
+
+function focusRecordCurrent(record, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'Focus assignment');
+  if (focusAssignment !== record || record.binding !== authContextProtocolScope(authContext)
+    || !currentLicenseIsActive() || !currentClassroomState
+    || focusScopeKey(currentClassroomState) !== record.scopeKey
+    || currentClassroomState.restrictions.focus?.assignmentId !== record.assignmentId
+    || RuntimeCore.classroomStateExpiry(currentClassroomState).expired
+    || record.contextAuthorityRevision !== (currentClassroomState.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null))
+    throw authContextSuperseded('Focus assignment');
+  return record;
+}
+
+function publicFocusStatus() { return { ...focusStatus }; }
+
+function publishFocusStatus(status, authContext) {
+  if (JSON.stringify(focusStatus) === JSON.stringify(status)) return;
+  focusStatus = status;
+  sendClassroomStateAck(currentClassroomState, lastClassroomStateOutcome,
+    undefined, authContext);
+  scheduleEventHeartbeat('focus-status');
+}
+
+async function retireFocus(record = focusAssignment, reason = null, authContext = null, options = {}) {
+  if (record && focusAssignment !== record) return false;
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement');
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
+  focusAssignment = null;
+  focusStatus = reason && record ? { assignmentId: record.assignmentId, state: 'invalidated', reason } : { state: 'inactive' };
+  if (hasSessionStorage()) {
+    if (record && authContext && (reason || options.retireAssignment === true)) {
+      const registry = await focusRefRegistry(authContext);
+      registry.retiredAssignments = [...new Set([...(registry.retiredAssignments || []), record.assignmentId])].slice(-1000);
+      await persistFocusRegistry(registry, authContext);
+    }
+    await durableSessionKv.remove(FOCUS_ASSIGNMENT_KEY);
+  }
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement');
+  if (options.clearState !== false && currentClassroomState?.restrictions.focus) {
+    // Preserve the accepted non-Focus snapshot's revision and original lease.
+    currentClassroomState = { ...currentClassroomState, restrictions: { ...currentClassroomState.restrictions, focus: { active: false } } };
+    await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: persistedClassroomStateSnapshot(currentClassroomState) });
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement persistence');
+  }
+  if (reason && authContext) {
+    sendClassroomStateAck(currentClassroomState, lastClassroomStateOutcome, undefined, authContext);
+    scheduleEventHeartbeat('focus-invalidated');
+  }
+  return true;
+}
+
+async function prepareFocusAssignment(state, authContext, authorityEnvelope, trustedRestore = false) {
+  const focus = state.restrictions.focus;
+  if (!focus?.active) {
+    const saved = !focusAssignment && !trustedRestore && hasSessionStorage()
+      ? (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY] : null;
+    if (!trustedRestore && (focusAssignment || saved?.binding === authContextProtocolScope(authContext))) {
+      const binding = assertCurrentStudentBinding(authorityEnvelope, 'Focus state cleanup', { authContext, requireFullAuthority: true });
+      assertBindingMatchesAuthContext(binding, authContext, 'Focus state cleanup', { requireFullAuthority: true });
+    }
+    return null;
+  }
+  if (!authContext || !state.teachingSessionId && !state.supervisionContextId) throw focusError('FOCUS_RESTRICTION_INVALID');
+  if (!currentLicenseIsActive()) {
+    // Wake restores classroom metadata before the canonical license step.
+    // Only its same exact-scope, verified LKG proof permits a protected
+    // restore; new wire adoption still requires the active runtime license.
+    const storedLicense = trustedRestore ? await kv.get(['licenseActive', LICENSE_STATE_SCOPE_KEY, LICENSE_LAST_VERIFIED_AT_KEY]) : null;
+    assertAuthenticatedContextCurrent(authContext, 'Focus restore entitlement');
+    if (!trustedRestore || !licenseLkgMatchesExactScope(storedLicense, licenseScopeForAuthContext(authContext)))
+      throw focusError('COMMAND_AUTHORITY_MISMATCH');
+  }
+  const scopeKey = focusScopeKey(state);
+  const registry = await focusRefRegistry(authContext);
+  if ((registry.retiredAssignments || []).includes(focus.assignmentId)) throw focusError('STALE_TAB_REF');
+  if (registry.cleanupScope === scopeKey && state.revision <= (registry.cleanupRevision || 0)) throw focusError('STALE_TAB_REF');
+  const retained = focusAssignment?.assignmentId === focus.assignmentId ? focusAssignment : null;
+  let record = retained;
+  if (trustedRestore && !record) record = (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'Focus adoption');
+  if (!trustedRestore) {
+    if (!hasNegotiatedCapability('focusTabV1', authContext)) throw focusError('FOCUS_CAPABILITY_REQUIRED');
+    const binding = assertCurrentStudentBinding(authorityEnvelope, 'Focus adoption', { authContext, requireFullAuthority: true });
+    assertBindingMatchesAuthContext(binding, authContext, 'Focus adoption', { requireFullAuthority: true });
+    if (binding.controlRevision !== state.revision) throw focusError('STALE_TAB_REF');
+  }
+  if (record) {
+    if (record.binding !== authContextProtocolScope(authContext) || record.scopeKey !== scopeKey
+      || record.assignmentId !== focus.assignmentId || record.tabRef !== focus.tabRef
+      || record.observedRevision !== focus.observedRevision || record.targetKind !== focus.targetKind
+      || record.contextAuthorityRevision !== (state.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null))
+      throw focusError('STALE_TAB_REF');
+    return { ...record, controlRevision: state.revision };
+  }
+  if (trustedRestore) throw focusError('STALE_TAB_REF');
+  let target;
+  if (focus.targetKind === 'open_receipt') {
+    target = registry.entries.find(entry => entry.tabRef === focus.tabRef && entry.receiptRevision === focus.observedRevision);
+  } else {
+    try { target = (await resolveExactTabRefs([focus.tabRef], focus.observedRevision, authContext)).targets[0]; }
+    catch { throw focusError('STALE_TAB_REF'); }
+  }
+  if (!target || retiredFocusTabRefs.has(focus.tabRef)) throw focusError('STALE_TAB_REF');
+  const tab = await chrome.tabs.get(target.tabId).catch(() => null);
+  assertAuthenticatedContextCurrent(authContext, 'Focus target validation');
+  if (!tab) throw focusError('STALE_TAB_REF');
+  if (!state.restrictions.attentionMode.active && !focusNavigationDecision(state, tab).allowed)
+    throw focusError('FOCUS_TAB_OFF_POLICY');
+  return { version: 1, binding: authContextProtocolScope(authContext), scopeKey,
+    assignmentId: focus.assignmentId, tabRef: focus.tabRef, tabId: target.tabId,
+    observedRevision: focus.observedRevision, targetKind: focus.targetKind, controlRevision: state.revision,
+    contextAuthorityRevision: state.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null,
+    lastAttemptAt: 0 };
+}
+
+async function commitFocusAssignment(record, state, authContext) {
+  if (!record) { await retireFocus(focusAssignment, null, authContext, { clearState: false }); return; }
+  assertAuthenticatedContextCurrent(authContext, 'Focus commit');
+  await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: record });
+  assertAuthenticatedContextCurrent(authContext, 'Focus commit');
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
+  focusAssignment = record;
+  focusStatus = { assignmentId: record.assignmentId, state: 'suspended', reason: state.restrictions.attentionMode.active
+    ? 'attention' : 'browser_operation_pending' };
+  queueFocusMaintenance(record);
+}
+
+async function maintainFocus(record, authContext) {
+  const current = () => focusRecordCurrent(record, authContext);
+  const getTab = () => boundedClassroomOperation(chrome.tabs.get(record.tabId), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus tab lookup');
+  try {
+    current();
+    record.lastAttemptAt = Date.now();
+    await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: record }); current();
+    if (currentClassroomState.restrictions.attentionMode.active) {
+      publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'attention' }, authContext); return;
+    }
+    const tab = await getTab().catch(error => {
+      if (error.code === 'CLASSROOM_BROWSER_OPERATION_TIMEOUT') throw error;
+      return null;
+    }); current();
+    if (!tab || retiredFocusTabRefs.has(record.tabRef)) { await retireFocus(record, 'focus_tab_missing', authContext); return; }
+    const decision = focusNavigationDecision(currentClassroomState, tab);
+    const foreground = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus foreground lookup'))[0]; current();
+    const foregroundDecision = foreground && focusNavigationDecision(currentClassroomState, foreground);
+    const pendingAuth = restrictionAuthPolicyRefreshPending
+      && (restrictionAuthRefreshPendingTab(tab) || restrictionAuthRefreshPendingTab(foreground));
+    if (decision.source === 'authentication' || foregroundDecision?.source === 'authentication' || pendingAuth) {
+      publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'authentication' }, authContext); return;
+    }
+    if (!decision.allowed) { await retireFocus(record, 'focus_tab_off_policy', authContext); return; }
+    current();
+    await boundedClassroomOperation(chrome.tabs.update(record.tabId, { active: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus activation'); current();
+    await boundedClassroomOperation(chrome.windows.update(tab.windowId, { focused: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus window activation'); current();
+    const verified = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus activation verification'))[0]; current();
+    const exact = await getTab(); current();
+    if (verified?.id !== record.tabId || verified.windowId !== tab.windowId
+      || !focusNavigationDecision(currentClassroomState, exact).allowed)
+      throw focusError('CLASSROOM_BROWSER_OPERATION_TIMEOUT');
+    publishFocusStatus({ assignmentId: record.assignmentId, state: 'active' }, authContext);
+  } catch (error) {
+    if (focusAssignment !== record) return;
+    if (isAuthContextCancellation(error)) {
+      // A same-context ownership/entitlement loss must retire the owned copy,
+      // while an old auth generation never writes into its replacement.
+      try { assertAuthenticatedContextCurrent(authContext, 'Focus authority retirement'); }
+      catch {
+        if (focusAssignment === record) {
+          if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+          focusMaintenanceTimer = null; focusAssignment = null; focusStatus = { state: 'inactive' };
+        }
+        return;
+      }
+      await retireFocus(record, null, authContext, { retireAssignment: true, clearState: currentClassroomState?.restrictions.focus?.assignmentId === record.assignmentId });
+      return;
+    }
+    publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'browser_operation_pending' }, authContext);
+    queueFocusMaintenance(record);
+  }
+}
+
+function queueFocusMaintenance(record = focusAssignment) {
+  if (!record || record !== focusAssignment || focusMaintenanceTimer) return;
+  let authContext;
+  try { authContext = captureAuthenticatedContext('Focus maintenance'); } catch { return; }
+  const delay = Math.max(0, FOCUS_MAINTENANCE_MS - (Date.now() - record.lastAttemptAt));
+  focusMaintenanceTimer = setTimeout(() => {
+    focusMaintenanceTimer = null;
+    if (record !== focusAssignment || focusMaintenanceRunning) return;
+    focusMaintenanceRunning = true;
+    enqueueStudentAuthMutation(async () => {
+      await authStateRestorePromise; await classroomStateRestorePromise;
+      return enqueueClassroomStateOperation(() => maintainFocus(record, authContext));
+    }).catch(() => {}).finally(() => {
+      focusMaintenanceRunning = false;
+      // An event for B during A's bounded operation must not be lost.
+      if (focusAssignment && focusAssignment !== record) queueFocusMaintenance(focusAssignment);
+    });
+  }, delay);
+}
+
+async function retireFocusTabReference(tabId, captured, authContext) {
+  if (!authContext) return;
+  assertAuthenticatedContextCurrent(authContext, 'Focus closed reference');
+  const registry = await focusRefRegistry(authContext);
+  for (const entry of registry.entries.filter(entry => entry.tabId === tabId)) retiredFocusTabRefs.add(entry.tabRef);
+  registry.entries = registry.entries.filter(entry => entry.tabId !== tabId);
+  await persistFocusRegistry(registry, authContext);
+  tabSnapshotMutation = tabSnapshotMutation.catch(() => {}).then(async () => {
+    const stored = (await kv.get(TAB_SNAPSHOT_STORAGE_KEY))[TAB_SNAPSHOT_STORAGE_KEY];
+    assertAuthenticatedContextCurrent(authContext, 'Focus closed public reference');
+    if (stored?.binding === tabSnapshotAuthBinding(authContext)) {
+      for (const entry of stored.entries.filter(entry => entry.tabId === tabId)) retiredFocusTabRefs.add(entry.tabRef);
+      if (stored.entries.some(entry => entry.tabId === tabId)) {
+        const revision = stored.revision + 1;
+        await kv.set({ [TAB_SNAPSHOT_STORAGE_KEY]: {
+          ...stored, revision, entries: stored.entries.filter(entry => entry.tabId !== tabId) } });
+        assertAuthenticatedContextCurrent(authContext, 'Focus closed public reference persistence');
+        currentTabSnapshotRevision = revision;
+      }
+    }
+  });
+  await tabSnapshotMutation;
+  if (captured?.tabId === tabId && focusAssignment === captured) await retireFocus(captured, 'focus_tab_closed', authContext);
+}
+
+function focusBrowserEvent(tabId = null, retired = false, updatedTab = null) {
+  const captured = focusAssignment;
+  let authContext;
+  try { authContext = captureAuthenticatedContext('Focus browser event'); } catch { return; }
+  if (retired && captured?.tabId === tabId) retiredFocusTabRefs.add(captured.tabRef);
+  const policy = currentClassroomState;
+  const unsafeAssignedNavigation = !retired && captured?.tabId === tabId && updatedTab
+    && !policy?.restrictions.attentionMode.active
+    && !(restrictionAuthPolicyRefreshPending && restrictionAuthRefreshPendingTab(updatedTab))
+    && !focusNavigationDecision(policy, updatedTab).allowed;
+  if (unsafeAssignedNavigation) {
+    enqueueStudentAuthMutation(async () => {
+      await authStateRestorePromise; await classroomStateRestorePromise;
+      await enqueueClassroomStateOperation(async () => {
+        if (focusAssignment === captured && currentClassroomState === policy) {
+          focusRecordCurrent(captured, authContext);
+          await retireFocus(captured, 'focus_tab_off_policy', authContext);
+        }
+      });
+    }).catch(() => {});
+    return;
+  }
+  if (retired) enqueueStudentAuthMutation(async () => {
+    await authStateRestorePromise; await classroomStateRestorePromise;
+    await enqueueClassroomStateOperation(() => retireFocusTabReference(tabId, captured, authContext));
+  }).catch(() => {});
+  else queueFocusMaintenance(captured);
+}
+
+// Register synchronously: replacement does not necessarily emit onRemoved.
+chrome.tabs.onActivated.addListener(() => focusBrowserEvent());
+chrome.windows.onFocusChanged.addListener(() => focusBrowserEvent());
+chrome.tabs.onRemoved.addListener(tabId => focusBrowserEvent(tabId, true));
+chrome.tabs.onReplaced.addListener((_added, removed) => focusBrowserEvent(removed, true));
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url || change.status) focusBrowserEvent(tabId, false, tab); });
+
+async function applyBareFocusCleanup(command, envelope, authContext) {
+  if (command?.type !== 'stop-focus'
+    || envelope.classroomState || command.classroomState || command.data.classroomState
+    || !hasNegotiatedCapability('scopedAuthorityChecksV1', authContext)) throw focusError('FOCUS_RESTRICTION_INVALID');
+  RuntimeCore.normalizeStopFocusData(command.data);
+  const binding = assertCurrentStudentBinding(envelope, 'Focus cleanup', { authContext, requireFullAuthority: true });
+  assertBindingMatchesAuthContext(binding, authContext, 'Focus cleanup', { requireFullAuthority: true });
+  const delivery = RuntimeCore.commandDeliveryState(command, envelope);
+  if (delivery.expired || delivery.deliveryPolicy !== 'persistent_control') throw focusError('COMMAND_EXPIRED');
+  const authority = assertCurrentCommandAuthority(command, envelope);
+  if (!currentLicenseIsActive() || !currentClassroomState || focusScopeKey(authority) !== focusScopeKey(currentClassroomState)
+    || binding.controlRevision < currentClassroomState.revision
+    || currentClassroomState.supervisionContextId && envelope.contextAuthorityRevision !== currentFabState?.contextAuthorityRevision)
+    throw focusError('COMMAND_AUTHORITY_MISMATCH');
+  const priorRegistry = await focusRefRegistry(authContext);
+  if (priorRegistry.cleanupScope === focusScopeKey(authority)
+    && binding.controlRevision < (priorRegistry.cleanupRevision || 0)) throw focusError('STUDENT_BINDING_MISMATCH');
+  await retireFocus(focusAssignment, null, authContext, { retireAssignment: true });
+  const registry = await focusRefRegistry(authContext);
+  registry.cleanupScope = focusScopeKey(authority);
+  registry.cleanupRevision = Math.max(registry.cleanupRevision || 0, binding.controlRevision);
+  await persistFocusRegistry(registry, authContext);
+  assertCurrentStudentBinding(envelope, 'Focus cleanup commit', { authContext, requireFullAuthority: true });
+  return { commandType: 'stop-focus', focusStatus: { state: 'inactive' }, outcome: 'applied' };
+}
+
 let currentClassroomState = null;
 let restrictionAuthPolicyRefreshPending = false;
 let restrictionAuthPolicyRefreshHosts = new Map();
@@ -18777,7 +19172,11 @@ let lastClassroomStateOutcome = 'pending';
 function persistedClassroomStateSnapshot(state) {
   if (!state || typeof state !== 'object') return state;
   const persisted = JSON.parse(JSON.stringify(state));
-  if (RuntimeCore.hasPreciseRestrictions(state)) {
+  if (state.restrictions?.focus?.active) {
+    persisted.schemaVersion = 3;
+    persisted.focusPersistenceVersion = 1;
+  }
+  if (RuntimeCore.hasPreciseRestrictions(state) && !state.restrictions?.focus?.active) {
     // Storage-only marker: old cores refuse schema 2 instead of restoring a
     // resource as permission for the whole provider website. Wire stays v1.
     persisted.schemaVersion = 2;
@@ -19124,6 +19523,7 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
   currentClassroomState = normalized;
   classroomRuntimeOwner = createClassroomRuntimeOwner(authContext, normalized.revision);
   const restrictions = normalized.restrictions;
+  await commitFocusAssignment(await prepareFocusAssignment(normalized, authContext, null, true), normalized, authContext);
   screenLocked = Boolean(restrictions.screenLock.active);
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
@@ -19213,6 +19613,7 @@ function sendClassroomStateAck(state, outcome, error, authContext = null) {
     appliedRevision: state.revision,
     appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision(),
     outcome,
+    ...(state === currentClassroomState ? { focusStatus: publicFocusStatus() } : {}),
     teachingSessionId: state.teachingSessionId || undefined,
     supervisionContextId: state.supervisionContextId || undefined,
     error: error ? commandErrorMessage(error).slice(0, 200) : undefined,
@@ -19223,6 +19624,7 @@ function sendClassroomStateAck(state, outcome, error, authContext = null) {
 
 function classroomRestrictionsFromRuntime() {
   return {
+    ...(currentClassroomState?.restrictions.focus ? { focus: { ...currentClassroomState.restrictions.focus } } : {}),
     screenLock: {
       active: screenLocked,
       url: lockedUrl,
@@ -19378,6 +19780,7 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
 
 async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   if (expectedOwner && !classroomRuntimeIsOwnedBy(expectedOwner)) return false;
+  await retireFocus(focusAssignment, null, null, { clearState: false });
   const cleanupOwner = expectedOwner || classroomRuntimeOwner;
   classroomRuntimeOwner = null;
   screenLocked = false;
@@ -19900,6 +20303,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
   };
   let normalized;
   let nextAuthPolicyFence = null;
+  let preparedFocus = null;
   try {
     assertCurrent();
     const prepared = await resolveCurrentUrlMarker(rawState, assertCurrent);
@@ -19949,10 +20353,11 @@ async function applyClassroomStateNow(rawState, options = {}) {
         'classroom state control revision',
       );
     }
+    preparedFocus = await prepareFocusAssignment(normalized, authContext, authorityEnvelope, options.trustedPersistedRestrictionSso === true);
   } catch (error) {
     if (isAuthContextCancellation(error)) throw error;
     const ackState = classroomStateAckTarget(rawState);
-    const outcome = error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA'
+    const outcome = ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED'].includes(error?.code)
       ? 'unsupported'
       : 'failed';
     sendClassroomStateAck(ackState, outcome, error, authContext);
@@ -20031,6 +20436,8 @@ async function applyClassroomStateNow(rawState, options = {}) {
   }
 
   const runtimeBackup = classroomRuntimeBackup();
+  const focusBackup = focusAssignment;
+  const focusStatusBackup = focusStatus;
   let statePersisted = false;
   let sideEffectsScheduled = false;
   try {
@@ -20064,6 +20471,12 @@ async function applyClassroomStateNow(rawState, options = {}) {
       [RESTRICTION_AUTH_POLICY_FENCE_STORAGE_KEY]: nextAuthPolicyFence,
       [TRANSIENT_CURRENT_PAGE_RESTRICTION_STORAGE_KEY]: null,
     });
+    if (preparedFocus) {
+      const tab = await boundedClassroomOperation(chrome.tabs.get(preparedFocus.tabId), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus adoption validation');
+      assertCurrent('Focus adoption commit');
+      if (!tab || retiredFocusTabRefs.has(preparedFocus.tabRef)) throw focusError('STALE_TAB_REF');
+    }
+    await commitFocusAssignment(preparedFocus, normalized, authContext);
     transientCurrentPageRestrictionActive = false;
     restrictionAuthPolicyFenceState = nextAuthPolicyFence;
     if (authContext?.studentId) {
@@ -20189,6 +20602,12 @@ async function applyClassroomStateNow(rawState, options = {}) {
       }
       restoreClassroomRuntimeBackup(runtimeBackup);
       currentClassroomState = previousState;
+      focusAssignment = focusBackup;
+      focusStatus = focusStatusBackup;
+      if (hasSessionStorage()) {
+        if (focusBackup) await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: focusBackup });
+        else await durableSessionKv.remove(FOCUS_ASSIGNMENT_KEY);
+      }
       await composeAllManagedDynamicRules();
       assertCurrent('classroom state rollback');
       if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
@@ -20290,6 +20709,7 @@ function applyClassroomState(rawState, options = {}) {
 
 async function expireClassroomState(reason = 'hard_expiry', options = {}) {
   if (!currentClassroomState) return;
+  await retireFocus(focusAssignment, null, options.authContext || null, { clearState: false, retireAssignment: true });
   const expiringTransientCurrentPage = transientCurrentPageRestrictionActive;
   const authContext = options.authContext || (() => {
     try {
@@ -20833,6 +21253,8 @@ async function getClassroomCommandStateSnapshot(options = {}) {
 }
 
 async function clearTeacherSessionStateForSignOutNow(options = {}) {
+  await retireFocus(focusAssignment, null, null, { clearState: false });
+  if (hasSessionStorage()) await durableSessionKv.remove(FOCUS_REFS_KEY);
   const eventScope = getMonitoringEventScope();
   // A clear replayed from the crash marker must not emit a second
   // restriction_state_cleared event when nothing was left to clear.
@@ -20933,6 +21355,7 @@ function isOnSameDomain(url, domain) {
 }
 
 const AUTHORITY_BOUND_COMMAND_TYPES = new Set([
+  'activate-tab', 'focus-tab', 'stop-focus',
   'open-tab',
   'close-tabs',
   'close-tab',
@@ -21144,9 +21567,13 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
   let authContext;
   let commandBinding;
   let transientCurrentPageWaypoint = null;
+  let exactFocusTarget = null;
   try {
     authContext = captureAuthenticatedContext('remote-control command');
+    if (commandType === 'focus-tab' || commandType === 'stop-focus')
+      observeExactStudentControlRevision(envelope, authContext, 'Focus command revision');
     const requireFullAuthority = exactTabCloseV2AuthorityRequired(command, authContext)
+      || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
       || commandDeclaresCurrentPageWaypoint(command);
     commandBinding = assertCurrentStudentBinding(envelope, 'remote-control command', {
       authContext,
@@ -21243,16 +21670,26 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       assertCurrentStudentBinding(envelope, 'remote-control command', {
         authContext,
         requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext)
+          || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
           || Boolean(transientCurrentPageWaypoint),
       }),
       authContext,
       'remote-control command',
       {
         requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext)
+          || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
           || Boolean(transientCurrentPageWaypoint),
       },
     );
     assertCurrentCommandAuthority(command, envelope);
+    if (commandType === 'activate-tab' || commandType === 'focus-tab') exactFocusTarget = RuntimeCore.normalizeExactTabTarget(command.data);
+    if (commandType === 'stop-focus') RuntimeCore.normalizeStopFocusData(command.data);
+    if (commandType === 'stop-focus' && !envelope.classroomState && !envelope.stateSnapshot && !command.classroomState) {
+      const result = await enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(() => applyBareFocusCleanup(command, envelope, authContext)));
+      if (commandId) await sendCommandAck(commandId, 'completed', { authContext, binding: commandBinding,
+        commandType, result, outcome: 'applied', deliveryPolicy: delivery.deliveryPolicy, expiresAt: delivery.expiresAt });
+      return result;
+    }
     if (authority?.teachingSessionId || authority?.supervisionContextId) {
       command.data = {
         ...(command.data || {}),
@@ -21273,6 +21710,10 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       && authority?.kind !== 'school_policy';
     if (!classroomState && (Object.hasOwn(command.data || {}, 'resource') || Object.hasOwn(command.data || {}, 'resources')))
       throw Object.assign(new Error('Precise commands require an authoritative classroom state'), { code: 'PRECISE_RESTRICTION_INVALID' });
+    if (commandType === 'focus-tab' && (!classroomState?.restrictions?.focus?.active
+      || classroomState.restrictions.focus.tabRef !== exactFocusTarget.tabRef
+      || classroomState.restrictions.focus.observedRevision !== exactFocusTarget.observedRevision))
+      throw focusError('FOCUS_RESTRICTION_INVALID');
     let application = null;
     let result;
     let deferredCommandSideEffect = null;
@@ -21296,6 +21737,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
         appliedRevision: application.appliedRevision,
         outcome: application.outcome,
         completedAt: new Date().toISOString(),
+        ...(['focus-tab', 'stop-focus'].includes(commandType) ? { focusStatus: publicFocusStatus() } : {}),
       };
     } else if (isClassroomStatefulCommand) {
       result = await enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(async () => {
@@ -21445,6 +21887,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
         delivery,
         authContext,
         binding: commandBinding,
+        exactFocusTarget,
       };
       const executeOrdinaryCommand = () => executeRemoteControlCommand(
         command || {},
@@ -21516,7 +21959,10 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
           errorCode: commandDiagnosticCode(error),
           state,
           appliedRevision: currentClassroomState?.revision ?? 0,
-          outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
+          outcome: ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code) ? 'unsupported' : 'failed',
+          ...(['activate-tab', 'focus-tab'].includes(commandType) ? { result: {
+            status: ['FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code)
+              ? 'unsupported' : error?.code === 'STALE_TAB_REF' ? 'stale_tab_ref' : 'unavailable' } } : {}),
           deliveryPolicy: delivery.deliveryPolicy,
           expiresAt: delivery.expiresAt,
         });
@@ -21542,6 +21988,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
     commandAuthContext,
   );
   const exactCommandAuthorityRequired = exactTabAuthorityRequired
+    || command.type === 'activate-tab'
     || Boolean(executionContext.transientCurrentPageWaypoint);
   const commandControlRevision = executionContext.binding?.controlRevision
     ?? currentStudentControlRevision();
@@ -21562,6 +22009,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
       const error = new Error(`${reason} belongs to a retired control revision`);
       error.code = 'STUDENT_BINDING_MISMATCH';
       throw error;
+    }
+    if (command.type === 'activate-tab') {
+      if (!hasNegotiatedCapability('focusTabV1', commandAuthContext)) throw focusError('TAB_ACTIVATE_CAPABILITY_REQUIRED');
+      if (!currentLicenseIsActive()) throw focusError('COMMAND_AUTHORITY_MISMATCH');
+      assertCurrentCommandAuthority(command, executionContext.envelope || command);
     }
   };
   const commandSourceMessage = executionContext.envelope || command;
@@ -21630,6 +22082,32 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
   command.data = command.data || {};
 
   switch (command.type) {
+      case 'activate-tab': {
+        if (!hasNegotiatedCapability('focusTabV1', commandAuthContext)) throw focusError('TAB_ACTIVATE_CAPABILITY_REQUIRED');
+        const target = executionContext.exactFocusTarget || RuntimeCore.normalizeExactTabTarget(command.data);
+        const resolve = async () => {
+          try { return (await resolveExactTabRefs([target.tabRef], target.observedRevision, commandAuthContext)).targets[0]; }
+          catch { throw focusError('STALE_TAB_REF'); }
+        };
+        const exact = await resolve(); assertCommandExecutionCurrent('Bring Forward exact resolution');
+        const tab = await chrome.tabs.get(exact.tabId).catch(() => null); assertCommandExecutionCurrent('Bring Forward validation');
+        if (!tab) throw focusError('STALE_TAB_REF');
+        if (!currentLicenseIsActive() || !focusNavigationDecision(currentClassroomState, tab).allowed) throw focusError('FOCUS_TAB_OFF_POLICY');
+        if ((await resolve()).tabId !== tab.id) throw focusError('STALE_TAB_REF');
+        assertCommandExecutionCurrent('Bring Forward activation');
+        await boundedClassroomOperation(chrome.tabs.update(tab.id, { active: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward activation');
+        assertCommandExecutionCurrent('Bring Forward window');
+        await boundedClassroomOperation(chrome.windows.update(tab.windowId, { focused: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward window');
+        assertCommandExecutionCurrent('Bring Forward verification');
+        const verified = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+          CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward verification'))[0];
+        assertCommandExecutionCurrent('Bring Forward verified');
+        const stillExact = await chrome.tabs.get(tab.id).catch(() => null);
+        assertCommandExecutionCurrent('Bring Forward final policy');
+        if (verified?.id !== tab.id || verified.windowId !== tab.windowId || (await resolve()).tabId !== tab.id || !stillExact) throw focusError('STALE_TAB_REF');
+        if (!focusNavigationDecision(currentClassroomState, stillExact).allowed) throw focusError('FOCUS_TAB_OFF_POLICY');
+        return { status: 'activated', tabRef: target.tabRef, tabSnapshotRevision: target.observedRevision };
+      }
       case 'open-tab':
         if (!command.data.url) {
           throw new Error('Missing URL for open-tab command');
@@ -21648,6 +22126,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             const tabSnapshot = await buildOpaqueTabSnapshot(tabs, commandAuthContext);
             assertCommandExecutionCurrent('open-tab command');
             const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
+            if (hasNegotiatedCapability('focusTabV1', commandAuthContext)) {
+              const receipt = await createFocusOpenReceipt(tab, tabSnapshot, commandAuthContext);
+              assertCommandExecutionCurrent('open-tab receipt');
+              scheduleBoundCommandScreenshot(2000);
+              return receipt;
+            }
             result.openedUrl = command.data.url;
             result.tabRef = openedEntry?.tabRef || null;
             result.tabSnapshotRevision = tabSnapshot.revision;

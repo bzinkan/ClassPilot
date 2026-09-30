@@ -50,6 +50,7 @@ export const RECOVERY_CASES = Object.freeze({
   'blocked-fallback-diagnostics': { expectedRedOnBase: false },
   'recovered-startup-obsolete-school': { expectedRedOnBase: false },
   'worker-suspension-preserves-classroom': { expectedRedOnBase: false },
+  'focus-worker-suspension': { expectedRedOnBase: '2.9.5', expectedFailure: '[regression:focus-wake]' },
   'protected-storage-retry': { expectedRedOnBase: '2.9.4', expectedFailure: '[regression:protected-storage-retry]' },
   'protected-storage-persistent': { expectedRedOnBase: false },
   'private-vault-browser-restart': { expectedRedOnBase: '2.9.4', expectedFailure: '[regression:private-vault]' },
@@ -2586,11 +2587,13 @@ await withBrowser({ caseName: 'recovered-startup-obsolete-school', seed: (origin
   console.log('PASS recovered startup clears obsolete supervision authority (protocol, overlay, command authority)');
 });
 
-await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetwork: true }, async ({ context, worker, extensionId, fixture }) => {
+async function checkWorkerSuspension({ context, worker, extensionId, fixture }, includeFocus = false) {
+  if (includeFocus) assert.ok(await worker.evaluate(() => EXTENSION_CAPABILITIES.includes('focusTabV1')),
+    '[regression:focus-wake] exact Focus capability is absent');
   // Phase A: a durable signed-in student with a live supervision-context
   // classroom state, FAB context and timer overlay, written through the
   // production persistence paths (not hand-seeded storage).
-  const live = await worker.evaluate(async (origin) => {
+  const live = await worker.evaluate(async ({ origin, includeFocus }) => {
     await authStateRestorePromise; await classroomStateRestorePromise; await studentAuthMutationTail;
     scheduleHeartbeat(null);
     await new Promise((done) => chrome.storage.local.set({ deviceId: 'device-live', autoRegistrationPaused: true,
@@ -2613,17 +2616,42 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
     await applyFabSettings({ schemaVersion: 1, revision: 1, ownershipRevision: 41, teachingSessionId: null, contextAuthorityRevision: '0', supervisionContextId: 'ctx-live',
       activeSessionIds: [], activeContexts: [{ supervisionContextId: 'ctx-live' }], contextSource: 'scheduled_testing', contextName: 'Live', messagingEnabled: true, handRaisingEnabled: true }, { authContext: auth });
     const overlay = await persistTimerOverlay({ authority: { supervisionContextId: 'ctx-live' }, data: { action: 'start', seconds: 1800 } }, { authContext: auth });
+    let focusedReceipt = null;
+    let focusTargetId = null;
+    if (includeFocus) {
+      await activateLicenseForAuthenticatedResponse(auth, 'active');
+      schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+      schoolSettingsScope = schoolPolicyScopeForAuthContext(auth); schoolSettingsFetchedAt = Date.now(); trackingState = TRACKING_STATES.ACTIVE;
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1', 'scheduledClassroomV1', 'classroomStateV1', 'focusTabV1'] }, auth);
+      for (let index = 0; index < 21; index++) await chrome.tabs.create({ url: `${origin}/classroom?focus-filler=${index}`, active: false });
+      const exactBinding = { bindingVersion: 2, schoolId: auth.schoolId, deviceId: auth.deviceId, studentId: auth.studentId, studentSessionId: auth.studentSessionId, controlRevision: 41 };
+      focusedReceipt = await executeRemoteControlCommand({ type: 'open-tab', supervisionContextId: 'ctx-live', data: { url: `${origin}/classroom?focus-private-receipt=1` } },
+        { authContext: auth, envelope: { exactBinding }, binding: exactBinding });
+      exactBinding.controlRevision = 42;
+      const focusEnvelope = { exactBinding, studentId: auth.studentId, studentSessionId: auth.studentSessionId, contextAuthorityRevision: '0' };
+      observeExactStudentControlRevision(focusEnvelope, auth, 'Focus cold wake fixture');
+      await applyClassroomState({ schemaVersion: 1, revision: 42, supervisionContextId: 'ctx-live', receivedAt: Date.now(), hardExpiresAt: end, scheduledEndAt: end,
+        restrictions: { focus: { active: true, assignmentId: 'suspension-assignment', targetKind: 'open_receipt', tabRef: focusedReceipt.tabRef,
+          observedRevision: focusedReceipt.tabSnapshotRevision, source: 'teacher', setAt: new Date().toISOString() } } },
+        { force: true, reason: 'Focus cold wake fixture', authContext: auth, authorityEnvelope: focusEnvelope });
+      await applyFabSettings({ schemaVersion: 1, revision: 2, ownershipRevision: 42, teachingSessionId: null, contextAuthorityRevision: '0', supervisionContextId: 'ctx-live',
+        activeSessionIds: [], activeContexts: [{ supervisionContextId: 'ctx-live' }], contextSource: 'scheduled_testing', contextName: 'Live', messagingEnabled: true, handRaisingEnabled: true }, { authContext: auth });
+      focusTargetId = focusAssignment?.tabId;
+      if (!focusTargetId || focusAssignment?.tabRef !== focusedReceipt.tabRef) throw new Error('[regression:focus-wake] private receipt was not adopted');
+      if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+      focusMaintenanceTimer = null;
+    }
     // Classroom control state is durable (local); FAB context and overlays are
     // browser-session scoped, so the production writer routes them to session.
     const stored = await new Promise((done) => chrome.storage.local.get(['classroomControlStateV1', 'studentAuthInvalidatingV1'],
       (local) => chrome.storage.session.get(['classroomOverlayStateV1', 'fabContextV1'], (session) => done({ ...local, ...session }))));
-    return { authContextId, outcome: application?.outcome ?? null, classroom: currentClassroomState?.supervisionContextId ?? null, revision: currentClassroomState?.revision ?? null,
+    return { authContextId, focusedReceipt, focusTargetId, hardExpiresAt: currentClassroomState?.hardExpiresAt, outcome: application?.outcome ?? null, classroom: currentClassroomState?.supervisionContextId ?? null, revision: currentClassroomState?.revision ?? null,
       storedClassroom: stored.classroomControlStateV1?.supervisionContextId ?? null, storedTimer: stored.classroomOverlayStateV1?.timer?.supervisionContextId ?? null,
       storedBinding: stored.fabContextV1?.binding ?? null, marker: stored.studentAuthInvalidatingV1 ?? null, overlayTimer: overlay?.timer?.supervisionContextId ?? null };
-  }, fixture.origin);
+  }, { origin: fixture.origin, includeFocus });
   assert.equal(live.classroom, 'ctx-live', `fixture classroom state did not apply (${JSON.stringify(live)})`);
   assert.equal(live.storedClassroom, 'ctx-live', `fixture classroom state was not persisted (${JSON.stringify(live)})`);
-  assert.equal(live.storedTimer, 'ctx-live', `fixture timer overlay was not persisted (${JSON.stringify(live)})`);
+  if (!includeFocus) assert.equal(live.storedTimer, 'ctx-live', `fixture timer overlay was not persisted (${JSON.stringify(live)})`);
   assert.equal(live.storedBinding, `v3:${live.authContextId}`, JSON.stringify(live)); assert.equal(live.marker, null);
   // Phase B: suspend only the MV3 worker (storage.session survives), then wake it by navigation.
   const stopPage = await context.newPage();
@@ -2670,6 +2698,7 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
     return { authenticated: hasStudentAuth(), authContextId: CONFIG.authContextId, classroom: currentClassroomState?.supervisionContextId ?? null, revision: currentClassroomState?.revision ?? null,
       timer: restorable?.timer?.supervisionContextId ?? null, storedClassroom: stored.classroomControlStateV1?.supervisionContextId ?? null, marker: stored.studentAuthInvalidatingV1 ?? null,
       authClears: __managedRecoveryFixture.authClears.map((event) => event.reason), startup: authGateStartupComplete,
+      focus: typeof focusAssignment !== 'undefined' ? focusAssignment : null, license: currentLicenseIsActive(), storedLicense: await kv.get(['licenseActive', 'licenseStateScopeV1']),
       overlay: stored.classroomOverlayStateV1 ? { binding: stored.classroomOverlayStateV1.binding, timer: stored.classroomOverlayStateV1.timer?.supervisionContextId ?? null, revision: stored.classroomOverlayStateV1.timer?.contextAuthorityRevision ?? null } : null,
       fab: currentFabState ? { context: currentFabState.supervisionContextId ?? null, ownership: currentFabState.ownershipRevision ?? null, authority: currentFabState.contextAuthorityRevision ?? null } : null,
       binding: fabIdentityBinding(), activeContexts: typeof activeClassroomContexts === 'function' ? activeClassroomContexts() : null };
@@ -2677,16 +2706,30 @@ await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetw
   assert.equal(restored.authenticated, true, `suspension must not sign the student out (${JSON.stringify(restored)})`);
   assert.equal(restored.authContextId, live.authContextId, 'the exact auth context must survive suspension');
   assert.deepEqual(restored.authClears, [], 'an ordinary suspension must not run any auth clear');
-  assert.equal(restored.classroom, 'ctx-live', 'supervision-context classroom state must be restored after suspension');
-  assert.equal(restored.revision, 41);
+  assert.equal(restored.classroom, 'ctx-live', `supervision-context classroom state must be restored after suspension: ${JSON.stringify(restored)}`);
+  assert.equal(restored.revision, includeFocus ? 42 : 41);
   assert.equal(restored.storedClassroom, 'ctx-live'); assert.equal(restored.marker, null); assert.equal(restored.startup, true);
   assert.equal(await stopPage.locator('#classpilot-auth-gate').count(), 0, 'an authenticated page must not be gated after suspension');
+  if (includeFocus) {
+    const focused = await woken.evaluate(async () => ({ assignment: focusAssignment, status: publicFocusStatus(), expiresAt: currentClassroomState?.hardExpiresAt,
+      protectedAssignment: (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY],
+      publicRefs: (await buildOpaqueTabSnapshot(await chrome.tabs.query({}), captureAuthenticatedContext('Focus wake receipt check'))).tabs.map(tab => tab.tabRef) }));
+    assert.equal(focused.assignment?.assignmentId, 'suspension-assignment', `[regression:focus-wake] assignment not restored: ${JSON.stringify(focused)}`);
+    assert.equal(focused.assignment?.tabRef, live.focusedReceipt.tabRef, '[regression:focus-wake] original exact receipt changed');
+    assert.equal(focused.assignment?.tabId, live.focusTargetId, '[regression:focus-wake] Chrome target changed');
+    assert.equal(focused.expiresAt, live.hardExpiresAt, '[regression:focus-wake] original lifetime changed');
+    assert.equal(focused.protectedAssignment?.assignmentId, 'suspension-assignment');
+    assert.ok(!focused.publicRefs.includes(live.focusedReceipt.tabRef), 'private receipt escaped capped public snapshot after cold wake');
+    console.log('PASS managed native worker suspension preserves exact private Focus receipt and original deadline');
+  }
   // Recorded, not asserted: the timer/poll overlay is a separate session
   // record. In 2.8.9 the worker-wake classroom restore treats the in-memory
   // scope change (null -> supervision context) as an authority change and
   // clears overlays; the contract under test only covers classroom state.
   console.log('PASS ordinary worker suspension preserves supervision-context classroom state without any clear', JSON.stringify({ authContextId: live.authContextId, outcome: live.outcome, overlayTimerAfterWake: restored.timer, overlayRecordAfterWake: restored.overlay }));
-});
+}
+await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetwork: true }, checkWorkerSuspension);
+await withBrowser({ caseName: 'focus-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, true));
 
 await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true }, async ({ context, worker, fixture }) => {
   fixture.state.allowFreshLogin = true;

@@ -421,6 +421,7 @@
   ]);
 
   const TRANSIENT_COMMAND_TYPES = new Set([
+    'activate-tab',
     'open-tab',
     'close-tab',
     'close-tabs',
@@ -429,6 +430,7 @@
   ]);
 
   const PERSISTENT_COMMAND_TYPES = new Set([
+    'focus-tab', 'stop-focus',
     'lock-screen',
     'unlock-screen',
     'apply-flight-path',
@@ -899,6 +901,33 @@
     };
   }
 
+  function normalizeFocus(value) {
+    const fail = () => { throw Object.assign(new Error('Invalid Focus restriction'), { code: 'FOCUS_RESTRICTION_INVALID' }); };
+    if (!isPlainObject(value)) return fail();
+    if (value.active === false && hasExactKeys(value, ['active'])) return { active: false };
+    if (value.active !== true || !hasExactKeys(value,
+      ['active', 'assignmentId', 'tabRef', 'observedRevision', 'targetKind', 'source', 'setAt'])) return fail();
+    if (![value.assignmentId, value.tabRef].every(item => typeof item === 'string' && item.trim() === item && item.length > 0 && item.length <= 128)
+      || !Number.isSafeInteger(value.observedRevision) || value.observedRevision < 1
+      || !['snapshot', 'open_receipt'].includes(value.targetKind) || value.source !== 'teacher'
+      || typeof value.setAt !== 'string' || value.setAt.length > 64 || timestampMs(value.setAt) === null) return fail();
+    return { ...value };
+  }
+
+  function normalizeExactTabTarget(value) {
+    if (!isPlainObject(value) || !hasExactKeys(value, ['tabRef', 'observedRevision'])
+      || typeof value.tabRef !== 'string' || !value.tabRef || value.tabRef.trim() !== value.tabRef || value.tabRef.length > 128
+      || !Number.isSafeInteger(value.observedRevision) || value.observedRevision < 1)
+      throw Object.assign(new Error('Invalid exact tab target'), { code: 'STALE_TAB_REF' });
+    return { ...value };
+  }
+
+  function normalizeStopFocusData(value) {
+    if (!isPlainObject(value) || Object.keys(value).length !== 0)
+      throw Object.assign(new Error('Invalid Stop Focus data'), { code: 'FOCUS_RESTRICTION_INVALID' });
+    return {};
+  }
+
   function normalizeRestrictions(rawRestrictions, nowMs) {
     const raw = rawRestrictions && typeof rawRestrictions === 'object' ? rawRestrictions : {};
     const rawScreenLock = raw.screenLock ?? raw.screen_lock ?? {};
@@ -984,6 +1013,7 @@
       },
       tabLimit,
       temporaryAllows,
+      ...(Object.hasOwn(raw, 'focus') ? { focus: normalizeFocus(raw.focus) } : {}),
     };
   }
 
@@ -1085,6 +1115,14 @@
 
   function normalizePersistedClassroomState(rawState, nowValue = Date.now()) {
     let wireState = rawState;
+    if (rawState?.schemaVersion === 3) {
+      if (rawState.focusPersistenceVersion !== 1 || rawState.restrictions?.focus?.active !== true)
+        throw Object.assign(new Error('Unsupported persisted Focus'), { code: 'FOCUS_RESTRICTION_INVALID' });
+      normalizeFocus(rawState.restrictions.focus);
+      wireState = { ...rawState, schemaVersion: 1 };
+      delete wireState.focusPersistenceVersion;
+      delete wireState.precisePersistenceVersion;
+    }
     if (rawState?.schemaVersion === 2) {
       if (rawState.precisePersistenceVersion !== 1 || !hasPreciseRestrictions(rawState))
         throw preciseRestrictionError('Unsupported persisted precise restriction');
@@ -2055,6 +2093,9 @@
     MONITORING_EVENT_TYPES,
     DELIVERY_POLICIES,
     emptyRestrictions,
+    normalizeFocus,
+    normalizeExactTabTarget,
+    normalizeStopFocusData,
     emptyConnectivityHealth,
     normalizeConnectivityHealth,
     connectivityHealthAfterSuccess,

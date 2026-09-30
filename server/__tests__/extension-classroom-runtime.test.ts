@@ -2,13 +2,13 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
-function loadRuntimeCore() {
-  const source = readFileSync(
+function loadRuntimeCore(source = readFileSync(
     resolve(__dirname, "../../extension/classroom-runtime-core.js"),
     "utf8"
-  );
+  )) {
   const context: Record<string, unknown> = {
     URL,
     Date,
@@ -29,6 +29,46 @@ const preciseState = (restrictions: Record<string, unknown>) => core.normalizeCl
   schemaVersion: 1, revision: 1, teachingSessionId: "precise-session",
   hardExpiresAt: NOW + 60_000, restrictions,
 }, NOW);
+
+describe("exact Focus restriction contract", () => {
+  const focus = { active: true, assignmentId: "assignment-a", tabRef: "opaque-a", observedRevision: 3,
+    targetKind: "snapshot", source: "teacher", setAt: new Date(NOW).toISOString() };
+  it("keeps legacy restriction bytes additive and admits only strict exact targets", () => {
+    expect(preciseState({}).restrictions).not.toHaveProperty("focus");
+    expect(preciseState({ focus: { active: false } }).restrictions.focus).toEqual({ active: false });
+    expect(preciseState({ focus }).restrictions.focus).toEqual(focus);
+    expect(core.normalizeExactTabTarget({ tabRef: "opaque-a", observedRevision: 3 }))
+      .toEqual({ tabRef: "opaque-a", observedRevision: 3 });
+    for (const value of [{ tabId: 1 }, { tabRef: "opaque-a", observedRevision: 3, url: "https://example.test" },
+      { tabRef: " opaque-a", observedRevision: 3 }, { tabRef: "opaque-a", observedRevision: 0 },
+      { tabRef: "opaque-a", observedRevision: "3" }, { tabRef: "opaque-a", observedRevision: 3.1 }])
+      expect(() => core.normalizeExactTabTarget(value)).toThrow();
+    expect(core.normalizeStopFocusData({})).toEqual({});
+    for (const value of [null, undefined, [], "", { tabRef: "a" }]) expect(() => core.normalizeStopFocusData(value)).toThrow();
+  });
+  it("rejects an entire snapshot rather than silently dropping invalid Focus", () => {
+    for (const value of [null, true, { active: false, assignmentId: "a" }, { ...focus, extra: true },
+      { ...focus, observedRevision: 0 }, { ...focus, source: "url" }, { ...focus, targetKind: "url" },
+      { ...focus, assignmentId: " a" }, { ...focus, setAt: "invalid" }])
+      expect(() => preciseState({ flightPath: { active: true, allowedDomains: ["example.test"] }, focus: value })).toThrow();
+  });
+  it("keeps schema 3 storage-only and refuses a lost/incomplete downgrade fence", () => {
+    const persisted = { schemaVersion: 3, focusPersistenceVersion: 1, revision: 1,
+      teachingSessionId: "focus-class", hardExpiresAt: NOW + 60_000, restrictions: { focus } };
+    expect(() => core.normalizeClassroomState(persisted, NOW)).toThrow();
+    expect(core.normalizePersistedClassroomState(persisted, NOW).restrictions.focus).toEqual(focus);
+    expect(core.normalizePersistedClassroomState(persisted, NOW).schemaVersion).toBe(1);
+    expect(() => core.normalizePersistedClassroomState({ ...persisted, focusPersistenceVersion: 2 }, NOW)).toThrow();
+    expect(() => core.normalizePersistedClassroomState({ ...persisted, restrictions: {} }, NOW)).toThrow();
+    const receipt = JSON.parse(readFileSync(resolve(__dirname, "../../scripts/fixtures/auth-recovery-2.9.5.json"), "utf8"));
+    const bytes = readFileSync(resolve(__dirname, "../../scripts/fixtures/auth-recovery-2.9.5.json.gz"));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(receipt.archiveSha256);
+    const released = JSON.parse(gunzipSync(bytes).toString("utf8"));
+    const oldSource = released.files["classroom-runtime-core.js"];
+    expect(createHash("sha256").update(oldSource).digest("hex")).toBe(receipt.files["classroom-runtime-core.js"]);
+    expect(() => loadRuntimeCore(oldSource).normalizeClassroomState(persisted, NOW)).toThrow();
+  });
+});
 
 describe("normative precise resource contract", () => {
   it("pins the server fixture bytes and passes every identity, match, validation and budget row", () => {
