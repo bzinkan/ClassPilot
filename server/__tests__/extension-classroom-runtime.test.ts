@@ -52,7 +52,7 @@ describe("exact Focus restriction contract", () => {
       { ...focus, assignmentId: " a" }, { ...focus, setAt: "invalid" }])
       expect(() => preciseState({ flightPath: { active: true, allowedDomains: ["example.test"] }, focus: value })).toThrow();
   });
-  it("keeps schema 3 storage-only and refuses a lost/incomplete downgrade fence", () => {
+  it.each(["2.9.5", "2.9.6"])("keeps schema 3 storage-only and rejects downgrade to immutable repository %s", version => {
     const persisted = { schemaVersion: 3, focusPersistenceVersion: 1, revision: 1,
       teachingSessionId: "focus-class", hardExpiresAt: NOW + 60_000, restrictions: { focus } };
     expect(() => core.normalizeClassroomState(persisted, NOW)).toThrow();
@@ -60,8 +60,8 @@ describe("exact Focus restriction contract", () => {
     expect(core.normalizePersistedClassroomState(persisted, NOW).schemaVersion).toBe(1);
     expect(() => core.normalizePersistedClassroomState({ ...persisted, focusPersistenceVersion: 2 }, NOW)).toThrow();
     expect(() => core.normalizePersistedClassroomState({ ...persisted, restrictions: {} }, NOW)).toThrow();
-    const receipt = JSON.parse(readFileSync(resolve(__dirname, "../../scripts/fixtures/auth-recovery-2.9.5.json"), "utf8"));
-    const bytes = readFileSync(resolve(__dirname, "../../scripts/fixtures/auth-recovery-2.9.5.json.gz"));
+    const receipt = JSON.parse(readFileSync(resolve(__dirname, `../../scripts/fixtures/auth-recovery-${version}.json`), "utf8"));
+    const bytes = readFileSync(resolve(__dirname, `../../scripts/fixtures/auth-recovery-${version}.json.gz`));
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(receipt.archiveSha256);
     const released = JSON.parse(gunzipSync(bytes).toString("utf8"));
     const oldSource = released.files["classroom-runtime-core.js"];
