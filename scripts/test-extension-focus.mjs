@@ -241,8 +241,14 @@ try {
     await wait(() => finalLookupHeld, 'same-assignment final native lookup was not held');
     const eventsBeforeSwitch = focusMaintenanceEvents;
     await chrome.tabs.update(first.id, { active: true });
-    await wait(() => focusMaintenanceEvents > eventsBeforeSwitch && focusMaintenanceRunning && focusMaintenanceTimer === null,
-      'native activation event timer did not fire during held lookup', 2500);
+    try {
+      await wait(() => focusMaintenanceEvents > eventsBeforeSwitch && focusMaintenanceRunning && focusMaintenanceTimer === null,
+        'native activation event timer did not fire during held lookup', 2500);
+    } catch (error) {
+      throw new Error(`${error.message}: ${JSON.stringify({ eventsBeforeSwitch, events: focusMaintenanceEvents,
+        running: focusMaintenanceRunning, timer: Boolean(focusMaintenanceTimer), elapsed: Date.now() - focusAssignment.lastAttemptAt,
+        foreground: (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id, first: first.id, second: second.id })}`);
+    }
     releaseFinalLookup(); chrome.tabs.get = nativeGet;
     await wait(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id === second.id,
       'same-assignment event was lost after in-flight maintenance');
@@ -279,14 +285,31 @@ try {
     // The exact 21st+ successful open receipt is private, independently of
     // the bounded public dashboard snapshot.
     const currentHttp = (await chrome.tabs.query({})).filter(tab => isHttpUrl(tab.url));
-    for (let index = currentHttp.length; index < 21; index++) await chrome.tabs.create({ url: `https://example.test/filler-${index}`, active: false });
+    const fillers = [];
+    for (let index = currentHttp.length; index < 21; index++) fillers.push(await chrome.tabs.create({ url: `https://example.test/filler-${index}`, active: false }));
+    await wait(async () => (await Promise.all(fillers.map(tab => chrome.tabs.get(tab.id))))
+      .every(tab => isHttpUrl(tab.url) && !tab.pendingUrl), 'native fillers did not commit before the capped snapshot');
     const receipt = await executeRemoteControlCommand({ type: 'open-tab', teachingSessionId: 'focus-class', data: { url: 'https://example.test/private-open' } },
       { authContext: auth, envelope: envelope(currentStudentControlRevision()), binding: exactStudentBinding(envelope(currentStudentControlRevision())) });
     require(JSON.stringify(Object.keys(receipt).sort()) === JSON.stringify(['tabReceiptVersion', 'tabRef', 'tabSnapshotRevision'].sort()), 'open receipt is not strict/honest');
+    // A successful open receipt proves exact native creation, not completed
+    // navigation. Wait for that same protected ID to commit the fixture URL
+    // before expecting policy-valid Focus; never repair the target by URL.
+    const receiptEntry = (await focusRefRegistry(auth)).entries.find(entry => entry.tabRef === receipt.tabRef
+      && entry.receiptRevision === receipt.tabSnapshotRevision);
+    require(Number.isInteger(receiptEntry?.tabId), 'private receipt lost its protected exact tab');
+    await wait(async () => { const tab = await chrome.tabs.get(receiptEntry.tabId);
+      return tab.url === 'https://example.test/private-open' && !tab.pendingUrl; }, 'private exact native tab did not commit its requested URL');
     snapshot = await exact();
     require(!snapshot.tabs.some(tab => tab.tabRef === receipt.tabRef), 'private 21st receipt leaked into capped public snapshot');
     const privateFocus = target(receipt, receipt.tabSnapshotRevision, 'private-open-focus', 'open_receipt');
-    await install(state(privateFocus)); await wait(() => focusStatus.state === 'active', 'private receipt Focus failed');
+    try { await install(state(privateFocus)); }
+    catch (error) {
+      const entry = (await focusRefRegistry(auth)).entries.find(value => value.tabRef === receipt.tabRef);
+      const tab = entry ? await chrome.tabs.get(entry.tabId).catch(() => null) : null;
+      throw new Error(`Private exact receipt adoption failed: ${JSON.stringify({ code: error.code, tab, decision: focusNavigationDecision(currentClassroomState, tab) })}`);
+    }
+    await wait(() => focusStatus.state === 'active', 'private receipt Focus failed');
     const privateId = focusAssignment.tabId;
     require((await chrome.tabs.get(privateId)).url === 'https://example.test/private-open', 'receipt selected a URL substitute');
     // A cold in-memory restore uses the protected session record, never URL.
