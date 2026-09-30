@@ -239,9 +239,10 @@ try {
     };
     queueFocusMaintenance();
     await wait(() => finalLookupHeld, 'same-assignment final native lookup was not held');
+    const eventsBeforeSwitch = focusMaintenanceEvents;
     await chrome.tabs.update(first.id, { active: true });
-    await new Promise(done => setTimeout(done, 2100));
-    require(focusMaintenanceRunning && focusMaintenanceTimer === null, 'event timer did not fire during held lookup');
+    await wait(() => focusMaintenanceEvents > eventsBeforeSwitch && focusMaintenanceRunning && focusMaintenanceTimer === null,
+      'native activation event timer did not fire during held lookup', 2500);
     releaseFinalLookup(); chrome.tabs.get = nativeGet;
     await wait(async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id === second.id,
       'same-assignment event was lost after in-flight maintenance');
