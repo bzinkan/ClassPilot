@@ -36,12 +36,25 @@ try {
     await classroomStateRestorePromise.catch(() => {});
     await studentAuthMutationTail.catch(() => {});
     CONFIG.autoRegistrationPaused = true;
+    // The wake IIFE continues beyond storage restoration and can initialize
+    // adaptive tracking/offscreen recovery. Fence its actual completion before
+    // adopting the isolated fixture authority.
+    const wakeDeadline = Date.now() + 20_000;
+    while (!workerWakeSettled) {
+      if (Date.now() >= wakeDeadline) throw new Error('Worker startup did not settle before the precise fixture');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
     if (chromeProfileRegistrationInFlight) await chromeProfileRegistrationInFlight.catch(() => {});
     advanceStudentAuthMutationGeneration();
     // Only synthetic authority is installed; DNS and transports cannot reach a school.
     fetchWithBackoff = async () => new Response('{}', { status: 503 });
     sendHeartbeat = async () => {};
     connectWebSocket = async () => {};
+    // Startup offscreen recovery can outlive the auth/storage restore promises
+    // and reset transport readiness between native DNR awaits. Drain that real
+    // startup operation before installing the isolated synthetic transport.
+    recoverOffscreenWebSocketStatus = async () => true;
+    if (wsConnectInFlight) await wsConnectInFlight.catch(() => {});
     scheduleEventHeartbeat = () => {};
     enqueueMonitoringEvent = async () => {};
     scheduleClassroomStateSideEffects = () => {};

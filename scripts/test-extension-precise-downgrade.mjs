@@ -8,12 +8,7 @@ import { runInNewContext } from 'node:vm';
 import { gunzipSync } from 'node:zlib';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const receipt = JSON.parse(readFileSync(join(root, 'scripts/fixtures/auth-recovery-2.9.5.json')));
-const archive = readFileSync(join(root, 'scripts/fixtures/auth-recovery-2.9.5.json.gz'));
 const sha256 = value => createHash('sha256').update(value).digest('hex');
-assert.equal(sha256(archive), receipt.archiveSha256);
-const oldSource = JSON.parse(gunzipSync(archive)).files['classroom-runtime-core.js'];
-assert.equal(sha256(oldSource), receipt.files['classroom-runtime-core.js']);
 const extension = resolve(process.env.CLASSPILOT_EXTENSION_PATH || join(root, 'extension'));
 const currentSource = readFileSync(join(extension, 'classroom-runtime-core.js'), 'utf8');
 function load(source) {
@@ -21,7 +16,7 @@ function load(source) {
   runInNewContext(source, context);
   return context.ClassPilotRuntimeCore;
 }
-const old = load(oldSource), current = load(currentSource);
+const current = load(currentSource);
 const resource = JSON.parse(readFileSync(join(root, 'server/__tests__/fixtures/restriction-resource-matcher-cases.json'))).resources.googleDoc;
 const otherDocument = 'https://docs.google.com/document/d/DifferentSyntheticDocumentId0123456789/edit';
 const now = Date.now();
@@ -30,7 +25,13 @@ const wire = { schemaVersion: 1, revision: 1, teachingSessionId: 'synthetic-clas
     active: true, url: resource.canonicalUrl, domain: 'docs.google.com', resource } } };
 const persisted = { ...wire, schemaVersion: 2, precisePersistenceVersion: 1 };
 
-test('released 2.9.5 refuses the storage-only schema instead of widening a precise Waypoint', () => {
+for (const version of ['2.9.5', '2.9.6']) test(`tagged ${version} refuses the storage-only schema instead of widening a precise Waypoint`, () => {
+  const receipt = JSON.parse(readFileSync(join(root, `scripts/fixtures/auth-recovery-${version}.json`)));
+  const archive = readFileSync(join(root, `scripts/fixtures/auth-recovery-${version}.json.gz`));
+  assert.equal(sha256(archive), receipt.archiveSha256);
+  const oldSource = JSON.parse(gunzipSync(archive)).files['classroom-runtime-core.js'];
+  assert.equal(sha256(oldSource), receipt.files['classroom-runtime-core.js']);
+  const old = load(oldSource);
   // Establish why the storage fence is necessary using the unmodified receipt.
   const oldWire = old.normalizeClassroomState(wire, now);
   assert.equal(old.isRestrictionDestinationUrl(oldWire, otherDocument), true);

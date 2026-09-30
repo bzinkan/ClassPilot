@@ -31,7 +31,7 @@ and rules survive and adoption is acknowledged failed.
 Precise persistence uses storage-only schema2 with a version1 marker. Wire
 schema remains1. The current worker decodes and validates the exact restriction
 while preserving SSO provenance for the existing trusted-restore validator.
-The immutable released2.9.5 runtime rejects schema2; an old worker therefore
+The immutable tagged2.9.5 and2.9.6 runtimes reject schema2; an old worker therefore
 cannot silently restore a document restriction as a whole-host Waypoint.
 Sign-out/new-student cleanup clears resources and their persisted rules.
 
@@ -47,6 +47,16 @@ package test chains both include these checks. Full source Chrome/red-on-old
 and CI gates are recorded separately at the final revision.
 
 ## Release gates
+
+The official Store listing was rechecked on September 30, 2026 and shows 2.9.6,
+updated September 27. This supersedes the earlier observed 2.9.5 listing. The
+remote v2.9.6 tag resolves to `55bb531cb5f130cebec9d994daa957e82e87a13b`;
+the immutable source fixture is reproducible with archive SHA-256
+`c7a6c31c8e2fbe4e7264a0f62d559af5ebb78f52326d203a7ac79038fd87e696`.
+GitHub Releases is empty; remote tags extend through v2.9.6, with no 2.10.0 tag.
+These are dated source/listing observations, not proof of the Store ZIP hash.
+The Store must be verified again immediately before any authorized later upload.
+[Official listing](https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca).
 
 Focus is a separate dependent source slice. Package precise enforcement and
 Focus together only after both source and exact-package checks pass. Record
