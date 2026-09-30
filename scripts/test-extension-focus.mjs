@@ -81,6 +81,8 @@ try {
     const exact = async () => buildOpaqueTabSnapshot(await chrome.tabs.query({}), auth);
     const first = await chrome.tabs.create({ url: 'https://example.test/same', active: true });
     const second = await chrome.tabs.create({ url: 'https://example.test/same', active: true });
+    await wait(async () => (await chrome.tabs.get(first.id)).url === 'https://example.test/same'
+      && (await chrome.tabs.get(second.id)).url === 'https://example.test/same', 'duplicate native tabs did not finish navigation');
     await install(state());
     let snapshot = await exact();
     const firstRef = snapshot.localEntries.find(entry => entry.tabId === first.id);
@@ -180,9 +182,16 @@ try {
     await wait(() => focusStatus.reason === 'authentication', 'approved auth popup did not suspend Focus');
     await new Promise(done => setTimeout(done, 2100));
     require((await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.windowId === popup.id, 'Focus stole authentication popup');
-    await chrome.windows.remove(popup.id);
-    await chrome.windows.update(first.windowId, { focused: true });
-    await wait(() => focusStatus.state === 'active', 'auth completion did not resume original Focus');
+    // Isolate the native onRemoved hook: window/activation events can precede
+    // completed popup removal and must not be the only resume opportunity.
+    const browserEvent = focusBrowserEvent;
+    focusBrowserEvent = (tabId, retired, updated) => { if (retired) browserEvent(tabId, retired, updated); };
+    try {
+      await chrome.windows.remove(popup.id);
+      await chrome.windows.update(first.windowId, { focused: true });
+      await wait(() => focusStatus.state === 'active', 'auth completion did not resume original Focus');
+      require(focusAssignment.assignmentId === authFocus.assignmentId, 'auth completion replaced original Focus');
+    } finally { focusBrowserEvent = browserEvent; }
     // A timed-out native operation stays suspended. Its delayed callback
     // cannot publish A against replacement B or retire B's record.
     const nativeUpdate = chrome.tabs.update.bind(chrome.tabs);

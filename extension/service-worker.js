@@ -19127,7 +19127,13 @@ function focusBrowserEvent(tabId = null, retired = false, updatedTab = null) {
   }
   if (retired) enqueueStudentAuthMutation(async () => {
     await authStateRestorePromise; await classroomStateRestorePromise;
-    await enqueueClassroomStateOperation(() => retireFocusTabReference(tabId, captured, authContext));
+    await enqueueClassroomStateOperation(async () => {
+      await retireFocusTabReference(tabId, captured, authContext);
+      // Closing an unrelated authentication popup changes the foreground
+      // eligibility too. A preceding window event can still observe the
+      // closing popup, so its completed removal must schedule fresh upkeep.
+      if (captured && focusAssignment === captured) queueFocusMaintenance(captured);
+    });
   }).catch(() => {});
   else queueFocusMaintenance(captured);
 }
