@@ -73,6 +73,10 @@ try {
     schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
     schoolSettingsScope = schoolPolicyScopeForAuthContext(authContext);
     schoolSettingsFetchedAt = Date.now();
+    // The install event's jittered tracking startup can run after worker wake.
+    // Give its real cache read the same exact-scoped fixture policy as memory.
+    await kv.set({ [SCHOOL_SETTINGS_CACHE_KEY]: schoolSettings, [SCHOOL_SETTINGS_SCOPE_KEY]: schoolSettingsScope,
+      [SCHOOL_SETTINGS_FETCHED_AT_KEY]: schoolSettingsFetchedAt });
     trackingState = TRACKING_STATES.ACTIVE;
     adoptNegotiatedProtocolState({ serverProtocolVersion: 3,
       acceptedCapabilities: ['scopedAuthorityChecksV1', 'preciseRestrictionResourcesV1', 'classroomStateV1'] }, authContext);
@@ -119,6 +123,12 @@ try {
       const state = snapshot([resource]);
       try { require((await install(state)).outcome === 'applied', 'valid precise resource was not applied'); }
       catch (error) { throw new Error(`${error.message}: ${JSON.stringify(supportResults)}`); }
+      if (resource === resources[0]) {
+        await initializeAdaptiveTracking('precise-fixture-cache-reload');
+        require(schoolSettingsScope === schoolPolicyScopeForAuthContext(authContext)
+          && trackingState === TRACKING_STATES.ACTIVE && wsConnected,
+          'real cached-settings reload must preserve the scoped fixture policy and synthetic ACK transport');
+      }
       const landingUrl = RuntimeCore.canonicalUrlForResource(resource);
       require(await installedAction(landingUrl) !== 'block', `canonical landing blocked: ${landingUrl}`);
       for (const test of valid.filter(value => JSON.stringify(value.resource) === JSON.stringify(resource))) {
@@ -155,7 +165,7 @@ try {
     const failedAcks = acknowledgements.slice(ackStart).filter(value => value.type === 'classroom-state-ack'
       && value.appliedRevision === rejectedState.revision);
     require(failedAcks.length > 0 && failedAcks.every(value => value.outcome === 'failed'),
-      `installation failure did not acknowledge its exact revision failed: ${JSON.stringify({ connected: wsConnected, outcome: lastClassroomStateOutcome, failedAcks, messages: acknowledgements.slice(-3) })}`);
+      `installation failure did not acknowledge its exact revision failed: ${JSON.stringify({ connected: wsConnected, tracking: trackingState, settingsScoped: schoolSettingsScope === schoolPolicyScopeForAuthContext(authContext), outcome: lastClassroomStateOutcome, failedAcks, messages: acknowledgements.slice(-3) })}`);
     const saved = persistedClassroomStateSnapshot(currentClassroomState);
     require(saved.schemaVersion === 2 && saved.precisePersistenceVersion === 1, 'precise persistence lacks downgrade fence');
     require(RuntimeCore.normalizePersistedClassroomState(saved).restrictions.flightPath.resources.length === 1,
@@ -186,7 +196,7 @@ try {
     await install(snapshot([browserResource]));
     const browserDocumentUrl = RuntimeCore.canonicalUrlForResource(browserResource);
     return { fixtureChecks: checks.length, distinctResources: resources.length, failuresPreservedPolicy: true,
-      honestAcknowledgements: true, downgradeAndRestore: true, capabilityWithdrawal: true,
+      honestAcknowledgements: true, cachedSettingsReload: true, downgradeAndRestore: true, capabilityWithdrawal: true,
       actualRules: (await chrome.declarativeNetRequest.getDynamicRules()).length,
       browserDocumentUrl, outsideDocumentUrl: browserDocumentUrl.replace(browserResource.resourceId, 'DifferentSyntheticDocumentId0123456789') };
   }, { fixtures });
