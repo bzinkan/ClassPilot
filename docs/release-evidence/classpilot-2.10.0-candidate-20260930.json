@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "state": "local-candidate",
+  "version": "2.10.0",
+  "repository": "bzinkan/ClassPilot",
+  "testedCommit": "b187af42d97f63eff31da9a1c9cf7535f853bb6f",
+  "node": "24.19.0",
+  "browser": "Chrome/151.0.7922.34",
+  "package": {
+    "path": "dist/ClassPilot-v2.10.0.zip",
+    "sha256": "84808cfc8b900d0fe29f2e682f4211c84510bff72afcf3e969b4b8794c94557e",
+    "bytes": 363097,
+    "filesVerifiedByteForByte": 24
+  },
+  "sharedPreciseFixtureSha256": "4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243",
+  "commands": [
+    "npm run check",
+    "npm test",
+    "npm run test:extension:chrome",
+    "node scripts/verify-extension-package.mjs dist/ClassPilot-v2.10.0.zip"
+  ],
+  "results": {
+    "unitTestsPassed": 199,
+    "unitTestsFailed": 0,
+    "expectedOldReleaseRegressions": 20,
+    "nativePreciseFixtureChecks": 94,
+    "nativeFocusScenarioGroups": 16,
+    "nativeFocusAcknowledgements": 47,
+    "sourceBrowserSuite": "passed",
+    "exactPackageSuite": "passed"
+  },
+  "evidence": [
+    {
+      "gate": "check",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-2100-check-b187af42-20260930.log",
+      "logSha256": "b762b7d55e270dac2cb68c2b33dcdbf6c2139fca8bcb35e05a2963a86250fed7",
+      "logBytes": 65,
+      "finishedUtc": "2026-10-01T00:01:33.9967385Z"
+    },
+    {
+      "gate": "unit",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-2100-unit-b187af42-20260930.log",
+      "logSha256": "2b2b5c31fa4b8a93b71d99b19ed1e621ffbdd5141bd50b5a389f2d2592c011fa",
+      "logBytes": 36735,
+      "finishedUtc": "2026-10-01T00:03:24.3778145Z"
+    },
+    {
+      "gate": "source",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-2100-source-b187af42-20260930.log",
+      "logSha256": "a9ab08fd180e60dba6ddd8f3b62afa686057e852928f185b7f752768943d9427",
+      "logBytes": 44132,
+      "finishedUtc": "2026-10-01T00:20:04.1473904Z"
+    },
+    {
+      "gate": "package",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-2100-package-b187af42-20260930.log",
+      "logSha256": "a646499bf73ea908fa1cff76be2341ac116457e36238b0e309fb30d53aa44b88",
+      "logBytes": 30298,
+      "finishedUtc": "2026-10-01T00:30:26.5779714Z"
+    }
+  ],
+  "storeObservation": {
+    "observedDate": "2026-09-30",
+    "publicVersion": "2.9.6",
+    "publicUpdatedDate": "2026-09-27",
+    "url": "https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca",
+    "tagCommit": "55bb531cb5f130cebec9d994daa957e82e87a13b",
+    "publishedPackageSha256": null,
+    "releaseHistory": "GitHub Releases empty at observation",
+    "recheckBeforeUpload": true
+  },
+  "releaseGates": {
+    "currentHeadCi": "pending",
+    "twoManagedChromebooks": "pending",
+    "managedDeviceResults": [],
+    "managedReleaseValidationBound": false,
+    "approvedFreezeBoundaries": null,
+    "deployed": "unknown",
+    "activated": "unknown",
+    "storeUploaded": false,
+    "publicationAuthorized": false
+  }
+}
