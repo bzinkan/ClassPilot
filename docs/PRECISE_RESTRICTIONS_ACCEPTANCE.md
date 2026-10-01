@@ -3,9 +3,11 @@
 This source slice implements SchoolPilot's finalized #555/#559 precise resource
 contract. The byte-identical shared fixture has SHA-256
 `4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243`.
-The repository's existing 2.9.6 version is an unsubmitted prepared candidate,
-not evidence of the live Chrome Web Store version. Select a successor version
-only after checking the live listing and release history. Publication is outside
+This source slice retains the main manifest's 2.9.6 version; it does not identify
+the published Store package or imply publication of this implementation. The
+combined local successor selected after the dated listing/history checks is
+2.10.0. Its separate source/package evidence is in
+`release-evidence/classpilot-2.10.0-candidate-20260930.json`. Publication is outside
 this implementation workstream.
 
 ## Enforcement and compatibility
