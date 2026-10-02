@@ -246,6 +246,16 @@
       || state?.restrictions?.flightPath?.resources?.length);
   }
 
+  // Exactly SchoolPilot's classpilotCommandPayloadRequiresPreciseCapability:
+  // only a Waypoint's `resource` or a Flight Path's `resources` is precise. A
+  // Class tools lesson activity carries ordinary link `resources` instead.
+  function commandPayloadRequiresPreciseState(commandType, payload) {
+    const key = commandType === 'lock-screen' ? 'resource'
+      : commandType === 'apply-flight-path' ? 'resources' : null;
+    return key !== null && isPlainObject(payload)
+      && Object.prototype.hasOwnProperty.call(payload, key) && payload[key] !== undefined;
+  }
+
   function restrictionLandingUrl(state) {
     const restrictions = state?.restrictions ?? emptyRestrictions();
     if (restrictions.screenLock?.active) return restrictions.screenLock.url;
@@ -2130,6 +2140,7 @@
     restrictionResourceRuleCount,
     restrictionResourceRegexes,
     hasPreciseRestrictions,
+    commandPayloadRequiresPreciseState,
     restrictionLandingUrl,
     decideNavigation,
     classroomContext,
