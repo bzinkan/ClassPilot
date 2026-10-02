@@ -25,6 +25,7 @@ export const RECOVERY_CASES = Object.freeze({
   'upgrade-2.8.8': { expectedRedOnBase: false, historicalUpgrade: true },
   'upgrade-2.8.9': { expectedRedOnBase: false, historicalUpgrade: true },
   'upgrade-2.9.4-native-reload': { expectedRedOnBase: false },
+  'upgrade-2.9.6-native-reload': { expectedRedOnBase: false },
   'auth-read-retry': { expectedRedOnBase: false },
   // 2.8.9 retains an unresolved read forever; 2.9.0 reconciles it at the deadline.
   'auth-read-pending': { expectedRedOnBase: true },
@@ -90,7 +91,7 @@ function loadSnapshot(version) {
 }
 const legacy = loadSnapshot('2.8.6');
 const previous = loadSnapshot('2.8.7');
-const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9'), '2.9.4': loadSnapshot('2.9.4') };
+const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9'), '2.9.4': loadSnapshot('2.9.4'), '2.9.6': loadSnapshot('2.9.6') };
 
 async function fixtureServer() {
   const state = { configRequests: 0, rosterRequests: 0, studentLoginRequests: 0, pageLoads: 0 };
@@ -2111,10 +2112,10 @@ await withBrowser({caseName:'private-vault-migration-crash',quietNetwork:true,se
   console.log('PASS commit-before-delete migration, crash cleanup retry, and durable empty tombstone prevent legacy resurrection');
 });
 
-await withBrowser({ caseName: 'upgrade-2.9.4-native-reload', snapshotVersion: '2.9.4', quietNetwork: true },
+for (const snapshotVersion of ['2.9.4', '2.9.6']) await withBrowser({ caseName: `upgrade-${snapshotVersion}-native-reload`, snapshotVersion, quietNetwork: true },
   async ({ context, worker, extensionId, extensionPath, fixture }) => {
-    assert.notEqual(candidateVersion, '2.9.4', 'the native upgrade needs a newer candidate');
-    assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version), '2.9.4');
+    assert.notEqual(candidateVersion, snapshotVersion, 'the native upgrade needs a newer candidate');
+    assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version), snapshotVersion);
     const browserMajor = await worker.evaluate(() => Number(navigator.userAgent.match(/Chrome\/(\d+)/)?.[1]));
     assert.ok(Number.isInteger(browserMajor));
     // A native reload converts a command-line installation to an unpacked
@@ -2127,12 +2128,13 @@ await withBrowser({ caseName: 'upgrade-2.9.4-native-reload', snapshotVersion: '2
     if (!await developerMode.evaluate(toggle => toggle.checked)) await developerMode.click();
     assert.equal(await developerMode.evaluate(toggle => toggle.checked), true);
     await extensionsPage.close();
-    const page = await openGatedPage(context, fixture, 'case=native-294-upgrade');
+    const page = await openGatedPage(context, fixture, `case=native-${snapshotVersion}-upgrade`);
     // The released worker itself fails before140 because local storage access
     // levels are unavailable. Do not patch its auth functions or wait for
     // successful restoration before exercising the real installed upgrade.
-    if (browserMajor < 140) {
-      await waitForPhase(page, 'unavailable', 15_000, '2.9.4');
+    const releasedStartupBlocked = snapshotVersion === '2.9.4' && browserMajor < 140;
+    if (releasedStartupBlocked) {
+      await waitForPhase(page, 'unavailable', 15_000, snapshotVersion);
       assert.equal(await worker.evaluate(() => authGateStartupComplete), false);
       const storageFailure = await worker.evaluate(() => trustedLocalStorageAccessPromise.then(
         () => null, error => error?.message,
@@ -2141,8 +2143,19 @@ await withBrowser({ caseName: 'upgrade-2.9.4-native-reload', snapshotVersion: '2
         'Trusted-only extension storage could not be enabled'].includes(storageFailure),
         'released startup must be blocked by the actual unavailable local access-level API');
     } else {
-      await waitForPhase(page, 'ready', 15_000, '2.9.4');
+      await waitForPhase(page, 'ready', 15_000, snapshotVersion);
     }
+    const inspectPageOwners = async activeWorker => activeWorker.evaluate(async url => {
+      const tab = (await chrome.tabs.query({})).find(item => item.url === url);
+      if (!tab?.id) throw new Error('Native upgrade page is missing');
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id },
+        func: () => globalThis.ClassPilotPageLifecycle?.inspect() || [] });
+      return result;
+    }, page.url());
+    const oldOwners = await inspectPageOwners(worker);
+    assert.ok(oldOwners.some(owner => owner.active && owner.version === snapshotVersion),
+      `already-open page must be owned by the immutable released content script: ${JSON.stringify(oldOwners)}`);
+    assert.ok(oldOwners.every(owner => owner.version === snapshotVersion));
     await assertProtected(page);
     assert.equal(fixture.state.studentLoginRequests, 0);
     const loadsBefore = fixture.state.pageLoads;
@@ -2180,10 +2193,17 @@ await withBrowser({ caseName: 'upgrade-2.9.4-native-reload', snapshotVersion: '2
       await waitForPhase(page, 'ready');
     }
     await assertProtected(page);
+    const currentOwners = await inspectPageOwners(updated);
+    assert.ok(currentOwners.some(owner => owner.active && owner.version === candidateVersion),
+      `updated page must have an actual current content-script owner: ${JSON.stringify(currentOwners)}`);
+    assert.ok(currentOwners.every(owner => owner.version === candidateVersion),
+      'retired released owners must not remain active after candidate recovery');
+    assert.equal(new Set(currentOwners.map(owner => owner.kind)).size, currentOwners.length,
+      'upgrade must leave exactly one owner for each page-script kind');
     assert.ok(fixture.state.pageLoads <= loadsBefore + 1, 'upgrade must not enter a reload loop');
     assert.equal(fixture.state.studentLoginRequests, 0, 'upgrade cannot replay credentials');
     await freshLoginAfterStorageRecovery({ worker: updated, probe, page, fixture });
-    console.log(`PASS native same-ID2.9.4→${candidateVersion} upgrade onChrome${browserMajor} (${browserMajor < 140 ? 'released startup blocked' : 'released startup ready'}, ${pageRecovery}), private vault and fresh PIN`);
+    console.log(`PASS native same-ID${snapshotVersion}→${candidateVersion} upgrade onChrome${browserMajor} (${releasedStartupBlocked ? 'released startup blocked' : 'released startup ready'}, ${pageRecovery}), immutable already-open content ${oldOwners.map(owner => owner.version).join('/')}→${currentOwners.map(owner => owner.version).join('/')}, private vault and fresh PIN`);
   });
 
 await withBrowser({ caseName: 'wake-partial-auth-clear', authReadMode: 'never', seed: browserSessionCredentialSeed, quietNetwork: true }, async ({ context, worker, probe, fixture }) => {

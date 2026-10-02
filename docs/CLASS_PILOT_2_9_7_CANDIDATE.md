@@ -35,6 +35,15 @@ results will be bound to the local immutable checkpoint in the new evidence
 record after the final contract and gates settle. No complete matrix or package
 pass is claimed by this preparation document.
 
+The native upgrade case installs the immutable released 2.9.6 source archive,
+opens a page with its actual 2.9.6 content owners, then reloads the same native
+extension identity with the candidate. Chrome120 and the local modern engine
+take the existing protected manual ownership fallback: no automatic page
+navigation is authorized, one explicit reload adopts only 2.9.7 owners, and
+private storage and fresh sign-in remain intact. These source probes do not
+prove a Store update or a managed Chromebook rollout. The same case is part of
+the exact-package gate, whose result remains pending until that gate completes.
+
 ## Historical evidence and operational boundaries
 
 The prior unpublished 2.10.0 candidate document and JSON remain unchanged.
