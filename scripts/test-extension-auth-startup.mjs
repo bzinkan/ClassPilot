@@ -1222,7 +1222,13 @@ async function requestLiveRefresh(worker) {
     // A ready UI can be painted before its tracked request finishes persisting
     // and broadcasting. Force intentionally joins pending production work, so
     // drain that owner before asking for the fixture's newly configured reply.
-    while (sharedSignInConfigPromise) await sharedSignInConfigPromise;
+    // Each pass joins a distinct in-flight request. A settled owner that was
+    // never cleared would otherwise spin this microtask loop forever, starving
+    // the worker so the evaluation (and the suite) never returns.
+    for (let drained = 0; sharedSignInConfigPromise; drained += 1) {
+      if (drained >= 20) throw new Error('sharedSignInConfigPromise stayed set after its request settled');
+      await sharedSignInConfigPromise;
+    }
     await refreshSharedSignInLoginConfig({
       force: true,
       reason: 'chromium_test',
@@ -2246,7 +2252,14 @@ async function main() {
         sharedSignInLoginConfig = originalSharedConfig;
         sharedSignInConfigGeneration = originalConfigGeneration;
         sharedSignInConfigRetryAttempt = originalRetryAttempt;
+        // The snapshot reset displaced any captured in-flight owner, so its own
+        // cleanup no longer clears the slot. If it settled during this step,
+        // restoring it as-is would pin a settled promise forever; re-arm the
+        // production "clear when settled" rule for the restored owner.
         sharedSignInConfigPromise = originalConfigPromise;
+        originalConfigPromise?.finally(() => {
+          if (sharedSignInConfigPromise === originalConfigPromise) sharedSignInConfigPromise = null;
+        }).catch(() => {});
         managedAuthGateSetupUnavailable = originalSetupUnavailable;
         chrome.alarms?.clear?.(SHARED_SIGN_IN_CONFIG_RETRY_ALARM);
         const restore = {};
