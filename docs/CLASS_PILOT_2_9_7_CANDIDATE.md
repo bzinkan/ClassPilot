@@ -22,6 +22,9 @@ and the following release corrections:
   Established sessions fail closed after capability withdrawal or incomplete
   lifecycle recovery. Protected session storage retains bounded per-activity
   floors across worker wake; inactive threads cannot receive private delivery.
+  Reclaiming the same activity may replace its thread only through a validated
+  FAB with newer ownership revision. Private messages cannot introduce a new
+  owner, and retired thread IDs cannot be restored by delayed FAB/messages.
 
 The manifest is 2.9.7 with the existing extension identity and Chrome120 floor.
 Wire protocol remains3; precise classroom wire schema remains1. The release

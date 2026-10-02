@@ -134,6 +134,8 @@ async function runScheduledClassAttention() {
       const deliver = frame => handleWsMessage(JSON.stringify(frame), wsConnectionGeneration, auth);
       const acks = () => sent.filter(item => item.type === 'chat-message-ack')
         .map(item => `${item.messageId}:${item.deliveryStatus}`);
+      let lifecycle = null;
+      let contextAuthorityRevision = '7';
       globalThis.__scheduledChat = {
         // classpilotClassroomStatePushFrame (classroom-state-sync).
         state(value, restrictions) {
@@ -143,20 +145,49 @@ async function runScheduledClassAttention() {
             .then(() => ({ revision: currentClassroomState?.revision ?? null, attention: attentionModeActive }));
         },
         // classpilotFabStatePushFrame with buildStudentFabState's scheduled data.
-        fab(value) {
+        fab(value, emptyAuthority = false) {
           return deliver({ type: 'fab-state-sync', _msgId: `scheduled-fab-${value}`, exactBinding: exactBinding(value),
-            data: { schemaVersion: 1, ...binding, ownershipRevision: value, teachingSessionId: null, supervisionContextId,
-              contextSource: 'scheduled_testing', contextName: 'Testing block', contextAuthorityRevision: '7',
-              activeSessionIds: [], activeContexts: [{ supervisionContextId }], lifecycleRevision: 3, revision: 3,
+            data: { schemaVersion: 1, ...binding, ownershipRevision: value, teachingSessionId: null,
+              supervisionContextId: emptyAuthority ? null : supervisionContextId,
+              contextSource: 'scheduled_testing', contextName: 'Testing block', contextAuthorityRevision,
+              activeSessionIds: [], activeContexts: emptyAuthority ? [] : [{ supervisionContextId }], lifecycleRevision: 3, revision: 3,
+              ...(lifecycle ? { privateChatLifecycleState: { schoolEpoch: lifecycle.schoolEpoch,
+                threads: emptyAuthority ? [] : [{ ...lifecycle, teachingSessionId: null, supervisionContextId }] } } : {}),
               messagingEnabled: true, messagingChannelEnabled: true, handRaisingEnabled: true, messagesPaused: false,
               pauseReason: null, handRaised: false, activeHands: [], classTools: null, sessions: [],
               reason: 'control_ownership_transition' } })
             .then(() => currentFabState?.ownershipRevision ?? null);
         },
         // The scheduled POST /api/classpilot/teacher/reply frame (chat.ts).
-        reply(id, text, value) {
+        reply(id, text, value, overrides = {}) {
           return deliver({ type: 'teacher-message', _msgId: id, chatMessageId: id, messageId: id, supervisionContextId,
-            ...binding, studentControlRevision: value, message: text, fromName: 'Teacher' }).then(() => true);
+            ...binding, contextAuthorityRevision, studentControlRevision: value, message: text, fromName: 'Teacher',
+            ...(lifecycle ? { messageKind: 'private', privateChatLifecycle: { ...lifecycle } } : {}), ...overrides }).then(() => true);
+        },
+        enableLifecycle() {
+          adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+            'classroomStateV1', 'scheduledClassroomV1', 'studentChatIdempotencyV1', 'privateChatLifecycleV1'] }, auth);
+          lifecycle = { threadId: 'scheduled-assignment-one', schoolEpoch: 1, activityEpoch: 1, threadGeneration: 5 };
+          return this.fab(55);
+        },
+        async reclaim() {
+          const oldToken = { ...lifecycle };
+          const oldFab = { type: 'fab-state-sync', _msgId: 'scheduled-stale-old-owner',
+            exactBinding: exactBinding(55), data: { ...currentFabState } };
+          contextAuthorityRevision = '8';
+          await deliver({ type: 'classroom-state-sync', _msgId: 'scheduled-release', ...binding,
+            exactBinding: exactBinding(56), classroomState: null });
+          await this.fab(56, true);
+          contextAuthorityRevision = '9';
+          lifecycle = { ...oldToken, threadId: 'scheduled-assignment-two', threadGeneration: 1 };
+          await this.state(57, {}); await this.fab(57);
+          await this.reply('scheduled-reclaim-fresh', 'New claimed conversation', 57);
+          await deliver(oldFab);
+          await this.reply('scheduled-reclaim-old', 'Previous claimed conversation', 57, { privateChatLifecycle: oldToken });
+          const known = privateChatThreadFor({ supervisionContextId }, auth);
+          return { threadId: known?.threadId, generation: known?.threadGeneration,
+            authorityRevision: currentFabState.contextAuthorityRevision,
+            oldDelivered: acks().includes('scheduled-reclaim-old:delivered') };
         },
         counts: () => ({ notifications: notifications.length, acks: acks().length }),
         // The ACK outbox re-sends unreceipted ACKs; each is reported once.
@@ -241,6 +272,11 @@ async function runScheduledClassAttention() {
       await settle();
       await release(54);
     });
+    assert.equal(await fx(() => __scheduledChat.enableLifecycle()), 55);
+    await step(() => fx(() => __scheduledChat.reply('scheduled-before-reclaim', 'Original claimed conversation', 55)));
+    let reclaimed;
+    outcomes.reclaimed = await step(async () => { reclaimed = await fx(() => __scheduledChat.reclaim()); });
+    outcomes.reclaimed.result = reclaimed;
     return outcomes;
   } finally {
     if (scheduledContext) await scheduledContext.close().catch(() => {});
@@ -483,6 +519,32 @@ try {
           expiredDrained: !after.some(entry => entry.ackId === 'lifecycle-ack-expired'),
           authorityStaleRetained: after.some(entry => entry.ackId === 'lifecycle-ack-stale') };
       },
+      async reclaimSameActivity() {
+        const old = { ...lifecycle };
+        const oldFab = { type: 'fab-state-sync', _msgId: 'lifecycle-delayed-old-fab',
+          exactBinding: exactBinding(currentFabState.ownershipRevision), data: { ...currentFabState } };
+        // A reply may overtake the new authoritative FAB. Never infer a
+        // replacement owner from the private message itself or ACK it delivered.
+        const next = { ...old, threadId: 'opaque-reclaimed-thread', threadGeneration: 1 };
+        await deliver({ type: 'fab-state-sync', _msgId: 'lifecycle-same-owner-replacement',
+          exactBinding: exactBinding(currentFabState.ownershipRevision), data: { ...currentFabState,
+            revision: currentFabState.revision + 1, lifecycleRevision: currentFabState.revision + 1,
+            privateChatLifecycleState: { schoolEpoch: next.schoolEpoch,
+              threads: [{ ...next, teachingSessionId: classId, supervisionContextId: null }] } } });
+        const sameOwnerRejected = privateChatThreadFor({ teachingSessionId: classId }, auth)?.threadId === old.threadId;
+        await this.reply('lifecycle-unknown-reclaim', 'Wait for reclaimed ownership', { privateChatLifecycle: next });
+        const unknownAcked = sent.some(entry => entry.type === 'chat-message-ack' && entry.messageId === 'lifecycle-unknown-reclaim');
+        await this.fab({ messagingEnabled: false, messagingChannelEnabled: false, emptyAuthority: true });
+        lifecycle = next;
+        await this.fab({ messagingEnabled: true, messagingChannelEnabled: true });
+        await this.reply('lifecycle-reclaimed-new', 'Fresh reclaimed conversation');
+        await deliver(oldFab);
+        await this.reply('lifecycle-reclaimed-old', 'Retired previous conversation', { privateChatLifecycle: old });
+        const known = privateChatThreadFor({ teachingSessionId: classId }, auth);
+        return { threadId: known?.threadId, generation: known?.threadGeneration, unknownAcked, sameOwnerRejected,
+          oldDelivered: sent.some(entry => entry.type === 'chat-message-ack' && entry.messageId === 'lifecycle-reclaimed-old'
+            && entry.deliveryStatus === 'delivered') };
+      },
       withdrawLifecycle() {
         adoptNegotiatedProtocolState({ serverProtocolVersion: 3,
           acceptedCapabilities: ['scopedAuthorityChecksV1', 'classroomStateV1'] }, auth); return true;
@@ -689,7 +751,7 @@ try {
     await fixture(() => __chatFixture.releasePageClose());
     await fixture(() => __chatFixture.finishClose());
     const after = await settle();
-    outcomes.backupBeforeClose = { overtaken: { open: overtaken.open, thread: overtaken.thread, announcement: overtaken.announcement },
+    outcomes.backupBeforeClose = { overtaken: { privateContainsAnnouncement: overtaken.thread.includes('Backup delivery after the close'), announcement: overtaken.announcement },
       after: { open: after.open, thread: after.thread, newToasts: after.toasts.slice(before.toasts.length) },
       stored: await fixture(() => __chatFixture.storedChat()) };
   }
@@ -861,6 +923,9 @@ try {
   await fixture(() => __chatFixture.fab({ messagingEnabled: true, messagingChannelEnabled: true }));
   outcomes.lifecycleStudentRetry = await fixture(() => __chatFixture.queuedStudentAcrossClose());
   outcomes.lifecycleTerminalReceipts = await fixture(() => __chatFixture.terminalAckReceipts());
+  let reclaimResult;
+  outcomes.lifecycleReclaim = await step(async () => { reclaimResult = await fixture(() => __chatFixture.reclaimSameActivity()); });
+  outcomes.lifecycleReclaim.result = reclaimResult;
   outcomes.lifecycleMissingDependency = await fixture(() => __chatFixture.withdrawIdempotency());
   await fixture(() => __chatFixture.withdrawLifecycle());
   outcomes.lifecycleWithdrawal = await step(() => fixture(() => __chatFixture.reply('lifecycle-withdrawn', 'Must stay retired after withdrawal')));
@@ -915,7 +980,7 @@ try {
     thread: outcomes.repeatClose.thread, newToasts: outcomes.repeatClose.newToasts }, { open: false, thread: [], newToasts: [] });
   // A close ends only what came before it, in every delivery order.
   check('B1: a command-linked announcement overtakes a close independently of the private conversation',
-    outcomes.backupBeforeClose, { overtaken: { open: true, thread: ['New question: what is 3/4 of 12?'], announcement: 'Backup delivery after the close' },
+    outcomes.backupBeforeClose, { overtaken: { privateContainsAnnouncement: false, announcement: 'Backup delivery after the close' },
       after: { open: false, thread: [], newToasts: [ENDED_TOAST] },
       stored: { thread: [], closed: true } });
   check('B1: a close that reaches a reloaded page late keeps the conversation that followed it',
@@ -1005,6 +1070,10 @@ try {
   check('scheduled class: the held message is shown, seen and announced once Attention ends (FAB snapshot first)',
     scheduledView(outcomes.scheduled.releasedFabFirst), { open: true, overlay: false, last: 'During the next Attention',
       acks: ['scheduled-r3:seen'], notifications: ['Message from Teacher'] });
+  check('scheduled class: releasing and reclaiming the same context replaces only the authoritative thread', {
+    open: outcomes.scheduled.reclaimed.open, thread: outcomes.scheduled.reclaimed.thread,
+    result: outcomes.scheduled.reclaimed.result }, { open: true, thread: ['New claimed conversation'],
+    result: { threadId: 'scheduled-assignment-two', generation: 1, authorityRevision: '9', oldDelivered: false } });
 
   // Heartbeat announcements use the modal; legacy rows stay in the inbox.
   check('heartbeat: an announcement reaches its modal and a legacy row stays in the inbox', {
@@ -1041,6 +1110,11 @@ try {
     { queued: true, frozenGeneration: 3, postGeneration: 3, transmissions: 1, remainsQueued: false });
   check('lifecycle: terminal expiry drains ACK while ordinary stale authority remains retryable', outcomes.lifecycleTerminalReceipts,
     { tokenRetained: true, expiredDrained: true, authorityStaleRetained: true });
+  check('lifecycle: same activity reclaim admits only newer authoritative thread ownership', {
+    thread: outcomes.lifecycleReclaim.thread, open: outcomes.lifecycleReclaim.open,
+    result: outcomes.lifecycleReclaim.result },
+  { thread: ['Fresh reclaimed conversation'], open: true,
+    result: { threadId: 'opaque-reclaimed-thread', generation: 1, unknownAcked: false, sameOwnerRejected: true, oldDelivered: false } });
   check('lifecycle: admission requires student idempotency support', outcomes.lifecycleMissingDependency, false);
   check('lifecycle: capability withdrawal never sends a new student reply through legacy transport', outcomes.lifecycleStudentWithdrawal,
     { code: 'PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE', transmitted: false });

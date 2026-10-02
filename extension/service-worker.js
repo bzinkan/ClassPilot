@@ -9772,7 +9772,8 @@ async function loadPrivateChatLifecycle(authContext) {
   const normalized = stored?.binding === binding ? RuntimeCore.normalizePrivateChatLifecycleState({
     schoolEpoch: stored.schoolEpoch, threads: stored.threads }) : null;
   const watermarks = normalized ? normalizePrivateChatWatermarks(stored.watermarks ?? normalized.threads, normalized.schoolEpoch) : null;
-  currentPrivateChatLifecycle = normalized && watermarks ? { ...normalized, watermarks, binding } : null;
+  currentPrivateChatLifecycle = normalized && watermarks ? { ...normalized, watermarks, binding,
+    ownershipRevision: Number.isSafeInteger(stored.ownershipRevision) && stored.ownershipRevision >= 0 ? stored.ownershipRevision : 0 } : null;
   privateChatLifecycleEstablishedBinding = stored?.binding === binding && stored.established === true ? binding : null;
   if (currentPrivateChatLifecycle) {
     currentPrivateChatLifecycle.channelEnabled = stored.channelEnabled !== false;
@@ -9785,13 +9786,23 @@ function normalizePrivateChatWatermarks(entries, schoolEpoch) {
   if (!Array.isArray(entries) || entries.length > 64) return null;
   const result = [], keys = new Set();
   for (const entry of entries) {
-    const normalized = RuntimeCore.normalizePrivateChatLifecycleState({ schoolEpoch, threads: [entry] });
+    if (!entry || Object.keys(entry).some(key => !['threadId', 'schoolEpoch', 'activityEpoch', 'threadGeneration',
+      'teachingSessionId', 'supervisionContextId', 'ownershipRevision', 'retired'].includes(key))) return null;
+    const { ownershipRevision = 0, retired = false, ...wire } = entry;
+    if (!Number.isSafeInteger(ownershipRevision) || ownershipRevision < 0 || typeof retired !== 'boolean') return null;
+    const normalized = RuntimeCore.normalizePrivateChatLifecycleState({ schoolEpoch, threads: [wire] });
     const thread = normalized?.threads[0];
-    const key = thread && RuntimeCore.classroomContextKey(thread);
+    const key = thread && JSON.stringify([RuntimeCore.classroomContextKey(thread), thread.threadId]);
     if (!key || keys.has(key)) return null;
-    keys.add(key); result.push(thread);
+    keys.add(key); result.push({ ...thread, ownershipRevision, retired });
   }
   return result;
+}
+
+function privateChatThreadWire(entry) {
+  return { threadId: entry.threadId, schoolEpoch: entry.schoolEpoch, activityEpoch: entry.activityEpoch,
+    threadGeneration: entry.threadGeneration, teachingSessionId: entry.teachingSessionId,
+    supervisionContextId: entry.supervisionContextId };
 }
 
 function markPrivateChatLifecycleUnavailable(authContext) {
@@ -9850,23 +9861,33 @@ function adoptPrivateChatLifecycleState(rawState, authContext, nextFabState) {
   return enqueueMessageInboxMutation(async () => {
     const reason = 'private chat lifecycle adoption';
     const state = RuntimeCore.normalizePrivateChatLifecycleState(rawState);
+    const ownershipRevision = nextFabState.ownershipRevision;
     const activeKeys = new Set(RuntimeCore.classroomContexts(nextFabState).map(RuntimeCore.classroomContextKey));
-    if (!state || state.threads.some(thread => !activeKeys.has(RuntimeCore.classroomContextKey(thread))))
+    if (!state || nextFabState.ownershipRevisionKnown !== true || !Number.isSafeInteger(ownershipRevision)
+      || ownershipRevision < 0 || state.threads.some(thread => !activeKeys.has(RuntimeCore.classroomContextKey(thread))))
       throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
     const binding = monitoringEventAuthBindingForContext(authContext);
     await loadPrivateChatLifecycle(authContext);
     const prior = currentPrivateChatLifecycle;
+    if (prior?.ownershipRevision > ownershipRevision) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
     let adopted = state;
     if (prior?.schoolEpoch > state.schoolEpoch) adopted = {
       schoolEpoch: prior.schoolEpoch,
       threads: prior.threads.filter(thread => activeKeys.has(RuntimeCore.classroomContextKey(thread))),
     };
     else if (prior?.schoolEpoch === state.schoolEpoch) adopted = { ...state, threads: state.threads.map(thread => {
-      const previous = (prior.watermarks || prior.threads).find(entry => RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(thread));
+      const archive = prior.watermarks || prior.threads;
+      const records = archive.filter(entry => RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(thread));
+      if (records.some(entry => entry.threadId === thread.threadId && entry.retired === true))
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+      const previous = records.find(entry => !entry.retired);
       if (!previous) return thread;
-      if (previous.activityEpoch > thread.activityEpoch) return previous;
+      if (previous.activityEpoch > thread.activityEpoch) return privateChatThreadWire(previous);
+      if (previous.threadId !== thread.threadId
+        && ownershipRevision <= (previous.ownershipRevision ?? prior.ownershipRevision ?? 0))
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
       if (previous.activityEpoch === thread.activityEpoch) {
-        if (previous.threadId !== thread.threadId) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+        if (previous.threadId !== thread.threadId) return thread;
         return { ...thread, threadGeneration: Math.max(previous.threadGeneration, thread.threadGeneration) };
       }
       return thread;
@@ -9878,13 +9899,15 @@ function adoptPrivateChatLifecycleState(rawState, authContext, nextFabState) {
     assertAuthenticatedContextCurrent(authContext, reason);
     const entries = Array.isArray(storedChat.fabChatMessages) ? storedChat.fabChatMessages : [];
     const retained = channelOff ? [] : entries.filter(entry => privateChatEntryCurrent(entry, adopted));
-    const active = new Set(adopted.threads.map(RuntimeCore.classroomContextKey));
+    const active = new Map(adopted.threads.map(thread => [RuntimeCore.classroomContextKey(thread), thread]));
     const inactive = prior?.schoolEpoch === adopted.schoolEpoch ? (prior.watermarks || prior.threads)
-      .filter(thread => !active.has(RuntimeCore.classroomContextKey(thread))) : [];
+      .filter(thread => active.get(RuntimeCore.classroomContextKey(thread))?.threadId !== thread.threadId)
+      .map(thread => ({ ...thread, retired: thread.retired === true || active.has(RuntimeCore.classroomContextKey(thread)) })) : [];
     // Retain a bounded private floor for temporarily inactive typed activities.
     // Active threads are never evicted or exposed through this private archive.
-    const watermarks = [...inactive.slice(-(64 - adopted.threads.length)), ...adopted.threads];
-    const next = { ...adopted, watermarks, binding, established: true, recoveryPending: false, channelEnabled: !channelOff };
+    const watermarks = [...inactive.slice(-(64 - adopted.threads.length)), ...adopted.threads.map(thread =>
+      ({ ...thread, ownershipRevision, retired: false }))];
+    const next = { ...adopted, watermarks, ownershipRevision, binding, established: true, recoveryPending: false, channelEnabled: !channelOff };
     await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: next,
       ...(retained.length !== entries.length ? { fabChatMessages: retained, fabChatClosed: retained.length === 0 } : {}) },
     { authContext, expectedBinding: binding }, reason);
@@ -9911,13 +9934,24 @@ async function advancePrivateChatLifecycleNow(message, authContext) {
     requestPrivateChatLifecycleRecovery();
     throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
   }
+  if (token.threadId !== known.threadId && token.schoolEpoch === known.schoolEpoch
+    && token.activityEpoch === known.activityEpoch) {
+    const retired = currentPrivateChatLifecycle.watermarks?.some(thread => thread.retired === true
+      && RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message)
+      && thread.threadId === token.threadId);
+    if (!retired) {
+      requestPrivateChatLifecycleRecovery();
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+    }
+  }
   if (!privateTeacherMessageIsCurrent(message, authContext))
     throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
   if (token.threadGeneration === known.threadGeneration) return token;
   const next = { ...currentPrivateChatLifecycle, threads: currentPrivateChatLifecycle.threads.map(thread =>
     RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message) ? { ...thread, ...token } : thread) };
   next.watermarks = (currentPrivateChatLifecycle.watermarks || currentPrivateChatLifecycle.threads).map(thread =>
-    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message) ? { ...thread, ...token } : thread);
+    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message)
+      && thread.threadId === token.threadId && thread.retired !== true ? { ...thread, ...token } : thread);
   const chat = await kv.get('fabChatMessages');
   assertAuthenticatedContextCurrent(authContext, 'private chat generation');
   const retained = (Array.isArray(chat.fabChatMessages) ? chat.fabChatMessages : [])

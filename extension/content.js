@@ -239,7 +239,7 @@ function adoptPagePrivateChatLifecycle(state) {
   privateChatLifecycleState = { schoolEpoch: state.schoolEpoch, threads: state.threads.map(thread => {
     const old = prior?.schoolEpoch === state.schoolEpoch && prior.threads.find(value =>
       studentClassroomKey(value) === studentClassroomKey(thread));
-    return old && (old.activityEpoch > thread.activityEpoch || old.activityEpoch === thread.activityEpoch
+    return old && old.threadId === thread.threadId && (old.activityEpoch > thread.activityEpoch || old.activityEpoch === thread.activityEpoch
       && old.threadGeneration > thread.threadGeneration) ? old : thread;
   }) };
 }

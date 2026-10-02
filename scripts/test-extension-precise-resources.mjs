@@ -127,7 +127,10 @@ try {
         await initializeAdaptiveTracking('precise-fixture-cache-reload');
         require(schoolSettingsScope === schoolPolicyScopeForAuthContext(authContext)
           && trackingState === TRACKING_STATES.ACTIVE && wsConnected,
-          'real cached-settings reload must preserve the scoped fixture policy and synthetic ACK transport');
+          `real cached-settings reload must preserve the scoped fixture policy and synthetic ACK transport: ${JSON.stringify({
+            scopeCurrent: schoolSettingsScope === schoolPolicyScopeForAuthContext(authContext), trackingState, wsConnected,
+            authenticated: hasStudentAuth(), currentLicense: currentLicenseIsActive(), invalidating: studentAuthInvalidating,
+            wsConnectPending: Boolean(wsConnectInFlight), wakeSettled: workerWakeSettled })}`);
       }
       const landingUrl = RuntimeCore.canonicalUrlForResource(resource);
       require(await installedAction(landingUrl) !== 'block', `canonical landing blocked: ${landingUrl}`);
