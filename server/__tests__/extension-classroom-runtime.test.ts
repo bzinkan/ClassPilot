@@ -23,6 +23,44 @@ function loadRuntimeCore(source = readFileSync(
 const core = loadRuntimeCore();
 const NOW = Date.parse("2026-08-13T16:00:00.000Z");
 
+describe("server-issued private chat lifecycle fences", () => {
+  const token = { threadId: "opaque-thread", schoolEpoch: 2, activityEpoch: 3, threadGeneration: 4 };
+  it("requires a bounded opaque thread and exact positive safe-integer epochs", () => {
+    expect(core.normalizePrivateChatLifecycle(token)).toEqual(token);
+    for (const bad of [null, [], { ...token, extra: true }, { ...token, threadId: "x".repeat(129) },
+      { ...token, threadId: "thread\n" }, { ...token, schoolEpoch: 0 }, { ...token, activityEpoch: "3" },
+      { ...token, threadGeneration: Number.MAX_SAFE_INTEGER + 1 }, Object.create(token)])
+      expect(core.normalizePrivateChatLifecycle(bad)).toBeNull();
+  });
+  it("retains fresh generation G across close G while retiring every older generation", () => {
+    expect(core.privateChatLifecycleDecision(token, token)).toBe("current");
+    expect(core.privateChatLifecycleDecision({ ...token, threadGeneration: 3 }, token)).toBe("expired");
+    expect(core.privateChatLifecycleDecision({ ...token, threadGeneration: 5 }, token)).toBe("current");
+    for (const changed of [{ threadId: "other" }, { schoolEpoch: 1 }, { schoolEpoch: 3 }, { activityEpoch: 4 }])
+      expect(core.privateChatLifecycleDecision({ ...token, ...changed }, token)).toBe("expired");
+    expect(core.privateChatLifecycleDecision(token, null)).toBe("unavailable");
+  });
+  it("admits a school watermark with no threads and rejects ambiguous or duplicated activity authority", () => {
+    const thread = { ...token, teachingSessionId: "class-a", supervisionContextId: null };
+    expect(core.normalizePrivateChatLifecycleState({ schoolEpoch: 2, threads: [] }))
+      .toEqual({ schoolEpoch: 2, threads: [] });
+    const snapshot = { schoolEpoch: 2, threads: [thread] };
+    expect(core.normalizePrivateChatLifecycleState(snapshot)).toEqual(snapshot);
+    expect(core.normalizePrivateChatLifecycleState(core.normalizePrivateChatLifecycleState(snapshot))).toEqual(snapshot);
+    for (const bad of [{ schoolEpoch: 2, threads: [thread, thread] },
+      { schoolEpoch: 1, threads: [thread] }, { schoolEpoch: 2, threads: [{ ...thread, supervisionContextId: "coverage" }] },
+      { schoolEpoch: 2, threads: [{ ...thread, teachingSessionId: null }] },
+      { schoolEpoch: 2, threads: [{ ...thread, teacherId: "extra" }] }, { schoolEpoch: 0, threads: [] }])
+      expect(core.normalizePrivateChatLifecycleState(bad)).toBeNull();
+  });
+  it("preserves the server discriminator and frozen lifecycle through durable inbox normalization", () => {
+    const message = { id: "message", message: "Private text", teachingSessionId: "class-a",
+      messageKind: "private", privateChatLifecycle: token };
+    expect(core.normalizeTeacherMessage(message, NOW)).toMatchObject(message);
+    expect(core.mergeTeacherMessageInbox([], [], [message], NOW).messages[0]).toMatchObject(message);
+  });
+});
+
 const preciseBytes = readFileSync(resolve(__dirname, "fixtures/restriction-resource-matcher-cases.json"));
 const preciseCases = JSON.parse(preciseBytes.toString("utf8"));
 const preciseState = (restrictions: Record<string, unknown>) => core.normalizeClassroomState({
@@ -170,7 +208,7 @@ describe("normative precise resource contract", () => {
     expect(core.decideNavigation(video.canonicalUrl, { ...policy, globalBlockedDomains: ["youtube.com"] }, NOW))
       .toEqual({ allowed: false, source: "school" });
     state.restrictions.attentionMode.active = true;
-    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "attention_mode" });
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "teacher" });
     state.restrictions.attentionMode.active = false;
     state.restrictions.blockList.active = false;
     expect(core.decideNavigation("https://www.youtube.com/watch?v=AAAAAAAAAAA", policy, NOW))
@@ -389,17 +427,21 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isRuleInRange(2000, "school")).toBe(false);
   });
 
-  it("persists Attention Mode as the single classroom navigation rule", () => {
+  it("keeps Attention overlay independent of navigation and retained DNR policies", () => {
     const normalized = state(4, {
       restrictions: { attentionMode: { active: true, message: "Pause" } },
     });
     const rules = core.buildDnrRules({ classroomState: normalized }, ["classroom"], NOW);
-    expect(rules).toEqual([{
-      id: 1,
-      priority: 2000,
-      action: { type: "block" },
-      condition: { resourceTypes: ["main_frame"] },
-    }]);
+    expect(rules).toEqual([]);
+    expect(core.decideNavigation("https://example.edu/lesson", { classroomState: normalized }, NOW))
+      .toEqual({ allowed: true, source: null });
+    normalized.restrictions.flightPath = { active: true, allowedDomains: ["example.edu"], resources: [] };
+    const heldPolicy = { classroomState: normalized, globalBlockedDomains: ["blocked.example"] };
+    const retained = core.buildDnrRules(heldPolicy, ["classroom", "school"], NOW);
+    normalized.restrictions.attentionMode.active = false;
+    expect(retained).toEqual(core.buildDnrRules(heldPolicy, ["classroom", "school"], NOW));
+    expect(retained.find((rule: any) => rule.id === 1)?.condition.excludedRequestDomains).toEqual(["example.edu"]);
+    expect(retained.find((rule: any) => rule.id === 1000)?.priority).toBe(1000);
   });
 
   it("keeps Flight Path underneath a foreground screen-lock overlay", () => {
@@ -1157,7 +1199,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(subsequent.updates).toEqual([]);
   });
 
-  it("keeps portal entry within the independent tab limit and attention control", () => {
+  it("keeps portal entry and its independent tab limit during Attention", () => {
     const snapshot = state(15, {
       authPassThrough: authPolicy(),
       restrictions: {
@@ -1183,8 +1225,8 @@ describe("ClassPilot classroom runtime core", () => {
     }, tabs, {
       foregroundTabId: 1, restrictionAuthPassThrough: true, portalFirstOnLogin: true,
     });
-    expect(attention.createUrl).not.toBe("https://district.clever.com/login?school=one");
-    expect(attention.updates.some((update: { url: string }) => update.url.includes("clever.com"))).toBe(false);
+    expect(attention.activateTabId).toBe(3);
+    expect(attention.removeTabIds).not.toContain(3);
   });
 
   it("completes Waypoints on the approved domain including subpages and queries", () => {
@@ -1222,7 +1264,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isRestrictionSsoTab({ url: "https://accounts.google.com.evil.example/" })).toBe(false);
   });
 
-  it("composes SSO pass-through below attention, school, and explicit teacher blocks", () => {
+  it("composes SSO pass-through below school and explicit teacher blocks during Attention", () => {
     const deferred = state(11, {
       deliveryContext: { lateSignInRestrictionSso: true },
       restrictions: {
@@ -1253,7 +1295,10 @@ describe("ClassPilot classroom runtime core", () => {
       classroomState: deferred,
       restrictionSsoPassThrough: true,
     }, ["classroom", "restrictionSso"], NOW);
-    expect(attentionRules.map((rule: any) => rule.id)).toEqual([1]);
+    deferred.restrictions.attentionMode.active = false;
+    expect(attentionRules).toEqual(core.buildDnrRules({
+      classroomState: deferred, restrictionSsoPassThrough: true,
+    }, ["classroom", "restrictionSso"], NOW));
 
     const ordinaryRules = core.buildDnrRules({
       classroomState: state(12, {

@@ -27,16 +27,18 @@
 // page before the close does, or when the close reaches a reloaded page late.
 // A paused class shows the message read-only, whether the pause came as a FAB
 // snapshot or as the legacy toggle.
-// SchoolPilot reports a pause even while a hard switch is off, so a pause
-// counts only when messagingChannelEnabled says the channel is on: an off
-// switch keeps replies and announcements in the popup inbox quietly with or
-// without a pause, and so does a pause from a server that predates the field.
+// A pause counts only while messagingChannelEnabled is on. Before lifecycle
+// negotiation legacy private replies retain the older quiet-inbox behavior.
+// After negotiation, hard-off and End Chat retire server-stamped generations;
+// delayed private messages cannot reappear after reopening. Announcements use
+// their own modal, notification and inbox, independently of private chat.
 // Attention defers the chat and its notification, and sign-out leaves nothing
 // of the previous student on the page. In a scheduled class SchoolPilot ends
 // Attention with classroom-state-sync and then the class's FAB snapshot, and
 // the held message is still reported seen and announced.
-// The heartbeat inbox path is also exercised: a command-linked announcement
-// reaches the chat, and a legacy row without a commandId stays in the inbox.
+// Heartbeat delivery reaches the same private generation checks; authorized
+// command-linked announcements use the separate modal, while legacy rows
+// without a commandId stay in the inbox.
 //
 // The unpacked extension runs in Chromium with real content scripts on a real
 // page and the real popup page. Frames enter through handleWsMessage; only the
@@ -278,7 +280,11 @@ try {
     advanceStudentAuthMutationGeneration();
     // School transports only. Inbox, notifications, page broadcasts, the
     // content script and the popup stay native.
-    fetchWithBackoff = async () => new Response('{}', { status: 503 });
+    const studentPosts = [];
+    fetchWithBackoff = async (url, options) => {
+      if (String(url).endsWith('/api/student/send-message')) studentPosts.push(JSON.parse(options.body));
+      return new Response('{}', { status: 503 });
+    };
     sendHeartbeat = async () => {}; connectWebSocket = async () => {}; scheduleEventHeartbeat = () => {};
     recoverOffscreenWebSocketStatus = async () => true;
     if (wsConnectInFlight) await wsConnectInFlight.catch(() => {});
@@ -341,6 +347,7 @@ try {
 
     let revision = 40;
     let sequence = 0;
+    let lifecycle = null;
     const binding = { studentId: auth.studentId, studentSessionId: auth.studentSessionId };
     const exactBinding = value => ({ bindingVersion: 2, schoolId: auth.schoolId, deviceId: auth.deviceId,
       studentId: auth.studentId, studentSessionId: auth.studentSessionId, controlRevision: value });
@@ -358,12 +365,16 @@ try {
       // the hard switches (school-wide and the class's own); SchoolPilot also
       // reports a pause while a switch is off. Omitting it models a server
       // that predates the field.
-      async fab({ messagingEnabled, messagingChannelEnabled, messagesPaused = false, pauseReason = null }) {
+      async fab({ messagingEnabled, messagingChannelEnabled, messagesPaused = false, pauseReason = null, omitLifecycle = false,
+        emptyAuthority = false, staleGeneration = null }) {
         const value = revision++;
         const channel = messagingChannelEnabled === undefined ? {} : { messagingChannelEnabled };
         await deliver({ type: 'fab-state-sync', _msgId: `chat-fab-${value}`, exactBinding: exactBinding(value), data: {
-          schemaVersion: 1, ...binding, ownershipRevision: value, teachingSessionId: classId, lifecycleRevision: value,
-          revision: value, activeSessionIds: [classId], activeContexts: [{ teachingSessionId: classId }], messagingEnabled,
+          schemaVersion: 1, ...binding, ownershipRevision: value, teachingSessionId: emptyAuthority ? null : classId, lifecycleRevision: value,
+          revision: value, activeSessionIds: emptyAuthority ? [] : [classId], activeContexts: emptyAuthority ? [] : [{ teachingSessionId: classId }], messagingEnabled,
+          ...(lifecycle && !omitLifecycle ? { privateChatLifecycleState: { schoolEpoch: lifecycle.schoolEpoch,
+            threads: emptyAuthority ? [] : [{ ...lifecycle, threadGeneration: staleGeneration ?? lifecycle.threadGeneration,
+              teachingSessionId: classId, supervisionContextId: null }] } } : {}),
           ...channel, handRaisingEnabled: true, messagesPaused, pauseReason, handRaised: false, activeHands: [], classTools: null,
           sessions: [{ sessionId: classId, messagingEnabled, ...channel, handRaisingEnabled: true, messagesPaused, pauseReason,
             handRaised: false, lifecycleRevision: value }] } });
@@ -386,7 +397,7 @@ try {
       // command dispatcher, with a commandId.
       announce(id, text) {
         return deliver({ type: 'teacher-message', _msgId: id, messageId: id, commandId: `chat-command-${id}`, ...binding,
-          deliveryPolicy: 'durable_message', expiresAt: null, ...authority, message: text, fromName: 'Teacher' });
+          deliveryPolicy: 'durable_message', expiresAt: null, ...authority, messageKind: 'announcement', message: text, fromName: 'Teacher' });
       },
       // Command ACK states in first-sent order (the outbox may re-send).
       commandAcks: commandId => [...new Set(sent.filter(item => item.type === 'command-ack' && item.commandId === commandId)
@@ -402,13 +413,91 @@ try {
       // The frame POST /api/classpilot/teacher/reply pushes (chat.ts): no
       // commandId, no creation time.
       replyFrame: (id, text, overrides = {}) => ({ type: 'teacher-message', _msgId: id, chatMessageId: id, messageId: id,
-        sessionId: classId, ...binding, message: text, fromName: 'Teacher', ...overrides }),
+        sessionId: classId, ...binding, message: text, fromName: 'Teacher',
+        ...(lifecycle ? { messageKind: 'private', privateChatLifecycle: { ...lifecycle } } : {}), ...overrides }),
       reply(id, text, overrides = {}) { return deliver(this.replyFrame(id, text, overrides)); },
       startReply(id, text) { pending.set(id, deliver(this.replyFrame(id, text)).then(() => 'done')); return true; },
       finish(id) { return pending.get(id); },
       // The frame POST /api/classpilot/teacher/close-chat pushes.
       close() {
-        return deliver({ type: 'chat-closed', _msgId: `chat-close-${++sequence}`, sessionId: classId, ...binding, ...authority });
+        if (lifecycle) lifecycle = { ...lifecycle, threadGeneration: lifecycle.threadGeneration + 1 };
+        return deliver({ type: 'chat-closed', _msgId: `chat-close-${++sequence}`, sessionId: classId, ...binding, ...authority,
+          ...(lifecycle ? { privateChatLifecycle: { ...lifecycle } } : {}) });
+      },
+      deliverFrame: frame => deliver(frame),
+      async enableLifecycle() {
+        lifecycle = { threadId: 'opaque-private-thread', schoolEpoch: 1, activityEpoch: 1, threadGeneration: 1 };
+        adoptNegotiatedProtocolState({ serverProtocolVersion: 3,
+          acceptedCapabilities: ['scopedAuthorityChecksV1', 'classroomStateV1', 'privateChatLifecycleV1', 'studentChatIdempotencyV1'] }, auth);
+        return this.fab({ messagingEnabled: true, messagingChannelEnabled: true });
+      },
+      async lifecycleOff() {
+        lifecycle = { ...lifecycle, schoolEpoch: lifecycle.schoolEpoch + 1 };
+        return this.fab({ messagingEnabled: false, messagingChannelEnabled: false });
+      },
+      async lifecycleReadAfterMemoryRetirement() {
+        currentPrivateChatLifecycle = null;
+        await loadPrivateChatLifecycle(auth);
+        return { schoolEpoch: currentPrivateChatLifecycle?.schoolEpoch,
+          generation: currentPrivateChatLifecycle?.threads[0]?.threadGeneration,
+          localPresent: Boolean((await rawLocalKv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]),
+          sessionPresent: Boolean((await durableSessionKv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]) };
+      },
+      async activityReturnWithStaleSnapshot() {
+        await this.fab({ messagingEnabled: false, messagingChannelEnabled: false, emptyAuthority: true });
+        currentPrivateChatLifecycle = null;
+        await loadPrivateChatLifecycle(auth);
+        await this.fab({ messagingEnabled: true, messagingChannelEnabled: true, staleGeneration: 1 });
+        const floor = privateChatThreadFor({ teachingSessionId: classId }, auth)?.threadGeneration;
+        const old = this.replyFrame('lifecycle-return-old', 'Old activity generation', {
+          privateChatLifecycle: { ...lifecycle, threadGeneration: 1 } });
+        await this.deliverFrame(old);
+        return { floor, oldDelivered: sent.some(entry => entry.type === 'chat-message-ack'
+          && entry.messageId === 'lifecycle-return-old' && entry.deliveryStatus === 'delivered') };
+      },
+      async queuedStudentAcrossClose() {
+        const initial = await queueAndSendStudentChatMessage({ clientMessageId: 'lifecycle-student-queued',
+          message: 'Queued student reply', sessionId: classId, teachingSessionId: classId }, auth);
+        const stored = (await durableLocalKv.get(STUDENT_CHAT_OUTBOX_KEY))[STUDENT_CHAT_OUTBOX_KEY];
+        const frozen = stored.find(entry => entry.clientMessageId === 'lifecycle-student-queued')?.expectedPrivateChatLifecycle;
+        await this.close();
+        await flushStudentChatOutbox();
+        const remaining = (await durableLocalKv.get(STUDENT_CHAT_OUTBOX_KEY))[STUDENT_CHAT_OUTBOX_KEY];
+        return { queued: initial.queued, frozenGeneration: frozen?.threadGeneration,
+          postGeneration: studentPosts.at(-1)?.expectedPrivateChatLifecycle?.threadGeneration,
+          transmissions: studentPosts.filter(entry => entry.clientMessageId === 'lifecycle-student-queued').length,
+          remainsQueued: remaining.some(entry => entry.clientMessageId === 'lifecycle-student-queued') };
+      },
+      async terminalAckReceipts() {
+        const token = { ...lifecycle };
+        for (const id of ['expired', 'stale']) await enqueueChatAck({ ackId: `lifecycle-ack-${id}`,
+          messageId: `lifecycle-message-${id}`, teachingSessionId: classId, deliveryStatus: 'delivered', privateChatLifecycle: token }, auth);
+        const before = (await durableLocalKv.get(CHAT_ACK_OUTBOX_KEY))[CHAT_ACK_OUTBOX_KEY];
+        await removeAcceptedChatAckReceipts([
+          { ackId: 'lifecycle-ack-expired', messageId: 'lifecycle-message-expired', accepted: false, code: 'PRIVATE_CHAT_EXPIRED' },
+          { ackId: 'lifecycle-ack-stale', messageId: 'lifecycle-message-stale', accepted: false, code: 'CHAT_ACK_STALE' },
+        ], auth);
+        const after = (await durableLocalKv.get(CHAT_ACK_OUTBOX_KEY))[CHAT_ACK_OUTBOX_KEY];
+        const storedToken = before.find(entry => entry.ackId === 'lifecycle-ack-expired')?.privateChatLifecycle;
+        return { tokenRetained: Object.keys(token).every(key => storedToken?.[key] === token[key]),
+          expiredDrained: !after.some(entry => entry.ackId === 'lifecycle-ack-expired'),
+          authorityStaleRetained: after.some(entry => entry.ackId === 'lifecycle-ack-stale') };
+      },
+      withdrawLifecycle() {
+        adoptNegotiatedProtocolState({ serverProtocolVersion: 3,
+          acceptedCapabilities: ['scopedAuthorityChecksV1', 'classroomStateV1'] }, auth); return true;
+      },
+      withdrawIdempotency() {
+        adoptNegotiatedProtocolState({ serverProtocolVersion: 3,
+          acceptedCapabilities: ['scopedAuthorityChecksV1', 'classroomStateV1', 'privateChatLifecycleV1'] }, auth);
+        return hasNegotiatedCapability('privateChatLifecycleV1', auth);
+      },
+      async refusedStudentAfterWithdrawal() {
+        const count = studentPosts.length;
+        let code = null;
+        try { await queueAndSendStudentChatMessage({ message: 'Must not use legacy after withdrawal', sessionId: classId,
+          teachingSessionId: classId }, auth); } catch (error) { code = error.code; }
+        return { code, transmitted: studentPosts.length !== count };
       },
       startClose() { pendingClose = this.close(); return true; },
       finishClose() { return pendingClose.then(() => true, () => false); },
@@ -507,6 +596,7 @@ try {
       toasts: [...(window.__chatToasts || [])],
       overlay: Boolean(document.getElementById('classpilot-attention-overlay')),
       visibility: document.visibilityState,
+      announcement: document.querySelector('#classpilot-message-modal .classpilot-modal-body')?.textContent.trim() || '',
     };
   });
   // Sign-out may move the page through the sign-in gate; read it once settled.
@@ -599,7 +689,7 @@ try {
     await fixture(() => __chatFixture.releasePageClose());
     await fixture(() => __chatFixture.finishClose());
     const after = await settle();
-    outcomes.backupBeforeClose = { overtaken: { open: overtaken.open, thread: overtaken.thread },
+    outcomes.backupBeforeClose = { overtaken: { open: overtaken.open, thread: overtaken.thread, announcement: overtaken.announcement },
       after: { open: after.open, thread: after.thread, newToasts: after.toasts.slice(before.toasts.length) },
       stored: await fixture(() => __chatFixture.storedChat()) };
   }
@@ -740,6 +830,42 @@ try {
   }, MARKUP);
   await popup.close();
 
+  // Negotiated lifecycle: the server's generations, not arrival timestamps,
+  // fence Redis/heartbeat retries, late closes and hard switch transitions.
+  await fixture(() => __chatFixture.enableLifecycle());
+  await settle();
+  const delayedPrivate = await fixture(() => __chatFixture.replyFrame('lifecycle-old', 'Queued before End Chat'));
+  outcomes.lifecycleClose = await step(() => fixture(() => __chatFixture.close()));
+  outcomes.lifecycleExpired = await step(() => fixture(frame => __chatFixture.deliverFrame(frame), delayedPrivate));
+  await fixture(url => __chatFixture.holdPageClose(url), `${origin}/lesson`);
+  await fixture(() => __chatFixture.startClose());
+  await fixture(() => __chatFixture.pageCloseHeld());
+  const freshBackup = await fixture(() => ({ ...__chatFixture.replyFrame('lifecycle-fresh', 'A fresh generation'), id: 'lifecycle-fresh' }));
+  outcomes.lifecycleFresh = await step(() => fixture(frame => __chatFixture.heartbeat([frame]), freshBackup));
+  outcomes.lifecycleLateClose = await step(async () => {
+    await fixture(() => __chatFixture.releasePageClose()); await fixture(() => __chatFixture.finishClose());
+  });
+  const beforeOff = await fixture(() => __chatFixture.replyFrame('lifecycle-before-off', 'Queued before hard-off'));
+  await fixture(() => __chatFixture.lifecycleOff()); await settle();
+  outcomes.lifecycleOffExpired = await step(() => fixture(frame => __chatFixture.deliverFrame(frame), beforeOff));
+  outcomes.lifecycleOffAnnouncement = await step(() => fixture(() => __chatFixture.announce('lifecycle-announcement', 'Announcements remain available')));
+  await fixture(() => __chatFixture.fab({ messagingEnabled: true, messagingChannelEnabled: true })); await settle();
+  outcomes.lifecycleOldEpoch = await step(() => fixture(frame => __chatFixture.deliverFrame(frame), beforeOff));
+  outcomes.lifecycleRecovery = await fixture(() => __chatFixture.lifecycleReadAfterMemoryRetirement());
+  outcomes.lifecycleRecoveredFresh = await step(() => fixture(() => __chatFixture.reply('lifecycle-recovered', 'Current after protected recovery')));
+  outcomes.lifecycleActivityReturn = await fixture(() => __chatFixture.activityReturnWithStaleSnapshot());
+  outcomes.lifecycleMissingSnapshot = await step(async () => {
+    await fixture(() => __chatFixture.fab({ messagingEnabled: true, messagingChannelEnabled: true, omitLifecycle: true }));
+    await fixture(() => __chatFixture.reply('lifecycle-without-state', 'Must wait for known ownership'));
+  });
+  await fixture(() => __chatFixture.fab({ messagingEnabled: true, messagingChannelEnabled: true }));
+  outcomes.lifecycleStudentRetry = await fixture(() => __chatFixture.queuedStudentAcrossClose());
+  outcomes.lifecycleTerminalReceipts = await fixture(() => __chatFixture.terminalAckReceipts());
+  outcomes.lifecycleMissingDependency = await fixture(() => __chatFixture.withdrawIdempotency());
+  await fixture(() => __chatFixture.withdrawLifecycle());
+  outcomes.lifecycleWithdrawal = await step(() => fixture(() => __chatFixture.reply('lifecycle-withdrawn', 'Must stay retired after withdrawal')));
+  outcomes.lifecycleStudentWithdrawal = await fixture(() => __chatFixture.refusedStudentAfterWithdrawal());
+
   // Phase G: sign-out leaves nothing of the previous student on the page, and
   // a late frame for that student shows nothing.
   outcomes.signOut = await step(() => fixture(() => __chatFixture.signOut()));
@@ -788,10 +914,10 @@ try {
   check('B1: a repeated End chat leaves the ended chat quiet', { open: outcomes.repeatClose.open,
     thread: outcomes.repeatClose.thread, newToasts: outcomes.repeatClose.newToasts }, { open: false, thread: [], newToasts: [] });
   // A close ends only what came before it, in every delivery order.
-  check('B1: a backup delivery that overtakes the close starts the next conversation, and the late close keeps it',
-    outcomes.backupBeforeClose, { overtaken: { open: true, thread: ['Backup delivery after the close'] },
-      after: { open: true, thread: ['Backup delivery after the close'], newToasts: [] },
-      stored: { thread: ['Backup delivery after the close'], closed: false } });
+  check('B1: a command-linked announcement overtakes a close independently of the private conversation',
+    outcomes.backupBeforeClose, { overtaken: { open: true, thread: ['New question: what is 3/4 of 12?'], announcement: 'Backup delivery after the close' },
+      after: { open: false, thread: [], newToasts: [ENDED_TOAST] },
+      stored: { thread: [], closed: true } });
   check('B1: a close that reaches a reloaded page late keeps the conversation that followed it',
     outcomes.lateCloseAfterReload, { reloaded: { open: false, thread: [] },
       shown: { open: true, thread: ['Fresh message after the reload'] },
@@ -834,10 +960,11 @@ try {
   check('B2: with a switch off and a pause still set, a reply stays quietly in the inbox', {
     ...quiet(outcomes.offPaused, 'Off, with a pause still set.'), acks: outcomes.offPaused.acks },
   { ...quietExpected, acks: ['chat-r5b:delivered'] });
-  check('B2: with a switch off and a pause still set, an announcement stays quietly in the inbox', {
+  check('B2: with a switch off and a pause still set, an announcement uses its independent surface', {
     ...quiet(outcomes.offPausedAnnouncement, 'An announcement while off.'),
     commandAcks: outcomes.offPausedAnnouncement.commandAcks },
-  { ...quietExpected, commandAcks: ['received:pending', 'completed:applied'] });
+  { ...quietExpected, notifications: [{ title: 'Message from Teacher', message: 'An announcement while off.' }],
+    commandAcks: ['received:pending', 'completed:applied'] });
   check("B2: with a switch off and a pause still set, the student's Message click keeps today's toast", {
     open: outcomes.offPausedStudentOpen.open, messageButton: outcomes.offPausedStudentOpen.messageButton,
     newToasts: outcomes.offPausedStudentOpen.newToasts }, { open: false, messageButton: 'Unavailable', newToasts: [DISABLED_TOAST] });
@@ -879,12 +1006,44 @@ try {
     scheduledView(outcomes.scheduled.releasedFabFirst), { open: true, overlay: false, last: 'During the next Attention',
       acks: ['scheduled-r3:seen'], notifications: ['Message from Teacher'] });
 
-  // Heartbeat inbox (unchanged): a command-linked announcement reaches the
-  // chat; a legacy row without a commandId stays in the inbox only.
-  check('heartbeat: an announcement reaches the chat and a legacy row stays in the inbox', {
-    last: outcomes.heartbeat.thread.at(-1), legacyInThread: has(outcomes.heartbeat.thread, 'Legacy inbox row'),
+  // Heartbeat announcements use the modal; legacy rows stay in the inbox.
+  check('heartbeat: an announcement reaches its modal and a legacy row stays in the inbox', {
+    announcement: outcomes.heartbeat.announcement, legacyInThread: has(outcomes.heartbeat.thread, 'Legacy inbox row'),
     inbox: ['heartbeat-announcement', 'heartbeat-legacy-row'].map(id => has(outcomes.heartbeat.inbox, id)) },
-  { last: 'Heartbeat announcement', legacyInThread: false, inbox: [true, true] });
+  { announcement: 'Heartbeat announcement', legacyInThread: false, inbox: [true, true] });
+
+  check('lifecycle: queued private message before End Chat never opens or ACKs delivered', {
+    open: outcomes.lifecycleExpired.open, thread: outcomes.lifecycleExpired.thread,
+    notifications: outcomes.lifecycleExpired.notifications, delivered: outcomes.lifecycleExpired.acks.includes('lifecycle-old:delivered') },
+  { open: false, thread: [], notifications: [], delivered: false });
+  check('lifecycle: fresh G survives delayed close G', { fresh: outcomes.lifecycleFresh.thread,
+    afterClose: outcomes.lifecycleLateClose.thread, open: outcomes.lifecycleLateClose.open },
+  { fresh: ['A fresh generation'], afterClose: ['A fresh generation'], open: true });
+  for (const key of ['lifecycleOffExpired', 'lifecycleOldEpoch', 'lifecycleWithdrawal'])
+    check(`lifecycle: ${key} never delivers private content`, {
+      contains: outcomes[key].thread.some(text => text.includes('Queued before hard-off') || text.includes('Must stay retired')),
+      notifications: outcomes[key].notifications, delivered: outcomes[key].acks.some(ack => ack.endsWith(':delivered')) },
+    { contains: false, notifications: [], delivered: false });
+  check('lifecycle: hard-off leaves announcements available', { announcement: outcomes.lifecycleOffAnnouncement.announcement,
+    notifications: titles(outcomes.lifecycleOffAnnouncement.notifications) },
+  { announcement: 'Announcements remain available', notifications: ['Message from Teacher'] });
+  check('lifecycle: watermarks survive memory retirement only in protected session storage', outcomes.lifecycleRecovery,
+    { schoolEpoch: 2, generation: 3, localPresent: false, sessionPresent: true });
+  check('lifecycle: protected recovery permits only a current generation', outcomes.lifecycleRecoveredFresh.thread,
+    ['Current after protected recovery']);
+  check('lifecycle: typed activity return cannot lower the retired generation after protected reload', outcomes.lifecycleActivityReturn,
+    { floor: 3, oldDelivered: false });
+  check('lifecycle: missing full-state ownership does not ACK private delivery', {
+    newText: outcomes.lifecycleMissingSnapshot.thread.includes('Must wait for known ownership'),
+    delivered: outcomes.lifecycleMissingSnapshot.acks.some(ack => ack.endsWith(':delivered')),
+    notifications: outcomes.lifecycleMissingSnapshot.notifications }, { newText: false, delivered: false, notifications: [] });
+  check('lifecycle: a queued student reply keeps its token and never retries across End Chat', outcomes.lifecycleStudentRetry,
+    { queued: true, frozenGeneration: 3, postGeneration: 3, transmissions: 1, remainsQueued: false });
+  check('lifecycle: terminal expiry drains ACK while ordinary stale authority remains retryable', outcomes.lifecycleTerminalReceipts,
+    { tokenRetained: true, expiredDrained: true, authorityStaleRetained: true });
+  check('lifecycle: admission requires student idempotency support', outcomes.lifecycleMissingDependency, false);
+  check('lifecycle: capability withdrawal never sends a new student reply through legacy transport', outcomes.lifecycleStudentWithdrawal,
+    { code: 'PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE', transmitted: false });
 
   // B4: teacher text stays text on the page and in the popup inbox.
   check('the page chat shows teacher markup as text', outcomes.markupOnPage.thread.at(-1), MARKUP);

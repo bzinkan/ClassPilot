@@ -72,6 +72,9 @@ let authGateManagedPolicyFenceRetryTimer = null;
 let studentMessageEpoch = 0;
 let currentStudentMessageContext = null;
 let currentFabAuthorityBinding = null;
+let privateChatLifecycleRequired = false;
+let privateChatLifecycleState = null;
+const privateChatCloseHandled = new Map();
 const authGateQuarantinedElements = new Map();
 const authGateDetachedBrowsingContexts = new Map();
 const AUTH_GATE_FRAME_ORIGIN = chrome.runtime.getURL('').replace(/\/$/, '');
@@ -170,7 +173,11 @@ function withCurrentStudentMessageContext(message, apply, sendResponse) {
     ) {
       currentStudentMessageContext = { ...studentMessageContext };
       currentFabAuthorityBinding = response.fabBinding || null;
-      apply();
+      if (response.privateChatLifecycleRequired === true) {
+        privateChatLifecycleRequired = true;
+        adoptPagePrivateChatLifecycle(response.privateChatLifecycleState);
+      }
+      apply(response);
       sendResponse?.({ success: true });
       return;
     }
@@ -200,6 +207,41 @@ function studentClassroomContext(value) {
 function studentClassroomKey(value) {
   const context = studentClassroomContext(value);
   return context ? context.supervisionContextId ? `supervision:${context.supervisionContextId}` : `teaching:${context.teachingSessionId}` : null;
+}
+
+function pagePrivateChatToken(value) {
+  if (!value || typeof value !== 'object' || typeof value.threadId !== 'string'
+    || !value.threadId || value.threadId.length > 128
+    || !['schoolEpoch', 'activityEpoch', 'threadGeneration'].every(key =>
+      Number.isSafeInteger(value[key]) && value[key] > 0)) return null;
+  return { threadId: value.threadId, schoolEpoch: value.schoolEpoch,
+    activityEpoch: value.activityEpoch, threadGeneration: value.threadGeneration };
+}
+
+function privateChatThreadForPage(value) {
+  return privateChatLifecycleState?.threads?.find(thread =>
+    studentClassroomKey(thread) === studentClassroomKey(value)) || null;
+}
+
+function pagePrivateChatEntryCurrent(value) {
+  const token = pagePrivateChatToken(value?.privateChatLifecycle);
+  const known = privateChatThreadForPage(value);
+  return Boolean(token && known && token.threadId === known.threadId
+    && token.schoolEpoch === known.schoolEpoch && token.activityEpoch === known.activityEpoch
+    && token.threadGeneration >= known.threadGeneration);
+}
+
+function adoptPagePrivateChatLifecycle(state) {
+  if (!state || !Number.isSafeInteger(state.schoolEpoch) || state.schoolEpoch <= 0
+    || !Array.isArray(state.threads) || state.threads.length > 32) return;
+  if (privateChatLifecycleState?.schoolEpoch > state.schoolEpoch) return;
+  const prior = privateChatLifecycleState;
+  privateChatLifecycleState = { schoolEpoch: state.schoolEpoch, threads: state.threads.map(thread => {
+    const old = prior?.schoolEpoch === state.schoolEpoch && prior.threads.find(value =>
+      studentClassroomKey(value) === studentClassroomKey(thread));
+    return old && (old.activityEpoch > thread.activityEpoch || old.activityEpoch === thread.activityEpoch
+      && old.threadGeneration > thread.threadGeneration) ? old : thread;
+  }) };
 }
 
 function studentClassroomContexts(value) {
@@ -346,6 +388,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     studentMessageEpoch += 1;
     currentStudentMessageContext = null;
     currentFabAuthorityBinding = null;
+    privateChatLifecycleRequired = false;
+    privateChatLifecycleState = null;
+    privateChatCloseHandled.clear();
     seenChatMsgIds.clear();
     respondedPollIds.clear();
     chatMessages = [];
@@ -417,7 +462,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // close this page knows (a delayed pre-close message) never reopens
       // the chat; the popup inbox keeps it.
       const closeStamp = Number(message.data?.chatClosedAt) || 0;
-      if (closeStamp < chatClosedAt) return;
+      if (privateChatLifecycleRequired || message.data?.privateChatLifecycle) {
+        if (!pagePrivateChatEntryCurrent(message.data)) return;
+        const token = pagePrivateChatToken(message.data.privateChatLifecycle);
+        const known = privateChatThreadForPage(message.data);
+        if (token.threadGeneration > known.threadGeneration) known.threadGeneration = token.threadGeneration;
+        chatMessages = chatMessages.filter(entry => pagePrivateChatEntryCurrent(entry));
+        if (chatMessages.length === 0) chatClosed = true;
+      } else if (closeStamp < chatClosedAt) return;
       // Class or school messaging is off: students see no chat and no toast.
       // The popup inbox keeps the message.
       if (!chatChannelOn()) return;
@@ -437,7 +489,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // The message followed a teacher close this page has not applied yet:
       // its backup delivery (heartbeat) can overtake the close's own page
       // message. That close ended the thread on screen, so it goes first.
-      if (closeStamp > chatClosedAt) {
+      if (!message.data?.privateChatLifecycle && closeStamp > chatClosedAt) {
         chatClosedAt = closeStamp;
         chatMessages = [];
         chatClosed = true;
@@ -458,6 +510,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         fromName: message.data.fromName,
         time: Date.now(),
         closeStamp,
+        ...(message.data?.privateChatLifecycle ? { privateChatLifecycle: message.data.privateChatLifecycle } : {}),
       });
       persistFabChatState();
       renderChatMessages();
@@ -469,6 +522,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // close, so each worker-stamped close applies once.
   if (message.type === 'chat-closed') {
     return withCurrentStudentMessageContext(message, () => {
+      if (privateChatLifecycleRequired || message.data?.privateChatLifecycle) {
+        const token = pagePrivateChatToken(message.data?.privateChatLifecycle);
+        const known = privateChatThreadForPage(message.data);
+        if (!token || !known || token.threadId !== known.threadId || token.schoolEpoch !== known.schoolEpoch
+          || token.activityEpoch !== known.activityEpoch) return;
+        const closeKey = `${studentClassroomKey(message.data)}:${token.schoolEpoch}:${token.activityEpoch}:${token.threadId}`;
+        if (token.threadGeneration <= (privateChatCloseHandled.get(closeKey) || 0)) return;
+        privateChatCloseHandled.set(closeKey, token.threadGeneration);
+        if (privateChatCloseHandled.size > 32) privateChatCloseHandled.delete(privateChatCloseHandled.keys().next().value);
+        const retired = chatMessages.filter(entry => !pagePrivateChatEntryCurrent(entry));
+        if (retired.length === 0) {
+          if (chatMessages.length === 0 && message.data.wasOpen === true && token.threadGeneration === known.threadGeneration)
+            showFabNotification('Teacher ended the chat.');
+          return;
+        }
+        chatMessages = chatMessages.filter(entry => pagePrivateChatEntryCurrent(entry));
+        if (chatMessages.length === 0) { chatClosed = true; chatDisplayDeferred = false; hideMessageBox(); closeFabMenu(); }
+        persistFabChatState(); renderChatMessages();
+        if (message.data.wasOpen === true) showFabNotification('Teacher ended the chat.');
+        return;
+      }
       const closedAt = Number(message.data?.closedAt) || 0;
       if (closedAt ? closedAt <= chatCloseHandledAt : chatClosed) return;
       chatCloseHandledAt = Math.max(chatCloseHandledAt, closedAt);
@@ -3010,6 +3084,7 @@ function persistFabChatState() {
     type: 'persist-fab-chat-state',
     messages: chatMessages.slice(-50),
     chatClosed,
+    ...(privateChatLifecycleRequired ? { expectedPrivateChatLifecycle: pagePrivateChatToken(privateChatThreadForPage(actionContext)) } : {}),
     ...studentActionAuthorityPayload(actionContext),
   }, () => {
     // Durable state is advisory UI history but identity-bound. The worker owns
@@ -3141,6 +3216,16 @@ function applyFabState(state = {}) {
       revision: Number(state.revision ?? nextContext.revision ?? 0),
       lifecycleRevision: Number(state.lifecycleRevision ?? nextContext.lifecycleRevision ?? 0),
     };
+  }
+  if (state.privateChatLifecycleState) {
+    privateChatLifecycleRequired = true;
+    adoptPagePrivateChatLifecycle(state.privateChatLifecycleState);
+    const retained = chatMessages.filter(entry => pagePrivateChatEntryCurrent(entry));
+    if (retained.length !== chatMessages.length) {
+      chatMessages = retained;
+      if (retained.length === 0) { chatClosed = true; chatDisplayDeferred = false; hideMessageBox(); }
+      renderChatMessages();
+    }
   }
 
   if (typeof state.messagingEnabled === 'boolean') {

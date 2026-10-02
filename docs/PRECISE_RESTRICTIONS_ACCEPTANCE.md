@@ -3,19 +3,20 @@
 This source slice implements SchoolPilot's finalized #555/#559 precise resource
 contract. The byte-identical shared fixture has SHA-256
 `4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243`.
-This source slice retains the main manifest's 2.9.6 version; it does not identify
-the published Store package or imply publication of this implementation. The
-combined local successor selected after the dated listing/history checks is
-2.10.0. Its separate source/package evidence is in
-`release-evidence/classpilot-2.10.0-candidate-20260930.json`. Publication is outside
+The combined unpublished successor is now 2.9.7; its source and exact-package
+results are recorded separately in [the current candidate record](CLASS_PILOT_2_9_7_CANDIDATE.md).
+The earlier `release-evidence/classpilot-2.10.0-candidate-20260930.json` remains
+immutable historical evidence and does not cover the new extension bytes.
+Neither record identifies the published Store package. Publication is outside
 this implementation workstream.
 
 ## Enforcement and compatibility
 
 Resource-only Flight Paths and resource/Section Waypoints use strict whole-state
 validation. One matcher drives navigation, tab creation, reconciliation and
-restriction destinations. School and teacher blocks and Attention retain their
-priority over resources; temporary allows cannot become resource exceptions.
+restriction destinations. School and teacher blocks retain their priority over
+resources; temporary allows cannot become resource exceptions. Attention covers
+the page while independent DNR, precise and authentication policies remain active.
 Only negotiated, exact-bound delivery can install new precise policy.
 
 Main-frame DNR rules are built before mutation, checked against the classroom
@@ -61,8 +62,10 @@ The Store must be verified again immediately before any authorized later upload.
 [Official listing](https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca).
 
 Focus is a separate dependent source slice. Package precise enforcement and
-Focus together only after both source and exact-package checks pass. Record
-commit, selected version, ZIP SHA-256 and results on two managed Chromebooks.
-No local Chrome simulation satisfies that managed-device gate. Capabilities
+Focus together only after both source and exact-package checks pass. For the
+2.9.7 release the user expressly waived the two managed Chromebook pre-release
+gate and chose exact-package live production acceptance after their greenlight.
+Record installed version/capabilities and actual live results; local Chrome
+simulations remain distinct from managed production evidence. Capabilities
 remain default off on the server. Deployment, activation, Store upload and
 incompatible-state clearing/rollback require their separate workstreams.

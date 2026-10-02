@@ -60,6 +60,7 @@ export const RECOVERY_CASES = Object.freeze({
   // lifecycle events, writing student names into page-owned elements that
   // carried the form's IDs; 2.9.6 removes it and refuses web-page senders.
   'page-dom-roster-isolation': { expectedRedOnBase: '2.9.5', expectedFailure: '[regression:page-roster-isolation]' },
+  'private-chat-worker-suspension': { expectedRedOnBase: false },
 });
 if (process.argv.includes('--list-cases')) {
   console.log(JSON.stringify(RECOVERY_CASES));
@@ -2587,13 +2588,13 @@ await withBrowser({ caseName: 'recovered-startup-obsolete-school', seed: (origin
   console.log('PASS recovered startup clears obsolete supervision authority (protocol, overlay, command authority)');
 });
 
-async function checkWorkerSuspension({ context, worker, extensionId, fixture }, includeFocus = false) {
+async function checkWorkerSuspension({ context, worker, extensionId, fixture }, includeFocus = false, includePrivateChat = false) {
   if (includeFocus) assert.ok(await worker.evaluate(() => EXTENSION_CAPABILITIES.includes('focusTabV1')),
     '[regression:focus-wake] exact Focus capability is absent');
   // Phase A: a durable signed-in student with a live supervision-context
   // classroom state, FAB context and timer overlay, written through the
   // production persistence paths (not hand-seeded storage).
-  const live = await worker.evaluate(async ({ origin, includeFocus }) => {
+  const live = await worker.evaluate(async ({ origin, includeFocus, includePrivateChat }) => {
     await authStateRestorePromise; await classroomStateRestorePromise; await studentAuthMutationTail;
     scheduleHeartbeat(null);
     await new Promise((done) => chrome.storage.local.set({ deviceId: 'device-live', autoRegistrationPaused: true,
@@ -2641,6 +2642,20 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
       if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
       focusMaintenanceTimer = null;
     }
+    if (includePrivateChat) {
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+        'scheduledClassroomV1', 'classroomStateV1', 'studentChatIdempotencyV1', 'privateChatLifecycleV1'] }, auth);
+      const token = { threadId: 'suspension-private-thread', schoolEpoch: 3, activityEpoch: 4, threadGeneration: 7 };
+      await applyFabSettings({ ...currentFabState, revision: 2, messagingEnabled: true, messagingChannelEnabled: true,
+        activeContexts: [{ supervisionContextId: 'ctx-live' }],
+        privateChatLifecycleState: { schoolEpoch: 3, threads: [{ ...token, teachingSessionId: null, supervisionContextId: 'ctx-live' }] } }, { authContext: auth });
+      // Negotiating scheduled authority changes the initial legacy FAB scope;
+      // install the timer in that admitted scope before the suspension proof.
+      await persistTimerOverlay({ authority: { supervisionContextId: 'ctx-live' }, data: { action: 'start', seconds: 1800 } }, { authContext: auth });
+      await recordTeacherChatClosed({ supervisionContextId: 'ctx-live', contextAuthorityRevision: '0',
+        studentId: auth.studentId, studentSessionId: auth.studentSessionId, studentControlRevision: 41,
+        privateChatLifecycle: { ...token, threadGeneration: 8 } }, auth);
+    }
     // Classroom control state is durable (local); FAB context and overlays are
     // browser-session scoped, so the production writer routes them to session.
     const stored = await new Promise((done) => chrome.storage.local.get(['classroomControlStateV1', 'studentAuthInvalidatingV1'],
@@ -2648,7 +2663,7 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
     return { authContextId, focusedReceipt, focusTargetId, hardExpiresAt: currentClassroomState?.hardExpiresAt, outcome: application?.outcome ?? null, classroom: currentClassroomState?.supervisionContextId ?? null, revision: currentClassroomState?.revision ?? null,
       storedClassroom: stored.classroomControlStateV1?.supervisionContextId ?? null, storedTimer: stored.classroomOverlayStateV1?.timer?.supervisionContextId ?? null,
       storedBinding: stored.fabContextV1?.binding ?? null, marker: stored.studentAuthInvalidatingV1 ?? null, overlayTimer: overlay?.timer?.supervisionContextId ?? null };
-  }, { origin: fixture.origin, includeFocus });
+  }, { origin: fixture.origin, includeFocus, includePrivateChat });
   assert.equal(live.classroom, 'ctx-live', `fixture classroom state did not apply (${JSON.stringify(live)})`);
   assert.equal(live.storedClassroom, 'ctx-live', `fixture classroom state was not persisted (${JSON.stringify(live)})`);
   if (!includeFocus) assert.equal(live.storedTimer, 'ctx-live', `fixture timer overlay was not persisted (${JSON.stringify(live)})`);
@@ -2722,6 +2737,32 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
     assert.ok(!focused.publicRefs.includes(live.focusedReceipt.tabRef), 'private receipt escaped capped public snapshot after cold wake');
     console.log('PASS managed native worker suspension preserves exact private Focus receipt and original deadline');
   }
+  if (includePrivateChat) {
+    const lifecycle = await woken.evaluate(async () => {
+      const auth = captureAuthenticatedContext('private chat wake check');
+      await loadPrivateChatLifecycle(auth);
+      const requiredBeforeNegotiation = privateChatLifecycleEstablishedBinding === monitoringEventAuthBindingForContext(auth);
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+        'scheduledClassroomV1', 'classroomStateV1', 'studentChatIdempotencyV1', 'privateChatLifecycleV1'] }, auth);
+      const frame = { supervisionContextId: 'ctx-live', privateChatLifecycle: { threadId: 'suspension-private-thread',
+        schoolEpoch: 3, activityEpoch: 4, threadGeneration: 7 } };
+      // Cold wake withholds scheduled activity until fresh negotiation/FAB.
+      // A recovered stale snapshot must restore authority without lowering G8.
+      await applyFabSettings({ ...currentFabState, revision: 3, messagingEnabled: true, messagingChannelEnabled: true,
+        activeContexts: [{ supervisionContextId: 'ctx-live' }], privateChatLifecycleState: {
+          schoolEpoch: 3, threads: [{ ...frame.privateChatLifecycle, teachingSessionId: null, supervisionContextId: 'ctx-live' }] } }, { authContext: auth });
+      return { requiredBeforeNegotiation, schoolEpoch: currentPrivateChatLifecycle?.schoolEpoch,
+        generation: privateChatThreadFor(frame, auth)?.threadGeneration,
+        localPresent: Boolean((await rawLocalKv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]),
+        sessionPresent: Boolean((await durableSessionKv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]),
+        expiredAccepted: privateTeacherMessageIsCurrent(frame, auth),
+        currentAccepted: privateTeacherMessageIsCurrent({ ...frame, privateChatLifecycle: { ...frame.privateChatLifecycle, threadGeneration: 8 } }, auth) };
+    });
+    assert.deepEqual(lifecycle, { requiredBeforeNegotiation: true, schoolEpoch: 3, generation: 8,
+      localPresent: false, sessionPresent: true, expiredAccepted: false, currentAccepted: true },
+    `native suspension lost the exact private chat generation: ${JSON.stringify(lifecycle)}`);
+    console.log('PASS managed-mode native worker suspension retains protected private chat generation and rejects expired messages');
+  }
   // Recorded, not asserted: the timer/poll overlay is a separate session
   // record. In 2.8.9 the worker-wake classroom restore treats the in-memory
   // scope change (null -> supervision context) as an authority change and
@@ -2730,6 +2771,7 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
 }
 await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetwork: true }, checkWorkerSuspension);
 await withBrowser({ caseName: 'focus-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, true));
+await withBrowser({ caseName: 'private-chat-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, false, true));
 
 await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true }, async ({ context, worker, fixture }) => {
   fixture.state.allowFreshLogin = true;

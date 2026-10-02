@@ -24,6 +24,12 @@ try {
   await waitForExtensionWorkerDeclarations(worker);
   assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version),
     JSON.parse(readFileSync(join(extension, 'manifest.json'), 'utf8')).version);
+  // Attach interception before native navigation, so title assertions use
+  // real lesson documents rather than DNS-error pages with lesson URLs.
+  for (let index = 0; index < 2; index++) {
+    const targetPage = await browser.newPage();
+    await targetPage.goto('https://example.test/same', { waitUntil: 'load' });
+  }
   const result = await worker.evaluate(async () => {
     await authStateRestorePromise.catch(() => {}); await classroomStateRestorePromise.catch(() => {});
     await studentAuthMutationTail.catch(() => {});
@@ -79,8 +85,8 @@ try {
     const target = (entry, observedRevision, assignmentId, targetKind = 'snapshot') => ({ active: true, assignmentId,
       tabRef: entry.tabRef, observedRevision, targetKind, source: 'teacher', setAt: new Date().toISOString() });
     const exact = async () => buildOpaqueTabSnapshot(await chrome.tabs.query({}), auth);
-    const first = await chrome.tabs.create({ url: 'https://example.test/same', active: true });
-    const second = await chrome.tabs.create({ url: 'https://example.test/same', active: true });
+    const [first, second] = await chrome.tabs.query({ url: 'https://example.test/same' });
+    require(first && second, 'two intercepted native lesson documents are required');
     await wait(async () => (await chrome.tabs.get(first.id)).url === 'https://example.test/same'
       && (await chrome.tabs.get(second.id)).url === 'https://example.test/same', 'duplicate native tabs did not finish navigation');
     await install(state());
@@ -90,6 +96,17 @@ try {
     require(firstRef?.tabRef && secondRef?.tabRef && firstRef.tabRef !== secondRef.tabRef, 'duplicate URLs must have distinct refs');
     const a = target(firstRef, snapshot.revision, 'focus-A');
     const firstFocusState = state(a);
+    // A document title is display metadata, even on the selected tab. Both
+    // native title changes refresh wire metadata without staling exact refs.
+    await chrome.scripting.executeScript({ target: { tabId: first.id },
+      func: () => { document.title = 'Selected lesson title changed'; } });
+    await chrome.scripting.executeScript({ target: { tabId: second.id },
+      func: () => { document.title = 'Unrelated lesson title changed'; } });
+    const titledSnapshot = await exact();
+    require(titledSnapshot.revision === a.observedRevision
+      && titledSnapshot.tabs.some(tab => tab.title === 'Selected lesson title changed')
+      && titledSnapshot.tabs.some(tab => tab.title === 'Unrelated lesson title changed'),
+      `title metadata invalidated an exact target or was not refreshed: ${JSON.stringify(titledSnapshot.tabs)}`);
     const firstFocusEnvelope = { ...envelope(firstFocusState.revision), type: 'remote-control',
       commandId: 'focus-command-A', classroomState: firstFocusState, deliveryPolicy: 'persistent_control',
       expiresAt: new Date(expiry).toISOString() };

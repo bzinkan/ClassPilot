@@ -270,7 +270,8 @@
     const restrictions = state?.restrictions ?? emptyRestrictions();
     const host = normalizeDomain(url);
     if (!isHttpTab({ url }) || !host) return { allowed: true, source: null };
-    if (restrictions.attentionMode?.active) return { allowed: false, source: 'attention_mode' };
+    // Attention is a page overlay. Browser navigation keeps the independent
+    // school and classroom policy; it never destroys the lesson's history.
     const matches = domains => (domains || []).some(domain => isHostWithinDomain(host, normalizeDomain(domain)));
     if (matches(policy?.globalBlockedDomains)) return { allowed: false, source: 'school' };
     const restricted = restrictions.screenLock?.active || restrictions.flightPath?.active;
@@ -1231,14 +1232,8 @@
     const globalDomains = normalizeDomainList(input?.globalBlockedDomains, 'school block list');
 
     if (ranges.has('classroom')) {
-      if (classroom.attentionMode?.active) {
-        rules.push({
-          id: DNR_RANGES.classroom[0],
-          priority: 2000,
-          action: { type: 'block' },
-          condition: { resourceTypes: ['main_frame'] },
-        });
-      } else {
+      {
+        // Attention must not replace these independently owned restrictions.
         // A screen lock is an overlay, not a destructive replacement for an
         // independently configured Flight Path. It wins enforcement while
         // active; removing only the screen lock reveals the retained path.
@@ -1337,11 +1332,9 @@
       const authPassThrough = classroomState?.authPassThrough || null;
       const restrictionAuthPassThroughActive = input?.restrictionAuthPassThrough === true
         && Boolean(authPassThrough)
-        && !classroom.attentionMode?.active
         && (classroom.screenLock?.active || classroom.flightPath?.active);
       const legacyRestrictionSsoActive = input?.restrictionSsoPassThrough === true
         && classroomState?.deliveryContext?.lateSignInRestrictionSso === true
-        && !classroom.attentionMode?.active
         && (classroom.screenLock?.active || classroom.flightPath?.active);
       if (restrictionAuthPassThroughActive || legacyRestrictionSsoActive) {
         const candidateAuthRules = restrictionAuthPassThroughActive
@@ -1370,7 +1363,7 @@
             id: DNR_RANGES.restrictionSso[0] + index,
             // This allow must outrank both the Waypoint block (500) and the
             // Flight Path block (1). School policy remains authoritative at
-            // 1000 and attention mode at 2000.
+            // 1000 and explicit teacher blocks above authentication.
             priority: 600,
             action: { type: 'allow' },
             condition,
@@ -1693,7 +1686,6 @@
       : RESTRICTION_SSO_COLD_START_URL;
 
     if (options.portalFirstOnLogin === true && defaultAuthProfile
-      && !restrictions.attentionMode?.active
       && (restrictions.screenLock?.active || restrictions.flightPath?.active)) {
       // Login entry is independent of control revisions. Preserve every
       // teacher-approved page, and reuse a portal tab without reloading it.
@@ -2020,6 +2012,51 @@
     );
   }
 
+  function normalizePrivateChatLifecycle(value) {
+    if (!isPlainObject(value) || !hasExactKeys(value,
+      ['threadId', 'schoolEpoch', 'activityEpoch', 'threadGeneration'])) return null;
+    if (typeof value.threadId !== 'string' || !value.threadId || value.threadId.length > 128
+      || /[\s\u0000-\u001f\u007f]/.test(value.threadId)) return null;
+    if (!['schoolEpoch', 'activityEpoch', 'threadGeneration'].every(key =>
+      Number.isSafeInteger(value[key]) && value[key] > 0)) return null;
+    return { threadId: value.threadId, schoolEpoch: value.schoolEpoch,
+      activityEpoch: value.activityEpoch, threadGeneration: value.threadGeneration };
+  }
+
+  function normalizePrivateChatLifecycleState(value) {
+    if (!isPlainObject(value) || !hasExactKeys(value, ['schoolEpoch', 'threads'])
+      || !Number.isSafeInteger(value.schoolEpoch) || value.schoolEpoch <= 0
+      || !Array.isArray(value.threads) || value.threads.length > 32) return null;
+    const seen = new Set();
+    const threads = [];
+    for (const entry of value.threads) {
+      if (!isPlainObject(entry) || !hasExactKeys(entry, ['threadId', 'schoolEpoch', 'activityEpoch',
+        'threadGeneration', 'teachingSessionId', 'supervisionContextId'])) return null;
+      const token = normalizePrivateChatLifecycle({ threadId: entry.threadId, schoolEpoch: entry.schoolEpoch,
+        activityEpoch: entry.activityEpoch, threadGeneration: entry.threadGeneration });
+      const context = classroomContext(entry);
+      if (!token || token.schoolEpoch !== value.schoolEpoch || !context
+        || [entry.teachingSessionId, entry.supervisionContextId].some(id => id !== null
+          && (typeof id !== 'string' || !id || id.length > 200))) return null;
+      const key = classroomContextKey(context);
+      if (seen.has(key)) return null;
+      seen.add(key); threads.push({ ...token, teachingSessionId: context.teachingSessionId || null,
+        supervisionContextId: context.supervisionContextId || null });
+    }
+    return { schoolEpoch: value.schoolEpoch, threads };
+  }
+
+  // A close publishes the first generation it does NOT retire. A message at
+  // that generation survives a delayed duplicate close; older ones do not.
+  function privateChatLifecycleDecision(value, watermark) {
+    const token = normalizePrivateChatLifecycle(value);
+    const known = normalizePrivateChatLifecycle(watermark);
+    if (!token || !known) return 'unavailable';
+    if (token.threadId !== known.threadId || token.schoolEpoch !== known.schoolEpoch
+      || token.activityEpoch !== known.activityEpoch) return 'expired';
+    return token.threadGeneration < known.threadGeneration ? 'expired' : 'current';
+  }
+
   function normalizeTeacherMessage(rawMessage, nowValue = Date.now()) {
     const id = teacherMessageId(rawMessage);
     const message = boundedString(rawMessage?.message, MAX_MESSAGE_BODY_LENGTH);
@@ -2033,6 +2070,10 @@
         ?? positiveTimestamp(nowValue)
         ?? Date.now(),
       read: rawMessage?.read === true,
+      ...(rawMessage?.messageKind === 'announcement' || rawMessage?.messageKind === 'private'
+        ? { messageKind: rawMessage.messageKind } : {}),
+      ...(normalizePrivateChatLifecycle(rawMessage?.privateChatLifecycle)
+        ? { privateChatLifecycle: normalizePrivateChatLifecycle(rawMessage.privateChatLifecycle) } : {}),
       ...(positiveTimestamp(rawMessage?.seenAckedAt)
         ? { seenAckedAt: positiveTimestamp(rawMessage.seenAckedAt) }
         : {}),
@@ -2161,6 +2202,9 @@
     acknowledgedMonitoringEventIds,
     teacherMessageId,
     normalizeTeacherMessage,
+    normalizePrivateChatLifecycle,
+    normalizePrivateChatLifecycleState,
+    privateChatLifecycleDecision,
     normalizeMessageDedupIds,
     mergeTeacherMessageInbox,
   });

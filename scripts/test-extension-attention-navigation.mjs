@@ -1,25 +1,10 @@
-// Attention navigation regression proof for 2.10.0 (real Chrome, real events).
+// Overlay Attention regression proof for 2.9.7 (real Chrome, real events).
 //
-// 2.9.6 left URL changes inside the current document alone during Attention
-// and blocked a new navigation silently; Attention's main-frame DNR rule blocks
-// real loads. The 2.10.0 candidate also ran the navigation policy on
-// onHistoryStateUpdated, onReferenceFragmentUpdated and onCommitted, so every
-// pushState, replaceState, #fragment change and every navigation already in
-// flight when Attention began was stepped back with a "Navigation Blocked"
-// notification per step until the tab was about:blank. An Attention-suspended
-// Focus tab was then retired as off policy instead of resuming. A navigation
-// that starts while the Attention frame is being applied, and so reaches the
-// serialized policy only after Attention took effect, is also left alone
-// (2.9.6 and the candidate both stepped it back).
-// The one silent step-back for a new navigation also must not retrigger itself:
-// in a tab with several earlier documents, 2.9.6 and the candidate both blocked
-// that step-back's own history traversal and kept stepping back. That kept
-// step-back still costs the student the page: Attention's DNR rule blocks its
-// load of the earlier page too, so the tab shows Chrome's "blocked" error page
-// (or about:blank with no earlier entry) until the student reloads, as asserted
-// below. A precise Waypoint stays enforced: an in-page move off its resource
-// during Attention is reconciled when Attention is released and is redirected
-// at once without it.
+// Attention covers a page without blocking browser navigation or editing its
+// history. Allowed native loads, in-flight loads and same-document transitions
+// preserve their documents. Releasing Attention resumes the exact saved Focus
+// target. Independent school, Flight Path, Waypoint and authentication policies
+// remain enforced throughout; Attention never replaces their DNR rules.
 //
 // The unpacked extension runs in Chromium. Classroom and FAB state arrive as
 // SchoolPilot-shaped WebSocket frames through handleWsMessage. Navigation
@@ -357,8 +342,8 @@ try {
     { active: true, message: 'Eyes up front' }, { attentionMode: { active: true, message: 'Eyes up front' } }));
   assert.ok(attentionOn.includes('completed:applied'), `Attention frame was not applied: ${JSON.stringify(attentionOn)}`);
   assert.equal((await fixture(() => __attentionFixture.runtime())).attentionModeActive, true);
-  assert.equal(await fixture(() => __attentionFixture.attentionRuleInstalled()), true,
-    'Attention must install its main-frame DNR block');
+  assert.equal(await fixture(() => __attentionFixture.attentionRuleInstalled()), false,
+    'Attention overlay must never install a destructive main-frame DNR block');
   for (const target of [push, replace, fragment, link, documents]) {
     await target.page.waitForSelector('#classpilot-attention-overlay', { state: 'attached', timeout: 10_000 });
   }
@@ -392,6 +377,9 @@ try {
     await link.page.evaluate(() => document.getElementById('next').click()).catch(() => {});
     await fixture(({ tabId, url }) => __attentionFixture.waitForNavigation('onBeforeNavigate', tabId, url),
       { tabId: link.tabId, url: `${origin}/link-destination` });
+    await fixture(({ tabId, url }) => __attentionFixture.waitForNavigation('onCommitted', tabId, url),
+      { tabId: link.tabId, url: `${origin}/link-destination` });
+    await link.page.waitForSelector('#classpilot-attention-overlay', { state: 'attached', timeout: 10_000 });
     await fixture(() => __attentionFixture.settle());
     const activity = await fixture(value => __attentionFixture.since(value), mark);
     outcomes.linkNavigation = {
@@ -417,6 +405,9 @@ try {
     }).catch(() => {});
     await fixture(({ tabId, url }) => __attentionFixture.waitForNavigation('onBeforeNavigate', tabId, url),
       { tabId: documents.tabId, url: `${origin}/history-destination` });
+    await fixture(({ tabId, url }) => __attentionFixture.waitForNavigation('onCommitted', tabId, url),
+      { tabId: documents.tabId, url: `${origin}/history-destination` });
+    await documents.page.waitForSelector('#classpilot-attention-overlay', { state: 'attached', timeout: 10_000 });
     await fixture(() => __attentionFixture.settle());
     const activity = await fixture(value => __attentionFixture.since(value), mark);
     outcomes.multiDocumentLink = {
@@ -546,10 +537,26 @@ try {
     notifications: focusActivity.notifications.map(value => value.title),
   };
 
-  // Phase C: a precise Waypoint around Attention. Attention has priority, so an
-  // in-page move off the resource during Attention is left alone; releasing
-  // Attention reconciles the tab back to the Waypoint, and outside Attention
-  // the same move is still redirected at once.
+  // A real load on the saved native tab is the page-loss regression: it must
+  // commit beneath Attention and resume the same assignment after release.
+  await fixture(value => __attentionFixture.command('attention-mode', { active: true }, value),
+    { flightPath, focus, attentionMode: { active: true, message: 'Eyes up front' } });
+  const loadMark = await fixture(() => __attentionFixture.counts());
+  await focused.page.goto(`${origin}/focus-lesson/new-document`, { waitUntil: 'load' });
+  await focused.page.waitForSelector('#classpilot-attention-overlay', { state: 'attached', timeout: 10_000 });
+  assert.equal(await overlay(focused.page), true);
+  await fixture(value => __attentionFixture.command('attention-mode', { active: false }, value),
+    { flightPath, focus, attentionMode: { active: false } });
+  const loadResumed = await fixture(() => __attentionFixture.waitForFocus(['active', 'invalidated', 'inactive']));
+  const loadActivity = await fixture(value => __attentionFixture.since(value), loadMark);
+  outcomes.focusDocumentLoad = { state: loadResumed.state,
+    assignedTab: (await fixture(() => __attentionFixture.runtime())).focusTabId === focused.tabId,
+    ...(await committedView(focused.page)),
+    stepBacks: loadActivity.goBack.filter(tabId => tabId === focused.tabId).length,
+    notifications: loadActivity.notifications.map(value => value.title) };
+
+  // Phase C: a precise Waypoint remains enforced beneath Attention, so an
+  // in-page move off the resource is redirected during and after Attention.
   await focused.page.close();
   const section = { type: 'section', hostname: 'example.test', includeSubdomains: false, pathPrefix: '/lesson' };
   const waypoint = { screenLock: { active: true, url: `${origin}/lesson`, domain: 'example.test', resource: section } };
@@ -595,45 +602,24 @@ try {
   assert.deepEqual(outcomes.raceWithAttention, { attentionWhileHeld: false, url: `${origin}/race-destination`,
     destinationDocument: true, overlay: true, stepBacks: 0, notifications: [], blockedTelemetry: [] },
   `a navigation that started while Attention was being applied was stepped back: ${report}`);
-  assert.equal(outcomes.linkNavigation.destinationServed, false, `Attention DNR let a new load through: ${report}`);
-  assert.equal(outcomes.linkNavigation.destinationCommitted, false, `a link navigation committed during Attention: ${report}`);
-  assert.equal(outcomes.linkNavigation.destinationDocument, false, `a link destination rendered during Attention: ${report}`);
-  assert.deepEqual(outcomes.linkNavigation.blockedTelemetry, [{ url: `${origin}/link-destination`, policySource: 'attention_mode' }],
-    `a blocked Attention navigation must be recorded exactly once: ${report}`);
-  assert.deepEqual(outcomes.linkNavigation.notifications, [], `Attention blocks silently, as in 2.9.6: ${report}`);
-  assert.ok(outcomes.linkNavigation.stepBacks <= 1, `an Attention step-back retriggered itself: ${report}`);
-  // What the student is left with is the kept 2.9.6 step-back, measured, not
-  // assumed. With Attention's main-frame DNR rule in force (and no
-  // back/forward cache with the extension loaded), the step-back's own load
-  // of the earlier page is blocked too, so the tab shows Chrome's "blocked"
-  // error page for that earlier URL, or about:blank when Chrome had no earlier
-  // entry yet (goBackOrBlankForAuth's fallback). Chrome versions differ in
-  // whether the blocked load's error entry commits before the step-back.
-  // Releasing Attention does not reload it; that is a product decision.
-  const errorOrBlank = shown => shown.document === null && shown.overlay === false
-    && ['chrome-error', 'about:blank'].includes(shown.committed);
-  assert.ok([`${origin}/link-source`, 'about:blank'].includes(outcomes.linkNavigation.url)
-    && errorOrBlank(outcomes.linkNavigation.shown)
-    && (outcomes.linkNavigation.url === 'about:blank') === (outcomes.linkNavigation.shown.committed === 'about:blank')
-    && outcomes.linkNavigation.reloadedSource === false,
-  `the link tab after the Attention step-back is not the measured 2.9.6 outcome: ${report}`);
-  // The single step-back is itself a cross-document traversal. It must not be
-  // blocked and stepped back again on its way to about:blank. Chrome versions
-  // differ in whether the blocked load's error entry commits first, so that one
-  // step returns to /history-c or /history-b, never further, and Chrome shows
-  // its error page for that URL.
+  assert.equal(outcomes.linkNavigation.destinationServed, true, `Attention blocked an allowed load: ${report}`);
+  assert.equal(outcomes.linkNavigation.destinationCommitted, true, `the allowed link did not commit: ${report}`);
+  assert.equal(outcomes.linkNavigation.destinationDocument, true, `the allowed link did not render: ${report}`);
+  assert.deepEqual(outcomes.linkNavigation.blockedTelemetry, [], `Attention recorded an allowed load as blocked: ${report}`);
+  assert.deepEqual(outcomes.linkNavigation.notifications, [], `Attention showed navigation notification: ${report}`);
+  assert.equal(outcomes.linkNavigation.stepBacks, 0, `Attention moved browser history: ${report}`);
+  assert.equal(outcomes.linkNavigation.url, `${origin}/link-destination`);
+  assert.equal(outcomes.linkNavigation.shown.overlay, true);
   const { url: historyUrl, shown: historyShown, ...historyOutcome } = outcomes.multiDocumentLink;
-  assert.deepEqual(historyOutcome, { destinationServed: false, stepBacks: 1, notifications: [],
-    blockedTelemetry: [{ url: `${origin}/history-destination`, policySource: 'attention_mode' }], reloadedHistory: false },
-  `an Attention step-back retriggered itself: ${report}`);
-  assert.ok([`${origin}/history-c`, `${origin}/history-b`].includes(historyUrl),
-    `an Attention step-back walked past the student's last pages: ${report}`);
-  assert.deepEqual(historyShown, { committed: 'chrome-error', document: null, overlay: false },
-    `the multi-document tab after the Attention step-back is not the measured outcome: ${report}`);
-  assert.deepEqual(outcomes.afterAttentionStepBack, {
-    link: { url: outcomes.linkNavigation.url, ...outcomes.linkNavigation.shown },
-    documents: { url: historyUrl, ...historyShown },
-  }, `a stepped-back tab changed when Attention ended: ${report}`);
+  assert.deepEqual(historyOutcome, { destinationServed: true, stepBacks: 0, notifications: [],
+    blockedTelemetry: [], reloadedHistory: false }, `Attention disturbed the multi-document tab: ${report}`);
+  assert.equal(historyUrl, `${origin}/history-destination`);
+  assert.equal(historyShown.overlay, true);
+  assert.equal(historyShown.document, '/history-destination');
+  assert.equal(outcomes.afterAttentionStepBack.link.url, `${origin}/link-destination`);
+  assert.equal(outcomes.afterAttentionStepBack.link.overlay, false);
+  assert.equal(outcomes.afterAttentionStepBack.documents.url, `${origin}/history-destination`);
+  assert.equal(outcomes.afterAttentionStepBack.documents.overlay, false);
   assert.deepEqual(outcomes.afterAttention, {
     push: { url: `${origin}/spa-push/during-attention`, overlay: false },
     replace: { url: `${origin}/spa-replace/entry?autosave=1`, overlay: false },
@@ -644,12 +630,15 @@ try {
   assert.deepEqual(outcomes.focusAfterAttention, { focusStatus: 'active', focusReason: null, assignedTab: true,
     url: `${origin}/focus-lesson/during-attention`, foreground: true, sameDocument: true, stepBacks: 0, notifications: [] },
   `Focus did not resume on its intact tab after Attention: ${report}`);
-  untouched(outcomes.waypointPushState, `${origin}/outside/during-attention`);
+  assert.deepEqual(outcomes.focusDocumentLoad, { state: 'active', assignedTab: true,
+    committed: '/focus-lesson/new-document', document: '/focus-lesson/new-document',
+    overlay: false, stepBacks: 0, notifications: [] }, `Attention destroyed the saved Focus document: ${report}`);
+  assert.equal(outcomes.waypointPushState.url, `${origin}/lesson`, `Attention disabled precise Waypoint: ${report}`);
   assert.deepEqual(outcomes.waypointEnforcement, { afterAttention: `${origin}/lesson`, withoutAttention: `${origin}/lesson`,
     redirected: true, blockedTelemetry: [{ url: `${origin}/outside/without-attention`, policySource: 'resource' }] },
   `the precise Waypoint was not enforced around Attention: ${report}`);
   console.log(JSON.stringify({ attentionNavigation: outcomes }, null, 2));
-  console.log('PASS Attention leaves in-page and in-flight navigation alone, blocks new loads silently once, resumes Focus and keeps a precise Waypoint enforced');
+  console.log('PASS overlay Attention preserves native navigation/pages, resumes Focus and retains precise Waypoint enforcement');
 } finally {
   releaseInflight();
   raceHoldRelease();

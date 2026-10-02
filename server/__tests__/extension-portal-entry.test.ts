@@ -156,12 +156,12 @@ describe("portal login intent authority and restart lifecycle", () => {
     },
   );
 
-  it("pauses for attention and cancels when the teacher changes its revision", async () => {
+  it("allows authentication during overlay Attention and cancels when the teacher changes its revision", async () => {
     const { api } = harness();
     const state = snapshot();
     state.restrictions.attentionMode.active = true;
     await api.initialize(binding, state);
-    expect(await api.pending(state, binding)).toBe(false);
+    expect(await api.pending(state, binding)).toBe(true);
     expect((await api.read(binding))?.phase).toBe("pending");
     state.restrictions.attentionMode.active = false;
     state.revision++;

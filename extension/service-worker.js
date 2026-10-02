@@ -349,9 +349,11 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'chatPauseV1',
   'chatSeenAckV1',
   'focusTabV1',
+  'privateChatLifecycleV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'focusTabV1',
+  'privateChatLifecycleV1',
   'preciseRestrictionResourcesV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
@@ -742,6 +744,9 @@ const FAB_CHAT_CONTEXT_STORAGE_KEY = 'fabChatContextV1';
 // it: SchoolPilot's teacher-message and chat-closed frames carry no creation
 // or close time. It is a bare stamp, not tied to one student.
 const FAB_CHAT_CLOSED_AT_STORAGE_KEY = 'fabChatClosedAt';
+const PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY = 'privateChatLifecycleV1';
+let currentPrivateChatLifecycle = null;
+let privateChatLifecycleEstablishedBinding = null;
 // The newest teacher message that arrived during Attention, announced once
 // Attention ends (raiseDeferredTeacherMessageNotification). Ending Attention
 // together with its class drops it.
@@ -2011,6 +2016,7 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'fabChatMessages',
   'fabChatClosed',
   'fabChatClosedAt',
+  'privateChatLifecycleV1',
   'tabSnapshotV1',
   'focusTabRefsV1',
   'focusAssignmentV1',
@@ -6531,6 +6537,19 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   }
 
   const bindingChanged = priorContext.binding !== binding;
+  if (authContext && hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    if (Object.hasOwn(rawFabState, 'privateChatLifecycleState')) {
+      nextState.privateChatLifecycleState = await adoptPrivateChatLifecycleState(
+        rawFabState.privateChatLifecycleState, authContext, nextState);
+      assertCurrent('private chat lifecycle adoption');
+    } else {
+      // A negotiated full snapshot cannot restore private delivery without
+      // the server watermark. Other independent classroom UI still updates.
+      await markPrivateChatLifecycleUnavailable(authContext);
+      assertCurrent('private chat lifecycle recovery fence');
+      requestPrivateChatLifecycleRecovery();
+    }
+  }
   const lifecycleEnded = ['session-ended', 'entitlement-inactive']
     .includes(nextState.reason) || nextState.activeContexts.length === 0;
   const scheduledOwnerChanged = Boolean(nextState.supervisionContextId)
@@ -7159,6 +7178,8 @@ async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expect
     ...classroomAuthorityPayload(message),
     deliveryStatus,
     status: deliveryStatus,
+    ...(RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle)
+      ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle) } : {}),
     errorMessage: errorMessage || null,
     timestamp: new Date().toISOString(),
   };
@@ -7520,9 +7541,11 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
       title,
       favicon: faviconByTabId.get(tabId) || '',
     }));
-    const previousProjection = (bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
-      .map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }));
-    const changed = JSON.stringify(previousProjection) !== JSON.stringify(localEntries);
+    // Titles and favicons are display metadata. Only exact tab membership,
+    // ordering, opaque ref and URL changes invalidate a teacher's selection.
+    const identityProjection = entries => entries.map(({ tabId, tabRef, url }) => ({ tabId, tabRef, url }));
+    const previousProjection = identityProjection(bindingMatches && Array.isArray(prior.entries) ? prior.entries : []);
+    const changed = JSON.stringify(previousProjection) !== JSON.stringify(identityProjection(localEntries));
     const priorRevision = bindingMatches ? Number(prior.revision || 0) : 0;
     if (bindingMatches && !changed && Number.isSafeInteger(priorRevision) && priorRevision >= 1) {
       currentTabSnapshotRevision = priorRevision;
@@ -8085,6 +8108,7 @@ function commandAckReceiptIsDrainable(receipt, requireDisposition = false) {
 const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set([
   'INVALID_CHAT_ACK',
   'CHAT_MESSAGE_NOT_FOUND',
+  'PRIVATE_CHAT_EXPIRED',
 ]);
 
 function chatAckReceiptIsTerminal(receipt) {
@@ -8384,6 +8408,8 @@ function enqueueChatAck(rawAck, authContext) {
     deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
     status: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
     errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
+    ...(RuntimeCore.normalizePrivateChatLifecycle(rawAck.privateChatLifecycle)
+      ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(rawAck.privateChatLifecycle) } : {}),
     bindingVersion: 2,
     schoolId: authContext.schoolId || undefined,
     deviceId: authContext.deviceId,
@@ -8614,6 +8640,8 @@ function normalizeStudentChatEntry(raw = {}) {
     sessionId,
     ...context,
     ...(context.supervisionContextId ? { studentControlRevision: raw.studentControlRevision } : {}),
+    ...(RuntimeCore.normalizePrivateChatLifecycle(raw.expectedPrivateChatLifecycle)
+      ? { expectedPrivateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(raw.expectedPrivateChatLifecycle) } : {}),
     binding,
     queuedAt: Number(raw.queuedAt || Date.now()),
     updatedAt: Number(raw.updatedAt || Date.now()),
@@ -8946,6 +8974,16 @@ function assertStudentChatSessionCurrent(entry, authContext, reason = 'student m
     error.code = 'STUDENT_CHAT_SESSION_RETIRED';
     throw error;
   }
+  if (entry.expectedPrivateChatLifecycle || hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    const known = privateChatThreadFor(entry, authContext);
+    if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext) || teacherChatChannelOff()
+      || RuntimeCore.privateChatLifecycleDecision(entry.expectedPrivateChatLifecycle, known) !== 'current'
+      || entry.expectedPrivateChatLifecycle.threadGeneration !== known.threadGeneration) {
+      const error = new Error('Student message belongs to a retired private chat');
+      error.code = 'STUDENT_CHAT_SESSION_RETIRED';
+      throw error;
+    }
+  }
   return sessionId;
 }
 
@@ -8972,6 +9010,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
   if (!entry || entry.binding !== binding) throw authContextSuperseded('student message delivery');
   let attempted = entry;
   try {
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) await loadPrivateChatLifecycle(authContext);
     assertStudentChatSessionCurrent(entry, authContext, 'student message delivery');
     const attemptStatus = entry.attempts > 0 ? 'Retrying' : 'Sending';
     await notifyStudentChatStatus(entry, attemptStatus, {}, authContext);
@@ -8996,6 +9035,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
           messageType: attempted.messageType,
           sessionId: attempted.sessionId,
           ...classroomAuthorityPayload(attempted),
+          ...(attempted.expectedPrivateChatLifecycle ? { expectedPrivateChatLifecycle: attempted.expectedPrivateChatLifecycle } : {}),
         }),
         signal: authContext.signal,
       },
@@ -9185,6 +9225,17 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     error.pauseReason = currentFabState.pauseReason === 'testing' ? 'testing' : 'teacher';
     throw error;
   }
+  let expectedPrivateChatLifecycle = null;
+  await loadPrivateChatLifecycle(authContext);
+  if (privateChatLifecycleEstablishedBinding === monitoringEventAuthBindingForContext(authContext)
+    && !hasNegotiatedCapability('privateChatLifecycleV1', authContext))
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    expectedPrivateChatLifecycle = RuntimeCore.normalizePrivateChatLifecycle(privateChatThreadFor(raw, authContext));
+    if (!expectedPrivateChatLifecycle || teacherChatChannelOff()
+      || !hasNegotiatedCapability('studentChatIdempotencyV1', authContext))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
   if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
     if (raw.supervisionContextId) throw new Error('Scheduled classroom messaging requires durable chat support');
     return sendLegacyStudentChatMessage(raw, authContext, requestedSessionId);
@@ -9196,6 +9247,7 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     messageType: raw.messageType,
     sessionId: requestedSessionId,
     ...classroomAuthorityPayload(raw),
+    ...(expectedPrivateChatLifecycle ? { expectedPrivateChatLifecycle } : {}),
     queuedAt: Date.now(),
     status: 'sending',
   }, authContext);
@@ -9337,6 +9389,7 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
       MESSAGE_INBOX_STORAGE_KEY,
       MESSAGE_INBOX_BINDING_KEY,
       MESSAGE_INBOX_DEDUP_KEY,
+      PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY,
       'fabChatMessages',
       'fabChatClosed',
       PENDING_CHECK_IN_KEY,
@@ -9690,6 +9743,199 @@ function teacherChatCloseStamp(value) {
   return Number.isSafeInteger(stamp) && stamp > 0 ? stamp : 0;
 }
 
+function privateChatLifecycleError(code) {
+  const error = new Error('Private chat lifecycle is unavailable or retired');
+  error.code = code;
+  return error;
+}
+
+function requestPrivateChatLifecycleRecovery() {
+  lastFabHeartbeatSyncRequestAt = 0;
+  scheduleEventHeartbeat('private-chat-lifecycle-recovery');
+}
+
+function privateChatThreadFor(authority, authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding || currentPrivateChatLifecycle?.binding !== binding || currentPrivateChatLifecycle.recoveryPending) return null;
+  const key = RuntimeCore.classroomContextKey(authority);
+  const thread = key && currentPrivateChatLifecycle.threads.find(entry => RuntimeCore.classroomContextKey(entry) === key);
+  return thread ? { threadId: thread.threadId, schoolEpoch: thread.schoolEpoch,
+    activityEpoch: thread.activityEpoch, threadGeneration: thread.threadGeneration } : null;
+}
+
+async function loadPrivateChatLifecycle(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'private chat lifecycle read');
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (currentPrivateChatLifecycle?.binding === binding) return currentPrivateChatLifecycle;
+  const stored = (await kv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'private chat lifecycle read');
+  const normalized = stored?.binding === binding ? RuntimeCore.normalizePrivateChatLifecycleState({
+    schoolEpoch: stored.schoolEpoch, threads: stored.threads }) : null;
+  const watermarks = normalized ? normalizePrivateChatWatermarks(stored.watermarks ?? normalized.threads, normalized.schoolEpoch) : null;
+  currentPrivateChatLifecycle = normalized && watermarks ? { ...normalized, watermarks, binding } : null;
+  privateChatLifecycleEstablishedBinding = stored?.binding === binding && stored.established === true ? binding : null;
+  if (currentPrivateChatLifecycle) {
+    currentPrivateChatLifecycle.channelEnabled = stored.channelEnabled !== false;
+    currentPrivateChatLifecycle.recoveryPending = stored.recoveryPending === true;
+  }
+  return currentPrivateChatLifecycle;
+}
+
+function normalizePrivateChatWatermarks(entries, schoolEpoch) {
+  if (!Array.isArray(entries) || entries.length > 64) return null;
+  const result = [], keys = new Set();
+  for (const entry of entries) {
+    const normalized = RuntimeCore.normalizePrivateChatLifecycleState({ schoolEpoch, threads: [entry] });
+    const thread = normalized?.threads[0];
+    const key = thread && RuntimeCore.classroomContextKey(thread);
+    if (!key || keys.has(key)) return null;
+    keys.add(key); result.push(thread);
+  }
+  return result;
+}
+
+function markPrivateChatLifecycleUnavailable(authContext) {
+  return enqueueMessageInboxMutation(async () => {
+    await loadPrivateChatLifecycle(authContext);
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    const marker = { ...(currentPrivateChatLifecycle || {}), binding, established: true,
+      recoveryPending: true, channelEnabled: false };
+    await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: marker },
+      { authContext, expectedBinding: binding }, 'private chat recovery fence');
+    privateChatLifecycleEstablishedBinding = binding;
+    currentPrivateChatLifecycle = currentPrivateChatLifecycle ? marker : null;
+    if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage))
+      deferredTeacherMessageNotification = null;
+    await clearPrivateTeacherNotifications(authContext);
+  });
+}
+
+function privateTeacherMessageIsCurrent(message, authContext, allowAdvance = true) {
+  if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext))
+    return privateChatLifecycleEstablishedBinding !== monitoringEventAuthBindingForContext(authContext);
+  const token = RuntimeCore.normalizePrivateChatLifecycle(message?.privateChatLifecycle);
+  const known = privateChatThreadFor(message, authContext);
+  if (!token || !known || !classroomContextIsCurrent(message)) return false;
+  return RuntimeCore.privateChatLifecycleDecision(token, known) === 'current'
+    && (allowAdvance || token.threadGeneration === known.threadGeneration);
+}
+
+function privateChatMessageIsAnnouncement(message) {
+  return message?.messageKind === 'announcement'
+    || message?.messageKind === undefined && Boolean(getCommandIdFromMessage(message));
+}
+
+async function clearPrivateTeacherNotifications(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  const prefix = `${authBoundNotificationPrefixForContext(authContext)}private_`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const notifications = await chrome.notifications.getAll();
+  assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  for (const id of Object.keys(notifications || {})) {
+    if (!id.startsWith(prefix)) continue;
+    await clearAuthBoundNotification(id);
+    activeAuthBoundNotificationIds.delete(id);
+    assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  }
+}
+
+function privateChatEntryCurrent(entry, snapshot) {
+  const token = RuntimeCore.normalizePrivateChatLifecycle(entry?.privateChatLifecycle);
+  const known = snapshot?.threads.find(thread => RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(entry));
+  return Boolean(token && known && RuntimeCore.privateChatLifecycleDecision(token, {
+    threadId: known.threadId, schoolEpoch: known.schoolEpoch,
+    activityEpoch: known.activityEpoch, threadGeneration: known.threadGeneration }) === 'current');
+}
+
+function adoptPrivateChatLifecycleState(rawState, authContext, nextFabState) {
+  return enqueueMessageInboxMutation(async () => {
+    const reason = 'private chat lifecycle adoption';
+    const state = RuntimeCore.normalizePrivateChatLifecycleState(rawState);
+    const activeKeys = new Set(RuntimeCore.classroomContexts(nextFabState).map(RuntimeCore.classroomContextKey));
+    if (!state || state.threads.some(thread => !activeKeys.has(RuntimeCore.classroomContextKey(thread))))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    await loadPrivateChatLifecycle(authContext);
+    const prior = currentPrivateChatLifecycle;
+    let adopted = state;
+    if (prior?.schoolEpoch > state.schoolEpoch) adopted = {
+      schoolEpoch: prior.schoolEpoch,
+      threads: prior.threads.filter(thread => activeKeys.has(RuntimeCore.classroomContextKey(thread))),
+    };
+    else if (prior?.schoolEpoch === state.schoolEpoch) adopted = { ...state, threads: state.threads.map(thread => {
+      const previous = (prior.watermarks || prior.threads).find(entry => RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(thread));
+      if (!previous) return thread;
+      if (previous.activityEpoch > thread.activityEpoch) return previous;
+      if (previous.activityEpoch === thread.activityEpoch) {
+        if (previous.threadId !== thread.threadId) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+        return { ...thread, threadGeneration: Math.max(previous.threadGeneration, thread.threadGeneration) };
+      }
+      return thread;
+    }) };
+    const channelOff = nextFabState.messagingChannelEnabled === false
+      || nextFabState.messagingEnabled === false && !(nextFabState.messagesPaused === true
+        && nextFabState.messagingChannelEnabled === true && activeKeys.size > 0);
+    const storedChat = await kv.get(['fabChatMessages', 'fabChatClosed']);
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const entries = Array.isArray(storedChat.fabChatMessages) ? storedChat.fabChatMessages : [];
+    const retained = channelOff ? [] : entries.filter(entry => privateChatEntryCurrent(entry, adopted));
+    const active = new Set(adopted.threads.map(RuntimeCore.classroomContextKey));
+    const inactive = prior?.schoolEpoch === adopted.schoolEpoch ? (prior.watermarks || prior.threads)
+      .filter(thread => !active.has(RuntimeCore.classroomContextKey(thread))) : [];
+    // Retain a bounded private floor for temporarily inactive typed activities.
+    // Active threads are never evicted or exposed through this private archive.
+    const watermarks = [...inactive.slice(-(64 - adopted.threads.length)), ...adopted.threads];
+    const next = { ...adopted, watermarks, binding, established: true, recoveryPending: false, channelEnabled: !channelOff };
+    await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: next,
+      ...(retained.length !== entries.length ? { fabChatMessages: retained, fabChatClosed: retained.length === 0 } : {}) },
+    { authContext, expectedBinding: binding }, reason);
+    currentPrivateChatLifecycle = next;
+    privateChatLifecycleEstablishedBinding = binding;
+    if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage)
+      && (channelOff || !privateChatEntryCurrent(deferredTeacherMessageNotification.sourceMessage, adopted)))
+      deferredTeacherMessageNotification = null;
+    if (channelOff || JSON.stringify(prior) !== JSON.stringify(next)) await clearPrivateTeacherNotifications(authContext);
+    return adopted;
+  });
+}
+
+async function advancePrivateChatLifecycleNow(message, authContext) {
+  await loadPrivateChatLifecycle(authContext);
+  const token = RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle);
+  const known = privateChatThreadFor(message, authContext);
+  if (!token || !known) {
+    requestPrivateChatLifecycleRecovery();
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
+  if (token.schoolEpoch > known.schoolEpoch || token.schoolEpoch === known.schoolEpoch
+    && token.activityEpoch > known.activityEpoch) {
+    requestPrivateChatLifecycleRecovery();
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
+  if (!privateTeacherMessageIsCurrent(message, authContext))
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+  if (token.threadGeneration === known.threadGeneration) return token;
+  const next = { ...currentPrivateChatLifecycle, threads: currentPrivateChatLifecycle.threads.map(thread =>
+    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message) ? { ...thread, ...token } : thread) };
+  next.watermarks = (currentPrivateChatLifecycle.watermarks || currentPrivateChatLifecycle.threads).map(thread =>
+    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message) ? { ...thread, ...token } : thread);
+  const chat = await kv.get('fabChatMessages');
+  assertAuthenticatedContextCurrent(authContext, 'private chat generation');
+  const retained = (Array.isArray(chat.fabChatMessages) ? chat.fabChatMessages : [])
+    .filter(entry => privateChatEntryCurrent(entry, next));
+  const updatedFab = currentFabState ? { ...currentFabState,
+    privateChatLifecycleState: { schoolEpoch: next.schoolEpoch, threads: next.threads } } : null;
+  await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: next,
+    ...(updatedFab ? { [FAB_STATE_STORAGE_KEY]: updatedFab } : {}),
+    fabChatMessages: retained, fabChatClosed: retained.length === 0 },
+  { authContext, expectedBinding: monitoringEventAuthBindingForContext(authContext), sourceMessage: message }, 'private chat generation');
+  currentPrivateChatLifecycle = next;
+  if (updatedFab) currentFabState = updatedFab;
+  if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage)
+    && !privateChatEntryCurrent(deferredTeacherMessageNotification.sourceMessage, next)) deferredTeacherMessageNotification = null;
+  await clearPrivateTeacherNotifications(authContext);
+  return token;
+}
+
 // The teacher ended the chat (SchoolPilot "End chat"). The close is recorded
 // in the inbox writer's order, so every teacher message persisted after it is
 // stamped with it and may reopen the chat, while a message persisted before it
@@ -9713,6 +9959,26 @@ function recordTeacherChatClosed(message, authContext) {
     assertMessageInboxOperationCurrent(options, reason);
     const wasOpen = storedChat.fabChatClosed !== true
       || (Array.isArray(storedChat.fabChatMessages) && storedChat.fabChatMessages.length > 0);
+    await loadPrivateChatLifecycle(authContext);
+    if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext)
+      && privateChatLifecycleEstablishedBinding === identity.binding) return { ignored: true };
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+      const token = RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle);
+      const known = privateChatThreadFor(message, authContext);
+      if (!token || !known) {
+        requestPrivateChatLifecycleRecovery();
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+      }
+      if (token.threadId !== known.threadId || token.schoolEpoch !== known.schoolEpoch
+        || token.activityEpoch !== known.activityEpoch || token.threadGeneration < known.threadGeneration)
+        return { ignored: true };
+      await advancePrivateChatLifecycleNow(message, authContext);
+      const entries = Array.isArray(storedChat.fabChatMessages) ? storedChat.fabChatMessages : [];
+      const retained = entries.filter(entry => privateChatEntryCurrent(entry, currentPrivateChatLifecycle));
+      await setMessageInboxStorageFenced({ fabChatMessages: retained, fabChatClosed: retained.length === 0,
+        [FAB_CHAT_CONTEXT_STORAGE_KEY]: fabChatStorageContext(fabBinding, message) }, options, reason);
+      return { privateChatLifecycle: token, wasOpen: retained.length !== entries.length && wasOpen };
+    }
     const closedAt = Math.max(Date.now(), identity.chatClosedAt + 1);
     await setMessageInboxStorageFenced({
       fabChatMessages: [],
@@ -9744,6 +10010,18 @@ function persistTeacherMessages(rawMessages, options = {}) {
       // The response belonged to an earlier authenticated student/session.
       // Never attach its inbox rows to whoever is signed in now.
       return { messages: identity.messages, seenIds: identity.seenIds, addedMessageIds: [] };
+    }
+    if (options.authContext) {
+      await loadPrivateChatLifecycle(options.authContext);
+      for (const message of rawMessages || []) {
+        if (privateChatMessageIsAnnouncement(message)) continue;
+        const negotiated = hasNegotiatedCapability('privateChatLifecycleV1', options.authContext);
+        if (!negotiated && privateChatLifecycleEstablishedBinding === identity.binding)
+          throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_CAPABILITY_REQUIRED');
+        if (!negotiated) continue;
+        if (teacherChatChannelOff()) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+        await advancePrivateChatLifecycleNow(message, options.authContext);
+      }
     }
     const merged = RuntimeCore.mergeTeacherMessageInbox(
       identity.messages,
@@ -9797,6 +10075,7 @@ async function markTeacherMessageSeen(message, actionRequest) {
     expectedBinding: monitoringEventAuthBindingForContext(authContext),
   };
   let firstSeen = false;
+  let seenLifecycle = null;
   await enqueueMessageInboxMutation(async () => {
     assertMessageInboxOperationCurrent(options, 'chat-message-seen');
     const identity = await reconcileMessageInboxIdentityNow('chat-message-seen', options);
@@ -9804,6 +10083,11 @@ async function markTeacherMessageSeen(message, actionRequest) {
     if (!identity.binding) return;
     const entry = identity.messages.find((item) => item?.id === messageId);
     if (!entry || entry.seenAckedAt) return;
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext) && !privateChatMessageIsAnnouncement(entry)) {
+      await loadPrivateChatLifecycle(authContext);
+      if (!privateTeacherMessageIsCurrent(entry, authContext) || teacherChatChannelOff()) return;
+      seenLifecycle = entry.privateChatLifecycle;
+    }
     firstSeen = true;
     const seenAckedAt = Date.now();
     const messages = identity.messages.map((item) => (
@@ -9823,6 +10107,7 @@ async function markTeacherMessageSeen(message, actionRequest) {
     ...classroomAuthorityPayload(actionRequest),
     studentId: authContext.studentId,
     studentSessionId: authContext.studentSessionId,
+    ...(seenLifecycle ? { privateChatLifecycle: seenLifecycle } : {}),
   }, 'seen', null, authContext);
   return { acked: true };
 }
@@ -9870,7 +10155,9 @@ function clearStudentMessageState(reason = 'student-auth-cleared') {
       fabChatMessages: [],
       fabChatClosed: false,
     });
-    await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+    await kv.remove([MESSAGE_INBOX_BINDING_KEY, PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]);
+    currentPrivateChatLifecycle = null;
+    privateChatLifecycleEstablishedBinding = null;
     await notifyStudentMessageStateCleared(reason);
   });
 }
@@ -10183,6 +10470,8 @@ function persistFabChatStateForRequest(message, actionRequest) {
       // The newest teacher close the entry followed (fabChatClosedAt), so a
       // page can tell an ended thread from the conversation after it.
       closeStamp: teacherChatCloseStamp(entry?.closeStamp),
+      ...(RuntimeCore.normalizePrivateChatLifecycle(entry?.privateChatLifecycle)
+        ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(entry.privateChatLifecycle) } : {}),
     }))
     .filter((entry) => entry.text && RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(actionRequest));
   const options = {
@@ -10191,6 +10480,20 @@ function persistFabChatStateForRequest(message, actionRequest) {
   };
   return enqueueMessageInboxMutation(async () => {
     assertStudentActionRequestCurrent(actionRequest, 'FAB chat state persistence');
+    if (hasNegotiatedCapability('privateChatLifecycleV1', actionRequest.authContext)) {
+      await loadPrivateChatLifecycle(actionRequest.authContext);
+      const known = privateChatThreadFor(actionRequest, actionRequest.authContext);
+      const expected = RuntimeCore.normalizePrivateChatLifecycle(message.expectedPrivateChatLifecycle);
+      if (!known || RuntimeCore.privateChatLifecycleDecision(expected, known) !== 'current'
+        || expected.threadGeneration !== known.threadGeneration)
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const entry = messages[index];
+        if (entry.sender === 'student' && !entry.privateChatLifecycle) entry.privateChatLifecycle = expected;
+        if (RuntimeCore.privateChatLifecycleDecision(entry.privateChatLifecycle, known) !== 'current'
+          || entry.privateChatLifecycle.threadGeneration !== known.threadGeneration) messages.splice(index, 1);
+      }
+    }
     const context = fabChatStorageContext(actionRequest.fabBinding, actionRequest);
     await setMessageInboxStorageFenced({
       fabChatMessages: messages,
@@ -10516,6 +10819,7 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
   const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => (
     advertised.has(name)
     && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
+    && (name !== 'privateChatLifecycleV1' || advertised.has('studentChatIdempotencyV1'))
   ));
   negotiatedProtocolState = Object.freeze({
     scope: authContextProtocolScope(context),
@@ -11257,7 +11561,6 @@ async function restrictionPortalEntryPending(state, context) {
     await setRestrictionPortalEntryPhase(context, 'cancelled', { pendingOnly: true });
     return false;
   }
-  if (state.restrictions.attentionMode?.active) return false;
   const profile = state.authPassThrough.profiles.find((candidate) => (
     candidate.id === state.authPassThrough.defaultProfileId
   ));
@@ -18858,7 +19161,7 @@ let schoolPolicyMutation = Promise.resolve();
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
-let attentionModeActive = false; // When true, blocks navigation and new tabs
+let attentionModeActive = false; // Page overlay; browser UI and navigation stay available.
 let restrictionSsoPassThroughActive = false;
 let restrictionAuthPassThroughActive = false;
 let activeAuthPassThroughPolicy = null;
@@ -22801,7 +23104,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const attentionActive = command.data.active;
         const attentionMessage = command.data.message || 'Please look up!';
 
-        // Update attention mode state (blocks navigation and new tabs when active)
+        // Attention owns only the page overlay, retaining other controls.
         attentionModeActive = attentionActive;
         await composeDynamicRules(['classroom', 'restrictionSso']);
         assertCommandExecutionCurrent('attention-mode rules');
@@ -23413,6 +23716,9 @@ async function notifyTeacherMessageForAuth(opts, authContext, sourceMessage, mes
     assertAuthenticatedContextCurrent(authContext, reason);
     const binding = assertCurrentStudentBinding(sourceMessage, reason, { authContext });
     assertBindingMatchesAuthContext(binding, authContext, reason);
+    if (!privateChatMessageIsAnnouncement(sourceMessage)
+      && (teacherChatChannelOff() || !privateTeacherMessageIsCurrent(sourceMessage, authContext)))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
   };
   assertCurrent();
   const inventoryReady = await ensureAuthBoundNotificationInventory();
@@ -23505,6 +23811,8 @@ async function broadcastToAllTabsForAuth(
 // class is off, as before the pause existed. With no FAB state at all the
 // pages decide from their own state, as before.
 function teacherChatChannelOff() {
+  if (currentPrivateChatLifecycle?.binding === messageInboxAuthBinding()
+    && currentPrivateChatLifecycle.channelEnabled === false) return true;
   const state = currentFabState;
   if (!state || state.messagingEnabled === true) return false;
   return !(state.messagesPaused === true && state.messagingChannelEnabled === true
@@ -23559,18 +23867,24 @@ async function raiseDeferredTeacherMessageNotification(authContext) {
   deferredTeacherMessageNotification = null;
   const reason = 'deferred teacher message notification';
   assertAuthenticatedContextCurrent(authContext, reason);
-  if (pending.scope !== authContextProtocolScope(authContext) || teacherChatChannelOff()
+  const announcement = privateChatMessageIsAnnouncement(pending.sourceMessage);
+  if (pending.scope !== authContextProtocolScope(authContext) || !announcement && teacherChatChannelOff()
     || !deferredTeacherMessageClassCurrent(pending)) return;
   const stored = await kv.get(FAB_CHAT_CLOSED_AT_STORAGE_KEY);
   assertAuthenticatedContextCurrent(authContext, reason);
-  if (teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]) > pending.chatClosedAt
+  if (!announcement && (teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]) > pending.chatClosedAt
+      || !privateTeacherMessageIsCurrent(pending.sourceMessage, authContext))
     || attentionModeActive) return;
   await notifyTeacherMessageForAuth({
     title: 'Message from Teacher',
     message: pending.text,
     priority: 2,
     requireInteraction: false,
-  }, authContext, pending.sourceMessage, pending.id);
+  }, authContext, pending.sourceMessage, `${announcement ? 'announcement' : 'private'}_${pending.id}`);
+  if (announcement) await broadcastToAllTabsForAuth('show-message', {
+    id: pending.id, ...classroomAuthorityPayload(pending.sourceMessage), message: pending.text,
+    fromName: pending.sourceMessage.fromName || 'Teacher', messageKind: 'announcement',
+  }, authContext, pending.sourceMessage);
 }
 
 function messageMatchesActiveFabSession(message = {}) {
@@ -23683,6 +23997,12 @@ async function handleDurableTeacherMessage(message, options = {}) {
     if (!messageMatchesActiveFabSession(message)) {
       throw new Error('Teacher message belongs to an inactive teaching session');
     }
+    const announcement = privateChatMessageIsAnnouncement(message);
+    if (message.messageKind !== undefined && !['private', 'announcement'].includes(message.messageKind))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+    if (announcement && (!commandId || message.privateChatLifecycle)
+      || !announcement && commandId && message.messageKind === 'private')
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
     assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
     assertCurrentStudentBinding(message, 'durable teacher message');
     const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
@@ -23717,7 +24037,7 @@ async function handleDurableTeacherMessage(message, options = {}) {
       // inbox keeps the message quietly, with no notification or page chat.
       // Attention keeps the screen, so no notification is raised over it;
       // pages show the chat, and the worker the notification, once it ends.
-      const channelOff = teacherChatChannelOff();
+      const channelOff = !announcement && teacherChatChannelOff();
       if (!channelOff && attentionModeActive) {
         deferTeacherMessageNotification(authContext, message, inboxMessage, inboxResult.chatClosedAt || 0);
       } else if (!channelOff) {
@@ -23727,12 +24047,12 @@ async function handleDurableTeacherMessage(message, options = {}) {
           message: inboxMessage.message || 'New message',
           priority: 2,
           requireInteraction: false,
-        }, authContext, message, inboxMessage.id);
+        }, authContext, message, `${announcement ? 'announcement' : 'private'}_${inboxMessage.id}`);
       }
       assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
       assertCurrentStudentBinding(message, 'durable teacher message notification', { authContext });
-      if (!channelOff) {
-        await broadcastToAllTabsForAuth('chat-reply', {
+      if (!channelOff && !(announcement && attentionModeActive)) {
+        await broadcastToAllTabsForAuth(announcement ? 'show-message' : 'chat-reply', {
           _msgId: inboxMessage.id,
           chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
           messageId: message.chatMessageId || message.messageId || inboxMessage.id,
@@ -23743,6 +24063,9 @@ async function handleDurableTeacherMessage(message, options = {}) {
           fromName: inboxMessage.fromName || 'Teacher',
           timestamp: inboxMessage.timestamp || Date.now(),
           chatClosedAt: inboxResult.chatClosedAt || 0,
+          messageKind: announcement ? 'announcement' : 'private',
+          ...(hasNegotiatedCapability('privateChatLifecycleV1', authContext) && message.privateChatLifecycle
+            ? { privateChatLifecycle: message.privateChatLifecycle } : {}),
         }, authContext, message);
         assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
       }
@@ -23783,7 +24106,8 @@ async function handleDurableTeacherMessage(message, options = {}) {
     }
     return { messageId: inboxMessage.id, deduplicated };
   } catch (error) {
-    if (hasChatDelivery && authContext && commandBinding && !isAuthContextCancellation(error)) {
+    if (hasChatDelivery && authContext && commandBinding && !isAuthContextCancellation(error)
+      && error?.code !== 'PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE') {
       await sendChatDeliveryAck(
         message,
         'failed',
@@ -23818,7 +24142,7 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding, auth
   const legacyMessages = [];
   const addedMessageIds = [];
   for (const rawMessage of rawMessages || []) {
-    if (!getCommandIdFromMessage(rawMessage)) {
+    if (!getCommandIdFromMessage(rawMessage) && rawMessage.messageKind !== 'private' && !rawMessage.privateChatLifecycle) {
       legacyMessages.push(rawMessage);
       continue;
     }
@@ -24152,7 +24476,7 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
 
 function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   const targetDomain = extractDomain(urlValue);
-  if (!targetDomain || attentionModeActive) return true;
+  if (!targetDomain) return true;
   const blockedBy = (domains) => domains.some((domain) => {
     const normalized = String(domain || '').replace(/^www\./, '');
     return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
@@ -24160,48 +24484,9 @@ function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   return blockedBy(globalBlockedDomains) || blockedBy(teacherBlockedDomains);
 }
 
-// Attention keeps its 2.9.6 navigation behaviour. Its main-frame DNR rule
-// already blocks every new load; a navigation that is about to start is only
-// recorded and stepped back, silently. URL changes inside the current document
-// (pushState, replaceState, #fragment) and a navigation already in flight when
-// Attention began are left alone: stepping those back walked the tab through
-// its history to about:blank with a notification at every step, and left an
-// Attention-suspended Focus tab off policy.
-// onBeforeNavigate is the only one of the four registered events whose details
-// carry no transitionType; onCommitted, onHistoryStateUpdated and
-// onReferenceFragmentUpdated always include it.
-const attentionStepBackByTab = new Map();
-
-function attentionStepBackOwner(authContext) {
-  return `${authContextProtocolScope(authContext)}:${currentClassroomState?.revision ?? ''}`;
-}
-
-// The next navigation start in a tab that Attention stepped back is that
-// step-back's own cross-document history traversal. It is not stepped back
-// again, so a step-back can never retrigger itself; DNR still blocks its load.
-// (A same-document traversal starts no navigation; the tab's next navigation
-// start is then skipped instead, and DNR still blocks that load too.)
-function takeAttentionStepBackTraversal(details, authContext) {
-  if (details.transitionType !== undefined || !attentionStepBackByTab.has(details.tabId)) return false;
-  const owner = attentionStepBackByTab.get(details.tabId);
-  attentionStepBackByTab.delete(details.tabId);
-  return owner === attentionStepBackOwner(authContext);
-}
-
-async function blockAttentionNavigationForAuth(details, authContext, ownTraversal) {
-  if (details.transitionType !== undefined || ownTraversal) return;
-  await recordNavigationBlockedForAuth(authContext, details.url, 'attention_mode');
-  attentionStepBackByTab.set(details.tabId, attentionStepBackOwner(authContext));
-  await goBackOrBlankForAuth(details.tabId, authContext, 'navigation policy back');
-}
-
 // One policy decision for network, SPA, history and prerender navigations.
 async function handleBeforeNavigateForPolicy(details) {
   if (details.frameId !== 0) return;
-  // Read when Chrome reports the event, before this event waits its turn in
-  // the policy queue: the policy did not yet include Attention, so this
-  // navigation started before Attention took effect (see below).
-  const startedBeforeAttention = classroomStateRestoreSettled && !attentionModeActive;
   let eventAuthContext;
   try {
     eventAuthContext = captureAuthenticatedContext('navigation policy event');
@@ -24212,7 +24497,6 @@ async function handleBeforeNavigateForPolicy(details) {
     await classroomStateRestorePromise;
     await enqueueStudentAuthMutation(async () => {
       assertAuthenticatedContextCurrent(eventAuthContext, 'navigation policy event');
-      const attentionTraversal = takeAttentionStepBackTraversal(details, eventAuthContext);
       if (details.url.startsWith('chrome://') || details.url.startsWith('about:')) return;
       if (restrictionAuthPolicyRefreshPending) {
         requestClassroomStateSync('navigation-auth-policy-pending', true);
@@ -24269,23 +24553,8 @@ async function handleBeforeNavigateForPolicy(details) {
         restrictionSsoPassThrough: restrictionSsoPassThroughActive,
         restrictionAuthPassThrough: restrictionAuthPassThroughActive,
       };
-      let decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
-      // A navigation that started before Attention took effect, and reaches
-      // its turn here only after, is judged by the rest of the policy, as it
-      // would have been without the wait, and silently, since Attention now
-      // holds the screen. Attention's DNR rule still blocks its load if that
-      // starts after the rule, and a page it commits shows the overlay.
-      const startedBeforeHeldAttention = decision.source === 'attention_mode' && startedBeforeAttention
-        && details.transitionType === undefined;
-      if (startedBeforeHeldAttention) {
-        decision = RuntimeCore.decideNavigation(details.url, { ...policy, classroomState: { ...policy.classroomState,
-          restrictions: { ...policy.classroomState.restrictions, attentionMode: { active: false } } } }, Date.now());
-      }
+      const decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
       if (decision.allowed) return;
-      if (decision.source === 'attention_mode') {
-        await blockAttentionNavigationForAuth(details, eventAuthContext, attentionTraversal);
-        return;
-      }
       const policySource = decision.source;
       const precise = RuntimeCore.hasPreciseRestrictions(policy.classroomState);
       const landing = RuntimeCore.restrictionLandingUrl(policy.classroomState);
@@ -24310,7 +24579,7 @@ async function handleBeforeNavigateForPolicy(details) {
           'navigation policy back',
         );
       }
-      if (notification && !startedBeforeHeldAttention) {
+      if (notification) {
         await notifyNavigationBlockedForAuth(
           eventAuthContext,
           notification,
@@ -24426,7 +24695,6 @@ function activeCreatedRestrictionSsoTabId(tab) {
 
 async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   const policy = {
-    attentionModeActive,
     screenLocked,
     lockedDomain,
     allowedDomains: [...allowedDomains],
@@ -24459,9 +24727,7 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
     restrictionSsoPassThrough: restrictionSsoPassThroughActive,
     restrictionAuthPassThrough: restrictionAuthPassThroughActive,
   });
-  if (policy.attentionModeActive) {
-    policySource = 'attention_mode';
-  } else if (/^https?:\/\//i.test(createdUrl) && !navigationDecision.allowed) {
+  if (/^https?:\/\//i.test(createdUrl) && !navigationDecision.allowed) {
     policySource = navigationDecision.source;
     notification = { title: policySource === 'screen_lock' ? 'Waypoint Set' : 'Navigation Blocked',
       message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
@@ -24589,7 +24855,6 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
 
 function createdTabRemovalDecisionStillApplies(decision, currentTab) {
   if (!decision?.policySource || !Number.isInteger(currentTab?.id)) return false;
-  if (decision.policySource === 'attention_mode') return attentionModeActive;
   if (decision.policySource === 'screen_lock') {
     if (!screenLocked || !lockedDomain) return false;
     const currentUrl = currentTab.pendingUrl || currentTab.url || '';
@@ -26452,11 +26717,13 @@ async function handleWsMessage(
               console.warn('[Chat] Could not record the chat close:', safeDiagnosticError(error));
             }
             assertAuthenticatedContextCurrent(authContext, 'chat close');
+            if (close?.ignored) return;
             await broadcastToAllTabsForAuth('chat-closed', {
               sessionId: message.sessionId,
               ...classroomAuthorityPayload(message),
               studentId: message.studentId,
               ...(close ? { closedAt: close.closedAt, wasOpen: close.wasOpen } : {}),
+              ...(close?.privateChatLifecycle ? { privateChatLifecycle: close.privateChatLifecycle } : {}),
             }, authContext, message);
             assertAuthenticatedContextCurrent(authContext, 'chat close broadcast');
           } catch (error) {
@@ -26763,6 +27030,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activeContexts,
         activeContext: activeContexts.length === 1 ? activeContexts[0] : null,
         studentControlRevision: currentStudentControlRevision(authContext),
+        privateChatLifecycleRequired: hasNegotiatedCapability('privateChatLifecycleV1', authContext)
+          || privateChatLifecycleEstablishedBinding === monitoringEventAuthBindingForContext(authContext),
+        privateChatLifecycleState: currentPrivateChatLifecycle?.binding === monitoringEventAuthBindingForContext(authContext)
+          && !currentPrivateChatLifecycle.recoveryPending
+          ? { schoolEpoch: currentPrivateChatLifecycle.schoolEpoch, threads: currentPrivateChatLifecycle.threads } : null,
         activeTeachingSessionId: activeSessionIds.includes(preferredSessionId)
           ? preferredSessionId
           : activeSessionIds.length === 1 ? activeSessionIds[0] : null,
@@ -26781,6 +27053,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       activeTeachingSessionIds: activeTeachingSessionIds(),
       activeContexts: activeClassroomContexts(),
       studentControlRevision: currentStudentControlRevision(),
+      privateChatLifecycleRequired: hasNegotiatedCapability('privateChatLifecycleV1')
+        || privateChatLifecycleEstablishedBinding === monitoringEventAuthBinding(),
+      privateChatLifecycleState: currentPrivateChatLifecycle?.binding === monitoringEventAuthBinding()
+        && !currentPrivateChatLifecycle.recoveryPending
+        ? { schoolEpoch: currentPrivateChatLifecycle.schoolEpoch, threads: currentPrivateChatLifecycle.threads } : null,
     });
     return true;
   }
