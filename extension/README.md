@@ -2,6 +2,16 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
+The unpublished successor is now **2.9.7**. Its Attention overlay preserves
+the underlying page, navigation and independent restriction/authentication
+policies; browser UI remains available. Private conversations negotiate
+`privateChatLifecycleV1` with scoped authority and durable student sends.
+End Chat and hard-off retire pending private generations; announcements use
+their own modal, notification and inbox. See the current
+[2.9.7 candidate record](../docs/CLASS_PILOT_2_9_7_CANDIDATE.md) for source,
+exact-package and explicitly waived pre-release managed-device gates. The
+older 2.10.0 evidence remains an immutable historical candidate record.
+
 ## Features
 
 - **Automatic Tab & URL Monitoring**: Automatically tracks and shares student browsing activity
@@ -203,8 +213,8 @@ or local restriction state.
 For an accepted marked restriction, a cold session starts at
 `https://clever.com/`. During that authentication flow, only `clever.com` and
 its subdomains plus the exact `accounts.google.com` family can pass through the
-Waypoint or Flight Path fence. Lookalike suffixes are rejected. Attention mode,
-the school block list, and an explicit teacher block remain authoritative over
+Waypoint or Flight Path fence. Lookalike suffixes are rejected. The school
+block list and an explicit teacher block remain authoritative over
 this pass-through. An active authentication tab is not counted as a compliant
 destination and is not navigated or pulled out of focus mid-login.
 
@@ -243,7 +253,7 @@ the selected websites, including their paths and query strings. Later navigation
 may still use the approved sign-in providers. Authentication host matching is exact
 unless the administrator explicitly
 allows subdomains; substring matches and lookalike suffixes are rejected.
-Attention mode and school or teacher blocks have higher priority than the
+School or teacher blocks have higher priority than the
 authentication exception, which in turn has higher priority than the
 Waypoint/Flight Path redirect.
 

@@ -1,0 +1,392 @@
+{
+  "schemaVersion": 2,
+  "state": "unpublished-local-candidate",
+  "version": "2.9.7",
+  "repository": "bzinkan/ClassPilot",
+  "testedCommit": "065be165b5df704d84eb716e3fb914c1fed17f98",
+  "runtimeCommit": "9aa02c07757c0e2396f85cd155ce25f5e5a8a190",
+  "parentReviewedPr122Commit": "2aa6df988a78cb5860cef2c0866cab46566ffec5",
+  "node": "24.19.0",
+  "defaultBrowser": "Chrome/151.0.7922.34",
+  "wireProtocolVersion": 3,
+  "preciseClassroomWireSchemaVersion": 1,
+  "package": {
+    "path": "dist/ClassPilot-v2.9.7.zip",
+    "sha256": "82352b04020b5fefdee06aa46cc3ba963ddac0d6c7eab4e241fca2cf6ca61575",
+    "bytes": 376052,
+    "filesVerifiedByteForByte": 24,
+    "nativeSuite": "passed",
+    "rebuiltAfterTesting": false,
+    "remoteMatrixArtifact": "CI builds its own archive per job; those ZIP bytes are not claimed equal to this frozen local ZIP"
+  },
+  "sourceBinding": {
+    "productionRawSha256": {
+      "auth-gate-bootstrap.js": "8dbfbe0a87655605703e8aa4406c24470206b44e2ca592e0633001b0a55dc437",
+      "auth-gate-frame.html": "11dd5cfe631f8f76cd393beaf744069d879651b155ba0f42367f4f297858e1a6",
+      "auth-gate-frame.js": "1f42106396046c6f1b13483dba79342135a1431983d4ce41847bd2d5d2cd43ab",
+      "auth-gate-transport.js": "09ba965896ecb5ff8def4ecdc6f6d4e868fd8c57d0a2f9bc9f2e9dfd06081965",
+      "auth-recovery-diagnostics.js": "c24effee6fa540cbaf32415dcebcf89f1dec71aadce5c2eac7fb1fe49d56a17f",
+      "classroom-runtime-core.js": "ee67fb13107fc3f4d2c8af8aab4e75f327703d1bde1b6718c678cab0275154af",
+      "content-injection.js": "742ac3b09e1559eb7e8c7bf2a989d05f1694b06f4838a164633289ada4867db1",
+      "content.js": "4f42da8174b079095c61a088cce7a7b48e3a1f654dbfab4180ab08e3d78b9aa5",
+      "manifest.json": "ebdb2967cc17b6f854a3d89eb201d992bbdd5b0eded27f6bef32d13379505ea0",
+      "offscreen.js": "6736b3644f99353f6c001bacf0693f4a0971e5e830dafd83e8efa018b657e2c2",
+      "page-lifecycle.js": "dbabde62e9722e304e481ec7e26c75077d214e04de77e20eb216265adaab18ec",
+      "popup.js": "7649115d0cdeb02983ecc86c579b5c0a6e0822d80ab0a5241e4738b0553c1681",
+      "private-recovery-store.js": "fe986923bde4db520768501441788eb9bbac3979618eca9387c37c4c67b7d7d8",
+      "school-website-policy.js": "58debc61211064d8282dc78441d9eca759e54ef91ae3653aeb74cd23c41e71a0",
+      "service-worker.js": "3367a8663abc0d3ba8c661cc90dadc78379fd951e470981462ad1b775bf3ac60"
+    },
+    "capabilitySourceFile": "extension/service-worker.js",
+    "capabilitySourceRawSha256": "3367a8663abc0d3ba8c661cc90dadc78379fd951e470981462ad1b775bf3ac60",
+    "capabilitySourceLfSha256": "3e14a557672f84f60887bcd7943ad77ea8f3092d3a3e39af3fcabc391c9cf7ad"
+  },
+  "advertisedCapabilities": [
+    "helpRequestsV1",
+    "questionParkingV1",
+    "timerControlsV1",
+    "lessonActivitiesV1",
+    "exitTicketsV1",
+    "classroomStateV1",
+    "fabStateRevisionV1",
+    "exactTabCloseV1",
+    "scopedAuthorityChecksV1",
+    "scheduledClassroomV1",
+    "authBoundTelemetryV1",
+    "exactBindingAckV2",
+    "exactTabCloseV2",
+    "studentAuthGatePresenceV1",
+    "lateSignInRestrictionSsoV1",
+    "restrictionAuthPassThroughV1",
+    "preciseRestrictionResourcesV1",
+    "restrictionPortalFirstV1",
+    "afterHoursSafetyOnlyV1",
+    "schoolWebsiteBlockEnforcementV1",
+    "studentChatIdempotencyV1",
+    "screenshotTrackingWindowLeaseV1",
+    "screenshotActiveObservationCadenceV1",
+    "screenshotObservationLeaseV1",
+    "safetyEvidenceCaptureV1",
+    "liveViewIceServersV1",
+    "kioskLaunchTicketV1",
+    "kioskLaunchTicketV2",
+    "managedDeviceContinuityV1",
+    "screenOnlyUnlockV1",
+    "durableChatAckV1",
+    "commandAckReceiptV1",
+    "classroomOverlayRestoreV1",
+    "liveViewNegotiationV1",
+    "domainPreservingRestrictionsV1",
+    "chatPauseV1",
+    "chatSeenAckV1",
+    "focusTabV1",
+    "privateChatLifecycleV1"
+  ],
+  "lifecycleDependencies": [
+    "scopedAuthorityChecksV1",
+    "studentChatIdempotencyV1"
+  ],
+  "sharedPreciseFixtureSha256": "4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243",
+  "results": {
+    "typecheck": "passed",
+    "unitTestsPassed": 204,
+    "unitTestsFailed": 0,
+    "primaryFullSourceChain": "passed",
+    "expectedOldReleaseRegressions": 20,
+    "defaultRecoveryScenarios": 42,
+    "exactPackageFullNativeChain": "passed",
+    "nativePreciseFixtureChecks": 94,
+    "nativeFocusScenarioGroups": 16,
+    "nativeFocusAcknowledgements": 47,
+    "localChrome133FullSource": "passed",
+    "localChrome133RecoveryScenarios": 38,
+    "localChrome120": "targeted Attention, Focus, lifecycle/reclaim and immutable2.9.6 already-open-page upgrade passed; no duplicate full local lane claimed",
+    "canonicalRemoteMatrix": "All5 required jobs passed, including120/133/152/stable full source/package lanes"
+  },
+  "evidence": [
+    {
+      "gate": "check",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-297-check-native-fixture.log",
+      "logSha256": "b762b7d55e270dac2cb68c2b33dcdbf6c2139fca8bcb35e05a2963a86250fed7",
+      "logBytes": 65,
+      "finishedUtc": "2026-10-02T17:30:01.485Z"
+    },
+    {
+      "gate": "unit",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-297-unit-native-fixture.log",
+      "logSha256": "a23b0c92f984f1c283b270045197c593e916541fe8e556f17677aa72d002b5e2",
+      "logBytes": 36016,
+      "finishedUtc": "2026-10-02T17:30:39.474Z"
+    },
+    {
+      "gate": "primary-source-and-20-old-release-reds",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-297-source-native-065be16-serial.log",
+      "logSha256": "b098a6e07fba21bc5df33cb4b3d860018c53722bba67fd0f947b30da8f89de8c",
+      "logBytes": 88438,
+      "finishedUtc": "2026-10-02T18:10:24.957Z"
+    },
+    {
+      "gate": "exact-8235-zip-native",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-297-exact-package-native-065be16-serial.log",
+      "logSha256": "23383689a96954ac59131c2bd381e0a94806c640987c3a3963f848ccb5a50f63",
+      "logBytes": 74454,
+      "finishedUtc": "2026-10-02T18:23:19.280Z"
+    },
+    {
+      "gate": "chrome133-full-source",
+      "result": "passed",
+      "exitCode": 0,
+      "log": "classpilot-297-source-chrome133-065be16.log",
+      "logSha256": "1c8ede8892bed6ea52162e6035da94ddd822cf312a653680de60b49106ebf3b5",
+      "logBytes": 75682,
+      "finishedUtc": "2026-10-02T17:49:11.431Z"
+    },
+    {
+      "gate": "chrome120-attention",
+      "result": "passed",
+      "log": "classpilot-297-attention-owner-chrome120.log",
+      "logSha256": "df0cb31d51361a4f52234a8d3fe94c75bb77f49946f0c0c24800d38b6f7ede96",
+      "logBytes": 6496,
+      "finishedUtc": "2026-10-02T17:12:14.831Z"
+    },
+    {
+      "gate": "chrome120-focus",
+      "result": "passed",
+      "log": "classpilot-297-focus-owner-chrome120.log",
+      "logSha256": "700faf34710dbde81b864887bb3697952b16b7ca54795ee20d0ad08291153683",
+      "logBytes": 552,
+      "finishedUtc": "2026-10-02T17:13:13.974Z"
+    },
+    {
+      "gate": "chrome120-private-lifecycle",
+      "result": "passed",
+      "log": "classpilot-297-private-owner-final-chrome120.log",
+      "logSha256": "c39a60e18f0f1dfa88c2b51f852c8184c4891f0fcc2786b663292c3b41f96574",
+      "logBytes": 27579,
+      "finishedUtc": "2026-10-02T17:15:46.871Z"
+    },
+    {
+      "gate": "chrome120-authoritative-reclaim",
+      "result": "passed",
+      "log": "classpilot-297-scheduled-reclaim-chrome120.log",
+      "logSha256": "8172fef8560724273854e72b7797db014a3507dcfb52adaae2c575dcd2f3372a",
+      "logBytes": 27543,
+      "finishedUtc": "2026-10-02T17:11:37.748Z"
+    },
+    {
+      "gate": "chrome120-already-open-296-upgrade",
+      "result": "passed",
+      "log": "classpilot-297-native-upgrade-296-chrome120.log",
+      "logSha256": "046cf65ab6c0e0a0d799156e5be2dc243dd7fdc38b87e1bc528b11e948811d60",
+      "logBytes": 1763,
+      "finishedUtc": "2026-10-02T17:26:37.226Z"
+    },
+    {
+      "gate": "modern-already-open-296-upgrade",
+      "result": "passed",
+      "log": "classpilot-297-native-upgrade-296-modern.log",
+      "logSha256": "b4b03fd3f9f3208542dddefa41f27948fb8559cf97dc42e7228ae89f3fe50887",
+      "logBytes": 1763,
+      "finishedUtc": "2026-10-02T17:29:00.328Z"
+    },
+    {
+      "gate": "native-private-worker-stop-wake",
+      "result": "passed",
+      "log": "classpilot-297-private-chat-native-wake-owner.log",
+      "logSha256": "2d1a89926951ccad58549a1cf0f6303e7d27665ad6fa705f401daa674975697a",
+      "logBytes": 1923,
+      "finishedUtc": "2026-10-02T17:06:52.389Z"
+    },
+    {
+      "gate": "attention-red-on-pr122",
+      "result": "expected regression demonstrated",
+      "log": "classpilot-297-attention-red-on-122.log",
+      "logSha256": "922b95145d5af8b5a1563d8f559208197b7fdb8fb4e5e7b1d3e67292e91701c2",
+      "logBytes": 467,
+      "finishedUtc": "2026-10-02T16:45:24.135Z"
+    },
+    {
+      "gate": "title-red-on-pr122",
+      "result": "expected regression demonstrated",
+      "log": "classpilot-297-title-red-on-122.log",
+      "logSha256": "9c8ec1ce9d931372db72e9f47908aab772a625780fe52d1fed5d9a239019840c",
+      "logBytes": 716,
+      "finishedUtc": "2026-10-02T16:45:33.543Z"
+    },
+    {
+      "gate": "native-idle-original-fixture",
+      "result": "controlled fixture RED",
+      "log": "classpilot-297-precise-native-idle-red.log",
+      "logSha256": "124719122486a55192274ae97a903e2ff3dc3cd18e21d96eab71265a3dd716ce",
+      "logBytes": 716,
+      "finishedUtc": "2026-10-02T17:24:38.395Z"
+    },
+    {
+      "gate": "native-idle-corrected-fixture",
+      "result": "controlled fixture GREEN",
+      "log": "classpilot-297-precise-native-idle-green.log",
+      "logSha256": "016a1b78e672dd7f220b88f2eff8b6c073869160b5832168d902c35cd91d2f03",
+      "logBytes": 380,
+      "finishedUtc": "2026-10-02T17:25:37.453Z"
+    },
+    {
+      "gate": "normal-precise-fixture",
+      "result": "passed",
+      "log": "classpilot-297-precise-cache-idle-normal-green.log",
+      "logSha256": "016a1b78e672dd7f220b88f2eff8b6c073869160b5832168d902c35cd91d2f03",
+      "logBytes": 380,
+      "finishedUtc": "2026-10-02T17:28:58.228Z"
+    }
+  ],
+  "retainedFailures": [
+    {
+      "gate": "concurrent-primary-source",
+      "result": "failed",
+      "exitCode": 1,
+      "classification": "Scheduled classroom fixture retired authentication-context failure; unchanged serialized full source passed. Contention/setup cause remains unproven.",
+      "log": "classpilot-297-source-native-065be16.log",
+      "logSha256": "1a8f40c21128a354cc418d328f9a101ffe9d36776a2ee74c27e0b178af92977e",
+      "logBytes": 11476,
+      "finishedUtc": "2026-10-02T17:34:50.283Z"
+    },
+    {
+      "gate": "concurrent-chrome120-source",
+      "result": "failed",
+      "exitCode": 1,
+      "classification": "Scheduled classroom fixture valid timer rejected; no deadline or production change. Exact-head remote compatibility lane remains separately recorded.",
+      "log": "classpilot-297-source-chrome120-065be16.log",
+      "logSha256": "88bb01c805390192fcae5d878642cfc17b1bb486cb1d058348026ecc1e751d65",
+      "logBytes": 11044,
+      "finishedUtc": "2026-10-02T17:34:51.188Z"
+    },
+    {
+      "gate": "concurrent-exact-package",
+      "result": "failed",
+      "exitCode": 1,
+      "classification": "Unchanged 2000ms auth-startup paint assertion timed out; no deadline change. Unchanged serialized exact package passed.",
+      "log": "classpilot-297-exact-package-native-065be16.log",
+      "logSha256": "0c5537aa76c1a3d17aa0f2a8ea830de52079436e792ac7a5494eab3cec8759f0",
+      "logBytes": 48686,
+      "finishedUtc": "2026-10-02T17:39:58.444Z"
+    }
+  ],
+  "upgradeEvidence": {
+    "baselineVersion": "2.9.6",
+    "baselineTagCommit": "55bb531cb5f130cebec9d994daa957e82e87a13b",
+    "baselineArchiveSha256": "c7a6c31c8e2fbe4e7264a0f62d559af5ebb78f52326d203a7ac79038fd87e696",
+    "sameNativeExtensionIdentity": true,
+    "actualAlreadyOpenOldContentOwners": true,
+    "observedPath": "manual_ownership_fallback",
+    "explicitPageReloadRequired": true,
+    "automaticNavigationAuthorized": false,
+    "currentContentOwnersAfterReload": "2.9.7/2.9.7",
+    "privateVaultAndFreshPin": "passed",
+    "sourceBrowsers": [
+      120,
+      151
+    ],
+    "exactPackageBrowser": 151,
+    "storeUpdateProven": false,
+    "managedChromebookProven": false
+  },
+  "ciSnapshot": {
+    "capturedUtc": "2026-10-02T18:33:58.731Z",
+    "headSha": "065be165b5df704d84eb716e3fb914c1fed17f98",
+    "canonical": {
+      "runId": 37044469285,
+      "event": "pull_request",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285",
+      "jobs": [
+        {
+          "id": 110962357283,
+          "name": "test",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285/job/110962357283"
+        },
+        {
+          "id": 110962357535,
+          "name": "chrome-compatibility (120.0.6099.109)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285/job/110962357535"
+        },
+        {
+          "id": 110962357550,
+          "name": "chrome-compatibility (133.0.6943.141)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285/job/110962357550"
+        },
+        {
+          "id": 110962357615,
+          "name": "chrome-compatibility (stable)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285/job/110962357615"
+        },
+        {
+          "id": 110962357676,
+          "name": "chrome-compatibility (152.0.7977.82)",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044469285/job/110962357676"
+        }
+      ]
+    },
+    "canceledDuplicate": {
+      "runId": 37044463367,
+      "event": "push",
+      "status": "completed",
+      "conclusion": "cancelled",
+      "url": "https://github.com/bzinkan/ClassPilot/actions/runs/37044463367",
+      "reason": "Parent explicitly authorized cancellation of redundant same-head push; required pull-request matrix retained."
+    }
+  },
+  "storeObservation": {
+    "observedDate": "2026-10-02",
+    "publicVersion": "2.9.6",
+    "publicUpdatedDate": "2026-09-27",
+    "url": "https://chromewebstore.google.com/detail/classpilot/iggbfegfcjkfieoemeolfmfnapepalca",
+    "publishedPackageSha256": null,
+    "publishedSourceBinding": null,
+    "recheckImmediatelyBeforeAuthorizedUpload": true
+  },
+  "historicalEvidence": {
+    "document": "docs/CLASS_PILOT_2_10_CANDIDATE.md",
+    "record": "docs/release-evidence/classpilot-2.10.0-candidate-20260930.json",
+    "zipSha256": "84808cfc8b900d0fe29f2e682f4211c84510bff72afcf3e969b4b8794c94557e",
+    "unchanged": true,
+    "coversThisCandidate": false,
+    "locallyInstalled210BuildAutomaticallyDowngrades": false
+  },
+  "releaseGates": {
+    "testedHeadCi": "passed",
+    "documentationHeadCi": "Documentation-only head not created at capture; later exact-head outcomes belong in the PR body",
+    "independentProductionReview": "Parent reviewed runtime checkpoint9aa02c0; candidate/evidence review remains separate",
+    "twoManagedChromebooksPreRelease": {
+      "required": false,
+      "explicitlyWaivedByUser": true,
+      "performed": false
+    },
+    "intendedScopeExactPackageLiveAcceptance": "pending user greenlight",
+    "managedReleaseValidationBound": false,
+    "merged": false,
+    "deployed": false,
+    "activated": false,
+    "storeUploaded": false,
+    "publicationAuthorized": false,
+    "serverDependency": "Unmerged SchoolPilot consolidated release PR603; final server contract/capability bridge must be compatible before activation",
+    "rollback": "Disable new feature activation with exact-bound cleanup and compatible serving/rollback images; Store rollback normally requires a higher reviewed version. Store adoption is asynchronous."
+  }
+}

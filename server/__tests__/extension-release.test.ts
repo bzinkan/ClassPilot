@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.9.6");
+    expect(manifest.version).toBe("2.9.7");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
@@ -827,6 +827,7 @@ describe("ClassPilot extension release package guards", () => {
       "domainPreservingRestrictionsV1",
       "chatPauseV1",
       "chatSeenAckV1",
+      "privateChatLifecycleV1",
     ]) {
       expect(serviceWorker).toContain(`'${capability}'`);
     }
@@ -924,11 +925,10 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toMatch(/buildOpaqueTabSnapshot[\s\S]*snapshotFaviconUrl\(metadata\.favicon\)/);
     expect(serviceWorker).toContain("favicon: faviconByTabId.get(tabId) || ''");
     expect(serviceWorker).toMatch(/tabs: wireTabs\(\),[\s\S]*tabs: wireTabs\(\),/);
-    // The persisted tabSnapshotV1 record and the revision compare keep the
-    // four-field shape, so an icon change never rewrites storage or bumps
-    // the revision that exact tab close is fenced on.
+    // Display metadata stays outside the exact identity revision. A late
+    // favicon or title update must not stale an otherwise unchanged tab.
     expect(serviceWorker).toContain(
-      ".map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }))",
+      "entries.map(({ tabId, tabRef, url }) => ({ tabId, tabRef, url }))",
     );
   });
 
@@ -1435,7 +1435,7 @@ describe("ClassPilot 2.9.1 class chat controls", () => {
     expect(serviceWorker).toContain("}, 'seen', null, authContext);");
     expect(serviceWorker).toContain("rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered'");
     expect(serviceWorker).toContain("entries = entries.filter((item) => item.messageId !== ack.messageId || item.status === 'seen');");
-    expect(serviceWorker).toMatch(/const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set\(\[\s+'INVALID_CHAT_ACK',\s+'CHAT_MESSAGE_NOT_FOUND',\s+\]\);/);
+    expect(serviceWorker).toMatch(/const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set\(\[\s+'INVALID_CHAT_ACK',\s+'CHAT_MESSAGE_NOT_FOUND',\s+'PRIVATE_CHAT_EXPIRED',\s+\]\);/);
     expect(serviceWorker).toContain("} else if (receipt?.accepted !== true && !chatAckReceiptIsTerminal(receipt)) {");
     expect(runtimeCore).toContain("seenAckedAt: positiveTimestamp(rawMessage.seenAckedAt)");
   });

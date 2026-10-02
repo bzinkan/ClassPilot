@@ -87,6 +87,8 @@ const DIAGNOSTIC_CODE_ALLOWLIST = new Set([
   'TAB_CLOSE_CAPABILITY_REQUIRED',
   'TAB_CLOSE_FAILED',
   'TAB_REF_NOT_FOUND',
+  'STALE_TAB_REF', 'TAB_ACTIVATE_CAPABILITY_REQUIRED', 'FOCUS_CAPABILITY_REQUIRED',
+  'FOCUS_RESTRICTION_INVALID', 'FOCUS_TAB_OFF_POLICY', 'FOCUS_SESSION_STORAGE_REQUIRED',
   'TAB_SNAPSHOT_REVISION_REQUIRED',
   'TAB_TARGET_REQUIRED',
   'TAB_URL_NOT_FOUND',
@@ -325,6 +327,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'studentAuthGatePresenceV1',
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
+  'preciseRestrictionResourcesV1',
   'restrictionPortalFirstV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
@@ -345,8 +348,13 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'domainPreservingRestrictionsV1',
   'chatPauseV1',
   'chatSeenAckV1',
+  'focusTabV1',
+  'privateChatLifecycleV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'focusTabV1',
+  'privateChatLifecycleV1',
+  'preciseRestrictionResourcesV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
   'afterHoursSafetyOnlyV1',
@@ -437,6 +445,16 @@ const COMMAND_DIAGNOSTIC_MESSAGES = Object.freeze({
   TAB_CLOSE_CAPABILITY_REQUIRED: 'A ClassPilot update is required for this action.',
   UNSUPPORTED_CLASSROOM_STATE_SCHEMA: 'This classroom command is not supported.',
   CLASSROOM_STATE_INVALID: 'The classroom command could not be applied.',
+  PRECISE_RESTRICTION_INVALID: 'The precise restriction could not be applied.',
+  STALE_TAB_REF: 'Refresh the selected tab before trying again.',
+  TAB_ACTIVATE_CAPABILITY_REQUIRED: 'A ClassPilot update is required to bring this tab forward.',
+  FOCUS_CAPABILITY_REQUIRED: 'A ClassPilot update is required for Focus.',
+  FOCUS_RESTRICTION_INVALID: 'The Focus restriction could not be applied.',
+  FOCUS_TAB_OFF_POLICY: 'The selected tab is outside classroom policy.',
+  FOCUS_SESSION_STORAGE_REQUIRED: 'Protected browser-session storage is unavailable.',
+  PRECISE_RESTRICTION_NOT_NEGOTIATED: 'A ClassPilot update is required for this restriction.',
+  DNR_REGEX_BUDGET_EXCEEDED: 'The restriction exceeds the browser rule budget.',
+  DNR_REGEX_UNSUPPORTED: 'The browser cannot install this restriction safely.',
   COMMAND_FAILED: 'Command could not be completed.',
 });
 const COMMAND_DIAGNOSTIC_TEXT_ALLOWLIST = new Set([
@@ -721,6 +739,18 @@ const PENDING_CHECK_IN_MAX_AGE_MS = 5 * 60 * 1000;
 const FAB_STATE_STORAGE_KEY = 'fabStateV1';
 const FAB_CONTEXT_STORAGE_KEY = 'fabContextV1';
 const FAB_CHAT_CONTEXT_STORAGE_KEY = 'fabChatContextV1';
+// Stamp of the newest teacher "End chat" in this browser session, kept with
+// fabChatClosed. It only grows, so pages can order teacher messages against
+// it: SchoolPilot's teacher-message and chat-closed frames carry no creation
+// or close time. It is a bare stamp, not tied to one student.
+const FAB_CHAT_CLOSED_AT_STORAGE_KEY = 'fabChatClosedAt';
+const PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY = 'privateChatLifecycleV1';
+let currentPrivateChatLifecycle = null;
+let privateChatLifecycleEstablishedBinding = null;
+// The newest teacher message that arrived during Attention, announced once
+// Attention ends (raiseDeferredTeacherMessageNotification). Ending Attention
+// together with its class drops it.
+let deferredTeacherMessageNotification = null;
 const CLASSROOM_OVERLAY_STORAGE_KEY = 'classroomOverlayStateV1';
 const CLASSROOM_OVERLAY_EXPIRY_ALARM = 'classroom-overlay-expiry';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
@@ -1985,7 +2015,11 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'pauseReason',
   'fabChatMessages',
   'fabChatClosed',
+  'fabChatClosedAt',
+  'privateChatLifecycleV1',
   'tabSnapshotV1',
+  'focusTabRefsV1',
+  'focusAssignmentV1',
   'monitoringEventOutboxV1',
   'monitoringEventOutboxDropped',
   'monitoringEventOutboxAuthBindingV1',
@@ -5018,6 +5052,12 @@ function adoptLicenseState(active, planStatus, authContext, options = {}) {
     ? Number(options.verifiedAt)
     : Date.now();
   licenseRefreshState = licenseActive ? 'active' : 'denied';
+  if (!licenseActive && typeof focusAssignment !== 'undefined' && focusAssignment) {
+    const retired = focusAssignment;
+    // Status cannot remain active while canonical entitlement is denied.
+    focusStatus = { state: 'inactive' };
+    enqueueClassroomStateOperation(() => retireFocus(retired, null, authContext, { retireAssignment: true })).catch(() => {});
+  }
   return scope;
 }
 
@@ -6321,6 +6361,12 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     : rawState.pauseReason === 'testing' || rawState.pauseReason === 'teacher' ? rawState.pauseReason
       : fallbackState.pauseReason === 'testing' || fallbackState.pauseReason === 'teacher' ? fallbackState.pauseReason
         : 'teacher';
+  // SchoolPilot's hard messaging switches (school-wide and the class's own),
+  // which ignore the pause. SchoolPilot reports a pause even while a switch is
+  // off, so only this field tells a paused class from a switched-off one. A
+  // server that predates it leaves it unknown (null), never on.
+  const messagingChannelEnabled = scheduledUnavailable ? false
+    : typeof rawState.messagingChannelEnabled === 'boolean' ? rawState.messagingChannelEnabled : null;
   const rawTools = rawState.classTools;
   const toolCapabilities = Array.isArray(rawTools?.capabilities) ? rawTools.capabilities.filter(name => hasNegotiatedCapability(name)
     && ['helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1'].includes(name)) : [];
@@ -6356,6 +6402,7 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     handRaisingEnabled: scheduledUnavailable ? false : typeof rawState.handRaisingEnabled === 'boolean'
       ? rawState.handRaisingEnabled
       : fallbackState.handRaisingEnabled !== false,
+    messagingChannelEnabled,
     messagesPaused,
     pauseReason,
     handRaised: typeof rawState.handRaised === 'boolean'
@@ -6405,6 +6452,7 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
     lifecycleRevision: 0,
     activeSessionIds: [],
     messagingEnabled: false,
+    messagingChannelEnabled: false,
     handRaisingEnabled: false,
     handRaised: false,
     messagesPaused: false,
@@ -6489,6 +6537,19 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   }
 
   const bindingChanged = priorContext.binding !== binding;
+  if (authContext && hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    if (Object.hasOwn(rawFabState, 'privateChatLifecycleState')) {
+      nextState.privateChatLifecycleState = await adoptPrivateChatLifecycleState(
+        rawFabState.privateChatLifecycleState, authContext, nextState);
+      assertCurrent('private chat lifecycle adoption');
+    } else {
+      // A negotiated full snapshot cannot restore private delivery without
+      // the server watermark. Other independent classroom UI still updates.
+      await markPrivateChatLifecycleUnavailable(authContext);
+      assertCurrent('private chat lifecycle recovery fence');
+      requestPrivateChatLifecycleRecovery();
+    }
+  }
   const lifecycleEnded = ['session-ended', 'entitlement-inactive']
     .includes(nextState.reason) || nextState.activeContexts.length === 0;
   const scheduledOwnerChanged = Boolean(nextState.supervisionContextId)
@@ -6541,6 +6602,11 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
   await kv.set(updates);
   assertCurrent();
   currentFabState = nextState;
+  if (focusAssignment && (lifecycleEnded || scheduledOwnerChanged
+    || focusAssignment.scopeKey !== focusScopeKey(nextState))) {
+    await retireFocus(focusAssignment, null, authContext, { retireAssignment: true });
+    assertCurrent();
+  }
   const authorityEnvelope = options.authorityEnvelope || rawFabState;
   const broadcastSource = (() => {
     if (!authContext) return authorityEnvelope;
@@ -6579,6 +6645,15 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     } else {
       await broadcastToAllTabs('fab-state', { ...nextState, context });
     }
+  }
+  // A scheduled class's FAB snapshot follows its Attention release; the
+  // notification held during Attention may be raised now.
+  if (deferredTeacherMessageNotification && authContext && !attentionModeActive) {
+    raiseDeferredTeacherMessageNotification(authContext).catch((error) => {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Chat] Deferred teacher notification failed:', safeDiagnosticError(error));
+      }
+    });
   }
   return nextState;
 }
@@ -7103,6 +7178,8 @@ async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expect
     ...classroomAuthorityPayload(message),
     deliveryStatus,
     status: deliveryStatus,
+    ...(RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle)
+      ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle) } : {}),
     errorMessage: errorMessage || null,
     timestamp: new Date().toISOString(),
   };
@@ -7442,13 +7519,16 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
     const bindingMatches = prior?.binding === binding;
     const priorById = new Map((bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
       .map((entry) => [entry.tabId, entry]));
+    const focusRefs = hasSessionStorage() ? await focusRefRegistry(authContext) : null;
+    const receiptById = new Map((focusRefs?.entries || []).map(entry => [entry.tabId, entry]));
     const faviconByTabId = new Map();
     const localEntries = tabs.map((tab) => {
       const metadata = restrictionSafeMonitoringMetadata(tab);
       faviconByTabId.set(tab.id, snapshotFaviconUrl(metadata.favicon));
       return {
         tabId: tab.id,
-        tabRef: priorById.get(tab.id)?.tabRef || generateOpaqueTabRef(),
+        tabRef: [priorById.get(tab.id)?.tabRef, receiptById.get(tab.id)?.tabRef]
+          .find(ref => ref && !retiredFocusTabRefs.has(ref)) || generateOpaqueTabRef(),
         url: String(metadata.url || '').slice(0, 512),
         title: String(metadata.title || 'Untitled').slice(0, 512),
       };
@@ -7461,9 +7541,11 @@ function buildOpaqueTabSnapshot(rawTabs, expectedAuthContext = null) {
       title,
       favicon: faviconByTabId.get(tabId) || '',
     }));
-    const previousProjection = (bindingMatches && Array.isArray(prior.entries) ? prior.entries : [])
-      .map(({ tabId, tabRef, url, title }) => ({ tabId, tabRef, url, title }));
-    const changed = JSON.stringify(previousProjection) !== JSON.stringify(localEntries);
+    // Titles and favicons are display metadata. Only exact tab membership,
+    // ordering, opaque ref and URL changes invalidate a teacher's selection.
+    const identityProjection = entries => entries.map(({ tabId, tabRef, url }) => ({ tabId, tabRef, url }));
+    const previousProjection = identityProjection(bindingMatches && Array.isArray(prior.entries) ? prior.entries : []);
+    const changed = JSON.stringify(previousProjection) !== JSON.stringify(identityProjection(localEntries));
     const priorRevision = bindingMatches ? Number(prior.revision || 0) : 0;
     if (bindingMatches && !changed && Number.isSafeInteger(priorRevision) && priorRevision >= 1) {
       currentTabSnapshotRevision = priorRevision;
@@ -8026,6 +8108,7 @@ function commandAckReceiptIsDrainable(receipt, requireDisposition = false) {
 const TERMINAL_CHAT_ACK_RECEIPT_CODES = new Set([
   'INVALID_CHAT_ACK',
   'CHAT_MESSAGE_NOT_FOUND',
+  'PRIVATE_CHAT_EXPIRED',
 ]);
 
 function chatAckReceiptIsTerminal(receipt) {
@@ -8325,6 +8408,8 @@ function enqueueChatAck(rawAck, authContext) {
     deliveryStatus: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
     status: rawAck.deliveryStatus === 'failed' ? 'failed' : rawAck.deliveryStatus === 'seen' ? 'seen' : 'delivered',
     errorMessage: rawAck.errorMessage ? String(rawAck.errorMessage).slice(0, 500) : null,
+    ...(RuntimeCore.normalizePrivateChatLifecycle(rawAck.privateChatLifecycle)
+      ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(rawAck.privateChatLifecycle) } : {}),
     bindingVersion: 2,
     schoolId: authContext.schoolId || undefined,
     deviceId: authContext.deviceId,
@@ -8555,6 +8640,8 @@ function normalizeStudentChatEntry(raw = {}) {
     sessionId,
     ...context,
     ...(context.supervisionContextId ? { studentControlRevision: raw.studentControlRevision } : {}),
+    ...(RuntimeCore.normalizePrivateChatLifecycle(raw.expectedPrivateChatLifecycle)
+      ? { expectedPrivateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(raw.expectedPrivateChatLifecycle) } : {}),
     binding,
     queuedAt: Number(raw.queuedAt || Date.now()),
     updatedAt: Number(raw.updatedAt || Date.now()),
@@ -8887,6 +8974,16 @@ function assertStudentChatSessionCurrent(entry, authContext, reason = 'student m
     error.code = 'STUDENT_CHAT_SESSION_RETIRED';
     throw error;
   }
+  if (entry.expectedPrivateChatLifecycle || hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    const known = privateChatThreadFor(entry, authContext);
+    if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext) || teacherChatChannelOff()
+      || RuntimeCore.privateChatLifecycleDecision(entry.expectedPrivateChatLifecycle, known) !== 'current'
+      || entry.expectedPrivateChatLifecycle.threadGeneration !== known.threadGeneration) {
+      const error = new Error('Student message belongs to a retired private chat');
+      error.code = 'STUDENT_CHAT_SESSION_RETIRED';
+      throw error;
+    }
+  }
   return sessionId;
 }
 
@@ -8913,6 +9010,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
   if (!entry || entry.binding !== binding) throw authContextSuperseded('student message delivery');
   let attempted = entry;
   try {
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) await loadPrivateChatLifecycle(authContext);
     assertStudentChatSessionCurrent(entry, authContext, 'student message delivery');
     const attemptStatus = entry.attempts > 0 ? 'Retrying' : 'Sending';
     await notifyStudentChatStatus(entry, attemptStatus, {}, authContext);
@@ -8937,6 +9035,7 @@ async function deliverStudentChatEntry(rawEntry, authContext) {
           messageType: attempted.messageType,
           sessionId: attempted.sessionId,
           ...classroomAuthorityPayload(attempted),
+          ...(attempted.expectedPrivateChatLifecycle ? { expectedPrivateChatLifecycle: attempted.expectedPrivateChatLifecycle } : {}),
         }),
         signal: authContext.signal,
       },
@@ -9126,6 +9225,17 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     error.pauseReason = currentFabState.pauseReason === 'testing' ? 'testing' : 'teacher';
     throw error;
   }
+  let expectedPrivateChatLifecycle = null;
+  await loadPrivateChatLifecycle(authContext);
+  if (privateChatLifecycleEstablishedBinding === monitoringEventAuthBindingForContext(authContext)
+    && !hasNegotiatedCapability('privateChatLifecycleV1', authContext))
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+    expectedPrivateChatLifecycle = RuntimeCore.normalizePrivateChatLifecycle(privateChatThreadFor(raw, authContext));
+    if (!expectedPrivateChatLifecycle || teacherChatChannelOff()
+      || !hasNegotiatedCapability('studentChatIdempotencyV1', authContext))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
   if (!hasNegotiatedCapability('studentChatIdempotencyV1', authContext)) {
     if (raw.supervisionContextId) throw new Error('Scheduled classroom messaging requires durable chat support');
     return sendLegacyStudentChatMessage(raw, authContext, requestedSessionId);
@@ -9137,6 +9247,7 @@ async function queueAndSendStudentChatMessage(raw = {}, expectedAuthContext = nu
     messageType: raw.messageType,
     sessionId: requestedSessionId,
     ...classroomAuthorityPayload(raw),
+    ...(expectedPrivateChatLifecycle ? { expectedPrivateChatLifecycle } : {}),
     queuedAt: Date.now(),
     status: 'sending',
   }, authContext);
@@ -9278,6 +9389,7 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
       MESSAGE_INBOX_STORAGE_KEY,
       MESSAGE_INBOX_BINDING_KEY,
       MESSAGE_INBOX_DEDUP_KEY,
+      PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY,
       'fabChatMessages',
       'fabChatClosed',
       PENDING_CHECK_IN_KEY,
@@ -9584,10 +9696,12 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     MESSAGE_INBOX_DEDUP_KEY,
     'fabChatMessages',
     'fabChatClosed',
+    FAB_CHAT_CLOSED_AT_STORAGE_KEY,
   ]);
   assertMessageInboxOperationCurrent(options, reason);
   const storedBinding = stored[MESSAGE_INBOX_BINDING_KEY] || null;
   const bindingChanged = storedBinding !== binding;
+  const chatClosedAt = teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]);
 
   if (!binding || bindingChanged) {
     await setMessageInboxStorageFenced({
@@ -9608,7 +9722,7 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     ) {
       await notifyStudentMessageStateCleared(reason);
     }
-    return { binding, bindingChanged, messages: [], seenIds: [] };
+    return { binding, bindingChanged, messages: [], seenIds: [], chatClosedAt };
   }
 
   return {
@@ -9620,7 +9734,294 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     seenIds: Array.isArray(stored[MESSAGE_INBOX_DEDUP_KEY])
       ? stored[MESSAGE_INBOX_DEDUP_KEY]
       : [],
+    chatClosedAt,
   };
+}
+
+function teacherChatCloseStamp(value) {
+  const stamp = Number(value);
+  return Number.isSafeInteger(stamp) && stamp > 0 ? stamp : 0;
+}
+
+function privateChatLifecycleError(code) {
+  const error = new Error('Private chat lifecycle is unavailable or retired');
+  error.code = code;
+  return error;
+}
+
+function requestPrivateChatLifecycleRecovery() {
+  lastFabHeartbeatSyncRequestAt = 0;
+  scheduleEventHeartbeat('private-chat-lifecycle-recovery');
+}
+
+function privateChatThreadFor(authority, authContext) {
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (!binding || currentPrivateChatLifecycle?.binding !== binding || currentPrivateChatLifecycle.recoveryPending) return null;
+  const key = RuntimeCore.classroomContextKey(authority);
+  const thread = key && currentPrivateChatLifecycle.threads.find(entry => RuntimeCore.classroomContextKey(entry) === key);
+  return thread ? { threadId: thread.threadId, schoolEpoch: thread.schoolEpoch,
+    activityEpoch: thread.activityEpoch, threadGeneration: thread.threadGeneration } : null;
+}
+
+async function loadPrivateChatLifecycle(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'private chat lifecycle read');
+  const binding = monitoringEventAuthBindingForContext(authContext);
+  if (currentPrivateChatLifecycle?.binding === binding) return currentPrivateChatLifecycle;
+  const stored = (await kv.get(PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY))[PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'private chat lifecycle read');
+  const normalized = stored?.binding === binding ? RuntimeCore.normalizePrivateChatLifecycleState({
+    schoolEpoch: stored.schoolEpoch, threads: stored.threads }) : null;
+  const watermarks = normalized ? normalizePrivateChatWatermarks(stored.watermarks ?? normalized.threads, normalized.schoolEpoch) : null;
+  currentPrivateChatLifecycle = normalized && watermarks ? { ...normalized, watermarks, binding,
+    ownershipRevision: Number.isSafeInteger(stored.ownershipRevision) && stored.ownershipRevision >= 0 ? stored.ownershipRevision : 0 } : null;
+  privateChatLifecycleEstablishedBinding = stored?.binding === binding && stored.established === true ? binding : null;
+  if (currentPrivateChatLifecycle) {
+    currentPrivateChatLifecycle.channelEnabled = stored.channelEnabled !== false;
+    currentPrivateChatLifecycle.recoveryPending = stored.recoveryPending === true;
+  }
+  return currentPrivateChatLifecycle;
+}
+
+function normalizePrivateChatWatermarks(entries, schoolEpoch) {
+  if (!Array.isArray(entries) || entries.length > 64) return null;
+  const result = [], keys = new Set();
+  for (const entry of entries) {
+    if (!entry || Object.keys(entry).some(key => !['threadId', 'schoolEpoch', 'activityEpoch', 'threadGeneration',
+      'teachingSessionId', 'supervisionContextId', 'ownershipRevision', 'retired'].includes(key))) return null;
+    const { ownershipRevision = 0, retired = false, ...wire } = entry;
+    if (!Number.isSafeInteger(ownershipRevision) || ownershipRevision < 0 || typeof retired !== 'boolean') return null;
+    const normalized = RuntimeCore.normalizePrivateChatLifecycleState({ schoolEpoch, threads: [wire] });
+    const thread = normalized?.threads[0];
+    const key = thread && JSON.stringify([RuntimeCore.classroomContextKey(thread), thread.threadId]);
+    if (!key || keys.has(key)) return null;
+    keys.add(key); result.push({ ...thread, ownershipRevision, retired });
+  }
+  return result;
+}
+
+function privateChatThreadWire(entry) {
+  return { threadId: entry.threadId, schoolEpoch: entry.schoolEpoch, activityEpoch: entry.activityEpoch,
+    threadGeneration: entry.threadGeneration, teachingSessionId: entry.teachingSessionId,
+    supervisionContextId: entry.supervisionContextId };
+}
+
+function markPrivateChatLifecycleUnavailable(authContext) {
+  return enqueueMessageInboxMutation(async () => {
+    await loadPrivateChatLifecycle(authContext);
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    const marker = { ...(currentPrivateChatLifecycle || {}), binding, established: true,
+      recoveryPending: true, channelEnabled: false };
+    await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: marker },
+      { authContext, expectedBinding: binding }, 'private chat recovery fence');
+    privateChatLifecycleEstablishedBinding = binding;
+    currentPrivateChatLifecycle = currentPrivateChatLifecycle ? marker : null;
+    if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage))
+      deferredTeacherMessageNotification = null;
+    await clearPrivateTeacherNotifications(authContext);
+  });
+}
+
+function privateTeacherMessageIsCurrent(message, authContext, allowAdvance = true) {
+  if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext))
+    return privateChatLifecycleEstablishedBinding !== monitoringEventAuthBindingForContext(authContext);
+  const token = RuntimeCore.normalizePrivateChatLifecycle(message?.privateChatLifecycle);
+  const known = privateChatThreadFor(message, authContext);
+  if (!token || !known || !classroomContextIsCurrent(message)) return false;
+  return RuntimeCore.privateChatLifecycleDecision(token, known) === 'current'
+    && (allowAdvance || token.threadGeneration === known.threadGeneration);
+}
+
+function privateChatMessageIsAnnouncement(message) {
+  return message?.messageKind === 'announcement'
+    || message?.messageKind === undefined && Boolean(getCommandIdFromMessage(message));
+}
+
+async function clearPrivateTeacherNotifications(authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  const prefix = `${authBoundNotificationPrefixForContext(authContext)}private_`.replace(/[^a-zA-Z0-9_-]/g, '');
+  const notifications = await chrome.notifications.getAll();
+  assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  for (const id of Object.keys(notifications || {})) {
+    if (!id.startsWith(prefix)) continue;
+    await clearAuthBoundNotification(id);
+    activeAuthBoundNotificationIds.delete(id);
+    assertAuthenticatedContextCurrent(authContext, 'private notification cleanup');
+  }
+}
+
+function privateChatEntryCurrent(entry, snapshot) {
+  const token = RuntimeCore.normalizePrivateChatLifecycle(entry?.privateChatLifecycle);
+  const known = snapshot?.threads.find(thread => RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(entry));
+  return Boolean(token && known && RuntimeCore.privateChatLifecycleDecision(token, {
+    threadId: known.threadId, schoolEpoch: known.schoolEpoch,
+    activityEpoch: known.activityEpoch, threadGeneration: known.threadGeneration }) === 'current');
+}
+
+function adoptPrivateChatLifecycleState(rawState, authContext, nextFabState) {
+  return enqueueMessageInboxMutation(async () => {
+    const reason = 'private chat lifecycle adoption';
+    const state = RuntimeCore.normalizePrivateChatLifecycleState(rawState);
+    const ownershipRevision = nextFabState.ownershipRevision;
+    const activeKeys = new Set(RuntimeCore.classroomContexts(nextFabState).map(RuntimeCore.classroomContextKey));
+    if (!state || nextFabState.ownershipRevisionKnown !== true || !Number.isSafeInteger(ownershipRevision)
+      || ownershipRevision < 0 || state.threads.some(thread => !activeKeys.has(RuntimeCore.classroomContextKey(thread))))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+    const binding = monitoringEventAuthBindingForContext(authContext);
+    await loadPrivateChatLifecycle(authContext);
+    const prior = currentPrivateChatLifecycle;
+    if (prior?.ownershipRevision > ownershipRevision) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+    let adopted = state;
+    if (prior?.schoolEpoch > state.schoolEpoch) adopted = {
+      schoolEpoch: prior.schoolEpoch,
+      threads: prior.threads.filter(thread => activeKeys.has(RuntimeCore.classroomContextKey(thread))),
+    };
+    else if (prior?.schoolEpoch === state.schoolEpoch) adopted = { ...state, threads: state.threads.map(thread => {
+      const archive = prior.watermarks || prior.threads;
+      const records = archive.filter(entry => RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(thread));
+      if (records.some(entry => entry.threadId === thread.threadId && entry.retired === true))
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+      const previous = records.find(entry => !entry.retired);
+      if (!previous) return thread;
+      if (previous.activityEpoch > thread.activityEpoch) return privateChatThreadWire(previous);
+      if (previous.threadId !== thread.threadId
+        && ownershipRevision <= (previous.ownershipRevision ?? prior.ownershipRevision ?? 0))
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+      if (previous.activityEpoch === thread.activityEpoch) {
+        if (previous.threadId !== thread.threadId) return thread;
+        return { ...thread, threadGeneration: Math.max(previous.threadGeneration, thread.threadGeneration) };
+      }
+      return thread;
+    }) };
+    const channelOff = nextFabState.messagingChannelEnabled === false
+      || nextFabState.messagingEnabled === false && !(nextFabState.messagesPaused === true
+        && nextFabState.messagingChannelEnabled === true && activeKeys.size > 0);
+    const storedChat = await kv.get(['fabChatMessages', 'fabChatClosed']);
+    assertAuthenticatedContextCurrent(authContext, reason);
+    const entries = Array.isArray(storedChat.fabChatMessages) ? storedChat.fabChatMessages : [];
+    const retained = channelOff ? [] : entries.filter(entry => privateChatEntryCurrent(entry, adopted));
+    const active = new Map(adopted.threads.map(thread => [RuntimeCore.classroomContextKey(thread), thread]));
+    const inactive = prior?.schoolEpoch === adopted.schoolEpoch ? (prior.watermarks || prior.threads)
+      .filter(thread => active.get(RuntimeCore.classroomContextKey(thread))?.threadId !== thread.threadId)
+      .map(thread => ({ ...thread, retired: thread.retired === true || active.has(RuntimeCore.classroomContextKey(thread)) })) : [];
+    // Retain a bounded private floor for temporarily inactive typed activities.
+    // Active threads are never evicted or exposed through this private archive.
+    const watermarks = [...inactive.slice(-(64 - adopted.threads.length)), ...adopted.threads.map(thread =>
+      ({ ...thread, ownershipRevision, retired: false }))];
+    const next = { ...adopted, watermarks, ownershipRevision, binding, established: true, recoveryPending: false, channelEnabled: !channelOff };
+    await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: next,
+      ...(retained.length !== entries.length ? { fabChatMessages: retained, fabChatClosed: retained.length === 0 } : {}) },
+    { authContext, expectedBinding: binding }, reason);
+    currentPrivateChatLifecycle = next;
+    privateChatLifecycleEstablishedBinding = binding;
+    if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage)
+      && (channelOff || !privateChatEntryCurrent(deferredTeacherMessageNotification.sourceMessage, adopted)))
+      deferredTeacherMessageNotification = null;
+    if (channelOff || JSON.stringify(prior) !== JSON.stringify(next)) await clearPrivateTeacherNotifications(authContext);
+    return adopted;
+  });
+}
+
+async function advancePrivateChatLifecycleNow(message, authContext) {
+  await loadPrivateChatLifecycle(authContext);
+  const token = RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle);
+  const known = privateChatThreadFor(message, authContext);
+  if (!token || !known) {
+    requestPrivateChatLifecycleRecovery();
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
+  if (token.schoolEpoch > known.schoolEpoch || token.schoolEpoch === known.schoolEpoch
+    && token.activityEpoch > known.activityEpoch) {
+    requestPrivateChatLifecycleRecovery();
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+  }
+  if (token.threadId !== known.threadId && token.schoolEpoch === known.schoolEpoch
+    && token.activityEpoch === known.activityEpoch) {
+    const retired = currentPrivateChatLifecycle.watermarks?.some(thread => thread.retired === true
+      && RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message)
+      && thread.threadId === token.threadId);
+    if (!retired) {
+      requestPrivateChatLifecycleRecovery();
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+    }
+  }
+  if (!privateTeacherMessageIsCurrent(message, authContext))
+    throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+  if (token.threadGeneration === known.threadGeneration) return token;
+  const next = { ...currentPrivateChatLifecycle, threads: currentPrivateChatLifecycle.threads.map(thread =>
+    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message) ? { ...thread, ...token } : thread) };
+  next.watermarks = (currentPrivateChatLifecycle.watermarks || currentPrivateChatLifecycle.threads).map(thread =>
+    RuntimeCore.classroomContextKey(thread) === RuntimeCore.classroomContextKey(message)
+      && thread.threadId === token.threadId && thread.retired !== true ? { ...thread, ...token } : thread);
+  const chat = await kv.get('fabChatMessages');
+  assertAuthenticatedContextCurrent(authContext, 'private chat generation');
+  const retained = (Array.isArray(chat.fabChatMessages) ? chat.fabChatMessages : [])
+    .filter(entry => privateChatEntryCurrent(entry, next));
+  const updatedFab = currentFabState ? { ...currentFabState,
+    privateChatLifecycleState: { schoolEpoch: next.schoolEpoch, threads: next.threads } } : null;
+  await setMessageInboxStorageFenced({ [PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]: next,
+    ...(updatedFab ? { [FAB_STATE_STORAGE_KEY]: updatedFab } : {}),
+    fabChatMessages: retained, fabChatClosed: retained.length === 0 },
+  { authContext, expectedBinding: monitoringEventAuthBindingForContext(authContext), sourceMessage: message }, 'private chat generation');
+  currentPrivateChatLifecycle = next;
+  if (updatedFab) currentFabState = updatedFab;
+  if (deferredTeacherMessageNotification && !privateChatMessageIsAnnouncement(deferredTeacherMessageNotification.sourceMessage)
+    && !privateChatEntryCurrent(deferredTeacherMessageNotification.sourceMessage, next)) deferredTeacherMessageNotification = null;
+  await clearPrivateTeacherNotifications(authContext);
+  return token;
+}
+
+// The teacher ended the chat (SchoolPilot "End chat"). The close is recorded
+// in the inbox writer's order, so every teacher message persisted after it is
+// stamped with it and may reopen the chat, while a message persisted before it
+// can never reopen it. Ending a chat wipes its thread even with no page open.
+// wasOpen says whether the stored chat was still open or held messages: pages
+// announce only a close that ended one, so a repeated End chat stays quiet. It
+// is read here because a page on Chrome 120 can reload the closed chat from
+// storage before the close's own page message reaches it.
+function recordTeacherChatClosed(message, authContext) {
+  const options = {
+    authContext,
+    expectedBinding: monitoringEventAuthBindingForContext(authContext),
+    sourceMessage: message,
+  };
+  return enqueueMessageInboxMutation(async () => {
+    const reason = 'teacher chat close';
+    const identity = await reconcileMessageInboxIdentityNow(reason, options);
+    const fabBinding = fabIdentityBinding();
+    if (!identity.binding || !fabBinding) throw authContextSuperseded(reason);
+    const storedChat = await kv.get(['fabChatMessages', 'fabChatClosed']);
+    assertMessageInboxOperationCurrent(options, reason);
+    const wasOpen = storedChat.fabChatClosed !== true
+      || (Array.isArray(storedChat.fabChatMessages) && storedChat.fabChatMessages.length > 0);
+    await loadPrivateChatLifecycle(authContext);
+    if (!hasNegotiatedCapability('privateChatLifecycleV1', authContext)
+      && privateChatLifecycleEstablishedBinding === identity.binding) return { ignored: true };
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext)) {
+      const token = RuntimeCore.normalizePrivateChatLifecycle(message.privateChatLifecycle);
+      const known = privateChatThreadFor(message, authContext);
+      if (!token || !known) {
+        requestPrivateChatLifecycleRecovery();
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE');
+      }
+      if (token.threadId !== known.threadId || token.schoolEpoch !== known.schoolEpoch
+        || token.activityEpoch !== known.activityEpoch || token.threadGeneration < known.threadGeneration)
+        return { ignored: true };
+      await advancePrivateChatLifecycleNow(message, authContext);
+      const entries = Array.isArray(storedChat.fabChatMessages) ? storedChat.fabChatMessages : [];
+      const retained = entries.filter(entry => privateChatEntryCurrent(entry, currentPrivateChatLifecycle));
+      await setMessageInboxStorageFenced({ fabChatMessages: retained, fabChatClosed: retained.length === 0,
+        [FAB_CHAT_CONTEXT_STORAGE_KEY]: fabChatStorageContext(fabBinding, message) }, options, reason);
+      return { privateChatLifecycle: token, wasOpen: retained.length !== entries.length && wasOpen };
+    }
+    const closedAt = Math.max(Date.now(), identity.chatClosedAt + 1);
+    await setMessageInboxStorageFenced({
+      fabChatMessages: [],
+      fabChatClosed: true,
+      [FAB_CHAT_CLOSED_AT_STORAGE_KEY]: closedAt,
+      [FAB_CHAT_CONTEXT_STORAGE_KEY]: fabChatStorageContext(fabBinding, message),
+    }, options, reason);
+    return { closedAt, wasOpen };
+  });
 }
 
 function reconcileMessageInboxIdentity(reason = 'identity-check', options = {}) {
@@ -9644,6 +10045,18 @@ function persistTeacherMessages(rawMessages, options = {}) {
       // Never attach its inbox rows to whoever is signed in now.
       return { messages: identity.messages, seenIds: identity.seenIds, addedMessageIds: [] };
     }
+    if (options.authContext) {
+      await loadPrivateChatLifecycle(options.authContext);
+      for (const message of rawMessages || []) {
+        if (privateChatMessageIsAnnouncement(message)) continue;
+        const negotiated = hasNegotiatedCapability('privateChatLifecycleV1', options.authContext);
+        if (!negotiated && privateChatLifecycleEstablishedBinding === identity.binding)
+          throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_CAPABILITY_REQUIRED');
+        if (!negotiated) continue;
+        if (teacherChatChannelOff()) throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+        await advancePrivateChatLifecycleNow(message, options.authContext);
+      }
+    }
     const merged = RuntimeCore.mergeTeacherMessageInbox(
       identity.messages,
       identity.seenIds,
@@ -9656,7 +10069,8 @@ function persistTeacherMessages(rawMessages, options = {}) {
       [MESSAGE_INBOX_BINDING_KEY]: identity.binding,
     }, options, reason);
     assertMessageInboxOperationCurrent(options, reason);
-    return merged;
+    // The newest teacher close recorded before these messages arrived.
+    return { ...merged, chatClosedAt: identity.chatClosedAt };
   });
 }
 
@@ -9695,6 +10109,7 @@ async function markTeacherMessageSeen(message, actionRequest) {
     expectedBinding: monitoringEventAuthBindingForContext(authContext),
   };
   let firstSeen = false;
+  let seenLifecycle = null;
   await enqueueMessageInboxMutation(async () => {
     assertMessageInboxOperationCurrent(options, 'chat-message-seen');
     const identity = await reconcileMessageInboxIdentityNow('chat-message-seen', options);
@@ -9702,6 +10117,11 @@ async function markTeacherMessageSeen(message, actionRequest) {
     if (!identity.binding) return;
     const entry = identity.messages.find((item) => item?.id === messageId);
     if (!entry || entry.seenAckedAt) return;
+    if (hasNegotiatedCapability('privateChatLifecycleV1', authContext) && !privateChatMessageIsAnnouncement(entry)) {
+      await loadPrivateChatLifecycle(authContext);
+      if (!privateTeacherMessageIsCurrent(entry, authContext) || teacherChatChannelOff()) return;
+      seenLifecycle = entry.privateChatLifecycle;
+    }
     firstSeen = true;
     const seenAckedAt = Date.now();
     const messages = identity.messages.map((item) => (
@@ -9721,6 +10141,7 @@ async function markTeacherMessageSeen(message, actionRequest) {
     ...classroomAuthorityPayload(actionRequest),
     studentId: authContext.studentId,
     studentSessionId: authContext.studentSessionId,
+    ...(seenLifecycle ? { privateChatLifecycle: seenLifecycle } : {}),
   }, 'seen', null, authContext);
   return { acked: true };
 }
@@ -9768,7 +10189,9 @@ function clearStudentMessageState(reason = 'student-auth-cleared') {
       fabChatMessages: [],
       fabChatClosed: false,
     });
-    await kv.remove(MESSAGE_INBOX_BINDING_KEY);
+    await kv.remove([MESSAGE_INBOX_BINDING_KEY, PRIVATE_CHAT_LIFECYCLE_STORAGE_KEY]);
+    currentPrivateChatLifecycle = null;
+    privateChatLifecycleEstablishedBinding = null;
     await notifyStudentMessageStateCleared(reason);
   });
 }
@@ -10044,6 +10467,25 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
   }, NAVIGATION_DEBOUNCE_MS));
 }
 
+// Pages restore the chat with this context and compare it with the FAB
+// context, contextAuthorityRevision included. Without that field a page that
+// is told about session-storage changes (Chrome 120) treated every chat save
+// as a class change and wiped the thread it had just shown.
+function fabChatStorageContext(fabBinding, authority) {
+  return {
+    schemaVersion: 1,
+    binding: fabBinding,
+    ...classroomAuthorityPayload(authority),
+    contextAuthorityRevision: currentFabState?.contextAuthorityRevision ?? null,
+    activeSessionIds: activeTeachingSessionIds(),
+    activeContexts: activeClassroomContexts(),
+    revision: Number(currentFabState?.revision || 0),
+    lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
+    ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
+    ownershipRevisionKnown: currentFabState?.ownershipRevisionKnown === true,
+  };
+}
+
 function persistFabChatStateForRequest(message, actionRequest) {
   const allowedStatuses = new Set(['Sending', 'Retrying', 'Delivered', 'Failed', 'Waiting']);
   const messages = (Array.isArray(message?.messages) ? message.messages : [])
@@ -10059,6 +10501,11 @@ function persistFabChatStateForRequest(message, actionRequest) {
       time: Number.isFinite(Number(entry?.time)) ? Number(entry.time) : Date.now(),
       status: allowedStatuses.has(entry?.status) ? entry.status : null,
       seenAt: Number.isFinite(Number(entry?.seenAt)) && Number(entry.seenAt) > 0 ? Number(entry.seenAt) : null,
+      // The newest teacher close the entry followed (fabChatClosedAt), so a
+      // page can tell an ended thread from the conversation after it.
+      closeStamp: teacherChatCloseStamp(entry?.closeStamp),
+      ...(RuntimeCore.normalizePrivateChatLifecycle(entry?.privateChatLifecycle)
+        ? { privateChatLifecycle: RuntimeCore.normalizePrivateChatLifecycle(entry.privateChatLifecycle) } : {}),
     }))
     .filter((entry) => entry.text && RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(actionRequest));
   const options = {
@@ -10067,17 +10514,21 @@ function persistFabChatStateForRequest(message, actionRequest) {
   };
   return enqueueMessageInboxMutation(async () => {
     assertStudentActionRequestCurrent(actionRequest, 'FAB chat state persistence');
-    const context = {
-      schemaVersion: 1,
-      binding: actionRequest.fabBinding,
-      ...classroomAuthorityPayload(actionRequest),
-      activeSessionIds: activeTeachingSessionIds(),
-      activeContexts: activeClassroomContexts(),
-      revision: Number(currentFabState?.revision || 0),
-      lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
-      ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
-      ownershipRevisionKnown: currentFabState?.ownershipRevisionKnown === true,
-    };
+    if (hasNegotiatedCapability('privateChatLifecycleV1', actionRequest.authContext)) {
+      await loadPrivateChatLifecycle(actionRequest.authContext);
+      const known = privateChatThreadFor(actionRequest, actionRequest.authContext);
+      const expected = RuntimeCore.normalizePrivateChatLifecycle(message.expectedPrivateChatLifecycle);
+      if (!known || RuntimeCore.privateChatLifecycleDecision(expected, known) !== 'current'
+        || expected.threadGeneration !== known.threadGeneration)
+        throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
+      for (let index = messages.length - 1; index >= 0; index--) {
+        const entry = messages[index];
+        if (entry.sender === 'student' && !entry.privateChatLifecycle) entry.privateChatLifecycle = expected;
+        if (RuntimeCore.privateChatLifecycleDecision(entry.privateChatLifecycle, known) !== 'current'
+          || entry.privateChatLifecycle.threadGeneration !== known.threadGeneration) messages.splice(index, 1);
+      }
+    }
+    const context = fabChatStorageContext(actionRequest.fabBinding, actionRequest);
     await setMessageInboxStorageFenced({
       fabChatMessages: messages,
       fabChatClosed: message?.chatClosed === true,
@@ -10168,6 +10619,10 @@ function abortActiveAuthContext() {
   lastKnownTabsAuthBinding = null;
   currentTabSnapshotRevision = 0;
   cameraActiveTabs.clear();
+  focusAssignment = null;
+  focusStatus = { state: 'inactive' };
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
   cameraActive = false;
   // Teacher-broadcast viewing state is student authority, not a school-global
   // transport flag. Do not let a new identity send a leave for the retired
@@ -10398,6 +10853,7 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
   const acceptedCapabilities = EXTENSION_CAPABILITIES.filter((name) => (
     advertised.has(name)
     && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
+    && (name !== 'privateChatLifecycleV1' || advertised.has('studentChatIdempotencyV1'))
   ));
   negotiatedProtocolState = Object.freeze({
     scope: authContextProtocolScope(context),
@@ -11139,7 +11595,6 @@ async function restrictionPortalEntryPending(state, context) {
     await setRestrictionPortalEntryPhase(context, 'cancelled', { pendingOnly: true });
     return false;
   }
-  if (state.restrictions.attentionMode?.active) return false;
   const profile = state.authPassThrough.profiles.find((candidate) => (
     candidate.id === state.authPassThrough.defaultProfileId
   ));
@@ -14763,6 +15218,17 @@ async function applyClassroomStateFromAuthResponse(data, reason, options = {}) {
   const snapshot = data.classroomState;
   await classroomStateRestorePromise;
   assertCurrent();
+  if (data.focusCleanup) {
+    if (snapshot) throw focusError('FOCUS_RESTRICTION_INVALID');
+    const cleanup = data.focusCleanup;
+    observeExactStudentControlRevision(cleanup, authContext, 'Focus cleanup revision');
+    const result = await enqueueClassroomStateOperation(() => applyBareFocusCleanup(cleanup.command, cleanup, authContext));
+    assertCurrent();
+    await sendCommandAck(getCommandIdFromMessage(cleanup, cleanup.command), 'completed', {
+      authContext, binding: exactStudentBinding(cleanup), commandType: 'stop-focus', result,
+      outcome: 'applied', deliveryPolicy: 'persistent_control', expiresAt: cleanup.command.expiresAt });
+    return;
+  }
   const storedBinding = await getStoredAuthState([CLASSROOM_STATE_STUDENT_BINDING_KEY]);
   assertCurrent();
   const boundStudentId = storedBinding[CLASSROOM_STATE_STUDENT_BINDING_KEY] || null;
@@ -15905,11 +16371,15 @@ function armWorkerWakeWatchdog() {
 }
 
 let markClassroomStateRestored;
+// Synchronous view of classroomStateRestorePromise: the restored runtime
+// (Attention included) is in place.
+let classroomStateRestoreSettled = false;
 const classroomStateRestorePromise = new Promise((resolve) => {
   let settled = false;
   markClassroomStateRestored = () => {
     if (settled) return;
     settled = true;
+    classroomStateRestoreSettled = true;
     resolve();
   };
 });
@@ -16477,7 +16947,7 @@ const authStateRestorePromise = new Promise((resolve) => {
         restoreAuthContext,
       );
       if (!awaitingAuthPolicy) {
-        await applyClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY], {
+        await applyClassroomState(RuntimeCore.normalizePersistedClassroomState(stored[CLASSROOM_STATE_STORAGE_KEY]), {
           force: true,
           reason: 'worker_wake',
           trustedPersistedRestrictionSso: true,
@@ -16686,6 +17156,40 @@ async function safeNotify(opts) {
 // Each feature owns a half-open ID range, so changing teacher controls cannot
 // erase school policy or unrelated extension rules.
 let dynamicRuleCompositionTail = Promise.resolve();
+const supportedRestrictionRegexes = new Map();
+
+async function preflightPreciseDnrRules(addRules, existingRules, requestedRanges) {
+  if (!RuntimeCore.hasPreciseRestrictions(runtimeClassroomStateForRules())) return addRules;
+  const remaining = existingRules.filter(rule => !requestedRanges.some(range => RuntimeCore.isRuleInRange(rule.id, range)));
+  if ([...remaining, ...addRules].filter(rule => rule.condition?.regexFilter).length > 800)
+    throw Object.assign(new Error('DNR regex budget exceeded'), { code: 'DNR_REGEX_BUDGET_EXCEEDED' });
+  if (typeof chrome.declarativeNetRequest.isRegexSupported !== 'function')
+    throw Object.assign(new Error('DNR regex validation is unavailable'), { code: 'DNR_REGEX_UNSUPPORTED' });
+  const resources = lockedResource ? [lockedResource] : flightPathResources;
+  const narrowShapes = resources.flatMap(resource => RuntimeCore.restrictionResourceRegexes(resource, true));
+  const check = (regex, isCaseSensitive) => {
+    const key = `${isCaseSensitive}:${regex}`;
+    if (!supportedRestrictionRegexes.has(key)) {
+      if (supportedRestrictionRegexes.size >= 1000) supportedRestrictionRegexes.delete(supportedRestrictionRegexes.keys().next().value);
+      const promise = boundedClassroomOperation(chrome.declarativeNetRequest.isRegexSupported({
+        regex, isCaseSensitive, requireCapturing: false,
+      }), CLASSROOM_DNR_OPERATION_TIMEOUT_MS, 'Restriction regex validation');
+      supportedRestrictionRegexes.set(key, promise);
+      promise.catch(() => supportedRestrictionRegexes.delete(key));
+    }
+    return supportedRestrictionRegexes.get(key);
+  };
+  return Promise.all(addRules.map(async rule => {
+    const expression = rule.condition?.regexFilter;
+    if (!expression) return rule;
+    const sensitive = rule.condition.isUrlFilterCaseSensitive === true;
+    if ((await check(expression, sensitive))?.isSupported === true) return rule;
+    const fallback = RuntimeCore.isRuleInRange(rule.id, 'classroom') ? narrowShapes[rule.id - 3] : null;
+    if (!fallback || fallback === expression || (await check(fallback, sensitive))?.isSupported !== true)
+      throw Object.assign(new Error('DNR cannot install a safe restriction shape'), { code: 'DNR_REGEX_UNSUPPORTED' });
+    return { ...rule, condition: { ...rule.condition, regexFilter: fallback } };
+  }));
+}
 
 function runtimeClassroomStateForRules() {
   return {
@@ -16696,8 +17200,10 @@ function runtimeClassroomStateForRules() {
       deliveryContext: { lateSignInRestrictionSso: true },
     } : {}),
     restrictions: {
-      screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain },
-      flightPath: { active: allowedDomains.length > 0, allowedDomains },
+      screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain,
+        ...(lockedResource ? { resource: lockedResource } : {}) },
+      flightPath: { active: flightPathIsActive(), allowedDomains,
+        ...(flightPathResources.length ? { resources: flightPathResources } : {}) },
       blockList: { active: teacherBlockedDomains.length > 0, blockedDomains: teacherBlockedDomains },
       attentionMode: { active: attentionModeActive },
       temporaryAllows: temporaryAllowedDomains,
@@ -16712,7 +17218,7 @@ function composeDynamicRules(rangeNames, options = {}) {
   const run = async () => {
     // Validate and build before changing Chrome state. Oversized or malformed
     // lists therefore leave the previous complete ruleset intact.
-    const addRules = RuntimeCore.buildDnrRules({
+    let addRules = RuntimeCore.buildDnrRules({
       classroomState: runtimeClassroomStateForRules(),
       restrictionSsoPassThrough: restrictionSsoPassThroughActive,
       restrictionAuthPassThrough: restrictionAuthPassThroughActive,
@@ -16725,6 +17231,7 @@ function composeDynamicRules(rangeNames, options = {}) {
       CLASSROOM_DNR_OPERATION_TIMEOUT_MS,
       'Classroom DNR inventory',
     );
+    addRules = await preflightPreciseDnrRules(addRules, existingRules, requestedRanges);
     const removeRuleIds = existingRules
       .filter((rule) => requestedRanges.some((range) => RuntimeCore.isRuleInRange(rule.id, range)))
       .map((rule) => rule.id);
@@ -17430,6 +17937,7 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
       classroomStateOutcome: heartbeatClassroomAckIsCurrent
         ? lastClassroomStateOutcome
         : 'pending',
+      focusStatus: publicFocusStatus(),
       restrictionAuthState: restrictionAuthTelemetryState(),
       classroomStateSessionId: currentClassroomState?.teachingSessionId || undefined,
       classroomStateSupervisionContextId: currentClassroomState?.supervisionContextId || undefined,
@@ -18664,6 +19172,8 @@ async function captureSafetyEvidence(rawRequest, exactTargets, authContext, opti
 let screenLocked = false;
 let lockedUrl = null;
 let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
+let lockedResource = null;
+let flightPathResources = [];
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
 let currentMaxTabs = null;
@@ -18676,7 +19186,7 @@ function screenLockIsActive() {
 }
 
 function flightPathIsActive() {
-  return allowedDomains.length > 0;
+  return allowedDomains.length + flightPathResources.length > 0;
 }
 let globalBlockedDomains = []; // School-wide blacklist (e.g., ["lens.google.com", "chat.openai.com"])
 let globalBlockedDomainsStateTrusted = false;
@@ -18685,7 +19195,7 @@ let schoolPolicyMutation = Promise.resolve();
 let teacherBlockedDomains = []; // Teacher-applied session blacklist
 let activeBlockListName = null; // Name of the currently active teacher block list
 let temporaryAllowedDomains = []; // Temporarily unblocked domains with expiry times: [{ domain, expiresAt }]
-let attentionModeActive = false; // When true, blocks navigation and new tabs
+let attentionModeActive = false; // Page overlay; browser UI and navigation stay available.
 let restrictionSsoPassThroughActive = false;
 let restrictionAuthPassThroughActive = false;
 let activeAuthPassThroughPolicy = null;
@@ -18703,6 +19213,7 @@ const CLASSROOM_DNR_OPERATION_TIMEOUT_MS = 5000;
 const CLASSROOM_STATE_EXPIRY_RETRY_MS = 15 * 1000;
 const CLASSROOM_STATE_SYNC_INTERVAL_MS = 30 * 1000;
 const STATEFUL_COMMAND_TYPES = new Set([
+  'focus-tab', 'stop-focus',
   'lock-screen',
   'unlock-screen',
   'apply-flight-path',
@@ -18714,11 +19225,375 @@ const STATEFUL_COMMAND_TYPES = new Set([
   'attention-mode',
 ]);
 const AUTHORITY_BOUND_TAB_COMMAND_TYPES = new Set([
+  'activate-tab',
   'open-tab',
   'close-tab',
   'close-tabs',
   'limit-tabs',
 ]);
+// Session-only browser identities are never reconstructible from URL or title.
+const FOCUS_REFS_KEY = 'focusTabRefsV1';
+const FOCUS_ASSIGNMENT_KEY = 'focusAssignmentV1';
+const FOCUS_MAINTENANCE_MS = 2000;
+let focusAssignment = null;
+let focusStatus = { state: 'inactive' };
+let focusMaintenanceTimer = null;
+let focusMaintenanceRunning = false;
+let focusMaintenanceEvents = 0;
+const retiredFocusTabRefs = new Set();
+
+function focusError(code, message = 'Exact Focus target is unavailable') {
+  return Object.assign(new Error(message), { code });
+}
+
+function focusScopeKey(state) {
+  return RuntimeCore.classroomContextKey(state);
+}
+
+function focusNavigationDecision(state, tab) {
+  const url = tab?.pendingUrl || tab?.url || '';
+  // The general navigation planner preserves protected browser pages. They
+  // are never eligible exact web targets for activation or persistent Focus.
+  if (!isHttpUrl(url)) return { allowed: false, source: 'unsupported_tab' };
+  return RuntimeCore.decideNavigation(url, {
+    classroomState: state, globalBlockedDomains: [...globalBlockedDomains],
+    restrictionAuthPassThrough: restrictionAuthPassThroughForState(state),
+    restrictionSsoPassThrough: restrictionSsoPassThroughForState(state),
+  });
+}
+
+async function focusRefRegistry(authContext) {
+  if (!hasSessionStorage()) throw focusError('FOCUS_SESSION_STORAGE_REQUIRED');
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference storage');
+  const stored = (await durableSessionKv.get(FOCUS_REFS_KEY))[FOCUS_REFS_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference storage');
+  return stored?.version === 1 && stored.binding === authContextProtocolScope(authContext)
+    ? stored : { version: 1, binding: authContextProtocolScope(authContext), entries: [], retiredAssignments: [] };
+}
+
+async function persistFocusRegistry(registry, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference persistence');
+  await durableSessionKv.set({ [FOCUS_REFS_KEY]: registry });
+  assertAuthenticatedContextCurrent(authContext, 'Focus reference persistence');
+}
+
+async function createFocusOpenReceipt(tab, snapshot, authContext) {
+  const registry = await focusRefRegistry(authContext);
+  const exact = await chrome.tabs.get(tab.id);
+  assertAuthenticatedContextCurrent(authContext, 'open receipt browser validation');
+  if (!Number.isInteger(exact?.id) || exact.id !== tab.id) throw focusError('STALE_TAB_REF');
+  const known = snapshot.localEntries.find(entry => entry.tabId === tab.id)
+    || registry.entries.find(entry => entry.tabId === tab.id);
+  const tabRef = known?.tabRef || generateOpaqueTabRef();
+  if (retiredFocusTabRefs.has(tabRef)) throw focusError('STALE_TAB_REF');
+  const receipt = { tabRef, tabId: tab.id, receiptRevision: snapshot.revision };
+  registry.entries = [...registry.entries.filter(entry => entry.tabId !== tab.id), receipt].slice(-1000);
+  await persistFocusRegistry(registry, authContext);
+  return { tabReceiptVersion: 1, tabRef, tabSnapshotRevision: snapshot.revision };
+}
+
+function focusRecordCurrent(record, authContext) {
+  assertAuthenticatedContextCurrent(authContext, 'Focus assignment');
+  if (focusAssignment !== record || record.binding !== authContextProtocolScope(authContext)
+    || !currentLicenseIsActive() || !currentClassroomState
+    || focusScopeKey(currentClassroomState) !== record.scopeKey
+    || currentClassroomState.restrictions.focus?.assignmentId !== record.assignmentId
+    || RuntimeCore.classroomStateExpiry(currentClassroomState).expired
+    || record.contextAuthorityRevision !== (currentClassroomState.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null))
+    throw authContextSuperseded('Focus assignment');
+  return record;
+}
+
+function publicFocusStatus() { return { ...focusStatus }; }
+
+function publishFocusStatus(status, authContext) {
+  if (JSON.stringify(focusStatus) === JSON.stringify(status)) return;
+  focusStatus = status;
+  sendClassroomStateAck(currentClassroomState, lastClassroomStateOutcome,
+    undefined, authContext);
+  scheduleEventHeartbeat('focus-status');
+}
+
+async function retireFocus(record = focusAssignment, reason = null, authContext = null, options = {}) {
+  if (record && focusAssignment !== record) return false;
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement');
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
+  focusAssignment = null;
+  focusStatus = reason && record ? { assignmentId: record.assignmentId, state: 'invalidated', reason } : { state: 'inactive' };
+  if (hasSessionStorage()) {
+    if (record && authContext && (reason || options.retireAssignment === true)) {
+      const registry = await focusRefRegistry(authContext);
+      registry.retiredAssignments = [...new Set([...(registry.retiredAssignments || []), record.assignmentId])].slice(-1000);
+      await persistFocusRegistry(registry, authContext);
+    }
+    await durableSessionKv.remove(FOCUS_ASSIGNMENT_KEY);
+  }
+  if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement');
+  if (options.clearState !== false && currentClassroomState?.restrictions.focus) {
+    // Preserve the accepted non-Focus snapshot's revision and original lease.
+    currentClassroomState = { ...currentClassroomState, restrictions: { ...currentClassroomState.restrictions, focus: { active: false } } };
+    await kv.set({ [CLASSROOM_STATE_STORAGE_KEY]: persistedClassroomStateSnapshot(currentClassroomState) });
+    if (authContext) assertAuthenticatedContextCurrent(authContext, 'Focus retirement persistence');
+  }
+  if (reason && authContext) {
+    sendClassroomStateAck(currentClassroomState, lastClassroomStateOutcome, undefined, authContext);
+    scheduleEventHeartbeat('focus-invalidated');
+  }
+  return true;
+}
+
+async function prepareFocusAssignment(state, authContext, authorityEnvelope, trustedRestore = false) {
+  const focus = state.restrictions.focus;
+  if (!focus?.active) {
+    const saved = !focusAssignment && !trustedRestore && hasSessionStorage()
+      ? (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY] : null;
+    if (!trustedRestore && (focusAssignment || saved?.binding === authContextProtocolScope(authContext))) {
+      const binding = assertCurrentStudentBinding(authorityEnvelope, 'Focus state cleanup', { authContext, requireFullAuthority: true });
+      assertBindingMatchesAuthContext(binding, authContext, 'Focus state cleanup', { requireFullAuthority: true });
+    }
+    return null;
+  }
+  if (!authContext || !state.teachingSessionId && !state.supervisionContextId) throw focusError('FOCUS_RESTRICTION_INVALID');
+  if (!currentLicenseIsActive()) {
+    // Wake restores classroom metadata before the canonical license step.
+    // Only its same exact-scope, verified LKG proof permits a protected
+    // restore; new wire adoption still requires the active runtime license.
+    const storedLicense = trustedRestore ? await kv.get(['licenseActive', LICENSE_STATE_SCOPE_KEY, LICENSE_LAST_VERIFIED_AT_KEY]) : null;
+    assertAuthenticatedContextCurrent(authContext, 'Focus restore entitlement');
+    if (!trustedRestore || !licenseLkgMatchesExactScope(storedLicense, licenseScopeForAuthContext(authContext)))
+      throw focusError('COMMAND_AUTHORITY_MISMATCH');
+  }
+  const scopeKey = focusScopeKey(state);
+  const registry = await focusRefRegistry(authContext);
+  if ((registry.retiredAssignments || []).includes(focus.assignmentId)) throw focusError('STALE_TAB_REF');
+  if (registry.cleanupScope === scopeKey && state.revision <= (registry.cleanupRevision || 0)) throw focusError('STALE_TAB_REF');
+  const retained = focusAssignment?.assignmentId === focus.assignmentId ? focusAssignment : null;
+  let record = retained;
+  if (trustedRestore && !record) record = (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY];
+  assertAuthenticatedContextCurrent(authContext, 'Focus adoption');
+  if (!trustedRestore) {
+    if (!hasNegotiatedCapability('focusTabV1', authContext)) throw focusError('FOCUS_CAPABILITY_REQUIRED');
+    const binding = assertCurrentStudentBinding(authorityEnvelope, 'Focus adoption', { authContext, requireFullAuthority: true });
+    assertBindingMatchesAuthContext(binding, authContext, 'Focus adoption', { requireFullAuthority: true });
+    if (binding.controlRevision !== state.revision) throw focusError('STALE_TAB_REF');
+  }
+  if (record) {
+    if (record.binding !== authContextProtocolScope(authContext) || record.scopeKey !== scopeKey
+      || record.assignmentId !== focus.assignmentId || record.tabRef !== focus.tabRef
+      || record.observedRevision !== focus.observedRevision || record.targetKind !== focus.targetKind
+      || record.contextAuthorityRevision !== (state.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null))
+      throw focusError('STALE_TAB_REF');
+    return { ...record, controlRevision: state.revision };
+  }
+  if (trustedRestore) throw focusError('STALE_TAB_REF');
+  let target;
+  if (focus.targetKind === 'open_receipt') {
+    target = registry.entries.find(entry => entry.tabRef === focus.tabRef && entry.receiptRevision === focus.observedRevision);
+  } else {
+    try { target = (await resolveExactTabRefs([focus.tabRef], focus.observedRevision, authContext)).targets[0]; }
+    catch { throw focusError('STALE_TAB_REF'); }
+  }
+  if (!target || retiredFocusTabRefs.has(focus.tabRef)) throw focusError('STALE_TAB_REF');
+  const tab = await chrome.tabs.get(target.tabId).catch(() => null);
+  assertAuthenticatedContextCurrent(authContext, 'Focus target validation');
+  if (!tab) throw focusError('STALE_TAB_REF');
+  if (!state.restrictions.attentionMode.active && !focusNavigationDecision(state, tab).allowed)
+    throw focusError('FOCUS_TAB_OFF_POLICY');
+  return { version: 1, binding: authContextProtocolScope(authContext), scopeKey,
+    assignmentId: focus.assignmentId, tabRef: focus.tabRef, tabId: target.tabId,
+    observedRevision: focus.observedRevision, targetKind: focus.targetKind, controlRevision: state.revision,
+    contextAuthorityRevision: state.supervisionContextId ? currentFabState?.contextAuthorityRevision ?? null : null,
+    lastAttemptAt: 0 };
+}
+
+async function commitFocusAssignment(record, state, authContext) {
+  if (!record) { await retireFocus(focusAssignment, null, authContext, { clearState: false }); return; }
+  assertAuthenticatedContextCurrent(authContext, 'Focus commit');
+  await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: record });
+  assertAuthenticatedContextCurrent(authContext, 'Focus commit');
+  if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+  focusMaintenanceTimer = null;
+  focusAssignment = record;
+  focusStatus = { assignmentId: record.assignmentId, state: 'suspended', reason: state.restrictions.attentionMode.active
+    ? 'attention' : 'browser_operation_pending' };
+  queueFocusMaintenance(record);
+}
+
+async function maintainFocus(record, authContext) {
+  const current = () => focusRecordCurrent(record, authContext);
+  const getTab = () => boundedClassroomOperation(chrome.tabs.get(record.tabId), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus tab lookup');
+  try {
+    current();
+    record.lastAttemptAt = Date.now();
+    await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: record }); current();
+    if (currentClassroomState.restrictions.attentionMode.active) {
+      publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'attention' }, authContext); return;
+    }
+    const tab = await getTab().catch(error => {
+      if (error.code === 'CLASSROOM_BROWSER_OPERATION_TIMEOUT') throw error;
+      return null;
+    }); current();
+    if (!tab || retiredFocusTabRefs.has(record.tabRef)) { await retireFocus(record, 'focus_tab_missing', authContext); return; }
+    const decision = focusNavigationDecision(currentClassroomState, tab);
+    const foreground = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus foreground lookup'))[0]; current();
+    const foregroundDecision = foreground && focusNavigationDecision(currentClassroomState, foreground);
+    const pendingAuth = restrictionAuthPolicyRefreshPending
+      && (restrictionAuthRefreshPendingTab(tab) || restrictionAuthRefreshPendingTab(foreground));
+    if (decision.source === 'authentication' || foregroundDecision?.source === 'authentication' || pendingAuth) {
+      publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'authentication' }, authContext); return;
+    }
+    if (!decision.allowed) { await retireFocus(record, 'focus_tab_off_policy', authContext); return; }
+    current();
+    await boundedClassroomOperation(chrome.tabs.update(record.tabId, { active: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus activation'); current();
+    await boundedClassroomOperation(chrome.windows.update(tab.windowId, { focused: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus window activation'); current();
+    const verified = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus activation verification'))[0]; current();
+    const exact = await getTab(); current();
+    if (verified?.id !== record.tabId || verified.windowId !== tab.windowId
+      || !focusNavigationDecision(currentClassroomState, exact).allowed)
+      throw focusError('CLASSROOM_BROWSER_OPERATION_TIMEOUT');
+    publishFocusStatus({ assignmentId: record.assignmentId, state: 'active' }, authContext);
+  } catch (error) {
+    if (focusAssignment !== record) return;
+    if (isAuthContextCancellation(error)) {
+      // A same-context ownership/entitlement loss must retire the owned copy,
+      // while an old auth generation never writes into its replacement.
+      try { assertAuthenticatedContextCurrent(authContext, 'Focus authority retirement'); }
+      catch {
+        if (focusAssignment === record) {
+          if (focusMaintenanceTimer) clearTimeout(focusMaintenanceTimer);
+          focusMaintenanceTimer = null; focusAssignment = null; focusStatus = { state: 'inactive' };
+        }
+        return;
+      }
+      await retireFocus(record, null, authContext, { retireAssignment: true, clearState: currentClassroomState?.restrictions.focus?.assignmentId === record.assignmentId });
+      return;
+    }
+    publishFocusStatus({ assignmentId: record.assignmentId, state: 'suspended', reason: 'browser_operation_pending' }, authContext);
+    queueFocusMaintenance(record);
+  }
+}
+
+function queueFocusMaintenance(record = focusAssignment) {
+  if (!record || record !== focusAssignment) return;
+  focusMaintenanceEvents++;
+  if (focusMaintenanceTimer) return;
+  let authContext;
+  try { authContext = captureAuthenticatedContext('Focus maintenance'); } catch { return; }
+  const delay = Math.max(0, FOCUS_MAINTENANCE_MS - (Date.now() - record.lastAttemptAt));
+  focusMaintenanceTimer = setTimeout(() => {
+    focusMaintenanceTimer = null;
+    if (record !== focusAssignment || focusMaintenanceRunning) return;
+    focusMaintenanceRunning = true;
+    const observedEvents = focusMaintenanceEvents;
+    enqueueStudentAuthMutation(async () => {
+      await authStateRestorePromise; await classroomStateRestorePromise;
+      return enqueueClassroomStateOperation(() => maintainFocus(record, authContext));
+    }).catch(() => {}).finally(() => {
+      focusMaintenanceRunning = false;
+      // Events for the same assignment and for replacement B during A's
+      // bounded operation must survive an already-fired coalescing timer.
+      if (focusAssignment && (focusAssignment !== record || focusMaintenanceEvents !== observedEvents))
+        queueFocusMaintenance(focusAssignment);
+    });
+  }, delay);
+}
+
+async function retireFocusTabReference(tabId, captured, authContext) {
+  if (!authContext) return;
+  assertAuthenticatedContextCurrent(authContext, 'Focus closed reference');
+  const registry = await focusRefRegistry(authContext);
+  for (const entry of registry.entries.filter(entry => entry.tabId === tabId)) retiredFocusTabRefs.add(entry.tabRef);
+  registry.entries = registry.entries.filter(entry => entry.tabId !== tabId);
+  await persistFocusRegistry(registry, authContext);
+  tabSnapshotMutation = tabSnapshotMutation.catch(() => {}).then(async () => {
+    const stored = (await kv.get(TAB_SNAPSHOT_STORAGE_KEY))[TAB_SNAPSHOT_STORAGE_KEY];
+    assertAuthenticatedContextCurrent(authContext, 'Focus closed public reference');
+    if (stored?.binding === tabSnapshotAuthBinding(authContext)) {
+      for (const entry of stored.entries.filter(entry => entry.tabId === tabId)) retiredFocusTabRefs.add(entry.tabRef);
+      if (stored.entries.some(entry => entry.tabId === tabId)) {
+        const revision = stored.revision + 1;
+        await kv.set({ [TAB_SNAPSHOT_STORAGE_KEY]: {
+          ...stored, revision, entries: stored.entries.filter(entry => entry.tabId !== tabId) } });
+        assertAuthenticatedContextCurrent(authContext, 'Focus closed public reference persistence');
+        currentTabSnapshotRevision = revision;
+      }
+    }
+  });
+  await tabSnapshotMutation;
+  if (captured?.tabId === tabId && focusAssignment === captured) await retireFocus(captured, 'focus_tab_closed', authContext);
+}
+
+function focusBrowserEvent(tabId = null, retired = false, updatedTab = null) {
+  const captured = focusAssignment;
+  let authContext;
+  try { authContext = captureAuthenticatedContext('Focus browser event'); } catch { return; }
+  if (retired && captured?.tabId === tabId) retiredFocusTabRefs.add(captured.tabRef);
+  const policy = currentClassroomState;
+  const unsafeAssignedNavigation = !retired && captured?.tabId === tabId && updatedTab
+    && !policy?.restrictions.attentionMode.active
+    && !(restrictionAuthPolicyRefreshPending && restrictionAuthRefreshPendingTab(updatedTab))
+    && !focusNavigationDecision(policy, updatedTab).allowed;
+  if (unsafeAssignedNavigation) {
+    enqueueStudentAuthMutation(async () => {
+      await authStateRestorePromise; await classroomStateRestorePromise;
+      await enqueueClassroomStateOperation(async () => {
+        if (focusAssignment === captured && currentClassroomState === policy) {
+          focusRecordCurrent(captured, authContext);
+          await retireFocus(captured, 'focus_tab_off_policy', authContext);
+        }
+      });
+    }).catch(() => {});
+    return;
+  }
+  if (retired) enqueueStudentAuthMutation(async () => {
+    await authStateRestorePromise; await classroomStateRestorePromise;
+    await enqueueClassroomStateOperation(async () => {
+      await retireFocusTabReference(tabId, captured, authContext);
+      // Closing an unrelated authentication popup changes the foreground
+      // eligibility too. A preceding window event can still observe the
+      // closing popup, so its completed removal must schedule fresh upkeep.
+      if (captured && focusAssignment === captured) queueFocusMaintenance(captured);
+    });
+  }).catch(() => {});
+  else queueFocusMaintenance(captured);
+}
+
+// Register synchronously: replacement does not necessarily emit onRemoved.
+chrome.tabs.onActivated.addListener(() => focusBrowserEvent());
+chrome.windows.onFocusChanged.addListener(() => focusBrowserEvent());
+chrome.tabs.onRemoved.addListener(tabId => focusBrowserEvent(tabId, true));
+chrome.tabs.onReplaced.addListener((_added, removed) => focusBrowserEvent(removed, true));
+chrome.tabs.onUpdated.addListener((tabId, change, tab) => { if (change.url || change.status) focusBrowserEvent(tabId, false, tab); });
+
+async function applyBareFocusCleanup(command, envelope, authContext) {
+  if (command?.type !== 'stop-focus'
+    || envelope.classroomState || command.classroomState || command.data?.classroomState
+    || !hasNegotiatedCapability('scopedAuthorityChecksV1', authContext)) throw focusError('FOCUS_RESTRICTION_INVALID');
+  RuntimeCore.normalizeStopFocusData(command.data);
+  const binding = assertCurrentStudentBinding(envelope, 'Focus cleanup', { authContext, requireFullAuthority: true });
+  assertBindingMatchesAuthContext(binding, authContext, 'Focus cleanup', { requireFullAuthority: true });
+  const delivery = RuntimeCore.commandDeliveryState(command, envelope);
+  if (delivery.expired || delivery.deliveryPolicy !== 'persistent_control') throw focusError('COMMAND_EXPIRED');
+  const authority = assertCurrentCommandAuthority(command, envelope);
+  if (!currentLicenseIsActive() || !currentClassroomState || focusScopeKey(authority) !== focusScopeKey(currentClassroomState)
+    || binding.controlRevision < currentClassroomState.revision
+    || currentClassroomState.supervisionContextId && envelope.contextAuthorityRevision !== currentFabState?.contextAuthorityRevision)
+    throw focusError('COMMAND_AUTHORITY_MISMATCH');
+  const priorRegistry = await focusRefRegistry(authContext);
+  if (priorRegistry.cleanupScope === focusScopeKey(authority)
+    && binding.controlRevision < (priorRegistry.cleanupRevision || 0)) throw focusError('STUDENT_BINDING_MISMATCH');
+  await retireFocus(focusAssignment, null, authContext, { retireAssignment: true });
+  const registry = await focusRefRegistry(authContext);
+  registry.cleanupScope = focusScopeKey(authority);
+  registry.cleanupRevision = Math.max(registry.cleanupRevision || 0, binding.controlRevision);
+  await persistFocusRegistry(registry, authContext);
+  assertCurrentStudentBinding(envelope, 'Focus cleanup commit', { authContext, requireFullAuthority: true });
+  return { commandType: 'stop-focus', focusStatus: { state: 'inactive' }, outcome: 'applied' };
+}
+
 let currentClassroomState = null;
 let restrictionAuthPolicyRefreshPending = false;
 let restrictionAuthPolicyRefreshHosts = new Map();
@@ -18732,6 +19607,16 @@ let lastClassroomStateOutcome = 'pending';
 function persistedClassroomStateSnapshot(state) {
   if (!state || typeof state !== 'object') return state;
   const persisted = JSON.parse(JSON.stringify(state));
+  if (state.restrictions?.focus?.active) {
+    persisted.schemaVersion = 3;
+    persisted.focusPersistenceVersion = 1;
+  }
+  if (RuntimeCore.hasPreciseRestrictions(state) && !state.restrictions?.focus?.active) {
+    // Storage-only marker: old cores refuse schema 2 instead of restoring a
+    // resource as permission for the whole provider website. Wire stays v1.
+    persisted.schemaVersion = 2;
+    persisted.precisePersistenceVersion = 1;
+  }
   // Authentication start URLs may contain district routing hints or opaque
   // IdP query values. Profiles, host fences, and provider URLs are runtime-only
   // authority and must never enter chrome.storage.local/session. Dynamic DNR
@@ -18897,6 +19782,8 @@ function classroomRuntimeBackup() {
     screenLocked,
     lockedUrl,
     lockedDomain,
+    lockedResource: lockedResource ? { ...lockedResource } : null,
+    flightPathResources: flightPathResources.map(resource => ({ ...resource })),
     allowedDomains: [...allowedDomains],
     activeFlightPathName,
     currentMaxTabs,
@@ -18915,6 +19802,8 @@ function restoreClassroomRuntimeBackup(backup) {
   screenLocked = backup.screenLocked;
   lockedUrl = backup.lockedUrl;
   lockedDomain = backup.lockedDomain;
+  lockedResource = backup.lockedResource;
+  flightPathResources = backup.flightPathResources;
   allowedDomains = backup.allowedDomains;
   activeFlightPathName = backup.activeFlightPathName;
   currentMaxTabs = backup.currentMaxTabs;
@@ -19041,7 +19930,7 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
     authContext,
     { trustedPersistedRestrictionSso: true },
   );
-  const normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+  const normalized = RuntimeCore.normalizePersistedClassroomState(prepared, Date.now());
   if (normalized?.deliveryContext?.lateSignInRestrictionSso === true) {
     normalized.deliveryContext.bindingDigest = restrictionSsoBinding;
   }
@@ -19069,10 +19958,13 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
   currentClassroomState = normalized;
   classroomRuntimeOwner = createClassroomRuntimeOwner(authContext, normalized.revision);
   const restrictions = normalized.restrictions;
+  await commitFocusAssignment(await prepareFocusAssignment(normalized, authContext, null, true), normalized, authContext);
   screenLocked = Boolean(restrictions.screenLock.active);
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
+  lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
+  flightPathResources = restrictions.flightPath.active ? (restrictions.flightPath.resources || []).map(resource => ({ ...resource })) : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
   teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
@@ -19156,6 +20048,7 @@ function sendClassroomStateAck(state, outcome, error, authContext = null) {
     appliedRevision: state.revision,
     appliedAuthPolicyRevision: appliedRestrictionAuthPolicyRevision(),
     outcome,
+    ...(state === currentClassroomState ? { focusStatus: publicFocusStatus() } : {}),
     teachingSessionId: state.teachingSessionId || undefined,
     supervisionContextId: state.supervisionContextId || undefined,
     error: error ? commandErrorMessage(error).slice(0, 200) : undefined,
@@ -19166,14 +20059,17 @@ function sendClassroomStateAck(state, outcome, error, authContext = null) {
 
 function classroomRestrictionsFromRuntime() {
   return {
+    ...(currentClassroomState?.restrictions.focus ? { focus: { ...currentClassroomState.restrictions.focus } } : {}),
     screenLock: {
       active: screenLocked,
       url: lockedUrl,
       domain: lockedDomain,
+      ...(lockedResource ? { resource: lockedResource } : {}),
     },
     flightPath: {
-      active: allowedDomains.length > 0,
+      active: flightPathIsActive(),
       allowedDomains,
+      ...(flightPathResources.length ? { resources: flightPathResources } : {}),
       name: activeFlightPathName,
     },
     blockList: {
@@ -19239,9 +20135,11 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   const backup = classroomRuntimeBackup();
   screenLocked = Boolean(restrictions.screenLock.active);
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
+  flightPathResources = restrictions.flightPath.active ? (restrictions.flightPath.resources || []).map(resource => ({ ...resource })) : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
+  lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
   teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
   temporaryAllowedDomains = restrictions.temporaryAllows.map((item) => ({ ...item }));
@@ -19261,7 +20159,9 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   } catch (error) {
     if (!isAuthContextCancellation(error) && classroomRuntimeIsOwnedBy(runtimeOwner)) {
       restoreClassroomRuntimeBackup(backup);
-      classroomRuntimeOwner = null;
+      // The caller still owns this attempt and must report failed adoption.
+      // Clearing ownership here misclassifies a native installation error as
+      // retired authority and can scrub the previously valid persisted policy.
     }
     throw error;
   }
@@ -19298,6 +20198,13 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
         message: state.restrictions.attentionMode.message || 'Please look up!',
       });
       assertCurrent();
+      if (!state.restrictions.attentionMode.active) {
+        raiseDeferredTeacherMessageNotification(authContext).catch((error) => {
+          if (!isAuthContextCancellation(error)) {
+            console.warn('[Chat] Deferred teacher notification failed:', safeDiagnosticError(error));
+          }
+        });
+      }
       await reconcileClassroomStateTabsBestEffort(state, {
         authContext,
         assertCurrent,
@@ -19315,12 +20222,15 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
 
 async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   if (expectedOwner && !classroomRuntimeIsOwnedBy(expectedOwner)) return false;
+  await retireFocus(focusAssignment, null, null, { clearState: false });
   const cleanupOwner = expectedOwner || classroomRuntimeOwner;
   classroomRuntimeOwner = null;
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
+  lockedResource = null;
   allowedDomains = [];
+  flightPathResources = [];
   activeFlightPathName = null;
   teacherMaxTabs = null;
   currentMaxTabs = effectiveTabLimit();
@@ -19328,6 +20238,7 @@ async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  deferredTeacherMessageNotification = null;
   restrictionSsoPassThroughActive = false;
   restrictionAuthPassThroughActive = false;
   activeAuthPassThroughPolicy = null;
@@ -19835,6 +20746,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
   };
   let normalized;
   let nextAuthPolicyFence = null;
+  let preparedFocus = null;
   try {
     assertCurrent();
     const prepared = await resolveCurrentUrlMarker(rawState, assertCurrent);
@@ -19854,6 +20766,14 @@ async function applyClassroomStateNow(rawState, options = {}) {
     );
     assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (RuntimeCore.hasPreciseRestrictions(normalized)
+      && options.trustedPersistedRestrictionSso !== true) {
+      if (!authContext || !hasNegotiatedCapability('preciseRestrictionResourcesV1', authContext)) {
+        throw Object.assign(new Error('Precise restrictions were not negotiated'), { code: 'PRECISE_RESTRICTION_NOT_NEGOTIATED' });
+      }
+      const preciseBinding = assertCurrentStudentBinding(authorityEnvelope, 'precise restriction delivery', { authContext });
+      assertBindingMatchesAuthContext(preciseBinding, authContext, 'precise restriction delivery', { requireFullAuthority: true });
+    }
     if (options.trustedPortalFirstLogin === true
       && normalized.deliveryContext?.portalFirstOnLogin === true) {
       if (!restrictionAuthPassThroughForState(normalized)) {
@@ -19876,10 +20796,11 @@ async function applyClassroomStateNow(rawState, options = {}) {
         'classroom state control revision',
       );
     }
+    preparedFocus = await prepareFocusAssignment(normalized, authContext, authorityEnvelope, options.trustedPersistedRestrictionSso === true);
   } catch (error) {
     if (isAuthContextCancellation(error)) throw error;
     const ackState = classroomStateAckTarget(rawState);
-    const outcome = error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA'
+    const outcome = ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED'].includes(error?.code)
       ? 'unsupported'
       : 'failed';
     sendClassroomStateAck(ackState, outcome, error, authContext);
@@ -19958,6 +20879,8 @@ async function applyClassroomStateNow(rawState, options = {}) {
   }
 
   const runtimeBackup = classroomRuntimeBackup();
+  const focusBackup = focusAssignment;
+  const focusStatusBackup = focusStatus;
   let statePersisted = false;
   let sideEffectsScheduled = false;
   try {
@@ -19991,6 +20914,12 @@ async function applyClassroomStateNow(rawState, options = {}) {
       [RESTRICTION_AUTH_POLICY_FENCE_STORAGE_KEY]: nextAuthPolicyFence,
       [TRANSIENT_CURRENT_PAGE_RESTRICTION_STORAGE_KEY]: null,
     });
+    if (preparedFocus) {
+      const tab = await boundedClassroomOperation(chrome.tabs.get(preparedFocus.tabId), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Focus adoption validation');
+      assertCurrent('Focus adoption commit');
+      if (!tab || retiredFocusTabRefs.has(preparedFocus.tabRef)) throw focusError('STALE_TAB_REF');
+    }
+    await commitFocusAssignment(preparedFocus, normalized, authContext);
     transientCurrentPageRestrictionActive = false;
     restrictionAuthPolicyFenceState = nextAuthPolicyFence;
     if (authContext?.studentId) {
@@ -20116,6 +21045,12 @@ async function applyClassroomStateNow(rawState, options = {}) {
       }
       restoreClassroomRuntimeBackup(runtimeBackup);
       currentClassroomState = previousState;
+      focusAssignment = focusBackup;
+      focusStatus = focusStatusBackup;
+      if (hasSessionStorage()) {
+        if (focusBackup) await durableSessionKv.set({ [FOCUS_ASSIGNMENT_KEY]: focusBackup });
+        else await durableSessionKv.remove(FOCUS_ASSIGNMENT_KEY);
+      }
       await composeAllManagedDynamicRules();
       assertCurrent('classroom state rollback');
       if (!classroomRuntimeIsOwnedBy(runtimeOwner)) {
@@ -20217,6 +21152,7 @@ function applyClassroomState(rawState, options = {}) {
 
 async function expireClassroomState(reason = 'hard_expiry', options = {}) {
   if (!currentClassroomState) return;
+  await retireFocus(focusAssignment, null, options.authContext || null, { clearState: false, retireAssignment: true });
   const expiringTransientCurrentPage = transientCurrentPageRestrictionActive;
   const authContext = options.authContext || (() => {
     try {
@@ -20259,7 +21195,7 @@ async function expireClassroomState(reason = 'hard_expiry', options = {}) {
     currentClassroomState = expiredState;
     if (expiredState.supervisionContextId && currentFabState) {
       await applyFabSettings({ ...currentFabState, activeContexts: [], activeSessionIds: [],
-        teachingSessionId: null, supervisionContextId: null, messagingEnabled: false,
+        teachingSessionId: null, supervisionContextId: null, messagingEnabled: false, messagingChannelEnabled: false,
         handRaisingEnabled: false, handRaised: false, reason: 'session-ended' }, { authContext, authorityEnvelope });
       assertCurrent();
     }
@@ -20336,7 +21272,9 @@ async function checkClassroomStateExpiryNow(options = {}) {
     screenLocked = false;
     lockedUrl = null;
     lockedDomain = null;
+    lockedResource = null;
     allowedDomains = [];
+    flightPathResources = [];
     activeFlightPathName = null;
     teacherMaxTabs = null;
     currentMaxTabs = effectiveTabLimit();
@@ -20344,6 +21282,7 @@ async function checkClassroomStateExpiryNow(options = {}) {
     activeBlockListName = null;
     temporaryAllowedDomains = [];
     attentionModeActive = false;
+    deferredTeacherMessageNotification = null;
     restrictionSsoPassThroughActive = false;
     restrictionAuthPassThroughActive = false;
     activeAuthPassThroughPolicy = null;
@@ -20758,11 +21697,13 @@ async function getClassroomCommandStateSnapshot(options = {}) {
 }
 
 async function clearTeacherSessionStateForSignOutNow(options = {}) {
+  await retireFocus(focusAssignment, null, null, { clearState: false });
+  if (hasSessionStorage()) await durableSessionKv.remove(FOCUS_REFS_KEY);
   const eventScope = getMonitoringEventScope();
   // A clear replayed from the crash marker must not emit a second
   // restriction_state_cleared event when nothing was left to clear.
   const hadTeacherSessionState = Boolean(
-    screenLocked || lockedUrl || lockedDomain || allowedDomains.length > 0
+    screenLocked || lockedUrl || lockedDomain || flightPathIsActive()
     || activeFlightPathName || teacherMaxTabs != null
     || teacherBlockedDomains.length > 0 || activeBlockListName
     || temporaryAllowedDomains.length > 0 || attentionModeActive
@@ -20776,7 +21717,9 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   screenLocked = false;
   lockedUrl = null;
   lockedDomain = null;
+  lockedResource = null;
   allowedDomains = [];
+  flightPathResources = [];
   activeFlightPathName = null;
   teacherMaxTabs = null;
   currentMaxTabs = effectiveTabLimit();
@@ -20784,6 +21727,7 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  deferredTeacherMessageNotification = null;
   restrictionSsoPassThroughActive = false;
   restrictionAuthPassThroughActive = false;
   activeAuthPassThroughPolicy = null;
@@ -20856,6 +21800,7 @@ function isOnSameDomain(url, domain) {
 }
 
 const AUTHORITY_BOUND_COMMAND_TYPES = new Set([
+  'activate-tab', 'focus-tab', 'stop-focus',
   'open-tab',
   'close-tabs',
   'close-tab',
@@ -21067,9 +22012,13 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
   let authContext;
   let commandBinding;
   let transientCurrentPageWaypoint = null;
+  let exactFocusTarget = null;
   try {
     authContext = captureAuthenticatedContext('remote-control command');
+    if (commandType === 'focus-tab' || commandType === 'stop-focus')
+      observeExactStudentControlRevision(envelope, authContext, 'Focus command revision');
     const requireFullAuthority = exactTabCloseV2AuthorityRequired(command, authContext)
+      || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
       || commandDeclaresCurrentPageWaypoint(command);
     commandBinding = assertCurrentStudentBinding(envelope, 'remote-control command', {
       authContext,
@@ -21166,16 +22115,26 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       assertCurrentStudentBinding(envelope, 'remote-control command', {
         authContext,
         requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext)
+          || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
           || Boolean(transientCurrentPageWaypoint),
       }),
       authContext,
       'remote-control command',
       {
         requireFullAuthority: exactTabCloseV2AuthorityRequired(command, authContext)
+          || ['activate-tab', 'focus-tab', 'stop-focus'].includes(commandType)
           || Boolean(transientCurrentPageWaypoint),
       },
     );
     assertCurrentCommandAuthority(command, envelope);
+    if (commandType === 'activate-tab' || commandType === 'focus-tab') exactFocusTarget = RuntimeCore.normalizeExactTabTarget(command.data);
+    if (commandType === 'stop-focus') RuntimeCore.normalizeStopFocusData(command.data);
+    if (commandType === 'stop-focus' && !envelope.classroomState && !envelope.stateSnapshot && !command.classroomState) {
+      const result = await enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(() => applyBareFocusCleanup(command, envelope, authContext)));
+      if (commandId) await sendCommandAck(commandId, 'completed', { authContext, binding: commandBinding,
+        commandType, result, outcome: 'applied', deliveryPolicy: delivery.deliveryPolicy, expiresAt: delivery.expiresAt });
+      return result;
+    }
     if (authority?.teachingSessionId || authority?.supervisionContextId) {
       command.data = {
         ...(command.data || {}),
@@ -21194,6 +22153,14 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     // active on the device.
     const isClassroomStatefulCommand = STATEFUL_COMMAND_TYPES.has(commandType)
       && authority?.kind !== 'school_policy';
+    // Only a precise Waypoint or Flight Path must travel with its snapshot.
+    // A lesson activity's link `resources` is transient Class tools content.
+    if (!classroomState && RuntimeCore.commandPayloadRequiresPreciseState(commandType, command.data))
+      throw Object.assign(new Error('Precise commands require an authoritative classroom state'), { code: 'PRECISE_RESTRICTION_INVALID' });
+    if (commandType === 'focus-tab' && (!classroomState?.restrictions?.focus?.active
+      || classroomState.restrictions.focus.tabRef !== exactFocusTarget.tabRef
+      || classroomState.restrictions.focus.observedRevision !== exactFocusTarget.observedRevision))
+      throw focusError('FOCUS_RESTRICTION_INVALID');
     let application = null;
     let result;
     let deferredCommandSideEffect = null;
@@ -21217,6 +22184,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
         appliedRevision: application.appliedRevision,
         outcome: application.outcome,
         completedAt: new Date().toISOString(),
+        ...(['focus-tab', 'stop-focus'].includes(commandType) ? { focusStatus: publicFocusStatus() } : {}),
       };
     } else if (isClassroomStatefulCommand) {
       result = await enqueueStudentAuthMutation(() => enqueueClassroomStateOperation(async () => {
@@ -21366,6 +22334,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
         delivery,
         authContext,
         binding: commandBinding,
+        exactFocusTarget,
       };
       const executeOrdinaryCommand = () => executeRemoteControlCommand(
         command || {},
@@ -21437,7 +22406,10 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
           errorCode: commandDiagnosticCode(error),
           state,
           appliedRevision: currentClassroomState?.revision ?? 0,
-          outcome: error?.code === 'UNSUPPORTED_CLASSROOM_STATE_SCHEMA' ? 'unsupported' : 'failed',
+          outcome: ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code) ? 'unsupported' : 'failed',
+          ...(['activate-tab', 'focus-tab'].includes(commandType) ? { result: {
+            status: ['FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code)
+              ? 'unsupported' : error?.code === 'STALE_TAB_REF' ? 'stale_tab_ref' : 'unavailable' } } : {}),
           deliveryPolicy: delivery.deliveryPolicy,
           expiresAt: delivery.expiresAt,
         });
@@ -21463,6 +22435,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
     commandAuthContext,
   );
   const exactCommandAuthorityRequired = exactTabAuthorityRequired
+    || command.type === 'activate-tab'
     || Boolean(executionContext.transientCurrentPageWaypoint);
   const commandControlRevision = executionContext.binding?.controlRevision
     ?? currentStudentControlRevision();
@@ -21483,6 +22456,11 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
       const error = new Error(`${reason} belongs to a retired control revision`);
       error.code = 'STUDENT_BINDING_MISMATCH';
       throw error;
+    }
+    if (command.type === 'activate-tab') {
+      if (!hasNegotiatedCapability('focusTabV1', commandAuthContext)) throw focusError('TAB_ACTIVATE_CAPABILITY_REQUIRED');
+      if (!currentLicenseIsActive()) throw focusError('COMMAND_AUTHORITY_MISMATCH');
+      assertCurrentCommandAuthority(command, executionContext.envelope || command);
     }
   };
   const commandSourceMessage = executionContext.envelope || command;
@@ -21551,6 +22529,32 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
   command.data = command.data || {};
 
   switch (command.type) {
+      case 'activate-tab': {
+        if (!hasNegotiatedCapability('focusTabV1', commandAuthContext)) throw focusError('TAB_ACTIVATE_CAPABILITY_REQUIRED');
+        const target = executionContext.exactFocusTarget || RuntimeCore.normalizeExactTabTarget(command.data);
+        const resolve = async () => {
+          try { return (await resolveExactTabRefs([target.tabRef], target.observedRevision, commandAuthContext)).targets[0]; }
+          catch { throw focusError('STALE_TAB_REF'); }
+        };
+        const exact = await resolve(); assertCommandExecutionCurrent('Bring Forward exact resolution');
+        const tab = await chrome.tabs.get(exact.tabId).catch(() => null); assertCommandExecutionCurrent('Bring Forward validation');
+        if (!tab) throw focusError('STALE_TAB_REF');
+        if (!currentLicenseIsActive() || !focusNavigationDecision(currentClassroomState, tab).allowed) throw focusError('FOCUS_TAB_OFF_POLICY');
+        if ((await resolve()).tabId !== tab.id) throw focusError('STALE_TAB_REF');
+        assertCommandExecutionCurrent('Bring Forward activation');
+        await boundedClassroomOperation(chrome.tabs.update(tab.id, { active: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward activation');
+        assertCommandExecutionCurrent('Bring Forward window');
+        await boundedClassroomOperation(chrome.windows.update(tab.windowId, { focused: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward window');
+        assertCommandExecutionCurrent('Bring Forward verification');
+        const verified = (await boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+          CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward verification'))[0];
+        assertCommandExecutionCurrent('Bring Forward verified');
+        const stillExact = await chrome.tabs.get(tab.id).catch(() => null);
+        assertCommandExecutionCurrent('Bring Forward final policy');
+        if (verified?.id !== tab.id || verified.windowId !== tab.windowId || (await resolve()).tabId !== tab.id || !stillExact) throw focusError('STALE_TAB_REF');
+        if (!focusNavigationDecision(currentClassroomState, stillExact).allowed) throw focusError('FOCUS_TAB_OFF_POLICY');
+        return { status: 'activated', tabRef: target.tabRef, tabSnapshotRevision: target.observedRevision };
+      }
       case 'open-tab':
         if (!command.data.url) {
           throw new Error('Missing URL for open-tab command');
@@ -21569,6 +22573,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             const tabSnapshot = await buildOpaqueTabSnapshot(tabs, commandAuthContext);
             assertCommandExecutionCurrent('open-tab command');
             const openedEntry = tabSnapshot.localEntries.find((entry) => entry.tabId === tab.id);
+            if (hasNegotiatedCapability('focusTabV1', commandAuthContext)) {
+              const receipt = await createFocusOpenReceipt(tab, tabSnapshot, commandAuthContext);
+              assertCommandExecutionCurrent('open-tab receipt');
+              scheduleBoundCommandScreenshot(2000);
+              return receipt;
+            }
             result.openedUrl = command.data.url;
             result.tabRef = openedEntry?.tabRef || null;
             result.tabSnapshotRevision = tabSnapshot.revision;
@@ -21727,6 +22737,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
 
         lockedUrl = urlToLock;
+        lockedResource = null;
         lockedDomain = extractDomain(lockedUrl);
         if (!lockedDomain) {
           throw new Error('Could not determine locked domain');
@@ -21857,14 +22868,16 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
       case 'unlock-screen':
         {
         const screenOnly = command.data.screenOnly === true || command.screenOnly === true;
-        const preserveFlightPath = screenOnly && allowedDomains.length > 0;
+        const preserveFlightPath = screenOnly && flightPathIsActive();
         const removedTransientCurrentPage = transientCurrentPageRestrictionActive;
         screenLocked = false;
         lockedUrl = null;
         lockedDomain = null;
+        lockedResource = null;
         transientCurrentPageRestrictionActive = false;
         if (!screenOnly) {
-          allowedDomains = []; // Legacy full unlock clears all lock state
+          allowedDomains = [];
+          flightPathResources = []; // Legacy full unlock clears all lock state
           activeFlightPathName = null;
           restrictionSsoPassThroughActive = false;
           restrictionAuthPassThroughActive = false;
@@ -21928,13 +22941,15 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           }
 
           allowedDomains = RuntimeCore.normalizeDomainList(requestedAllowedDomains, 'Flight Path domains');
+          flightPathResources = [];
           activeFlightPathName = command.data.flightPathName || null;
         }
         // Applying a Flight Path replaces the foreground screen lock while
         // establishing its own independent browsing restriction.
         screenLocked = false;
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
-        lockedDomain = null; // Clear single domain when applying Flight Path
+        lockedDomain = null;
+        lockedResource = null; // Clear single domain when applying Flight Path
         restrictionSsoPassThroughActive = false;
         restrictionAuthPassThroughActive = false;
         activeAuthPassThroughPolicy = null;
@@ -21959,7 +22974,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         
         // Use the same foreground-aware reconciliation as revisioned state so
         // an allowed page in another window is preserved and focused.
-        if (allowedDomains.length > 0) {
+        if (flightPathIsActive()) {
           await reconcileClassroomStateTabsBestEffort({
             restrictions: classroomRestrictionsFromRuntime(),
           }, {
@@ -21985,7 +23000,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
         
       case 'remove-flight-path':
-        allowedDomains = []; // Clear all flight path domains
+        allowedDomains = [];
+        flightPathResources = []; // Clear all flight path domains
         activeFlightPathName = null; // Clear Flight Path name
         if (!screenLocked) {
           restrictionSsoPassThroughActive = false;
@@ -22122,7 +23138,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         const attentionActive = command.data.active;
         const attentionMessage = command.data.message || 'Please look up!';
 
-        // Update attention mode state (blocks navigation and new tabs when active)
+        // Attention owns only the page overlay, retaining other controls.
         attentionModeActive = attentionActive;
         await composeDynamicRules(['classroom', 'restrictionSso']);
         assertCommandExecutionCurrent('attention-mode rules');
@@ -22139,6 +23155,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             message: attentionMessage,
             priority: 2,
           });
+        } else {
+          raiseDeferredTeacherMessageNotification(commandAuthContext).catch(() => {});
         }
 
         result.active = attentionActive;
@@ -22279,6 +23297,14 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await applyFabSettings({
           ...(currentFabState || {}),
           messagingEnabled,
+          // The toggle carries the class's whole messaging state; SchoolPilot
+          // sends it alone (without a FAB snapshot) to late sign-ins. A toggle
+          // without the hard-switch field leaves the channel unknown, never on.
+          messagingChannelEnabled: typeof command.data.messagingChannelEnabled === 'boolean'
+            ? command.data.messagingChannelEnabled : null,
+          ...(typeof command.data.messagesPaused === 'boolean'
+            ? { messagesPaused: command.data.messagesPaused, pauseReason: command.data.pauseReason ?? null }
+            : {}),
           ...(Number.isSafeInteger(messagingRevision) && messagingRevision >= 0
             ? { revision: messagingRevision, lifecycleRevision: messagingRevision }
             : {}),
@@ -22724,6 +23750,9 @@ async function notifyTeacherMessageForAuth(opts, authContext, sourceMessage, mes
     assertAuthenticatedContextCurrent(authContext, reason);
     const binding = assertCurrentStudentBinding(sourceMessage, reason, { authContext });
     assertBindingMatchesAuthContext(binding, authContext, reason);
+    if (!privateChatMessageIsAnnouncement(sourceMessage)
+      && (teacherChatChannelOff() || !privateTeacherMessageIsCurrent(sourceMessage, authContext)))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_EXPIRED');
   };
   assertCurrent();
   const inventoryReady = await ensureAuthBoundNotificationInventory();
@@ -22808,6 +23837,90 @@ async function broadcastToAllTabsForAuth(
 }
 
 // Chat/Message Handlers (Phase 2)
+
+// The class or school messaging switch is off, or may be. SchoolPilot folds
+// the soft pause into messagingEnabled and reports messagesPaused even while a
+// hard switch is off, so a paused class counts as on only when the server says
+// its channel (messagingChannelEnabled) is on. Without that field a disabled
+// class is off, as before the pause existed. With no FAB state at all the
+// pages decide from their own state, as before.
+function teacherChatChannelOff() {
+  if (currentPrivateChatLifecycle?.binding === messageInboxAuthBinding()
+    && currentPrivateChatLifecycle.channelEnabled === false) return true;
+  const state = currentFabState;
+  if (!state || state.messagingEnabled === true) return false;
+  return !(state.messagesPaused === true && state.messagingChannelEnabled === true
+    && Array.isArray(state.activeContexts) && state.activeContexts.length > 0);
+}
+
+// Attention keeps the screen, so a teacher message that arrives during it
+// raises no notification then. The newest such message is announced once
+// Attention ends, so a student whose tab has no page chat (a new tab or a
+// browser page) still learns of it. It is dropped if the student or class
+// changed, the channel went off or the teacher ended the chat meanwhile.
+// Memory only: a worker restart drops it, and the popup inbox keeps the text.
+function deferTeacherMessageNotification(authContext, sourceMessage, inboxMessage, chatClosedAt) {
+  deferredTeacherMessageNotification = {
+    scope: authContextProtocolScope(authContext),
+    sourceMessage,
+    id: inboxMessage.id,
+    text: inboxMessage.message || 'New message',
+    chatClosedAt,
+    // A scheduled class's owner; another teacher taking the class over
+    // changes it (and pages then drop the held chat with its thread).
+    contextAuthorityRevision: currentFabState?.contextAuthorityRevision ?? null,
+  };
+}
+
+// SchoolPilot releases a scheduled class's Attention with classroom-state-sync
+// first and the class's FAB snapshot (with the new ownership revision) after
+// it. Between the two the class is not current yet, so the held notification
+// waits for that snapshot (applyFabSettingsNow) instead of being dropped.
+function deferredTeacherMessageAwaitsFabSnapshot(pending) {
+  const supervisionContextId = pending.sourceMessage?.supervisionContextId;
+  return Boolean(supervisionContextId
+    && currentClassroomState?.supervisionContextId === supervisionContextId
+    && Number(currentFabState?.ownershipRevision || 0) < Number(currentClassroomState?.revision || 0));
+}
+
+// The held message's class is still the student's current class. Releasing a
+// scheduled class's Attention advances the student's control revision, so a
+// scheduled message is matched by its class and that class's owner, as pages
+// match the held chat they show, never by the revision it arrived under.
+function deferredTeacherMessageClassCurrent(pending) {
+  const message = pending.sourceMessage || {};
+  if (!message.supervisionContextId) return messageMatchesActiveFabSession(message);
+  return classroomContextIsCurrent(message)
+    && (currentFabState?.contextAuthorityRevision ?? null) === pending.contextAuthorityRevision;
+}
+
+async function raiseDeferredTeacherMessageNotification(authContext) {
+  const pending = deferredTeacherMessageNotification;
+  if (!pending || !authContext || attentionModeActive
+    || deferredTeacherMessageAwaitsFabSnapshot(pending)) return;
+  deferredTeacherMessageNotification = null;
+  const reason = 'deferred teacher message notification';
+  assertAuthenticatedContextCurrent(authContext, reason);
+  const announcement = privateChatMessageIsAnnouncement(pending.sourceMessage);
+  if (pending.scope !== authContextProtocolScope(authContext) || !announcement && teacherChatChannelOff()
+    || !deferredTeacherMessageClassCurrent(pending)) return;
+  const stored = await kv.get(FAB_CHAT_CLOSED_AT_STORAGE_KEY);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  if (!announcement && (teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]) > pending.chatClosedAt
+      || !privateTeacherMessageIsCurrent(pending.sourceMessage, authContext))
+    || attentionModeActive) return;
+  await notifyTeacherMessageForAuth({
+    title: 'Message from Teacher',
+    message: pending.text,
+    priority: 2,
+    requireInteraction: false,
+  }, authContext, pending.sourceMessage, `${announcement ? 'announcement' : 'private'}_${pending.id}`);
+  if (announcement) await broadcastToAllTabsForAuth('show-message', {
+    id: pending.id, ...classroomAuthorityPayload(pending.sourceMessage), message: pending.text,
+    fromName: pending.sourceMessage.fromName || 'Teacher', messageKind: 'announcement',
+  }, authContext, pending.sourceMessage);
+}
+
 function messageMatchesActiveFabSession(message = {}) {
   if (message.supervisionContextId) {
     const revision = message.studentControlRevision ?? message.controlRevision;
@@ -22918,6 +24031,12 @@ async function handleDurableTeacherMessage(message, options = {}) {
     if (!messageMatchesActiveFabSession(message)) {
       throw new Error('Teacher message belongs to an inactive teaching session');
     }
+    const announcement = privateChatMessageIsAnnouncement(message);
+    if (message.messageKind !== undefined && !['private', 'announcement'].includes(message.messageKind))
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
+    if (announcement && (!commandId || message.privateChatLifecycle)
+      || !announcement && commandId && message.messageKind === 'private')
+      throw privateChatLifecycleError('PRIVATE_CHAT_LIFECYCLE_INVALID');
     assertAuthenticatedContextCurrent(authContext, 'durable teacher message');
     assertCurrentStudentBinding(message, 'durable teacher message');
     const inboxMessage = messageWithStableLocalId(message, 'teacher-message');
@@ -22948,27 +24067,42 @@ async function handleDurableTeacherMessage(message, options = {}) {
     if (deduplicated) {
       console.log('Dedup: skipping duplicate teacher-message');
     } else {
-      assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
-      await notifyTeacherMessageForAuth({
-        title: 'Reply from Teacher',
-        message: inboxMessage.message || 'New message',
-        priority: 2,
-        requireInteraction: false,
-      }, authContext, message, inboxMessage.id);
+      // With the class or school switch off students see no chat: the popup
+      // inbox keeps the message quietly, with no notification or page chat.
+      // Attention keeps the screen, so no notification is raised over it;
+      // pages show the chat, and the worker the notification, once it ends.
+      const channelOff = !announcement && teacherChatChannelOff();
+      if (!channelOff && attentionModeActive) {
+        deferTeacherMessageNotification(authContext, message, inboxMessage, inboxResult.chatClosedAt || 0);
+      } else if (!channelOff) {
+        assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
+        await notifyTeacherMessageForAuth({
+          title: 'Message from Teacher',
+          message: inboxMessage.message || 'New message',
+          priority: 2,
+          requireInteraction: false,
+        }, authContext, message, `${announcement ? 'announcement' : 'private'}_${inboxMessage.id}`);
+      }
       assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
       assertCurrentStudentBinding(message, 'durable teacher message notification', { authContext });
-      await broadcastToAllTabsForAuth('chat-reply', {
-        _msgId: inboxMessage.id,
-        chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
-        messageId: message.chatMessageId || message.messageId || inboxMessage.id,
-        sessionId: message.sessionId,
-        ...classroomAuthorityPayload(message),
-        studentId: message.studentId,
-        message: inboxMessage.message,
-        fromName: inboxMessage.fromName || 'Teacher',
-        timestamp: inboxMessage.timestamp || Date.now(),
-      }, authContext, message);
-      assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
+      if (!channelOff && !(announcement && attentionModeActive)) {
+        await broadcastToAllTabsForAuth(announcement ? 'show-message' : 'chat-reply', {
+          _msgId: inboxMessage.id,
+          chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
+          messageId: message.chatMessageId || message.messageId || inboxMessage.id,
+          sessionId: message.sessionId,
+          ...classroomAuthorityPayload(message),
+          studentId: message.studentId,
+          message: inboxMessage.message,
+          fromName: inboxMessage.fromName || 'Teacher',
+          timestamp: inboxMessage.timestamp || Date.now(),
+          chatClosedAt: inboxResult.chatClosedAt || 0,
+          messageKind: announcement ? 'announcement' : 'private',
+          ...(hasNegotiatedCapability('privateChatLifecycleV1', authContext) && message.privateChatLifecycle
+            ? { privateChatLifecycle: message.privateChatLifecycle } : {}),
+        }, authContext, message);
+        assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
+      }
     }
 
     if (hasChatDelivery) {
@@ -23006,7 +24140,8 @@ async function handleDurableTeacherMessage(message, options = {}) {
     }
     return { messageId: inboxMessage.id, deduplicated };
   } catch (error) {
-    if (hasChatDelivery && authContext && commandBinding && !isAuthContextCancellation(error)) {
+    if (hasChatDelivery && authContext && commandBinding && !isAuthContextCancellation(error)
+      && error?.code !== 'PRIVATE_CHAT_LIFECYCLE_UNAVAILABLE') {
       await sendChatDeliveryAck(
         message,
         'failed',
@@ -23041,7 +24176,7 @@ async function handleHeartbeatPendingMessages(rawMessages, expectedBinding, auth
   const legacyMessages = [];
   const addedMessageIds = [];
   for (const rawMessage of rawMessages || []) {
-    if (!getCommandIdFromMessage(rawMessage)) {
+    if (!getCommandIdFromMessage(rawMessage) && rawMessage.messageKind !== 'private' && !rawMessage.privateChatLifecycle) {
       legacyMessages.push(rawMessage);
       continue;
     }
@@ -23375,7 +24510,7 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
 
 function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   const targetDomain = extractDomain(urlValue);
-  if (!targetDomain || attentionModeActive) return true;
+  if (!targetDomain) return true;
   const blockedBy = (domains) => domains.some((domain) => {
     const normalized = String(domain || '').replace(/^www\./, '');
     return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
@@ -23383,7 +24518,7 @@ function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   return blockedBy(globalBlockedDomains) || blockedBy(teacherBlockedDomains);
 }
 
-// Prevent navigation when screen is locked (domain-based blocking)
+// One policy decision for network, SPA, history and prerender navigations.
 async function handleBeforeNavigateForPolicy(details) {
   if (details.frameId !== 0) return;
   let eventAuthContext;
@@ -23447,99 +24582,27 @@ async function handleBeforeNavigateForPolicy(details) {
       }
 
       const policy = {
-        attentionModeActive,
+        classroomState: runtimeClassroomStateForRules(),
         globalBlockedDomains: [...globalBlockedDomains],
-        screenLocked,
-        lockedDomain,
-        lockedUrl,
-        temporaryAllowedDomains: temporaryAllowedDomains.map((item) => ({ ...item })),
-        teacherBlockedDomains: [...teacherBlockedDomains],
-        allowedDomains: [...allowedDomains],
-        restrictionSsoPassThroughActive,
-        restrictionAuthPassThroughActive,
-        authPassThrough: activeAuthPassThroughPolicy,
+        restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+        restrictionAuthPassThrough: restrictionAuthPassThroughActive,
       };
-      let policySource = null;
-      let notification = null;
-      let action = 'back';
-
-      if (policy.attentionModeActive) {
-        policySource = 'attention_mode';
-      } else if (policy.globalBlockedDomains.some((domain) => {
-        const normalized = domain.replace(/^www\./, '');
-        return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-      })) {
-        policySource = 'school';
-        notification = {
-          title: 'Website Blocked',
-          message: `Access to ${targetDomain} is blocked by your school.`,
-          priority: 2,
-        };
-      } else if ((
-        policy.restrictionAuthPassThroughActive
-          && RuntimeCore.authPassThroughProfileForUrl(policy.authPassThrough, details.url)
-      ) || (
-        policy.restrictionSsoPassThroughActive
-          && normalizedRestrictionSsoHost(details.url)
-      )) {
-        const teacherBlocked = policy.teacherBlockedDomains.some((domain) => {
-          const normalized = domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        });
-        if (!teacherBlocked) return;
-        policySource = 'teacher';
-        notification = {
-          title: 'Website Blocked',
-          message: `Access to ${targetDomain} is blocked by your teacher.`,
-          priority: 2,
-        };
-      } else if (policy.screenLocked) {
-        if (policy.lockedDomain && isOnSameDomain(details.url, policy.lockedDomain)) return;
-        policySource = 'screen_lock';
-        action = policy.lockedUrl ? 'locked_url' : 'back';
-        notification = {
-          title: 'Navigation Blocked',
-          message: policy.lockedDomain
-            ? `You can only browse within ${policy.lockedDomain}`
-            : 'Your screen is locked by your teacher.',
-          priority: 2,
-        };
-      } else {
-        const temporarilyAllowed = policy.temporaryAllowedDomains.some((item) => {
-          const normalized = item.domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        });
-        if (temporarilyAllowed) return;
-        if (policy.teacherBlockedDomains.some((domain) => {
-          const normalized = domain.replace(/^www\./, '');
-          return targetDomain === normalized || targetDomain.endsWith(`.${normalized}`);
-        })) {
-          policySource = 'teacher';
-          notification = {
-            title: 'Website Blocked',
-            message: `Access to ${targetDomain} is blocked by your teacher.`,
-            priority: 2,
-          };
-        } else if (
-          policy.allowedDomains.length > 0
-          && !policy.allowedDomains.some((domain) => isOnSameDomain(details.url, domain))
-        ) {
-          policySource = 'flight_path';
-          action = policy.lockedUrl ? 'locked_url' : 'back';
-          notification = {
-            title: 'Navigation Blocked',
-            message: `You can only access: ${policy.allowedDomains.join(', ')}`,
-            priority: 1,
-          };
-        }
-      }
-
+      const decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
+      if (decision.allowed) return;
+      const policySource = decision.source;
+      const precise = RuntimeCore.hasPreciseRestrictions(policy.classroomState);
+      const landing = RuntimeCore.restrictionLandingUrl(policy.classroomState);
+      const target = precise
+        ? landing && RuntimeCore.decideNavigation(landing, policy, Date.now()).allowed ? landing : null
+        : policySource === 'screen_lock' ? lockedUrl : null;
+      const notification = { title: 'Navigation Blocked',
+        message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
       if (!policySource) return;
       await recordNavigationBlockedForAuth(eventAuthContext, details.url, policySource);
-      if (action === 'locked_url') {
+      if (target) {
         await updateTabForAuth(
           details.tabId,
-          { url: policy.lockedUrl },
+          { url: target },
           eventAuthContext,
           'navigation policy redirect',
         );
@@ -23564,6 +24627,9 @@ async function handleBeforeNavigateForPolicy(details) {
   }
 }
 chrome.webNavigation.onBeforeNavigate.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onHistoryStateUpdated.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(handleBeforeNavigateForPolicy);
+chrome.webNavigation.onCommitted.addListener(handleBeforeNavigateForPolicy);
 
 // Track navigation commits for instant URL updates (fires immediately when navigation commits)
 chrome.webNavigation.onCommitted.addListener(async (details) => {
@@ -23614,8 +24680,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 function restrictionDestinationTab(tab) {
   const url = tab?.pendingUrl || tab?.url || '';
   if (!/^https?:\/\//i.test(url) || restrictionAuthenticationTab(tab)) return false;
-  if (screenLocked && lockedUrl) return restrictionAuthDestinationMatches(url);
-  return allowedDomains.some((domain) => isOnSameDomain(url, domain));
+  return RuntimeCore.isRestrictionDestinationUrl(runtimeClassroomStateForRules(), url);
 }
 
 function restrictionSsoTabLimitPreserveIds(tabs, options = {}) {
@@ -23664,7 +24729,6 @@ function activeCreatedRestrictionSsoTabId(tab) {
 
 async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   const policy = {
-    attentionModeActive,
     screenLocked,
     lockedDomain,
     allowedDomains: [...allowedDomains],
@@ -23691,16 +24755,22 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   let removalTarget = null;
   let evaluatedMaxTabs = null;
   let activeAuthPopupPlaceholder = false;
-  if (policy.attentionModeActive) {
-    policySource = 'attention_mode';
+  const createdUrl = policyTab.pendingUrl || policyTab.url || '';
+  const navigationDecision = RuntimeCore.decideNavigation(createdUrl, {
+    classroomState: runtimeClassroomStateForRules(), globalBlockedDomains: [...globalBlockedDomains],
+    restrictionSsoPassThrough: restrictionSsoPassThroughActive,
+    restrictionAuthPassThrough: restrictionAuthPassThroughActive,
+  });
+  if (/^https?:\/\//i.test(createdUrl) && !navigationDecision.allowed) {
+    policySource = navigationDecision.source;
+    notification = { title: policySource === 'screen_lock' ? 'Waypoint Set' : 'Navigation Blocked',
+      message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
   } else if (policy.screenLocked && policy.lockedDomain) {
     // Lenient on-domain lock: a new tab already destined for the locked
     // domain (e.g. a middle-clicked link) is allowed; DNR and the
     // navigation listener keep it fenced afterward. Anything else —
     // chrome://newtab, about:blank, off-domain — is removed.
-    const createdUrl = policyTab.pendingUrl || policyTab.url || '';
-    const onLockedDomain = /^https?:\/\//i.test(createdUrl)
-      && isOnSameDomain(createdUrl, policy.lockedDomain);
+    const onLockedDomain = RuntimeCore.isRestrictionDestinationUrl(runtimeClassroomStateForRules(), createdUrl);
     const onRestrictionSso = (
       policy.restrictionSsoPassThroughActive || policy.restrictionAuthPassThroughActive
     ) && restrictionAuthenticationUrlAllowed(createdUrl);
@@ -23735,14 +24805,8 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
     evaluatedMaxTabs = inventoryMaxTabs;
     if (inventoryMaxTabs && tabs.length > inventoryMaxTabs) {
       const otherTabs = tabs.filter((candidate) => candidate.id !== policyTab.id);
-      const existingCompliant = policy.screenLocked && policy.lockedDomain
-        ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-          && isOnSameDomain(candidate.pendingUrl || candidate.url || '', policy.lockedDomain))
-        : policy.allowedDomains.length > 0
-          ? otherTabs.find((candidate) => /^https?:\/\//i.test(candidate.pendingUrl || candidate.url || '')
-            && policy.allowedDomains.some((domain) => (
-              isOnSameDomain(candidate.pendingUrl || candidate.url || '', domain)
-            )))
+      const existingCompliant = policy.screenLocked || flightPathIsActive()
+        ? otherTabs.find(restrictionDestinationTab)
           : otherTabs.find((candidate) => !/^(chrome|chrome-extension|devtools):\/\//i.test(
             candidate.pendingUrl || candidate.url || ''
           ));
@@ -23825,7 +24889,6 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
 
 function createdTabRemovalDecisionStillApplies(decision, currentTab) {
   if (!decision?.policySource || !Number.isInteger(currentTab?.id)) return false;
-  if (decision.policySource === 'attention_mode') return attentionModeActive;
   if (decision.policySource === 'screen_lock') {
     if (!screenLocked || !lockedDomain) return false;
     const currentUrl = currentTab.pendingUrl || currentTab.url || '';
@@ -25452,6 +26515,7 @@ async function handleWsMessage(
             activeContexts: remainingContexts,
             activeSessionIds: remainingSessionIds,
             messagingEnabled: remainingContexts.length > 0 && currentFabState?.messagingEnabled === true,
+            messagingChannelEnabled: remainingContexts.length > 0 && currentFabState?.messagingChannelEnabled === true,
             handRaisingEnabled: remainingContexts.length > 0 && currentFabState?.handRaisingEnabled === true,
             handRaised: false,
             reason: 'session-ended',
@@ -25678,10 +26742,22 @@ async function handleWsMessage(
           recentMsgIds.add(dedupKey);
           setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
           try {
+            let close = null;
+            try {
+              close = await recordTeacherChatClosed(message, authContext);
+            } catch (error) {
+              if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') throw error;
+              // Pages still end the chat; without a stamp any later message may reopen it.
+              console.warn('[Chat] Could not record the chat close:', safeDiagnosticError(error));
+            }
+            assertAuthenticatedContextCurrent(authContext, 'chat close');
+            if (close?.ignored) return;
             await broadcastToAllTabsForAuth('chat-closed', {
               sessionId: message.sessionId,
               ...classroomAuthorityPayload(message),
               studentId: message.studentId,
+              ...(close ? { closedAt: close.closedAt, wasOpen: close.wasOpen } : {}),
+              ...(close?.privateChatLifecycle ? { privateChatLifecycle: close.privateChatLifecycle } : {}),
             }, authContext, message);
             assertAuthenticatedContextCurrent(authContext, 'chat close broadcast');
           } catch (error) {
@@ -25881,6 +26957,7 @@ async function getStudentSessionUiState(message = {}) {
     'pauseReason',
     'fabChatMessages',
     'fabChatClosed',
+    FAB_CHAT_CLOSED_AT_STORAGE_KEY,
     FAB_STATE_STORAGE_KEY,
     FAB_CONTEXT_STORAGE_KEY,
     FAB_CHAT_CONTEXT_STORAGE_KEY,
@@ -25987,6 +27064,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         activeContexts,
         activeContext: activeContexts.length === 1 ? activeContexts[0] : null,
         studentControlRevision: currentStudentControlRevision(authContext),
+        privateChatLifecycleRequired: hasNegotiatedCapability('privateChatLifecycleV1', authContext)
+          || privateChatLifecycleEstablishedBinding === monitoringEventAuthBindingForContext(authContext),
+        privateChatLifecycleState: currentPrivateChatLifecycle?.binding === monitoringEventAuthBindingForContext(authContext)
+          && !currentPrivateChatLifecycle.recoveryPending
+          ? { schoolEpoch: currentPrivateChatLifecycle.schoolEpoch, threads: currentPrivateChatLifecycle.threads } : null,
         activeTeachingSessionId: activeSessionIds.includes(preferredSessionId)
           ? preferredSessionId
           : activeSessionIds.length === 1 ? activeSessionIds[0] : null,
@@ -26005,6 +27087,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       activeTeachingSessionIds: activeTeachingSessionIds(),
       activeContexts: activeClassroomContexts(),
       studentControlRevision: currentStudentControlRevision(),
+      privateChatLifecycleRequired: hasNegotiatedCapability('privateChatLifecycleV1')
+        || privateChatLifecycleEstablishedBinding === monitoringEventAuthBinding(),
+      privateChatLifecycleState: currentPrivateChatLifecycle?.binding === monitoringEventAuthBinding()
+        && !currentPrivateChatLifecycle.recoveryPending
+        ? { schoolEpoch: currentPrivateChatLifecycle.schoolEpoch, threads: currentPrivateChatLifecycle.threads } : null,
     });
     return true;
   }
