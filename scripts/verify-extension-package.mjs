@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import {
   existsSync,
   lstatSync,
@@ -30,6 +31,19 @@ const archivePath = resolve(
 );
 const verifyOnly = process.argv.includes('--verify-only');
 const unpackRoot = mkdtempSync(join(tmpdir(), 'classpilot-release-package-'));
+// A hung harness must fail this lane by name instead of silently consuming the
+// CI job timeout. The slowest packaged suite takes about five minutes on CI;
+// slower local browsers can raise the limit with the environment variable.
+const DEFAULT_PACKAGED_SUITE_TIMEOUT_MS = 15 * 60_000;
+// Node clamps timers above 2^31-1 ms to 1 ms, so an oversized, negative or
+// non-numeric override would kill every suite at once. Ignore those values.
+const MAX_TIMER_MS = 2_147_483_647;
+const requestedSuiteTimeoutMs = Number(process.env.CLASSPILOT_PACKAGED_SUITE_TIMEOUT_MS);
+const PACKAGED_SUITE_TIMEOUT_MS = Number.isFinite(requestedSuiteTimeoutMs)
+  && requestedSuiteTimeoutMs > 0 && requestedSuiteTimeoutMs <= MAX_TIMER_MS
+  ? requestedSuiteTimeoutMs
+  : DEFAULT_PACKAGED_SUITE_TIMEOUT_MS;
+const PACKAGED_SUITE_KILL_GRACE_MS = 30_000;
 
 const excludedExact = new Set([
   'README.md',
@@ -133,7 +147,29 @@ function validateEntryName(name) {
   return normalized;
 }
 
-function runPackagedTests() {
+async function runPackagedSuite(script, environment) {
+  const child = spawn(process.execPath, [resolve(scriptDir, script)], {
+    cwd: repoRoot,
+    env: environment,
+    stdio: 'inherit',
+  });
+  const exited = once(child, 'exit');
+  let timedOut = false;
+  const deadline = setTimeout(() => {
+    timedOut = true;
+    console.error(`${script} exceeded ${PACKAGED_SUITE_TIMEOUT_MS / 60_000} minutes; terminating it.`);
+    // SIGTERM lets Playwright close its browser so the stuck call rejects with
+    // the harness stack; SIGKILL bounds a shutdown that never completes.
+    child.kill('SIGTERM');
+    setTimeout(() => child.kill('SIGKILL'), PACKAGED_SUITE_KILL_GRACE_MS).unref();
+  }, PACKAGED_SUITE_TIMEOUT_MS);
+  const [code, signal] = await exited;
+  clearTimeout(deadline);
+  assert(!timedOut, `${script} did not finish within ${PACKAGED_SUITE_TIMEOUT_MS / 60_000} minutes`);
+  assert.equal(code, 0, `${script} failed (exit ${code}${signal ? `, signal ${signal}` : ''})`);
+}
+
+async function runPackagedTests() {
   const environment = { ...process.env, CLASSPILOT_EXTENSION_PATH: unpackRoot };
   for (const script of [
     'test-extension-resilience.mjs',
@@ -141,9 +177,12 @@ function runPackagedTests() {
     'test-extension-precise-resources.mjs',
     'test-extension-precise-downgrade.mjs',
     'test-extension-focus.mjs',
+    'test-extension-attention-navigation.mjs',
     'test-extension-browser-api.mjs',
     'test-extension-scheduled-classroom.mjs',
     'test-extension-class-tools.mjs',
+    'test-extension-lesson-activity-ack.mjs',
+    'test-extension-teacher-chat.mjs',
     'test-extension-2-7-behavior.mjs',
     'test-extension-offscreen-identity.mjs',
     'test-extension-popup-identity.mjs',
@@ -162,11 +201,7 @@ function runPackagedTests() {
     'test-extension-page-lifecycle.mjs',
     'test-extension-auth-recovery-browser.mjs',
   ]) {
-    execFileSync(process.execPath, [resolve(scriptDir, script)], {
-      cwd: repoRoot,
-      env: environment,
-      stdio: 'inherit',
-    });
+    await runPackagedSuite(script, environment);
   }
 }
 
@@ -209,7 +244,7 @@ try {
   console.log(`Verified ${archiveFiles.length} packaged files byte-for-byte.`);
   console.log(`SHA-256 ${digest}`);
 
-  if (!verifyOnly) runPackagedTests();
+  if (!verifyOnly) await runPackagedTests();
   console.log(verifyOnly
     ? 'ClassPilot release package verification passed.'
     : 'ClassPilot unpacked release integration tests passed.');

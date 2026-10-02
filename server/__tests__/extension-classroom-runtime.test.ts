@@ -180,6 +180,32 @@ describe("normative precise resource contract", () => {
     expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: true, source: "temporary" });
     expect(core.buildDnrRules(policy, ["teacher"], NOW)[0].priority).toBe(800);
   });
+
+  it("requires a snapshot only for SchoolPilot's precise Waypoint and Flight Path payloads", () => {
+    // SchoolPilot classpilotCommandPayloadRequiresPreciseCapability: key presence.
+    const section = preciseCases.resources.classSection;
+    const precise = (type: string, payload: unknown) => core.commandPayloadRequiresPreciseState(type, payload);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: section })).toBe(true);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: null })).toBe(true);
+    expect(precise("apply-flight-path", { allowedDomains: [], resources: [section] })).toBe(true);
+    expect(precise("apply-flight-path", { allowedDomains: ["example.edu"], resources: [] })).toBe(true);
+    // A lesson activity always owns link `resources` (default []); it is not precise.
+    for (const resources of [[], [{ title: "Fraction strips", url: "https://example.test/strips" }]]) {
+      expect(precise("lesson-activity", { action: "start", title: "Fractions", resources })).toBe(false);
+      expect(precise("lesson-activity", { action: "update", activityId: "a", expectedRevision: 1,
+        title: "Fractions", resources })).toBe(false);
+    }
+    expect(precise("lock-screen", { url: "https://example.edu/class", resources: [section] })).toBe(false);
+    expect(precise("apply-flight-path", { allowedDomains: ["example.edu"], resource: section })).toBe(false);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: undefined })).toBe(false);
+    expect(precise("apply-flight-path", Object.create({ resources: [section] }))).toBe(false);
+    for (const type of ["open-tab", "timer", "poll", "attention-mode", "lesson-activity", ""])
+      expect(precise(type, { resource: section, resources: [section] })).toBe(false);
+    for (const payload of [null, undefined, [], "resource", 1]) {
+      expect(precise("lock-screen", payload)).toBe(false);
+      expect(precise("apply-flight-path", payload)).toBe(false);
+    }
+  });
 });
 
 describe("typed classroom contexts", () => {

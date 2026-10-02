@@ -225,13 +225,19 @@ try {
     require(focusAssignment === replacementRecord && !acks.slice(ackStart).some(ack => ack.focusStatus?.assignmentId === authFocus.assignmentId), 'late callback relabeled/retired replacement B');
     // A real activation event during the final exact-tab lookup must survive
     // its coalescing timer firing while the same assignment is still running.
+    // Count only Focus upkeep's own lookups of B, starting with no upkeep in
+    // flight: the upkeep that restored B above can still be finishing, and the
+    // activation it caused also reads B (auth gate and activation listeners),
+    // so a bare call count could hold one of those reads instead.
+    await wait(() => !focusMaintenanceRunning, 'previous Focus upkeep did not settle');
     const nativeGet = chrome.tabs.get.bind(chrome.tabs);
     let releaseFinalLookup;
     let lookupCount = 0;
     let finalLookupHeld = false;
     chrome.tabs.get = async id => {
+      const upkeepLookup = id === second.id && /\bmaintainFocus\b/.test(new Error().stack);
       const found = await nativeGet(id);
-      if (id === second.id && ++lookupCount === 2) {
+      if (upkeepLookup && ++lookupCount === 2) {
         finalLookupHeld = true;
         await new Promise(done => { releaseFinalLookup = done; });
       }
@@ -258,7 +264,13 @@ try {
     await install(state({ active: false }, { flightPath: { active: false, allowedDomains: [] } }));
     const documentUrl = 'https://docs.google.com/document/d/SyntheticFocusDocument0123456789/edit';
     const doc = await chrome.tabs.create({ url: documentUrl, active: true });
-    await wait(async () => Boolean((await chrome.tabs.get(doc.id)).url?.startsWith('https://docs.google.com/')), 'native document did not settle');
+    // The exact snapshot fences every tab's URL and title. Take it only once
+    // this native load completes: a committed URL can still show a provisional
+    // title, and a title that settles after the snapshot advances its revision,
+    // so the precise Focus below would be refused as stale.
+    await wait(async () => { const tab = await chrome.tabs.get(doc.id);
+      return Boolean(tab.url?.startsWith('https://docs.google.com/')) && !tab.pendingUrl && tab.status === 'complete'; },
+      'native document did not settle');
     snapshot = await exact();
     const docFocus = target(snapshot.localEntries.find(entry => entry.tabId === doc.id), snapshot.revision, 'focus-precise-document');
     const resource = { type: 'resource', hostname: 'docs.google.com', includeSubdomains: false,

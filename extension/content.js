@@ -280,6 +280,10 @@ function clearStudentBoundUiForIdentityTransition() {
   attentionModeActive = false;
   handRaised = false;
   messagingEnabled = false;
+  messagingChannelEnabled = null;
+  messagesPaused = false;
+  pauseReason = null;
+  chatDisplayDeferred = false;
   handRaisingEnabled = false;
   currentFabContext = null;
   clearStudentTools();
@@ -403,12 +407,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }, sendResponse);
   }
 
-  // Teacher reply — add to chat thread (ignore if teacher already closed the chat)
+  // Teacher message (reply, new conversation or announcement) — add to the chat thread
   if (message.type === 'chat-reply') {
     return withCurrentStudentMessageContext(message, () => {
-      // Both checks intentionally live after the asynchronous worker
-      // validation; either value can change while that request is pending.
-      if (chatClosed) return;
+      // Every check intentionally lives after the asynchronous worker
+      // validation; each value can change while that request is pending.
+      // The worker stamps a message with the newest teacher close it had
+      // recorded when the message arrived. A message that arrived before a
+      // close this page knows (a delayed pre-close message) never reopens
+      // the chat; the popup inbox keeps it.
+      const closeStamp = Number(message.data?.chatClosedAt) || 0;
+      if (closeStamp < chatClosedAt) return;
+      // Class or school messaging is off: students see no chat and no toast.
+      // The popup inbox keeps the message.
+      if (!chatChannelOn()) return;
       const activeFabSessions = currentFabContext?.activeSessionIds || [];
       if (message.data?.sessionId && activeFabSessions.length > 0
           && !activeFabSessions.includes(message.data.sessionId)) return;
@@ -422,6 +434,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         seenChatMsgIds.add(msgId);
         setTimeout(() => seenChatMsgIds.delete(msgId), 60000);
       }
+      // The message followed a teacher close this page has not applied yet:
+      // its backup delivery (heartbeat) can overtake the close's own page
+      // message. That close ended the thread on screen, so it goes first.
+      if (closeStamp > chatClosedAt) {
+        chatClosedAt = closeStamp;
+        chatMessages = [];
+        chatClosed = true;
+        chatDisplayDeferred = false;
+      }
+      // A teacher message that arrived after the teacher ended the chat starts
+      // a new conversation. Ending the chat already wiped the old thread.
+      if (chatClosed) {
+        chatClosed = false;
+        chatMessages = [];
+      }
       chatMessages.push({
         id: message.data?.chatMessageId || message.data?.messageId || msgId,
         sessionId: message.data?.sessionId,
@@ -430,19 +457,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         text: message.data.message,
         fromName: message.data.fromName,
         time: Date.now(),
+        closeStamp,
       });
       persistFabChatState();
-      const chatBox = document.getElementById('classpilot-fab-message-box');
-      if (!chatBox?.classList.contains('classpilot-fab-message-box-open')) showMessageBox();
       renderChatMessages();
-      reportTeacherMessagesSeen();
+      if (showChatForTeacherMessage()) reportTeacherMessagesSeen();
     }, sendResponse);
   }
 
-  // Teacher closed the chat — only act if chat is active (dedup replays)
+  // Teacher closed the chat. Local and Redis delivery can both carry one
+  // close, so each worker-stamped close applies once.
   if (message.type === 'chat-closed') {
     return withCurrentStudentMessageContext(message, () => {
-      if (chatClosed) return;
+      const closedAt = Number(message.data?.closedAt) || 0;
+      if (closedAt ? closedAt <= chatCloseHandledAt : chatClosed) return;
+      chatCloseHandledAt = Math.max(chatCloseHandledAt, closedAt);
+      chatClosedAt = Math.max(chatClosedAt, closedAt);
+      // A close ends only what came before it. A teacher message stamped with
+      // this close (a backup delivery can reach the page first, and a page
+      // that loads after the close can get its message late) already started
+      // the next conversation; that conversation stays.
+      if (closedAt) {
+        const following = chatMessages.filter(entry => chatEntryCloseStamp(entry) >= closedAt);
+        if (following.length > 0) {
+          if (following.length < chatMessages.length) {
+            chatMessages = following;
+            persistFabChatState();
+            renderChatMessages();
+          }
+          return;
+        }
+      }
+      // Only a close that ended a chat the student still had is announced, so
+      // a repeated End chat stays quiet. The worker saw the stored chat before
+      // this close: a page on Chrome 120 may already have reloaded it closed.
+      const hadChat = message.data?.wasOpen === true || !chatClosed || chatMessages.length > 0;
+      chatDisplayDeferred = false;
+      if (!hadChat) return;
       chatMessages = [];
       chatClosed = true;
       persistFabChatState();
@@ -548,6 +599,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return withCurrentStudentMessageContext(message, () => {
       applyFabState({
         messagingEnabled: message.data.enabled,
+        // As in the worker: a toggle without the hard-switch field leaves the
+        // channel unknown, so a pause it reports never reopens an off class.
+        messagingChannelEnabled: typeof message.data.messagingChannelEnabled === 'boolean'
+          ? message.data.messagingChannelEnabled : null,
         ...(typeof message.data.messagesPaused === 'boolean'
           ? { messagesPaused: message.data.messagesPaused, pauseReason: message.data.pauseReason }
           : {}),
@@ -2094,6 +2149,13 @@ function hideAttentionOverlay() {
     overlay.classList.add('classpilot-fade-out');
     setTimeout(() => overlay.remove(), 300);
   }
+  // A teacher message that arrived during Attention is shown now, if it is
+  // still in the thread (a class change or an ended chat wipes it).
+  if (chatDisplayDeferred) {
+    chatDisplayDeferred = false;
+    if (chatMessages.some(entry => entry.sender === 'teacher' && !entry.seenAt)
+      && showChatForTeacherMessage()) reportTeacherMessagesSeen();
+  }
 }
 
 function addAttentionStyles() {
@@ -2815,14 +2877,26 @@ let messagingEnabled = true;
 let handRaisingEnabled = true;
 let chatMessages = []; // { sender: 'student'|'teacher', text: string, time: number }
 let chatClosed = false; // Set when teacher closes chat — prevents re-opening old conversation
+// Worker stamps of teacher closes. chatClosedAt is the newest close this page
+// knows (also restored from storage); only a teacher message stamped with it
+// or a newer close may show. chatCloseHandledAt is the newest close whose own
+// page message was applied. Each chat entry keeps the close it followed
+// (closeStamp), so a thread from before a known close never shows again.
+let chatClosedAt = 0;
+let chatCloseHandledAt = 0;
+let chatDisplayDeferred = false; // A teacher message waits for Attention to end
 let messagesPaused = false; // Soft pause: thread stays visible, new sends are refused
 let pauseReason = null; // 'teacher' | 'testing' while paused
+// SchoolPilot's hard switches (school-wide and the class's own): true or false
+// when the server says, null when it does not (a server that predates it).
+let messagingChannelEnabled = null;
 let lastStudentSendAt = 0;
 const STUDENT_SEND_MIN_INTERVAL_MS = 2000;
 const CHAT_MESSAGE_MAX_CHARS = 500;
 const CHAT_COUNTER_FROM_CHARS = 400;
 const FAB_CHAT_MESSAGES_KEY = 'fabChatMessages';
 const FAB_CHAT_CLOSED_KEY = 'fabChatClosed';
+const FAB_CHAT_CLOSED_AT_KEY = 'fabChatClosedAt';
 const FAB_STATE_KEY = 'fabStateV1';
 const FAB_CONTEXT_KEY = 'fabContextV1';
 const FAB_CHAT_CONTEXT_KEY = 'fabChatContextV1';
@@ -2878,18 +2952,25 @@ function hydrateFabStateFromStorage(stored, expectedFabBinding) {
     (Array.isArray(stored[FAB_CHAT_MESSAGES_KEY]) && stored[FAB_CHAT_MESSAGES_KEY].length > 0)
     || stored[FAB_CHAT_CLOSED_KEY] === true
   ) || Boolean(expectedFabBinding && storedChatContext?.binding === expectedFabBinding);
+  // The worker's close stamps only grow, so a page that loads after a close
+  // still refuses a teacher message that arrived before it.
+  chatClosedAt = Math.max(chatClosedAt, Number(stored[FAB_CHAT_CLOSED_AT_KEY]) || 0);
   if (!fabStateCurrent || !chatStateCurrent) {
     handRaised = false;
     messagingEnabled = false;
+    messagingChannelEnabled = null;
     handRaisingEnabled = false;
     messagesPaused = false;
     pauseReason = null;
     chatMessages = [];
     chatClosed = true;
+    chatDisplayDeferred = false;
     currentFabContext = null;
   } else {
     handRaised = stored.handRaised === true;
     messagingEnabled = stored.messagingEnabled !== false;
+    messagingChannelEnabled = typeof stored[FAB_STATE_KEY]?.messagingChannelEnabled === 'boolean'
+      ? stored[FAB_STATE_KEY].messagingChannelEnabled : null;
     handRaisingEnabled = stored.handRaisingEnabled !== false;
     messagesPaused = stored.messagesPaused === true;
     pauseReason = messagesPaused ? (stored.pauseReason === 'testing' ? 'testing' : 'teacher') : null;
@@ -2897,6 +2978,13 @@ function hydrateFabStateFromStorage(stored, expectedFabBinding) {
       ? stored[FAB_CHAT_MESSAGES_KEY]
       : [];
     chatClosed = stored[FAB_CHAT_CLOSED_KEY] === true;
+    // A thread saved by a page that had not applied a newer close yet is the
+    // thread that close ended: it never shows again.
+    const followingClose = chatMessages.filter(entry => chatEntryCloseStamp(entry) >= chatClosedAt);
+    if (followingClose.length < chatMessages.length) {
+      chatMessages = followingClose;
+      if (followingClose.length === 0) chatClosed = true;
+    }
     currentFabContext = storedChatContext || storedFabContext || null;
     if (stored[FAB_STATE_KEY]) {
       applyFabState({ ...stored[FAB_STATE_KEY], context: storedFabContext });
@@ -2907,7 +2995,12 @@ function hydrateFabStateFromStorage(stored, expectedFabBinding) {
   updateFabChatControls();
   updateFabIdentityState();
   renderChatMessages();
-  if (!messagingEnabled || chatClosed) hideMessageBox();
+  if (!chatChannelOn() || chatClosed) hideMessageBox();
+}
+
+// The newest teacher close a chat entry followed (0 before any close).
+function chatEntryCloseStamp(entry) {
+  return Number(entry?.closeStamp) || 0;
 }
 
 function persistFabChatState() {
@@ -2929,10 +3022,29 @@ function chatPauseCopy() {
   return pauseReason === 'testing' ? 'Paused during testing' : 'Paused by your teacher';
 }
 
+function chatPauseReason() {
+  return pauseReason === 'testing'
+    ? "Messages are paused during testing. You can read, but you can't reply right now."
+    : "Your teacher paused messages. You can read, but you can't reply right now.";
+}
+
+// SchoolPilot folds a soft pause into messagingEnabled, so a paused class
+// arrives as messagingEnabled false with messagesPaused true. Its channel is
+// still on: the thread stays readable and only replies stop. The channel is
+// off when the class or school switch is off; students then see no chat.
+// SchoolPilot also reports a pause while a switch is off, so a paused class
+// counts as on only when the server says its channel is on; without that
+// field a disabled class stays off, as before the pause existed.
+function chatChannelOn() {
+  return messagingEnabled
+    || (messagesPaused && messagingChannelEnabled === true
+      && studentClassroomContexts(currentFabContext).length > 0);
+}
+
 function updateFabChatControls() {
   const input = document.getElementById('classpilot-fab-chat-input');
   const sendButton = document.getElementById('classpilot-fab-chat-send-btn');
-  const paused = messagingEnabled && messagesPaused;
+  const paused = messagesPaused && chatChannelOn();
   if (input) {
     input.disabled = !messagingEnabled || paused;
     input.placeholder = paused ? chatPauseCopy() : 'Type a message...';
@@ -2940,7 +3052,7 @@ function updateFabChatControls() {
   if (sendButton) sendButton.disabled = !messagingEnabled || paused;
   const banner = document.getElementById('classpilot-fab-chat-pause');
   if (banner) {
-    banner.textContent = paused ? chatPauseCopy() : '';
+    banner.textContent = paused ? chatPauseReason() : '';
     banner.classList.toggle('classpilot-fab-chat-pause-visible', paused);
   }
   updateChatCounter();
@@ -2957,16 +3069,23 @@ function updateChatCounter() {
 
 // A teacher message counts as seen once it has been on screen in an open chat
 // on a visible tab. Reported once per message; the worker dedups across tabs.
+// A report the worker refuses is reported again by a later trigger: right
+// after a scheduled class's Attention ends, the worker already holds the
+// class's new control revision while this page's FAB state (and so the
+// report) still carries the old one, until the class's FAB snapshot arrives.
 function reportTeacherMessagesSeen() {
   const messageBox = document.getElementById('classpilot-fab-message-box');
   if (!messageBox?.classList.contains('classpilot-fab-message-box-open')) return;
   if (document.visibilityState !== 'visible' || chatClosed) return;
+  // The Attention overlay covers the chat; it is reported once Attention ends.
+  if (attentionModeActive) return;
   const actionContext = captureStudentActionContext();
   if (!actionContext) return;
   let changed = false;
   for (const entry of chatMessages) {
     if (entry.sender !== 'teacher' || !entry.id || entry.seenAt) continue;
-    entry.seenAt = Date.now();
+    const seenAt = Date.now();
+    entry.seenAt = seenAt;
     changed = true;
     try {
       chrome.runtime.sendMessage({
@@ -2974,7 +3093,12 @@ function reportTeacherMessagesSeen() {
         messageId: entry.id,
         chatMessageId: entry.id,
         ...studentActionAuthorityPayload(actionContext),
-      }, () => { void chrome.runtime.lastError; });
+      }, (response) => {
+        if (!chrome.runtime.lastError && response?.success === true) return;
+        // Storage-driven hydration may have replaced the entry object.
+        const refused = chatMessages.find(item => item.id === entry.id && item.seenAt === seenAt);
+        if (refused) refused.seenAt = null;
+      });
     } catch {
       // The worker owns the durable acknowledgement; a torn-down runtime is not retried here.
     }
@@ -3029,6 +3153,10 @@ function applyFabState(state = {}) {
     messagesPaused = state.messagesPaused;
     pauseReason = messagesPaused ? (state.pauseReason === 'testing' ? 'testing' : 'teacher') : null;
   }
+  if (Object.prototype.hasOwnProperty.call(state, 'messagingChannelEnabled')) {
+    messagingChannelEnabled = typeof state.messagingChannelEnabled === 'boolean'
+      ? state.messagingChannelEnabled : null;
+  }
   if (typeof state.handRaised === 'boolean') {
     handRaised = state.handRaised;
   }
@@ -3038,12 +3166,15 @@ function applyFabState(state = {}) {
     respondedPollIds.clear();
     chatMessages = [];
     chatClosed = sessionEnded;
+    // A teacher message held for the end of Attention left with its thread.
+    chatDisplayDeferred = false;
     persistFabChatState();
     renderChatMessages();
   } else if (sessionEnded && (chatMessages.length > 0 || !chatClosed)) {
     clearStudentTools();
     chatMessages = [];
     chatClosed = true;
+    chatDisplayDeferred = false;
     persistFabChatState();
     renderChatMessages();
   } else if (messagingEnabled && (!wasMessagingEnabled || reason === 'messaging-toggle')) {
@@ -3052,7 +3183,8 @@ function applyFabState(state = {}) {
     renderChatMessages();
   }
 
-  if (!messagingEnabled || sessionEnded) {
+  // A soft pause keeps the thread on screen; only an off switch hides it.
+  if (!chatChannelOn() || sessionEnded) {
     hideMessageBox();
     closeFabMenu();
   }
@@ -3061,6 +3193,9 @@ function applyFabState(state = {}) {
   updateFabHandState();
   updateFabMessageState();
   updateFabChatControls();
+  // SchoolPilot follows every scheduled-class change (an Attention release
+  // included) with this FAB snapshot, so a refused seen report can land now.
+  reportTeacherMessagesSeen();
 }
 
 function clearStudentTools() {
@@ -3289,10 +3424,10 @@ function createFloatingActionButton() {
     }
   });
 
-  // Message button - show message box
+  // Message button - show message box (read-only while messages are paused)
   lifecycle.listen(document.getElementById('classpilot-fab-message'), 'click', (e) => {
     e.stopPropagation();
-    if (!messagingEnabled) {
+    if (!chatChannelOn()) {
       showFabNotification('Messaging is currently disabled by your teacher.', true);
       return;
     }
@@ -3373,7 +3508,7 @@ function closeFabMenu() {
 }
 
 function showMessageBox() {
-  if (!messagingEnabled) {
+  if (!chatChannelOn()) {
     showFabNotification('Messaging is currently disabled by your teacher.', true);
     return;
   }
@@ -3383,6 +3518,21 @@ function showMessageBox() {
   updateFabChatControls();
   document.getElementById('classpilot-fab-chat-input')?.focus();
   reportTeacherMessagesSeen();
+}
+
+// An incoming teacher message never shows a toast. With messaging off the
+// popup inbox keeps it; during Attention the overlay stays in charge and the
+// chat opens when Attention ends. Returns whether the chat is on screen.
+function showChatForTeacherMessage() {
+  if (!chatChannelOn() || chatClosed) return false;
+  if (attentionModeActive) {
+    chatDisplayDeferred = true;
+    return false;
+  }
+  const messageBox = document.getElementById('classpilot-fab-message-box');
+  if (!messageBox) return false;
+  if (!messageBox.classList.contains('classpilot-fab-message-box-open')) showMessageBox();
+  return true;
 }
 
 function hideMessageBox() {
@@ -3472,7 +3622,7 @@ function updateFabMessageState() {
   const messageBtn = document.getElementById('classpilot-fab-message');
   const label = messageBtn?.querySelector('.classpilot-fab-label');
 
-  if (!messagingEnabled) {
+  if (!chatChannelOn()) {
     messageBtn?.classList.add('classpilot-fab-disabled');
     if (label) label.textContent = 'Unavailable';
   } else {
@@ -3521,7 +3671,7 @@ function sendMessage() {
   const input = document.getElementById('classpilot-fab-chat-input');
   const message = input?.value?.trim();
 
-  if (!messagingEnabled) {
+  if (!chatChannelOn()) {
     showFabNotification('Messaging is currently disabled by your teacher.', true);
     return;
   }
@@ -3559,6 +3709,7 @@ function sendMessage() {
     text: message,
     time: Date.now(),
     status: 'Sending',
+    closeStamp: chatClosedAt,
   });
   persistFabChatState();
   input.value = '';

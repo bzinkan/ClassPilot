@@ -737,6 +737,15 @@ const PENDING_CHECK_IN_MAX_AGE_MS = 5 * 60 * 1000;
 const FAB_STATE_STORAGE_KEY = 'fabStateV1';
 const FAB_CONTEXT_STORAGE_KEY = 'fabContextV1';
 const FAB_CHAT_CONTEXT_STORAGE_KEY = 'fabChatContextV1';
+// Stamp of the newest teacher "End chat" in this browser session, kept with
+// fabChatClosed. It only grows, so pages can order teacher messages against
+// it: SchoolPilot's teacher-message and chat-closed frames carry no creation
+// or close time. It is a bare stamp, not tied to one student.
+const FAB_CHAT_CLOSED_AT_STORAGE_KEY = 'fabChatClosedAt';
+// The newest teacher message that arrived during Attention, announced once
+// Attention ends (raiseDeferredTeacherMessageNotification). Ending Attention
+// together with its class drops it.
+let deferredTeacherMessageNotification = null;
 const CLASSROOM_OVERLAY_STORAGE_KEY = 'classroomOverlayStateV1';
 const CLASSROOM_OVERLAY_EXPIRY_ALARM = 'classroom-overlay-expiry';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
@@ -2001,6 +2010,7 @@ const SESSION_SCOPED_STUDENT_STORAGE_KEYS = new Set([
   'pauseReason',
   'fabChatMessages',
   'fabChatClosed',
+  'fabChatClosedAt',
   'tabSnapshotV1',
   'focusTabRefsV1',
   'focusAssignmentV1',
@@ -6345,6 +6355,12 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     : rawState.pauseReason === 'testing' || rawState.pauseReason === 'teacher' ? rawState.pauseReason
       : fallbackState.pauseReason === 'testing' || fallbackState.pauseReason === 'teacher' ? fallbackState.pauseReason
         : 'teacher';
+  // SchoolPilot's hard messaging switches (school-wide and the class's own),
+  // which ignore the pause. SchoolPilot reports a pause even while a switch is
+  // off, so only this field tells a paused class from a switched-off one. A
+  // server that predates it leaves it unknown (null), never on.
+  const messagingChannelEnabled = scheduledUnavailable ? false
+    : typeof rawState.messagingChannelEnabled === 'boolean' ? rawState.messagingChannelEnabled : null;
   const rawTools = rawState.classTools;
   const toolCapabilities = Array.isArray(rawTools?.capabilities) ? rawTools.capabilities.filter(name => hasNegotiatedCapability(name)
     && ['helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1'].includes(name)) : [];
@@ -6380,6 +6396,7 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
     handRaisingEnabled: scheduledUnavailable ? false : typeof rawState.handRaisingEnabled === 'boolean'
       ? rawState.handRaisingEnabled
       : fallbackState.handRaisingEnabled !== false,
+    messagingChannelEnabled,
     messagesPaused,
     pauseReason,
     handRaised: typeof rawState.handRaised === 'boolean'
@@ -6429,6 +6446,7 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
     lifecycleRevision: 0,
     activeSessionIds: [],
     messagingEnabled: false,
+    messagingChannelEnabled: false,
     handRaisingEnabled: false,
     handRaised: false,
     messagesPaused: false,
@@ -6608,6 +6626,15 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
     } else {
       await broadcastToAllTabs('fab-state', { ...nextState, context });
     }
+  }
+  // A scheduled class's FAB snapshot follows its Attention release; the
+  // notification held during Attention may be raised now.
+  if (deferredTeacherMessageNotification && authContext && !attentionModeActive) {
+    raiseDeferredTeacherMessageNotification(authContext).catch((error) => {
+      if (!isAuthContextCancellation(error)) {
+        console.warn('[Chat] Deferred teacher notification failed:', safeDiagnosticError(error));
+      }
+    });
   }
   return nextState;
 }
@@ -9616,10 +9643,12 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     MESSAGE_INBOX_DEDUP_KEY,
     'fabChatMessages',
     'fabChatClosed',
+    FAB_CHAT_CLOSED_AT_STORAGE_KEY,
   ]);
   assertMessageInboxOperationCurrent(options, reason);
   const storedBinding = stored[MESSAGE_INBOX_BINDING_KEY] || null;
   const bindingChanged = storedBinding !== binding;
+  const chatClosedAt = teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]);
 
   if (!binding || bindingChanged) {
     await setMessageInboxStorageFenced({
@@ -9640,7 +9669,7 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     ) {
       await notifyStudentMessageStateCleared(reason);
     }
-    return { binding, bindingChanged, messages: [], seenIds: [] };
+    return { binding, bindingChanged, messages: [], seenIds: [], chatClosedAt };
   }
 
   return {
@@ -9652,7 +9681,47 @@ async function reconcileMessageInboxIdentityNow(reason = 'identity-check', optio
     seenIds: Array.isArray(stored[MESSAGE_INBOX_DEDUP_KEY])
       ? stored[MESSAGE_INBOX_DEDUP_KEY]
       : [],
+    chatClosedAt,
   };
+}
+
+function teacherChatCloseStamp(value) {
+  const stamp = Number(value);
+  return Number.isSafeInteger(stamp) && stamp > 0 ? stamp : 0;
+}
+
+// The teacher ended the chat (SchoolPilot "End chat"). The close is recorded
+// in the inbox writer's order, so every teacher message persisted after it is
+// stamped with it and may reopen the chat, while a message persisted before it
+// can never reopen it. Ending a chat wipes its thread even with no page open.
+// wasOpen says whether the stored chat was still open or held messages: pages
+// announce only a close that ended one, so a repeated End chat stays quiet. It
+// is read here because a page on Chrome 120 can reload the closed chat from
+// storage before the close's own page message reaches it.
+function recordTeacherChatClosed(message, authContext) {
+  const options = {
+    authContext,
+    expectedBinding: monitoringEventAuthBindingForContext(authContext),
+    sourceMessage: message,
+  };
+  return enqueueMessageInboxMutation(async () => {
+    const reason = 'teacher chat close';
+    const identity = await reconcileMessageInboxIdentityNow(reason, options);
+    const fabBinding = fabIdentityBinding();
+    if (!identity.binding || !fabBinding) throw authContextSuperseded(reason);
+    const storedChat = await kv.get(['fabChatMessages', 'fabChatClosed']);
+    assertMessageInboxOperationCurrent(options, reason);
+    const wasOpen = storedChat.fabChatClosed !== true
+      || (Array.isArray(storedChat.fabChatMessages) && storedChat.fabChatMessages.length > 0);
+    const closedAt = Math.max(Date.now(), identity.chatClosedAt + 1);
+    await setMessageInboxStorageFenced({
+      fabChatMessages: [],
+      fabChatClosed: true,
+      [FAB_CHAT_CLOSED_AT_STORAGE_KEY]: closedAt,
+      [FAB_CHAT_CONTEXT_STORAGE_KEY]: fabChatStorageContext(fabBinding, message),
+    }, options, reason);
+    return { closedAt, wasOpen };
+  });
 }
 
 function reconcileMessageInboxIdentity(reason = 'identity-check', options = {}) {
@@ -9688,7 +9757,8 @@ function persistTeacherMessages(rawMessages, options = {}) {
       [MESSAGE_INBOX_BINDING_KEY]: identity.binding,
     }, options, reason);
     assertMessageInboxOperationCurrent(options, reason);
-    return merged;
+    // The newest teacher close recorded before these messages arrived.
+    return { ...merged, chatClosedAt: identity.chatClosedAt };
   });
 }
 
@@ -10076,6 +10146,25 @@ function queueNavigationEvent(eventType, url, title, metadata = {}) {
   }, NAVIGATION_DEBOUNCE_MS));
 }
 
+// Pages restore the chat with this context and compare it with the FAB
+// context, contextAuthorityRevision included. Without that field a page that
+// is told about session-storage changes (Chrome 120) treated every chat save
+// as a class change and wiped the thread it had just shown.
+function fabChatStorageContext(fabBinding, authority) {
+  return {
+    schemaVersion: 1,
+    binding: fabBinding,
+    ...classroomAuthorityPayload(authority),
+    contextAuthorityRevision: currentFabState?.contextAuthorityRevision ?? null,
+    activeSessionIds: activeTeachingSessionIds(),
+    activeContexts: activeClassroomContexts(),
+    revision: Number(currentFabState?.revision || 0),
+    lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
+    ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
+    ownershipRevisionKnown: currentFabState?.ownershipRevisionKnown === true,
+  };
+}
+
 function persistFabChatStateForRequest(message, actionRequest) {
   const allowedStatuses = new Set(['Sending', 'Retrying', 'Delivered', 'Failed', 'Waiting']);
   const messages = (Array.isArray(message?.messages) ? message.messages : [])
@@ -10091,6 +10180,9 @@ function persistFabChatStateForRequest(message, actionRequest) {
       time: Number.isFinite(Number(entry?.time)) ? Number(entry.time) : Date.now(),
       status: allowedStatuses.has(entry?.status) ? entry.status : null,
       seenAt: Number.isFinite(Number(entry?.seenAt)) && Number(entry.seenAt) > 0 ? Number(entry.seenAt) : null,
+      // The newest teacher close the entry followed (fabChatClosedAt), so a
+      // page can tell an ended thread from the conversation after it.
+      closeStamp: teacherChatCloseStamp(entry?.closeStamp),
     }))
     .filter((entry) => entry.text && RuntimeCore.classroomContextKey(entry) === RuntimeCore.classroomContextKey(actionRequest));
   const options = {
@@ -10099,17 +10191,7 @@ function persistFabChatStateForRequest(message, actionRequest) {
   };
   return enqueueMessageInboxMutation(async () => {
     assertStudentActionRequestCurrent(actionRequest, 'FAB chat state persistence');
-    const context = {
-      schemaVersion: 1,
-      binding: actionRequest.fabBinding,
-      ...classroomAuthorityPayload(actionRequest),
-      activeSessionIds: activeTeachingSessionIds(),
-      activeContexts: activeClassroomContexts(),
-      revision: Number(currentFabState?.revision || 0),
-      lifecycleRevision: Number(currentFabState?.lifecycleRevision || 0),
-      ownershipRevision: Number(currentFabState?.ownershipRevision || 0),
-      ownershipRevisionKnown: currentFabState?.ownershipRevisionKnown === true,
-    };
+    const context = fabChatStorageContext(actionRequest.fabBinding, actionRequest);
     await setMessageInboxStorageFenced({
       fabChatMessages: messages,
       fabChatClosed: message?.chatClosed === true,
@@ -15952,11 +16034,15 @@ function armWorkerWakeWatchdog() {
 }
 
 let markClassroomStateRestored;
+// Synchronous view of classroomStateRestorePromise: the restored runtime
+// (Attention included) is in place.
+let classroomStateRestoreSettled = false;
 const classroomStateRestorePromise = new Promise((resolve) => {
   let settled = false;
   markClassroomStateRestored = () => {
     if (settled) return;
     settled = true;
+    classroomStateRestoreSettled = true;
     resolve();
   };
 });
@@ -19775,6 +19861,13 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
         message: state.restrictions.attentionMode.message || 'Please look up!',
       });
       assertCurrent();
+      if (!state.restrictions.attentionMode.active) {
+        raiseDeferredTeacherMessageNotification(authContext).catch((error) => {
+          if (!isAuthContextCancellation(error)) {
+            console.warn('[Chat] Deferred teacher notification failed:', safeDiagnosticError(error));
+          }
+        });
+      }
       await reconcileClassroomStateTabsBestEffort(state, {
         authContext,
         assertCurrent,
@@ -19808,6 +19901,7 @@ async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  deferredTeacherMessageNotification = null;
   restrictionSsoPassThroughActive = false;
   restrictionAuthPassThroughActive = false;
   activeAuthPassThroughPolicy = null;
@@ -20764,7 +20858,7 @@ async function expireClassroomState(reason = 'hard_expiry', options = {}) {
     currentClassroomState = expiredState;
     if (expiredState.supervisionContextId && currentFabState) {
       await applyFabSettings({ ...currentFabState, activeContexts: [], activeSessionIds: [],
-        teachingSessionId: null, supervisionContextId: null, messagingEnabled: false,
+        teachingSessionId: null, supervisionContextId: null, messagingEnabled: false, messagingChannelEnabled: false,
         handRaisingEnabled: false, handRaised: false, reason: 'session-ended' }, { authContext, authorityEnvelope });
       assertCurrent();
     }
@@ -20851,6 +20945,7 @@ async function checkClassroomStateExpiryNow(options = {}) {
     activeBlockListName = null;
     temporaryAllowedDomains = [];
     attentionModeActive = false;
+    deferredTeacherMessageNotification = null;
     restrictionSsoPassThroughActive = false;
     restrictionAuthPassThroughActive = false;
     activeAuthPassThroughPolicy = null;
@@ -21295,6 +21390,7 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   activeBlockListName = null;
   temporaryAllowedDomains = [];
   attentionModeActive = false;
+  deferredTeacherMessageNotification = null;
   restrictionSsoPassThroughActive = false;
   restrictionAuthPassThroughActive = false;
   activeAuthPassThroughPolicy = null;
@@ -21720,7 +21816,9 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     // active on the device.
     const isClassroomStatefulCommand = STATEFUL_COMMAND_TYPES.has(commandType)
       && authority?.kind !== 'school_policy';
-    if (!classroomState && (Object.hasOwn(command.data || {}, 'resource') || Object.hasOwn(command.data || {}, 'resources')))
+    // Only a precise Waypoint or Flight Path must travel with its snapshot.
+    // A lesson activity's link `resources` is transient Class tools content.
+    if (!classroomState && RuntimeCore.commandPayloadRequiresPreciseState(commandType, command.data))
       throw Object.assign(new Error('Precise commands require an authoritative classroom state'), { code: 'PRECISE_RESTRICTION_INVALID' });
     if (commandType === 'focus-tab' && (!classroomState?.restrictions?.focus?.active
       || classroomState.restrictions.focus.tabRef !== exactFocusTarget.tabRef
@@ -22720,6 +22818,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             message: attentionMessage,
             priority: 2,
           });
+        } else {
+          raiseDeferredTeacherMessageNotification(commandAuthContext).catch(() => {});
         }
 
         result.active = attentionActive;
@@ -22860,6 +22960,14 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         await applyFabSettings({
           ...(currentFabState || {}),
           messagingEnabled,
+          // The toggle carries the class's whole messaging state; SchoolPilot
+          // sends it alone (without a FAB snapshot) to late sign-ins. A toggle
+          // without the hard-switch field leaves the channel unknown, never on.
+          messagingChannelEnabled: typeof command.data.messagingChannelEnabled === 'boolean'
+            ? command.data.messagingChannelEnabled : null,
+          ...(typeof command.data.messagesPaused === 'boolean'
+            ? { messagesPaused: command.data.messagesPaused, pauseReason: command.data.pauseReason ?? null }
+            : {}),
           ...(Number.isSafeInteger(messagingRevision) && messagingRevision >= 0
             ? { revision: messagingRevision, lifecycleRevision: messagingRevision }
             : {}),
@@ -23389,6 +23497,82 @@ async function broadcastToAllTabsForAuth(
 }
 
 // Chat/Message Handlers (Phase 2)
+
+// The class or school messaging switch is off, or may be. SchoolPilot folds
+// the soft pause into messagingEnabled and reports messagesPaused even while a
+// hard switch is off, so a paused class counts as on only when the server says
+// its channel (messagingChannelEnabled) is on. Without that field a disabled
+// class is off, as before the pause existed. With no FAB state at all the
+// pages decide from their own state, as before.
+function teacherChatChannelOff() {
+  const state = currentFabState;
+  if (!state || state.messagingEnabled === true) return false;
+  return !(state.messagesPaused === true && state.messagingChannelEnabled === true
+    && Array.isArray(state.activeContexts) && state.activeContexts.length > 0);
+}
+
+// Attention keeps the screen, so a teacher message that arrives during it
+// raises no notification then. The newest such message is announced once
+// Attention ends, so a student whose tab has no page chat (a new tab or a
+// browser page) still learns of it. It is dropped if the student or class
+// changed, the channel went off or the teacher ended the chat meanwhile.
+// Memory only: a worker restart drops it, and the popup inbox keeps the text.
+function deferTeacherMessageNotification(authContext, sourceMessage, inboxMessage, chatClosedAt) {
+  deferredTeacherMessageNotification = {
+    scope: authContextProtocolScope(authContext),
+    sourceMessage,
+    id: inboxMessage.id,
+    text: inboxMessage.message || 'New message',
+    chatClosedAt,
+    // A scheduled class's owner; another teacher taking the class over
+    // changes it (and pages then drop the held chat with its thread).
+    contextAuthorityRevision: currentFabState?.contextAuthorityRevision ?? null,
+  };
+}
+
+// SchoolPilot releases a scheduled class's Attention with classroom-state-sync
+// first and the class's FAB snapshot (with the new ownership revision) after
+// it. Between the two the class is not current yet, so the held notification
+// waits for that snapshot (applyFabSettingsNow) instead of being dropped.
+function deferredTeacherMessageAwaitsFabSnapshot(pending) {
+  const supervisionContextId = pending.sourceMessage?.supervisionContextId;
+  return Boolean(supervisionContextId
+    && currentClassroomState?.supervisionContextId === supervisionContextId
+    && Number(currentFabState?.ownershipRevision || 0) < Number(currentClassroomState?.revision || 0));
+}
+
+// The held message's class is still the student's current class. Releasing a
+// scheduled class's Attention advances the student's control revision, so a
+// scheduled message is matched by its class and that class's owner, as pages
+// match the held chat they show, never by the revision it arrived under.
+function deferredTeacherMessageClassCurrent(pending) {
+  const message = pending.sourceMessage || {};
+  if (!message.supervisionContextId) return messageMatchesActiveFabSession(message);
+  return classroomContextIsCurrent(message)
+    && (currentFabState?.contextAuthorityRevision ?? null) === pending.contextAuthorityRevision;
+}
+
+async function raiseDeferredTeacherMessageNotification(authContext) {
+  const pending = deferredTeacherMessageNotification;
+  if (!pending || !authContext || attentionModeActive
+    || deferredTeacherMessageAwaitsFabSnapshot(pending)) return;
+  deferredTeacherMessageNotification = null;
+  const reason = 'deferred teacher message notification';
+  assertAuthenticatedContextCurrent(authContext, reason);
+  if (pending.scope !== authContextProtocolScope(authContext) || teacherChatChannelOff()
+    || !deferredTeacherMessageClassCurrent(pending)) return;
+  const stored = await kv.get(FAB_CHAT_CLOSED_AT_STORAGE_KEY);
+  assertAuthenticatedContextCurrent(authContext, reason);
+  if (teacherChatCloseStamp(stored[FAB_CHAT_CLOSED_AT_STORAGE_KEY]) > pending.chatClosedAt
+    || attentionModeActive) return;
+  await notifyTeacherMessageForAuth({
+    title: 'Message from Teacher',
+    message: pending.text,
+    priority: 2,
+    requireInteraction: false,
+  }, authContext, pending.sourceMessage, pending.id);
+}
+
 function messageMatchesActiveFabSession(message = {}) {
   if (message.supervisionContextId) {
     const revision = message.studentControlRevision ?? message.controlRevision;
@@ -23529,27 +23713,39 @@ async function handleDurableTeacherMessage(message, options = {}) {
     if (deduplicated) {
       console.log('Dedup: skipping duplicate teacher-message');
     } else {
-      assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
-      await notifyTeacherMessageForAuth({
-        title: 'Reply from Teacher',
-        message: inboxMessage.message || 'New message',
-        priority: 2,
-        requireInteraction: false,
-      }, authContext, message, inboxMessage.id);
+      // With the class or school switch off students see no chat: the popup
+      // inbox keeps the message quietly, with no notification or page chat.
+      // Attention keeps the screen, so no notification is raised over it;
+      // pages show the chat, and the worker the notification, once it ends.
+      const channelOff = teacherChatChannelOff();
+      if (!channelOff && attentionModeActive) {
+        deferTeacherMessageNotification(authContext, message, inboxMessage, inboxResult.chatClosedAt || 0);
+      } else if (!channelOff) {
+        assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
+        await notifyTeacherMessageForAuth({
+          title: 'Message from Teacher',
+          message: inboxMessage.message || 'New message',
+          priority: 2,
+          requireInteraction: false,
+        }, authContext, message, inboxMessage.id);
+      }
       assertAuthenticatedContextCurrent(authContext, 'durable teacher message notification');
       assertCurrentStudentBinding(message, 'durable teacher message notification', { authContext });
-      await broadcastToAllTabsForAuth('chat-reply', {
-        _msgId: inboxMessage.id,
-        chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
-        messageId: message.chatMessageId || message.messageId || inboxMessage.id,
-        sessionId: message.sessionId,
-        ...classroomAuthorityPayload(message),
-        studentId: message.studentId,
-        message: inboxMessage.message,
-        fromName: inboxMessage.fromName || 'Teacher',
-        timestamp: inboxMessage.timestamp || Date.now(),
-      }, authContext, message);
-      assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
+      if (!channelOff) {
+        await broadcastToAllTabsForAuth('chat-reply', {
+          _msgId: inboxMessage.id,
+          chatMessageId: message.chatMessageId || message.messageId || inboxMessage.id,
+          messageId: message.chatMessageId || message.messageId || inboxMessage.id,
+          sessionId: message.sessionId,
+          ...classroomAuthorityPayload(message),
+          studentId: message.studentId,
+          message: inboxMessage.message,
+          fromName: inboxMessage.fromName || 'Teacher',
+          timestamp: inboxMessage.timestamp || Date.now(),
+          chatClosedAt: inboxResult.chatClosedAt || 0,
+        }, authContext, message);
+        assertAuthenticatedContextCurrent(authContext, 'durable teacher message broadcast');
+      }
     }
 
     if (hasChatDelivery) {
@@ -23964,9 +24160,48 @@ function restrictionAuthUrlBlockedByHigherPriority(urlValue) {
   return blockedBy(globalBlockedDomains) || blockedBy(teacherBlockedDomains);
 }
 
+// Attention keeps its 2.9.6 navigation behaviour. Its main-frame DNR rule
+// already blocks every new load; a navigation that is about to start is only
+// recorded and stepped back, silently. URL changes inside the current document
+// (pushState, replaceState, #fragment) and a navigation already in flight when
+// Attention began are left alone: stepping those back walked the tab through
+// its history to about:blank with a notification at every step, and left an
+// Attention-suspended Focus tab off policy.
+// onBeforeNavigate is the only one of the four registered events whose details
+// carry no transitionType; onCommitted, onHistoryStateUpdated and
+// onReferenceFragmentUpdated always include it.
+const attentionStepBackByTab = new Map();
+
+function attentionStepBackOwner(authContext) {
+  return `${authContextProtocolScope(authContext)}:${currentClassroomState?.revision ?? ''}`;
+}
+
+// The next navigation start in a tab that Attention stepped back is that
+// step-back's own cross-document history traversal. It is not stepped back
+// again, so a step-back can never retrigger itself; DNR still blocks its load.
+// (A same-document traversal starts no navigation; the tab's next navigation
+// start is then skipped instead, and DNR still blocks that load too.)
+function takeAttentionStepBackTraversal(details, authContext) {
+  if (details.transitionType !== undefined || !attentionStepBackByTab.has(details.tabId)) return false;
+  const owner = attentionStepBackByTab.get(details.tabId);
+  attentionStepBackByTab.delete(details.tabId);
+  return owner === attentionStepBackOwner(authContext);
+}
+
+async function blockAttentionNavigationForAuth(details, authContext, ownTraversal) {
+  if (details.transitionType !== undefined || ownTraversal) return;
+  await recordNavigationBlockedForAuth(authContext, details.url, 'attention_mode');
+  attentionStepBackByTab.set(details.tabId, attentionStepBackOwner(authContext));
+  await goBackOrBlankForAuth(details.tabId, authContext, 'navigation policy back');
+}
+
 // One policy decision for network, SPA, history and prerender navigations.
 async function handleBeforeNavigateForPolicy(details) {
   if (details.frameId !== 0) return;
+  // Read when Chrome reports the event, before this event waits its turn in
+  // the policy queue: the policy did not yet include Attention, so this
+  // navigation started before Attention took effect (see below).
+  const startedBeforeAttention = classroomStateRestoreSettled && !attentionModeActive;
   let eventAuthContext;
   try {
     eventAuthContext = captureAuthenticatedContext('navigation policy event');
@@ -23977,6 +24212,7 @@ async function handleBeforeNavigateForPolicy(details) {
     await classroomStateRestorePromise;
     await enqueueStudentAuthMutation(async () => {
       assertAuthenticatedContextCurrent(eventAuthContext, 'navigation policy event');
+      const attentionTraversal = takeAttentionStepBackTraversal(details, eventAuthContext);
       if (details.url.startsWith('chrome://') || details.url.startsWith('about:')) return;
       if (restrictionAuthPolicyRefreshPending) {
         requestClassroomStateSync('navigation-auth-policy-pending', true);
@@ -24033,8 +24269,23 @@ async function handleBeforeNavigateForPolicy(details) {
         restrictionSsoPassThrough: restrictionSsoPassThroughActive,
         restrictionAuthPassThrough: restrictionAuthPassThroughActive,
       };
-      const decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
+      let decision = RuntimeCore.decideNavigation(details.url, policy, Date.now());
+      // A navigation that started before Attention took effect, and reaches
+      // its turn here only after, is judged by the rest of the policy, as it
+      // would have been without the wait, and silently, since Attention now
+      // holds the screen. Attention's DNR rule still blocks its load if that
+      // starts after the rule, and a page it commits shows the overlay.
+      const startedBeforeHeldAttention = decision.source === 'attention_mode' && startedBeforeAttention
+        && details.transitionType === undefined;
+      if (startedBeforeHeldAttention) {
+        decision = RuntimeCore.decideNavigation(details.url, { ...policy, classroomState: { ...policy.classroomState,
+          restrictions: { ...policy.classroomState.restrictions, attentionMode: { active: false } } } }, Date.now());
+      }
       if (decision.allowed) return;
+      if (decision.source === 'attention_mode') {
+        await blockAttentionNavigationForAuth(details, eventAuthContext, attentionTraversal);
+        return;
+      }
       const policySource = decision.source;
       const precise = RuntimeCore.hasPreciseRestrictions(policy.classroomState);
       const landing = RuntimeCore.restrictionLandingUrl(policy.classroomState);
@@ -24059,7 +24310,7 @@ async function handleBeforeNavigateForPolicy(details) {
           'navigation policy back',
         );
       }
-      if (notification) {
+      if (notification && !startedBeforeHeldAttention) {
         await notifyNavigationBlockedForAuth(
           eventAuthContext,
           notification,
@@ -25965,6 +26216,7 @@ async function handleWsMessage(
             activeContexts: remainingContexts,
             activeSessionIds: remainingSessionIds,
             messagingEnabled: remainingContexts.length > 0 && currentFabState?.messagingEnabled === true,
+            messagingChannelEnabled: remainingContexts.length > 0 && currentFabState?.messagingChannelEnabled === true,
             handRaisingEnabled: remainingContexts.length > 0 && currentFabState?.handRaisingEnabled === true,
             handRaised: false,
             reason: 'session-ended',
@@ -26191,10 +26443,20 @@ async function handleWsMessage(
           recentMsgIds.add(dedupKey);
           setTimeout(() => recentMsgIds.delete(dedupKey), MSG_DEDUP_TTL);
           try {
+            let close = null;
+            try {
+              close = await recordTeacherChatClosed(message, authContext);
+            } catch (error) {
+              if (isAuthContextCancellation(error) || error?.code === 'STUDENT_BINDING_MISMATCH') throw error;
+              // Pages still end the chat; without a stamp any later message may reopen it.
+              console.warn('[Chat] Could not record the chat close:', safeDiagnosticError(error));
+            }
+            assertAuthenticatedContextCurrent(authContext, 'chat close');
             await broadcastToAllTabsForAuth('chat-closed', {
               sessionId: message.sessionId,
               ...classroomAuthorityPayload(message),
               studentId: message.studentId,
+              ...(close ? { closedAt: close.closedAt, wasOpen: close.wasOpen } : {}),
             }, authContext, message);
             assertAuthenticatedContextCurrent(authContext, 'chat close broadcast');
           } catch (error) {
@@ -26394,6 +26656,7 @@ async function getStudentSessionUiState(message = {}) {
     'pauseReason',
     'fabChatMessages',
     'fabChatClosed',
+    FAB_CHAT_CLOSED_AT_STORAGE_KEY,
     FAB_STATE_STORAGE_KEY,
     FAB_CONTEXT_STORAGE_KEY,
     FAB_CHAT_CONTEXT_STORAGE_KEY,
