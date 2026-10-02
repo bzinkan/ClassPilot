@@ -1,4 +1,4 @@
-# ClassPilot 2.9.7 candidate preparation
+# ClassPilot 2.9.7 local candidate
 
 This unpublished candidate is stacked on reviewed PR #122 at
 `2aa6df988a78cb5860cef2c0866cab46566ffec5`. It includes precise restrictions,
@@ -30,10 +30,34 @@ The manifest is 2.9.7 with the existing extension identity and Chrome120 floor.
 Wire protocol remains3; precise classroom wire schema remains1. The release
 does not change historical matcher fixtures or released-source archives.
 
-Source/check, full native browser matrix, exact final ZIP and independent review
-results will be bound to the local immutable checkpoint in the new evidence
-record after the final contract and gates settle. No complete matrix or package
-pass is claimed by this preparation document.
+The immutable tested source is `065be165b5df704d84eb716e3fb914c1fed17f98`,
+with production bytes from parent-reviewed runtime checkpoint `9aa02c0`.
+Node24.19 typecheck and204 unit tests pass. The serialized full source chain,
+42 recovery scenarios and20 expected historical-release rejection probes pass.
+The exact frozen ZIP verifies24 files byte-for-byte and passes the full native
+chain on Chrome151, including private-vault browser restart, fresh sign-in and
+actual local managed-mode worker stop/wake for Focus and private chat.
+
+The ZIP is `dist/ClassPilot-v2.9.7.zip`,376052 bytes, SHA-256
+`82352b04020b5fefdee06aa46cc3ba963ddac0d6c7eab4e241fca2cf6ca61575`.
+It was not rebuilt after verification. The
+[new evidence record](release-evidence/classpilot-2.9.7-candidate-20261002.json)
+pins logs, hashes,39 advertised capabilities and their exact raw/LF source
+binding. The earlier concurrent scheduled-classroom and cold-paint failures
+remain recorded; their contention/setup cause is unproven. The unchanged
+serialized gates pass, with no production or deadline relaxation.
+
+At the dated capture, all five required jobs in
+[pull-request run37044469285](https://github.com/bzinkan/ClassPilot/actions/runs/37044469285)
+passed, including full source/package lanes on Chrome120,133,152 and stable.
+CI builds an archive per job; that matrix does not claim those ZIP bytes equal
+the frozen local ZIP. Actual120 Attention/Focus/lifecycle and2.9.6 upgrade
+probes, local133 full source and the exact local ZIP gate are separate evidence.
+The redundant same-head push run37044463367 was deliberately canceled while
+the required pull-request matrix was retained. This record covers tested065;
+later documentation-only head outcomes belong in the PR body, avoiding a
+self-referential evidence/CI commit loop. Backend release PR603 and final
+release review/operational acceptance remain separate gates.
 
 The native upgrade case installs the immutable released 2.9.6 source archive,
 opens a page with its actual 2.9.6 content owners, then reloads the same native
@@ -41,8 +65,9 @@ extension identity with the candidate. Chrome120 and the local modern engine
 take the existing protected manual ownership fallback: no automatic page
 navigation is authorized, one explicit reload adopts only 2.9.7 owners, and
 private storage and fresh sign-in remain intact. These source probes do not
-prove a Store update or a managed Chromebook rollout. The same case is part of
-the exact-package gate, whose result remains pending until that gate completes.
+prove a Store update or a managed Chromebook rollout. The same native case also
+passes against the exact frozen ZIP on Chrome151, inspecting actual old and
+current content owners.
 
 ## Historical evidence and operational boundaries
 
