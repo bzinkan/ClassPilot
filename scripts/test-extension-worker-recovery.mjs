@@ -463,7 +463,7 @@ test('ordinary state polling reuses proven policy rather than rereading managed 
 
 // Exercise the real publication initializers, durable reservation and stable
 // readiness barriers. Only the native storage adapter is controlled here.
-function durablePublicationHarness({kind,operation='set',failure='reject',failCount=1,autoStart=true}={}) {
+function durablePublicationHarness({kind,operation='set',failure='reject',failCount=1,autoStart=true,fingerprintGate=null}={}) {
   const h=harness(), c=h.context, handler=gateHandler(h), pending=deferred();
   const state={}, reads=[], writes=[];
   const revisionReady=deferred(), rosterReady=deferred();
@@ -478,7 +478,8 @@ function durablePublicationHarness({kind,operation='set',failure='reject',failCo
     else throw new Error('private-native-storage-detail');
   };
   Object.assign(c,{
-    crypto:webcrypto,TextEncoder,Uint8Array,
+    crypto:fingerprintGate ? { subtle: { async digest(...args) { await fingerprintGate; return webcrypto.subtle.digest(...args); } } } : webcrypto,
+    TextEncoder,Uint8Array,
     AUTH_GATE_REVISION_STORAGE_KEY:'revision-ceiling',AUTH_GATE_REVISION_BLOCK_SIZE:1024,
     AUTH_GATE_ROSTER_CONTEXT_STORAGE_KEY:'roster-context',AUTH_GATE_ROSTER_CONTEXT_SCHEMA_VERSION:1,
     authGateStateRevision:0,authGateStateRevisionCeiling:0,authGateStatePendingRevisionBumps:0,
@@ -519,6 +520,11 @@ function durablePublicationHarness({kind,operation='set',failure='reject',failCo
   };
   return {...h,handler,state,reads,writes,pending,selectedKey,
     async settle(){for(let i=0;i<5;i++){await new Promise(done=>setImmediate(done));await flush();}},
+    async settleUntil(predicate,message) {
+      const deadline=Date.now()+5000;
+      while(!predicate()&&Date.now()<deadline) {await new Promise(done=>setImmediate(done));await flush();}
+      assert.ok(predicate(),message);
+    },
     get failures(){return failures;},
   };
 }
@@ -527,10 +533,16 @@ for(const kind of ['revision','roster_context']) {
   for(const operation of ['set','get']) {
     test(`completed ${kind} ${operation} rejection permits fresh explicit Retry without poisoning startup`,async()=>{
       const h=durablePublicationHarness({kind,operation}),c=h.context,replies=[];
-      await h.settle();
       if(kind==='roster_context'&&operation==='get') {
-        c.retryAuthGateStartupPublications({userInitiated:true});await h.settle();
+        await h.settleUntil(()=>c.authGateStartupPublicationOwners.get(kind)?.failed
+          && !c.authGateStartupPublicationOwners.get(kind).inFlight,'the initial roster write must reject before the fresh-read Retry');
+        c.retryAuthGateStartupPublications({userInitiated:true});
       }
+      await h.settleUntil(()=>h.failures===1&&c.authGateStartupPublicationOwners.get(kind)?.failed
+        && !c.authGateStartupPublicationOwners.get(kind).inFlight,'the selected native storage failure must settle');
+      const sibling=kind==='revision'?'roster_context':'revision';
+      await h.settleUntil(()=>c.authGateStartupPublicationOwners.get(sibling)?.settled
+        && !c.authGateStartupPublicationOwners.get(sibling).inFlight,'the independent sibling publication must settle before counting all native operations');
       assert.equal(h.failures,1,'the selected native storage operation must actually fail');
       assert.equal(c.authGateStartupComplete,false);
       assert.equal(kind==='revision'?c.authGateRevisionReady:c.authGateRosterContextReady,false);
@@ -540,7 +552,8 @@ for(const kind of ['revision','roster_context']) {
       await h.settle();assert.equal(h.reads.length+h.writes.length,operationsBefore);
       h.handler({type:'refresh-auth-state',reason:'user'},{},value=>replies.push(value));
       h.handler({type:'refresh-auth-state',reason:'user'},{},value=>replies.push(value));
-      await h.settle();await c.authStateRestorePromise;await flush();
+      await h.settleUntil(()=>replies.length===2,'both explicit Retry replies must settle');
+      await c.authStateRestorePromise;await flush();
       assert.equal(c.authGateStartupComplete,true);
       assert.equal(c.authGateRevisionReady,true);assert.equal(c.authGateRosterContextReady,true);
       assert.ok(h.state['revision-ceiling']>c.authGateStateRevision);
@@ -552,8 +565,15 @@ for(const kind of ['revision','roster_context']) {
 
     test(`never-settling ${kind} ${operation} is reconciled at the response deadline and recovers only on Retry`,async()=>{
       const h=durablePublicationHarness({kind,operation,failure:'pending'}),c=h.context,replies=[];
-      await h.settle();
-      if(kind==='roster_context'&&operation==='get') {c.retryAuthGateStartupPublications({userInitiated:true});await h.settle();}
+      if(kind==='roster_context'&&operation==='get') {
+        await h.settleUntil(()=>c.authGateStartupPublicationOwners.get(kind)?.failed
+          && !c.authGateStartupPublicationOwners.get(kind).inFlight,'the initial roster write must reject before the pending fresh-read Retry');
+        c.retryAuthGateStartupPublications({userInitiated:true});
+      }
+      await h.settleUntil(()=>h.failures===1,'the selected native storage operation must enter its pending state');
+      const sibling=kind==='revision'?'roster_context':'revision';
+      await h.settleUntil(()=>c.authGateStartupPublicationOwners.get(sibling)?.settled
+        && !c.authGateStartupPublicationOwners.get(sibling).inFlight,'the independent sibling publication must settle before the no-replay baseline');
       assert.equal(h.failures,1);
       const owner=c.authGateStartupPublicationOwners.get(kind),active=owner.inFlight;
       assert.ok(active);
@@ -582,6 +602,44 @@ for(const kind of ['revision','roster_context']) {
     });
   }
 }
+
+test('real fingerprint completion is required before asserting a native roster write rejection',async()=>{
+  const gate=deferred();
+  const h=durablePublicationHarness({kind:'roster_context',fingerprintGate:gate.promise}),c=h.context;
+  await h.settle();
+  assert.equal(h.failures,0,'event-loop turns cannot stand in for completed WebCrypto');
+  const failed=h.settleUntil(()=>h.failures===1&&c.authGateStartupPublicationOwners.get('roster_context')?.failed
+    && !c.authGateStartupPublicationOwners.get('roster_context').inFlight,'the delayed fingerprint must reach the rejected native write');
+  await new Promise(done=>setImmediate(done));
+  assert.equal(h.failures,0);
+  gate.resolve();await failed;
+  assert.equal(c.authGateStartupComplete,false);
+  c.retryAuthGateStartupPublications({userInitiated:true});
+  await c.authStateRestorePromise;
+  assert.equal(c.authGateStartupComplete,true);
+  assert.equal(c.authGateRosterContextReady,true);
+});
+
+test('a stalled revision read retains its owner while an independently held roster fingerprint publishes once',async()=>{
+  const gate=deferred(),h=durablePublicationHarness({kind:'revision',operation:'get',failure:'pending',fingerprintGate:gate.promise}),c=h.context;
+  await h.settleUntil(()=>h.failures===1,'the revision read must enter native storage');
+  const active=c.authGateStartupPublicationOwners.get('revision').inFlight;
+  assert.equal(h.writes.length,0,'the sibling digest is still deliberately held');
+  gate.resolve();
+  await h.settleUntil(()=>c.authGateStartupPublicationOwners.get('roster_context')?.settled,'the sibling roster publication must finish before the all-writes baseline');
+  assert.deepEqual(h.writes,['roster-context']);
+  const writesBefore=h.writes.length,replies=[];
+  h.handler({type:'refresh-auth-state',reason:'user'},{},value=>replies.push(value));
+  await h.advance(8999);await h.settle();
+  assert.equal(c.authGateStartupPublicationOwners.get('revision').inFlight,active);
+  assert.equal(h.writes.length,writesBefore,'the sibling first publication is not a replay of the stalled revision read');
+  await h.advance(1);await h.settle();
+  assert.equal(h.writes.length,writesBefore);
+  assert.equal(replies.length,1);assert.equal(replies[0].success,false);
+  h.pending.resolve();await h.settle();
+  c.retryAuthGateStartupPublications({userInitiated:true});await h.settle();await c.authStateRestorePromise;
+  assert.equal(c.authGateStartupComplete,true);
+});
 
 test('completed stale roster publication never releases ready before current policy is durably reconciled',async()=>{
   const h=durablePublicationHarness({kind:'roster_context',failure:'pending'}),c=h.context;

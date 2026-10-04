@@ -1,0 +1,13 @@
+# Focus and Bring Forward implementation candidate
+
+This local candidate implements the reviewed [SchoolPilot Focus contract](https://github.com/bzinkan/SchoolPilot/blob/e97ceb7774d0cd6a6019dec3e707efad110a702e/docs/CLASSPILOT_FOCUS_BRING_FORWARD_CONTRACT.md). Wire classroom schema stays 1. `focusTabV1` is additive and depends on accepted `scopedAuthorityChecksV1`; its server flag defaults off. Extension version alone does not enable the feature.
+
+`activate-tab` verifies one public opaque ref and observed snapshot revision, activates its existing tab/window once, then reports the observed result. `focus-tab` adopts an immutable assignment with the exact same tuple and maintains it at most once per two seconds. Neither action navigates, reopens, selects by URL, or relaxes classroom policy. Public snapshots remain capped at 20 tabs. A successful open under the accepted capability returns only its strict versioned receipt; the protected browser-session map allows the server's validated continuation to address the exact 21st tab.
+
+Attention and approved delivered authentication authority suspend Focus. Unsafe navigation, closure/replacement, authority/entitlement loss and expiry retire it. Replacement never transfers the old reference to the new tab ID. Focus status does not manufacture an applied classroom-policy outcome. Browser API timeouts report suspension; stale callbacks cannot clear or relabel a replacement assignment.
+
+Stop is strict empty data and requires the current exact binding. A cleanup-only `focusCleanup` envelope intercepts a null restriction snapshot, removes only owned/restorable Focus, and preserves the original non-Focus policy and deadline even after capability withdrawal. Control revision and immutable assignment fences reject late prior cleanup. Protected session records never appear in teacher DTOs. Storage schema 3 is a downgrade fence only; it is never sent as a new wire schema.
+
+`scripts/test-extension-focus.mjs` runs native Chrome exact-target, policy, Attention/auth popup, timeout/late callback, private receipt and cleanup cases. The managed recovery suite has a `focus-worker-suspension` case that stops and wakes the real MV3 worker while preserving protected session authority and the original lease; its immutable released-source case must fail on the missing Focus behavior. Both the source Chrome gate and unpacked package gate include these tests.
+
+Managed Chromebook acceptance, coordinated final packaging/version selection, runtime pilot evidence and Store publication remain separate release gates. SchoolPilot API/web deployment does not distribute this extension.

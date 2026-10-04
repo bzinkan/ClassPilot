@@ -383,6 +383,13 @@ async function popupStudentActionContextIsCurrent(context) {
   );
 }
 
+// Teacher-written text is shown as text, never parsed as markup.
+function popupTextHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (character) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[character]);
+}
+
 async function loadMessages() {
   const actionContext = await capturePopupStudentActionContext();
   if (!actionContext) return;
@@ -425,7 +432,7 @@ async function loadMessages() {
           <span class="message-title">💬 MESSAGE</span>
           <span class="message-time">${time}</span>
         </div>
-        <div class="message-content">${msg.message}</div>
+        <div class="message-content">${popupTextHtml(msg.message)}</div>
       </div>
     `;
   });

@@ -1,13 +1,14 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { runInNewContext } from "node:vm";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
-function loadRuntimeCore() {
-  const source = readFileSync(
+function loadRuntimeCore(source = readFileSync(
     resolve(__dirname, "../../extension/classroom-runtime-core.js"),
     "utf8"
-  );
+  )) {
   const context: Record<string, unknown> = {
     URL,
     Date,
@@ -21,6 +22,229 @@ function loadRuntimeCore() {
 
 const core = loadRuntimeCore();
 const NOW = Date.parse("2026-08-13T16:00:00.000Z");
+
+describe("server-issued private chat lifecycle fences", () => {
+  const token = { threadId: "opaque-thread", schoolEpoch: 2, activityEpoch: 3, threadGeneration: 4 };
+  it("requires a bounded opaque thread and exact positive safe-integer epochs", () => {
+    expect(core.normalizePrivateChatLifecycle(token)).toEqual(token);
+    for (const bad of [null, [], { ...token, extra: true }, { ...token, threadId: "x".repeat(129) },
+      { ...token, threadId: "thread\n" }, { ...token, schoolEpoch: 0 }, { ...token, activityEpoch: "3" },
+      { ...token, threadGeneration: Number.MAX_SAFE_INTEGER + 1 }, Object.create(token)])
+      expect(core.normalizePrivateChatLifecycle(bad)).toBeNull();
+  });
+  it("retains fresh generation G across close G while retiring every older generation", () => {
+    expect(core.privateChatLifecycleDecision(token, token)).toBe("current");
+    expect(core.privateChatLifecycleDecision({ ...token, threadGeneration: 3 }, token)).toBe("expired");
+    expect(core.privateChatLifecycleDecision({ ...token, threadGeneration: 5 }, token)).toBe("current");
+    for (const changed of [{ threadId: "other" }, { schoolEpoch: 1 }, { schoolEpoch: 3 }, { activityEpoch: 4 }])
+      expect(core.privateChatLifecycleDecision({ ...token, ...changed }, token)).toBe("expired");
+    expect(core.privateChatLifecycleDecision(token, null)).toBe("unavailable");
+  });
+  it("admits a school watermark with no threads and rejects ambiguous or duplicated activity authority", () => {
+    const thread = { ...token, teachingSessionId: "class-a", supervisionContextId: null };
+    expect(core.normalizePrivateChatLifecycleState({ schoolEpoch: 2, threads: [] }))
+      .toEqual({ schoolEpoch: 2, threads: [] });
+    const snapshot = { schoolEpoch: 2, threads: [thread] };
+    expect(core.normalizePrivateChatLifecycleState(snapshot)).toEqual(snapshot);
+    expect(core.normalizePrivateChatLifecycleState(core.normalizePrivateChatLifecycleState(snapshot))).toEqual(snapshot);
+    for (const bad of [{ schoolEpoch: 2, threads: [thread, thread] },
+      { schoolEpoch: 1, threads: [thread] }, { schoolEpoch: 2, threads: [{ ...thread, supervisionContextId: "coverage" }] },
+      { schoolEpoch: 2, threads: [{ ...thread, teachingSessionId: null }] },
+      { schoolEpoch: 2, threads: [{ ...thread, teacherId: "extra" }] }, { schoolEpoch: 0, threads: [] }])
+      expect(core.normalizePrivateChatLifecycleState(bad)).toBeNull();
+  });
+  it("preserves the server discriminator and frozen lifecycle through durable inbox normalization", () => {
+    const message = { id: "message", message: "Private text", teachingSessionId: "class-a",
+      messageKind: "private", privateChatLifecycle: token };
+    expect(core.normalizeTeacherMessage(message, NOW)).toMatchObject(message);
+    expect(core.mergeTeacherMessageInbox([], [], [message], NOW).messages[0]).toMatchObject(message);
+  });
+});
+
+const preciseBytes = readFileSync(resolve(__dirname, "fixtures/restriction-resource-matcher-cases.json"));
+const preciseCases = JSON.parse(preciseBytes.toString("utf8"));
+const preciseState = (restrictions: Record<string, unknown>) => core.normalizeClassroomState({
+  schemaVersion: 1, revision: 1, teachingSessionId: "precise-session",
+  hardExpiresAt: NOW + 60_000, restrictions,
+}, NOW);
+
+describe("exact Focus restriction contract", () => {
+  const focus = { active: true, assignmentId: "assignment-a", tabRef: "opaque-a", observedRevision: 3,
+    targetKind: "snapshot", source: "teacher", setAt: new Date(NOW).toISOString() };
+  it("keeps legacy restriction bytes additive and admits only strict exact targets", () => {
+    expect(preciseState({}).restrictions).not.toHaveProperty("focus");
+    expect(preciseState({ focus: { active: false } }).restrictions.focus).toEqual({ active: false });
+    expect(preciseState({ focus }).restrictions.focus).toEqual(focus);
+    expect(core.normalizeExactTabTarget({ tabRef: "opaque-a", observedRevision: 3 }))
+      .toEqual({ tabRef: "opaque-a", observedRevision: 3 });
+    for (const value of [{ tabId: 1 }, { tabRef: "opaque-a", observedRevision: 3, url: "https://example.test" },
+      { tabRef: " opaque-a", observedRevision: 3 }, { tabRef: "opaque-a", observedRevision: 0 },
+      { tabRef: "opaque-a", observedRevision: "3" }, { tabRef: "opaque-a", observedRevision: 3.1 }])
+      expect(() => core.normalizeExactTabTarget(value)).toThrow();
+    expect(core.normalizeStopFocusData({})).toEqual({});
+    for (const value of [null, undefined, [], "", { tabRef: "a" }]) expect(() => core.normalizeStopFocusData(value)).toThrow();
+  });
+  it("rejects an entire snapshot rather than silently dropping invalid Focus", () => {
+    for (const value of [null, true, { active: false, assignmentId: "a" }, { ...focus, extra: true },
+      { ...focus, observedRevision: 0 }, { ...focus, source: "url" }, { ...focus, targetKind: "url" },
+      { ...focus, assignmentId: " a" }, { ...focus, setAt: "invalid" }])
+      expect(() => preciseState({ flightPath: { active: true, allowedDomains: ["example.test"] }, focus: value })).toThrow();
+  });
+  it.each(["2.9.5", "2.9.6"])("keeps schema 3 storage-only and rejects downgrade to immutable repository %s", version => {
+    const persisted = { schemaVersion: 3, focusPersistenceVersion: 1, revision: 1,
+      teachingSessionId: "focus-class", hardExpiresAt: NOW + 60_000, restrictions: { focus } };
+    expect(() => core.normalizeClassroomState(persisted, NOW)).toThrow();
+    expect(core.normalizePersistedClassroomState(persisted, NOW).restrictions.focus).toEqual(focus);
+    expect(core.normalizePersistedClassroomState(persisted, NOW).schemaVersion).toBe(1);
+    expect(() => core.normalizePersistedClassroomState({ ...persisted, focusPersistenceVersion: 2 }, NOW)).toThrow();
+    expect(() => core.normalizePersistedClassroomState({ ...persisted, restrictions: {} }, NOW)).toThrow();
+    const receipt = JSON.parse(readFileSync(resolve(__dirname, `../../scripts/fixtures/auth-recovery-${version}.json`), "utf8"));
+    const bytes = readFileSync(resolve(__dirname, `../../scripts/fixtures/auth-recovery-${version}.json.gz`));
+    expect(createHash("sha256").update(bytes).digest("hex")).toBe(receipt.archiveSha256);
+    const released = JSON.parse(gunzipSync(bytes).toString("utf8"));
+    const oldSource = released.files["classroom-runtime-core.js"];
+    expect(createHash("sha256").update(oldSource).digest("hex")).toBe(receipt.files["classroom-runtime-core.js"]);
+    expect(() => loadRuntimeCore(oldSource).normalizeClassroomState(persisted, NOW)).toThrow();
+  });
+});
+
+describe("normative precise resource contract", () => {
+  it("pins the server fixture bytes and passes every identity, match, validation and budget row", () => {
+    expect(createHash("sha256").update(preciseBytes).digest("hex"))
+      .toBe("4ff6b3311bcf6937a776deb5c5eec60de98d7d74e9dc963bf762a842b440d243");
+    for (const row of preciseCases.identity)
+      expect(core.extractRestrictionResourceIdentity(row.url), row.name).toEqual(row.expect);
+    for (const row of preciseCases.match)
+      expect(core.isUrlAllowedByResource(row.url, preciseCases.resources[row.resource]), row.name).toBe(row.allowed);
+    for (const row of preciseCases.validate.filter((row: any) => !row.serverOnly))
+      expect(Boolean(core.validateAllowedResource(row.value)), row.name).toBe(row.valid);
+    for (const row of preciseCases.ruleCount)
+      expect(core.restrictionResourceRuleCount(preciseCases.resources[row.resource]), row.name).toBe(row.expect);
+  });
+
+  it("allows resource-only paths and rejects the whole state when any entry is invalid", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ flightPath: { active: true, allowedDomains: [], resources: [video] } });
+    expect(core.restrictionLandingUrl(state)).toBe(video.canonicalUrl);
+    const plan = core.planClassroomTabReconciliation(state, [{ id: 1, url: "https://www.youtube.com/", active: true }],
+      { foregroundTabId: 1 });
+    expect(plan.updates).toEqual([{ tabId: 1, url: video.canonicalUrl }]);
+    const invalid = [video, { ...video, resourceId: "bad" }];
+    expect(() => preciseState({ flightPath: { active: true, allowedDomains: ["youtube.com"], resources: invalid } }))
+      .toThrow(/resources/);
+    expect(() => preciseState({ flightPath: { active: false, resources: [video] } })).toThrow();
+    expect(() => preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: { ...video, extra: true } } }))
+      .toThrow();
+    expect(() => preciseState({ screenLock: { active: true, url: "https://www.youtube.com/", resource: video } })).toThrow();
+    expect(() => preciseState({ flightPath: { active: true, resources: [video, video] } })).toThrow();
+  });
+
+  it("installs only anchored case-sensitive main-frame shapes within the existing range", () => {
+    for (const [name, resource] of Object.entries(preciseCases.resources) as Array<[string, any]>) {
+      if (resource.type === "website" || !core.validateAllowedResource(resource)) continue;
+      const state = preciseState({ screenLock: { active: true, url: core.canonicalUrlForResource(resource), resource } });
+      const rules = core.buildDnrRules({ classroomState: state }, ["classroom"], NOW);
+      expect(rules[0]).toMatchObject({ id: 1, priority: 500, action: { type: "block" } });
+      expect(rules.some((rule: any) => rule.id === 2)).toBe(false);
+      for (const rule of rules.slice(1)) {
+        expect(rule.priority).toBe(500);
+        expect(core.isRuleInRange(rule.id, "classroom")).toBe(true);
+        expect(rule.condition.resourceTypes).toEqual(["main_frame"]);
+        expect(rule.condition.isUrlFilterCaseSensitive).toBe(true);
+        const expression = new RegExp(rule.condition.regexFilter);
+        expect(rule.condition.regexFilter.startsWith("^https://")).toBe(true);
+        for (const row of preciseCases.match.filter((row: any) => row.resource === name)) {
+          let browserUrl: string;
+          try { browserUrl = new URL(row.url).toString(); } catch { continue; }
+          if (expression.test(browserUrl)) expect(core.isUrlAllowedByResource(browserUrl, resource), row.name).toBe(true);
+        }
+      }
+      expect(rules.slice(1).some((rule: any) => new RegExp(rule.condition.regexFilter).test(state.restrictions.screenLock.url)))
+        .toBe(true);
+      const fallback = core.restrictionResourceRegexes(resource, true);
+      expect(fallback.some((expression: string) => new RegExp(expression).test(state.restrictions.screenLock.url))).toBe(true);
+      for (const row of preciseCases.match.filter((row: any) => row.resource === name && !row.allowed))
+        expect(fallback.some((expression: string) => new RegExp(expression).test(row.url)), row.name).toBe(false);
+    }
+  });
+
+  it("fits a maximal 200-video path and rejects overflow before installing rules", () => {
+    const template = preciseCases.resources.youtubeVideo;
+    const resources = Array.from({ length: 200 }, (_, index) => {
+      const resourceId = `v${String(index).padStart(10, "0")}`;
+      return { ...template, resourceId, canonicalUrl: `https://www.youtube.com/watch?v=${resourceId}` };
+    });
+    const state = preciseState({ flightPath: { active: true, allowedDomains: [], resources } });
+    const rules = core.buildDnrRules({ classroomState: state }, ["classroom"], NOW);
+    expect(rules).toHaveLength(401);
+    expect(rules.slice(1).every((rule: any) => rule.priority === 2 && core.isRuleInRange(rule.id, "classroom"))).toBe(true);
+    expect(() => preciseState({ flightPath: { active: true, resources: [...resources, resources[0]] } })).toThrow();
+    state.authPassThrough = { profiles: [{ hostRules: Array.from({ length: 801 }, (_, i) => ({ hostname: `idp${i}.example.org`, includeSubdomains: false })) }] };
+    expect(() => core.buildDnrRules({ classroomState: state, restrictionAuthPassThrough: true }, ["classroom", "restrictionSso"], NOW))
+      .toThrow(/regex budget/);
+  });
+
+  it("reconciles by exact resource rather than a matching provider host", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: video } });
+    expect(core.isRestrictionDestinationUrl(state, "https://www.youtube.com/watch?v=AAAAAAAAAAA")).toBe(false);
+    expect(core.isRestrictionDestinationUrl(state, video.canonicalUrl)).toBe(true);
+    const plan = core.planClassroomTabReconciliation(state, [
+      { id: 1, url: "https://www.youtube.com/watch?v=AAAAAAAAAAA", active: true },
+      { id: 2, url: video.canonicalUrl },
+    ], { foregroundTabId: 1 });
+    expect(plan.removeTabIds).toContain(1);
+    expect(plan.activateTabId).toBe(2);
+    expect(plan.updates).toEqual([]);
+  });
+
+  it("keeps teacher and school blocks above a precise Waypoint and restricts temporary allows", () => {
+    const video = preciseCases.resources.youtubeVideo;
+    const state = preciseState({ screenLock: { active: true, url: video.canonicalUrl, resource: video },
+      blockList: { active: true, blockedDomains: ["youtube.com"] },
+      temporaryAllows: [{ domain: "youtube.com", expiresAt: NOW + 10_000 }] });
+    const policy = { classroomState: state, globalBlockedDomains: [] };
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "teacher" });
+    expect(core.decideNavigation(video.canonicalUrl, { ...policy, globalBlockedDomains: ["youtube.com"] }, NOW))
+      .toEqual({ allowed: false, source: "school" });
+    state.restrictions.attentionMode.active = true;
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: false, source: "teacher" });
+    state.restrictions.attentionMode.active = false;
+    state.restrictions.blockList.active = false;
+    expect(core.decideNavigation("https://www.youtube.com/watch?v=AAAAAAAAAAA", policy, NOW))
+      .toEqual({ allowed: false, source: "resource" });
+    state.restrictions.screenLock.active = false;
+    state.restrictions.blockList.active = true;
+    expect(core.decideNavigation(video.canonicalUrl, policy, NOW)).toEqual({ allowed: true, source: "temporary" });
+    expect(core.buildDnrRules(policy, ["teacher"], NOW)[0].priority).toBe(800);
+  });
+
+  it("requires a snapshot only for SchoolPilot's precise Waypoint and Flight Path payloads", () => {
+    // SchoolPilot classpilotCommandPayloadRequiresPreciseCapability: key presence.
+    const section = preciseCases.resources.classSection;
+    const precise = (type: string, payload: unknown) => core.commandPayloadRequiresPreciseState(type, payload);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: section })).toBe(true);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: null })).toBe(true);
+    expect(precise("apply-flight-path", { allowedDomains: [], resources: [section] })).toBe(true);
+    expect(precise("apply-flight-path", { allowedDomains: ["example.edu"], resources: [] })).toBe(true);
+    // A lesson activity always owns link `resources` (default []); it is not precise.
+    for (const resources of [[], [{ title: "Fraction strips", url: "https://example.test/strips" }]]) {
+      expect(precise("lesson-activity", { action: "start", title: "Fractions", resources })).toBe(false);
+      expect(precise("lesson-activity", { action: "update", activityId: "a", expectedRevision: 1,
+        title: "Fractions", resources })).toBe(false);
+    }
+    expect(precise("lock-screen", { url: "https://example.edu/class", resources: [section] })).toBe(false);
+    expect(precise("apply-flight-path", { allowedDomains: ["example.edu"], resource: section })).toBe(false);
+    expect(precise("lock-screen", { url: "https://example.edu/class", resource: undefined })).toBe(false);
+    expect(precise("apply-flight-path", Object.create({ resources: [section] }))).toBe(false);
+    for (const type of ["open-tab", "timer", "poll", "attention-mode", "lesson-activity", ""])
+      expect(precise(type, { resource: section, resources: [section] })).toBe(false);
+    for (const payload of [null, undefined, [], "resource", 1]) {
+      expect(precise("lock-screen", payload)).toBe(false);
+      expect(precise("apply-flight-path", payload)).toBe(false);
+    }
+  });
+});
 
 describe("typed classroom contexts", () => {
   it("keeps teaching and supervision namespaces distinct and rejects ambiguous authority", () => {
@@ -203,17 +427,21 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isRuleInRange(2000, "school")).toBe(false);
   });
 
-  it("persists Attention Mode as the single classroom navigation rule", () => {
+  it("keeps Attention overlay independent of navigation and retained DNR policies", () => {
     const normalized = state(4, {
       restrictions: { attentionMode: { active: true, message: "Pause" } },
     });
     const rules = core.buildDnrRules({ classroomState: normalized }, ["classroom"], NOW);
-    expect(rules).toEqual([{
-      id: 1,
-      priority: 2000,
-      action: { type: "block" },
-      condition: { resourceTypes: ["main_frame"] },
-    }]);
+    expect(rules).toEqual([]);
+    expect(core.decideNavigation("https://example.edu/lesson", { classroomState: normalized }, NOW))
+      .toEqual({ allowed: true, source: null });
+    normalized.restrictions.flightPath = { active: true, allowedDomains: ["example.edu"], resources: [] };
+    const heldPolicy = { classroomState: normalized, globalBlockedDomains: ["blocked.example"] };
+    const retained = core.buildDnrRules(heldPolicy, ["classroom", "school"], NOW);
+    normalized.restrictions.attentionMode.active = false;
+    expect(retained).toEqual(core.buildDnrRules(heldPolicy, ["classroom", "school"], NOW));
+    expect(retained.find((rule: any) => rule.id === 1)?.condition.excludedRequestDomains).toEqual(["example.edu"]);
+    expect(retained.find((rule: any) => rule.id === 1000)?.priority).toBe(1000);
   });
 
   it("keeps Flight Path underneath a foreground screen-lock overlay", () => {
@@ -971,7 +1199,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(subsequent.updates).toEqual([]);
   });
 
-  it("keeps portal entry within the independent tab limit and attention control", () => {
+  it("keeps portal entry and its independent tab limit during Attention", () => {
     const snapshot = state(15, {
       authPassThrough: authPolicy(),
       restrictions: {
@@ -997,8 +1225,8 @@ describe("ClassPilot classroom runtime core", () => {
     }, tabs, {
       foregroundTabId: 1, restrictionAuthPassThrough: true, portalFirstOnLogin: true,
     });
-    expect(attention.createUrl).not.toBe("https://district.clever.com/login?school=one");
-    expect(attention.updates.some((update: { url: string }) => update.url.includes("clever.com"))).toBe(false);
+    expect(attention.activateTabId).toBe(3);
+    expect(attention.removeTabIds).not.toContain(3);
   });
 
   it("completes Waypoints on the approved domain including subpages and queries", () => {
@@ -1036,7 +1264,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.isRestrictionSsoTab({ url: "https://accounts.google.com.evil.example/" })).toBe(false);
   });
 
-  it("composes SSO pass-through below attention, school, and explicit teacher blocks", () => {
+  it("composes SSO pass-through below school and explicit teacher blocks during Attention", () => {
     const deferred = state(11, {
       deliveryContext: { lateSignInRestrictionSso: true },
       restrictions: {
@@ -1067,7 +1295,10 @@ describe("ClassPilot classroom runtime core", () => {
       classroomState: deferred,
       restrictionSsoPassThrough: true,
     }, ["classroom", "restrictionSso"], NOW);
-    expect(attentionRules.map((rule: any) => rule.id)).toEqual([1]);
+    deferred.restrictions.attentionMode.active = false;
+    expect(attentionRules).toEqual(core.buildDnrRules({
+      classroomState: deferred, restrictionSsoPassThrough: true,
+    }, ["classroom", "restrictionSso"], NOW));
 
     const ordinaryRules = core.buildDnrRules({
       classroomState: state(12, {
