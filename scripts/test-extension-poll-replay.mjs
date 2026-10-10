@@ -163,6 +163,33 @@ try {
   await page.locator('#classpilot-poll-overlay').waitFor({ state: 'hidden' });
   assert.equal(await page.locator('#page-work').inputValue(), 'Keep this work');
   assert.equal(await worker.evaluate(() => __pollNotifications), 3, 'Only genuinely new starts notify');
+  await worker.evaluate(async () => {
+    await __sendPoll(13, 'expiring-a');
+    const auth = captureAuthenticatedContext('expiry interleaving fixture');
+    await mutateClassroomOverlayState(state => ({ ...state, poll: { ...state.poll, expiresAt: Date.now() - 1 } }), { authContext: auth });
+    const original = broadcastToAllTabsForAuth;
+    let expiryReady;
+    const ready = new Promise(done => { expiryReady = done; });
+    const held = new Promise(done => { globalThis.__releasePollExpiry = done; });
+    broadcastToAllTabsForAuth = async (type, data, ...args) => {
+      if (type === 'poll' && data.reason === 'expired'
+        || type === 'poll-state-sync' && data.cursor?.transientOrder === 13 && !data.poll) {
+        expiryReady();
+        await held;
+      }
+      return original(type, data, ...args);
+    };
+    globalThis.__pendingPollExpiry = expireClassroomOverlays({ authContext: auth })
+      .finally(() => { broadcastToAllTabsForAuth = original; });
+    await ready;
+  });
+  await worker.evaluate(() => __sendPoll(14, 'newer-than-expiry-b'));
+  await page.locator('#classpilot-exit-answer').fill('Keep this draft after old expiry');
+  await worker.evaluate(async () => { __releasePollExpiry(); await __pendingPollExpiry; });
+  assert.equal(await page.locator('#classpilot-poll-overlay').evaluate(node => node.classList.contains('classpilot-poll-out')), false,
+    'Delayed old expiry cannot retire the newer overlay during its removal animation');
+  assert.equal(await page.locator('#classpilot-exit-answer').count(), 1, 'Delayed old expiry cannot dismiss a newer poll');
+  assert.equal(await page.locator('#classpilot-exit-answer').inputValue(), 'Keep this draft after old expiry');
   await worker.evaluate(frames => {
     globalThis.__serverPollFrames = structuredClone(frames);
     for (const frame of Object.values(__serverPollFrames)) {

@@ -7224,10 +7224,12 @@ async function expireClassroomOverlays(options = {}) {
   }
   let timerExpired = false;
   let pollExpired = false;
-  await mutateClassroomOverlayState(async (state) => {
+  let orderedPollExpired = false;
+  const expiredState = await mutateClassroomOverlayState(async (state) => {
     const now = Date.now();
     timerExpired = Boolean(state.timer && (state.timer.pausedRemainingMs == null && Number(state.timer.endsAt) + 5000 <= now || state.timer.expiresAt && Number(state.timer.expiresAt) <= now));
     pollExpired = Boolean(state.poll && Number(state.poll.expiresAt) <= now);
+    orderedPollExpired = pollExpired && Number.isSafeInteger(state.poll.transientOrder);
     return {
       ...state,
       timer: timerExpired ? null : state.timer,
@@ -7249,8 +7251,8 @@ async function expireClassroomOverlays(options = {}) {
     assertAuthenticatedContextCurrent(authContext, 'classroom overlay expiry broadcast');
     if (pollExpired) {
       await broadcastToAllTabsForAuth(
-        'poll',
-        { action: 'close', reason: 'expired' },
+        orderedPollExpired ? 'poll-state-sync' : 'poll',
+        orderedPollExpired ? canonicalPollState(expiredState) : { action: 'close', reason: 'expired' },
         authContext,
         sourceMessage,
       );

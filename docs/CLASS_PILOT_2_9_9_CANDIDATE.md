@@ -24,9 +24,10 @@ The canonical renderer preserves typed drafts for the same poll and represents
 pending and confirmed answers honestly. A newer close or confirmed answer retires
 an older visible poll even if the intervening start was missed. Historical live
 commands without ordering metadata cannot replace an established ordered cursor.
-Already-open content is upgraded through the existing page lifecycle, without
-reloading student work; snapshot hydration must establish current authority
-before rendering.
+Already-open authenticated content is upgraded through the existing page
+lifecycle without reloading student work; snapshot hydration must establish
+current authority before rendering. Signed-out or gated content may require
+the existing explicit manual page reload before fresh PIN sign-in.
 
 This candidate adds no permission, managed-policy key, or collected data. It
 retains the extension identity and Chrome 120 minimum. Socket tuning and timer
@@ -38,7 +39,8 @@ The new core and actual Chromium suites cover durable receipt ordering, a crash
 between persistence and ACK, pending answers across page reload and real MV3
 suspension, delayed capability negotiation, canonical 409 completion, stale
 starts/closes, historical no-order commands, legacy-to-ordered transitions,
-cross-tab missed starts, and draft preservation.
+cross-tab missed starts, delayed expiry arriving after a newer poll, and draft
+preservation.
 
 An immutable 2.9.8 source fixture exercises native upgrade on an existing
 authenticated page. The upgrade keeps ordinary page work and restores the
