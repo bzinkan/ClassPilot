@@ -30,6 +30,7 @@ try {
   console.info('[Config] No config.js override loaded; using managed policy or defaults');
 }
 importScripts('classroom-runtime-core.js');
+importScripts('poll-replay-core.js');
 importScripts('private-recovery-store.js');
 importScripts('school-website-policy.js');
 importScripts('auth-recovery-diagnostics.js');
@@ -315,6 +316,7 @@ const manualStudentLoginSuccessfulResponseFailures = new Set();
 
 const CLIENT_PROTOCOL_VERSION = 3;
 const EXTENSION_CAPABILITIES = Object.freeze([
+  'pollReplaySafeV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'classroomStateV1',
   'fabStateRevisionV1',
@@ -352,6 +354,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'privateChatLifecycleV1',
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
+  'pollReplaySafeV1',
   'focusTabV1',
   'privateChatLifecycleV1',
   'preciseRestrictionResourcesV1',
@@ -775,6 +778,7 @@ let privateChatLifecycleEstablishedBinding = null;
 let deferredTeacherMessageNotification = null;
 const CLASSROOM_OVERLAY_STORAGE_KEY = 'classroomOverlayStateV1';
 const CLASSROOM_OVERLAY_EXPIRY_ALARM = 'classroom-overlay-expiry';
+const POLL_RESPONSE_RETRY_ALARM = 'poll-response-retry';
 const API_RETRY_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 const API_RETRY_MAX_ATTEMPTS = 3;
 const API_RETRY_BASE_DELAY_MS = 1000;
@@ -6468,6 +6472,7 @@ async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options =
   lastFabHeartbeatSyncRequestAt = 0;
   await classroomOverlayMutation;
   await chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+  await chrome.alarms.clear(POLL_RESPONSE_RETRY_ALARM);
   await kv.set({
     [FAB_STATE_STORAGE_KEY]: null,
     [FAB_CONTEXT_STORAGE_KEY]: null,
@@ -6814,7 +6819,7 @@ function mutateClassroomOverlayState(operation, options = {}) {
     }
   }
   const expectedBinding = fabIdentityBinding();
-  classroomOverlayMutation = classroomOverlayMutation.then(async () => {
+  const applyMutation = async () => {
     if (authContext) assertAuthenticatedContextCurrent(authContext, 'classroom overlay mutation');
     if (expectedBinding !== fabIdentityBinding()) {
       throw authContextSuperseded('classroom overlay mutation');
@@ -6851,12 +6856,17 @@ function mutateClassroomOverlayState(operation, options = {}) {
     }
     scheduleClassroomOverlayExpiry(next);
     return next;
-  }, async () => null);
+  };
+  classroomOverlayMutation = classroomOverlayMutation.then(applyMutation, applyMutation);
   return classroomOverlayMutation;
 }
 
 function scheduleClassroomOverlayExpiry(state) {
   chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+  chrome.alarms.clear(POLL_RESPONSE_RETRY_ALARM);
+  if (state?.poll?.response?.status === 'pending' && state.poll.expiresAt > Date.now()) {
+    chrome.alarms.create(POLL_RESPONSE_RETRY_ALARM, { when: Date.now() + 30_000 });
+  }
   const candidates = [
     state?.timer?.pausedRemainingMs ? Number(state.timer.expiresAt) : state?.timer?.endsAt ? Number(state.timer.endsAt) + 5000 : null,
     state?.poll?.expiresAt ? Number(state.poll.expiresAt) : null,
@@ -6911,16 +6921,51 @@ function persistTimerOverlay(command, executionContext = {}) {
       command, executionContext.envelope, executionContext, 'timer overlay write') : null });
 }
 
+function usesSafePollReplay(command) {
+  return hasNegotiatedCapability('pollReplaySafeV1') && command.data?.transientOrder !== undefined;
+}
+
 function persistPollOverlay(command, executionContext = {}) {
   const action = command.data?.action;
   const pollId = String(command.data?.pollId || '').trim();
   const contextAuthorityRevision = currentFabState?.contextAuthorityRevision ?? null;
   return mutateClassroomOverlayState(async (state, binding) => {
+    if (binding && usesSafePollReplay(command)) {
+      const context = commandClassroomContext(command);
+      const contextKey = RuntimeCore.classroomContextKey(context);
+      const classExpiry = RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expiresAt;
+      const expiresAt = Math.min(overlayExpiresAt(command.data?.pollExpiresAt ?? command.data?.expiresAt,
+        Date.now() + 2 * 60 * 60 * 1000), classExpiry || Number.MAX_SAFE_INTEGER);
+      if (action === 'start' && expiresAt <= Date.now()) throw new Error('Poll has expired');
+      const orderedState = state.poll && !state.poll.contextKey
+        ? { ...state, poll: { ...state.poll, contextKey: RuntimeCore.classroomContextKey(state.poll) } } : state;
+      const applied = ClassPilotPollReplayCore.apply(orderedState, {
+        contextKey, transientOrder: command.data?.transientOrder, pollId, action, now: Date.now(),
+        poll: { commandId: executionContext.commandId || null, pollId, ...context,
+          ...(context?.supervisionContextId ? { contextAuthorityRevision } : {}),
+          purpose: command.data?.purpose || 'poll', responseType: command.data?.responseType || 'choice',
+          question: String(command.data?.question || '').slice(0, 1000),
+          options: (Array.isArray(command.data?.options) ? command.data.options : []).slice(0, 20)
+            .map(option => String(option).slice(0, 500)), expiresAt, receivedAt: Date.now(), response: null },
+      });
+      executionContext.pollStartedNew = applied.newStart;
+      return applied.state;
+    }
+    if (command.data?.transientOrder === undefined
+      && state.pollCursors?.[RuntimeCore.classroomContextKey(commandClassroomContext(command))]) {
+      // Historical one-shot retries have no order and cannot replace a newer
+      // ordered intent. They remain live-compatible before ordering begins.
+      executionContext.pollStartedNew = false;
+      executionContext.pollOrderedCursorBlocked = true;
+      return state;
+    }
     if (!binding || action !== 'start') {
       if (pollId && state.poll?.pollId && state.poll.pollId !== pollId) return state;
       return { ...state, binding, poll: null, updatedAt: Date.now() };
     }
     if (!pollId) throw new Error('Poll start requires a pollId');
+    if (state.poll?.pollId === pollId && RuntimeCore.classroomContextKey(state.poll)
+      === RuntimeCore.classroomContextKey(commandClassroomContext(command))) return state;
     const classExpiry = currentClassroomState
       ? RuntimeCore.classroomStateExpiry(currentClassroomState, Date.now()).expiresAt
       : null;
@@ -6963,6 +7008,7 @@ async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
     || (authContext ? fabIdentityBinding() : null);
   const sourceMessage = options.sourceMessage
     || (authContext ? browserPolicyEnvelopeForAuth(authContext) : null);
+  let preservedReplayPoll = false;
   const assertCurrent = (label = 'classroom overlay clear') => {
     if (!authContext) return;
     assertAuthenticatedContextCurrent(authContext, label);
@@ -6975,9 +7021,28 @@ async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
   const clearOperation = async () => {
     assertCurrent();
     await chrome.alarms.clear(CLASSROOM_OVERLAY_EXPIRY_ALARM);
+    await chrome.alarms.clear(POLL_RESPONSE_RETRY_ALARM);
     assertCurrent();
-    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: null });
+    let next = null;
+    if (options.replayPollWakeContext && expectedBinding) {
+      const stored = await kv.get([CLASSROOM_OVERLAY_STORAGE_KEY, FAB_CONTEXT_STORAGE_KEY]);
+      assertCurrent();
+      const prior = stored[CLASSROOM_OVERLAY_STORAGE_KEY], fab = stored[FAB_CONTEXT_STORAGE_KEY];
+      const key = RuntimeCore.classroomContextKey(options.replayPollWakeContext);
+      const cursor = prior?.pollCursors?.[key];
+      if (key && prior?.binding === expectedBinding && fab?.binding === expectedBinding
+        && RuntimeCore.classroomContextKey(fab) === key && Number.isSafeInteger(cursor?.transientOrder)
+        && cursor.transientOrder > 0 && (!fab.supervisionContextId || cursor.contextAuthorityRevision === fab.contextAuthorityRevision)
+        && (!prior.poll || RuntimeCore.classroomContextKey(prior.poll) === key
+          && (!prior.poll.supervisionContextId || prior.poll.contextAuthorityRevision === fab.contextAuthorityRevision))) {
+        next = { ...prior, timer: null, poll: prior.poll?.expiresAt > Date.now() ? prior.poll : null,
+          pollCursors: { [key]: cursor }, updatedAt: Date.now() };
+        preservedReplayPoll = true;
+      }
+    }
+    await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
     assertCurrent();
+    if (next) scheduleClassroomOverlayExpiry(next);
   };
   classroomOverlayMutation = classroomOverlayMutation.then(clearOperation, clearOperation);
   await classroomOverlayMutation;
@@ -6990,12 +7055,7 @@ async function clearClassroomOverlayState(reason = 'cleared', options = {}) {
       sourceMessage,
     );
     assertCurrent();
-    await broadcastToAllTabsForAuth(
-      'poll',
-      { action: 'close', reason },
-      authContext,
-      sourceMessage,
-    );
+    if (!preservedReplayPoll) await broadcastToAllTabsForAuth('poll', { action: 'close', reason }, authContext, sourceMessage);
     assertCurrent();
   } else {
     await broadcastToAllTabs('timer', { action: 'stop', reason });
@@ -7008,6 +7068,14 @@ function classroomOverlayAuthorityIsCurrent(overlay) {
   if (!classroomContextIsCurrent(overlay)) return false;
   return !overlay.supervisionContextId || Boolean(currentFabState?.contextAuthorityRevision
     && scheduledContextAuthorityRevision(overlay.contextAuthorityRevision) === currentFabState.contextAuthorityRevision);
+}
+
+function canonicalPollState(state) {
+  const context = activeClassroomContexts()[0];
+  const cursor = state?.pollCursors?.[RuntimeCore.classroomContextKey(context)];
+  const poll = state?.poll && state.poll.expiresAt > Date.now()
+    && classroomOverlayAuthorityIsCurrent(state.poll) ? state.poll : null;
+  return { cursor: cursor ? { ...cursor, ...context } : null, poll, ...context };
 }
 
 function getRestorableClassroomOverlayState(options = {}) {
@@ -7057,7 +7125,13 @@ function getRestorableClassroomOverlayState(options = {}) {
         ? state.poll
         : null;
       if (timer !== state.timer || poll !== state.poll) {
-        const next = { ...state, timer, poll, updatedAt: now };
+        // Negotiation is re-established after a worker restart. Keep an
+        // ordered scheduled poll private while that authority is unavailable;
+        // an ordinary read must not erase its answer or durable cursor.
+        const pendingPollAuthority = state.poll?.transientOrder && state.poll.expiresAt > now
+          && state.poll.supervisionContextId && !hasNegotiatedCapability('scheduledClassroomV1')
+          && RuntimeCore.classroomContextKey(state.poll) === RuntimeCore.classroomContextKey(currentClassroomState);
+        const next = { ...state, timer, poll: pendingPollAuthority ? state.poll : poll, updatedAt: now };
         await kv.set({ [CLASSROOM_OVERLAY_STORAGE_KEY]: next });
         assertCurrent();
         scheduleClassroomOverlayExpiry(next);
@@ -7103,7 +7177,7 @@ async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI
       ? storedOverlay.timer
       : null,
     poll: overlayCurrent
-      && !storedOverlay.poll?.response
+      && (!storedOverlay.poll?.response || storedOverlay.poll.transientOrder)
       && Number(storedOverlay.poll?.expiresAt || 0) > now
       && sessionMatches(storedOverlay.poll)
       ? storedOverlay.poll
@@ -7112,6 +7186,8 @@ async function getClassroomUiSnapshotForAuth(authContext, reason = 'classroom UI
   return {
     classroomState: currentClassroomState,
     overlays,
+    pollState: overlayCurrent && hasNegotiatedCapability('pollReplaySafeV1')
+      ? canonicalPollState(storedOverlay) : null,
     fabState,
     fabContext,
     fabBinding: expectedFabBinding,
@@ -7133,6 +7209,7 @@ async function replayClassroomUiForAuth(authContext, reason = 'classroom UI repl
     sourceMessage,
   );
   assertAuthenticatedContextCurrent(authContext, reason);
+  retryPendingPollResponse(authContext).catch(() => {});
   return snapshot;
 }
 
@@ -7197,6 +7274,105 @@ function markPollResponsePersisted(pollId, selectedOption, authContext = null) {
       updatedAt: Date.now(),
     };
   }, { authContext });
+}
+
+const pollResponseInFlight = new Map();
+
+function submitDurablePollResponse(message) {
+  const request = captureStudentActionRequest(message, 'durable poll response');
+  const key = `${request.fabBinding}:${RuntimeCore.classroomContextKey(request)}:${message.pollId}`;
+  if (pollResponseInFlight.has(key)) return pollResponseInFlight.get(key);
+  const operation = transmitDurablePollResponse(message, request).catch(async error => {
+    const state = (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY];
+    error.pollResponsePending = state?.binding === request.fabBinding
+      && state.poll?.pollId === message.pollId && state.poll.contextKey === RuntimeCore.classroomContextKey(request)
+      && state.poll.response?.status === 'pending';
+    throw error;
+  }).finally(() => pollResponseInFlight.delete(key));
+  pollResponseInFlight.set(key, operation);
+  return operation;
+}
+
+async function transmitDurablePollResponse(message, request) {
+  const assertCurrent = () => assertStudentActionRequestCurrent(request, 'durable poll response');
+  const contextKey = RuntimeCore.classroomContextKey(request);
+  const reserved = await mutateClassroomOverlayState(async state => {
+    assertCurrent();
+    const poll = state.poll;
+    if (!poll?.transientOrder || poll.pollId !== message.pollId || poll.contextKey !== contextKey
+      || !classroomOverlayAuthorityIsCurrent(poll)) throw new Error('This poll is no longer active');
+    const isText = poll.responseType === 'short_text';
+    const option = isText ? null : Number(message.selectedOption);
+    const answer = isText ? String(message.textResponse || '').trim() : null;
+    if (!poll.response) {
+      if (isText && (!hasNegotiatedCapability('exitTicketsV1') || !answer || answer.length > 500)) throw new Error('Enter a response of up to 500 characters');
+      if (!isText && (!Number.isSafeInteger(option) || option < 0 || option >= poll.options.length)) throw new Error('Invalid poll option');
+    }
+    return ClassPilotPollReplayCore.reserveAnswer(state, message.pollId, contextKey,
+      { selectedOption: option, textResponse: answer }, Date.now());
+  }, { authContext: request.authContext, assertAuthority: assertCurrent });
+  assertCurrent();
+  const answer = reserved.poll.response;
+  if (answer.status === 'completed') return { response: answer };
+  const source = { studentId: request.authContext.studentId, studentSessionId: request.authContext.studentSessionId };
+  await broadcastToAllTabsForAuth('poll-state-sync', canonicalPollState(reserved), request.authContext, source);
+  assertCurrent();
+  const response = await fetchWithBackoff(`${request.authContext.serverOrigin}/api/polls/${encodeURIComponent(message.pollId)}/respond`, {
+    method: 'POST', headers: buildDeviceAuthHeaders(request.authContext),
+    body: JSON.stringify({ deviceId: request.authContext.deviceId, studentId: request.authContext.studentId,
+      studentSessionId: request.authContext.studentSessionId, ...classroomAuthorityPayload(request),
+      ...(reserved.poll.responseType === 'short_text' ? { textResponse: answer.textResponse } : { selectedOption: answer.selectedOption }) }),
+    signal: request.authContext.signal,
+  }, { context: 'poll response', maxAttempts: 2, respectGlobalBackoff: false });
+  assertCurrent();
+  const data = await response.json().catch(() => ({}));
+  assertCurrent();
+  const canonical = data.response;
+  const alreadyAnswered = response.status === 409 && data.code === 'POLL_ALREADY_ANSWERED';
+  if (!response.ok && !alreadyAnswered) throw buildResponseError(response, data, 'Could not submit poll response');
+  if (canonical && (canonical.pollId !== message.pollId || canonical.studentId !== request.authContext.studentId)) {
+    throw new Error('Poll response identity did not match');
+  }
+  if (alreadyAnswered && !canonical) throw new Error('Recorded poll response is unavailable');
+  const completed = await mutateClassroomOverlayState(async state => {
+    assertCurrent();
+    if (state.poll?.pollId !== message.pollId || state.poll.contextKey !== contextKey) return state;
+    return { ...state, poll: { ...state.poll, response: { ...answer,
+      ...(canonical ? { selectedOption: canonical.selectedOption, textResponse: canonical.textResponse } : {}),
+      status: 'completed', submittedAt: Date.now() } }, updatedAt: Date.now() };
+  }, { authContext: request.authContext, assertAuthority: assertCurrent });
+  assertCurrent();
+  await broadcastToAllTabsForAuth('poll-state-sync', canonicalPollState(completed), request.authContext, source);
+  return data;
+}
+
+async function retryPendingPollResponse(authContext = captureAuthenticatedContext('poll response retry')) {
+  assertAuthenticatedContextCurrent(authContext, 'poll response retry');
+  const rearmPending = async () => {
+    const stored = (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY];
+    assertAuthenticatedContextCurrent(authContext, 'poll response retry negotiation');
+    if (stored?.binding === fabIdentityBinding() && stored.poll?.response?.status === 'pending'
+      && Number.isSafeInteger(stored.poll.transientOrder) && stored.poll.transientOrder > 0
+      && RuntimeCore.classroomContextKey(stored.poll) === RuntimeCore.classroomContextKey(currentClassroomState)
+      && stored.poll.expiresAt > Date.now()) {
+      chrome.alarms.create(POLL_RESPONSE_RETRY_ALARM, { when: Date.now() + 30_000 });
+    }
+  };
+  if (!hasNegotiatedCapability('pollReplaySafeV1')) {
+    await rearmPending();
+    return;
+  }
+  const { poll } = await getRestorableClassroomOverlayState({ authContext });
+  assertAuthenticatedContextCurrent(authContext, 'poll response retry');
+  if (poll?.response?.status !== 'pending' || !poll.transientOrder) {
+    // Scheduled authority may still be negotiating even after the poll
+    // capability returns. Keep the private answer retryable without sending it.
+    await rearmPending();
+    return;
+  }
+  return submitDurablePollResponse({ pollId: poll.pollId, ...poll.response,
+    ...classroomAuthorityPayload(poll), studentControlRevision: currentStudentControlRevision(),
+    studentMessageContext: studentMessageContextFor(authContext), fabBinding: fabIdentityBinding() });
 }
 
 async function sendChatDeliveryAck(message, deliveryStatus, errorMessage, expectedAuthContext) {
@@ -18484,6 +18660,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     expirePendingCheckIn(alarm).catch(() => {});
   } else if (alarm.name === CLASSROOM_OVERLAY_EXPIRY_ALARM) {
     expireClassroomOverlays().catch(() => {});
+  } else if (alarm.name === POLL_RESPONSE_RETRY_ALARM) {
+    retryPendingPollResponse().catch(() => {});
   } else if (alarm.name === 'screenshot-capture') {
     captureAndSendScreenshot({ reason: 'alarm' });
   } else if (alarm.name === SCREENSHOT_ACTIVE_CADENCE_EXPIRY_ALARM) {
@@ -21047,7 +21225,11 @@ async function applyClassroomStateNow(rawState, options = {}) {
     ).catch(() => {});
     const scopeChanged = normalized.teachingSessionId !== previousState?.teachingSessionId
       || normalized.supervisionContextId !== previousState?.supervisionContextId;
-    if (scopeChanged) await clearClassroomOverlayState('classroom-authority-changed', { authContext });
+    if (scopeChanged) await clearClassroomOverlayState('classroom-authority-changed', { authContext,
+      // A fresh worker has no in-memory previousState. Restore only a durable
+      // ordered poll whose exact binding and persisted FAB authority agree.
+      replayPollWakeContext: !previousState && options.reason === 'worker_wake'
+        && options.trustedPersistedRestrictionSso === true ? normalized : null });
     if (screenshotAuthorityChanged) {
       scheduleEventHeartbeat('screenshot-authority-changed');
     }
@@ -22173,7 +22355,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     return { rejected: true, error: commandErrorMessage(error) };
   }
 
-  if (commandId) {
+  if (commandId && !(commandType === 'poll' && usesSafePollReplay(command))) {
     await sendCommandAck(commandId, 'received', {
       authContext,
       binding: commandBinding,
@@ -23295,14 +23477,15 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         // The persisted poll is the restart-safe dedup boundary. The short
         // in-memory set only avoids duplicate same-turn broadcasts.
-        if (pollAction === 'start' && seenPollIds.has(pollId)) {
+        const safePollReplay = usesSafePollReplay(command);
+        if (!safePollReplay && pollAction === 'start' && seenPollIds.has(pollId)) {
           console.log('Poll dedup: already shown');
           result.action = pollAction;
           result.pollId = pollId;
           result.deduplicated = true;
           break;
         }
-        if (pollAction === 'start') {
+        if (!safePollReplay && pollAction === 'start') {
           seenPollIds.add(pollId);
           // Clean up after 60 seconds
           setTimeout(() => seenPollIds.delete(pollId), 60000);
@@ -23313,6 +23496,23 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         const pollState = await persistPollOverlay(command, executionContext);
         assertCommandExecutionCurrent('poll persistence');
+
+        if (safePollReplay || executionContext.pollOrderedCursorBlocked) {
+          if (safePollReplay && executionContext.commandId) {
+            await sendCommandAck(executionContext.commandId, 'received', {
+              authContext: commandAuthContext, binding: executionContext.binding, commandType: 'poll',
+              deliveryPolicy: executionContext.delivery?.deliveryPolicy,
+              expiresAt: executionContext.delivery?.expiresAt,
+            });
+            assertCommandExecutionCurrent('poll persisted receipt');
+          }
+          await broadcastCommandUi('poll-state-sync', canonicalPollState(pollState));
+          if (executionContext.pollStartedNew) await notifyCommandUi({ title: 'Poll', message: pollQuestion, priority: 2 });
+          result.action = pollAction;
+          result.pollId = pollId;
+          result.deduplicated = !executionContext.pollStartedNew;
+          break;
+        }
 
         await broadcastCommandUi('poll', {
           action: pollAction,
@@ -23884,6 +24084,12 @@ async function broadcastToAllTabsForAuth(
   for (const tab of validTabs) {
     assertCurrent();
     try {
+      // Old content can acknowledge an unknown message. Upgrade its lifecycle
+      // before canonical state delivery, rather than waiting for a send failure.
+      if (messageType === 'poll-state-sync' || messageType === 'classroom-overlay-state-sync') {
+        await injectContentScript({ target: { tabId: tab.id }, files: ['content.js'] });
+        assertCurrent();
+      }
       await sendTabMessage(tab.id, {
         type: messageType,
         data: messageData,
@@ -27617,6 +27823,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { pollId, selectedOption, textResponse } = message;
     console.log('[Poll] Response received');
 
+
     (async () => {
       const actionRequest = captureStudentActionRequest(message, 'poll response');
       assertStudentActionRequestCurrent(actionRequest, 'poll response');
@@ -27632,6 +27839,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ) {
         throw new Error('This poll is no longer active for the signed-in student');
       }
+      if (hasNegotiatedCapability('pollReplaySafeV1') && overlays.poll.transientOrder) return submitDurablePollResponse(message);
       const isText = overlays.poll.responseType === 'short_text';
       const option = isText ? null : Number(selectedOption);
       const answer = isText ? String(textResponse || '').trim() : null;
@@ -27682,7 +27890,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((data) => sendResponse({ success: true, data }))
       .catch((error) => {
         console.warn('Failed to submit poll response:', safeDiagnosticError(error));
-        sendResponse({ success: false, error: error?.message || 'Could not submit poll response' });
+        sendResponse({ success: false, pending: error?.pollResponsePending === true,
+          error: error?.message || 'Could not submit poll response' });
       });
     return true;
   }

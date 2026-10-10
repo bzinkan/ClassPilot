@@ -2,13 +2,19 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared release is **2.9.8**, a connection-smoothing release on top of
-2.9.7: a re-entered connect no longer replaces the socket that is still
-authenticating, a silent (half-open) socket is retired after two unanswered
-pings, and command/chat acknowledgement fallbacks keep their five-second delay
-in the packed build. It adds no permission, capability, managed-policy key or
-collected data. See the
-[2.9.8 candidate record](../docs/CLASS_PILOT_2_9_8_CANDIDATE.md).
+The prepared candidate is **2.9.9**, which adds negotiated safe poll replay:
+durable ordering, saved answers across worker restarts, and canonical UI
+restoration on already-open pages. It requires the corrected SchoolPilot
+backend and a separately enabled school pilot. It adds the `pollReplaySafeV1`
+capability, with no new permission, managed-policy key, or collected data. See
+the [2.9.9 candidate record](../docs/CLASS_PILOT_2_9_9_CANDIDATE.md) for release
+gates that remain open.
+
+It retains 2.9.8's connection smoothing: a re-entered connect leaves an
+authenticating socket alone, silent sockets retire after two unanswered pings,
+and command/chat acknowledgement fallbacks keep their five-second delay in
+the packed build. The [2.9.8 record](../docs/CLASS_PILOT_2_9_8_CANDIDATE.md)
+remains historical release evidence.
 
 The 2.9.7 feature set it carries: the Attention overlay preserves
 the underlying page, navigation and independent restriction/authentication
