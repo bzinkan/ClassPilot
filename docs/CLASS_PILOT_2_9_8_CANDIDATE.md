@@ -5,8 +5,11 @@ capability, no managed-policy key, no wire-protocol change and no collected
 data. The manifest keeps the existing extension identity and the Chrome 120
 floor. Wire protocol remains 3; the precise classroom wire schema remains 1.
 
-It follows the 2026-10-09 production audit of the student WebSocket lane
-(extension 2.9.6 fleet, three API tasks). The server was healthy (ALB p95
+It follows the 2026-10-09 production audit of the student WebSocket lane. The
+fleet was on 2.9.7: the Chrome Web Store publishes 2.9.7 and every
+`/api/extension/settings` request on 2026-10-08 carried the 2.9.7 capability
+list. The connection code is byte-identical between 2.9.6 and 2.9.7, so the
+numbers below describe both. The server was healthy (three API tasks, ALB p95
 59 ms, zero 5xx). The roughness was on the client side of the socket.
 
 ## What changes
