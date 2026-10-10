@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '2.9.8';
+const expectedPreparedReleaseVersion = '2.9.9';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -172,6 +172,8 @@ async function runPackagedSuite(script, environment) {
 async function runPackagedTests() {
   const environment = { ...process.env, CLASSPILOT_EXTENSION_PATH: unpackRoot };
   for (const script of [
+    'test-poll-replay-core.mjs',
+    'test-extension-poll-replay.mjs',
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
     'test-extension-precise-resources.mjs',

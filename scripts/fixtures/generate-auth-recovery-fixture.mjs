@@ -44,7 +44,8 @@ const sourceCommit = git('rev-parse', `${ref}^{commit}`).toString('utf8').trim()
 // Keep old receipts byte-identical while capturing the private store in newer
 // immutable fixtures. An old worker does not import this later module.
 const sourceFiles = git('ls-tree', '--name-only', `${sourceCommit}:extension`).toString('utf8').split(/\r?\n/);
-const runtimeFiles = [...FILES, ...(sourceFiles.includes('private-recovery-store.js') ? ['private-recovery-store.js'] : [])].sort();
+const runtimeFiles = [...FILES, ...['private-recovery-store.js', 'poll-replay-core.js']
+  .filter(name => sourceFiles.includes(name))].sort();
 const files = {};
 for (const name of runtimeFiles) {
   files[name] = git('show', `${sourceCommit}:extension/${name}`).toString('utf8').replace(/\r?\n/g, '\r\n');

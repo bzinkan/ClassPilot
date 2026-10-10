@@ -26,6 +26,8 @@ export const RECOVERY_CASES = Object.freeze({
   'upgrade-2.8.9': { expectedRedOnBase: false, historicalUpgrade: true },
   'upgrade-2.9.4-native-reload': { expectedRedOnBase: false },
   'upgrade-2.9.6-native-reload': { expectedRedOnBase: false },
+  'upgrade-2.9.8-native-reload': { expectedRedOnBase: false },
+  'upgrade-2.9.8-signed-in-poll': { expectedRedOnBase: false },
   'auth-read-retry': { expectedRedOnBase: false },
   // 2.8.9 retains an unresolved read forever; 2.9.0 reconciles it at the deadline.
   'auth-read-pending': { expectedRedOnBase: true },
@@ -62,6 +64,7 @@ export const RECOVERY_CASES = Object.freeze({
   // carried the form's IDs; 2.9.6 removes it and refuses web-page senders.
   'page-dom-roster-isolation': { expectedRedOnBase: '2.9.5', expectedFailure: '[regression:page-roster-isolation]' },
   'private-chat-worker-suspension': { expectedRedOnBase: false },
+  'poll-worker-suspension': { expectedRedOnBase: false },
 });
 if (process.argv.includes('--list-cases')) {
   console.log(JSON.stringify(RECOVERY_CASES));
@@ -91,7 +94,7 @@ function loadSnapshot(version) {
 }
 const legacy = loadSnapshot('2.8.6');
 const previous = loadSnapshot('2.8.7');
-const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9'), '2.9.4': loadSnapshot('2.9.4'), '2.9.6': loadSnapshot('2.9.6') };
+const snapshots = { '2.8.6': legacy, '2.8.7': previous, '2.8.8': loadSnapshot('2.8.8'), '2.8.9': loadSnapshot('2.8.9'), '2.9.4': loadSnapshot('2.9.4'), '2.9.6': loadSnapshot('2.9.6'), '2.9.8': loadSnapshot('2.9.8') };
 
 async function fixtureServer() {
   const state = { configRequests: 0, rosterRequests: 0, studentLoginRequests: 0, pageLoads: 0 };
@@ -2112,7 +2115,7 @@ await withBrowser({caseName:'private-vault-migration-crash',quietNetwork:true,se
   console.log('PASS commit-before-delete migration, crash cleanup retry, and durable empty tombstone prevent legacy resurrection');
 });
 
-for (const snapshotVersion of ['2.9.4', '2.9.6']) await withBrowser({ caseName: `upgrade-${snapshotVersion}-native-reload`, snapshotVersion, quietNetwork: true },
+for (const snapshotVersion of ['2.9.4', '2.9.6', '2.9.8']) await withBrowser({ caseName: `upgrade-${snapshotVersion}-native-reload`, snapshotVersion, quietNetwork: true },
   async ({ context, worker, extensionId, extensionPath, fixture }) => {
     assert.notEqual(candidateVersion, snapshotVersion, 'the native upgrade needs a newer candidate');
     assert.equal(await worker.evaluate(() => chrome.runtime.getManifest().version), snapshotVersion);
@@ -2204,6 +2207,74 @@ for (const snapshotVersion of ['2.9.4', '2.9.6']) await withBrowser({ caseName: 
     assert.equal(fixture.state.studentLoginRequests, 0, 'upgrade cannot replay credentials');
     await freshLoginAfterStorageRecovery({ worker: updated, probe, page, fixture });
     console.log(`PASS native same-ID${snapshotVersion}→${candidateVersion} upgrade onChrome${browserMajor} (${releasedStartupBlocked ? 'released startup blocked' : 'released startup ready'}, ${pageRecovery}), immutable already-open content ${oldOwners.map(owner => owner.version).join('/')}→${currentOwners.map(owner => owner.version).join('/')}, private vault and fresh PIN`);
+  });
+
+await withBrowser({ caseName: 'upgrade-2.9.8-signed-in-poll', snapshotVersion: '2.9.8', quietNetwork: true },
+  async ({ context, worker, probe, extensionId, extensionPath, fixture }) => {
+    const extensionsPage = await context.newPage();
+    await extensionsPage.goto('chrome://extensions/');
+    const developerMode = extensionsPage.locator('#devMode');
+    if (!await developerMode.evaluate(toggle => toggle.checked)) await developerMode.click();
+    await extensionsPage.close();
+    const page = await openGatedPage(context, fixture, 'case=signed-in-poll-upgrade');
+    const pageErrors = []; page.on('pageerror', error => pageErrors.push(error.message));
+    await freshLoginAfterStorageRecovery({ worker, probe, page, fixture });
+    await page.evaluate(() => { document.body.insertAdjacentHTML('beforeend', '<input id="student-work" value="Preserve my work">'); });
+    const inspectOwners = activeWorker => activeWorker.evaluate(async url => {
+      const tab = (await chrome.tabs.query({})).find(item => item.url === url);
+      const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id },
+        func: () => globalThis.ClassPilotPageLifecycle.inspect() });
+      return result;
+    }, page.url());
+    assert.ok((await inspectOwners(worker)).every(owner => owner.version === '2.9.8'));
+    const loadsBefore = fixture.state.pageLoads;
+    cpSync(sourceRoot, extensionPath, { recursive: true });
+    installManagedFixture(extensionPath, fixture.origin, 'ready', { quietNetwork: true });
+    await worker.evaluate(() => chrome.runtime.reload()).catch(error => assert.match(error.message, /closed|destroyed|invalidated/i));
+    const updated = await waitForWorkerVersion(context, extensionId, candidateVersion);
+    const updatedProbe = await context.newPage();
+    await updatedProbe.goto(`chrome-extension://${extensionId}/recovery-probe.html`);
+    await waitUntilWorker(updated, () => authGateStartupComplete, 16000, 'updated extension must become ready');
+    if (!(await updated.evaluate(() => hasStudentAuth()))) {
+      const login = await rpc(updatedProbe, { type: 'manual-student-login', payload: {
+        mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+      assert.equal(login?.success, true, 'Native reload clears browser-session authority; use a fresh trusted PIN');
+    }
+    await updated.evaluate(async () => {
+      await authStateRestorePromise; await classroomStateRestorePromise; await studentAuthMutationTail;
+      const deadline = Date.now() + 12000;
+      while (!workerWakeSettled && Date.now() < deadline) await new Promise(done => setTimeout(done, 20));
+      const auth = captureAuthenticatedContext('signed-in poll upgrade');
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+        'classroomStateV1', 'pollReplaySafeV1'] }, auth);
+      const end = Date.now() + 300000;
+      currentClassroomState = RuntimeCore.normalizeClassroomState({ schemaVersion: 1, revision: 41,
+        teachingSessionId: 'upgrade-class', hardExpiresAt: end, scheduledEndAt: end, restrictions: {} });
+      observeStudentControlRevision(41, auth, 'signed-in poll upgrade');
+      await applyFabSettings({ schemaVersion: 1, revision: 1, ownershipRevision: 41,
+        teachingSessionId: 'upgrade-class', activeSessionIds: ['upgrade-class'], messagingEnabled: true,
+        handRaisingEnabled: true }, { authContext: auth, broadcast: false });
+      const state = await persistPollOverlay({ authority: { teachingSessionId: 'upgrade-class' },
+        data: { action: 'start', transientOrder: 1, pollId: 'upgrade-poll', question: 'Did your work survive?', options: ['Yes', 'No'] } }, { authContext: auth });
+      await broadcastToAllTabsForAuth('poll-state-sync', canonicalPollState(state), auth,
+        { studentId: auth.studentId, studentSessionId: auth.studentSessionId });
+    });
+    try { await page.locator('#classpilot-poll-overlay').waitFor({ timeout: 8000 }); }
+    catch (error) {
+      console.error('Signed-in upgrade diagnostics', JSON.stringify({ owners: await inspectOwners(updated),
+        outcomes: await updated.evaluate(() => __managedRecoveryFixture.pageOutcomes),
+        state: await updated.evaluate(async () => ({ fab: currentFabState,
+          poll: (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY],
+          auth: hasStudentAuth(), cap: hasNegotiatedCapability('pollReplaySafeV1') })),
+        pageErrors, body: (await page.locator('body').innerText()).slice(-800),
+        gate: await page.locator('#classpilot-auth-gate').count() }));
+      throw error;
+    }
+    assert.equal(await page.locator('#student-work').inputValue(), 'Preserve my work');
+    assert.equal(fixture.state.pageLoads, loadsBefore, 'Canonical poll delivery must upgrade authenticated old content without navigation');
+    const owners = await inspectOwners(updated);
+    assert.ok(owners.every(owner => owner.version === candidateVersion));
+    console.log(`PASS immutable2.9.8 signed-in page upgrades to${candidateVersion} on canonical poll delivery without reload or losing page work`);
   });
 
 await withBrowser({ caseName: 'wake-partial-auth-clear', authReadMode: 'never', seed: browserSessionCredentialSeed, quietNetwork: true }, async ({ context, worker, probe, fixture }) => {
@@ -2608,13 +2679,13 @@ await withBrowser({ caseName: 'recovered-startup-obsolete-school', seed: (origin
   console.log('PASS recovered startup clears obsolete supervision authority (protocol, overlay, command authority)');
 });
 
-async function checkWorkerSuspension({ context, worker, extensionId, fixture }, includeFocus = false, includePrivateChat = false) {
+async function checkWorkerSuspension({ context, worker, extensionId, fixture }, includeFocus = false, includePrivateChat = false, includePoll = false) {
   if (includeFocus) assert.ok(await worker.evaluate(() => EXTENSION_CAPABILITIES.includes('focusTabV1')),
     '[regression:focus-wake] exact Focus capability is absent');
   // Phase A: a durable signed-in student with a live supervision-context
   // classroom state, FAB context and timer overlay, written through the
   // production persistence paths (not hand-seeded storage).
-  const live = await worker.evaluate(async ({ origin, includeFocus, includePrivateChat }) => {
+  const live = await worker.evaluate(async ({ origin, includeFocus, includePrivateChat, includePoll }) => {
     await authStateRestorePromise; await classroomStateRestorePromise; await studentAuthMutationTail;
     scheduleHeartbeat(null);
     await new Promise((done) => chrome.storage.local.set({ deviceId: 'device-live', autoRegistrationPaused: true,
@@ -2676,6 +2747,17 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
         studentId: auth.studentId, studentSessionId: auth.studentSessionId, studentControlRevision: 41,
         privateChatLifecycle: { ...token, threadGeneration: 8 } }, auth);
     }
+    if (includePoll) {
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+        'scheduledClassroomV1', 'classroomStateV1', 'pollReplaySafeV1'] }, auth);
+      await applyFabSettings({ ...currentFabState, revision: 2,
+        activeContexts: [{ supervisionContextId: 'ctx-live' }] }, { authContext: auth });
+      await persistTimerOverlay({ authority: { supervisionContextId: 'ctx-live' }, data: { action: 'start', seconds: 1800 } }, { authContext: auth });
+      await persistPollOverlay({ authority: { supervisionContextId: 'ctx-live' }, data: { action: 'start',
+        transientOrder: 1, pollId: 'suspension-poll', question: 'Ready?', options: ['Yes', 'No'], pollExpiresAt: end } }, { authContext: auth });
+      await mutateClassroomOverlayState(state => ClassPilotPollReplayCore.reserveAnswer(state, 'suspension-poll',
+        RuntimeCore.classroomContextKey({ supervisionContextId: 'ctx-live' }), { selectedOption: 1, textResponse: null }, Date.now()), { authContext: auth });
+    }
     // Classroom control state is durable (local); FAB context and overlays are
     // browser-session scoped, so the production writer routes them to session.
     const stored = await new Promise((done) => chrome.storage.local.get(['classroomControlStateV1', 'studentAuthInvalidatingV1'],
@@ -2683,7 +2765,7 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
     return { authContextId, focusedReceipt, focusTargetId, hardExpiresAt: currentClassroomState?.hardExpiresAt, outcome: application?.outcome ?? null, classroom: currentClassroomState?.supervisionContextId ?? null, revision: currentClassroomState?.revision ?? null,
       storedClassroom: stored.classroomControlStateV1?.supervisionContextId ?? null, storedTimer: stored.classroomOverlayStateV1?.timer?.supervisionContextId ?? null,
       storedBinding: stored.fabContextV1?.binding ?? null, marker: stored.studentAuthInvalidatingV1 ?? null, overlayTimer: overlay?.timer?.supervisionContextId ?? null };
-  }, { origin: fixture.origin, includeFocus, includePrivateChat });
+  }, { origin: fixture.origin, includeFocus, includePrivateChat, includePoll });
   assert.equal(live.classroom, 'ctx-live', `fixture classroom state did not apply (${JSON.stringify(live)})`);
   assert.equal(live.storedClassroom, 'ctx-live', `fixture classroom state was not persisted (${JSON.stringify(live)})`);
   if (!includeFocus) assert.equal(live.storedTimer, 'ctx-live', `fixture timer overlay was not persisted (${JSON.stringify(live)})`);
@@ -2745,6 +2827,23 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
   assert.equal(restored.revision, includeFocus ? 42 : 41);
   assert.equal(restored.storedClassroom, 'ctx-live'); assert.equal(restored.marker, null); assert.equal(restored.startup, true);
   assert.equal(await stopPage.locator('#classpilot-auth-gate').count(), 0, 'an authenticated page must not be gated after suspension');
+  if (includePoll) {
+    const poll = await woken.evaluate(async () => {
+      const auth = captureAuthenticatedContext('poll wake check');
+      const before = (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY];
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: ['scopedAuthorityChecksV1',
+        'scheduledClassroomV1', 'classroomStateV1', 'pollReplaySafeV1'] }, auth);
+      await persistPollOverlay({ authority: { supervisionContextId: 'ctx-live' }, data: { action: 'start',
+        transientOrder: 1, pollId: 'suspension-poll', question: 'Ready?', options: ['Yes', 'No'],
+        pollExpiresAt: Date.now() + 3600000 } }, { authContext: auth });
+      const state = (await kv.get(CLASSROOM_OVERLAY_STORAGE_KEY))[CLASSROOM_OVERLAY_STORAGE_KEY];
+      return { before, poll: state.poll, cursor: Object.values(state.pollCursors)[0] };
+    });
+    assert.equal(poll.poll.response?.status, 'pending', JSON.stringify(poll)); assert.equal(poll.poll.response.selectedOption, 1);
+    assert.equal(poll.cursor.transientOrder, 1);
+    assert.equal(poll.poll.expiresAt, live.hardExpiresAt, 'Replay after real worker suspension preserves original poll deadline');
+    console.log('PASS managed native worker suspension preserves poll cursor, pending answer, and deadline');
+  }
   if (includeFocus) {
     const focused = await woken.evaluate(async () => ({ assignment: focusAssignment, status: publicFocusStatus(), expiresAt: currentClassroomState?.hardExpiresAt,
       protectedAssignment: (await durableSessionKv.get(FOCUS_ASSIGNMENT_KEY))[FOCUS_ASSIGNMENT_KEY],
@@ -2792,6 +2891,7 @@ async function checkWorkerSuspension({ context, worker, extensionId, fixture }, 
 await withBrowser({ caseName: 'worker-suspension-preserves-classroom', quietNetwork: true }, checkWorkerSuspension);
 await withBrowser({ caseName: 'focus-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, true));
 await withBrowser({ caseName: 'private-chat-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, false, true));
+await withBrowser({ caseName: 'poll-worker-suspension', quietNetwork: true }, environment => checkWorkerSuspension(environment, false, false, true));
 
 await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true }, async ({ context, worker, fixture }) => {
   fixture.state.allowFreshLogin = true;
@@ -2854,9 +2954,32 @@ await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true },
   const roster = await rpc(frame, { type: 'get-login-roster', gradeLevel: '' });
   assert.equal(roster?.success, true, `the sign-in frame must still load the roster (${JSON.stringify(roster)})`);
   assert.ok(roster.students.some((student) => student.name === 'Fresh Fixture'));
-  const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
-  assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
+  const parentUrl = page.url(), pageLoads = fixture.state.pageLoads;
+  const deviceId = await worker.evaluate(() => CONFIG.deviceId);
+  let loginFrameRetired = false;
+  try {
+    const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+    assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
+  } catch (error) {
+    // Proactive page reconciliation can observe the committed login and remove
+    // its nonce-bound iframe before the original response callback returns.
+    // Never resend credentials or accept another kind of RPC failure.
+    assert.match(error.message, /Execution context was destroyed|Frame was detached/i);
+    loginFrameRetired = true;
+  }
   await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  const committedLogin = await worker.evaluate(() => ({ token: CONFIG.studentToken, schoolId: CONFIG.schoolId,
+    deviceId: CONFIG.deviceId, studentId: CONFIG.activeStudentId, sessionId: CONFIG.activeStudentSessionId,
+    invalidating: studentAuthInvalidating, pending: studentAuthCommitPending }));
+  const { deviceId: committedDeviceId, ...committedIdentity } = committedLogin;
+  assert.ok(typeof committedDeviceId === 'string' && committedDeviceId.length > 0, 'the fresh login must have a real device binding');
+  if (deviceId) assert.equal(committedDeviceId, deviceId, 'an existing device binding must be retained');
+  assert.deepEqual(committedIdentity, { token: 'fresh-fixture-token-1', schoolId: 'recovery-school',
+    studentId: 'student-fresh-fixture', sessionId: 'login-fresh-fixture-1', invalidating: false, pending: false },
+  'a retired iframe is successful only after the exact fresh login is committed');
+  if (loginFrameRetired) assert.equal(frame.isDetached(), true, 'the original login frame must actually have retired');
+  assert.equal(page.url(), parentUrl, 'login completion cannot navigate the underlying page');
+  assert.equal(fixture.state.pageLoads, pageLoads, 'login completion cannot reload the underlying page');
   assert.equal(fixture.state.studentLoginRequests, 1);
   assert.ok(!(await decoyText()).includes('Fresh Fixture'), 'roster names must never reach page-owned DOM');
   console.log('PASS page-owned DOM never receives roster names; roster, login and kiosk launch refuse web-page content scripts; the sign-in frame still signs in');
