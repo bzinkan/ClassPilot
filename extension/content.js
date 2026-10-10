@@ -26,6 +26,8 @@ let timerAutoHideTimeout = null;
 let activeTimerIdentity = null;
 let activePollId = null;
 let activePollTeachingSessionId = null;
+let activePollState = null;
+const pollStateCursors = new Map();
 let studentTools = null;
 let studentToolsTimerKey = '';
 let studentToolsExpiry = null;
@@ -319,6 +321,8 @@ function clearStudentBoundUiForIdentityTransition() {
   clearPollCompletionTimeouts();
   activePollId = null;
   activePollTeachingSessionId = null;
+  activePollState = null;
+  pollStateCursors.clear();
   attentionModeActive = false;
   handRaised = false;
   messagingEnabled = false;
@@ -626,6 +630,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   // Poll handlers (kiosk-filtered)
+  if (message.type === 'poll-state-sync') {
+    if (isPassPilotKioskPage()) return false;
+    return withCurrentStudentMessageContext(message, () => {
+      applyCanonicalPollState(message.data || {});
+    }, sendResponse);
+  }
+
   if (message.type === 'poll') {
     if (isPassPilotKioskPage()) return false;
     return withCurrentStudentMessageContext(message, () => {
@@ -973,6 +984,12 @@ function reconcileKioskFabSuppression(kioskOrigin) {
 }
 
 function applyClassroomUiSnapshot(snapshot = {}) {
+    const incomingFab = snapshot.fabContext;
+    if (incomingFab?.binding === currentFabContext?.binding
+      && Number.isSafeInteger(incomingFab?.ownershipRevision)
+      && Number.isSafeInteger(currentFabContext?.ownershipRevision)
+      && incomingFab.ownershipRevision < currentFabContext.ownershipRevision) return;
+    if (snapshot.fabState) applyFabState({ ...snapshot.fabState, context: incomingFab });
     const attention = snapshot.classroomState?.restrictions?.attentionMode;
     if (attention?.active) {
       showAttentionOverlay(attention.message || 'Please look up!');
@@ -986,14 +1003,12 @@ function applyClassroomUiSnapshot(snapshot = {}) {
       stopTimerOverlay();
     }
     const poll = snapshot.overlays?.poll;
-    if (poll && !poll.response && poll.expiresAt > Date.now()) {
+    if (snapshot.pollState) {
+      applyCanonicalPollState(snapshot.pollState);
+    } else if (poll && !poll.response && poll.expiresAt > Date.now()) {
       showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId, poll.supervisionContextId, poll.responseType, poll.purpose);
     } else if (!poll) {
       hidePollOverlay();
-    }
-    if (snapshot.fabContext) currentFabContext = snapshot.fabContext;
-    if (snapshot.fabState) {
-      applyFabState({ ...snapshot.fabState, context: snapshot.fabContext });
     }
 }
 
@@ -2497,6 +2512,11 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null, su
   if (respondedPollIds.has(pollId)) {
     return;
   }
+  // A canonical replay must preserve typed text, the selected answer, and an
+  // in-flight submission in the existing document.
+  if (activePollId === pollId && studentClassroomKey(activePollTeachingSessionId)
+    === studentClassroomKey({ teachingSessionId, supervisionContextId })
+    && document.getElementById('classpilot-poll-overlay')) return;
   clearPollCompletionTimeouts();
   activePollId = pollId;
   activePollTeachingSessionId = studentClassroomContext({ teachingSessionId, supervisionContextId });
@@ -2545,6 +2565,76 @@ function showPollOverlay(pollId, question, options, teachingSessionId = null, su
   });
 }
 
+function applyCanonicalPollState(state) {
+  const cursor = state.cursor;
+  const context = studentClassroomContext(cursor || state.poll || state);
+  const key = studentClassroomKey(context);
+  if (!key || !cursor
+    || !Number.isSafeInteger(cursor.transientOrder) || cursor.transientOrder <= 0) return;
+  if (!captureStudentActionContext(context)) {
+    // A newly injected document can receive the canonical frame before its
+    // FAB/identity hydration callbacks. Re-read current authority and state;
+    // never infer classroom membership from the incoming poll alone.
+    requestClassroomOverlayState();
+    return;
+  }
+  if (cursor.supervisionContextId && cursor.contextAuthorityRevision !== currentFabContext?.contextAuthorityRevision) return;
+  const previous = pollStateCursors.get(key);
+  if (previous && (cursor.transientOrder < previous.transientOrder
+    || cursor.transientOrder === previous.transientOrder && (cursor.pollId !== previous.pollId || cursor.status !== previous.status))) return;
+  pollStateCursors.set(key, cursor);
+  const poll = state.poll;
+  if (cursor.status === 'closed' || !poll || poll.expiresAt <= Date.now()) {
+    if (studentClassroomKey(activePollTeachingSessionId) === key
+      && (activePollId === cursor.pollId || !activePollState?.transientOrder
+        || activePollState.transientOrder < cursor.transientOrder)) hidePollOverlay();
+    return;
+  }
+  if (poll.pollId !== cursor.pollId || poll.transientOrder !== cursor.transientOrder
+    || studentClassroomKey(poll) !== key || poll.supervisionContextId
+      && poll.contextAuthorityRevision !== currentFabContext?.contextAuthorityRevision) return;
+  if (poll.response?.status === 'completed') {
+    if (activePollId === poll.pollId) completePollResponse(poll.pollId, poll.response.selectedOption);
+    else {
+      if (studentClassroomKey(activePollTeachingSessionId) === key) hidePollOverlay();
+      respondedPollIds.add(poll.pollId);
+    }
+    activePollState = poll;
+    return;
+  }
+  showPollOverlay(poll.pollId, poll.question, poll.options, poll.teachingSessionId,
+    poll.supervisionContextId, poll.responseType, poll.purpose);
+  activePollState = poll;
+  if (poll.response?.status === 'pending') renderPendingPollResponse(poll);
+}
+
+function renderPendingPollResponse(poll) {
+  if (activePollId !== poll.pollId) return;
+  const overlay = document.getElementById('classpilot-poll-overlay');
+  if (!overlay) return;
+  overlay.querySelectorAll('.classpilot-poll-option').forEach(button => {
+    button.disabled = true;
+    button.classList.add('classpilot-poll-disabled');
+    if (Number(button.dataset.index) === poll.response.selectedOption) button.classList.add('classpilot-poll-selected');
+  });
+  const textarea = overlay.querySelector('#classpilot-exit-answer');
+  if (textarea) { textarea.value = poll.response.textResponse || ''; textarea.readOnly = true; }
+  let status = overlay.querySelector('#classpilot-poll-submit-status');
+  if (!status) {
+    status = document.createElement('p'); status.id = 'classpilot-poll-submit-status';
+    status.setAttribute('role', 'status'); overlay.querySelector('.classpilot-poll-body').appendChild(status);
+  }
+  status.textContent = 'Your answer is saved on this Chromebook. Waiting for confirmation.';
+  let retry = overlay.querySelector('#classpilot-poll-retry');
+  if (!retry) {
+    retry = document.createElement('button'); retry.id = 'classpilot-poll-retry'; retry.textContent = 'Retry saved answer';
+    lifecycle.listen(retry, 'click', () => submitPollResponse(poll.pollId, poll.response.selectedOption, retry,
+      poll.responseType === 'short_text' ? poll.response.textResponse : undefined));
+    overlay.querySelector('.classpilot-poll-body').appendChild(retry);
+  }
+  retry.disabled = retry.dataset.submitting === 'true';
+}
+
 function submitPollResponse(pollId, selectedIndex, button, textResponse) {
   if (button.dataset.submitting === 'true') return;
   const actionContext = captureStudentActionContext(activePollTeachingSessionId);
@@ -2581,6 +2671,10 @@ function submitPollResponse(pollId, selectedIndex, button, textResponse) {
     const error = chrome.runtime.lastError?.message || response?.error;
     if (error || !response?.success) {
       button.dataset.submitting = 'false';
+      if (response?.pending && activePollState?.response?.status === 'pending') {
+        renderPendingPollResponse(activePollState);
+        return;
+      }
       allButtons.forEach(btn => {
         btn.disabled = false;
         btn.classList.remove('classpilot-poll-disabled', 'classpilot-poll-selected');
@@ -2594,6 +2688,7 @@ function submitPollResponse(pollId, selectedIndex, button, textResponse) {
 
 function completePollResponse(pollId, selectedIndex) {
   if (!pollId || (activePollId && activePollId !== pollId)) return;
+  if (respondedPollIds.has(pollId)) return;
   respondedPollIds.add(pollId);
   // Show thank you message
   const body = document.querySelector('.classpilot-poll-body');
@@ -2625,6 +2720,7 @@ function hidePollOverlay() {
   clearPollCompletionTimeouts();
   activePollId = null;
   activePollTeachingSessionId = null;
+  activePollState = null;
   const overlay = document.getElementById('classpilot-poll-overlay');
   if (overlay) {
     overlay.classList.add('classpilot-poll-out');
@@ -3249,6 +3345,7 @@ function applyFabState(state = {}) {
   if (bindingChanged || sessionSetChanged) {
     clearStudentTools();
     respondedPollIds.clear();
+    pollStateCursors.clear();
     chatMessages = [];
     chatClosed = sessionEnded;
     // A teacher message held for the end of Attention left with its thread.

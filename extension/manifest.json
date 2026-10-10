@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ClassPilot",
-  "version": "2.9.8",
+  "version": "2.9.9",
   "minimum_chrome_version": "120",
   "description": "Privacy-aware classroom monitoring for managed Chromebooks. Displays active tab information to teachers with transparent disclosure.",
   "icons": {

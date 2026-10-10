@@ -1,0 +1,69 @@
+{
+  "start": {
+    "type": "remote-control",
+    "_msgId": "1960ceaa-0437-4305-9bd2-ead80bdda00e",
+    "commandId": "81105c3d-e49b-4c1f-bdf5-f1a7d580098a",
+    "studentId": "97832f2e-5469-4f42-9df1-115fae8e8649",
+    "studentSessionId": "520cbb53-973f-4218-9faa-33d76ceec21a",
+    "deliveryPolicy": "transient_action",
+    "expiresAt": "2026-10-10T14:45:05.446Z",
+    "command": {
+      "type": "poll",
+      "commandId": "81105c3d-e49b-4c1f-bdf5-f1a7d580098a",
+      "studentId": "97832f2e-5469-4f42-9df1-115fae8e8649",
+      "studentSessionId": "520cbb53-973f-4218-9faa-33d76ceec21a",
+      "deliveryPolicy": "transient_action",
+      "expiresAt": "2026-10-10T14:45:05.446Z",
+      "authority": {
+        "teachingSessionId": "85b04af6-dfcc-4f59-9885-802729398528",
+        "supervisionContextId": null
+      },
+      "teachingSessionId": "85b04af6-dfcc-4f59-9885-802729398528",
+      "supervisionContextId": null,
+      "data": {
+        "action": "start",
+        "pollId": "5cfa4195-f603-413f-9721-ac77a1df8e88",
+        "options": [
+          "A",
+          "B"
+        ],
+        "purpose": "poll",
+        "question": "Canonical",
+        "expiresAt": "2026-10-11T02:44:05.490Z",
+        "responseType": "choice",
+        "pollExpiresAt": "2026-10-11T02:44:05.490Z",
+        "transientOrder": 18,
+        "commandId": "81105c3d-e49b-4c1f-bdf5-f1a7d580098a"
+      }
+    }
+  },
+  "close": {
+    "type": "remote-control",
+    "_msgId": "1337e910-2d3c-48fb-bad9-5e4b5b6271e0",
+    "commandId": "589760db-3a27-4020-b937-206dfb85c0a5",
+    "studentId": "97832f2e-5469-4f42-9df1-115fae8e8649",
+    "studentSessionId": "520cbb53-973f-4218-9faa-33d76ceec21a",
+    "deliveryPolicy": "transient_action",
+    "expiresAt": "2026-10-10T14:45:05.971Z",
+    "command": {
+      "type": "poll",
+      "commandId": "589760db-3a27-4020-b937-206dfb85c0a5",
+      "studentId": "97832f2e-5469-4f42-9df1-115fae8e8649",
+      "studentSessionId": "520cbb53-973f-4218-9faa-33d76ceec21a",
+      "deliveryPolicy": "transient_action",
+      "expiresAt": "2026-10-10T14:45:05.971Z",
+      "authority": {
+        "teachingSessionId": "85b04af6-dfcc-4f59-9885-802729398528",
+        "supervisionContextId": null
+      },
+      "teachingSessionId": "85b04af6-dfcc-4f59-9885-802729398528",
+      "supervisionContextId": null,
+      "data": {
+        "action": "close",
+        "pollId": "5cfa4195-f603-413f-9721-ac77a1df8e88",
+        "transientOrder": 19,
+        "commandId": "589760db-3a27-4020-b937-206dfb85c0a5"
+      }
+    }
+  }
+}
