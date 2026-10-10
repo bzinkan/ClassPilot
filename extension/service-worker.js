@@ -397,11 +397,12 @@ async function wsSend(data, expectedAuthContext = null) {
     || wsTransportIdentity?.serverOrigin !== authContext.serverOrigin
   ) return false;
   const str = typeof data === 'string' ? data : JSON.stringify(data);
+  const sendGeneration = wsConnectionGeneration;
   try {
     const response = await sendToOffscreen({
       type: 'WS_SEND',
       data: str,
-      connectionGeneration: wsConnectionGeneration,
+      connectionGeneration: sendGeneration,
       authContextId: authContext.authContextId,
       serverOrigin: authContext.serverOrigin,
     });
@@ -410,8 +411,29 @@ async function wsSend(data, expectedAuthContext = null) {
   } catch (error) {
     if (isAuthContextCancellation(error)) return false;
     console.warn('[WebSocket] Send deferred:', safeDiagnosticError(error));
+    noteWebSocketTransportNotOpen(error, sendGeneration, authContext);
     return false;
   }
+}
+
+// The offscreen proxy answers WS_NOT_OPEN when it no longer holds an open
+// socket for this generation: the document was recreated, or the socket closed
+// and its close event never reached this worker. The worker used to keep
+// believing it was connected, which pinned FAB reconciliation to the
+// five-minute cadence and silently dropped every later frame.
+function noteWebSocketTransportNotOpen(error, sendGeneration, authContext) {
+  if (error?.code !== 'WS_NOT_OPEN') return;
+  if (!wsConnected || sendGeneration !== wsConnectionGeneration) return;
+  wsConnected = false;
+  wsTransportConnected = false;
+  wsAuthenticatedGeneration = 0;
+  settleWebSocketAuthAttempt(sendGeneration);
+  try {
+    assertAuthenticatedContextCurrent(authContext, 'WebSocket transport loss');
+  } catch {
+    return;
+  }
+  connectWebSocket().catch(() => {});
 }
 
 function normalizeCommandId(commandId) {
@@ -835,6 +857,14 @@ let lastScreenshotError = '';
 let screenshotAttemptCount = 0;
 let screenshotSuccessCount = 0;
 let wsReconnectBackoffMs = 10000; // Start with 10s to reduce console noise during deploys
+// connectWebSocketNow() returns as soon as the offscreen proxy accepts
+// WS_CONNECT, long before the server answers the `auth` frame, and every
+// authenticated response (each ten-second heartbeat included) re-enters the
+// connect path. Without a bounded grace the second caller replaced the socket
+// the first caller was still authenticating: about one in five student
+// WebSocket authentications ended that way in production.
+const WS_AUTH_INFLIGHT_GRACE_MS = 15 * 1000;
+const WS_RECOVERY_AUTH_IN_FLIGHT = 'auth-in-flight';
 let navigationDebounceTimers = new Map();
 let pendingNavigationEvents = new Map();
 let idleListenerReady = false;
@@ -6292,6 +6322,12 @@ async function adoptAuthenticatedStudentBindingNow(raw, reason, responseGuard) {
   await cleanupRetiredExactBoundStorage(adoptedAuthContext, `${reason} storage adoption`);
   assertAuthMutationCurrent(mutationGeneration, reason);
   assertAuthenticatedResponseGuardCurrent(responseGuard, reason);
+  // Deliberate: every adopted response, each ten-second heartbeat included,
+  // re-enters the connect path. It is the fast reconnect lane after a socket
+  // drop (a packed extension's 'ws-reconnect' alarm cannot fire sooner than
+  // about thirty seconds) and it re-probes the offscreen document. The bounded
+  // in-flight guard in recoverOffscreenWebSocketStatus keeps this re-entry
+  // from replacing a socket that is still authenticating.
   if (trackingState !== TRACKING_STATES.OFF) connectWebSocket().catch(() => {});
   if (binding.bindingVersion === 2) {
     observeExactStudentControlRevision(raw, adoptedAuthContext, `${reason} control revision`);
@@ -8167,9 +8203,30 @@ async function removeAcceptedCommandAckReceipts(receipts, authContext) {
   return Math.max(0, entries.length - remaining);
 }
 
+let commandAckFlushTimer = null;
+let commandAckFlushTimerAt = 0;
+
 function scheduleCommandAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
+  const normalizedDelay = Math.max(1000, Number(delayMs || 0));
+  const timerAt = Date.now() + normalizedDelay;
+  // A packed extension's alarms fire no sooner than 30 s, so the alarm alone
+  // turned the five-second HTTP fallback into a thirty-second one. Keep an
+  // in-memory timer while this worker is alive; the alarm stays as the durable
+  // fallback across worker termination.
+  if (normalizedDelay < 30 * 1000
+    && (!commandAckFlushTimer || commandAckFlushTimerAt > timerAt)) {
+    if (commandAckFlushTimer) clearTimeout(commandAckFlushTimer);
+    commandAckFlushTimerAt = timerAt;
+    commandAckFlushTimer = setTimeout(() => {
+      commandAckFlushTimer = null;
+      commandAckFlushTimerAt = 0;
+      compactCommandAckStorageOnly()
+        .then(() => flushCommandAckOutbox({ forceHttp: true }))
+        .catch(() => {});
+    }, normalizedDelay);
+  }
   chrome.alarms.get(COMMAND_ACK_FLUSH_ALARM, (existing) => {
-    const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+    const when = Date.now() + normalizedDelay;
     if (
       !existing
       || Number(existing.scheduledTime || 0) <= Date.now()
@@ -8381,9 +8438,28 @@ async function flushCommandAckOutbox(options = {}) {
   return owner.promise;
 }
 
+let chatAckFlushTimer = null;
+let chatAckFlushTimerAt = 0;
+
 function scheduleChatAckFlush(delayMs = COMMAND_ACK_HTTP_FALLBACK_MS) {
+  const normalizedDelay = Math.max(1000, Number(delayMs || 0));
+  const timerAt = Date.now() + normalizedDelay;
+  // Same packed-alarm floor as the command acknowledgement flush above: the
+  // in-memory timer keeps the nominal delay, the alarm survives termination.
+  if (normalizedDelay < 30 * 1000
+    && (!chatAckFlushTimer || chatAckFlushTimerAt > timerAt)) {
+    if (chatAckFlushTimer) clearTimeout(chatAckFlushTimer);
+    chatAckFlushTimerAt = timerAt;
+    chatAckFlushTimer = setTimeout(() => {
+      chatAckFlushTimer = null;
+      chatAckFlushTimerAt = 0;
+      compactChatAckStorageOnly()
+        .then(() => flushChatAckOutbox({ forceHttp: true }))
+        .catch(() => {});
+    }, normalizedDelay);
+  }
   chrome.alarms.get(CHAT_ACK_FLUSH_ALARM, (existing) => {
-    const when = Date.now() + Math.max(1000, Number(delayMs || 0));
+    const when = Date.now() + normalizedDelay;
     if (
       !existing
       || Number(existing.scheduledTime || 0) <= Date.now()
@@ -26015,6 +26091,28 @@ async function closeReportedOffscreenWebSocket(status) {
   }).catch(() => {});
 }
 
+// True only while THIS worker's own connect attempt for the reported
+// generation is still unsettled, its socket is CONNECTING or OPEN, and the
+// bounded grace has not elapsed. A restarted worker has no response guard, a
+// settled attempt (auth-success, auth-error or close) is never in flight, and a
+// socket that is CLOSING or CLOSED is always replaceable.
+function offscreenAuthenticationInFlight(status, generation, authContext, nowValue = Date.now()) {
+  const guard = wsAuthenticatedResponseGuard;
+  if (!guard || guard.authSettled === true) return false;
+  if (guard.connectionGeneration !== generation || generation !== wsConnectionGeneration) return false;
+  if (wsAuthenticatedGeneration === generation) return false;
+  if (guard.authContext?.authContextId !== authContext.authContextId) return false;
+  const readyState = Number(status?.readyState);
+  if (readyState !== 0 && readyState !== 1) return false;
+  const elapsedMs = nowValue - Number(guard.requestStartedAt || 0);
+  return elapsedMs >= 0 && elapsedMs < WS_AUTH_INFLIGHT_GRACE_MS;
+}
+
+function settleWebSocketAuthAttempt(generation) {
+  const guard = wsAuthenticatedResponseGuard;
+  if (guard && guard.connectionGeneration === Number(generation)) guard.authSettled = true;
+}
+
 async function recoverOffscreenWebSocketStatus(authContext) {
   assertAuthenticatedContextCurrent(authContext, 'WebSocket recovery');
   const status = await queryOffscreenWebSocketStatus();
@@ -26071,6 +26169,11 @@ async function recoverOffscreenWebSocketStatus(authContext) {
     wsAuthenticatedGeneration = 0;
     wsTransportIdentity = null;
     return false;
+  }
+  // Leave the current generation's own unsettled authentication alone; its
+  // auth-success, its close, or the grace expiry decides what happens next.
+  if (offscreenAuthenticationInFlight(status, generation, authContext)) {
+    return WS_RECOVERY_AUTH_IN_FLIGHT;
   }
   wsTransportIdentity = {
     connectionGeneration: wsConnectionGeneration,
@@ -26148,7 +26251,12 @@ async function connectWebSocketNow(requestedAuthContext = null) {
   await ensureOffscreenDocument();
   assertAuthenticatedContextCurrent(authContext, 'WebSocket connect');
 
-  if (await recoverOffscreenWebSocketStatus(authContext)) {
+  const recovered = await recoverOffscreenWebSocketStatus(authContext);
+  if (recovered === WS_RECOVERY_AUTH_IN_FLIGHT) {
+    console.log('[WebSocket] Authentication already in flight for generation', wsConnectionGeneration);
+    return true;
+  }
+  if (recovered) {
     console.log('[WebSocket] Recovered authenticated offscreen transport');
     return true;
   }
@@ -26277,6 +26385,7 @@ async function processWsEvent(event, data, generation, authContext) {
     wsConnected = false;
     wsTransportConnected = false;
     wsAuthenticatedGeneration = 0;
+    settleWebSocketAuthAttempt(generation);
     if (wsTransportIdentity === closingTransportIdentity) wsTransportIdentity = null;
     setObservedState(false, 'ws-closed');
     await cleanupTeacherBroadcast('ws-closed', {
@@ -26342,6 +26451,7 @@ async function handleWsMessage(
       if (message.type === 'auth-error' || message.type === 'auth-failed') {
         wsConnected = false;
         wsAuthenticatedGeneration = 0;
+        settleWebSocketAuthAttempt(connectionGeneration);
         if (activeLiveViewNegotiationId) {
           await stopScreenShare({ notifyServer: false, reason: 'student-websocket-auth-rejected' });
         }
@@ -26385,6 +26495,7 @@ async function handleWsMessage(
         wsTransportConnected = true;
         wsConnected = true;
         wsAuthenticatedGeneration = wsConnectionGeneration;
+        settleWebSocketAuthAttempt(wsConnectionGeneration);
         wsReconnectBackoffMs = 10000;
         chrome.alarms.clear('ws-reconnect');
         await flushCommandAckOutbox().catch(() => {});

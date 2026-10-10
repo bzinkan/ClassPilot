@@ -986,4 +986,93 @@ assert.equal(
 );
 assert.equal(evaluate('screenshotCadenceSchedule'), null);
 
+// 2.9.8 liveness. The server answers every application ping with a pong, so an
+// authenticated socket that stays silent across consecutive pings is half-open.
+// It is retired at once (a half-open closing handshake can take a minute) and
+// the close is reported to the worker with a bounded detail.
+const pingFrame = JSON.stringify({ type: 'ping' });
+const pongEvent = `{ data: ${JSON.stringify(JSON.stringify({ type: 'pong' }))} }`;
+const authSuccessEvent = `{ data: ${JSON.stringify(JSON.stringify({ type: 'auth-success' }))} }`;
+const countPings = (socket) => socket.sent.filter((frame) => frame === pingFrame).length;
+const closeEventsFor = (generation) => relayed.filter((message) => (
+  message.type === 'WS_EVENT'
+  && message.event === 'close'
+  && message.connectionGeneration === generation
+));
+
+evaluate(`handleWsConnect(
+  'wss://school-pilot.net/ws',
+  { type: 'auth' },
+  40,
+  'liveness-context',
+  'https://school-pilot.net'
+)`);
+const intervalsBeforeLiveness = intervals.length;
+evaluate(`proxyWs.readyState = WebSocket.OPEN; proxyWs.onopen()`);
+assert.equal(intervals.length, intervalsBeforeLiveness + 1);
+const livenessKeepalive = intervals.at(-1);
+assert.equal(livenessKeepalive.delay, 25000);
+evaluate(`proxyWs.onmessage(${authSuccessEvent})`);
+const livenessSocket = evaluate('proxyWs');
+
+// An answered ping never accumulates, however much wall-clock time passes.
+livenessKeepalive.callback();
+assert.equal(countPings(livenessSocket), 1);
+assert.equal(evaluate('proxyUnansweredPings'), 1);
+evaluate(`proxyWs.onmessage(${pongEvent})`);
+assert.equal(evaluate('proxyUnansweredPings'), 0);
+evaluate('proxyLastInboundAt = Date.now() - 10 * 60 * 1000');
+livenessKeepalive.callback();
+assert.equal(countPings(livenessSocket), 2, 'one unanswered ping is not a silent socket');
+assert.equal(evaluate('wsStatus().transportOpen'), true);
+evaluate(`proxyWs.onmessage(${pongEvent})`);
+
+// Two unanswered pings inside the silence limit keep the socket.
+livenessKeepalive.callback();
+livenessKeepalive.callback();
+assert.equal(evaluate('proxyUnansweredPings'), 2);
+livenessKeepalive.callback();
+assert.equal(countPings(livenessSocket), 5, 'recent inbound traffic defers retirement');
+assert.equal(livenessSocket.closed, false);
+
+// Two or more unanswered pings plus bounded silence retire it without a ping.
+evaluate('proxyLastInboundAt = Date.now() - WS_LIVENESS_SILENCE_LIMIT_MS');
+livenessKeepalive.callback();
+assert.equal(countPings(livenessSocket), 5, 'a retired socket is not pinged again');
+assert.equal(livenessSocket.closed, true);
+assert.equal(livenessSocket.onclose, null);
+assert.equal(livenessKeepalive.cleared, true);
+const silentStatus = evaluate('wsStatus()');
+assert.equal(silentStatus.transportOpen, false);
+assert.equal(silentStatus.authenticated, false);
+assert.equal(silentStatus.connectionGeneration, 40);
+const livenessCloses = closeEventsFor(40);
+assert.equal(livenessCloses.length, 1, 'retirement reports exactly one close');
+assert.deepEqual(JSON.parse(livenessCloses[0].data), { code: 4000, clean: false });
+
+// An unauthenticated socket is never retired by liveness: the worker's bounded
+// authentication grace owns that window.
+evaluate(`handleWsConnect(
+  'wss://school-pilot.net/ws',
+  { type: 'auth' },
+  41,
+  'liveness-context',
+  'https://school-pilot.net'
+)`);
+evaluate(`proxyWs.readyState = WebSocket.OPEN; proxyWs.onopen()`);
+const unauthenticatedKeepalive = intervals.at(-1);
+const unauthenticatedSocket = evaluate('proxyWs');
+unauthenticatedKeepalive.callback();
+unauthenticatedKeepalive.callback();
+evaluate('proxyLastInboundAt = Date.now() - 10 * 60 * 1000');
+unauthenticatedKeepalive.callback();
+assert.equal(unauthenticatedSocket.closed, false);
+assert.equal(closeEventsFor(41).length, 0);
+
+// An ordinary close carries its code so the worker can tell causes apart.
+evaluate(`proxyWs.onclose({ code: 1011, wasClean: true })`);
+const ordinaryCloses = closeEventsFor(41);
+assert.equal(ordinaryCloses.length, 1);
+assert.deepEqual(JSON.parse(ordinaryCloses[0].data), { code: 1011, clean: true });
+
 console.log('ClassPilot offscreen WebSocket, Live View identity, and screenshot cadence test passed.');

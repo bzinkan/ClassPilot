@@ -2,7 +2,15 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The unpublished successor is now **2.9.7**. Its Attention overlay preserves
+The prepared release is **2.9.8**, a connection-smoothing release on top of
+2.9.7: a re-entered connect no longer replaces the socket that is still
+authenticating, a silent (half-open) socket is retired after two unanswered
+pings, and command/chat acknowledgement fallbacks keep their five-second delay
+in the packed build. It adds no permission, capability, managed-policy key or
+collected data. See the
+[2.9.8 candidate record](../docs/CLASS_PILOT_2_9_8_CANDIDATE.md).
+
+The 2.9.7 feature set it carries: the Attention overlay preserves
 the underlying page, navigation and independent restriction/authentication
 policies; browser UI remains available. Private conversations negotiate
 `privateChatLifecycleV1` with scoped authority and durable student sends.
