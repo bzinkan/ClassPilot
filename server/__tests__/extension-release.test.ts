@@ -18,9 +18,94 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("2.9.7");
+    expect(manifest.version).toBe("2.9.8");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
+  });
+
+  it("2.9.8: keeps one socket per authentication attempt and bounds silent sockets and acknowledgement fallbacks", () => {
+    const serviceWorker = readRepoFile("extension/service-worker.js");
+    const offscreen = readRepoFile("extension/offscreen.js");
+    const between = (source: string, start: string, end: string) => {
+      const from = source.indexOf(start);
+      expect(from, `${start} should exist`).toBeGreaterThan(-1);
+      const to = source.indexOf(end, from + start.length);
+      expect(to, `${end} should follow ${start}`).toBeGreaterThan(from);
+      return source.slice(from, to);
+    };
+
+    // The primary cadence constants were never pinned before 2.9.8.
+    expect(serviceWorker).toContain("const HEARTBEAT_INTERVAL_MS = 10000;");
+    expect(serviceWorker).toContain("let wsReconnectBackoffMs = 10000;");
+    expect(serviceWorker).toContain("const COMMAND_ACK_HTTP_FALLBACK_MS = 5000;");
+    expect(serviceWorker).toContain("const WS_AUTH_INFLIGHT_GRACE_MS = 15 * 1000;");
+    expect(offscreen).toContain("}, 25000);");
+
+    // A re-entered connect must not replace the socket whose authentication
+    // this worker is still awaiting. The guard sits after the fail-private
+    // Live View branch and before any generation bump.
+    const inFlight = between(
+      serviceWorker,
+      "function offscreenAuthenticationInFlight(",
+      "function settleWebSocketAuthAttempt(",
+    );
+    expect(inFlight).toContain("if (!guard || guard.authSettled === true) return false;");
+    expect(inFlight).toContain("if (readyState !== 0 && readyState !== 1) return false;");
+    expect(inFlight).toContain("return elapsedMs >= 0 && elapsedMs < WS_AUTH_INFLIGHT_GRACE_MS;");
+    const recover = between(
+      serviceWorker,
+      "async function recoverOffscreenWebSocketStatus(",
+      "async function connectWebSocket()",
+    );
+    expect(recover.indexOf("if (offscreenAuthenticationInFlight(status, generation, authContext)) {"))
+      .toBeGreaterThan(recover.indexOf("if (status.liveViewIdentity) {"));
+    expect(recover).toContain("return WS_RECOVERY_AUTH_IN_FLIGHT;");
+    const connectNow = between(
+      serviceWorker,
+      "async function connectWebSocketNow(",
+      "function handleWsEvent(",
+    );
+    expect(connectNow.indexOf("if (recovered === WS_RECOVERY_AUTH_IN_FLIGHT) {"))
+      .toBeGreaterThan(-1);
+    expect(connectNow.indexOf("if (recovered === WS_RECOVERY_AUTH_IN_FLIGHT) {"))
+      .toBeLessThan(connectNow.indexOf("wsConnectionGeneration += 1;"));
+    // Every settlement path ends the grace: auth-success, auth-error, close.
+    expect(serviceWorker).toContain("settleWebSocketAuthAttempt(wsConnectionGeneration);");
+    expect(serviceWorker).toContain("settleWebSocketAuthAttempt(connectionGeneration);");
+    expect(serviceWorker).toContain("settleWebSocketAuthAttempt(generation);");
+
+    // A packed extension's alarms fire no sooner than 30 s, so each short
+    // acknowledgement fallback keeps an in-memory timer and the alarm.
+    for (const [start, end, flush] of [
+      ["function scheduleCommandAckFlush(", "function enqueueCommandAck(", "flushCommandAckOutbox({ forceHttp: true })"],
+      ["function scheduleChatAckFlush(", "function enqueueChatAck(", "flushChatAckOutbox({ forceHttp: true })"],
+    ]) {
+      const body = between(serviceWorker, start, end);
+      expect(body).toContain("normalizedDelay < 30 * 1000");
+      expect(body).toContain("setTimeout(() => {");
+      expect(body).toContain(flush);
+      expect(body).toMatch(/chrome\.alarms\.create\((?:COMMAND|CHAT)_ACK_FLUSH_ALARM, \{ when \}\);/);
+    }
+
+    // The worker stops believing in a socket the proxy no longer holds.
+    const notOpen = between(
+      serviceWorker,
+      "function noteWebSocketTransportNotOpen(",
+      "connectWebSocket().catch(() => {});",
+    );
+    expect(notOpen).toContain("if (error?.code !== 'WS_NOT_OPEN') return;");
+    expect(notOpen).toContain("if (!wsConnected || sendGeneration !== wsConnectionGeneration) return;");
+
+    // Client-side liveness: two unanswered pings plus bounded silence retire an
+    // authenticated socket without waiting for its closing handshake.
+    expect(offscreen).toContain("const WS_LIVENESS_MAX_UNANSWERED_PINGS = 2;");
+    expect(offscreen).toContain("const WS_LIVENESS_SILENCE_LIMIT_MS = 50 * 1000;");
+    const keepalive = between(offscreen, "wsKeepAliveTimer = setInterval(() => {", "}, 25000);");
+    expect(keepalive).toContain("&& proxyAuthenticated");
+    expect(keepalive).toContain("&& proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS");
+    expect(keepalive.indexOf("closeSilentProxySocket(connection, connectionGeneration);"))
+      .toBeLessThan(keepalive.indexOf("proxyWs.send(JSON.stringify({ type: 'ping' }));"));
+    expect(offscreen).toContain("relayWsEvent('close', wsCloseDetail(event?.code, event?.wasClean));");
   });
 
   it("2.9.4: completed failures recover without migration replay or timeout takeover", () => {
@@ -1179,7 +1264,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(offscreen).toContain("Every capture attempt is a new negotiation");
     expect(offscreen).toContain("track.onended = () =>");
     expect(offscreen).toContain("peerConnection.onconnectionstatechange = null");
-    expect(offscreen).toMatch(/proxyWs\.onclose = \(\) => \{[\s\S]*stopScreenShare\(\)/);
+    expect(offscreen).toMatch(/proxyWs\.onclose = \((?:event)?\) => \{[\s\S]*stopScreenShare\(\)/);
     expect(offscreen).toMatch(/payload\?\.type === 'auth-error'[\s\S]*stopScreenShare\(\)/);
     expect(serviceWorker).toContain("function revokeRetiredOffscreenAuthority(");
     expect(serviceWorker).toMatch(/function abortActiveAuthContext\(\)[\s\S]*revokeRetiredOffscreenAuthority\(retiredLiveViewContext, retiredTransportIdentity\)/);

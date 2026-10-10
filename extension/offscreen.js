@@ -54,6 +54,16 @@ let proxyAuthenticated = false;
 let proxyUrl = null;
 let proxyAuthContextId = null;
 let proxyServerOrigin = null;
+// Client-side liveness. The server answers every application ping with a
+// {type:'pong'} frame, so an authenticated socket that stays silent across
+// consecutive pings is half-open (Wi-Fi roam, sleep, NAT rebinding). Nothing
+// else surfaces that state: the browser answers protocol pings itself, and a
+// half-open socket keeps readyState OPEN until TCP gives up.
+const WS_LIVENESS_MAX_UNANSWERED_PINGS = 2;
+const WS_LIVENESS_SILENCE_LIMIT_MS = 50 * 1000;
+const WS_LIVENESS_CLOSE_CODE = 4000;
+let proxyLastInboundAt = 0;
+let proxyUnansweredPings = 0;
 let screenshotCadenceTimer = null;
 let screenshotCadencePhaseTimer = null;
 let screenshotCadenceExpiryTimer = null;
@@ -426,6 +436,33 @@ async function sendLiveViewAttemptTelemetry(outcome, expectedPeer = peerConnecti
   }, attempt);
 }
 
+function wsCloseDetail(code, clean) {
+  const numericCode = Number(code);
+  return JSON.stringify({
+    code: Number.isInteger(numericCode) ? numericCode : 0,
+    clean: clean === true,
+  });
+}
+
+// A half-open socket can take a minute to finish its closing handshake, so do
+// not wait for onclose: retire the socket now and report the close ourselves.
+function closeSilentProxySocket(connection, connectionGeneration) {
+  if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return false;
+  if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  try {
+    connection.onopen = null;
+    connection.onmessage = null;
+    connection.onerror = null;
+    connection.onclose = null;
+    connection.close(WS_LIVENESS_CLOSE_CODE, 'inbound-silence');
+  } catch (e) { /* ignore */ }
+  proxyWs = null;
+  proxyAuthenticated = false;
+  stopScreenShare();
+  relayWsEvent('close', wsCloseDetail(WS_LIVENESS_CLOSE_CODE, false));
+  return true;
+}
+
 function relayWsEvent(event, data) {
   chrome.runtime.sendMessage({
     type: 'WS_EVENT',
@@ -499,6 +536,8 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
   proxyWs.onopen = () => {
     if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.log('[Offscreen-WS] Connected');
+    proxyLastInboundAt = Date.now();
+    proxyUnansweredPings = 0;
     relayWsEvent('open');
     // Send auth immediately if provided
     if (authPayload && proxyWs.readyState === WebSocket.OPEN) {
@@ -512,13 +551,26 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
     if (wsKeepAliveTimer) clearInterval(wsKeepAliveTimer);
     wsKeepAliveTimer = setInterval(() => {
       if (proxyWs && proxyWs.readyState === WebSocket.OPEN) {
+        if (
+          proxyWs === connection
+          && proxyAuthenticated
+          && proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS
+          && Date.now() - proxyLastInboundAt >= WS_LIVENESS_SILENCE_LIMIT_MS
+        ) {
+          console.warn('[Offscreen-WS] Silent across consecutive pings; retiring the socket');
+          closeSilentProxySocket(connection, connectionGeneration);
+          return;
+        }
         proxyWs.send(JSON.stringify({ type: 'ping' }));
+        proxyUnansweredPings += 1;
       }
     }, 25000);
   };
 
   proxyWs.onmessage = (event) => {
     if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
+    proxyLastInboundAt = Date.now();
+    proxyUnansweredPings = 0;
     try {
       const payload = JSON.parse(event.data);
       if (payload?.type === 'auth-success') proxyAuthenticated = true;
@@ -538,14 +590,14 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
     relayWsEvent('error');
   };
 
-  proxyWs.onclose = () => {
+  proxyWs.onclose = (event) => {
     if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.log('[Offscreen-WS] Disconnected');
     if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
     proxyWs = null;
     proxyAuthenticated = false;
     stopScreenShare();
-    relayWsEvent('close');
+    relayWsEvent('close', wsCloseDetail(event?.code, event?.wasClean));
   };
   return wsStatus();
 }

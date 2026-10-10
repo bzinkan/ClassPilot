@@ -3279,6 +3279,184 @@ async function main() {
       offscreenRecoveryIdentity.generationAfterMismatch + 1,
     );
 
+    // 2.9.8: sign-in shape. The tracking transition connects, then every
+    // adopted response (the first heartbeat included) re-enters the connect
+    // path while that socket is still authenticating. Through 2.9.7 each
+    // re-entry replaced the in-flight socket with a new generation.
+    const inFlightAuthentication = await worker.evaluate(async () => {
+      const original = {
+        queryOffscreenWebSocketStatus,
+        closeReportedOffscreenWebSocket,
+        sendToOffscreen,
+        ensureOffscreenDocument,
+        expireManualAuthIfStale,
+        reserveProtocolPolicyRequestGeneration,
+        reserveScreenshotPolicyRequestGeneration,
+        flushCommandAckOutbox,
+        flushChatAckOutbox,
+        generation: wsConnectionGeneration,
+        connected: wsConnected,
+        transportConnected: wsTransportConnected,
+        authenticatedGeneration: wsAuthenticatedGeneration,
+        transportIdentity: wsTransportIdentity,
+        responseGuard: wsAuthenticatedResponseGuard,
+        trackingState,
+        backoff: wsReconnectBackoffMs,
+      };
+      const authContext = captureAuthenticatedContext('in-flight authentication fixture');
+      const graceMs = typeof WS_AUTH_INFLIGHT_GRACE_MS === 'number' ? WS_AUTH_INFLIGHT_GRACE_MS : 15_000;
+      const connects = [];
+      let proxy = { generation: 0, readyState: 3, authenticated: false };
+      try {
+        flushCommandAckOutbox = async () => {};
+        flushChatAckOutbox = async () => {};
+        ensureOffscreenDocument = async () => {};
+        expireManualAuthIfStale = async () => false;
+        reserveProtocolPolicyRequestGeneration = () => 0;
+        reserveScreenshotPolicyRequestGeneration = () => 0;
+        closeReportedOffscreenWebSocket = async () => {
+          proxy = { generation: 0, readyState: 3, authenticated: false };
+        };
+        queryOffscreenWebSocketStatus = async () => ({
+          success: true,
+          connectionGeneration: proxy.generation,
+          readyState: proxy.readyState,
+          transportOpen: proxy.readyState === 1,
+          authenticated: proxy.authenticated,
+          authContextId: proxy.generation ? authContext.authContextId : null,
+          serverOrigin: proxy.generation ? authContext.serverOrigin : null,
+          liveViewIdentity: null,
+        });
+        sendToOffscreen = async (message) => {
+          if (message.type === 'WS_CONNECT') {
+            connects.push(message.connectionGeneration);
+            proxy = {
+              generation: message.connectionGeneration,
+              readyState: 0,
+              authenticated: false,
+            };
+            return {
+              success: true,
+              connectionGeneration: message.connectionGeneration,
+              authContextId: message.authContextId,
+              serverOrigin: message.serverOrigin,
+            };
+          }
+          return { success: true };
+        };
+        trackingState = TRACKING_STATES.ACTIVE;
+        wsConnected = false;
+        wsAuthenticatedGeneration = 0;
+
+        const first = await connectWebSocket();
+        const firstGeneration = wsConnectionGeneration;
+        const connectsAfterFirst = connects.length;
+        const whileConnecting = await connectWebSocket();
+        proxy.readyState = 1; // transport open, auth frame sent, no answer yet
+        const whileUnauthenticated = await connectWebSocket();
+        proxy.authenticated = true; // proxy saw auth-success; worker has not adopted it
+        const whileAdopting = await connectWebSocket();
+        const connectedWhileAdopting = wsConnected;
+        proxy.authenticated = false;
+        const connectsWithinGrace = connects.length;
+        const generationWithinGrace = wsConnectionGeneration;
+
+        // The grace is bounded: an attempt that never settles is replaced.
+        if (wsAuthenticatedResponseGuard) {
+          wsAuthenticatedResponseGuard.requestStartedAt = Date.now() - graceMs - 1;
+        }
+        const afterGrace = await connectWebSocket();
+        const connectsAfterGrace = connects.length;
+        const generationAfterGrace = wsConnectionGeneration;
+
+        // A settled attempt is replaceable at once, even inside its grace.
+        proxy.readyState = 1;
+        const insideSecondGrace = await connectWebSocket();
+        const connectsInsideSecondGrace = connects.length;
+        if (typeof settleWebSocketAuthAttempt === 'function') {
+          settleWebSocketAuthAttempt(wsConnectionGeneration);
+        }
+        const afterSettlement = await connectWebSocket();
+        return {
+          first,
+          whileConnecting,
+          whileUnauthenticated,
+          whileAdopting,
+          connectedWhileAdopting,
+          insideSecondGrace,
+          afterGrace,
+          afterSettlement,
+          firstGeneration,
+          generationWithinGrace,
+          generationAfterGrace,
+          connectsAfterFirst,
+          connectsWithinGrace,
+          connectsAfterGrace,
+          connectsInsideSecondGrace,
+          connectsAfterSettlement: connects.length,
+          startGeneration: original.generation,
+        };
+      } finally {
+        queryOffscreenWebSocketStatus = original.queryOffscreenWebSocketStatus;
+        closeReportedOffscreenWebSocket = original.closeReportedOffscreenWebSocket;
+        sendToOffscreen = original.sendToOffscreen;
+        ensureOffscreenDocument = original.ensureOffscreenDocument;
+        expireManualAuthIfStale = original.expireManualAuthIfStale;
+        reserveProtocolPolicyRequestGeneration = original.reserveProtocolPolicyRequestGeneration;
+        reserveScreenshotPolicyRequestGeneration = original.reserveScreenshotPolicyRequestGeneration;
+        flushCommandAckOutbox = original.flushCommandAckOutbox;
+        flushChatAckOutbox = original.flushChatAckOutbox;
+        wsConnectionGeneration = original.generation;
+        wsConnected = original.connected;
+        wsTransportConnected = original.transportConnected;
+        wsAuthenticatedGeneration = original.authenticatedGeneration;
+        wsTransportIdentity = original.transportIdentity;
+        wsAuthenticatedResponseGuard = original.responseGuard;
+        trackingState = original.trackingState;
+        wsReconnectBackoffMs = original.backoff;
+      }
+    });
+    assert.equal(inFlightAuthentication.first, true);
+    assert.equal(inFlightAuthentication.connectsAfterFirst, 1);
+    assert.equal(
+      inFlightAuthentication.firstGeneration,
+      inFlightAuthentication.startGeneration + 1,
+    );
+    assert.equal(
+      inFlightAuthentication.connectsWithinGrace,
+      1,
+      'a re-entered connect must not replace the socket that is still authenticating',
+    );
+    assert.equal(
+      inFlightAuthentication.generationWithinGrace,
+      inFlightAuthentication.firstGeneration,
+    );
+    assert.equal(inFlightAuthentication.whileConnecting, true);
+    assert.equal(inFlightAuthentication.whileUnauthenticated, true);
+    assert.equal(inFlightAuthentication.whileAdopting, true);
+    assert.equal(
+      inFlightAuthentication.connectedWhileAdopting,
+      false,
+      'only the worker\'s own auth-success adoption may mark an in-flight attempt connected',
+    );
+    assert.equal(
+      inFlightAuthentication.connectsAfterGrace,
+      2,
+      'an attempt that never settles is replaced once its bounded grace elapses',
+    );
+    assert.equal(
+      inFlightAuthentication.generationAfterGrace,
+      inFlightAuthentication.firstGeneration + 1,
+    );
+    assert.equal(inFlightAuthentication.afterGrace, true);
+    assert.equal(inFlightAuthentication.insideSecondGrace, true);
+    assert.equal(inFlightAuthentication.connectsInsideSecondGrace, 2);
+    assert.equal(
+      inFlightAuthentication.connectsAfterSettlement,
+      3,
+      'a settled attempt is replaceable inside its grace',
+    );
+
     const wsEventLifetime = await worker.evaluate(async () => {
       const originalHandleRemoteControl = handleRemoteControl;
       const generation = wsConnectionGeneration;
