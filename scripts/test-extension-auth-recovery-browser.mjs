@@ -2954,9 +2954,32 @@ await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true },
   const roster = await rpc(frame, { type: 'get-login-roster', gradeLevel: '' });
   assert.equal(roster?.success, true, `the sign-in frame must still load the roster (${JSON.stringify(roster)})`);
   assert.ok(roster.students.some((student) => student.name === 'Fresh Fixture'));
-  const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
-  assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
+  const parentUrl = page.url(), pageLoads = fixture.state.pageLoads;
+  const deviceId = await worker.evaluate(() => CONFIG.deviceId);
+  let loginFrameRetired = false;
+  try {
+    const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
+    assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
+  } catch (error) {
+    // Proactive page reconciliation can observe the committed login and remove
+    // its nonce-bound iframe before the original response callback returns.
+    // Never resend credentials or accept another kind of RPC failure.
+    assert.match(error.message, /Execution context was destroyed|Frame was detached/i);
+    loginFrameRetired = true;
+  }
   await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  const committedLogin = await worker.evaluate(() => ({ token: CONFIG.studentToken, schoolId: CONFIG.schoolId,
+    deviceId: CONFIG.deviceId, studentId: CONFIG.activeStudentId, sessionId: CONFIG.activeStudentSessionId,
+    invalidating: studentAuthInvalidating, pending: studentAuthCommitPending }));
+  const { deviceId: committedDeviceId, ...committedIdentity } = committedLogin;
+  assert.ok(typeof committedDeviceId === 'string' && committedDeviceId.length > 0, 'the fresh login must have a real device binding');
+  if (deviceId) assert.equal(committedDeviceId, deviceId, 'an existing device binding must be retained');
+  assert.deepEqual(committedIdentity, { token: 'fresh-fixture-token-1', schoolId: 'recovery-school',
+    studentId: 'student-fresh-fixture', sessionId: 'login-fresh-fixture-1', invalidating: false, pending: false },
+  'a retired iframe is successful only after the exact fresh login is committed');
+  if (loginFrameRetired) assert.equal(frame.isDetached(), true, 'the original login frame must actually have retired');
+  assert.equal(page.url(), parentUrl, 'login completion cannot navigate the underlying page');
+  assert.equal(fixture.state.pageLoads, pageLoads, 'login completion cannot reload the underlying page');
   assert.equal(fixture.state.studentLoginRequests, 1);
   assert.ok(!(await decoyText()).includes('Fresh Fixture'), 'roster names must never reach page-owned DOM');
   console.log('PASS page-owned DOM never receives roster names; roster, login and kiosk launch refuse web-page content scripts; the sign-in frame still signs in');
