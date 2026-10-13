@@ -62,6 +62,13 @@ let proxyServerOrigin = null;
 const WS_LIVENESS_MAX_UNANSWERED_PINGS = 2;
 const WS_LIVENESS_SILENCE_LIMIT_MS = 50 * 1000;
 const WS_LIVENESS_CLOSE_CODE = 4000;
+const WS_TRANSPORT_PROBE_INTERVAL_MS = 10 * 1000;
+const WS_TRANSPORT_PROBE_DEADLINE_MS = 5 * 1000;
+const WS_PROBE_LATE_TIMER_MS = 2 * 1000;
+let proxyTransportProbeSupported = false;
+let proxyProbe = null;
+let proxyProbeTimer = null;
+let proxyProbeSequence = 0;
 let proxyLastInboundAt = 0;
 let proxyUnansweredPings = 0;
 let screenshotCadenceTimer = null;
@@ -444,11 +451,69 @@ function wsCloseDetail(code, clean) {
   });
 }
 
+function clearProxyProbe() {
+  if (proxyProbeTimer) clearTimeout(proxyProbeTimer);
+  proxyProbeTimer = null;
+  proxyProbe = null;
+}
+
+function sendProxyTransportProbe(connection = proxyWs, generation = proxyConnectionGeneration) {
+  if (!connection || connection !== proxyWs || generation !== proxyConnectionGeneration
+    || connection.readyState !== WebSocket.OPEN || !proxyAuthenticated
+    || !proxyTransportProbeSupported || proxyProbe) return false;
+  const probe = {
+    nonce: `${generation}_${++proxyProbeSequence}_${Date.now()}`,
+    deadlineAt: Date.now() + WS_TRANSPORT_PROBE_DEADLINE_MS,
+  };
+  proxyProbe = probe;
+  try {
+    connection.send(JSON.stringify({ type: 'transport-probe', nonce: probe.nonce }));
+  } catch {
+    clearProxyProbe();
+    closeSilentProxySocket(connection, generation);
+    return false;
+  }
+  proxyProbeTimer = setTimeout(() => {
+    proxyProbeTimer = null;
+    if (proxyProbe !== probe || connection !== proxyWs || generation !== proxyConnectionGeneration) return;
+    proxyProbe = null;
+    // A callback delayed by sleep/throttling is not evidence of network loss.
+    // Give the resumed browser one actually sent probe and a fresh deadline.
+    if (Date.now() - probe.deadlineAt > WS_PROBE_LATE_TIMER_MS) {
+      sendProxyTransportProbe(connection, generation);
+      return;
+    }
+    closeSilentProxySocket(connection, generation);
+  }, WS_TRANSPORT_PROBE_DEADLINE_MS);
+  return true;
+}
+
+function startProxyKeepAlive(connection, generation) {
+  if (wsKeepAliveTimer) clearInterval(wsKeepAliveTimer);
+  if (proxyTransportProbeSupported) {
+    wsKeepAliveTimer = setInterval(() => sendProxyTransportProbe(connection, generation), WS_TRANSPORT_PROBE_INTERVAL_MS);
+    return;
+  }
+  // Older servers do not advertise the transport-only probe. Keep their
+  // original ping cadence and bounded-silence compatibility behavior.
+  wsKeepAliveTimer = setInterval(() => {
+    if (connection !== proxyWs || generation !== proxyConnectionGeneration || connection.readyState !== WebSocket.OPEN) return;
+    if (proxyAuthenticated && proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS
+      && Date.now() - proxyLastInboundAt >= WS_LIVENESS_SILENCE_LIMIT_MS) {
+      closeSilentProxySocket(connection, generation);
+      return;
+    }
+    connection.send(JSON.stringify({ type: 'ping' }));
+    proxyUnansweredPings += 1;
+  }, 25000);
+}
+
 // A half-open socket can take a minute to finish its closing handshake, so do
 // not wait for onclose: retire the socket now and report the close ourselves.
 function closeSilentProxySocket(connection, connectionGeneration) {
   if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return false;
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  clearProxyProbe();
   try {
     connection.onopen = null;
     connection.onmessage = null;
@@ -458,6 +523,7 @@ function closeSilentProxySocket(connection, connectionGeneration) {
   } catch (e) { /* ignore */ }
   proxyWs = null;
   proxyAuthenticated = false;
+  proxyTransportProbeSupported = false;
   stopScreenShare();
   relayWsEvent('close', wsCloseDetail(WS_LIVENESS_CLOSE_CODE, false));
   return true;
@@ -519,6 +585,7 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
 
   // Close any existing connection and keepalive
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  clearProxyProbe();
   if (proxyWs) {
     try { proxyWs.onclose = null; proxyWs.close(); } catch (e) { /* ignore */ }
     proxyWs = null;
@@ -526,6 +593,7 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
 
   proxyConnectionGeneration = connectionGeneration;
   proxyAuthenticated = false;
+  proxyTransportProbeSupported = false;
   proxyUrl = url;
   proxyAuthContextId = normalizedAuthContextId;
   proxyServerOrigin = normalizedServerOrigin;
@@ -544,38 +612,26 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
       proxyWs.send(JSON.stringify(authPayload));
       console.log('[Offscreen-WS] Auth sent');
     }
-    // Start application-level keepalive ping every 25 seconds.
-    // This serves two purposes:
-    // 1. Prevents Chrome from considering the offscreen document "inactive" and killing it
-    // 2. Keeps the WebSocket connection alive through proxies/load balancers
-    if (wsKeepAliveTimer) clearInterval(wsKeepAliveTimer);
-    wsKeepAliveTimer = setInterval(() => {
-      if (proxyWs && proxyWs.readyState === WebSocket.OPEN) {
-        if (
-          proxyWs === connection
-          && proxyAuthenticated
-          && proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS
-          && Date.now() - proxyLastInboundAt >= WS_LIVENESS_SILENCE_LIMIT_MS
-        ) {
-          console.warn('[Offscreen-WS] Silent across consecutive pings; retiring the socket');
-          closeSilentProxySocket(connection, connectionGeneration);
-          return;
-        }
-        proxyWs.send(JSON.stringify({ type: 'ping' }));
-        proxyUnansweredPings += 1;
-      }
-    }, 25000);
+    startProxyKeepAlive(connection, connectionGeneration);
   };
 
   proxyWs.onmessage = (event) => {
     if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     proxyLastInboundAt = Date.now();
     proxyUnansweredPings = 0;
+    clearProxyProbe();
     try {
       const payload = JSON.parse(event.data);
-      if (payload?.type === 'auth-success') proxyAuthenticated = true;
+      if (payload?.type === 'auth-success') {
+        proxyAuthenticated = true;
+        // This hint changes transport timing only; worker-side identity and
+        // exact authority adoption remain required for every action.
+        proxyTransportProbeSupported = payload.transportProbeV1 === true;
+        startProxyKeepAlive(connection, connectionGeneration);
+      }
       if (payload?.type === 'auth-error' || payload?.type === 'auth-failed') {
         proxyAuthenticated = false;
+        proxyTransportProbeSupported = false;
         stopScreenShare();
       }
     } catch { /* payload is relayed unchanged */ }
@@ -594,6 +650,7 @@ function handleWsConnect(url, authPayload, requestedGeneration, authContextId, s
     if (connection !== proxyWs || connectionGeneration !== proxyConnectionGeneration) return;
     console.log('[Offscreen-WS] Disconnected');
     if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+    clearProxyProbe();
     proxyWs = null;
     proxyAuthenticated = false;
     stopScreenShare();
@@ -633,11 +690,13 @@ function handleWsClose(requestedGeneration, authContextId, serverOrigin) {
   // the normal WebSocket close event.
   stopScreenShare();
   if (wsKeepAliveTimer) { clearInterval(wsKeepAliveTimer); wsKeepAliveTimer = null; }
+  clearProxyProbe();
   if (proxyWs) {
     try { proxyWs.onclose = null; proxyWs.close(); } catch (e) { /* ignore */ }
     proxyWs = null;
   }
   proxyAuthenticated = false;
+  proxyTransportProbeSupported = false;
   proxyUrl = null;
   proxyAuthContextId = null;
   proxyServerOrigin = null;
@@ -737,6 +796,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       if (message.type === 'WS_STATUS') {
+        if (message.probeNow === true) sendProxyTransportProbe();
         sendResponse(wsStatus());
         return;
       }

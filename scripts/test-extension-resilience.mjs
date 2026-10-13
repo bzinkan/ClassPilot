@@ -40,6 +40,14 @@ async function waitForInitialWorker(context) {
     try{return await new Promise((resolve,reject)=>{const req=db.transaction('recovery').objectStore('recovery').get('student-session-recovery');
       req.onsuccess=()=>resolve(req.result?.state??null);req.onerror=()=>reject(req.error);});}finally{db.close();}
   };});
+  if (process.env.CLASSPILOT_TEST_TRACE === '1') {
+    const evaluate = worker.evaluate.bind(worker);
+    worker.evaluate = (...args) => {
+      const site = new Error().stack.split('\n')[2]?.trim() || 'worker evaluation';
+      process.stderr.write(`[resilience start] ${site}\n`);
+      return evaluate(...args).finally(() => process.stderr.write(`[resilience done] ${site}\n`));
+    };
+  }
   return worker;
 }
 
@@ -3462,6 +3470,10 @@ async function main() {
       const generation = wsConnectionGeneration;
       const authContext = captureAuthenticatedContext('WebSocket lifetime fixture');
       const priorTransportIdentity = wsTransportIdentity;
+      const priorNegotiatedProtocol = negotiatedProtocolState;
+      // This fixture measures warm transport ordering. Cold workers now need
+      // the separate HTTP authority-recovery proof before command admission.
+      adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: [] }, authContext);
       wsTransportIdentity = {
         connectionGeneration: generation,
         authContextId: authContext.authContextId,
@@ -3507,7 +3519,14 @@ async function main() {
           firstSettled = true;
           return value;
         });
-        await firstStarted;
+        let firstStartDeadline;
+        try {
+          await Promise.race([firstStarted, new Promise((_, reject) => {
+            firstStartDeadline = setTimeout(() => reject(new Error('First ordered frame was not admitted')), 5000);
+          })]);
+        } finally {
+          clearTimeout(firstStartDeadline);
+        }
         const second = handleOffscreenMessage({
           type: 'WS_EVENT',
           event: 'message',
@@ -3524,6 +3543,7 @@ async function main() {
       } finally {
         handleRemoteControl = originalHandleRemoteControl;
         wsTransportIdentity = priorTransportIdentity;
+        negotiatedProtocolState = priorNegotiatedProtocol;
       }
     });
     assert.equal(wsEventLifetime.beforeRelease.firstSettled, false);

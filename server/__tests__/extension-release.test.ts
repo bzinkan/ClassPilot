@@ -36,7 +36,7 @@ describe("ClassPilot extension release package guards", () => {
 
     // The primary cadence constants were never pinned before 2.9.8.
     expect(serviceWorker).toContain("const HEARTBEAT_INTERVAL_MS = 10000;");
-    expect(serviceWorker).toContain("let wsReconnectBackoffMs = 10000;");
+    expect(serviceWorker).toContain("let wsReconnectBackoffMs = 1000;");
     expect(serviceWorker).toContain("const COMMAND_ACK_HTTP_FALLBACK_MS = 5000;");
     expect(serviceWorker).toContain("const WS_AUTH_INFLIGHT_GRACE_MS = 15 * 1000;");
     expect(offscreen).toContain("}, 25000);");
@@ -100,11 +100,14 @@ describe("ClassPilot extension release package guards", () => {
     // authenticated socket without waiting for its closing handshake.
     expect(offscreen).toContain("const WS_LIVENESS_MAX_UNANSWERED_PINGS = 2;");
     expect(offscreen).toContain("const WS_LIVENESS_SILENCE_LIMIT_MS = 50 * 1000;");
-    const keepalive = between(offscreen, "wsKeepAliveTimer = setInterval(() => {", "}, 25000);");
-    expect(keepalive).toContain("&& proxyAuthenticated");
-    expect(keepalive).toContain("&& proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS");
-    expect(keepalive.indexOf("closeSilentProxySocket(connection, connectionGeneration);"))
-      .toBeLessThan(keepalive.indexOf("proxyWs.send(JSON.stringify({ type: 'ping' }));"));
+    const keepalive = between(offscreen, "function startProxyKeepAlive(", "// A half-open socket");
+    expect(keepalive).toContain("proxyAuthenticated && proxyUnansweredPings >= WS_LIVENESS_MAX_UNANSWERED_PINGS");
+    expect(keepalive.indexOf("closeSilentProxySocket(connection, generation);"))
+      .toBeLessThan(keepalive.indexOf("connection.send(JSON.stringify({ type: 'ping' }));"));
+    expect(offscreen).toContain("proxyTransportProbeSupported = payload.transportProbeV1 === true;");
+    expect(offscreen).toContain("const WS_TRANSPORT_PROBE_INTERVAL_MS = 10 * 1000;");
+    expect(offscreen).toContain("const WS_TRANSPORT_PROBE_DEADLINE_MS = 5 * 1000;");
+    expect(serviceWorker).toContain("const ACK_HTTP_DEADLINE_MS = 8000;");
     expect(offscreen).toContain("relayWsEvent('close', wsCloseDetail(event?.code, event?.wasClean));");
   });
 
@@ -1150,7 +1153,7 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker).toContain("...extensionProtocolDescriptor()");
     const closeStart = serviceWorker.indexOf("case 'close-tabs':");
     const safetyIndex = serviceWorker.indexOf("result.safetyEvidence = await captureSafetyEvidence(", closeStart);
-    const closeIndex = serviceWorker.indexOf("await closeExactTabTargets(exact, authContext)", safetyIndex);
+    const closeIndex = serviceWorker.indexOf("await closeExactTabTargets(exact, authContext,", safetyIndex);
     expect(safetyIndex).toBeGreaterThan(closeStart);
     expect(closeIndex).toBeGreaterThan(safetyIndex);
   });
