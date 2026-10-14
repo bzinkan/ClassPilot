@@ -4217,7 +4217,7 @@ async function main() {
     assert.equal(transientRollback.secretInLocal, false);
     assert.equal(transientRollback.secretInSession, false);
 
-    const authenticatedTabId = await tabIdFor(worker, authenticatedPage);
+    const authenticatedTabId = await tabIdFor(worker, restrictionAuthControlPage);
     const staleRollbackDelivery = await worker.evaluate(async ({ tabId, revision }) => {
       try {
         return await chrome.tabs.sendMessage(tabId, {
@@ -4235,9 +4235,9 @@ async function main() {
       }
     }, { tabId: authenticatedTabId, revision: rollbackRevisionCeiling });
     assert.equal(staleRollbackDelivery?.success, true);
-    await authenticatedPage.waitForTimeout(150);
+    await restrictionAuthControlPage.waitForTimeout(150);
     assert.equal(
-      await authenticatedPage.locator(GATE_SELECTOR).count(),
+      await restrictionAuthControlPage.locator(GATE_SELECTOR).count(),
       0,
       'pre-restart revision re-gated the authenticated page after a clock rollback',
     );
