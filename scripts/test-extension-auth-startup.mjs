@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -425,14 +426,18 @@ async function preparePageForWorkerStop(page) {
     await page.goto('chrome://version');
   } catch (error) {
     // Restriction reconciliation can win the same navigation turn. Depending
-    // on Chrome, Playwright reports ERR_ABORTED or the exact internal error
-    // page interruption when the synthetic destination has no network route.
+    // on Chrome, Playwright reports ERR_ABORTED, the exact synthetic fixture
+    // destination, or its internal error page as the interrupting navigation.
     // This page is only a CDP target; the caller still verifies native worker
     // termination. Other navigation failures and closed pages remain errors.
     const message = String(error?.message || '');
-    const interrupted = message.includes('ERR_ABORTED') || message.includes(
-      'Navigation to "chrome://version" is interrupted by another navigation to "chrome-error://chromewebdata/"',
-    );
+    const interrupted = message.includes('ERR_ABORTED') || [
+      'chrome-error://chromewebdata/',
+      'https://classroom.google.com/restriction-sso-destination',
+      'https://classroom.google.com/c/restriction-auth-destination',
+    ].some(destination => message.includes(
+      `Navigation to "chrome://version" is interrupted by another navigation to "${destination}"`,
+    ));
     if (page.isClosed() || !interrupted) throw error;
   }
   return page;
@@ -3196,6 +3201,12 @@ async function main() {
     // binding, stop the MV3 worker, and prove the cold successor restores the
     // ledger instead of replaying the cold Clever landing. The same restored
     // runtime must keep both DNR and imperative navigation handling aligned.
+    // Prepare an independent protected CDP target before restrictions activate.
+    // A monitored student tab may legitimately be closed by later policy.
+    const restrictionAuthControlPage = await context.newPage();
+    await restrictionAuthControlPage.goto('chrome://version');
+    assert.equal(restrictionAuthControlPage.url(), 'chrome://version/');
+
     const restrictionSsoDestination = 'https://classroom.google.com/restriction-sso-destination';
     const restrictionSsoRestartSeed = await worker.evaluate(async (destinationUrl) => {
       const authContext = captureAuthenticatedContext('restriction SSO restart seed');
@@ -3288,6 +3299,10 @@ async function main() {
       bindingDigest: restrictionSsoRestartSeed.bindingDigest,
     });
 
+    const restrictionSsoOriginalIsolate = randomUUID();
+    await worker.evaluate((nonce) => {
+      globalThis.__classpilotWarmSsoOriginalIsolate = nonce;
+    }, restrictionSsoOriginalIsolate);
     await preparePageForWorkerStop(authenticatedPage);
     const restrictionSsoWorkerStop = await stopExtensionWorker(
       context,
@@ -3299,10 +3314,28 @@ async function main() {
       true,
       'could not stop the MV3 worker before restriction SSO restore',
     );
-    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
-      waitUntil: 'domcontentloaded',
-    });
+    // Wake on a normal monitored page. Replacing this tab with a protected
+    // extension page can race the restored restriction's native tab update.
+    // DNR or that exact restriction destination may interrupt this navigation;
+    // the browser-visible destination and all authority checks remain required.
+    const restrictionSsoWakeUrl = `${fixture.origin}/authenticated-after-warm-sso-restart`;
+    try {
+      await authenticatedPage.goto(restrictionSsoWakeUrl, { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      const message = String(error?.message || '');
+      const interrupted = ['ERR_BLOCKED_BY_CLIENT', 'ERR_ABORTED'].some((code) => (
+        message.includes(`page.goto: net::${code} at ${restrictionSsoWakeUrl}`)
+      )) || message.includes(
+        `Navigation to "${restrictionSsoWakeUrl}" is interrupted by another navigation to "${restrictionSsoDestination}"`,
+      );
+      if (authenticatedPage.isClosed() || !interrupted) throw error;
+    }
     worker = await waitForLiveWorker(context);
+    assert.equal(
+      await worker.evaluate(() => globalThis.__classpilotWarmSsoOriginalIsolate),
+      undefined,
+      'restriction SSO restore reused the original worker isolate',
+    );
     const restrictionSsoWorkerRestore = await worker.evaluate(async (destinationUrl) => {
       await authStateRestorePromise;
       await classroomStateRestorePromise;
@@ -3813,14 +3846,14 @@ async function main() {
     assert.equal(restrictionAuthSeed.startUrlInLocal, false);
     assert.equal(restrictionAuthSeed.durableHasAuthPolicy, false);
 
-    await preparePageForWorkerStop(authenticatedPage);
+    await preparePageForWorkerStop(restrictionAuthControlPage);
     const restrictionAuthWorkerStop = await stopExtensionWorker(
       context,
-      authenticatedPage,
+      restrictionAuthControlPage,
       extensionId,
     );
     assert.equal(restrictionAuthWorkerStop.stopped, true);
-    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+    await restrictionAuthControlPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
       waitUntil: 'domcontentloaded',
     });
     worker = await waitForLiveWorker(context);
@@ -3991,14 +4024,14 @@ async function main() {
     assert.equal(restrictionAuthRetry.secretInSession, false);
     assert.equal(restrictionAuthRetry.durableHasAuthPolicy, false);
 
-    await preparePageForWorkerStop(authenticatedPage);
+    await preparePageForWorkerStop(restrictionAuthControlPage);
     const restrictionAuthActiveWorkerStop = await stopExtensionWorker(
       context,
-      authenticatedPage,
+      restrictionAuthControlPage,
       extensionId,
     );
     assert.equal(restrictionAuthActiveWorkerStop.stopped, true);
-    await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
+    await restrictionAuthControlPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
       waitUntil: 'domcontentloaded',
     });
     worker = await waitForLiveWorker(context);
@@ -4057,10 +4090,10 @@ async function main() {
       popupId: restrictionAuthSeed.popupId,
       destinationTabId: restrictionAuthSeed.destinationTabId,
     });
-    await authenticatedPage.goto(`${fixture.origin}/authenticated-after-sso-worker-restart`, {
+    await restrictionAuthControlPage.goto(`${fixture.origin}/authenticated-after-sso-worker-restart`, {
       waitUntil: 'domcontentloaded',
     });
-    await authenticatedPage.waitForSelector(GATE_SELECTOR, {
+    await restrictionAuthControlPage.waitForSelector(GATE_SELECTOR, {
       state: 'detached',
       timeout: 12_000,
     });
