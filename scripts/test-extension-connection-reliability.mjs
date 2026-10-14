@@ -58,16 +58,35 @@ try {
     activateAuthenticatedContext('reliability-auth');
     const auth = captureAuthenticatedContext('connection fixture');
     adoptLicenseState(true, 'active', auth);
-    schoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
-    schoolSettingsScope = schoolPolicyScopeForAuthContext(auth);
-    schoolSettingsFetchedAt = Date.now();
-    trackingState = TRACKING_STATES.ACTIVE;
+    const fixtureSchoolSettings = { enableTrackingHours: false, afterHoursMode: 'off' };
+    const fixtureSchoolSettingsScope = schoolPolicyScopeForAuthContext(auth);
+    const fixtureSchoolSettingsFetchedAt = Date.now();
+    // The real install/startup callback can reload policy after worker wake.
+    // Seed the same exact-bound cache it reads, then prove a native cache read
+    // retains this synthetic policy. In-memory-only settings race that callback
+    // and correctly fail closed, which would invalidate the heartbeat fixture.
+    await enqueueStudentAuthMutation(() => enqueueSchoolSettingsMutation(() => kv.set({
+      [SCHOOL_SETTINGS_CACHE_KEY]: fixtureSchoolSettings,
+      [SCHOOL_SETTINGS_SCOPE_KEY]: fixtureSchoolSettingsScope,
+      [SCHOOL_SETTINGS_FETCHED_AT_KEY]: fixtureSchoolSettingsFetchedAt,
+    })));
+    await loadCachedSchoolSettings({ authContext: auth });
+    if (!validSchoolSettingsPayload(schoolSettings)
+      || schoolSettingsScope !== schoolPolicyScopeForAuthContext(auth)
+      || schoolSettings.enableTrackingHours !== false) throw new Error('Synthetic policy did not survive the real cache read');
+    // Match the native idle callback's initial decision as well, so an
+    // unrelated ACTIVE -> IDLE transition cannot add a schedule heartbeat.
+    idleState = await chrome.idle.queryState(IDLE_DETECTION_SECONDS);
+    trackingState = determineTrackingState();
+    if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(trackingState)) {
+      throw new Error('Synthetic connection fixture must have an authorized monitoring policy');
+    }
     heartbeatBackoffUntilMs = 0; apiBackoffUntilMs = 0;
     const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
-    const waitUntil = async predicate => {
+    const waitUntil = async (predicate, details = () => null) => {
       const until = Date.now() + 2000;
       while (!predicate() && Date.now() < until) await wait(10);
-      if (!predicate()) throw new Error('Fault fixture condition did not settle');
+      if (!predicate()) throw new Error(`Fault fixture condition did not settle: ${predicate}; requests=${requests}; inFlight=${heartbeatInFlight}; pending=${eventHeartbeatReason}; tracking=${trackingState}; details=${JSON.stringify(details())}`);
     };
     const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
@@ -90,6 +109,9 @@ try {
     if (eventHeartbeatTimer === null) throw new Error('Native coalescing timer was not scheduled');
     const initial = safeSendHeartbeat('interval');
     await waitUntil(() => requests === 1);
+    // Reproduce the real delayed install initialization during the held send.
+    // It must reload this same policy and retain the native idle decision.
+    await initializeAdaptiveTracking('connection-fixture-install-overlap');
     const freshTabUrl = `${negativeAckOrigin}/fresh-tab`;
     const freshTab = await chrome.tabs.create({ url: freshTabUrl, active: false });
     scheduleEventHeartbeat('navigation-latest');
@@ -316,15 +338,31 @@ try {
     activeTeachingSessionIds = originalSessions; getClassroomCommandStateSnapshot = originalSnapshot;
     const originalConnect = connectWebSocket;
     const originalRandom = Math.random;
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalAlarmCreate = chrome.alarms.create.bind(chrome.alarms);
+    clearWsReconnectTimer(); await chrome.alarms.clear('ws-reconnect');
     let reconnects = 0;
+    let reconnectTimers = 0; let reconnectAlarmRegistrations = 0; let awakeReconnectCallbacks = 0;
     connectWebSocket = async () => { reconnects++; };
     Math.random = () => 0.01;
     trackingState = TRACKING_STATES.ACTIVE;
     wsAuthRecoveryRequired = false; wsReconnectBackoffMs = 1000;
-    scheduleWsReconnect(); scheduleWsReconnect();
-    await waitUntil(() => reconnects === 1);
+    // The durable alarm can also dispatch the mocked connect function. Count
+    // the actual native awake timer, not calls to an unguarded transport mock;
+    // production connectWebSocket retains its own authentication singleflight.
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      reconnectTimers++;
+      return originalSetTimeout(() => { awakeReconnectCallbacks++; callback(...args); }, delay);
+    };
+    chrome.alarms.create = (name, ...args) => {
+      if (name === 'ws-reconnect') reconnectAlarmRegistrations++;
+      return originalAlarmCreate(name, ...args);
+    };
+    try { scheduleWsReconnect(); scheduleWsReconnect(); }
+    finally { globalThis.setTimeout = originalSetTimeout; chrome.alarms.create = originalAlarmCreate; }
+    await waitUntil(() => awakeReconnectCallbacks === 1 && reconnects >= 1,
+      () => ({ reconnects, reconnectTimers, reconnectAlarmRegistrations, awakeReconnectCallbacks }));
     const duplicateReconnects = reconnects;
-    const originalSetTimeout = globalThis.setTimeout;
     let retiredTimer;
     globalThis.setTimeout = callback => { retiredTimer = callback; return 987654; };
     scheduleWsReconnect();
@@ -339,6 +377,7 @@ try {
       headerFailure, headerMs, bodyFailure, bodyMs, cancellationFailure, negativeResponses,
       retainedAfterTimeout: retainedAfterTimeout.map(value => value.ackId), releasedAckFlight, sentAckIds, remainingAfterReceipt,
       beforeReady, delivered, stale: stale.ignored, authProgress, snapshots, acknowledgements, effects,
+      reconnectTimers, reconnectAlarmRegistrations, awakeReconnectCallbacks,
       duplicateReconnects, retiredReconnects, beforeColdHttp, coldCommands, coldExpiredAcks,
       replacementProgress, retainedIngressTails };
   }, negativeAckOrigin);
@@ -383,8 +422,11 @@ try {
   assert.deepEqual(result.coldExpiredAcks, ['expired']);
   assert.deepEqual(result.acknowledgements, ['received', 'expired']);
   assert.equal(result.effects, 0);
-  assert.equal(result.duplicateReconnects, 1);
-  assert.equal(result.retiredReconnects, 1);
+  assert.equal(result.reconnectTimers, 1);
+  assert.equal(result.reconnectAlarmRegistrations, 1);
+  assert.equal(result.awakeReconnectCallbacks, 1);
+  assert.ok(result.duplicateReconnects >= 1);
+  assert.equal(result.retiredReconnects, result.duplicateReconnects);
 
   // Real Chrome timers and a real local socket: reply once, then blackhole
   // application traffic without closing TCP. Protocol pong alone cannot hide it.

@@ -387,8 +387,8 @@ async function startFixtureServer() {
   return { server, state, origin: `http://127.0.0.1:${address.port}` };
 }
 
-function launchContext(executablePath, profilePath, extensionPath) {
-  return chromium.launchPersistentContext(profilePath, {
+async function launchContext(executablePath, profilePath, extensionPath) {
+  const context = await chromium.launchPersistentContext(profilePath, {
     executablePath,
     headless: true,
     hasTouch: true,
@@ -399,6 +399,20 @@ function launchContext(executablePath, profilePath, extensionPath) {
       `--load-extension=${extensionPath}`,
     ],
   });
+  // These are synthetic destinations used by the native restriction/restore
+  // cases. Keep the real browser navigation and DNR checks, but never depend
+  // on a live Google Classroom response (or its error-page URL semantics).
+  for (const destination of [
+    'https://classroom.google.com/restriction-sso-destination',
+    'https://classroom.google.com/c/restriction-auth-destination',
+  ]) {
+    await context.route(destination, route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: '<!doctype html><title>Synthetic classroom destination</title>',
+    }));
+  }
+  return context;
 }
 
 async function waitForWorker(context) {
@@ -410,9 +424,16 @@ async function preparePageForWorkerStop(page) {
   try {
     await page.goto('chrome://version');
   } catch (error) {
-    // Restriction reconciliation can win the same navigation turn and make
-    // Playwright report ERR_ABORTED while the page remains a valid CDP target.
-    if (page.isClosed() || !String(error?.message || '').includes('ERR_ABORTED')) throw error;
+    // Restriction reconciliation can win the same navigation turn. Depending
+    // on Chrome, Playwright reports ERR_ABORTED or the exact internal error
+    // page interruption when the synthetic destination has no network route.
+    // This page is only a CDP target; the caller still verifies native worker
+    // termination. Other navigation failures and closed pages remain errors.
+    const message = String(error?.message || '');
+    const interrupted = message.includes('ERR_ABORTED') || message.includes(
+      'Navigation to "chrome://version" is interrupted by another navigation to "chrome-error://chromewebdata/"',
+    );
+    if (page.isClosed() || !interrupted) throw error;
   }
   return page;
 }
