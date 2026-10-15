@@ -1075,4 +1075,34 @@ const ordinaryCloses = closeEventsFor(41);
 assert.equal(ordinaryCloses.length, 1);
 assert.deepEqual(JSON.parse(ordinaryCloses[0].data), { code: 1011, clean: true });
 
+// Negotiated transport probes detect an awake blackhole within 15 seconds,
+// while a late timer after sleep always gets a fresh probe deadline.
+evaluate(`handleWsConnect('wss://school-pilot.net/ws', { type: 'auth' }, 42,
+  'probe-context', 'https://school-pilot.net'); proxyWs.readyState = WebSocket.OPEN; proxyWs.onopen();
+  proxyWs.onmessage({ data: JSON.stringify({ type: 'auth-success', transportProbeV1: true }) });`);
+const probeInterval = intervals.at(-1);
+assert.equal(probeInterval.delay, 10_000);
+const probeSocket = evaluate('proxyWs');
+probeInterval.callback();
+const answeredProbeDeadline = timers.at(-1);
+assert.equal(answeredProbeDeadline.delay, 5_000);
+const firstProbe = JSON.parse(probeSocket.sent.at(-1));
+assert.equal(firstProbe.type, 'transport-probe');
+assert.match(firstProbe.nonce, /^[A-Za-z0-9_-]{8,64}$/);
+evaluate(`proxyWs.onmessage({ data: JSON.stringify({ type: 'transport-probe-reply', nonce: ${JSON.stringify(firstProbe.nonce)} }) });`);
+answeredProbeDeadline.callback();
+assert.equal(probeSocket.closed, false, 'a received reply cancels its exact deadline');
+probeInterval.callback();
+const sleptDeadline = timers.at(-1);
+evaluate('proxyProbe.deadlineAt = Date.now() - WS_PROBE_LATE_TIMER_MS - 1');
+sleptDeadline.callback();
+assert.equal(probeSocket.closed, false, 'sleep cannot retire a healthy surviving socket');
+assert.equal(JSON.parse(probeSocket.sent.at(-1)).type, 'transport-probe');
+const resumedDeadline = timers.at(-1);
+assert.notEqual(resumedDeadline.id, sleptDeadline.id);
+resumedDeadline.callback();
+assert.equal(probeSocket.closed, true, 'an unanswered newly sent probe retires the blackhole');
+assert.equal(closeEventsFor(42).length, 1);
+assert.equal(probeInterval.cleared, true);
+
 console.log('ClassPilot offscreen WebSocket, Live View identity, and screenshot cadence test passed.');

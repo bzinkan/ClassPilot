@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { tmpdir } from 'node:os';
@@ -221,31 +222,92 @@ async function proveCommittedLoginWorkerCrash(context, worker, fixture, kind, wo
   assert.equal(pending.storedSnapshot.authPassThrough, undefined, 'provider URLs must not be persisted');
   assert.equal(context.pages().some(page => page.url().startsWith(portalUrl)), false);
 
+  const isolateMarker = randomUUID();
+  const originalIdentity = await worker.evaluate(marker => {
+    globalThis.portalFixtureOldIsolate = marker;
+    return { extensionId: chrome.runtime.id, workerUrl: location.href };
+  }, isolateMarker);
   const probe = await context.newPage();
   await probe.goto('chrome://version');
   const cdp = await context.newCDPSession(probe);
   const versions = new Map();
   const workerUrl = worker.url();
+  let requestedRetirement = null;
+  const retirement = { stoppedVersion: false, destroyedTarget: false, targetAbsent: false };
+  assert.equal(originalIdentity.workerUrl, workerUrl);
   cdp.on('ServiceWorker.workerVersionUpdated', event => {
-    for (const version of event.versions || []) versions.set(version.versionId, version);
+    for (const version of event.versions || []) {
+      versions.set(version.versionId, version);
+      if (requestedRetirement && version.versionId === requestedRetirement.versionId
+        && version.scriptURL === workerUrl && version.runningStatus === 'stopped') {
+        retirement.stoppedVersion = true;
+      }
+    }
   });
+  cdp.on('Target.targetDestroyed', event => {
+    if (requestedRetirement && event.targetId === requestedRetirement.targetId) {
+      retirement.destroyedTarget = true;
+    }
+  });
+  await cdp.send('Target.setDiscoverTargets', { discover: true });
   await cdp.send('ServiceWorker.enable');
-  const version = await until(() => [...versions.values()].find(value => value.scriptURL === workerUrl && value.runningStatus !== 'stopped'), 'live extension worker version');
-  const { targetInfos } = await cdp.send('Target.getTargets');
-  const oldTarget = targetInfos.find(target => target.type === 'service_worker' && target.url === workerUrl);
-  assert.ok(oldTarget);
+  const original = await until(async () => {
+    const { targetInfos } = await cdp.send('Target.getTargets');
+    const targets = targetInfos.filter(target => target.type === 'service_worker' && target.url === workerUrl);
+    if (targets.length !== 1) return null;
+    const version = [...versions.values()].find(value => value.scriptURL === workerUrl
+      && value.runningStatus === 'running' && value.targetId === targets[0].targetId);
+    return version ? { version, target: targets[0] } : null;
+  }, 'exact current extension worker target and version');
+  const { version, target: oldTarget } = original;
+  assert.equal(await worker.evaluate(() => globalThis.portalFixtureOldIsolate), isolateMarker,
+    'the committed paused isolate must remain the actual worker being stopped');
+  const beforeStop = (await cdp.send('Target.getTargets')).targetInfos
+    .filter(target => target.type === 'service_worker' && target.url === workerUrl);
+  assert.deepEqual(beforeStop.map(target => target.targetId), [oldTarget.targetId]);
+  assert.deepEqual(retirement, { stoppedVersion: false, destroyedTarget: false, targetAbsent: false },
+    'events preceding the exact requested stop cannot establish retirement');
+  requestedRetirement = { versionId: version.versionId, targetId: oldTarget.targetId };
   await cdp.send('ServiceWorker.stopWorker', { versionId: version.versionId });
-  await until(async () => !(await cdp.send('Target.getTargets')).targetInfos.some(target => target.targetId === oldTarget.targetId), 'actual extension worker termination');
-  await cdp.detach();
+  // Trigger the real wake immediately: retirement events must survive a
+  // stop/revive transition that an absence-only polling check can miss.
   await probe.goto(lessonUrl);
+  await until(async () => {
+    if (retirement.stoppedVersion || retirement.destroyedTarget) return true;
+    retirement.targetAbsent = !(await cdp.send('Target.getTargets')).targetInfos
+      .some(target => target.targetId === oldTarget.targetId);
+    return retirement.targetAbsent;
+  }, 'actual extension worker termination');
   const restoredWorker = await until(async () => {
+    const targets = (await cdp.send('Target.getTargets')).targetInfos
+      .filter(target => target.type === 'service_worker' && target.url === workerUrl);
+    if (targets.length !== 1) return null;
+    const runningVersions = [...versions.values()].filter(value => value.scriptURL === workerUrl
+      && value.runningStatus === 'running' && value.targetId === targets[0].targetId);
+    if (runningVersions.length !== 1) return null;
     for (const candidate of [...context.serviceWorkers()].reverse()) {
-      if (candidate.url() !== workerUrl) continue;
-      if (await extensionWorkerDeclarationsReady(candidate)
-        && await candidate.evaluate(() => globalThis.portalFixturePausedAfterCommit !== true).catch(() => false)) return candidate;
+      if (candidate.url() !== workerUrl || !await extensionWorkerDeclarationsReady(candidate)) continue;
+      const fresh = await candidate.evaluate(expected => chrome.runtime.id === expected.extensionId
+        && location.href === expected.workerUrl
+        && globalThis.portalFixturePausedAfterCommit !== true
+        && globalThis.portalFixtureOldIsolate === undefined, originalIdentity).catch(() => false);
+      if (!fresh) continue;
+      // Chrome can reuse its target/version IDs and Playwright Worker wrapper
+      // after the observed retirement. The original global nonce must be gone:
+      // a changed SDK object alone cannot establish a fresh execution context.
+      console.log('portal worker restart proof', JSON.stringify({
+        originalTargetRetired: true, freshGlobalContext: true, exactExtensionIdentity: true,
+        uniqueRunningTarget: true, declarationsReady: true,
+        retirement,
+        targetIdReused: targets[0].targetId === oldTarget.targetId,
+        versionIdReused: runningVersions[0].versionId === version.versionId,
+        workerHandleReused: candidate === worker,
+      }));
+      return candidate;
     }
     return null;
-  }, 'new worker after committed login crash');
+  }, 'fresh worker context after committed login crash');
+  await cdp.detach();
   await restoredWorker.evaluate(async () => { await authStateRestorePromise; await classroomStateRestorePromise; });
   const restored = await restoredWorker.evaluate(async () => ({
     signedIn: hasStudentAuth(), studentSessionId: CONFIG.activeStudentSessionId,

@@ -2956,7 +2956,6 @@ await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true },
   assert.ok(roster.students.some((student) => student.name === 'Fresh Fixture'));
   const parentUrl = page.url(), pageLoads = fixture.state.pageLoads;
   const deviceId = await worker.evaluate(() => CONFIG.deviceId);
-  let loginFrameRetired = false;
   try {
     const login = await rpc(frame, { type: 'manual-student-login', payload: { mode: 'pin', studentId: 'student-fresh-fixture', pin: '1234' } });
     assert.equal(login?.success, true, `the sign-in frame must still sign in (${JSON.stringify(login)})`);
@@ -2965,9 +2964,20 @@ await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true },
     // its nonce-bound iframe before the original response callback returns.
     // Never resend credentials or accept another kind of RPC failure.
     assert.match(error.message, /Execution context was destroyed|Frame was detached/i);
-    loginFrameRetired = true;
   }
+  const retirementDeadline = Date.now() + 8_000;
   await page.locator('#classpilot-auth-gate').waitFor({ state: 'detached', timeout: 8_000 });
+  // Chrome can destroy the execution context before Playwright receives the
+  // matching frame-detached event. Require retirement of this exact original
+  // frame within the same cleanup budget; DOM removal alone is insufficient.
+  const retirementRemaining = retirementDeadline - Date.now();
+  if (!frame.isDetached() && retirementRemaining > 0) {
+    await page.waitForEvent('framedetached', {
+      predicate: retiredFrame => retiredFrame === frame,
+      timeout: retirementRemaining,
+    });
+  }
+  assert.equal(frame.isDetached(), true, 'the original login frame must actually have retired');
   const committedLogin = await worker.evaluate(() => ({ token: CONFIG.studentToken, schoolId: CONFIG.schoolId,
     deviceId: CONFIG.deviceId, studentId: CONFIG.activeStudentId, sessionId: CONFIG.activeStudentSessionId,
     invalidating: studentAuthInvalidating, pending: studentAuthCommitPending }));
@@ -2977,7 +2987,6 @@ await withBrowser({ caseName: 'page-dom-roster-isolation', quietNetwork: true },
   assert.deepEqual(committedIdentity, { token: 'fresh-fixture-token-1', schoolId: 'recovery-school',
     studentId: 'student-fresh-fixture', sessionId: 'login-fresh-fixture-1', invalidating: false, pending: false },
   'a retired iframe is successful only after the exact fresh login is committed');
-  if (loginFrameRetired) assert.equal(frame.isDetached(), true, 'the original login frame must actually have retired');
   assert.equal(page.url(), parentUrl, 'login completion cannot navigate the underlying page');
   assert.equal(fixture.state.pageLoads, pageLoads, 'login completion cannot reload the underlying page');
   assert.equal(fixture.state.studentLoginRequests, 1);

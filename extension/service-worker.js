@@ -295,6 +295,9 @@ let wsConnectInFlight = null;
 let wsConnectInFlightIdentity = null;
 let wsMessageProcessingGeneration = 0;
 let wsMessageProcessingTail = Promise.resolve();
+const wsIngressTails = new Map();
+let wsPendingIngressCount = 0;
+const WS_MAX_PENDING_INGRESS = 32;
 let wsAuthenticatedResponseGuard = null;
 let wsTransportIdentity = null;
 let studentAuthInvalidating = false;
@@ -481,6 +484,7 @@ const COMMAND_DIAGNOSTIC_MESSAGES = Object.freeze({
   DNR_REGEX_BUDGET_EXCEEDED: 'The restriction exceeds the browser rule budget.',
   DNR_REGEX_UNSUPPORTED: 'The browser cannot install this restriction safely.',
   COMMAND_FAILED: 'Command could not be completed.',
+  COMMAND_EXPIRED: 'The command delivery window elapsed.',
 });
 const COMMAND_DIAGNOSTIC_TEXT_ALLOWLIST = new Set([
   'Command belongs to an inactive supervision context',
@@ -860,7 +864,9 @@ let lastScreenshotErrorAt = 0;
 let lastScreenshotError = '';
 let screenshotAttemptCount = 0;
 let screenshotSuccessCount = 0;
-let wsReconnectBackoffMs = 10000; // Start with 10s to reduce console noise during deploys
+let wsReconnectBackoffMs = 1000;
+let wsReconnectTimer = null;
+let wsAuthRecoveryRequired = false;
 // connectWebSocketNow() returns as soon as the offscreen proxy accepts
 // WS_CONNECT, long before the server answers the `auth` frame, and every
 // authenticated response (each ten-second heartbeat included) re-enters the
@@ -882,6 +888,8 @@ let heartbeatIntervalId = null;
 let observedByTeacher = false;
 let eventHeartbeatTimer = null;
 let eventHeartbeatReason = null;
+let eventHeartbeatDueAt = 0;
+let eventHeartbeatScope = null;
 // Entitlement is pending/fail-private until the current exact authentication
 // context receives an authoritative school-status response. Never inherit a
 // previous student's or school's boolean across an authority transition.
@@ -903,6 +911,8 @@ let screenshotBackoffUntilMs = 0;
 // acknowledgements or settings reads that share the general API lane.
 let chatBackoffUntilMs = 0;
 let heartbeatInFlight = false;
+let heartbeatInFlightPromise = null;
+let wsWakeReconciliation = null;
 let lastHeartbeatDispatchAt = 0;
 let screenshotCaptureInFlight = false;
 let currentFabState = null;
@@ -2448,6 +2458,8 @@ async function recordHeartbeatSuccess(nowValue = Date.now(), authContext = null)
   const prior = RuntimeCore.connectivityHealthState(connectivityHealth, nowValue);
   const recovered = connectivityHealth.consecutiveFailures > 0 || prior.state === 'unreachable';
   heartbeatBackoffUntilMs = 0;
+  const resumeWebSocket = wsAuthRecoveryRequired;
+  wsAuthRecoveryRequired = false;
   connectivityHealth = RuntimeCore.connectivityHealthAfterSuccess(connectivityHealth, nowValue);
   await persistConnectivityHealthIfNeeded(prior.state, nowValue, authContext);
   if (authContext) assertAuthenticatedContextCurrent(authContext, 'heartbeat health success');
@@ -2464,6 +2476,7 @@ async function recordHeartbeatSuccess(nowValue = Date.now(), authContext = null)
     lastClassroomHeartbeatSyncRequestAt = 0;
     lastFabHeartbeatSyncRequestAt = 0;
   }
+  if (resumeWebSocket) connectWebSocket().catch(() => {});
   return recovered;
 }
 
@@ -7466,6 +7479,7 @@ function disconnectWebSocket(options = {}) {
     }
   };
   assertInitiatorCurrent();
+  clearWsReconnectTimer();
   chrome.alarms.clear('ws-reconnect');
   const broadcastCleanupPromise = cleanupTeacherBroadcast('websocket-disconnect', {
     notifyTeacher: false,
@@ -7546,9 +7560,7 @@ function scheduleHeartbeat(periodInMinutes) {
     });
     if (heartbeatIntervalId) clearInterval(heartbeatIntervalId);
     heartbeatIntervalId = null;
-    if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
-    eventHeartbeatTimer = null;
-    eventHeartbeatReason = null;
+    clearPendingEventHeartbeat();
     lastHeartbeatDispatchAt = 0;
     return;
   }
@@ -7574,6 +7586,7 @@ function scheduleHeartbeat(periodInMinutes) {
 }
 
 function clearNetworkAlarms() {
+  clearWsReconnectTimer();
   chrome.alarms.clear('settings-refresh');
   chrome.alarms.clear(LICENSE_CHECK_ALARM);
   chrome.alarms.clear(LICENSE_STATUS_RETRY_ALARM);
@@ -7586,9 +7599,7 @@ function clearNetworkAlarms() {
     clearInterval(heartbeatIntervalId);
     heartbeatIntervalId = null;
   }
-  if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
-  eventHeartbeatTimer = null;
-  eventHeartbeatReason = null;
+  clearPendingEventHeartbeat();
   settingsAlarmScheduled = false;
 }
 
@@ -7633,8 +7644,15 @@ async function safeSendHeartbeat(reason, options = {}) {
   }
   heartbeatInFlight = true;
   lastHeartbeatDispatchAt = Date.now();
+  // A periodic send can satisfy an already due event. Events arriving after
+  // this reservation remain pending and get one trailing fresh-tab snapshot.
+  if (eventHeartbeatReason && eventHeartbeatDueAt <= lastHeartbeatDispatchAt) {
+    clearPendingEventHeartbeat();
+  }
+  const flight = Promise.resolve().then(() => sendHeartbeat(reason, options));
+  heartbeatInFlightPromise = flight;
   try {
-    await sendHeartbeat(reason, options);
+    await flight;
     return true;
   } catch (error) {
     if (globalThis.Sentry?.captureException) {
@@ -7643,6 +7661,8 @@ async function safeSendHeartbeat(reason, options = {}) {
     console.warn(`[Heartbeat] Failed (${reason}):`, safeDiagnosticError(error));
   } finally {
     heartbeatInFlight = false;
+    if (heartbeatInFlightPromise === flight) heartbeatInFlightPromise = null;
+    drainPendingEventHeartbeat();
   }
 }
 
@@ -7658,15 +7678,41 @@ function handleHeartbeatRecoveryAlarm(nowValue = Date.now()) {
   return safeSendHeartbeat('alarm-recovery');
 }
 
-function scheduleEventHeartbeat(reason) {
-  eventHeartbeatReason = reason;
-  if (eventHeartbeatTimer) return;
+function clearPendingEventHeartbeat() {
+  if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
+  eventHeartbeatTimer = null;
+  eventHeartbeatReason = null;
+  eventHeartbeatDueAt = 0;
+  eventHeartbeatScope = null;
+}
+
+function drainPendingEventHeartbeat() {
+  if (!eventHeartbeatReason) return;
+  const scope = `${CONFIG.authContextId || ''}:${studentAuthMutationGeneration}`;
+  if (eventHeartbeatScope !== scope || !hasStudentAuth() || trackingState === TRACKING_STATES.OFF) {
+    clearPendingEventHeartbeat();
+    return;
+  }
+  if (heartbeatInFlight) return;
+  const waitMs = Math.max(eventHeartbeatDueAt, heartbeatBackoffUntilMs) - Date.now();
+  if (eventHeartbeatTimer) clearTimeout(eventHeartbeatTimer);
   eventHeartbeatTimer = setTimeout(() => {
-    const trailingReason = eventHeartbeatReason || 'event';
-    eventHeartbeatReason = null;
     eventHeartbeatTimer = null;
-    safeSendHeartbeat(`event:${trailingReason}`);
-  }, EVENT_HEARTBEAT_COALESCE_MS);
+    if (heartbeatInFlight || Date.now() < heartbeatBackoffUntilMs) {
+      drainPendingEventHeartbeat();
+      return;
+    }
+    safeSendHeartbeat(`event:${eventHeartbeatReason || 'event'}`);
+  }, Math.max(0, waitMs));
+}
+
+function scheduleEventHeartbeat(reason) {
+  const scope = `${CONFIG.authContextId || ''}:${studentAuthMutationGeneration}`;
+  if (eventHeartbeatScope && eventHeartbeatScope !== scope) clearPendingEventHeartbeat();
+  if (!eventHeartbeatReason) eventHeartbeatDueAt = Date.now() + EVENT_HEARTBEAT_COALESCE_MS;
+  eventHeartbeatScope = scope;
+  eventHeartbeatReason = reason;
+  drainPendingEventHeartbeat();
 }
 
 function generateOpaqueTabRef() {
@@ -7924,10 +7970,11 @@ async function closeExactTabTargets(exact, authContext, options = {}) {
         error.code = 'STALE_TAB_SNAPSHOT';
         throw error;
       }
+      options.beforeClose?.();
       await chrome.tabs.remove(target.tabId);
       assertAuthenticatedContextCurrent(authContext, 'exact tab close');
     } catch (error) {
-      if (error?.code === 'STALE_TAB_SNAPSHOT' || isAuthContextCancellation(error)) throw error;
+      if (error?.code === 'STALE_TAB_SNAPSHOT' || error?.code === 'COMMAND_EXPIRED' || isAuthContextCancellation(error)) throw error;
       const closeError = new Error(`Exact tab ${target.tabRef || 'target'} could not be closed`);
       closeError.code = 'TAB_CLOSE_FAILED';
       throw closeError;
@@ -8199,6 +8246,66 @@ const COMMAND_ACK_OUTBOX_KEY = 'commandAckOutboxV1';
 const COMMAND_ACK_BINDING_KEY = 'commandAckOutboxAuthBindingV1';
 const COMMAND_ACK_FLUSH_ALARM = 'command-ack-flush';
 const COMMAND_ACK_HTTP_FALLBACK_MS = 5000;
+const ACK_HTTP_DEADLINE_MS = 8000;
+
+async function fetchAckReceipt(path, payload, authContext, context) {
+  // Respect a server cooldown before starting this attempt's header/body
+  // deadline. Its cancellation is independent of an identity transition.
+  assertAuthenticatedContextCurrent(authContext, context);
+  const controller = new AbortController();
+  let rejectCancellation;
+  const cancellation = new Promise((_, reject) => { rejectCancellation = reject; });
+  const cancel = () => {
+    controller.abort();
+    rejectCancellation(authContextSuperseded(context));
+  };
+  authContext.signal.addEventListener('abort', cancel, { once: true });
+  if (authContext.signal.aborted) cancel();
+  let timeoutId;
+  try {
+    await Promise.race([waitForApiBackoff(context, 'api'), cancellation]);
+    assertAuthenticatedContextCurrent(authContext, context);
+    const deadline = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        const error = new Error('Acknowledgement request timed out');
+        error.code = 'ACK_HTTP_TIMEOUT';
+        reject(error);
+      }, ACK_HTTP_DEADLINE_MS);
+    });
+    return await Promise.race([
+      (async () => {
+        const response = await fetchWithBackoff(`${authContext.serverOrigin}${path}`, {
+          method: 'POST',
+          headers: buildDeviceAuthHeaders(authContext),
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }, { context, maxAttempts: 1, respectGlobalBackoff: false, retryStatuses: new Set([429, 503]) });
+        // The status is enough to defer this receipt. Stop the unread error
+        // stream now; clearing the deadline must not leave its fetch alive.
+        if (!response.ok) controller.abort();
+        const data = response.ok ? await response.json() : {};
+        assertAuthenticatedContextCurrent(authContext, context);
+        return { response, data };
+      })(),
+      deadline,
+      cancellation,
+    ]);
+  } catch (error) {
+    // fetchWithBackoff maps AbortError to auth cancellation. A deadline is
+    // retryable; the original auth signal is the authority for cancellation.
+    assertAuthenticatedContextCurrent(authContext, context);
+    if (controller.signal.aborted && !authContext.signal.aborted) {
+      const timeoutError = new Error('Acknowledgement request timed out');
+      timeoutError.code = 'ACK_HTTP_TIMEOUT';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    authContext.signal.removeEventListener('abort', cancel);
+  }
+}
 const COMMAND_ACK_MAX_ENTRIES = 200;
 const COMMAND_ACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const COMMAND_ACK_MAX_BYTES = 512 * 1024;
@@ -8573,23 +8680,15 @@ async function flushCommandAckOutbox(options = {}) {
         acks: batch.map(({ queuedAt, lastWsAttemptAt, ...ack }) => ack),
       };
       assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
-      const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/command-acks`, {
-        method: 'POST',
-        headers: buildDeviceAuthHeaders(authContext),
-        body: JSON.stringify(payload),
-        signal: authContext.signal,
-      }, {
-        context: 'command acknowledgement',
-        maxAttempts: 1,
-        retryStatuses: new Set([429, 503]),
-      });
+      const { response, data } = await fetchAckReceipt(
+        '/api/classpilot/device/command-acks', payload, authContext, 'command acknowledgement',
+      );
       assertAuthenticatedContextCurrent(authContext, 'command acknowledgement flush');
       if (!response.ok) {
         commandAckRetryDelayMs = Math.min(commandAckRetryDelayMs * 2, 5 * 60 * 1000);
         scheduleCommandAckFlush(commandAckRetryDelayMs);
         return;
       }
-      const data = await response.json().catch(() => ({}));
       assertAuthenticatedContextCurrent(authContext, 'command acknowledgement receipt');
       const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'command');
       if (receiptIds.length === 0) {
@@ -8830,24 +8929,16 @@ async function flushChatAckOutbox(options = {}) {
         return;
       }
       assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
-      const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/classpilot/device/chat-acks`, {
-        method: 'POST',
-        headers: buildDeviceAuthHeaders(authContext),
-        body: JSON.stringify({
+      const { response, data } = await fetchAckReceipt(
+        '/api/classpilot/device/chat-acks', {
           acks: batch.map(({ queuedAt, type, chatMessageId, deliveryStatus, timestamp, sessionId, ...ack }) => ack),
-        }),
-        signal: authContext.signal,
-      }, {
-        context: 'chat acknowledgement',
-        maxAttempts: 1,
-        retryStatuses: new Set([429, 503]),
-      });
+        }, authContext, 'chat acknowledgement',
+      );
       assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement flush');
       if (!response.ok) {
         scheduleChatAckFlush(30 * 1000);
         return;
       }
-      const data = await response.json().catch(() => ({}));
       assertAuthenticatedContextCurrent(authContext, 'chat acknowledgement receipt');
       const receiptIds = acceptedAckReceiptIds(data.receipts, batch, authContext, 'chat');
       if (binding !== monitoringEventAuthBindingForContext(authContext)) return;
@@ -10965,6 +11056,10 @@ function abortActiveAuthContext() {
 }
 
 function advanceStudentAuthMutationGeneration() {
+  clearPendingEventHeartbeat();
+  clearWsReconnectTimer();
+  wsAuthRecoveryRequired = false;
+  wsWakeReconciliation = null;
   abortActiveAuthContext();
   studentAuthMutationGeneration += 1;
   return studentAuthMutationGeneration;
@@ -22266,6 +22361,7 @@ function prepareTransientCurrentPageWaypoint(command, delivery, authContext, bin
 }
 
 async function handleRemoteControl(command, envelope = {}, executionOverrides = {}) {
+  await classroomStateRestorePromise;
   const commandId = getCommandIdFromMessage(envelope, command);
   const commandType = command?.type || 'unknown';
   const delivery = RuntimeCore.commandDeliveryState(command, envelope, Date.now());
@@ -22387,6 +22483,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       },
     );
     assertCurrentCommandAuthority(command, envelope);
+    assertTransientCommandNotExpired(command, envelope);
     if (commandType === 'activate-tab' || commandType === 'focus-tab') exactFocusTarget = RuntimeCore.normalizeExactTabTarget(command.data);
     if (commandType === 'stop-focus') RuntimeCore.normalizeStopFocusData(command.data);
     if (commandType === 'stop-focus' && !envelope.classroomState && !envelope.stateSnapshot && !command.classroomState) {
@@ -22658,7 +22755,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
       });
       try {
         assertAuthenticatedContextCurrent(authContext, 'failed command acknowledgement');
-        await sendCommandAck(commandId, 'failed', {
+        await sendCommandAck(commandId, error?.code === 'COMMAND_EXPIRED' ? 'expired' : 'failed', {
           authContext,
           binding: commandBinding,
           commandType,
@@ -22666,7 +22763,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
           errorCode: commandDiagnosticCode(error),
           state,
           appliedRevision: currentClassroomState?.revision ?? 0,
-          outcome: ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code) ? 'unsupported' : 'failed',
+          outcome: error?.code === 'COMMAND_EXPIRED' ? 'expired' : ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code) ? 'unsupported' : 'failed',
           ...(['activate-tab', 'focus-tab'].includes(commandType) ? { result: {
             status: ['FOCUS_CAPABILITY_REQUIRED', 'TAB_ACTIVATE_CAPABILITY_REQUIRED'].includes(error?.code)
               ? 'unsupported' : error?.code === 'STALE_TAB_REF' ? 'stale_tab_ref' : 'unavailable' } } : {}),
@@ -22681,7 +22778,14 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
   }
 }
 
+function assertTransientCommandNotExpired(command, envelope = {}) {
+  if (RuntimeCore.commandDeliveryState(command, envelope, Date.now()).expired) {
+    throw Object.assign(new Error('Command delivery deadline elapsed'), { code: 'COMMAND_EXPIRED' });
+  }
+}
+
 async function executeRemoteControlCommand(command, executionContext = {}) {
+  assertTransientCommandNotExpired(command, executionContext.envelope || {});
   if (![TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
     throw Object.assign(new Error('Classroom controls are unavailable outside monitoring hours'), {
       code: 'MONITORING_OUTSIDE_SCHOOL_HOURS',
@@ -22724,6 +22828,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
     }
   };
   const commandSourceMessage = executionContext.envelope || command;
+  let deliveryStarted = false;
+  const beginCommandSideEffect = () => {
+    if (deliveryStarted) return;
+    assertTransientCommandNotExpired(command, commandSourceMessage);
+    deliveryStarted = true;
+  };
   let commandNotificationSequence = 0;
   const broadcastCommandUi = async (messageType, messageData) => {
     assertCommandExecutionCurrent(`command ${messageType} broadcast`);
@@ -22762,6 +22872,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
     const before = knownTab || await getTab(tabId);
     assertCommandExecutionCurrent(reason);
     rememberClassroomTabUpdate(commandTabJournal, before);
+    beginCommandSideEffect();
     const updated = await chrome.tabs.update(tabId, updateProperties);
     assertCommandExecutionCurrent(reason);
     return updated;
@@ -22771,11 +22882,13 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
     const before = knownTab || await getTab(tabId);
     assertCommandExecutionCurrent(reason);
     rememberClassroomTabRemoval(commandTabJournal, before);
+    beginCommandSideEffect();
     await chrome.tabs.remove(tabId);
     assertCommandExecutionCurrent(reason);
   };
   const createCommandTab = async (createProperties, reason = 'command tab creation') => {
     assertCommandExecutionCurrent(reason);
+    beginCommandSideEffect();
     const created = await chrome.tabs.create(createProperties);
     if (Number.isInteger(created?.id)) commandTabJournal?.createdTabIds.add(created.id);
     assertCommandExecutionCurrent(reason);
@@ -22802,6 +22915,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         if (!currentLicenseIsActive() || !focusNavigationDecision(currentClassroomState, tab).allowed) throw focusError('FOCUS_TAB_OFF_POLICY');
         if ((await resolve()).tabId !== tab.id) throw focusError('STALE_TAB_REF');
         assertCommandExecutionCurrent('Bring Forward activation');
+        beginCommandSideEffect();
         await boundedClassroomOperation(chrome.tabs.update(tab.id, { active: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward activation');
         assertCommandExecutionCurrent('Bring Forward window');
         await boundedClassroomOperation(chrome.windows.update(tab.windowId, { focused: true }), CLASSROOM_TAB_OPERATION_TIMEOUT_MS, 'Bring Forward window');
@@ -22825,6 +22939,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             || ((createProperties) => chrome.tabs.create(createProperties));
           const queryTabs = executionContext.queryTabs || (() => chrome.tabs.query({}));
           const removeTab = executionContext.removeTab || ((tabId) => chrome.tabs.remove(tabId));
+          beginCommandSideEffect();
           const tab = await createTab({ url: command.data.url, active: true });
           try {
             assertCommandExecutionCurrent('open-tab command');
@@ -22895,7 +23010,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
               );
               assertCommandExecutionCurrent('safety evidence command');
             }
-            await closeExactTabTargets(exact, authContext);
+            await closeExactTabTargets(exact, authContext, { beforeClose: beginCommandSideEffect });
             assertCommandExecutionCurrent('exact tab close command');
             result.closedTabRefs = exact.targets.map((target) => target.tabRef);
             result.closedCount = exact.targets.length;
@@ -22917,7 +23032,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
                 reason: 'exact_tab_reference_required',
               };
             }
-            await closeExactTabTargets(exact, authContext);
+            await closeExactTabTargets(exact, authContext, { beforeClose: beginCommandSideEffect });
             assertCommandExecutionCurrent('legacy exact tab close');
             result.closedTabRefs = exact.targets.map((target) => target.tabRef).filter(Boolean);
             result.closedCount = exact.targets.length;
@@ -22942,6 +23057,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
               if (tabDomain && allowedDomainSet.has(tabDomain)) continue;
               assertAuthenticatedContextCurrent(authContext, 'close-all-tabs command');
               try {
+                beginCommandSideEffect();
                 await removeTab(tab.id);
                 assertCommandExecutionCurrent('close-all-tabs command');
                 closedCount += 1;
@@ -23425,6 +23541,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
 
       case 'timer':
+        beginCommandSideEffect();
         if (command.data?.timerId && hasNegotiatedCapability('timerControlsV1')) {
           // Revisioned timers render from the full FAB snapshot. Late commands
           // cannot resurrect a stopped timer or rewind pause/resume state.
@@ -23471,6 +23588,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
 
       case 'poll':
+        beginCommandSideEffect();
         // Show/hide poll overlay on all tabs (fire-and-forget for instant response)
         const pollAction = command.data.action;
         const pollId = command.data.pollId;
@@ -26255,18 +26373,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Schedule WebSocket reconnection with exponential backoff
 function scheduleWsReconnect() {
-  if (trackingState === TRACKING_STATES.OFF) {
+  if (trackingState === TRACKING_STATES.OFF || !hasStudentAuth()) {
+    clearWsReconnectTimer();
     return;
   }
-  const delay = Math.min(wsReconnectBackoffMs, 120000);
-  // Add jitter (0-20% of delay) to prevent thundering herd
-  const jitter = Math.floor(Math.random() * delay * 0.2);
-  const actualDelay = delay + jitter;
+  if (wsAuthRecoveryRequired) {
+    scheduleEventHeartbeat('websocket-auth-recovery');
+    return;
+  }
+  if (wsReconnectTimer) return;
+  const delay = Math.min(wsReconnectBackoffMs, 30000);
+  const actualDelay = Math.floor(Math.random() * delay);
+  const scope = `${CONFIG.authContextId || ''}:${studentAuthMutationGeneration}`;
   console.log(`WebSocket will reconnect in ${Math.round(actualDelay / 1000)}s...`);
   chrome.alarms.create('ws-reconnect', {
     when: Date.now() + actualDelay,
   });
-  wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 120000);
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    if (scope !== `${CONFIG.authContextId || ''}:${studentAuthMutationGeneration}`) return;
+    connectWebSocket().catch(() => {});
+  }, actualDelay);
+  wsReconnectBackoffMs = Math.min(wsReconnectBackoffMs * 2, 30000);
+}
+
+function clearWsReconnectTimer() {
+  if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+  wsReconnectTimer = null;
 }
 
 // Connect to WebSocket via offscreen document proxy
@@ -26274,7 +26407,7 @@ function scheduleWsReconnect() {
 // so the actual WebSocket lives in the offscreen document and relays messages here.
 async function queryOffscreenWebSocketStatus() {
   try {
-    return await sendToOffscreen({ type: 'WS_STATUS' });
+    return await sendToOffscreen({ type: 'WS_STATUS', probeNow: wsConnectionGeneration === 0 });
   } catch {
     return null;
   }
@@ -26392,7 +26525,8 @@ async function recoverOffscreenWebSocketStatus(authContext) {
   if (status.transportOpen === true && status.authenticated === true) {
     wsConnected = true;
     wsAuthenticatedGeneration = wsConnectionGeneration;
-    wsReconnectBackoffMs = 10000;
+    wsReconnectBackoffMs = 1000;
+    clearWsReconnectTimer();
     await chrome.alarms.clear('ws-reconnect');
     flushCommandAckOutbox().catch(() => {});
     flushChatAckOutbox().catch(() => {});
@@ -26430,6 +26564,11 @@ async function connectWebSocket() {
 }
 
 async function connectWebSocketNow(requestedAuthContext = null) {
+  clearWsReconnectTimer();
+  if (wsAuthRecoveryRequired) {
+    scheduleEventHeartbeat('websocket-auth-recovery');
+    return false;
+  }
   if (trackingState === TRACKING_STATES.SAFETY_ONLY) return;
   if (trackingState === TRACKING_STATES.OFF) {
     console.log('Skipping WebSocket - tracking state is OFF');
@@ -26540,32 +26679,109 @@ async function connectWebSocketNow(requestedAuthContext = null) {
 // Handle WebSocket events relayed from the offscreen document in transport
 // order. Offscreen emits frames without awaiting runtime.sendMessage, so an
 // explicit per-generation tail is required to keep auth/state/commands causal.
+async function reconcileColdSocketAuthority(authContext) {
+  const scope = authContextProtocolScope(authContext);
+  if (negotiatedProtocolState?.scope === scope) return true;
+  if (wsWakeReconciliation?.scope === scope) return wsWakeReconciliation.promise;
+  const owner = { scope, promise: null };
+  owner.promise = (async () => {
+    let timeoutId;
+    try {
+      lastClassroomHeartbeatSyncRequestAt = 0;
+      lastFabHeartbeatSyncRequestAt = 0;
+      // HTTP is independent of this serial WebSocket tail. Joining its
+      // singleflight cannot wait for the auth-success frame behind this one.
+      const requested = safeSendHeartbeat('worker-socket-authority');
+      const flight = heartbeatInFlightPromise || requested;
+      const restored = (async () => {
+        await flight;
+        await studentAuthMutationTail;
+        assertAuthenticatedContextCurrent(authContext, 'worker socket authority');
+        return negotiatedProtocolState?.scope === scope && currentLicenseIsActive();
+      })();
+      return await Promise.race([restored, new Promise(resolve => {
+        timeoutId = setTimeout(() => resolve(false), HEARTBEAT_REQUEST_TIMEOUT_MS);
+      })]);
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  })();
+  wsWakeReconciliation = owner;
+  return owner.promise;
+}
+
 function handleWsEvent(event, data, connectionGeneration, authContextId, serverOrigin) {
+  // Reserve ordering before any cold-worker read. The frame never supplies
+  // identity authority: restore it and query the surviving exact proxy first.
   const generation = Number(connectionGeneration || 0);
-  let authContext;
-  try {
-    authContext = captureAuthenticatedContext('WebSocket event');
-  } catch {
+  if (wsPendingIngressCount >= WS_MAX_PENDING_INGRESS) {
+    // Refuse excess transient work; persistent controls recover from the
+    // authoritative snapshot, never from a durable raw-frame replay queue.
+    authStateRestorePromise.then(() => {
+      if (String(authContextId || '') !== CONFIG.authContextId
+        || normalizedServerOrigin(serverOrigin) !== normalizedServerOrigin(CONFIG.serverUrl)) return;
+      requestClassroomStateSync('websocket-ingress-overflow', true);
+      scheduleEventHeartbeat('websocket-ingress-overflow');
+    }).catch(() => {});
     return Promise.resolve({ ignored: true });
   }
-  if (
-    generation !== wsConnectionGeneration
-    || String(authContextId || '') !== authContext.authContextId
-    || normalizedServerOrigin(serverOrigin) !== authContext.serverOrigin
-    || !wsIdentityMatchesContext({ connectionGeneration, authContextId, serverOrigin }, authContext)
-  ) {
-    console.info('[WebSocket] Ignoring stale transport event for generation', generation);
-    return Promise.resolve({ ignored: true });
-  }
-  if (wsMessageProcessingGeneration !== generation) {
+  wsPendingIngressCount += 1;
+  const processReadyEvent = async () => {
+    await authStateRestorePromise;
+    await awaitManagedAuthGatePolicyStable();
+    let authContext;
+    try {
+      authContext = captureAuthenticatedContext('WebSocket event');
+      if (wsConnectionGeneration === 0) await recoverOffscreenWebSocketStatus(authContext);
+      assertAuthenticatedContextCurrent(authContext, 'WebSocket event readiness');
+    } catch {
+      return { ignored: true };
+    }
+    if (
+      generation !== wsConnectionGeneration
+      || String(authContextId || '') !== authContext.authContextId
+      || normalizedServerOrigin(serverOrigin) !== authContext.serverOrigin
+      || !wsIdentityMatchesContext({ connectionGeneration, authContextId, serverOrigin }, authContext)
+    ) return { ignored: true };
     wsMessageProcessingGeneration = generation;
-    wsMessageProcessingTail = Promise.resolve();
-  }
-  const processing = wsMessageProcessingTail.then(
-    () => processWsEvent(event, data, generation, authContext),
-    () => processWsEvent(event, data, generation, authContext),
-  );
-  wsMessageProcessingTail = processing.catch(() => undefined);
+    let frame = null;
+    if (event === 'message') {
+      try { frame = JSON.parse(data); } catch { /* normal parser handles invalid frames */ }
+    }
+    if (event === 'message' && !wsAuthenticatedResponseGuard) {
+      try {
+        if (JSON.parse(data)?.type === 'auth-success') {
+          requestClassroomStateSync('worker-socket-recovered', true);
+          scheduleEventHeartbeat('worker-socket-recovered');
+          return { handled: true };
+        }
+      } catch { /* normal message validation owns malformed data */ }
+    }
+    if (frame && !['auth-success', 'auth-error', 'auth-failed', 'pong', 'transport-probe-reply',
+      'command-ack-receipt', 'chat-message-ack-receipt'].includes(frame.type)
+      && !(await reconcileColdSocketAuthority(authContext))) {
+      assertAuthenticatedContextCurrent(authContext, 'worker socket authority failure');
+      if (frame.type === 'remote-control'
+        && RuntimeCore.commandDeliveryState(frame.command, frame, Date.now()).expired) {
+        await handleRemoteControl(frame.command, frame);
+      }
+      scheduleEventHeartbeat('worker-socket-authority-unavailable');
+      return { ignored: true };
+    }
+    return processWsEvent(event, data, generation, authContext);
+  };
+  const transportKey = JSON.stringify([generation, String(authContextId || ''), normalizedServerOrigin(serverOrigin)]);
+  const priorTail = wsIngressTails.get(transportKey) || Promise.resolve();
+  const processing = priorTail.then(processReadyEvent, processReadyEvent)
+    .finally(() => {
+      wsPendingIngressCount -= 1;
+      if (wsIngressTails.get(transportKey) === tail) wsIngressTails.delete(transportKey);
+    });
+  const tail = processing.catch(() => undefined);
+  wsIngressTails.set(transportKey, tail);
+  wsMessageProcessingTail = tail;
   return processing;
 }
 
@@ -26584,6 +26800,9 @@ async function processWsEvent(event, data, generation, authContext) {
     console.warn('WebSocket connection issue');
     scheduleWsReconnect();
   } else if (event === 'close') {
+      try {
+        if (JSON.parse(data || '{}').code === 1008) wsAuthRecoveryRequired = true;
+      } catch { /* close metadata is advisory */ }
     const closingTransportIdentity = wsTransportIdentity;
     const closingLiveViewContext = activeLiveViewContext;
     const closingLiveViewNegotiationId = activeLiveViewNegotiationId;
@@ -26660,6 +26879,7 @@ async function handleWsMessage(
         wsConnected = false;
         wsAuthenticatedGeneration = 0;
         settleWebSocketAuthAttempt(connectionGeneration);
+        wsAuthRecoveryRequired = true;
         if (activeLiveViewNegotiationId) {
           await stopScreenShare({ notifyServer: false, reason: 'student-websocket-auth-rejected' });
         }
@@ -26704,12 +26924,13 @@ async function handleWsMessage(
         wsConnected = true;
         wsAuthenticatedGeneration = wsConnectionGeneration;
         settleWebSocketAuthAttempt(wsConnectionGeneration);
-        wsReconnectBackoffMs = 10000;
+        wsReconnectBackoffMs = 1000;
+        clearWsReconnectTimer();
         chrome.alarms.clear('ws-reconnect');
-        await flushCommandAckOutbox().catch(() => {});
-        assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication ACK flush');
-        await flushChatAckOutbox().catch(() => {});
-        assertAuthenticatedContextCurrent(authContext, 'WebSocket authentication chat ACK flush');
+          // Delivery receipts are durable and independent of ordered control
+          // adoption. A slow HTTP fallback must not hold subsequent frames.
+          flushCommandAckOutbox().catch(() => {});
+          flushChatAckOutbox().catch(() => {});
         
         // Always update maxTabsPerStudent (including null for unlimited), but
         // serialize destructive enforcement with authentication adoption.
