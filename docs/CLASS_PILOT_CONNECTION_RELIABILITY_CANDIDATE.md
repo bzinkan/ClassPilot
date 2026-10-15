@@ -1,9 +1,12 @@
-# Connection reliability candidate
+# ClassPilot 3.0.0 connection reliability release
 
-This is an unversioned successor candidate based on `40af839d` (2.9.9).
-The manifest intentionally remains 2.9.9 until release preparation. It is not
-a separately publishable 2.9.9 archive. No Store submission, deployment,
-managed-device acceptance or 800-device capacity acceptance is recorded here.
+This successor is based on `40af839d` (2.9.9) and is prepared as 3.0.0.
+A read-only check of the public Store listing on October 15, 2026 showed 2.9.9,
+updated October 10. Pending submissions could not be checked because browser
+navigation to the developer dashboard was unavailable. Recheck both immediately
+before uploading the final verified `dist/ClassPilot-v3.0.0.zip` and record its
+source commit and SHA-256. No Store submission or managed-device adoption is
+claimed by preparing this release.
 
 ## Behavior
 
@@ -49,9 +52,9 @@ network resolution blocked and synthetic school transports. The offscreen
 suite separately covers legacy fallback, probe replies, silence retirement,
 late timer recovery and generation retirement.
 
-Before packaging, verify the live Store listing and pending submissions, choose
-the next unused patch, align release/package guards, and bind the clean source
-commit and versioned ZIP SHA-256 to the evidence. Deploy the compatible server
+The manifest and package guard both require the requested 3.0.0 version. Before
+upload, verify the live Store listing and pending submissions and bind the clean
+source commit and versioned ZIP SHA-256 to the evidence. Deploy the compatible server
 hint/echo before evaluating the accelerated recovery target. Rollback to an
 older server keeps the legacy transport fallback.
 
@@ -63,13 +66,9 @@ seconds and authoritative status/preview recovery within thirty seconds.
 Actual sleeping/throttled periods must show stale status rather than promise a
 timer bound Chrome cannot execute.
 
-The 800-device fully observed capacity profile is twenty classes of forty:
-160 screenshot uploads, 80 heartbeats and at most 80 normal transport probes
-per second, plus staff requests, command bursts and retries. Validate on the
-existing serving infrastructure with bounded retry/fault cohorts and the
-SchoolPilot capacity/rollout contract. Simulated capacity evidence does not
-replace exact-package managed-device acceptance. No capacity traffic or
-infrastructure mutation is authorized by this file.
+Capacity stress testing is outside this focused connection-reliability release.
+Existing failed capacity campaigns remain failed; this release makes no capacity
+claim and does not authorize another capacity workload or infrastructure change.
 
 Validation on 2026-10-13 used Node 24: typecheck, 205 unit tests, production
 build and the complete Chrome aggregate passed. The final worker SHA-256 was
