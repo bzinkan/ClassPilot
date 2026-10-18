@@ -181,14 +181,89 @@
     return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.shield}</svg>`;
   }
 
+  // The theme's mark beside the brand, one small inline drawing per preset.
+  const THEME_MARKS = {
+    halloween: '<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="29" y="5" width="7" height="13" rx="3" fill="#15803d"/><ellipse cx="32" cy="38" rx="27" ry="23" fill="#f97316"/><ellipse cx="18" cy="38" rx="11" ry="22" fill="#ea580c" opacity=".55"/><ellipse cx="46" cy="38" rx="11" ry="22" fill="#ea580c" opacity=".55"/><ellipse cx="32" cy="38" rx="10" ry="23" fill="#fb923c" opacity=".7"/><path d="M17 31 L26 36 L17 39 Z" fill="#fef08a"/><path d="M47 31 L38 36 L47 39 Z" fill="#fef08a"/><path d="M32 38 L28.5 44 L35.5 44 Z" fill="#fef08a"/><path d="M15 46 Q32 60 49 46 L45 46 L43 51 L39 46 L35 51 L31 46 L27 51 L23 46 L21 50 L19 46 Z" fill="#fef08a"/></svg>',
+    thanksgiving: '<svg viewBox="0 0 64 64" aria-hidden="true"><g transform="translate(32 30)"><ellipse rx="7" ry="17" fill="#b45309" transform="rotate(-62) translate(0 -14)"/><ellipse rx="7" ry="17" fill="#dc2626" transform="rotate(-31) translate(0 -16)"/><ellipse rx="7" ry="18" fill="#f59e0b" transform="translate(0 -17)"/><ellipse rx="7" ry="17" fill="#dc2626" transform="rotate(31) translate(0 -16)"/><ellipse rx="7" ry="17" fill="#b45309" transform="rotate(62) translate(0 -14)"/></g><circle cx="32" cy="38" r="15" fill="#78350f"/><circle cx="26" cy="35" r="3.2" fill="#fff"/><circle cx="38" cy="35" r="3.2" fill="#fff"/><circle cx="26.6" cy="35.6" r="1.5" fill="#111"/><circle cx="38.6" cy="35.6" r="1.5" fill="#111"/><path d="M28.5 41 L35.5 41 L32 48 Z" fill="#f59e0b"/><path d="M33.5 43.5 C39 45 38 53 32.5 51 Z" fill="#dc2626"/></svg>',
+    christmas: '<svg viewBox="0 0 48 48" aria-hidden="true"><path d="M24 4 L34 18 L14 18 Z" fill="#22c55e"/><path d="M24 12 L37 29 L11 29 Z" fill="#16a34a"/><path d="M24 21 L40 41 L8 41 Z" fill="#15803d"/><rect x="21" y="41" width="6" height="5" fill="#78350f"/><circle cx="20" cy="24" r="2" fill="#ef4444"/><circle cx="29" cy="31" r="2" fill="#facc15"/><circle cx="17" cy="35" r="2" fill="#3b82f6"/><circle cx="31" cy="21" r="1.6" fill="#f472b6"/><path d="M24 1 L25.4 4.6 L29.2 4.8 L26.2 7.2 L27.2 11 L24 8.8 L20.8 11 L21.8 7.2 L18.8 4.8 L22.6 4.6 Z" fill="#fcd34d"/></svg>',
+    advent: '<svg viewBox="0 0 40 40" aria-hidden="true"><rect x="14" y="14" width="12" height="22" rx="2" fill="#7c3aed"/><rect x="14" y="14" width="12" height="4" fill="#a78bfa"/><ellipse cx="20" cy="9" rx="3.5" ry="6" fill="#fbbf24"/><ellipse cx="20" cy="10.5" rx="1.6" ry="3" fill="#fef3c7"/></svg>',
+    valentines: '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 29 C8 22 2 17 2 10.5 C2 6 5.5 3 9.5 3 C12.3 3 14.6 4.6 16 7 C17.4 4.6 19.7 3 22.5 3 C26.5 3 30 6 30 10.5 C30 17 24 22 16 29 Z" fill="#fb7185"/></svg>',
+    'st-patricks': '<svg viewBox="0 0 40 40" aria-hidden="true"><path d="M0 7 C-5.5 2.5 -8 -1 -8 -4.5 C-8 -7.5 -5.5 -9.5 -3 -9.5 C-1.4 -9.5 0 -8.5 0 -7 C0 -8.5 1.4 -9.5 3 -9.5 C5.5 -9.5 8 -7.5 8 -4.5 C8 -1 5.5 2.5 0 7 Z" fill="#16a34a" stroke="#15803d" stroke-width=".8" transform="translate(20 19) rotate(0) translate(0 -8.5)"/><path d="M0 7 C-5.5 2.5 -8 -1 -8 -4.5 C-8 -7.5 -5.5 -9.5 -3 -9.5 C-1.4 -9.5 0 -8.5 0 -7 C0 -8.5 1.4 -9.5 3 -9.5 C5.5 -9.5 8 -7.5 8 -4.5 C8 -1 5.5 2.5 0 7 Z" fill="#16a34a" stroke="#15803d" stroke-width=".8" transform="translate(20 19) rotate(120) translate(0 -8.5)"/><path d="M0 7 C-5.5 2.5 -8 -1 -8 -4.5 C-8 -7.5 -5.5 -9.5 -3 -9.5 C-1.4 -9.5 0 -8.5 0 -7 C0 -8.5 1.4 -9.5 3 -9.5 C5.5 -9.5 8 -7.5 8 -4.5 C8 -1 5.5 2.5 0 7 Z" fill="#16a34a" stroke="#15803d" stroke-width=".8" transform="translate(20 19) rotate(240) translate(0 -8.5)"/><path d="M20 22 Q23 30 19 37" stroke="#15803d" stroke-width="2.6" fill="none" stroke-linecap="round"/></svg>',
+    easter: '<svg viewBox="0 0 32 40" aria-hidden="true"><path d="M16 2 C8 2 3 14 3 24 C3 32 9 38 16 38 C23 38 29 32 29 24 C29 14 24 2 16 2 Z" fill="#f9a8d4"/><path d="M4 18 Q16 12 28 18" stroke="#fff" stroke-width="3" fill="none"/><path d="M4 27 Q16 33 28 27" stroke="#fff" stroke-width="3" fill="none"/><circle cx="16" cy="22.5" r="2.2" fill="#a78bfa"/></svg>',
+    spring: '<svg viewBox="0 0 40 40" aria-hidden="true"><g fill="#f9a8d4" stroke="rgba(0,0,0,.08)"><ellipse cx="20" cy="9" rx="4.2" ry="8"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(45 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(90 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(135 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(180 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(225 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(270 20 20)"/><ellipse cx="20" cy="9" rx="4.2" ry="8" transform="rotate(315 20 20)"/></g><circle cx="20" cy="20" r="6" fill="#fbbf24"/></svg>',
+    summer: '<svg viewBox="0 0 40 40" aria-hidden="true"><g stroke="#f59e0b" stroke-width="3" stroke-linecap="round"><line x1="20" y1="3" x2="20" y2="8"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(45 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(90 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(135 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(180 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(225 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(270 20 20)"/><line x1="20" y1="3" x2="20" y2="8" transform="rotate(315 20 20)"/></g><circle cx="20" cy="20" r="9" fill="#fbbf24"/></svg>',
+    fall: '<svg viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2 C27 8 30 19 16 30 C2 19 5 8 16 2 Z" fill="#ea580c"/><path d="M16 6 L16 28 M16 14 L10 10 M16 18 L22 13" stroke="rgba(0,0,0,.25)" stroke-width="1.5" fill="none"/></svg>',
+    winter: '<svg viewBox="0 0 40 40" aria-hidden="true"><g stroke="#e0f2fe" stroke-width="2.4" stroke-linecap="round"><g><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g><g transform="rotate(60 20 20)"><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g><g transform="rotate(120 20 20)"><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g><g transform="rotate(180 20 20)"><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g><g transform="rotate(240 20 20)"><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g><g transform="rotate(300 20 20)"><line x1="20" y1="20" x2="20" y2="3"/><line x1="20" y1="8" x2="16" y2="5" stroke-width="2"/><line x1="20" y1="8" x2="24" y2="5" stroke-width="2"/></g></g></svg>',
+  };
+  const THEME_PRESETS = Object.keys(THEME_MARKS);
+
+  // The worker already validated the theme against the server origin; the
+  // frame re-checks shape so a malformed state can never reach the markup.
+  function safeGateTheme(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    if (typeof value.preset !== 'string' || !THEME_PRESETS.includes(value.preset)) return null;
+    let artwork = null;
+    try { const url = new URL(String(value.artwork)); if (url.protocol === 'https:' || url.protocol === 'http:') artwork = url.href; } catch { artwork = null; }
+    if (!artwork) return null;
+    let brandFace = null;
+    const face = value.brandFace;
+    if (face && typeof face === 'object' && typeof face.family === 'string' && /^[A-Za-z][A-Za-z ]*$/.test(face.family.trim())) {
+      try {
+        const url = new URL(String(face.url));
+        if ((url.protocol === 'https:' || url.protocol === 'http:') && (Number(face.weight) === 400 || Number(face.weight) === 700)) {
+          brandFace = { family: face.family.trim().slice(0, 40), weight: Number(face.weight), url: url.href };
+        }
+      } catch { brandFace = null; }
+    }
+    return { preset: value.preset, artwork, brandFace };
+  }
+  function gateThemeKey(theme) {
+    const safe = safeGateTheme(theme);
+    return safe ? `${safe.preset}|${safe.artwork}|${safe.brandFace ? `${safe.brandFace.family}@${safe.brandFace.url}` : ''}` : '';
+  }
+  // A validated URL in a CSS url(): nothing but percent-encoding reaches the stylesheet.
+  function cssUrl(href) {
+    return `url("${href.replace(/["'\\()\s]/g, (character) => encodeURIComponent(character))}")`;
+  }
+  // Artwork paints only once it has loaded and the face only once it is
+  // available, so a slow or blocked network leaves the plain gate intact.
+  function applyGateTheme(theme) {
+    const safe = safeGateTheme(theme);
+    const panel = root.querySelector('.classpilot-auth-panel');
+    document.body.classList.toggle('classpilot-auth-themed', Boolean(safe));
+    if (!safe || !panel) {
+      document.body.style.removeProperty('--classpilot-theme-art');
+      return;
+    }
+    const image = new Image();
+    image.onload = () => {
+      if (!panel.isConnected) return;
+      panel.style.setProperty('--classpilot-theme-art', cssUrl(safe.artwork));
+      document.body.style.setProperty('--classpilot-theme-art', cssUrl(safe.artwork));
+      panel.classList.add('classpilot-auth-panel--art');
+    };
+    image.src = safe.artwork;
+    if (safe.brandFace && typeof FontFace === 'function' && document.fonts) {
+      const family = safe.brandFace.family;
+      const face = new FontFace(family, cssUrl(safe.brandFace.url), { weight: String(safe.brandFace.weight) });
+      face.load().then((loaded) => {
+        document.fonts.add(loaded);
+        if (!panel.isConnected) return;
+        panel.style.setProperty('--classpilot-brand-face', `"${family}"`);
+        panel.classList.add('classpilot-auth-panel--face');
+      }).catch(() => {});
+    }
+  }
+
   function shell(title, subtitle, body, options = {}) {
     return `
-      <section class="classpilot-auth-panel${options.kiosk ? ' classpilot-auth-panel--has-kiosk' : ''}" role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${options.busy ? 'aria-busy="true"' : ''} tabindex="-1">
+      <section class="classpilot-auth-panel${options.kiosk ? ' classpilot-auth-panel--has-kiosk' : ''}${options.theme ? ' classpilot-auth-panel--themed' : ''}"${options.theme ? ` data-theme="${options.theme.preset}"` : ''} role="dialog" aria-modal="true" aria-labelledby="classpilot-auth-title" aria-describedby="classpilot-auth-subtitle" ${options.busy ? 'aria-busy="true"' : ''} tabindex="-1">
         <aside class="classpilot-auth-side" aria-hidden="true">
           <div>
             <div class="classpilot-auth-brand">
               <span class="classpilot-auth-logo">${icon('plane')}</span>
-              <span>ClassPilot</span>
+              <span class="classpilot-auth-brand-name">ClassPilot</span>
+              ${options.theme ? `<span class="classpilot-auth-mark" data-mark="${options.theme.preset}">${THEME_MARKS[options.theme.preset]}</span>` : ''}
             </div>
             <div class="classpilot-auth-promise">Safe.<span>Focused.</span>Ready to learn.</div>
             <p class="classpilot-auth-side-copy">ClassPilot helps your school keep browsing safe, on-task, and distraction-free.</p>
@@ -455,8 +530,9 @@
       'Sign in to this Chromebook',
       subtitle,
       form,
-      { kiosk: Boolean(safeKioskUrl(state.kioskUrl)) },
+      { kiosk: Boolean(safeKioskUrl(state.kioskUrl)), theme: safeGateTheme(state.theme) },
     );
+    applyGateTheme(state.theme);
     retryFallbackIndex = 0;
     attachReadyHandlers(currentState);
     installFocusTrap(loginMethod === 'name_pin' ? '#classpilot-auth-grade' : '#classpilot-auth-email');
@@ -490,7 +566,8 @@
       (state.loginMethod === 'email_id' ? 'email_id' : 'name_pin') ===
         (currentState?.loginMethod === 'email_id' ? 'email_id' : 'name_pin') &&
       rosterContextGeneration(state) === rosterContextGeneration(currentState || {}) &&
-      safeKioskUrl(state.kioskUrl) === safeKioskUrl(currentState?.kioskUrl);
+      safeKioskUrl(state.kioskUrl) === safeKioskUrl(currentState?.kioskUrl) &&
+      gateThemeKey(state.theme) === gateThemeKey(currentState?.theme);
     if (sameReadyForm) {
       // Keep partially entered values and focus when a duplicate/newer ready
       // state arrives. A failed server login is rendered inline, not by

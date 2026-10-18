@@ -2,7 +2,16 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared candidate is **2.9.9**, which adds negotiated safe poll replay:
+The prepared candidate is **3.0.1**, which lets the shared student sign-in
+gate paint the school's dashboard theme. The worker accepts an optional
+`theme` on the login configuration only for a known preset with same-origin
+artwork, caches it with the gate presentation, and the frame applies artwork
+and brand face after they load. No permission, managed-policy key, capability
+or collected data is added. See the
+[3.0.1 candidate record](../docs/CLASS_PILOT_3_0_1_CANDIDATE.md) and the
+[3.0.0 connection reliability record](../docs/CLASS_PILOT_CONNECTION_RELIABILITY_CANDIDATE.md).
+
+It retains 2.9.9's negotiated safe poll replay:
 durable ordering, saved answers across worker restarts, and canonical UI
 restoration on already-open pages. It requires the corrected SchoolPilot
 backend and a separately enabled school pilot. It adds the `pollReplaySafeV1`

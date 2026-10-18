@@ -13572,6 +13572,7 @@ function restoreSharedSignInPresentationCache(rawCache) {
     pinLoginEnabled: rawCache.loginMethod !== 'email_id',
     schoolId: typeof rawCache.schoolId === 'string' ? rawCache.schoolId : null,
     passpilotKioskAvailable: rawCache.passpilotKioskAvailable === true,
+    theme: sanitizeSignInGateTheme(rawCache.theme, CONFIG.serverUrl),
     bindingKey: authGateConfigBindingKey(currentBinding),
   };
   bumpAuthGateStateRevision();
@@ -13590,6 +13591,10 @@ async function persistSharedSignInPresentationCache(config) {
       loginMethod: config.loginMethod === 'email_id' ? 'email_id' : 'name_pin',
       schoolId: typeof config.schoolId === 'string' ? config.schoolId : null,
       passpilotKioskAvailable: config.passpilotKioskAvailable === true,
+      // Presentation only: the sanitized theme (preset id, same-origin artwork
+      // and face URLs) is written only when the server sent one, so a school
+      // without a theme keeps the 3.0.0 cache shape.
+      ...(config.theme ? { theme: config.theme } : {}),
     },
   });
 }
@@ -13706,6 +13711,43 @@ function assertAuthMutationBindingCurrent(generation, binding, reason) {
 
 function isUnavailableAuthGateResponse(response) {
   return response?.status === 408 || response?.status === 429 || response?.status >= 500;
+}
+
+// ── School theme on the sign-in gate (3.0.1) ────────────────────────────
+// login-config may carry one school-level, presentation-only `theme`. Only a
+// known preset with same-origin artwork (and an optional same-origin display
+// face) is kept; anything else means the plain gate. Nothing here is per
+// student or per teacher, and nothing is sent back to the server.
+const SIGN_IN_GATE_THEME_PRESETS = ['halloween', 'thanksgiving', 'christmas', 'advent', 'valentines',
+  'st-patricks', 'easter', 'spring', 'summer', 'fall', 'winter'];
+
+function sameOriginAssetUrl(value, serverUrl) {
+  try {
+    const url = new URL(String(value));
+    const base = new URL(String(serverUrl));
+    if (url.origin !== base.origin || url.username || url.password || url.search || url.hash) return null;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function sanitizeSignInGateTheme(raw, serverUrl) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const preset = typeof raw.preset === 'string' && SIGN_IN_GATE_THEME_PRESETS.includes(raw.preset) ? raw.preset : null;
+  const artwork = sameOriginAssetUrl(raw.artwork, serverUrl);
+  if (!preset || !artwork) return null;
+  const label = typeof raw.label === 'string' ? raw.label.trim().slice(0, 40) : '';
+  let brandFace = null;
+  const face = raw.brandFace;
+  if (face && typeof face === 'object' && !Array.isArray(face)) {
+    const family = typeof face.family === 'string' ? face.family.trim().slice(0, 40) : '';
+    const url = sameOriginAssetUrl(face.url, serverUrl);
+    const weight = Number(face.weight);
+    if (/^[A-Za-z][A-Za-z ]*$/.test(family) && url && (weight === 400 || weight === 700)) brandFace = { family, weight, url };
+  }
+  return { preset, label: label || preset, artwork, mark: preset, brandFace };
 }
 
 function isValidSharedSignInConfigPayload(data) {
@@ -13861,6 +13903,7 @@ async function refreshSharedSignInLoginConfigFast(options = {}) {
           pinLoginEnabled: sharedSignInEnabled && data.loginMethod !== 'email_id',
           schoolId: typeof data.schoolId === 'string' ? data.schoolId : null,
           passpilotKioskAvailable: data.passpilotKioskAvailable === true,
+          theme: sharedSignInEnabled ? sanitizeSignInGateTheme(data.theme, CONFIG.serverUrl) : null,
           bindingKey,
         });
         await persistSharedSignInPresentationCache(state).catch(() => {});
@@ -14092,6 +14135,8 @@ function getAuthGateState() {
     // the gate on kiosk pages even when the button is hidden.
     kioskUrl: kioskLaunchUrl(),
     kioskOrigin: kioskGateOrigin(),
+    // The school's sign-in theme, presentation only; null paints the plain gate.
+    theme: authRequired && sharedSignInLoginConfig.sharedSignInEnabled === true ? (sharedSignInLoginConfig.theme || null) : null,
   };
 }
 
