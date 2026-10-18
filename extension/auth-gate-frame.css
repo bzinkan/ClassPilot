@@ -487,6 +487,85 @@ select:disabled {
   position: static;
 }
 
+
+/* ── School theme on the sign-in gate (3.0.1) ────────────────────────────
+   One school-level, presentation-only theme from login-config. The artwork
+   paints the page behind the gate under a dark scrim and the sign-in area
+   inside the panel; the form sits on a frosted white card, so every field,
+   button, size and contrast is exactly the plain gate's. The side column
+   takes the theme tint, the mark sits beside the brand, and three presets
+   set the brand in a display face once it has loaded. A missing image or
+   font simply leaves the plain gate. */
+body.classpilot-auth-themed {
+  background-color: #0b1220;
+  background-image: linear-gradient(rgba(5, 8, 20, .62), rgba(5, 8, 20, .76)), var(--classpilot-theme-art, none);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+.classpilot-auth-panel--themed .classpilot-auth-side {
+  background: var(--classpilot-theme-side, linear-gradient(180deg, var(--navy-dark), var(--navy)));
+}
+.classpilot-auth-panel--themed .classpilot-auth-logo,
+.classpilot-auth-panel--themed .classpilot-auth-button {
+  background: var(--classpilot-theme-accent, var(--yellow));
+  color: var(--classpilot-theme-accent-fg, var(--navy));
+}
+.classpilot-auth-panel--themed .classpilot-auth-button:hover:not(:disabled) {
+  background: var(--classpilot-theme-accent, var(--yellow));
+  filter: brightness(1.06);
+}
+.classpilot-auth-panel--themed .classpilot-auth-promise span {
+  color: var(--classpilot-theme-accent, var(--yellow));
+}
+.classpilot-auth-mark {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .3));
+}
+.classpilot-auth-mark svg { width: 100%; height: 100%; }
+.classpilot-auth-mark[data-mark="halloween"], .classpilot-auth-mark[data-mark="thanksgiving"] { width: 40px; height: 40px; }
+.classpilot-auth-mark[data-mark="valentines"] { transform: rotate(-12deg); }
+.classpilot-auth-mark[data-mark="fall"] { transform: rotate(24deg); }
+.classpilot-auth-panel--face .classpilot-auth-brand-name {
+  font-family: var(--classpilot-brand-face), Inter, ui-sans-serif, sans-serif;
+  font-size: var(--classpilot-brand-size, 26px);
+  font-weight: var(--classpilot-brand-weight, 400);
+  line-height: 1;
+  letter-spacing: var(--classpilot-brand-spacing, 0);
+}
+.classpilot-auth-panel--art .classpilot-auth-main {
+  padding: 28px 32px;
+  background: #fff var(--classpilot-theme-art, none) center/cover no-repeat;
+}
+.classpilot-auth-panel--art .classpilot-auth-main-inner {
+  padding: 34px 40px 22px;
+  border: 1px solid rgba(255, 255, 255, .7);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 18px 44px rgba(5, 19, 43, .22);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+.classpilot-auth-panel--art .classpilot-auth-footnote { background: transparent; }
+@media (prefers-reduced-transparency: reduce) {
+  .classpilot-auth-panel--art .classpilot-auth-main-inner { background: rgba(255, 255, 255, .97); -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
+.classpilot-auth-panel[data-theme="halloween"] { --classpilot-theme-side: rgba(18, 10, 36, .86); --classpilot-theme-accent: #f97316; --classpilot-theme-accent-fg: #1c0a05; --classpilot-brand-size: 26px; --classpilot-brand-spacing: .04em; }
+.classpilot-auth-panel[data-theme="thanksgiving"] { --classpilot-theme-side: rgba(74, 44, 23, .86); --classpilot-theme-accent: #f59e0b; --classpilot-theme-accent-fg: #2b1a0e; }
+.classpilot-auth-panel[data-theme="christmas"] { --classpilot-theme-side: rgba(110, 20, 20, .86); --classpilot-theme-accent: #fcd34d; --classpilot-theme-accent-fg: #7f1d1d; --classpilot-brand-size: 28px; --classpilot-brand-weight: 700; }
+.classpilot-auth-panel[data-theme="advent"] { --classpilot-theme-side: rgba(46, 16, 101, .86); --classpilot-theme-accent: #fbbf24; --classpilot-theme-accent-fg: #2e1065; }
+.classpilot-auth-panel[data-theme="valentines"] { --classpilot-theme-side: rgba(159, 18, 57, .86); --classpilot-theme-accent: #fb7185; --classpilot-theme-accent-fg: #4c0519; --classpilot-brand-size: 24px; }
+.classpilot-auth-panel[data-theme="st-patricks"] { --classpilot-theme-side: rgba(20, 83, 45, .86); --classpilot-theme-accent: #fbbf24; --classpilot-theme-accent-fg: #14532d; }
+.classpilot-auth-panel[data-theme="easter"] { --classpilot-theme-side: rgba(124, 58, 237, .84); --classpilot-theme-accent: #f9a8d4; --classpilot-theme-accent-fg: #4c1d95; }
+.classpilot-auth-panel[data-theme="spring"] { --classpilot-theme-side: rgba(63, 98, 18, .84); --classpilot-theme-accent: #f472b6; --classpilot-theme-accent-fg: #365314; }
+.classpilot-auth-panel[data-theme="summer"] { --classpilot-theme-side: rgba(15, 118, 110, .86); --classpilot-theme-accent: #fbbf24; --classpilot-theme-accent-fg: #134e4a; }
+.classpilot-auth-panel[data-theme="fall"] { --classpilot-theme-side: rgba(67, 20, 7, .86); --classpilot-theme-accent: #f59e0b; --classpilot-theme-accent-fg: #431407; }
+.classpilot-auth-panel[data-theme="winter"] { --classpilot-theme-side: rgba(30, 58, 138, .86); --classpilot-theme-accent: #e0f2fe; --classpilot-theme-accent-fg: #0c4a6e; }
+
 @media (max-width: 900px) {
   #classpilot-auth-gate {
     place-items: start center;

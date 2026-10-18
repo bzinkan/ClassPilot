@@ -2054,9 +2054,19 @@ async function main() {
         'schemaVersion',
         'schoolId',
         'sharedSignInEnabled',
+        // 3.0.1: present only when the server sent a sign-in gate theme; it
+        // holds a preset id and same-origin asset URLs, never student data.
+        ...(persistedPresentationCache?.theme ? ['theme'] : []),
       ].sort(),
       'presentation cache contains fields outside the privacy-safe allowlist',
     );
+    if (persistedPresentationCache?.theme) {
+      assert.deepEqual(
+        Object.keys(persistedPresentationCache.theme).sort(),
+        ['artwork', 'brandFace', 'label', 'mark', 'preset'],
+        'cached sign-in gate theme contains fields outside its allowlist',
+      );
+    }
     assert.deepEqual(persistedPresentationCache?.binding, {
       serverOrigin: fixture.origin,
       schoolId: 'cold-start-school',
