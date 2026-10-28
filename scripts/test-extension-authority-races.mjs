@@ -1013,7 +1013,7 @@ async function main() {
       let tabLimitRemovalStarted;
       const tabLimitRemovalReady = new Promise((resolve) => { tabLimitRemovalStarted = resolve; });
       const tabLimitRemovalGate = new Promise((resolve) => { releaseTabLimitRemoval = resolve; });
-      const tabLimitPromise = applyWebSocketTabLimitSetting(tabLimitMessage, tabLimitAuthA, {
+      const tabLimitPromise = applySchoolTabLimitSettingsSnapshot(tabLimitMessage, tabLimitAuthA, {
         queryTabs: async () => tabLimitTabs,
         getTab: async (tabId) => tabLimitTabs.find((tab) => tab.id === tabId),
         removeTab: async (tabId) => {
@@ -3585,7 +3585,7 @@ async function main() {
         { maxTabsPerStudent: 2, staleForegroundTab: multiWindowInventory[0] },
         { maxTabsPerStudent: 2, staleForegroundTab: multiWindowInventory[1] },
       ]) {
-        const result = await applyWebSocketTabLimitSetting({
+        const result = await applySchoolTabLimitSettingsSnapshot({
           type: 'auth-success',
           studentId: firstContext.studentId,
           studentSessionId: firstContext.studentSessionId,

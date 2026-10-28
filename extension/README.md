@@ -2,7 +2,12 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared candidate is **3.0.2**, which calls the existing website/resource
+The prepared candidate is **3.0.3**, which fixes school tab-limit recovery,
+preserves precise command failure reasons across acknowledgement retries, and
+separates authenticated supervision command authority from restriction delivery.
+See the [3.0.3 candidate record](../docs/CLASS_PILOT_3_0_3_CANDIDATE.md).
+
+It retains 3.0.2, which calls the existing website/resource
 restriction **Focus** in student Chrome notifications. Set and blocked-tab
 reminders say **Focus Set** and **Focus Active**; a screen-only release says
 **Focus Stopped** and explains when a Flight Path remains. Other school and
