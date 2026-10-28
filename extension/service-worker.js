@@ -808,6 +808,7 @@ let schoolSettings = null;
 let schoolSettingsFetchedAt = 0;
 let schoolSettingsScope = null;
 let schoolSettingsMutation = Promise.resolve();
+let schoolSettingsRefreshState = null;
 const MONITORING_STATE_STORAGE_KEY = 'monitoringStateV1';
 const MONITORING_STATE_SCOPE_KEY = 'monitoringStateScopeV1';
 let persistedMonitoringState = {
@@ -916,6 +917,9 @@ let wsWakeReconciliation = null;
 let lastHeartbeatDispatchAt = 0;
 let screenshotCaptureInFlight = false;
 let currentFabState = null;
+// Command permission is distinct from an applied browser restriction snapshot.
+// This record is intentionally not restored from disk; reconnect must verify it.
+let supervisionCommandAuthority = null;
 let studentControlRevisionAuthority = Object.freeze({
   scope: null,
   revision: null,
@@ -5511,7 +5515,51 @@ function loadCachedSchoolSettings(options = {}) {
   return options.authMutationHeld === true ? run() : enqueueStudentAuthMutation(run);
 }
 
+function schoolSettingsSuperseded() {
+  return Object.assign(new Error('School settings changed while refreshing'), { code: 'SCHOOL_SETTINGS_SUPERSEDED' });
+}
+
 async function refreshSchoolSettings(options = {}) {
+  const authContext = options.authContext || (hasStudentAuth() ? captureAuthenticatedContext('school settings refresh') : null);
+  if (!authContext) return null;
+  assertAuthenticatedContextCurrent(authContext, 'school settings refresh');
+  const binding = authContextProtocolScope(authContext);
+  if (schoolSettingsRefreshState?.binding !== binding) {
+    schoolSettingsRefreshState = { binding, generation: 0, appliedGeneration: -1, requireFresh: false, promise: null };
+  }
+  const owner = schoolSettingsRefreshState;
+  if (options.force) owner.generation += 1;
+  if (options.requireFresh) owner.requireFresh = true;
+  if (owner.promise) return owner.promise;
+  const flight = (async () => {
+    while (true) {
+      const generation = owner.generation;
+      let applied = false;
+      try {
+        const settings = await refreshSchoolSettingsOnce({ ...options, authContext,
+          force: options.force === true || owner.appliedGeneration < generation,
+          requireFresh: owner.requireFresh,
+          assertSettingsCurrent: () => {
+            if (schoolSettingsRefreshState !== owner || generation !== owner.generation) throw schoolSettingsSuperseded();
+          },
+          onSettingsApplied: () => { applied = true; },
+        });
+        if (schoolSettingsRefreshState !== owner || generation !== owner.generation) throw schoolSettingsSuperseded();
+        if (applied) owner.appliedGeneration = generation;
+        return settings;
+      } catch (error) {
+        assertAuthenticatedContextCurrent(authContext, 'school settings refresh retry');
+        if (error?.code !== 'SCHOOL_SETTINGS_SUPERSEDED' || schoolSettingsRefreshState !== owner) throw error;
+      }
+    }
+  })();
+  owner.promise = flight;
+  try { return await flight; } finally {
+    if (owner.promise === flight) { owner.promise = null; owner.requireFresh = false; }
+  }
+}
+
+async function refreshSchoolSettingsOnce(options = {}) {
   const force = options.force === true;
   const authContext = options.authContext || (hasStudentAuth()
     ? captureAuthenticatedContext('school settings refresh')
@@ -5520,6 +5568,7 @@ async function refreshSchoolSettings(options = {}) {
   const expectedScope = schoolPolicyScopeForAuthContext(authContext);
   const assertCurrent = () => {
     assertAuthenticatedContextCurrent(authContext, 'school settings refresh');
+    options.assertSettingsCurrent?.();
     if (options.authMutationGeneration !== undefined) {
       assertAuthMutationBindingCurrent(
         options.authMutationGeneration,
@@ -5563,12 +5612,13 @@ async function refreshSchoolSettings(options = {}) {
     const authenticatedResponseGuard = captureAuthenticatedResponseGuard();
     const settingsProtocolQuery = new URLSearchParams({ clientProtocolVersion: String(CLIENT_PROTOCOL_VERSION), capabilities: EXTENSION_CAPABILITIES.join(',') });
     const settingsProtocolGeneration = reserveProtocolPolicyRequestGeneration();
+    const settingsSignal = AbortSignal.any([authContext.signal, AbortSignal.timeout(10_000)]);
     const response = await fetchWithBackoff(`${authContext.serverOrigin}/api/extension/settings?${settingsProtocolQuery}`, {
       cache: 'no-store',
       headers: {
         'Authorization': `Bearer ${authContext.studentToken}`,
       },
-      signal: authContext.signal,
+      signal: settingsSignal,
     }, {
       context: 'extension settings',
       maxAttempts: 2,
@@ -5594,7 +5644,7 @@ async function refreshSchoolSettings(options = {}) {
     }
     await enqueueStudentAuthMutation(() => enqueueSchoolSettingsMutation(async () => {
       assertCurrent();
-      await applyFabSettings(settings.fab || settings, { authContext });
+      await applyFabSettings(settings.fab || settings, { authContext, authorityEnvelope: settings });
       assertCurrent();
       await kv.set({
         [SCHOOL_SETTINGS_CACHE_KEY]: settings,
@@ -5606,13 +5656,20 @@ async function refreshSchoolSettings(options = {}) {
       schoolSettingsFetchedAt = now;
       schoolSettingsScope = expectedScope;
     }));
+    const tabLimitOutcome = await applySchoolTabLimitSettingsSnapshot({ ...settings, settings }, authContext, {
+      assertCurrent,
+      enforceTabs: [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState()),
+    });
+    assertCurrent();
+    if (options.requireFresh && !tabLimitOutcome.applied) throw new Error('School tab-limit settings are incomplete');
+    if (tabLimitOutcome.applied) options.onSettingsApplied?.();
     console.log('[School Hours] Settings updated');
     if (Number.isSafeInteger(settings.policyRevision) && [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState())) {
       await reconcileSchoolWebsitePolicy(settings.blockedDomains || [], settings.policyRevision, { authContext });
     }
     return settings;
   } catch (error) {
-    if (isAuthContextCancellation(error) || error?.code === 'AUTH_MUTATION_SUPERSEDED') throw error;
+    if (isAuthContextCancellation(error) || ['AUTH_MUTATION_SUPERSEDED', 'SCHOOL_SETTINGS_SUPERSEDED'].includes(error?.code) || options.requireFresh) throw error;
     console.warn('[School Hours] Failed to fetch settings:', safeDiagnosticError(error));
     if (
       schoolSettingsScope !== expectedScope
@@ -5899,6 +5956,7 @@ function classifyStoredSchoolPolicy(
 }
 
 function resetStudentControlRevisionAuthority() {
+  supervisionCommandAuthority = null;
   studentControlRevisionAuthority = Object.freeze({
     scope: null,
     revision: null,
@@ -6471,6 +6529,84 @@ function normalizeFabState(rawState = {}, fallbackState = {}) {
   };
 }
 
+function adoptSupervisionCommandAuthority(rawFabState, nextState, authorityEnvelope, authContext) {
+  if (!authContext) return;
+  const scope = authContextProtocolScope(authContext);
+  const prior = supervisionCommandAuthority?.scope === scope ? supervisionCommandAuthority : null;
+  if (prior?.retired && nextState.ownershipRevision <= prior.controlRevision) return;
+  const contextId = nextState.supervisionContextId;
+  const contexts = RuntimeCore.classroomContexts(nextState);
+  const sameOwner = prior && prior.supervisionContextId === contextId
+    && prior.controlRevision === nextState.ownershipRevision
+    && prior.contextAuthorityRevision === nextState.contextAuthorityRevision;
+  if (!sameOwner) supervisionCommandAuthority = null;
+  if (!contextId || contexts.length !== 1 || contexts[0].supervisionContextId !== contextId
+    || nextState.teachingSessionId || nextState.ownershipRevisionKnown !== true
+    || nextState.contextAuthorityRevision === null || !hasNegotiatedCapability('scheduledClassroomV1', authContext)) return;
+  if (nextState.reason === 'session-ended' || nextState.reason === 'entitlement-inactive') {
+    if (sameOwner) supervisionCommandAuthority = { ...prior, retired: true };
+    return;
+  }
+  // Local FAB changes can retain a verified record, but cannot mint or renew it.
+  if (!Object.hasOwn(rawFabState, 'supervisionContext')) return;
+  try {
+    const binding = assertCurrentStudentBinding(authorityEnvelope, 'supervision command authority', {
+      authContext, requireFullAuthority: true,
+    });
+    assertBindingMatchesAuthContext(binding, authContext, 'supervision command authority', { requireFullAuthority: true });
+    const metadata = rawFabState.supervisionContext;
+    const endsAt = typeof metadata?.endsAt === 'number' ? metadata.endsAt : Date.parse(metadata?.endsAt);
+    const contextRevision = scheduledContextAuthorityRevision(metadata?.contextAuthorityRevision);
+    if (binding.controlRevision !== nextState.ownershipRevision || metadata?.id !== contextId
+      || contextRevision !== nextState.contextAuthorityRevision || !Number.isFinite(endsAt)
+      || endsAt <= Date.now() || endsAt > Date.now() + RuntimeCore.CLASSROOM_STATE_MAX_LIFETIME_MS) return;
+    supervisionCommandAuthority = Object.freeze({ scope, supervisionContextId: contextId,
+      contextAuthorityRevision: contextRevision, controlRevision: binding.controlRevision, endsAt, retired: false });
+  } catch {
+    // An incomplete or stale FAB may render existing UI, but grants no new
+    // command permission without the immutable school/device/student binding.
+  }
+}
+
+function verifiedSupervisionCommandAuthority(envelope) {
+  const authority = supervisionCommandAuthority;
+  if (!authority || authority.retired || authority.endsAt <= Date.now()) return null;
+  try {
+    const authContext = captureAuthenticatedContext('supervision command authority');
+    assertAuthenticatedContextCurrent(authContext, 'supervision command authority');
+    const binding = assertCurrentStudentBinding(envelope, 'supervision command authority', {
+      authContext, requireFullAuthority: true,
+    });
+    assertBindingMatchesAuthContext(binding, authContext, 'supervision command authority', { requireFullAuthority: true });
+    const fab = currentFabState;
+    const contexts = RuntimeCore.classroomContexts(fab || {});
+    if (authority.scope !== authContextProtocolScope(authContext)
+      || !hasNegotiatedCapability('scheduledClassroomV1', authContext)
+      || binding.controlRevision !== authority.controlRevision
+      || fab?.ownershipRevisionKnown !== true || fab.ownershipRevision !== authority.controlRevision
+      || fab.contextAuthorityRevision !== authority.contextAuthorityRevision
+      || fab.supervisionContextId !== authority.supervisionContextId || fab.teachingSessionId
+      || contexts.length !== 1 || contexts[0].supervisionContextId !== authority.supervisionContextId
+      || currentClassroomState && (currentClassroomState.supervisionContextId !== authority.supervisionContextId
+        || Number(currentClassroomState.revision) > authority.controlRevision)) return null;
+    return authority;
+  } catch {
+    return null;
+  }
+}
+
+function retireSupervisionCommandAuthority(message, authContext) {
+  const prior = supervisionCommandAuthority;
+  if (!prior || prior.scope !== authContextProtocolScope(authContext)) return;
+  const binding = assertCurrentStudentBinding(message, 'supervision authority end', { authContext });
+  if (binding.bindingVersion === 2 && (binding.schoolId !== authContext.schoolId
+    || binding.deviceId !== authContext.deviceId)) return;
+  const ended = RuntimeCore.classroomContext({ ...message, ...message.data });
+  if (ended && ended.supervisionContextId !== prior.supervisionContextId
+    || binding.controlRevision !== null && binding.controlRevision < prior.controlRevision) return;
+  supervisionCommandAuthority = Object.freeze({ ...prior, retired: true });
+}
+
 let fabStateMutation = Promise.resolve();
 
 function enqueueFabStateMutation(operation) {
@@ -6481,6 +6617,7 @@ function enqueueFabStateMutation(operation) {
 
 async function clearFabAndOverlayStateNow(reason = 'identity-cleared', options = {}) {
   const closeChat = options.closeChat === true;
+  if (supervisionCommandAuthority) supervisionCommandAuthority = { ...supervisionCommandAuthority, retired: true };
   currentFabState = null;
   lastFabHeartbeatSyncRequestAt = 0;
   await classroomOverlayMutation;
@@ -6679,6 +6816,7 @@ async function applyFabSettingsNow(rawFabState, options = {}) {
       );
     }
   }
+  adoptSupervisionCommandAuthority(rawFabState, nextState, authorityEnvelope, authContext);
   if (lifecycleChanged) {
     await clearClassroomOverlayState(`fab:${nextState.reason || 'lifecycle-change'}`, {
       authContext,
@@ -8345,7 +8483,7 @@ function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
   const ackState = String(rawAck?.ackState || '').trim();
   if (!commandId || !['received', 'completed', 'failed', 'expired'].includes(ackState)) return null;
   const ackId = String(rawAck?.ackId || `${commandId}:${ackState}`).trim().slice(0, 512);
-  const normalizedErrorCode = rawAck?.error
+  const normalizedErrorCode = rawAck?.error || rawAck?.errorCode
     ? commandDiagnosticCode({ code: rawAck?.errorCode })
     : undefined;
   return {
@@ -8366,7 +8504,10 @@ function normalizeCommandAckForStorage(rawAck, nowValue = Date.now()) {
       : undefined,
     result: boundedAckObject(rawAck?.result),
     state: boundedAckObject(rawAck?.state),
-    error: normalizedErrorCode ? COMMAND_DIAGNOSTIC_MESSAGES[normalizedErrorCode] : undefined,
+    // Keep only the existing exact safe reasons across durable retries. The
+    // shared helper replaces arbitrary browser/server text with a static
+    // diagnostic message and preserves allowlisted classroom failure details.
+    error: normalizedErrorCode ? commandErrorMessage({ message: rawAck?.error, code: normalizedErrorCode }) : undefined,
     errorCode: normalizedErrorCode,
     deliveryPolicy: rawAck?.deliveryPolicy,
     expiresAt: rawAck?.expiresAt,
@@ -18494,6 +18635,14 @@ async function sendHeartbeat(reason = 'manual', options = {}) {
           responseReceivedAt: heartbeatResponseReceivedAt,
           policySource: 'heartbeat',
         });
+        // A missed school-policy fanout recovers through the same bounded,
+        // authenticated settings cache as the periodic health check.
+        if (data.monitoringPolicy && data.monitoringPolicy.mode !== 'full'
+          && schoolSettingsRefreshState?.promise
+          && schoolSettingsRefreshState.binding === authContextProtocolScope(heartbeatAuthContext)) {
+          schoolSettingsRefreshState.generation += 1;
+        }
+        refreshSchoolSettings({ force: false, authContext: heartbeatAuthContext }).catch(() => {});
         if (data.monitoringPolicy && data.monitoringPolicy.mode !== 'full') {
           // A changed administrator schedule is authoritative immediately. Only
           // the tracking-hours projection is accepted on this response path.
@@ -22292,7 +22441,10 @@ function assertCurrentCommandAuthority(command = {}, envelope = {}) {
     return authority;
   }
 
-  if (currentClassroomState?.supervisionContextId !== authority.supervisionContextId) {
+  const verifiedSupervision = currentClassroomState?.supervisionContextId === authority.supervisionContextId
+    ? null : verifiedSupervisionCommandAuthority(envelope);
+  if (currentClassroomState?.supervisionContextId !== authority.supervisionContextId
+    && verifiedSupervision?.supervisionContextId !== authority.supervisionContextId) {
     const error = new Error('Command belongs to an inactive supervision context');
     error.code = 'COMMAND_AUTHORITY_MISMATCH';
     throw error;
@@ -22742,7 +22894,12 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
         command || {},
         ordinaryExecutionContext,
       );
-      if (AUTHORITY_BOUND_TAB_COMMAND_TYPES.has(commandType)) {
+      if (commandType === 'limit-tabs' && authority?.kind === 'school_policy') {
+        // Legacy school frames have no school-limit revision. Their numeric
+        // value is only an invalidation hint; fetch the current school policy.
+        result = await applyWebSocketTabLimitSetting({ ...envelope,
+          settings: { maxTabsPerStudent: command.data?.maxTabs } }, authContext);
+      } else if (AUTHORITY_BOUND_TAB_COMMAND_TYPES.has(commandType)) {
         result = await enqueueStudentAuthMutation(async () => {
           assertRemoteCommandExecutionContextCurrent(
             command,
@@ -23535,10 +23692,9 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
             : null;
           const authority = commandAuthority(command, executionContext.envelope);
           if (authority.kind === 'school_policy') {
-            schoolMaxTabs = normalizedLimit;
-          } else {
-            teacherMaxTabs = normalizedLimit;
+            throw Object.assign(new Error('School tab limits require current school settings'), { code: 'SCHOOL_SETTINGS_REFRESH_REQUIRED' });
           }
+          teacherMaxTabs = normalizedLimit;
           currentMaxTabs = effectiveTabLimit();
         }
         
@@ -24867,6 +25023,21 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
   if (!Object.prototype.hasOwnProperty.call(message?.settings || {}, 'maxTabsPerStudent')) {
     return { applied: false, limit: currentMaxTabs, closed: 0 };
   }
+  assertAuthenticatedContextCurrent(authContext, 'school tab-limit hint');
+  assertCurrentStudentBinding(message, 'school tab-limit hint', { authContext });
+  await refreshSchoolSettings({ force: true, requireFresh: true, authContext });
+  assertAuthenticatedContextCurrent(authContext, 'school tab-limit refresh');
+  return { applied: true, limit: currentMaxTabs, settingsReconciled: true };
+}
+
+async function applySchoolTabLimitSettingsSnapshot(message, authContext, options = {}) {
+  if (!Object.prototype.hasOwnProperty.call(message?.settings || {}, 'maxTabsPerStudent')) {
+    return { applied: false, limit: currentMaxTabs, closed: 0 };
+  }
+  const rawLimit = message.settings.maxTabsPerStudent;
+  if (rawLimit !== null && (!Number.isSafeInteger(Number(rawLimit)) || Number(rawLimit) <= 0 || Number(rawLimit) > 1000)) {
+    return { applied: false, limit: currentMaxTabs, closed: 0 };
+  }
   const queryTabs = options.queryTabs || ((query) => chrome.tabs.query(query));
   const getTab = options.getTab || ((tabId) => chrome.tabs.get(tabId));
   const removeTab = options.removeTab || ((tabId) => chrome.tabs.remove(tabId));
@@ -24882,8 +25053,12 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
   // has observed the retirement fence.
   return enqueueStudentAuthMutation(async () => {
     const reason = 'WebSocket tab-limit enforcement';
-    assertAuthenticatedContextCurrent(authContext, reason);
-    assertCurrentStudentBinding(message, reason, { authContext });
+    const assertSnapshotCurrent = (label) => {
+      assertAuthenticatedContextCurrent(authContext, label);
+      assertCurrentStudentBinding(message, label, { authContext });
+      options.assertCurrent?.();
+    };
+    assertSnapshotCurrent(reason);
     const parsedLimit = Number(message.settings.maxTabsPerStudent);
     schoolMaxTabs = Number.isFinite(parsedLimit) && parsedLimit > 0
       ? Math.min(parsedLimit, 1000)
@@ -24891,20 +25066,18 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
     currentMaxTabs = effectiveTabLimit();
     const appliedLimit = currentMaxTabs;
     console.log('Applied tab limit from settings:', appliedLimit === null ? 'unlimited' : appliedLimit);
-    if (appliedLimit === null || appliedLimit <= 0) {
+    if (appliedLimit === null || appliedLimit <= 0 || options.enforceTabs === false) {
       return { applied: true, limit: appliedLimit, closed: 0 };
     }
 
     const tabs = await queryTabs({});
-    assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit query');
-    assertCurrentStudentBinding(message, 'WebSocket tab-limit query', { authContext });
+    assertSnapshotCurrent('school tab-limit query');
     if (!Array.isArray(tabs) || tabs.length <= appliedLimit) {
       return { applied: true, limit: appliedLimit, closed: 0 };
     }
 
     const foregroundTabs = await queryTabs({ active: true, lastFocusedWindow: true });
-    assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit foreground query');
-    assertCurrentStudentBinding(message, 'WebSocket tab-limit foreground query', { authContext });
+    assertSnapshotCurrent('school tab-limit foreground query');
     const foregroundTab = Array.isArray(foregroundTabs)
       ? foregroundTabs.find((tab) => Number.isInteger(tab?.id) && tab.active === true)
       : null;
@@ -24929,17 +25102,15 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
     for (const target of targets) {
       if (!Number.isInteger(target.id) || target.url.startsWith('chrome://')) continue;
       try {
-        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit target check');
+        assertSnapshotCurrent('school tab-limit target check');
         const current = await getTab(target.id);
-        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit target check');
-        assertCurrentStudentBinding(message, 'WebSocket tab-limit target check', { authContext });
+        assertSnapshotCurrent('school tab-limit target check');
         if (!tabLimitTargetMatches(target, current)) continue;
         await removeTab(target.id);
-        assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit close');
-        assertCurrentStudentBinding(message, 'WebSocket tab-limit close', { authContext });
+        assertSnapshotCurrent('school tab-limit close');
         closed += 1;
       } catch (tabError) {
-        if (isAuthContextCancellation(tabError)) throw tabError;
+        if (isAuthContextCancellation(tabError) || tabError?.code === 'SCHOOL_SETTINGS_SUPERSEDED') throw tabError;
         console.warn('Failed to close an excess tab:', safeDiagnosticError(tabError));
       }
     }
@@ -24950,8 +25121,7 @@ async function applyWebSocketTabLimitSetting(message, authContext, options = {})
         message: `Your teacher has set a limit of ${appliedLimit} tab${appliedLimit === 1 ? '' : 's'}. Extra tabs have been closed.`,
         priority: 1,
       }, authContext, message, `tab-limit-${appliedLimit}`);
-      assertAuthenticatedContextCurrent(authContext, 'WebSocket tab-limit notification');
-      assertCurrentStudentBinding(message, 'WebSocket tab-limit notification', { authContext });
+      assertSnapshotCurrent('school tab-limit notification');
     }
     return { applied: true, limit: appliedLimit, closed };
   });
@@ -26763,6 +26933,25 @@ function handleWsEvent(event, data, connectionGeneration, authContextId, serverO
   // Reserve ordering before any cold-worker read. The frame never supplies
   // identity authority: restore it and query the surviving exact proxy first.
   const generation = Number(connectionGeneration || 0);
+  // Reserve a settings invalidation before the serial frame tail can wait on
+  // an older HTTP response. This grants no policy authority; the handler must
+  // still fetch and authenticate the current school settings.
+  if (event === 'message' && schoolSettingsRefreshState?.promise
+    && generation === wsConnectionGeneration && String(authContextId || '') === CONFIG.authContextId
+    && normalizedServerOrigin(serverOrigin) === normalizedServerOrigin(CONFIG.serverUrl)) {
+    try {
+      const frame = JSON.parse(data);
+      const authContext = captureAuthenticatedContext('school settings invalidation');
+      const limitHint = frame.type === 'auth-success'
+        && Object.prototype.hasOwnProperty.call(frame.settings || {}, 'maxTabsPerStudent');
+      const commandHint = frame.type === 'remote-control' && frame.command?.type === 'limit-tabs'
+        && assertCurrentCommandAuthority(frame.command, frame)?.kind === 'school_policy';
+      if ((limitHint || commandHint) && schoolSettingsRefreshState.binding === authContextProtocolScope(authContext)) {
+        assertCurrentStudentBinding(frame, 'school settings invalidation', { authContext });
+        schoolSettingsRefreshState.generation += 1;
+      }
+    } catch { /* Invalid or retired frames cannot invalidate current settings. */ }
+  }
   if (wsPendingIngressCount >= WS_MAX_PENDING_INGRESS) {
     // Refuse excess transient work; persistent controls recover from the
     // authoritative snapshot, never from a durable raw-frame replay queue.
@@ -27025,7 +27214,7 @@ async function handleWsMessage(
           });
           assertAuthenticatedContextCurrent(authContext, 'WebSocket classroom state');
         } else if (message.settings?.fab) {
-          await applyFabSettings(message.settings.fab).catch((error) => {
+          await applyFabSettings(message.settings.fab, { authContext, authorityEnvelope: message }).catch((error) => {
             if (isAuthContextCancellation(error)) throw error;
             console.warn('[FAB] Failed to apply initial state:', safeDiagnosticError(error));
           });
@@ -27075,6 +27264,7 @@ async function handleWsMessage(
 
       if (message.type === 'student-session-ended' || message.type === 'session-ended') {
         if (!acceptsCurrentStudentBinding(message, 'student session lifecycle')) return;
+        retireSupervisionCommandAuthority(message, authContext);
         const authoritativeFabState = message.fabState || message.state || null;
         const endedContext = RuntimeCore.classroomContext({ ...message, ...message.data });
         const contexts = RuntimeCore.classroomContexts(currentFabState || {});

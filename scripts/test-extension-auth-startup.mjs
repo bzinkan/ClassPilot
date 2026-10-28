@@ -3093,11 +3093,14 @@ async function main() {
       await chrome.storage.session?.set(auth);
       return rollbackCeiling;
     });
-    const authenticatedConfigRequestsBeforeNavigation = fixture.state.loginConfigRequests;
     const authenticatedPage = context.pages()[0] || await context.newPage();
     await preparePageForWorkerStop(authenticatedPage);
     const cohortStop = await stopExtensionWorker(context, authenticatedPage, extensionId);
     assert.equal(cohortStop.stopped, true, 'could not stop the MV3 worker before cold cohort requests');
+    // Auth was seeded only to storage; the prior worker is still locally
+    // signed out and can legitimately finish a login-config request while
+    // being stopped. Measure only the proven cold successor's request cohort.
+    const authenticatedConfigRequestsBeforeNavigation = fixture.state.loginConfigRequests;
     await authenticatedPage.goto(`chrome-extension://${extensionId}/cold-auth-cohort.html`, {
       waitUntil: 'domcontentloaded',
     });
