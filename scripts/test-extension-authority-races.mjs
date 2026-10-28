@@ -4595,7 +4595,7 @@ async function main() {
       },
       {
         authContextId: result.createdTabAuthContextId,
-        title: 'Waypoint Set',
+        title: 'Focus Active',
         source: 'screen_lock',
       },
     ]);

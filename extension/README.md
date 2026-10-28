@@ -2,8 +2,15 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared candidate is **3.0.1**, which lets the shared student sign-in
-gate paint the school's dashboard theme. The worker accepts an optional
+The prepared candidate is **3.0.2**, which calls the existing website/resource
+restriction **Focus** in student Chrome notifications. Set and blocked-tab
+reminders say **Focus Set** and **Focus Active**; a screen-only release says
+**Focus Stopped** and explains when a Flight Path remains. Other school and
+classroom restrictions may still apply. Enforcement, permissions, capabilities,
+notification timing, and wire/storage identifiers are unchanged. See the
+[3.0.2 candidate record](../docs/CLASS_PILOT_3_0_2_CANDIDATE.md).
+
+It retains 3.0.1's shared student sign-in gate theme. The worker accepts an optional
 `theme` on the login configuration only for a known preset with same-origin
 artwork, caches it with the gate presentation, and the frame applies artwork
 and brand face after they load. No permission, managed-policy key, capability

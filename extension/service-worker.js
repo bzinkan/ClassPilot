@@ -23270,8 +23270,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
 
         await notifyCommandUi({
-          title: 'Waypoint Set',
-          message: `Your teacher set a waypoint at ${lockedDomain}. You can only browse ${lockedDomain} right now.`,
+          title: 'Focus Set',
+          message: `Your teacher set Focus on ${lockedDomain}. Stay on the website or resource your teacher selected.`,
           priority: 2,
         });
 
@@ -23338,10 +23338,12 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         }
         
         await notifyCommandUi({
-          title: 'Screen Unlocked',
+          title: screenOnly ? 'Focus Stopped' : 'Screen Unlocked',
           message: preserveFlightPath
-            ? 'Your screen lock was removed. Your class Flight Path is still active.'
-            : 'Your screen has been unlocked. You can now browse freely.',
+            ? 'Focus has stopped. Your class Flight Path is still active.'
+            : screenOnly
+              ? 'Focus has stopped. Any other classroom or school browsing restrictions still apply.'
+              : 'Your screen has been unlocked. Any other classroom or school browsing restrictions still apply.',
           priority: 1,
         });
         
@@ -25210,7 +25212,7 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
   });
   if (/^https?:\/\//i.test(createdUrl) && !navigationDecision.allowed) {
     policySource = navigationDecision.source;
-    notification = { title: policySource === 'screen_lock' ? 'Waypoint Set' : 'Navigation Blocked',
+    notification = { title: policySource === 'screen_lock' ? 'Focus Active' : 'Navigation Blocked',
       message: 'This page is outside your current classroom or school browsing policy.', priority: 2 };
   } else if (policy.screenLocked && policy.lockedDomain) {
     // Lenient on-domain lock: a new tab already destined for the locked
@@ -25228,8 +25230,8 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
     if (!onLockedDomain && !onRestrictionSso && !activeAuthPopupPlaceholder) {
       policySource = 'screen_lock';
       notification = {
-        title: 'Waypoint Set',
-        message: `A waypoint is active at ${policy.lockedDomain}. You can only open new tabs on ${policy.lockedDomain}.`,
+        title: 'Focus Active',
+        message: `Focus is active on ${policy.lockedDomain}. Stay on the website or resource your teacher selected.`,
         priority: 2,
       };
     }
