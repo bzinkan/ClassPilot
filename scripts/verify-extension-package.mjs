@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '3.0.1';
+const expectedPreparedReleaseVersion = '3.0.2';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -179,6 +179,7 @@ async function runPackagedTests() {
     'test-extension-precise-resources.mjs',
     'test-extension-precise-downgrade.mjs',
     'test-extension-focus.mjs',
+    'test-extension-focus-notifications.mjs',
     'test-extension-attention-navigation.mjs',
     'test-extension-browser-api.mjs',
     'test-extension-scheduled-classroom.mjs',
