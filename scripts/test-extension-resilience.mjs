@@ -1003,6 +1003,17 @@ async function main() {
       ];
       const originalConfig = { ...CONFIG };
       const originalEnqueueMonitoringEvent = enqueueMonitoringEvent;
+      const originalFetchWithBackoff = fetchWithBackoff;
+      const originalSchoolSettings = schoolSettings;
+      const originalSchoolSettingsScope = schoolSettingsScope;
+      const originalSchoolSettingsFetchedAt = schoolSettingsFetchedAt;
+      const originalSchoolSettingsRefreshState = schoolSettingsRefreshState;
+      const schoolSettingsKeys = [SCHOOL_SETTINGS_CACHE_KEY, SCHOOL_SETTINGS_SCOPE_KEY, SCHOOL_SETTINGS_FETCHED_AT_KEY];
+      const originalStoredSchoolSettings = await kv.get(schoolSettingsKeys);
+      const originalSchoolBlockPolicy = { domains: [...globalBlockedDomains], scope: globalBlockedDomainsScope,
+        trusted: globalBlockedDomainsStateTrusted };
+      const schoolBlockPolicyKeys = ['globalBlockedDomains', GLOBAL_BLOCKED_DOMAINS_SCOPE_KEY];
+      const originalStoredSchoolBlockPolicy = await durableLocalKv.get(schoolBlockPolicyKeys);
       const originalTeacherMaxTabs = teacherMaxTabs;
       const originalSchoolMaxTabs = schoolMaxTabs;
       const originalCurrentMaxTabs = currentMaxTabs;
@@ -1018,6 +1029,21 @@ async function main() {
         schoolSettingsScope = schoolPolicyScopeForAuthContext(captureAuthenticatedContext('tab limit full-monitoring fixture'));
         schoolSettingsFetchedAt = Date.now();
         enqueueMonitoringEvent = async () => {};
+        // A school frame is an invalidation hint. Its canonical HTTP snapshot
+        // must be mocked too: this fixture deliberately blocks live DNS.
+        const policyAuth = captureAuthenticatedContext('tab limit canonical settings fixture');
+        let canonicalFetchCount = 0;
+        fetchWithBackoff = async (url, init, options) => {
+          if (!String(url).includes('/api/extension/settings')) return originalFetchWithBackoff(url, init, options);
+          if (init?.headers?.Authorization !== `Bearer ${policyAuth.studentToken}`) throw new Error('School policy fetched under the wrong student token');
+          canonicalFetchCount += 1;
+          return new Response(JSON.stringify({
+            schoolId: policyAuth.schoolId, studentId: policyAuth.studentId,
+            studentSessionId: policyAuth.studentSessionId,
+            enableTrackingHours: false, afterHoursMode: 'off', maxTabsPerStudent: 40,
+            fab: currentFabState,
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        };
         teacherMaxTabs = 50;
         schoolMaxTabs = null;
         currentMaxTabs = effectiveTabLimit();
@@ -1029,7 +1055,7 @@ async function main() {
 
         await handleRemoteControl({
           type: 'limit-tabs',
-          data: { maxTabs: 40 },
+          data: { maxTabs: 3 },
         }, {
           studentId: CONFIG.activeStudentId,
           studentSessionId: CONFIG.activeStudentSessionId,
@@ -1041,6 +1067,7 @@ async function main() {
         });
 
         const schoolPolicy = {
+          canonicalFetchCount,
           schoolMaxTabs,
           teacherMaxTabs,
           currentMaxTabs,
@@ -1077,6 +1104,21 @@ async function main() {
       } finally {
         CONFIG = originalConfig;
         enqueueMonitoringEvent = originalEnqueueMonitoringEvent;
+        fetchWithBackoff = originalFetchWithBackoff;
+        schoolSettings = originalSchoolSettings;
+        schoolSettingsScope = originalSchoolSettingsScope;
+        schoolSettingsFetchedAt = originalSchoolSettingsFetchedAt;
+        schoolSettingsRefreshState = originalSchoolSettingsRefreshState;
+        await kv.remove(schoolSettingsKeys);
+        if (Object.keys(originalStoredSchoolSettings).length > 0) await kv.set(originalStoredSchoolSettings);
+        // Authenticated settings adoption correctly retires the previous
+        // synthetic school's policy. Restore that fixture scope with CONFIG.
+        await durableLocalKv.remove(schoolBlockPolicyKeys);
+        if (Object.keys(originalStoredSchoolBlockPolicy).length > 0) await durableLocalKv.set(originalStoredSchoolBlockPolicy);
+        globalBlockedDomains = originalSchoolBlockPolicy.domains;
+        globalBlockedDomainsScope = originalSchoolBlockPolicy.scope;
+        globalBlockedDomainsStateTrusted = originalSchoolBlockPolicy.trusted;
+        await composeDynamicRules(['school'], { globalBlockedDomains: originalSchoolBlockPolicy.domains });
         teacherMaxTabs = originalTeacherMaxTabs;
         schoolMaxTabs = originalSchoolMaxTabs;
         currentMaxTabs = originalCurrentMaxTabs;
@@ -1090,6 +1132,7 @@ async function main() {
       return result;
     });
     assert.equal(tabLimitAuthority.teachingSessionId, 'integration-session');
+    assert.equal(tabLimitAuthority.schoolPolicy.canonicalFetchCount, 1);
     assert.equal(tabLimitAuthority.schoolPolicy.schoolMaxTabs, 40);
     assert.equal(tabLimitAuthority.schoolPolicy.teacherMaxTabs, 50);
     assert.equal(tabLimitAuthority.schoolPolicy.currentMaxTabs, 40);
