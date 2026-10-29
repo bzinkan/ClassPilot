@@ -30,6 +30,7 @@ try {
   console.info('[Config] No config.js override loaded; using managed policy or defaults');
 }
 importScripts('classroom-runtime-core.js');
+if (globalThis.CLASSPILOT_WINDOWS_BUILD) importScripts('windows-browser-channel.js');
 importScripts('poll-replay-core.js');
 importScripts('private-recovery-store.js');
 importScripts('school-website-policy.js');
@@ -382,7 +383,7 @@ function extensionProtocolDescriptor() {
   return {
     clientProtocolVersion: CLIENT_PROTOCOL_VERSION,
     extensionVersion: chrome.runtime.getManifest().version,
-    capabilities: [...EXTENSION_CAPABILITIES],
+    capabilities: globalThis.CLASSPILOT_WINDOWS_BUILD ? (globalThis.ClassPilotWindows?.capabilities() || []) : [...EXTENSION_CAPABILITIES],
   };
 }
 
@@ -13132,7 +13133,8 @@ function attachLegacyStudentToken(payload, headers, context = null) {
 }
 
 function isManualIdentitySource(source = CONFIG.identitySource) {
-  return source === 'manual_email_id' || source === 'manual_pin';
+  return source === 'manual_email_id' || source === 'manual_pin'
+    || (Boolean(globalThis.CLASSPILOT_WINDOWS_BUILD) && source === 'windows_guard');
 }
 
 function isManualLoginTimestampFresh(value, now = Date.now()) {
@@ -13146,6 +13148,9 @@ function isManualLoginTimestampFresh(value, now = Date.now()) {
 }
 
 function hasStudentAuth() {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD) {
+    try { globalThis.ClassPilotWindows.active(); } catch { return false; }
+  }
   return Boolean(
     !studentAuthInvalidating
     && !studentAuthCommitPending
@@ -13160,6 +13165,7 @@ function hasStudentAuth() {
 }
 
 function disableToolbarAction() {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD) { chrome.action?.enable?.(); return; }
   try {
     if (!chrome.action?.disable) return;
     const maybePromise = chrome.action.disable();
@@ -14238,6 +14244,15 @@ function refreshSharedSignInLoginConfig(options = {}) {
 }
 
 function getAuthGateState() {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD) {
+    const authRequired=!hasStudentAuth();
+    if(lastAuthGateAuthRequired!==authRequired){lastAuthGateAuthRequired=authRequired;bumpAuthGateStateRevision();}
+    return {authRequired,windowsSignIn:true,phase:authRequired?'ready':'authenticated',setupRequired:false,
+      studentName:authRequired?null:CONFIG.studentName,studentEmail:null,sharedSignInEnabled:true,
+      loginMethod:'name_pin',pinLoginEnabled:false,hasManagedSchoolSetup:hasManagedSchoolSetup(),
+      revision:authGateStateRevision,rosterContextGeneration:currentAuthGateRosterContextGeneration(),fastAuthGateEnabled,
+      configFetchedAt:Date.now(),retryAt:null,kioskUrl:null,kioskOrigin:kioskGateOrigin(),theme:null};
+  }
   const hasSchoolSetup = hasManagedSchoolSetup();
   const presentationPending = restrictionPortalPresentationPending();
   const authRequired = !hasStudentAuth() || presentationPending;
@@ -14849,7 +14864,11 @@ function clearStudentAuth(reason = 'manual-clear', options = {}) {
   if (options.expectedAuthContext) {
     assertAuthenticatedContextCurrent(options.expectedAuthContext, `authentication clear:${reason}`);
   }
+  const windowsEnd = globalThis.CLASSPILOT_WINDOWS_BUILD
+    ? globalThis.ClassPilotWindows?.retire(reason, { suppressPairing: options.notifyBackend === true || options.serverSessionEnded === true, notifyBackend: options.notifyBackend === true })
+    : null;
   const signOutAuthority = Object.freeze({
+    windowsEnd,
     token: options.expectedAuthContext?.studentToken || CONFIG.studentToken || null,
     serverOrigin: options.expectedAuthContext?.serverOrigin
       || normalizedServerOrigin(CONFIG.serverUrl),
@@ -14886,6 +14905,7 @@ function clearStudentAuth(reason = 'manual-clear', options = {}) {
 }
 
 async function notifyBackendOfStudentSignOut(signOutAuthority, reason) {
+  if (signOutAuthority?.windowsEnd) return signOutAuthority.windowsEnd;
   if (
     !signOutAuthority?.token
     || !signOutAuthority.serverOrigin
@@ -16445,6 +16465,7 @@ function runChromeProfileRegistration(registration) {
 }
 
 function ensureRegistered() {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD) return globalThis.ClassPilotWindows?.start();
   return runChromeProfileRegistration(() => ensureRegisteredNow());
 }
 
@@ -26755,6 +26776,7 @@ async function recoverOffscreenWebSocketStatus(authContext) {
 }
 
 async function connectWebSocket() {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD) return globalThis.ClassPilotWindows?.start();
   let requestedAuthContext = null;
   try {
     requestedAuthContext = captureAuthenticatedContext('WebSocket connect reservation');
@@ -28510,3 +28532,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 console.log('ClassPilot service worker loaded');
+
+// Installed only by the separately versioned Windows build. Existing Chromebook
+// artifacts have no CLASSPILOT_WINDOWS_BUILD and retain their original transport.
+if (globalThis.CLASSPILOT_WINDOWS_BUILD) importScripts('windows-worker-bridge.js');

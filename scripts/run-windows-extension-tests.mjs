@@ -1,0 +1,10 @@
+import { execFileSync } from 'node:child_process';
+import { dirname,join,resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const run=(script,args=[])=>execFileSync(process.execPath,[join(root,'scripts',script),...args],{cwd:root,stdio:'inherit'});
+run('test-windows-browser-channel.mjs');
+const output=execFileSync(process.execPath,[join(root,'scripts/package-windows-extension.mjs'),'--development'],{cwd:root,encoding:'utf8'});
+const artifact=JSON.parse(output.trim()).output;
+run('test-windows-package.mjs',[`--artifact=${artifact}`]);
+run('test-windows-workers.mjs',[`--artifact=${artifact}`]);

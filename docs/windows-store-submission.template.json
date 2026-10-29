@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "status": "PREPARATION ONLY — NOT SUBMITTED",
+  "product": "ClassPilot for Windows",
+  "initialCandidateVersion": "3.0.3.1",
+  "platforms": ["school-managed Windows Chrome", "school-managed Windows Edge"],
+  "category": "Education",
+  "shortDescriptionDraft": "School-managed classroom browser monitoring and controls. Requires the ClassPilot Windows app and an authorized SchoolPilot session.",
+  "listingDescriptionDraft": "Students sign in with their SchoolPilot PIN in the ClassPilot Windows app. Authorized teachers can monitor permitted browser activity and use classroom restrictions, exact tab controls, messaging and student tools. Chrome and Edge connect independently to the same student. Browser monitoring requires a valid Windows session guard, school policy and classroom authority. Desktop viewing is a separate, default-off capability with an explicit teacher viewer. Intended for school-managed devices, with one approved school profile per browser.",
+  "existingChromebookListing": "Preserve the existing ClassPilot 3.0.3 listing and identity",
+  "requiredExternalInputs": ["Approved Chrome and Edge Store identities/public keys", "Reviewed privacy-policy URL", "Store account authorization", "Screenshots from synthetic managed-device validation", "Completed enabled-capability matrix"],
+  "nativeMessagingJustification": "Connects only to the approved per-user session guard to obtain short-lived, one-use browser pairing proofs and signed-in status. The browser never receives the SchoolPilot PIN or native/installation credentials.",
+  "permissionJustifications": {
+    "tabs": "Reports authorized tab metadata and applies exact-source classroom tab actions.",
+    "activeTab": "Supports permitted browser thumbnail capture; it does not authorize native desktop capture.",
+    "storage": "Stores non-secret profile/configuration data and session-only browser authentication state.",
+    "notifications": "Displays permitted classroom messages and browser-control notices.",
+    "alarms": "Schedules bounded monitoring, policy refresh and expiry work.",
+    "idle": "Applies the existing browser idle monitoring behavior.",
+    "webNavigation": "Reconciles restrictions and authentication gates across navigation and history changes.",
+    "scripting": "Installs the classroom interface and authentication gate in permitted web documents.",
+    "declarativeNetRequest": "Enforces the school's and authorized teacher's website restrictions locally.",
+    "nativeMessaging": "Exchanges status and single-use pairing proofs with the approved session guard.",
+    "all_urls": "Provides the school-authorized browser gate, classroom interface and restrictions across student web browsing.",
+    "tabCapture_offscreen_optionalDesktopCapture": "Inherited shared-worker media declarations. Live View is retired and these declarations do not enable native desktop viewing; review and minimize them against the final approved Store build."
+  },
+  "browserDataDisclosure": "The school-authorized extension reports browser activity, tab details and permitted browser screenshots under existing school-hours, retention and classroom authorization. One managed profile per supported browser. Missing coverage is reported.",
+  "desktopDisclosure": "Desktop visibility belongs to the separate Windows app and requires independent authorization and an explicit teacher viewer. It is default-off and its images remain ephemeral.",
+  "reviewerInstructionsDraft": ["Use only the isolated synthetic school and controlled managed test devices supplied for review.", "Install the exact signed app/guard/host package and approved Chrome or Edge artifact using the management runbook.", "Enroll using an administrator-issued single-use token, then sign in once in the Windows app with the synthetic student's PIN.", "Verify separate Chrome and Edge sources, exact tab actions, shared classroom policies, reauthentication and explicit unavailable coverage.", "Do not activate production, publish a listing, import real-student data or replace the Chromebook listing as part of this draft."],
+  "publicationAuthorized": false,
+  "pilotReady": false
+}

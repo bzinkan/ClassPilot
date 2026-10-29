@@ -8,3 +8,5 @@ vite.config.ts.*
 *.tar.gz
 *.zip
 extension/config.js
+
+artifacts/

@@ -33,9 +33,22 @@ jobs:
           GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY: ${{ secrets.GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY }}
           REDIS_URL: ${{ secrets.REDIS_URL }}
       - run: npm run test:extension:chrome
+      - run: npm run test:extension:windows:unit
       - run: npm run build
       - run: bash extension/package-extension.sh
       - run: npm run test:extension:package
+
+  windows-browsers:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:extension:windows
 
   chrome-compatibility:
     runs-on: ubuntu-latest
