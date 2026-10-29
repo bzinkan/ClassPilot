@@ -484,6 +484,14 @@
       return;
     }
 
+    if (state.windowsSignIn === true) {
+      root.innerHTML = shell('Sign in using the ClassPilot Windows app',
+        'Enter your SchoolPilot PIN in the Windows app to connect this browser. Browsing stays protected until the session guard verifies your sign-in.',
+        '<p>Your teacher can see this browser only after your school session connects.</p><button id="classpilot-windows-refresh" type="button">Check connection</button>');
+      document.getElementById('classpilot-windows-refresh').addEventListener('click',()=>requestRefresh(true));
+      installFocusTrap('#classpilot-windows-refresh');scheduleLoadingPoll();return;
+    }
+
     if (phase === 'loading') {
       root.innerHTML = shell(
         'Connecting to ClassPilot…',

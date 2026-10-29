@@ -9,6 +9,7 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { extensionWorkerDeclarationsReady, waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
+import { pageForNativeTab } from './extension-native-tab-test-identity.mjs';
 
 // Real extension worker, Chrome navigation and DNR; identity-provider pages
 // and the API are controlled fixtures. No real student/provider credentials.
@@ -395,7 +396,7 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     const login = await worker.evaluate(() => manualStudentLogin({ mode: 'pin', studentId: 'portal-student', pin: '2468' }));
     assert.equal(login.success, true, `${kind}: actual manual sign-in failed`);
     assert.ok(fixture.state.loginPayloads[0].capabilities.includes('restrictionPortalFirstV1'));
-    const portal = await until(() => context.pages().find((p) => p.url().startsWith(portalUrl)), 'portal-first navigation');
+    let portal = await until(() => context.pages().find((p) => p.url().startsWith(portalUrl)), 'portal-first navigation');
     await portal.waitForSelector('h1');
     assert.equal(await portal.locator('h1').innerText(), 'Student portal');
     assert.equal(documents.some((url) => url.includes('ixl.com')), false, 'learning page opened before portal selection');
@@ -513,12 +514,20 @@ async function scenario(kind, { firstLoginCrash = false } = {}) {
     await worker.evaluate(async () => {
       await reconcileClassroomStateTabsBestEffort(currentClassroomState, { authContext: captureAuthenticatedContext('post-DNR fixture recovery') });
     });
-    // Chrome reports the denied network request before the worker's compliant
-    // fallback navigation completes. Let that navigation settle before the
-    // independent check that an approved URL remains usable.
-    await dnrProbe.waitForLoadState('networkidle');
-    await dnrProbe.goto(lessonUrl);
-    await dnrProbe.getByRole('heading', { name: 'Allowed lesson', exact: true }).waitFor();
+    // Reconciliation may replace the denied tab. Find the existing compliant
+    // native tab and match its actual document, without creating a replacement
+    // that could conceal lost work in the new-binding checks below.
+    const recoveredTabId = await until(() => worker.evaluate(async allowedPortal => {
+      const tabs = await chrome.tabs.query({});
+      return tabs.find(tab => tab.status === 'complete'
+        && (RuntimeCore.isRestrictionDestinationUrl(currentClassroomState, tab.url)
+          || tab.url === allowedPortal))?.id;
+    }, portalUrl), 'existing approved app or configured portal after native DNR denial');
+    portal = await pageForNativeTab(worker, context, recoveredTabId);
+    await portal.waitForLoadState('networkidle');
+    await portal.goto(lessonUrl);
+    await portal.getByRole('heading', { name: 'Allowed lesson', exact: true }).waitFor();
+    assert.equal(portal.url(), lessonUrl, 'approved navigation must commit its exact requested document');
 
     // Remove all prior portal pages so a leftover tab cannot make the new
     // binding test pass. Preserve work on an approved page across sign-in.

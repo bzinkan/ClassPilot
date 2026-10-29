@@ -18,7 +18,10 @@
     "test:extension:chrome:behavior": "npm run test:extension:connection && npm run test:extension:poll-replay && node scripts/test-extension-browser-api.mjs && npm run test:extension:policy && node scripts/test-extension-resilience.mjs && node scripts/test-extension-authority-races.mjs && node scripts/test-extension-school-tab-limit.mjs && node scripts/test-extension-command-ack-diagnostics.mjs && node scripts/test-extension-supervision-command-authority.mjs && node scripts/test-extension-precise-resources.mjs && node scripts/test-extension-precise-downgrade.mjs && node scripts/test-extension-focus.mjs && node scripts/test-extension-focus-notifications.mjs && node scripts/test-extension-attention-navigation.mjs && node scripts/test-extension-scheduled-classroom.mjs && node scripts/test-extension-class-tools.mjs && node scripts/test-extension-lesson-activity-ack.mjs && node scripts/test-extension-teacher-chat.mjs && node scripts/test-extension-2-7-behavior.mjs && node scripts/test-extension-offscreen-identity.mjs && node scripts/test-extension-popup-identity.mjs && node scripts/test-extension-auth-layout.mjs && node scripts/test-extension-auth-startup.mjs && node scripts/test-extension-portal-first.mjs && npm run test:extension:recovery",
     "test:extension:package": "node scripts/verify-extension-package.mjs",
     "db:push": "drizzle-kit push",
-    "test:extension:red-on-old": "node scripts/test-extension-recovery-red-on-old.mjs --old-only"
+    "test:extension:red-on-old": "node scripts/test-extension-recovery-red-on-old.mjs --old-only",
+    "test:extension:windows:unit": "node --test scripts/test-windows-browser-channel.mjs",
+    "package:extension:windows": "node scripts/package-windows-extension.mjs --development",
+    "test:extension:windows": "node scripts/run-windows-extension-tests.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
