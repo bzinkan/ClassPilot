@@ -3462,13 +3462,20 @@ async function main() {
         const cadenceCallsWithRecovery = heartbeatCalls;
         sendHeartbeat = originalSendHeartbeat;
 
-        let liveViewTelemetryRequest = null;
+        const liveViewTelemetryRequests = [];
+        let liveViewTelemetryInterleavedAckCount = 0;
         fetchWithBackoff = async (url, init = {}) => {
-          liveViewTelemetryRequest = {
-            url: String(url),
-            body: JSON.parse(String(init.body || '{}')),
-            hasAuthorization: Boolean(init.headers?.Authorization),
-          };
+          // ACK fallback timers share this transport while later fixture work
+          // awaits storage. Keep their requests from replacing this evidence.
+          if (new URL(String(url)).pathname === '/api/classpilot/device/live-view/telemetry') {
+            liveViewTelemetryRequests.push({
+              url: String(url),
+              body: JSON.parse(String(init.body || '{}')),
+              hasAuthorization: Boolean(init.headers?.Authorization),
+            });
+          } else if (new URL(String(url)).pathname === '/api/classpilot/device/command-acks') {
+            liveViewTelemetryInterleavedAckCount += 1;
+          }
           return new Response(null, { status: 204 });
         };
         activeLiveViewNegotiationId = 'telemetry-negotiation';
@@ -3531,6 +3538,10 @@ async function main() {
         });
         const ordinaryTeacherMessageInbox = await getCurrentMessageInbox();
         const ordinaryTeacherMessageAcks = await kv.get(COMMAND_ACK_OUTBOX_KEY);
+        // Deliberately exercise the unrelated real ACK lane before reading
+        // telemetry; this used to overwrite its URL under slower CI scheduling.
+        await commandAckFlushInFlight?.promise;
+        await flushCommandAckOutbox({ forceHttp: true });
         const sensitiveCommandFailure = await handleRemoteControl({
           commandId: 'sensitive-command-error-fixture',
           type: 'https://private.example/student?token=raw-secret',
@@ -4792,7 +4803,9 @@ async function main() {
           steadyCadenceCalls,
           staleRecoveryRan,
           cadenceCallsWithRecovery,
-          liveViewTelemetryRequest,
+          liveViewTelemetryRequest: liveViewTelemetryRequests[0] || null,
+          liveViewTelemetryRequestCount: liveViewTelemetryRequests.length,
+          liveViewTelemetryInterleavedAckCount,
           afterNegativeReceipt,
           afterV3AcceptedOnlyReceipt,
           afterWrongReceipt,
@@ -5390,6 +5403,8 @@ async function main() {
     assert.equal(result.staleRecoveryRan, true);
     assert.equal(result.cadenceCallsWithRecovery, 7);
     assert.equal(result.heartbeatCalls, 7);
+    assert.equal(result.liveViewTelemetryRequestCount, 1, 'the duplicate terminal attempt sends exactly one telemetry request');
+    assert.ok(result.liveViewTelemetryInterleavedAckCount > 0, 'an unrelated HTTP ACK must interleave without replacing telemetry');
     assert.equal(
       result.liveViewTelemetryRequest.url.endsWith('/api/classpilot/device/live-view/telemetry'),
       true,

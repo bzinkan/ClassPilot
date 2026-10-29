@@ -69,14 +69,26 @@ async function command(commandType,commandPayload,browser){return request('/comm
 async function tiles(selectedSources=[]){return request('/tiles',{body:{...authority,studentIds:[fixture.studentId],selectedSources}});}
 const checks=[];
 const sourceTarget=source=>({studentId:fixture.studentId,sourceRef:source.sourceRef,bindingRevision:source.bindingRevision});
-async function heartbeat(source){await source.worker.evaluate(()=>safeSendHeartbeat('schoolpilot-e2e'));}
-async function heartbeatAll(){for(const source of Object.values(sources))await heartbeat(source);}
+// The real bridge also polls every five seconds, in addition to the ordinary
+// worker heartbeat. Bound our extra traffic below the real 30/minute limit.
+// Each source has one queue; independent Chrome/Edge waits may run together.
+const heartbeatQueues=new WeakMap(),heartbeatTimes=new WeakMap();
+function heartbeat(source){
+  const pending=(heartbeatQueues.get(source)||Promise.resolve()).then(async()=>{
+    const remaining=6000-(performance.now()-(heartbeatTimes.get(source)??-Infinity));
+    if(remaining>0)await sleep(remaining);
+    heartbeatTimes.set(source,performance.now());
+    await source.worker.evaluate(()=>safeSendHeartbeat('schoolpilot-e2e'));
+  });
+  heartbeatQueues.set(source,pending.catch(()=>{}));return pending;
+}
+async function heartbeatAll(){await Promise.all(Object.values(sources).map(heartbeat));}
 async function acknowledgedCommand(type,payload,browser){
   const result=await command(type,payload,browser),expected=browser?[browser]:Object.values(sources);
   assert.equal(result.targets.length,expected.length);
   for(const source of expected)assert.ok(result.targets.some(target=>target.sourceRef===source.sourceRef&&target.bindingRevision===source.bindingRevision));
   await until(async()=>{
-    for(const source of expected){await heartbeat(source);await source.worker.evaluate(()=>flushCommandAckOutbox({forceHttp:true}));}
+    await Promise.all(expected.map(async source=>{await heartbeat(source);await source.worker.evaluate(()=>flushCommandAckOutbox({forceHttp:true}));}));
     const outcome=await request(`/commands/${result.command.id}?teachingSessionId=${encodeURIComponent(fixture.teachingSessionId)}`,{method:'GET'});
     assert.equal(outcome.targets.length,expected.length);
     return outcome.targets.every(target=>target.status==='completed'&&expected.some(source=>target.sourceRef===source.sourceRef&&target.bindingRevision===source.bindingRevision));
@@ -127,14 +139,14 @@ try{
     const page=context.pages()[0]||await context.newPage();await page.goto(`${pageOrigin}/page/${browserFamily}`);
     const popup=await context.newPage();await popup.goto(`chrome-extension://${new URL(worker.url()).host}/popup.html`);
     sources[browserFamily].page=page;sources[browserFamily].popup=popup;
-    await worker.evaluate(()=>safeSendHeartbeat('schoolpilot-e2e'));
+    await heartbeat(sources[browserFamily]);
   }
   assert.notEqual(sources.chrome.sourceRef,sources.edge.sourceRef);
   stage='paired-roster';const roster=await tiles();assert.equal(roster.tiles.length,1);assert.equal(roster.tiles[0].browserSources.length,2);
   const opened=`${pageOrigin}/page/chrome-selected-${randomUUID()}`;
   stage='chrome-exact-open';const open=await command('open-tab',{url:opened},sources.chrome);
   await until(async()=>{
-    await sources.chrome.worker.evaluate(()=>safeSendHeartbeat('schoolpilot-command'));
+    await heartbeat(sources.chrome);
     return sources.chrome.worker.evaluate(url=>chrome.tabs.query({}).then(tabs=>tabs.some(t=>t.url===url)),opened);
   },'WINDOWS_E2E_CHROME_TAB_NOT_OPENED');
   assert.equal(await sources.edge.worker.evaluate(url=>chrome.tabs.query({}).then(tabs=>tabs.some(t=>t.url===url)),opened),false);
@@ -142,7 +154,7 @@ try{
   await until(async()=>{const outcome=await request(`/commands/${openId}?teachingSessionId=${encodeURIComponent(fixture.teachingSessionId)}`,{method:'GET'});return outcome.targets.length===1&&outcome.targets[0].status==='completed';},'WINDOWS_E2E_ACK_NOT_ACCEPTED');
   stage='both-attention';const attention=await command('attention-mode',{active:true,message:'Synthetic classroom attention'});
   await until(async()=>{
-    for(const source of Object.values(sources))await source.worker.evaluate(()=>safeSendHeartbeat('schoolpilot-policy'));
+    await heartbeatAll();
     return (await Promise.all(Object.values(sources).map(source=>source.worker.evaluate(()=>attentionModeActive===true)))).every(Boolean);
   },'WINDOWS_E2E_POLICY_NOT_APPLIED');
   assert.equal(attention.targets.length,2);

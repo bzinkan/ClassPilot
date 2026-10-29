@@ -34,14 +34,60 @@ The expanded matrix reports 18 scenarios per browser. Navigation tests reuse the
 
 The real-server parity preparation separately discovered that help withdrawal was being routed as a new help request. The bridge correction distinguishes the DELETE operation. The synthetic helper requires a new, exact `class-tools:help-withdraw` request; an earlier help-request observation cannot satisfy that assertion. The complete suite above passed with the corrected artifact. The real server's help-row removal check is separate integration evidence. Relative to resource artifact `windows-development-1793250164988`, the only changed product file in each browser is `windows-worker-bridge.js`, containing that action mapping correction; all other product file hashes match.
 
+## Hosted Windows CI
+
+Both push and pull-request Windows jobs passed for committed source
+`762a6a48cc64abd9e8f9d3fde592e7c9b445ae89`. The
+[push job](https://github.com/bzinkan/ClassPilot/actions/runs/40824725563/job/123285024480)
+logs 13/13 channel tests, complete inventories for both ZIPs, and all 18 scenarios
+in Chrome 156.0.8078.48 and Edge 155.0.4283.62 with zero worker errors. Simulated
+native-port invalidation cleared local authority in 21 ms and 20 ms respectively.
+This extends browser-version and hosted-Windows coverage; the host and school
+server remain fixtures and `pilotReady` remains false.
+
+## Local SchoolPilot integration
+
+The final local SchoolPilot integration run passed 23/23 tests under forced tenant
+RLS. That count includes the API suite, Redis test and one expanded real-browser
+case; it does not mean 23 separate browser scenarios. The browser case passed seven
+scenario groups using actual packaged Chrome and Edge workers against the actual
+SchoolPilot API:
+
+1. Exact tab action, both-browser policy and source-bound durable ACKs.
+2. One server timer, both content overlays and acknowledged stop.
+3. Responses from both browsers reaching one student-deduplicated poll result.
+4. Both browsers updating shared lesson progress with exact revisions.
+5. Both browsers' hand, help, withdrawal and question actions persisting on the server.
+6. Announcement/private teacher replies reaching both browsers, and both student replies appearing in the server transcript.
+7. Actual thumbnails uploading and decoding under the exact teacher-selected source, with five-second observed cadence and thirty-second cadence after viewer release.
+
+Each observed JPEG was 5,740 bytes at 640×360; both teacher source reads succeeded.
+No browser credential reached a legacy credential route. The native proof broker
+remained simulated. No signed host, managed installation or physical OS transition
+was exercised.
+
+This run used Node 22 for the server and Node 24 for the browser child. Its server
+source was the final uncommitted source subsequently committed as
+`19167a12655499914a95de046a1ffbca897fd27a`, with no intervening code changes. The
+development package manifest records source revision
+`762a6a48cc64abd9e8f9d3fde592e7c9b445ae89`, `sourceDirty: true`, and the same product
+digest `75b49c3c8006a82b9b6a34533aed25a1ddd18f1344797964562d8ab3c532db48` as the
+expanded packaged matrix above. Its ZIP hashes are Chrome
+`aeba2536291b985abc1509007fec381f7d6b1c30d8ed3e0412d14e7559412d89` and Edge
+`edba22c9c0a310d19b246ea6e9fdfd27f8dc611b7b604cc6fbe4ab4bd79a27dc`.
+Installed executable versions were separately read as Chrome 156.0.8078.49 and
+Edge 156.0.4314.50; the browser summary itself did not record versions. The private
+`real-schoolpilot-browser-summary.json` contains the seven groups and image
+measurements. `pilotReady` remains false.
+
 ## Mandatory remaining acceptance
 
 These tests must not be used to claim that every enabled feature has completed end-to-end acceptance:
 
 - Review the actual enabled server capability profile against the Windows capability filter. An enabled capability without a Windows route is a functional gap; a historical or disabled capability is not evidence that it is enabled.
-- Test revisioned timer/activity snapshot rendering, short-text exit tickets, scheduled/supervision ownership changes, private-chat pause/end/reopen races and teacher-requested signout against the real server. The shared extension suites cover many corresponding lifecycle branches, but this new packaged-worker run does not reproduce all of them.
+- Test additional activity snapshot transitions, short-text exit tickets, scheduled/supervision ownership changes, private-chat pause/end/reopen races and teacher-requested signout against the real server. Timer start/stop, shared lesson progress and ordinary private replies are covered above; the shared extension suites cover many remaining lifecycle branches, but this Windows real-server case does not reproduce all of them.
 - Test the remaining restriction/navigation combinations, real SSO-provider authentication and browser/API refusal paths on managed browser versions. The basic local SSO, precise-resource, denial and tab-overflow paths above are already exercised in both packaged browsers.
-- Validate browser screenshot grants, cadence, decoding and teacher reads against the real server; the resource fixture's capture/discard path alone does not establish teacher viewing.
+- Complete managed-device screenshot denial, failure/recovery and sustained viewer acceptance. The local real-server case above verifies source-qualified upload/decoding/teacher reads and observed/released cadence; the resource fixture's separate capture/discard path does not add teacher-view evidence.
 - Verify the exact signed native host and Guard with Chrome/Edge, per-profile exclusivity, one-PIN pairing, UI close/crash continuity, guard crash, automatic extension loading after browser restart, managed installation/update/rollback and policy enforcement. No mock-host or CDP-reloaded development-package result substitutes for that evidence.
 - Verify supported physical lock/sleep/user-switch transitions on suitable hardware. This host remains unlocked and does not sleep; simulated signals and service-worker termination do not establish those OS outcomes.
 - Verify approved Store identities, extension adoption, forced policy/account restrictions and organization application control. This run does not apply registry or management policies and cannot establish coverage of portable or unapproved browsers.
