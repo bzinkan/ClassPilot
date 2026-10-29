@@ -22,6 +22,7 @@ export async function exerciseWindowsWorkerParity(fixture){
   assert.ok(session);
   const teachingSessionId=randomUUID(),end=Date.now()+600_000;
   let revision=0;
+  let lesson;
   const tools={phase:5,revision:1,capabilities:['helpRequestsV1','questionParkingV1','timerControlsV1','lessonActivitiesV1','exitTicketsV1'],help:null,questions:[],timer:null,
     activity:{activityId:randomUUID(),revision:1,title:'Synthetic exercise',instructions:'Read and answer.',resources:[],checklist:[{id:'one',text:'Read the prompt'}],expiresAt:new Date(end).toISOString(),progress:{status:'not_reported',completedItemIds:[],revision:0}}};
   function state(restrictions={},extra={}){
@@ -37,6 +38,10 @@ export async function exerciseWindowsWorkerParity(fixture){
     state(restrictions,extra);await heartbeat();
     try { await until(()=>worker.evaluate(expected=>currentClassroomState?.revision===expected,revision),'current exact-bound classroom policy'); }
     catch(error){console.error(await worker.evaluate(()=>({state:currentClassroomState,authenticated:hasStudentAuth(),trackingState,control:currentStudentControlRevision()})));throw error;}
+    // Revision adoption precedes native existing-tab reconciliation. Finish
+    // that lane and its compliant navigation before probing the next policy.
+    await worker.evaluate(()=>classroomStateApplicationTail);
+    if(lesson&&!lesson.isClosed())await lesson.waitForLoadState('networkidle',{timeout:5_000}).catch(()=>{});
   }
   function queue(type,data={},overrides={}){
     const id=randomUUID(),binding=policy(session).exactBinding;
@@ -59,7 +64,7 @@ export async function exerciseWindowsWorkerParity(fixture){
     return id;
   }
   await install();
-  let lesson=await context.newPage();await lesson.goto(`${origin}/parity-${browserFamily}`);
+  lesson=await context.newPage();await lesson.goto(`${origin}/parity-${browserFamily}`);
   await until(()=>lesson.locator('body').count(),'synthetic lesson page');
   let popup=await context.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   async function action(type,extra={}){
@@ -114,11 +119,30 @@ export async function exerciseWindowsWorkerParity(fixture){
     if(event.frameId===0)globalThis.__windowsNavigationErrors.push({url:event.url,error:event.error});};chrome.webNavigation.onErrorOccurred.addListener(globalThis.__windowsNavigationListener);});
   async function allowed(url){
     // A denied navigation can start an asynchronous compliant fallback. Let
-    // that native navigation settle, and retry only the resulting ERR_ABORTED;
+    // that native navigation settle, and retry only its interruption errors;
     // a DNR refusal or a final wrong document still fails this positive probe.
     for(let attempt=0;attempt<3;attempt++){
-      if(lesson.isClosed())lesson=await context.newPage();
-      try{await lesson.goto(url);break;}catch(error){if(attempt===2||!String(error).includes('ERR_ABORTED'))throw error;await lesson.waitForLoadState('networkidle').catch(()=>{});}
+      try{
+        // Existing-tab reconciliation can replace the fixture's old page with
+        // a compliant one before Playwright delivers the old page's close event.
+        const tabUrls=await worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(tab=>tab.url)));
+        const livePages=context.pages().filter(page=>!page.isClosed()&&tabUrls.includes(page.url())&&/^https?:/.test(page.url()));
+        lesson=livePages.find(page=>page.url()===url)||(livePages.includes(lesson)?lesson:livePages[0])||lesson;
+        if(lesson.isClosed()||!livePages.includes(lesson)){
+          // Reconciliation may replace the old disallowed tab. Opening the
+          // allowed URL atomically avoids creating an enforceable blank tab.
+          const [created]=await Promise.all([context.waitForEvent('page',{timeout:5_000}),
+            worker.evaluate(target=>chrome.tabs.create({url:target,active:true}),url)]);
+          lesson=created;await lesson.waitForLoadState('load',{timeout:15_000});
+        }else await lesson.goto(url);
+        break;
+      }catch(error){
+        const detail=String(error);
+        const interrupted=detail.includes('ERR_ABORTED')
+          || /Navigation to "[^"]+" is interrupted by another navigation to "[^"]+"/.test(detail);
+        if(attempt===2||detail.includes('ERR_BLOCKED_BY_CLIENT')||!interrupted)throw error;
+        await lesson.waitForLoadState('networkidle',{timeout:5_000}).catch(()=>{});
+      }
     }
     await lesson.locator('#network-fixture').waitFor({state:'visible'});
     assert.equal(lesson.url(),url,'Allowed navigation must commit its exact requested document');
@@ -129,7 +153,7 @@ export async function exerciseWindowsWorkerParity(fixture){
     await lesson.goto(url).catch(()=>{});
     await until(()=>worker.evaluate(value=>globalThis.__windowsNavigationErrors.some(row=>row.url===value&&row.error.includes('ERR_BLOCKED_BY_CLIENT')),url),'native DNR denial');
     assert.ok(!navigation.documents.includes(url),`${browserFamily} denied document reached the fixture: ${url}`);
-    if(!lesson.isClosed())await lesson.waitForLoadState('networkidle').catch(()=>{});
+    if(!lesson.isClosed())await lesson.waitForLoadState('networkidle',{timeout:5_000}).catch(()=>{});
   }
   await install({flightPath:{active:true,name:'Synthetic lesson',allowedDomains:['lesson.example.test']}});
   await allowed('https://lesson.example.test/flight-allowed');await denied('https://outside.example.test/flight-denied');
