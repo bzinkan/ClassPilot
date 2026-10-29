@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { waitForExtensionWorkerDeclarations } from './extension-worker-test-readiness.mjs';
+import { pageForNativeTab } from './extension-native-tab-test-identity.mjs';
 
 const pause=ms=>new Promise(done=>setTimeout(done,ms));
 async function until(predicate,label,timeout=15_000){
@@ -117,24 +118,29 @@ export async function exerciseWindowsWorkerParity(fixture){
   assert.ok(navigation);
   await worker.evaluate(()=>{globalThis.__windowsNavigationErrors=[];globalThis.__windowsNavigationListener=event=>{
     if(event.frameId===0)globalThis.__windowsNavigationErrors.push({url:event.url,error:event.error});};chrome.webNavigation.onErrorOccurred.addListener(globalThis.__windowsNavigationListener);});
+  let navigationPolicyRevision=-1,navigationTabId=null;
   async function allowed(url){
     // A denied navigation can start an asynchronous compliant fallback. Let
     // that native navigation settle, and retry only its interruption errors;
     // a DNR refusal or a final wrong document still fails this positive probe.
     for(let attempt=0;attempt<3;attempt++){
       try{
-        // Existing-tab reconciliation can replace the fixture's old page with
-        // a compliant one before Playwright delivers the old page's close event.
-        const tabUrls=await worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(tab=>tab.url)));
-        const livePages=context.pages().filter(page=>!page.isClosed()&&tabUrls.includes(page.url())&&/^https?:/.test(page.url()));
-        lesson=livePages.find(page=>page.url()===url)||(livePages.includes(lesson)?lesson:livePages[0])||lesson;
-        if(lesson.isClosed()||!livePages.includes(lesson)){
-          // Reconciliation may replace the old disallowed tab. Opening the
-          // allowed URL atomically avoids creating an enforceable blank tab.
-          const [created]=await Promise.all([context.waitForEvent('page',{timeout:5_000}),
-            worker.evaluate(target=>chrome.tabs.create({url:target,active:true}),url)]);
-          lesson=created;await lesson.waitForLoadState('load',{timeout:15_000});
-        }else await lesson.goto(url);
+        const firstForPolicy=navigationPolicyRevision!==revision;
+        if(firstForPolicy){
+          // The old policy's page may be scheduled for removal. Select the
+          // actual compliant tab, or open this allowed URL atomically, rather
+          // than navigating that obsolete page. SSO continuations below keep
+          // this same native tab ID for the entire policy.
+          navigationTabId=await worker.evaluate(async target=>{
+            const tabs=await chrome.tabs.query({});
+            const existing=tabs.find(tab=>tab.status==='complete'&&tab.url===target);
+            return existing?.id??(await chrome.tabs.create({url:target,active:true})).id;
+          },url);
+          assert.ok(Number.isInteger(navigationTabId));
+          navigationPolicyRevision=revision;
+        }
+        lesson=await pageForNativeTab(worker,context,navigationTabId);
+        if(!firstForPolicy)await lesson.goto(url);
         break;
       }catch(error){
         const detail=String(error);
