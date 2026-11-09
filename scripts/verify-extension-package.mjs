@@ -176,6 +176,7 @@ async function runPackagedTests() {
     'test-extension-poll-replay.mjs',
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
+    'test-extension-storage-handoff.mjs',
     'test-extension-school-tab-limit.mjs',
     'test-extension-command-ack-diagnostics.mjs',
     'test-extension-supervision-command-authority.mjs',

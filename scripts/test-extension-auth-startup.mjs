@@ -1303,18 +1303,59 @@ async function main() {
       };
     ` + endAnchor);
     writeFileSync(fixtureContentPath, fixtureContent);
+    // Concurrent page sends need not enter the worker before its first reply.
+    // Hold only these marked fixture replies until all three requests entered;
+    // retain the real handler's cold-cohort capture and every assertion below.
+    const fixtureWorkerPath = join(extensionPath, 'service-worker.js');
+    const coldCohortAnchor = `const authStateWasCold = ordinaryAuthStateColdCohortOpen;
+    authStateRestorePromise.then(async () => {`;
+    let fixtureWorker = readFileSync(fixtureWorkerPath, 'utf8').replace(/\r\n/g, '\n');
+    assert.equal(fixtureWorker.split(coldCohortAnchor).length, 2);
+    fixtureWorker = fixtureWorker.replace(coldCohortAnchor, `const authStateWasCold = ordinaryAuthStateColdCohortOpen;
+    const fixtureCohortReady = message.__classpilotTestColdCohort
+      ? __classpilotTestAwaitColdCohort(message.__classpilotTestColdCohort) : Promise.resolve();
+    authStateRestorePromise.then(async () => {
+      await fixtureCohortReady;`);
+    fixtureWorker += `
+      function __classpilotTestAwaitColdCohort(id) {
+        const cohorts = globalThis.__classpilotTestColdCohorts ||= new Map();
+        let cohort = cohorts.get(id);
+        if (!cohort) {
+          let release, fail;
+          const ready = new Promise((resolve, reject) => { release = resolve; fail = reject; });
+          const timer = setTimeout(() => {
+            cohorts.delete(id);
+            const error = new Error('[fixture:cold-auth-cohort] three worker entries did not arrive');
+            console.warn(error.message);
+            fail(error);
+          }, 3_000);
+          cohort = { count: 0, ready, release, timer };
+          cohorts.set(id, cohort);
+        }
+        cohort.count += 1;
+        if (cohort.count === 3) {
+          clearTimeout(cohort.timer);
+          cohorts.delete(id);
+          cohort.release();
+        }
+        return cohort.ready;
+      }
+    `;
+    writeFileSync(fixtureWorkerPath, fixtureWorker);
     writeFileSync(
       join(extensionPath, 'cold-auth-cohort.html'),
       '<!doctype html><meta charset="utf-8"><title>Cold auth cohort</title><script src="cold-auth-cohort.js"></script>',
     );
     writeFileSync(join(extensionPath, 'cold-auth-cohort.js'), `
-      const requestAuthState = () => new Promise((resolve) => {
-        chrome.runtime.sendMessage({ type: 'get-auth-state' }, (response) => {
+      const cohortId = crypto.randomUUID();
+      const requestAuthState = (joinCohort = false) => new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: 'get-auth-state',
+          ...(joinCohort ? { __classpilotTestColdCohort: cohortId } : {}) }, (response) => {
           const error = chrome.runtime.lastError;
           resolve(error ? { success: false, error: error.message } : response);
         });
       });
-      Promise.all([requestAuthState(), requestAuthState(), requestAuthState()])
+      Promise.all([requestAuthState(true), requestAuthState(true), requestAuthState(true)])
         .then(async (first) => {
           const later = await requestAuthState();
           globalThis.__classpilotColdAuthCohort = { first, later };
