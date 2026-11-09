@@ -2,7 +2,13 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared candidate is **3.0.3**, which fixes school tab-limit recovery,
+The prepared Chromebook candidate is **3.0.4**, which repairs the storage queue
+deadlock that could stop heartbeat, classroom and sign-in progress during a
+class transition. Cleanup drains parent/child writers before publishing its
+barrier, retaining exact identity and authentication-generation checks. See the
+[3.0.4 candidate record](../docs/CLASS_PILOT_3_0_4_CANDIDATE.md).
+
+It retains 3.0.3, which fixes school tab-limit recovery,
 preserves precise command failure reasons across acknowledgement retries, and
 separates authenticated supervision command authority from restriction delivery.
 See the [3.0.3 candidate record](../docs/CLASS_PILOT_3_0_3_CANDIDATE.md).
@@ -426,9 +432,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 
 ### Create the Versioned Web Store ZIP
 
-1. Confirm the live Chrome Web Store version and bump `extension/manifest.json`
+1. Confirm the live Chrome Web Store version and pending submissions, then bump `extension/manifest.json`
    to the next version. The manifest is the release source of truth.
-2. From the repository root in Git Bash, run:
+2. From the final clean, reviewed, tagged source checkout in Git Bash, run:
    ```bash
    ./extension/package-extension.sh
    ```
@@ -438,6 +444,12 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
    file byte-for-byte with the source allowlist and writes a `.sha256` record.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
+
+The current Chromebook candidate output is `dist/ClassPilot-v3.0.4.zip`, with
+its matching `.sha256` record. Follow the [3.0.4 candidate
+record](../docs/CLASS_PILOT_3_0_4_CANDIDATE.md), preserve every older versioned
+archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
+below remains historical evidence.
 
 For the prepared 2.9.6 sign-in roster isolation candidate, the canonical artifact
 name will be `dist/ClassPilot-v2.9.6.zip` after separately authorized clean-tag

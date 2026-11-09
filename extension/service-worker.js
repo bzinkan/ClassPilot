@@ -9847,8 +9847,8 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
   const expectedBinding = monitoringEventAuthBindingForContext(authContext);
   const expectedLicenseScope = licenseScopeForAuthContext(authContext);
   if (!expectedBinding) throw authContextSuperseded(reason);
-  const priorMutations = [
-    retiredExactBoundStorageCleanupMutation,
+  const priorCleanup = retiredExactBoundStorageCleanupMutation;
+  const currentMutationTails = () => [
     monitoringEventMutation,
     commandAckMutation,
     chatAckMutation,
@@ -9860,8 +9860,31 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
     schoolPolicyMutation,
     schoolSettingsMutation,
     classroomStateApplicationTail,
-  ].map((pending) => Promise.resolve(pending).catch(() => undefined));
-  const cleanup = Promise.all(priorMutations).then(async () => {
+  ];
+  let cleanupBarrier;
+  const cleanup = Promise.resolve(priorCleanup).catch(() => undefined).then(async () => {
+    // An in-flight parent (for example a FAB lifecycle transition) may still
+    // append an overlay child. Publishing our barrier before it finishes makes
+    // that child wait for cleanup while cleanup waits for its parent. Drain to
+    // a stable frontier first, including children appended during each wait.
+    while (true) {
+      const pending = currentMutationTails();
+      await Promise.all(pending.map((mutation) => Promise.resolve(mutation).catch(() => undefined)));
+      assertAuthenticatedContextCurrent(authContext, reason);
+      const latest = currentMutationTails();
+      if (pending.every((mutation, index) => mutation === latest[index])) break;
+    }
+    // No await separates the frontier check from barrier publication. Writers
+    // already running have drained; later exact-bound writers join our barrier.
+    monitoringEventMutation = cleanupBarrier;
+    commandAckMutation = cleanupBarrier;
+    chatAckMutation = cleanupBarrier;
+    studentChatMutation = cleanupBarrier;
+    tabSnapshotMutation = cleanupBarrier;
+    messageInboxMutation = cleanupBarrier;
+    fabStateMutation = cleanupBarrier;
+    classroomOverlayMutation = cleanupBarrier;
+    schoolPolicyMutation = cleanupBarrier;
     assertAuthenticatedContextCurrent(authContext, reason);
     const keys = [
       MONITORING_EVENT_OUTBOX_KEY,
@@ -10063,19 +10086,8 @@ function cleanupRetiredExactBoundStorage(authContext, reason = 'authority adopti
       binding: expectedBinding,
     };
   });
-  retiredExactBoundStorageCleanupMutation = cleanup.catch(() => undefined);
-  // Serialize every exact-bound writer behind the transition cleanup. Future
-  // writes chain from these globals, so a newly adopted identity cannot race
-  // the physical removal of a retired identity's payloads.
-  monitoringEventMutation = retiredExactBoundStorageCleanupMutation;
-  commandAckMutation = retiredExactBoundStorageCleanupMutation;
-  chatAckMutation = retiredExactBoundStorageCleanupMutation;
-  studentChatMutation = retiredExactBoundStorageCleanupMutation;
-  tabSnapshotMutation = retiredExactBoundStorageCleanupMutation;
-  messageInboxMutation = retiredExactBoundStorageCleanupMutation;
-  fabStateMutation = retiredExactBoundStorageCleanupMutation;
-  classroomOverlayMutation = retiredExactBoundStorageCleanupMutation;
-  schoolPolicyMutation = retiredExactBoundStorageCleanupMutation;
+  cleanupBarrier = cleanup.catch(() => undefined);
+  retiredExactBoundStorageCleanupMutation = cleanupBarrier;
   return cleanup;
 }
 

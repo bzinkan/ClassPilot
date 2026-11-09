@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '3.0.3';
+const expectedPreparedReleaseVersion = '3.0.4';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -176,6 +176,7 @@ async function runPackagedTests() {
     'test-extension-poll-replay.mjs',
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
+    'test-extension-storage-handoff.mjs',
     'test-extension-school-tab-limit.mjs',
     'test-extension-command-ack-diagnostics.mjs',
     'test-extension-supervision-command-authority.mjs',
