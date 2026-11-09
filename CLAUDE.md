@@ -134,7 +134,7 @@ review. The Chromebook packager excludes local configuration.
 
 ## Chromebook version and release contract
 
-The reviewed source prepares **3.0.3**, with Chrome **120** as its minimum.
+The reviewed source prepares **3.0.4**, with Chrome **120** as its minimum.
 This is a source observation, not a claim about the live Store or installed fleet.
 The root application package version is independent. When preparing a successor,
 update all extension version guards together:
@@ -163,7 +163,7 @@ Store upload/publication is separate from preparation, merge, API/web deployment
 and fleet adoption. Immediately before uploading, confirm the live version and
 pending submissions in the authenticated Developer Dashboard for extension
 `iggbfegfcjkfieoemeolfmfnapepalca`; an uploaded version cannot be reused. Follow
-[docs/CLASS_PILOT_3_0_3_CANDIDATE.md](./docs/CLASS_PILOT_3_0_3_CANDIDATE.md), or the
+[docs/CLASS_PILOT_3_0_4_CANDIDATE.md](./docs/CLASS_PILOT_3_0_4_CANDIDATE.md), or the
 reviewed successor record, for exact release scope and outstanding acceptance.
 
 ## Windows Chrome and Edge variants
