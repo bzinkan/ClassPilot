@@ -89,6 +89,27 @@ sockets.on('connection', socket => socket.on('message', raw => {
 await new Promise(resolveListen => http.listen(0, '127.0.0.1', resolveListen));
 const origin = `http://127.0.0.1:${http.address().port}`;
 
+async function authenticateTelemetryFixture(worker) {
+  let deadline;
+  try {
+    await Promise.race([(async () => {
+      while (!(await worker.evaluate(async () => {
+        // The offscreen socket can open before its worker event passes cold
+        // policy readiness. Drain that event before installing synthetic auth:
+        // processWsEvent('open') correctly resets wsConnected to false.
+        await awaitManagedAuthGatePolicyStable();
+        await wsMessageProcessingTail;
+        if (!wsTransportConnected || wsConnectionGeneration !== 101
+          || wsMessageProcessingGeneration !== 101) return false;
+        wsConnected = true; wsAuthenticatedGeneration = 101;
+        return true;
+      }))) await new Promise(resolve => setTimeout(resolve, 25));
+    })(), new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error('Synthetic telemetry worker open did not settle')), 10_000);
+    })]);
+  } finally { clearTimeout(deadline); }
+}
+
 try {
   browser = await chromium.launchPersistentContext(profile, {
     executablePath, headless: true,
@@ -143,7 +164,7 @@ try {
     if (attempt === 99) throw new Error('Local offscreen WebSocket did not open: ' + JSON.stringify({ status, diagnostics }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
   }
-  await worker.evaluate(() => { wsConnected = true; wsAuthenticatedGeneration = 101; });
+  await authenticateTelemetryFixture(worker);
   const runHeartbeat = () => worker.evaluate(async origin => {
     const response = await fetchWithBackoff(origin + '/api/device/heartbeat', {
       method: 'POST', body: JSON.stringify({ activeTabTitle: 'Synthetic lesson' }),

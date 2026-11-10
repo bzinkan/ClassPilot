@@ -10,13 +10,13 @@ const extensionFile = name => process.env.CLASSPILOT_EXTENSION_PATH
 const source = readFileSync(extensionFile('service-worker.js'), 'utf8').replace(/\r\n/g, '\n');
 const clientSource = readFileSync(extensionFile('device-telemetry.js'), 'utf8');
 const operationId = '11111111-1111-4111-8111-111111111111';
-function declaration(name) {
-  const start = new RegExp(`^(?:async )?function ${name}\\(`, 'm').exec(source);
+function declaration(name, input = source) {
+  const start = new RegExp(`^(?:async )?function ${name}\\(`, 'm').exec(input);
   assert.ok(start, `production ${name} must exist`);
-  const rest = source.slice(start.index + start[0].length);
+  const rest = input.slice(start.index + start[0].length);
   const end = /^}/m.exec(rest);
   assert.ok(end);
-  return source.slice(start.index, start.index + start[0].length + end.index + 1);
+  return input.slice(start.index, start.index + start[0].length + end.index + 1);
 }
 function fixture() {
   const controller = new AbortController();
@@ -57,6 +57,37 @@ function fixture() {
   };
 }
 const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+test('native telemetry fixture waits for a delayed worker open before authenticating its screenshot transport', async () => {
+  const f = fixture(); const context = f.sandbox;
+  let releasePolicy;
+  const policyGate = new Promise(resolve => { releasePolicy = resolve; });
+  Object.assign(context, { wsConnected: false, wsTransportConnected: false,
+    wsConnectionGeneration: 101, wsAuthenticatedGeneration: 0,
+    wsTransportIdentity: { ...context.wsTransportIdentity, connectionGeneration: 101 },
+    authStateRestorePromise: Promise.resolve(), awaitManagedAuthGatePolicyStable: () => policyGate,
+    wsPendingIngressCount: 0, WS_MAX_PENDING_INGRESS: 32, wsIngressTails: new Map(),
+    wsMessageProcessingTail: Promise.resolve(), wsMessageProcessingGeneration: 0,
+    wsAuthenticatedResponseGuard: null, schoolSettingsRefreshState: null,
+  });
+  for (const name of ['handleWsEvent', 'processWsEvent']) vm.runInContext(declaration(name), context);
+  const nativeHarness = readFileSync(new URL('./test-extension-device-telemetry-chrome.mjs', import.meta.url), 'utf8');
+  vm.runInContext(declaration('authenticateTelemetryFixture', nativeHarness), context);
+  const opening = context.handleWsEvent('open', null, 101, f.auth.authContextId, f.auth.serverOrigin);
+  const authenticating = context.authenticateTelemetryFixture({ evaluate: callback => callback() });
+  await flush();
+  releasePolicy();
+  await Promise.all([opening, authenticating]);
+  const pending = f.prepare('screenshot', { screenshot: 'data:image/jpeg;base64,ZmFrZQ==' })();
+  await flush();
+  assert.equal(f.sent.length, 1, 'delayed open must not silently move the native screenshot proof to HTTP');
+  assert.equal(f.sent[0].kind, 'screenshot'); assert.equal(f.http.length, 0);
+  assert.equal(context.acceptDeviceTelemetryEvent('message', JSON.stringify({
+    type: 'device-telemetry-result', operationId, kind: 'screenshot', status: 200,
+    body: { ok: true }, exactBinding: { studentId: f.auth.studentId, studentSessionId: f.auth.studentSessionId },
+  }), 101, f.auth.authContextId, f.auth.serverOrigin), true);
+  assert.equal((await pending).status, 200);
+});
 
 test('unnegotiated operations retain the original HTTP path', () => {
   const f = fixture(); f.disable();
