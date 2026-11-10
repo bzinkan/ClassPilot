@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { resolve } from 'node:path';
 
-const modulePath = new URL('../extension/device-telemetry.js', import.meta.url);
+const modulePath = process.env.CLASSPILOT_EXTENSION_PATH
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH, 'device-telemetry.js')
+  : new URL('../extension/device-telemetry.js', import.meta.url);
 let source = '';
 try { source = readFileSync(modulePath, 'utf8'); } catch { /* Red before implementation. */ }
 const operationId = '11111111-1111-4111-8111-111111111111';

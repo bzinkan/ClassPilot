@@ -172,6 +172,11 @@ async function runPackagedSuite(script, environment) {
 async function runPackagedTests() {
   const environment = { ...process.env, CLASSPILOT_EXTENSION_PATH: unpackRoot };
   for (const script of [
+    'test-extension-device-telemetry.mjs',
+    'test-extension-device-telemetry-integration.mjs',
+    'test-extension-screenshot-references.mjs',
+    'test-extension-screenshot-reference-upload.mjs',
+    'test-extension-device-telemetry-chrome.mjs',
     'test-poll-replay-core.mjs',
     'test-extension-poll-replay.mjs',
     'test-extension-resilience.mjs',

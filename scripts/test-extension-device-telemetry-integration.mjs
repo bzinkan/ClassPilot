@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
+import { resolve } from 'node:path';
 
-const source = readFileSync(new URL('../extension/service-worker.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-const clientSource = readFileSync(new URL('../extension/device-telemetry.js', import.meta.url), 'utf8');
+const extensionFile = name => process.env.CLASSPILOT_EXTENSION_PATH
+  ? resolve(process.env.CLASSPILOT_EXTENSION_PATH, name) : new URL('../extension/' + name, import.meta.url);
+const source = readFileSync(extensionFile('service-worker.js'), 'utf8').replace(/\r\n/g, '\n');
+const clientSource = readFileSync(extensionFile('device-telemetry.js'), 'utf8');
 const operationId = '11111111-1111-4111-8111-111111111111';
 function declaration(name) {
   const start = new RegExp(`^(?:async )?function ${name}\\(`, 'm').exec(source);
@@ -147,13 +150,25 @@ test('existing backoff retries canonical overload while keeping one cross-transp
 });
 
 test('Windows native browser pairing does not advertise the Chromebook WebSocket transport', () => {
-  const bridge = readFileSync(new URL('../extension/windows-worker-bridge.js', import.meta.url), 'utf8');
+  const bridge = readFileSync(extensionFile('windows-worker-bridge.js'), 'utf8');
   const stop = Symbol('native adapter boundary'); let advertised;
   assert.throws(() => vm.runInNewContext(bridge, {
     CLASSPILOT_WINDOWS_BUILD: { browserFamily: 'chrome' }, fetch() {},
     chrome: { runtime: {}, storage: { local: {} } },
-    EXTENSION_CAPABILITIES: ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1', 'focusTabV1'],
+    EXTENSION_CAPABILITIES: ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1', 'focusTabV1'],
     ClassPilotWindowsChannel: { create(options) { advertised = options.capabilities(); throw stop; } },
   }), error => error === stop);
   assert.deepEqual(Array.from(advertised), ['scopedAuthorityChecksV1', 'focusTabV1']);
+});
+
+test('Windows heartbeat descriptors and request adapters cannot negotiate unsupported telemetry', () => {
+  const f = fixture();
+  Object.assign(f.sandbox, { CLASSPILOT_WINDOWS_BUILD: { browserFamily: 'chrome' }, CLIENT_PROTOCOL_VERSION: 3,
+    ClassPilotWindows: { capabilities: () => ['scopedAuthorityChecksV1'] },
+    EXTENSION_CAPABILITIES: ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1'],
+    chrome: { runtime: { getManifest: () => ({ version: '3.0.4' }) } },
+  });
+  vm.runInContext(declaration('extensionProtocolDescriptor'), f.sandbox);
+  assert.deepEqual(Array.from(f.sandbox.extensionProtocolDescriptor().capabilities), ['scopedAuthorityChecksV1']);
+  assert.equal(f.prepare(), null);
 });

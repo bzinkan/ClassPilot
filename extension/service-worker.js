@@ -31,6 +31,7 @@ try {
 }
 importScripts('classroom-runtime-core.js');
 importScripts('device-telemetry.js');
+importScripts('screenshot-references.js');
 if (globalThis.CLASSPILOT_WINDOWS_BUILD) importScripts('windows-browser-channel.js');
 importScripts('poll-replay-core.js');
 importScripts('private-recovery-store.js');
@@ -314,6 +315,7 @@ let authContextAbortController = new AbortController();
 let lastRetiredStudentMessageContext = null;
 let negotiatedProtocolState = null;
 let deviceTelemetryClient = null;
+let screenshotReferenceCache = null;
 let studentAuthMutationTail = Promise.resolve();
 let chromeProfileRegistrationInFlight = null;
 let manualStudentLoginPendingGeneration = 0;
@@ -323,6 +325,7 @@ const manualStudentLoginSuccessfulResponseFailures = new Set();
 const CLIENT_PROTOCOL_VERSION = 3;
 const EXTENSION_CAPABILITIES = Object.freeze([
   'deviceTelemetryTransportV1',
+  'scopedScreenshotReferencesV1',
   'pollReplaySafeV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'classroomStateV1',
@@ -362,6 +365,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
 ]);
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'deviceTelemetryTransportV1',
+  'scopedScreenshotReferencesV1',
   'pollReplaySafeV1',
   'focusTabV1',
   'privateChatLifecycleV1',
@@ -448,7 +452,7 @@ function getDeviceTelemetryClient() {
 function prepareDeviceTelemetryRequest(url, init, options) {
   const operation = options.deviceTelemetry;
   const authContext = operation?.authContext;
-  if (!authContext || !['heartbeat', 'screenshot'].includes(operation.kind)
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD || !authContext || !['heartbeat', 'screenshot'].includes(operation.kind)
     || !hasNegotiatedCapability('deviceTelemetryTransportV1', authContext)
     || !hasNegotiatedCapability('scopedAuthorityChecksV1', authContext)
     || typeof globalThis.crypto?.randomUUID !== 'function') return null;
@@ -503,6 +507,43 @@ function acceptDeviceTelemetryEvent(event, data, connectionGeneration, authConte
     if (!wsIdentityMatchesContext(identity, authContext)) return false;
     return deviceTelemetryClient.acceptResult(message, identity);
   } catch { return false; }
+}
+
+function getScreenshotReferenceCache() {
+  if (!screenshotReferenceCache) screenshotReferenceCache = globalThis.ClassPilotScreenshotReferences.createCache();
+  return screenshotReferenceCache;
+}
+
+function prepareScreenshotImageCapture(source, authContext, policyGeneration, authorityScope) {
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD || !authorityScope || !['scopedScreenshotReferencesV1', 'deviceTelemetryTransportV1',
+    'screenshotTrackingWindowLeaseV1', 'scopedAuthorityChecksV1'].every(name => hasNegotiatedCapability(name, authContext))) {
+    getScreenshotReferenceCache().clear();
+    return null;
+  }
+  const scope = JSON.stringify([authContext.authContextId, authContext.mutationGeneration,
+    authContext.serverOrigin, authContext.schoolId, authContext.deviceId, authContext.studentId,
+    authContext.studentSessionId, policyGeneration, authorityScope]);
+  return getScreenshotReferenceCache().prepare(source, scope);
+}
+
+async function uploadRoutineScreenshot(url, init, options, metadata, source, ticket) {
+  const sendImage = image => fetchWithBackoff(url, {
+    ...init, body: JSON.stringify({ ...metadata, ...image }),
+  }, options);
+  let response = await sendImage(ticket?.body || { screenshot: source });
+  let responseReceivedAt = Date.now();
+  let responseBody = await response.json().catch(() => ({}));
+  if (ticket?.body.screenshotReferenceId && response.status === 409
+    && responseBody?.code === 'SCREENSHOT_IMAGE_REQUIRED') {
+    // The reference is not a committed upload. Recover the bytes from THIS
+    // fresh capture, without a recapture or a new capturedAt. beforeAttempt
+    // retains the original authority/cancellation fence on the full retry.
+    response = await sendImage(getScreenshotReferenceCache().fullBody(ticket));
+    responseReceivedAt = Date.now();
+    responseBody = await response.json().catch(() => ({}));
+  }
+  if (ticket && response.ok) getScreenshotReferenceCache().accept(ticket, responseBody);
+  return { response, responseBody, responseReceivedAt };
 }
 
 // The offscreen proxy answers WS_NOT_OPEN when it no longer holds an open
@@ -11170,6 +11211,7 @@ function revokeRetiredOffscreenAuthority(liveViewContext, transportIdentity) {
 }
 
 function abortActiveAuthContext() {
+  if (typeof screenshotReferenceCache !== 'undefined') screenshotReferenceCache?.clear();
   if (
     activeAuthContextGeneration === studentAuthMutationGeneration
     && !authContextAbortController.signal.aborted
@@ -11475,6 +11517,7 @@ function responseScreenshotLeaseKind(raw = {}) {
 }
 
 function advanceScreenshotPolicyAuthority() {
+  if (typeof screenshotReferenceCache !== 'undefined') screenshotReferenceCache?.clear();
   try {
     screenshotPolicyAbortController.abort();
   } catch {
@@ -19491,21 +19534,11 @@ async function captureAndSendScreenshot(options = {}) {
     const screenshotUploadStartedAt = Date.now();
     const screenshotUploadPolicyGeneration = reserveScreenshotPolicyRequestGeneration();
     const screenshotTabMetadata = restrictionSafeMonitoringMetadata(tab);
-    const response = await fetchWithBackoff(`${screenshotAuthContext.serverOrigin}${screenshotUploadPath}`, {
+    const imageCapture = prepareScreenshotImageCapture(dataUrl, screenshotAuthContext,
+      capturePolicyGeneration, captureAuthorityScope);
+    const uploadResult = await uploadRoutineScreenshot(`${screenshotAuthContext.serverOrigin}${screenshotUploadPath}`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        ...extensionProtocolDescriptor(),
-        screenshot: dataUrl,  // base64 data URL
-        capturedAt,
-        timestamp: Date.parse(capturedAt),
-        ...(trackingWindowLeaseNegotiated
-          ? { screenshotAuthority: captureScreenshotAuthority }
-          : { deviceId: screenshotAuthContext.deviceId }),
-        tabTitle: screenshotTabMetadata.title,
-        tabUrl: screenshotTabMetadata.url,
-        tabFavicon: screenshotTabMetadata.favicon,
-      }),
       signal: captureRequestAbortController.signal,
     }, {
       context: 'screenshot upload',
@@ -19520,10 +19553,17 @@ async function captureAndSendScreenshot(options = {}) {
         captureAuthorityScope,
         `screenshot:${reason}:upload-attempt`,
       ),
-    });
+    }, {
+      ...extensionProtocolDescriptor(), capturedAt, timestamp: Date.parse(capturedAt),
+      ...(trackingWindowLeaseNegotiated
+        ? { screenshotAuthority: captureScreenshotAuthority }
+        : { deviceId: screenshotAuthContext.deviceId }),
+      tabTitle: screenshotTabMetadata.title,
+      tabUrl: screenshotTabMetadata.url,
+      tabFavicon: screenshotTabMetadata.favicon,
+    }, dataUrl, imageCapture);
     assertAuthenticatedContextCurrent(screenshotAuthContext, `screenshot:${reason}:upload-response`);
-    const responseReceivedAt = Date.now();
-    const responseBody = await response.json().catch(() => ({}));
+    const { response, responseReceivedAt, responseBody } = uploadResult;
     if (response.status === 402 || (
       response.status === 403
       && isClassPilotNotEntitledResponse(responseBody)

@@ -17,8 +17,13 @@ const executablePath = [process.env.CLASSPILOT_CHROME_PATH, chromium.executableP
 assert.ok(executablePath, 'A local Chromium executable is required');
 const profile = mkdtempSync(join(tmpdir(), 'classpilot-device-telemetry-'));
 const frames = [], requests = [];
-let replyEnabled = true, browser;
+let replyEnabled = true, imageMissing = false, browser;
 const http = createServer((request, response) => {
+  if (request.url === '/capture') {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>Telemetry capture fixture</title><style>body{font:24px sans-serif;padding:32px}</style><h1>Static classroom worksheet</h1><p>Exact pixels remain useful without retransmitting them.</p>');
+    return;
+  }
   let body = '';
   request.on('data', chunk => { body += chunk; });
   request.on('end', () => {
@@ -32,9 +37,13 @@ sockets.on('connection', socket => socket.on('message', raw => {
   const frame = JSON.parse(raw.toString());
   if (frame.type !== 'device-telemetry') return;
   frames.push(frame);
+  const missing = frame.kind === 'screenshot' && frame.payload.screenshotReferenceId && imageMissing;
+  if (missing) imageMissing = false;
   if (replyEnabled) socket.send(JSON.stringify({
     type: 'device-telemetry-result', operationId: frame.operationId, kind: frame.kind,
-    status: 200, body: { ok: true, transport: 'websocket' },
+    status: missing ? 409 : 200,
+    body: missing ? { code: 'SCREENSHOT_IMAGE_REQUIRED' } : { ok: true, transport: 'websocket',
+      ...(frame.kind === 'screenshot' ? { retained: true, imageId: 'opaque_image_1111111111111111111111' } : {}) },
     exactBinding: { studentId: 'synthetic-student', studentSessionId: 'synthetic-session' },
   }));
 }));
@@ -108,6 +117,50 @@ try {
   assert.equal(recovery.body.telemetryOperationId, frames.at(-1).operationId);
   assert.equal(recovery.body.activeTabTitle, 'Synthetic lesson');
   console.log('PASS real Chrome: offscreen WebSocket canonical result and same-ID HTTP recovery');
+
+  replyEnabled = true;
+  const page = await browser.newPage(); await page.goto(origin + '/capture'); await page.bringToFront();
+  await page.evaluate(() => new Promise(resolvePaint => requestAnimationFrame(() => requestAnimationFrame(resolvePaint))));
+  await page.waitForTimeout(550); // Settle the browser compositor before captureVisibleTab reads the new tab.
+  await worker.evaluate(() => {
+    hasNegotiatedCapability = name => ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1',
+      'scopedScreenshotReferencesV1', 'screenshotTrackingWindowLeaseV1'].includes(name);
+  });
+  const capture = () => worker.evaluate(async origin => {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    const raw = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 50 });
+    const capturedAt = new Date().toISOString();
+    const source = await encodeScreenshotVariant(raw, 'thumbnail');
+    const auth = globalThis.__telemetryFixture.auth;
+    const ticket = prepareScreenshotImageCapture(source, auth, 7, 'synthetic-class:1/revision:3');
+    const result = await uploadRoutineScreenshot(origin + '/api/classpilot/device/screenshot',
+      { method: 'POST', signal: auth.signal },
+      { maxAttempts: 1, respectGlobalBackoff: false, deviceTelemetry: { kind: 'screenshot', authContext: auth } },
+      { capturedAt, timestamp: Date.parse(capturedAt), tabTitle: 'Static worksheet',
+        screenshotAuthority: { kind: 'teaching_session', teachingSessionId: 'synthetic-class', controlRevision: 3 } }, source, ticket);
+    return { status: result.response.status, capturedAt, bytes: source.length };
+  }, origin);
+  const first = await capture();
+  await page.waitForTimeout(550); // Chrome permits at most two captureVisibleTab calls per second.
+  const second = await capture();
+  assert.equal(first.status, 200); assert.equal(second.status, 200);
+  const images = frames.filter(frame => frame.kind === 'screenshot');
+  assert.equal(typeof images[0].payload.screenshot, 'string');
+  assert.equal(Boolean(images[1].payload.screenshotReferenceId), true,
+    JSON.stringify({ imageBytes: images.map(frame => frame.payload.screenshot?.length), firstCaptureBytes: first.bytes, secondCaptureBytes: second.bytes }));
+  assert.equal(images[1].payload.screenshotReferenceId, 'opaque_image_1111111111111111111111');
+  assert.notEqual(first.capturedAt, second.capturedAt);
+  imageMissing = true;
+  await page.waitForTimeout(550);
+  assert.equal((await capture()).status, 200);
+  const recoveredImages = frames.filter(frame => frame.kind === 'screenshot');
+  assert.equal(recoveredImages.length, 4);
+  assert.equal(recoveredImages[2].payload.screenshotReferenceId, 'opaque_image_1111111111111111111111');
+  assert.equal(recoveredImages[3].payload.screenshot, recoveredImages[0].payload.screenshot);
+  assert.equal(recoveredImages[2].payload.capturedAt, recoveredImages[3].payload.capturedAt);
+  assert.equal(recoveredImages[2].payload.timestamp, recoveredImages[3].payload.timestamp);
+  assert.equal(requests.filter(request => request.path?.includes('screenshot')).length, 0);
+  console.log('PASS real Chrome: real captures, scoped unchanged-image references and same-capture full-image recovery');
 } finally {
   await browser?.close();
   for (const socket of sockets.clients) socket.terminate();
