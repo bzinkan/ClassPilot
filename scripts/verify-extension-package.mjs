@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '3.0.4';
+const expectedPreparedReleaseVersion = '3.0.5';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
