@@ -20,7 +20,7 @@
   };
   const adapter = globalThis.ClassPilotWindowsChannel.create({
     runtime: chrome.runtime, storage: chrome.storage.local, fetch: originalFetch, origin, browserFamily: build.browserFamily,
-    capabilities: () => EXTENSION_CAPABILITIES.filter(name => !['managedDeviceContinuityV1', 'liveViewIceServersV1', 'kioskLaunchTicketV1', 'kioskLaunchTicketV2', 'liveViewNegotiationV1', 'safetyEvidenceCaptureV1', 'screenshotObservationLeaseV1', 'screenshotReadOnlyObservationV1'].includes(name)),
+    capabilities: () => EXTENSION_CAPABILITIES.filter(name => !['deviceTelemetryTransportV1', 'managedDeviceContinuityV1', 'liveViewIceServersV1', 'kioskLaunchTicketV1', 'kioskLaunchTicketV2', 'liveViewNegotiationV1', 'safetyEvidenceCaptureV1', 'screenshotObservationLeaseV1', 'screenshotReadOnlyObservationV1'].includes(name)),
     invalidate: reason => clearStudentAuth(reason, { notifyBackend: false, pauseAutoRegistration: true, disconnectWebSocket: true }),
     frame: value => handleWsMessage(JSON.stringify(value), wsConnectionGeneration, captureAuthenticatedContext('Windows browser frame')),
     ready: async () => {
