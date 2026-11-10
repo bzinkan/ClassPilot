@@ -1,1 +1,2 @@
 server/__tests__/fixtures/restriction-resource-matcher-cases.json -text
+extension/screenshot-delta-codec.js text eol=lf
