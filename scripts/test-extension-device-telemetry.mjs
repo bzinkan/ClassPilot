@@ -75,6 +75,30 @@ test('oversize UTF-8 frames and unavailable sockets recover without sending', as
   assert.equal(f.sent.length, 0);
 });
 
+test('a compact screenshot delta cannot bypass the full logical frame limit or expose local pixels', async () => {
+  const delta = { screenshotDelta: { codec: 'cp-bit-copy-v1', data: 'tiny' } };
+  const missing = fixture();
+  const missingPending = missing.client.request(request({ kind: 'screenshot', payload: delta }));
+  await Promise.resolve(); missing.client.cancelConnection(identity());
+  assert.equal(await missingPending, null);
+  assert.equal(missing.sent.length, 0);
+  const large = fixture();
+  const largePending = large.client.request(request({ kind: 'screenshot', payload: delta,
+    logicalPayload: { screenshot: 'x'.repeat(270_000) } }));
+  await Promise.resolve(); large.client.cancelConnection(identity());
+  assert.equal(await largePending, null);
+  assert.equal(large.sent.length, 0);
+  const valid = fixture();
+  const pending = valid.client.request(request({ kind: 'screenshot', payload: delta,
+    logicalPayload: { screenshot: 'data:image/jpeg;base64,exact-local-only' } }));
+  await Promise.resolve();
+  assert.equal(valid.sent.length, 1);
+  assert.equal(valid.sent[0].payload.screenshot, undefined);
+  assert.equal(valid.sent[0].logicalPayload, undefined);
+  valid.client.cancelConnection(identity());
+  assert.equal(await pending, null);
+});
+
 test('aborted or superseded authentication rejects and ignores late receipts', async () => {
   const f = fixture(); const controller = new AbortController();
   const pending = f.client.request(request({ context: { ...context(), signal: controller.signal } }));

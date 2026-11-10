@@ -42,10 +42,22 @@
       if (!options.isAvailable(context, identity) || activeKinds.has(kind) || pending.has(operationId)) {
         return Promise.resolve(null);
       }
-      const frame = JSON.stringify({
+      const envelope = {
         type: 'device-telemetry', operationId, kind, studentToken,
-        payload: { ...operation.payload, telemetryOperationId: operationId },
-      });
+      };
+      // A tiny lossless patch still represents a complete image. Apply the
+      // existing frame ceiling to that original image before choosing WS.
+      // The local source is never serialized into the actual patch frame.
+      if (operation.payload.screenshotDelta) {
+        if (!operation.logicalPayload || typeof operation.logicalPayload.screenshot !== 'string') {
+          return Promise.resolve(null);
+        }
+        const logicalFrame = JSON.stringify({ ...envelope,
+          payload: { ...operation.logicalPayload, telemetryOperationId: operationId } });
+        if (encoder.encode(logicalFrame).byteLength > MAX_FRAME_BYTES) return Promise.resolve(null);
+      }
+      const frame = JSON.stringify({ ...envelope,
+        payload: { ...operation.payload, telemetryOperationId: operationId } });
       if (encoder.encode(frame).byteLength > MAX_FRAME_BYTES) return Promise.resolve(null);
 
       return new Promise((resolve, reject) => {

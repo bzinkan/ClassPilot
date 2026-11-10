@@ -31,6 +31,7 @@ try {
 }
 importScripts('classroom-runtime-core.js');
 importScripts('device-telemetry.js');
+importScripts('screenshot-delta-codec.js');
 importScripts('screenshot-references.js');
 if (globalThis.CLASSPILOT_WINDOWS_BUILD) importScripts('windows-browser-channel.js');
 importScripts('poll-replay-core.js');
@@ -326,6 +327,7 @@ const CLIENT_PROTOCOL_VERSION = 3;
 const EXTENSION_CAPABILITIES = Object.freeze([
   'deviceTelemetryTransportV1',
   'scopedScreenshotReferencesV1',
+  'scopedScreenshotDeltasV1',
   'pollReplaySafeV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'classroomStateV1',
@@ -366,6 +368,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
 const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'deviceTelemetryTransportV1',
   'scopedScreenshotReferencesV1',
+  'scopedScreenshotDeltasV1',
   'pollReplaySafeV1',
   'focusTabV1',
   'privateChatLifecycleV1',
@@ -471,13 +474,19 @@ function prepareDeviceTelemetryRequest(url, init, options) {
   const operationId = globalThis.crypto.randomUUID();
   const requestPayload = { ...payload, telemetryOperationId: operationId };
   const requestInit = { ...init, body: JSON.stringify(requestPayload) };
+  let logicalPayload;
+  if (requestPayload.screenshotDelta && typeof operation.logicalScreenshot === 'string') {
+    logicalPayload = { ...requestPayload, screenshot: operation.logicalScreenshot };
+    delete logicalPayload.screenshotDelta;
+    delete logicalPayload.screenshotReferenceId;
+  }
   return async () => {
     assertAuthenticatedContextCurrent(authContext, 'device telemetry attempt');
     if (init.signal?.aborted) throw authContextSuperseded('device telemetry attempt');
     const identity = wsTransportIdentity ? { ...wsTransportIdentity } : null;
     const outcome = identity ? await getDeviceTelemetryClient().request({
       kind: operation.kind, operationId, studentToken: authContext.studentToken,
-      payload: requestPayload, context: authContext, identity, signal: init.signal,
+      payload: requestPayload, logicalPayload, context: authContext, identity, signal: init.signal,
     }) : null;
     assertAuthenticatedContextCurrent(authContext, 'device telemetry response');
     if (init.signal?.aborted) throw authContextSuperseded('device telemetry response');
@@ -526,23 +535,49 @@ function prepareScreenshotImageCapture(source, authContext, policyGeneration, au
   return getScreenshotReferenceCache().prepare(source, scope);
 }
 
+function screenshotDeltaTargetLimit(metadata) {
+  const payload = { ...metadata, screenshotImageProtocolVersion: 1 };
+  delete payload.screenshot; delete payload.screenshotReferenceId; delete payload.screenshotDelta;
+  const bytes = new TextEncoder().encode(JSON.stringify({ ...payload, screenshot: 'data:image/jpeg;base64,' })).byteLength;
+  return Math.max(0, Math.min(256 * 1024, Math.floor((256 * 1024 - 16384 - 1024 - bytes) / 4) * 3));
+}
+
 async function uploadRoutineScreenshot(url, init, options, metadata, source, ticket) {
+  let imageTicket = ticket;
+  let image = ticket?.body || { screenshot: source };
+  const context = options.deviceTelemetry?.authContext;
+  const deltaParents = ['scopedScreenshotDeltasV1', 'scopedScreenshotReferencesV1', 'deviceTelemetryTransportV1',
+    'screenshotTrackingWindowLeaseV1', 'scopedAuthorityChecksV1'];
+  if (!globalThis.CLASSPILOT_WINDOWS_BUILD && ticket && !image.screenshotReferenceId && context
+    && typeof globalThis.ClassPilotScreenshotDeltaCodec?.encodeScreenshotDelta === 'function'
+    && deltaParents.every(name => hasNegotiatedCapability(name, context))) {
+    imageTicket = await getScreenshotReferenceCache().prepareAsync(source, ticket.scope, {
+      allowDelta: true, maxTargetBytes: screenshotDeltaTargetLimit(metadata),
+    });
+    // WebCrypto is asynchronous. Its completion cannot preserve a retired
+    // capture/auth authority or override a capability rollback.
+    assertAuthenticatedContextCurrent(context, 'screenshot delta preparation');
+    await options.beforeAttempt?.();
+    assertAuthenticatedContextCurrent(context, 'screenshot delta preparation');
+    image = deltaParents.every(name => hasNegotiatedCapability(name, context))
+      ? imageTicket.body : getScreenshotReferenceCache().fullBody(imageTicket);
+  }
   const sendImage = image => fetchWithBackoff(url, {
     ...init, body: JSON.stringify({ ...metadata, ...image }),
-  }, options);
-  let response = await sendImage(ticket?.body || { screenshot: source });
+  }, image.screenshotDelta ? { ...options, deviceTelemetry: { ...options.deviceTelemetry, logicalScreenshot: source } } : options);
+  let response = await sendImage(image);
   let responseReceivedAt = Date.now();
   let responseBody = await response.json().catch(() => ({}));
-  if (ticket?.body.screenshotReferenceId && response.status === 409
+  if ((image.screenshotReferenceId || image.screenshotDelta) && response.status === 409
     && responseBody?.code === 'SCREENSHOT_IMAGE_REQUIRED') {
     // The reference is not a committed upload. Recover the bytes from THIS
     // fresh capture, without a recapture or a new capturedAt. beforeAttempt
     // retains the original authority/cancellation fence on the full retry.
-    response = await sendImage(getScreenshotReferenceCache().fullBody(ticket));
+    response = await sendImage(getScreenshotReferenceCache().fullBody(imageTicket));
     responseReceivedAt = Date.now();
     responseBody = await response.json().catch(() => ({}));
   }
-  if (ticket && response.ok) getScreenshotReferenceCache().accept(ticket, responseBody);
+  if (imageTicket && response.ok) getScreenshotReferenceCache().accept(imageTicket, responseBody);
   return { response, responseBody, responseReceivedAt };
 }
 
@@ -11482,6 +11517,8 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
     advertised.has(name)
     && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
     && (name !== 'privateChatLifecycleV1' || advertised.has('studentChatIdempotencyV1'))
+    && (name !== 'scopedScreenshotDeltasV1' || ['deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1',
+      'screenshotTrackingWindowLeaseV1'].every(parent => advertised.has(parent)))
   ));
   negotiatedProtocolState = Object.freeze({
     scope: authContextProtocolScope(context),

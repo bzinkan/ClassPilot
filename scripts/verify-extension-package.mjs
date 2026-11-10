@@ -176,6 +176,8 @@ async function runPackagedTests() {
     'test-extension-device-telemetry-integration.mjs',
     'test-extension-screenshot-references.mjs',
     'test-extension-screenshot-reference-upload.mjs',
+    'test-extension-screenshot-deltas.mjs',
+    'test-extension-screenshot-delta-upload.mjs',
     'test-extension-device-telemetry-chrome.mjs',
     'test-poll-replay-core.mjs',
     'test-extension-poll-replay.mjs',

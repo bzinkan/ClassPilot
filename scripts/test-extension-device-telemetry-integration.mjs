@@ -47,8 +47,8 @@ function fixture() {
   }) };
   return { sandbox, auth, controller, sent, http, timers,
     disable() { enabled = false; },
-    prepare(kind = 'heartbeat', payload = { activeTabTitle: 'Lesson' }) {
-      return sandbox.prepareDeviceTelemetryRequest(`${auth.serverOrigin}/api/device/${kind}`, { method: 'POST', body: JSON.stringify(payload), signal: controller.signal }, { deviceTelemetry: { kind, authContext: auth } });
+    prepare(kind = 'heartbeat', payload = { activeTabTitle: 'Lesson' }, local = {}) {
+      return sandbox.prepareDeviceTelemetryRequest(`${auth.serverOrigin}/api/device/${kind}`, { method: 'POST', body: JSON.stringify(payload), signal: controller.signal }, { deviceTelemetry: { kind, authContext: auth, ...local } });
     },
     reply(status = 200, body = { ok: true }, overrides = {}) {
       return sandbox.acceptDeviceTelemetryEvent('message', JSON.stringify({ type: 'device-telemetry-result', operationId, kind: 'heartbeat', status, body, exactBinding: { studentId: 'student', studentSessionId: 'session' }, ...overrides }), 1, 'auth', auth.serverOrigin);
@@ -113,6 +113,28 @@ test('only hardcoded telemetry endpoints and routine captures can use the adapte
   assert.equal(f.prepare('screenshot', { captureKind: 'safety_evidence', screenshot: 'pixels' }), null);
 });
 
+test('delta logical source remains local and oversized logical captures recover over HTTP with the same ID', async () => {
+  const payload = { screenshotImageProtocolVersion: 1, timestamp: 42,
+    screenshotDelta: { codec: 'cp-bit-copy-v1', data: 'tiny' } };
+  for (const local of [{}, { logicalScreenshot: 'x'.repeat(270_000) }]) {
+    const f = fixture();
+    const pending = f.prepare('screenshot', payload, local)();
+    await flush(); for (const callback of [...f.timers.values()]) callback();
+    assert.equal((await pending).status, 200);
+    assert.equal(f.sent.length, 0); assert.equal(f.http.length, 1);
+    assert.deepEqual(f.http[0].body.screenshotDelta, payload.screenshotDelta);
+    assert.equal(f.http[0].body.telemetryOperationId, operationId);
+    assert.equal(f.http[0].body.screenshot, undefined);
+  }
+  const f = fixture();
+  const pending = f.prepare('screenshot', payload, { logicalScreenshot: 'data:image/jpeg;base64,local-pixels' })();
+  await flush();
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].payload.screenshot, undefined);
+  assert.equal(JSON.stringify(f.sent).includes('local-pixels'), false);
+  f.reply(200, { ok: true }, { kind: 'screenshot' });
+  assert.equal((await pending).status, 200); assert.equal(f.http.length, 0);
+});
+
 test('server result settlement does not wait for the serial classroom frame queue', async () => {
   const f = fixture(); const pending = f.prepare()(); await flush();
   f.sandbox.wsMessageProcessingTail = new Promise(() => {});
@@ -155,10 +177,32 @@ test('Windows native browser pairing does not advertise the Chromebook WebSocket
   assert.throws(() => vm.runInNewContext(bridge, {
     CLASSPILOT_WINDOWS_BUILD: { browserFamily: 'chrome' }, fetch() {},
     chrome: { runtime: {}, storage: { local: {} } },
-    EXTENSION_CAPABILITIES: ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1', 'focusTabV1'],
+    EXTENSION_CAPABILITIES: ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1', 'scopedScreenshotDeltasV1', 'focusTabV1'],
     ClassPilotWindowsChannel: { create(options) { advertised = options.capabilities(); throw stop; } },
   }), error => error === stop);
   assert.deepEqual(Array.from(advertised), ['scopedAuthorityChecksV1', 'focusTabV1']);
+});
+
+test('screenshot deltas negotiate only with every parent capability in the actual build declaration', () => {
+  const parents = ['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1',
+    'scopedScreenshotReferencesV1', 'screenshotTrackingWindowLeaseV1'];
+  const f = fixture();
+  for (const name of ['EXTENSION_CAPABILITIES', 'SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES']) {
+    const declaration = new RegExp(`^const ${name} = [\\s\\S]*?^\\]\\);`, 'm').exec(source);
+    assert.ok(declaration, `actual ${name} declaration is required`);
+    vm.runInContext(declaration[0], f.sandbox);
+  }
+  Object.assign(f.sandbox, { authContextProtocolScope: () => 'scope', negotiatedProtocolState: null });
+  vm.runInContext(declaration('adoptNegotiatedProtocolState'), f.sandbox);
+  for (const absent of parents) {
+    const accepted = [...parents.filter(value => value !== absent), 'scopedScreenshotDeltasV1'];
+    const state = f.sandbox.adoptNegotiatedProtocolState({ acceptedCapabilities: accepted }, f.auth);
+    assert.equal(state.acceptedCapabilities.includes('scopedScreenshotDeltasV1'), false, absent);
+  }
+  const state = f.sandbox.adoptNegotiatedProtocolState({
+    acceptedCapabilities: [...parents, 'scopedScreenshotDeltasV1'],
+  }, f.auth);
+  assert.equal(state.acceptedCapabilities.includes('scopedScreenshotDeltasV1'), true);
 });
 
 test('Windows heartbeat descriptors and request adapters cannot negotiate unsupported telemetry', () => {
