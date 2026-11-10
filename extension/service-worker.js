@@ -536,7 +536,10 @@ function prepareScreenshotImageCapture(source, authContext, policyGeneration, au
 }
 
 function screenshotDeltaTargetLimit(metadata) {
-  const payload = { ...metadata, screenshotImageProtocolVersion: 1 };
+  // The transport appends this stable UUID after image preparation. Reserve
+  // its bytes now so a boundary-sized patch does not need a needless full retry.
+  const payload = { ...metadata, screenshotImageProtocolVersion: 1,
+    telemetryOperationId: '00000000-0000-4000-8000-000000000000' };
   delete payload.screenshot; delete payload.screenshotReferenceId; delete payload.screenshotDelta;
   const bytes = new TextEncoder().encode(JSON.stringify({ ...payload, screenshot: 'data:image/jpeg;base64,' })).byteLength;
   return Math.max(0, Math.min(256 * 1024, Math.floor((256 * 1024 - 16384 - 1024 - bytes) / 4) * 3));

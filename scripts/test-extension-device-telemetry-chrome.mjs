@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -22,7 +22,6 @@ const frames = [], requests = [];
 const codecContext = vm.createContext({ Uint8Array, DataView });
 vm.runInContext(readFileSync(join(extensionPath, 'screenshot-delta-codec.js'), 'utf8'), codecContext);
 const imagesById = new Map(), receipts = new Map();
-let imageSerial = 0;
 let replyEnabled = true, imageMissing = false, browser;
 function canonicalResult(frame) {
   if (receipts.has(frame.operationId)) return receipts.get(frame.operationId);
@@ -47,7 +46,7 @@ function canonicalResult(frame) {
       bytes = imagesById.get(payload.screenshotReferenceId);
       assert.ok(bytes, 'reference must name an acknowledged base');
     }
-    const imageId = payload.screenshotReferenceId || 'opaque_image_' + String(++imageSerial).padStart(28, '0');
+    const imageId = payload.screenshotReferenceId || randomUUID();
     imagesById.set(imageId, bytes);
     body = { ...body, retained: true, imageId };
   }

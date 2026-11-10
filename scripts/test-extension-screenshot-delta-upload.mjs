@@ -131,3 +131,15 @@ test('conservative full-frame logical bound leaves oversized captures on the unc
     assert.equal(f.calls[1].body.screenshot, source(changed));
     assert.equal(f.calls[1].body.screenshotDelta, undefined);
 });
+
+test('target ceiling reserves the stable telemetry UUID and counts UTF-8 metadata bytes', () => {
+    const f = fixture();
+    const metadata = { timestamp: 42, tabTitle: '😀'.repeat(1000) };
+    const maximum = f.context.screenshotDeltaTargetLimit(metadata);
+    const fullEnvelopeMetadata = { ...metadata, screenshotImageProtocolVersion: 1,
+        telemetryOperationId: '11111111-1111-4111-8111-111111111111', screenshot: 'data:image/jpeg;base64,' };
+    const logicalBytes = Buffer.byteLength(JSON.stringify(fullEnvelopeMetadata)) + Math.ceil(maximum / 3) * 4;
+    assert.ok(maximum > 0);
+    assert.ok(logicalBytes + 16_384 + 1024 <= 256 * 1024,
+        'a delta must fit the independently checked server full-image ceiling after the UUID is appended');
+});
