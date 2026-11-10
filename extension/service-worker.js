@@ -1001,6 +1001,12 @@ let screenshotPolicyState = Object.freeze({
 });
 let screenshotPolicyGeneration = 0;
 let screenshotPolicyAbortController = new AbortController();
+let screenshotDetailGeneration = 0;
+let screenshotDetailAbortController = new AbortController();
+let screenshotDetailExpiryTimer = null;
+let screenshotDetailCaptureInFlight = false;
+let screenshotPixelsCaptureOwner = null;
+let lastDetailPreviewPixelsAt = 0;
 let screenshotImmediateCapturePending = false;
 let screenshotCadenceGeneration = 0;
 let screenshotCadenceIssuedAt = 0;
@@ -11557,6 +11563,7 @@ function responseScreenshotLeaseKind(raw = {}) {
 }
 
 function advanceScreenshotPolicyAuthority() {
+  retireDetailPreviewCapture();
   if (typeof screenshotReferenceCache !== 'undefined') screenshotReferenceCache?.clear();
   try {
     screenshotPolicyAbortController.abort();
@@ -11676,6 +11683,89 @@ function normalizeScreenshotCaptureCadence(rawPolicy, context, options, policy) 
     intervalSeconds: 5,
     expiresAt: responseReceivedAt + remainingCadenceMs,
   });
+}
+
+// This optional policy is deliberately not a new fleet capability: older
+// clients ignore it and older servers never grant it. All existing negotiated
+// monitoring parents and exact current classroom authority still apply.
+function normalizeScreenshotDetailPreview(rawPolicy, context, options, policy) {
+  const raw = rawPolicy?.detailPreview;
+  if (globalThis.CLASSPILOT_WINDOWS_BUILD
+    || !['scopedAuthorityChecksV1', 'screenshotTrackingWindowLeaseV1',
+      'screenshotActiveObservationCadenceV1'].every(name => hasNegotiatedCapability(name, context))
+    || policy?.mode !== 'tracking_window_lease' || policy.valid !== true || policy.captureAllowed !== true
+    || !['teaching_session', 'supervision_context'].includes(policy.authority?.kind)
+    || policy.captureCadence?.mode !== 'active_view'
+    || !raw || typeof raw !== 'object' || Array.isArray(raw)
+    || raw.mode !== 'selected_student' || typeof raw.leaseId !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(raw.leaseId)
+    || !Number.isSafeInteger(raw.expiresInSeconds) || raw.expiresInSeconds <= 0 || raw.expiresInSeconds > 20
+    || raw.intervalSeconds !== 5 || raw.maxWidth !== 1920 || raw.jpegQuality !== 90) return null;
+  const received = Number(options.responseReceivedAt ?? Date.now());
+  const started = Number(options.requestStartedAt ?? received);
+  const serverTime = Date.parse(String(rawPolicy.serverTime || ''));
+  if (!Number.isFinite(received) || !Number.isFinite(started) || started > received
+    || !Number.isFinite(serverTime) || serverTime < started - 30_000 || serverTime > received + 30_000) return null;
+  const duration = raw.expiresInSeconds * 1000;
+  const expiresAt = Math.min(received + duration - (received - started), serverTime + duration,
+    policy.expiresAt, policy.captureCadence.expiresAt);
+  return expiresAt > received ? Object.freeze({ leaseId: raw.leaseId, expiresAt,
+    serverTimeOffsetMs: serverTime - received,
+    intervalSeconds: 5, maxWidth: 1920, jpegQuality: 90 }) : null;
+}
+
+function retireDetailPreviewCapture() {
+  if (screenshotDetailExpiryTimer) clearTimeout(screenshotDetailExpiryTimer);
+  screenshotDetailExpiryTimer = null;
+  screenshotDetailAbortController.abort();
+  screenshotDetailAbortController = new AbortController();
+  screenshotDetailGeneration++;
+}
+
+function pauseDetailPreviewForPolicyRefresh() {
+  // An exact-binding observation hint grants nothing. Stop the optional
+  // selected preview while a fresh authenticated heartbeat checks whether any
+  // visible viewer still holds its server lease; ordinary thumbnails continue.
+  if (!screenshotPolicyState.detailPreview) return;
+  screenshotPolicyState = Object.freeze({ ...screenshotPolicyState, detailPreview: null });
+  retireDetailPreviewCapture();
+}
+
+function reconcileDetailPreviewCapture(priorState, context) {
+  const previous = priorState?.detailPreview;
+  const detail = screenshotPolicyState.detailPreview;
+  if (previous?.leaseId !== detail?.leaseId || priorState?.authorityScope !== screenshotPolicyState.authorityScope) {
+    retireDetailPreviewCapture();
+  }
+  if (screenshotDetailExpiryTimer) clearTimeout(screenshotDetailExpiryTimer);
+  screenshotDetailExpiryTimer = null;
+  if (!detail) return;
+  const generation = screenshotDetailGeneration;
+  screenshotDetailExpiryTimer = setTimeout(() => {
+    if (generation !== screenshotDetailGeneration) return;
+    retireDetailPreviewCapture();
+  }, Math.max(0, detail.expiresAt - Date.now()));
+  if (previous?.leaseId !== detail.leaseId) {
+    Promise.resolve().then(() => captureAndSendDetailPreview()).catch(() => {});
+  }
+}
+
+function detailPreviewAllowed(context, nowValue = Date.now()) {
+  return !globalThis.CLASSPILOT_WINDOWS_BUILD
+    && currentLicenseIsActive()
+    && ['scopedAuthorityChecksV1', 'screenshotTrackingWindowLeaseV1',
+      'screenshotActiveObservationCadenceV1'].every(name => hasNegotiatedCapability(name, context))
+    && activeObservationScreenshotCadenceAllowed(context, nowValue)
+    && Number(screenshotPolicyState.detailPreview?.expiresAt || 0) > nowValue;
+}
+
+function assertDetailPreviewCurrent(context, generation, policyGeneration, authorityScope, leaseId) {
+  assertAmbientScreenshotPolicyCurrent(context, policyGeneration, authorityScope, 'selected student detail preview');
+  if (generation !== screenshotDetailGeneration || screenshotDetailAbortController.signal.aborted
+    || screenshotPolicyState.detailPreview?.leaseId !== leaseId || !detailPreviewAllowed(context)) {
+    const error = new Error('Selected student preview lease retired');
+    error.code = 'SCREENSHOT_POLICY_SUPERSEDED';
+    throw error;
+  }
 }
 
 function screenshotTrackingAuthorityMatchesCurrentState(authority = screenshotPolicyState.authority) {
@@ -13186,6 +13276,7 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     ...next,
     captureCadence: normalizeScreenshotCaptureCadence(rawPolicy, context, options, next),
   });
+  next = Object.freeze({ ...next, detailPreview: normalizeScreenshotDetailPreview(rawPolicy, context, options, next) });
   screenshotPolicyState = next;
   screenshotPolicySource = typeof options.policySource === 'string'
     ? options.policySource.slice(0, 32)
@@ -13202,6 +13293,7 @@ function adoptScreenshotPolicy(rawPolicy, context, options = {}) {
     || priorState.authorityScope !== next.authorityScope
     || priorAllowed !== nextAllowed;
   if (authorityChanged) advanceScreenshotPolicyAuthority();
+  reconcileDetailPreviewCapture(priorState, context);
   if (!nextAllowed) screenshotImmediateCapturePending = false;
   chrome.alarms.clear(SCREENSHOT_LEASE_EXPIRY_ALARM);
   if (['lease', 'tracking_window_lease'].includes(next.mode) && nextAllowed) {
@@ -19359,6 +19451,7 @@ async function captureAndSendScreenshot(options = {}) {
   await authStateRestorePromise;
   await awaitManagedAuthGatePolicyStable();
   const reason = options.reason || 'scheduled';
+  if (lastDetailPreviewPixelsAt && Date.now() - lastDetailPreviewPixelsAt < 550) return;
   let rapidCapture = reason === 'active-view-tick' || reason === 'active-view-navigation';
   const minimumGap = screenshotCaptureMinimumGap(reason);
   const elapsedSincePixels = Date.now() - lastScreenshotPixelsAt;
@@ -19369,7 +19462,7 @@ async function captureAndSendScreenshot(options = {}) {
     console.log(`[Screenshot] Coalescing ${reason} capture; cadence guard active`);
     return;
   }
-  if (screenshotCaptureInFlight) {
+  if (screenshotCaptureInFlight || screenshotPixelsCaptureOwner) {
     console.log('[Screenshot] Skipping capture; previous capture still in flight');
     return;
   }
@@ -19405,6 +19498,7 @@ async function captureAndSendScreenshot(options = {}) {
   const captureScreenshotAuthority = screenshotPolicyState.authority;
   const captureAuthorityScope = screenshotPolicyState.authorityScope || null;
   const capturePolicySignal = screenshotPolicyAbortController.signal;
+  if (screenshotCaptureInFlight || screenshotPixelsCaptureOwner) return;
   const captureRequestAbortController = new AbortController();
   const abortCaptureRequest = () => captureRequestAbortController.abort();
   screenshotAuthContext.signal.addEventListener('abort', abortCaptureRequest, { once: true });
@@ -19413,6 +19507,7 @@ async function captureAndSendScreenshot(options = {}) {
     abortCaptureRequest();
   }
   screenshotCaptureInFlight = true;
+  screenshotPixelsCaptureOwner = captureRequestAbortController;
   let screenshotPhase = 'capture';
   try {
     await recordScreenshotAttempt(Date.now(), screenshotAuthContext);
@@ -19536,6 +19631,7 @@ async function captureAndSendScreenshot(options = {}) {
       unsubscribeActivation?.();
       unsubscribeNavigation?.();
       unsubscribeWindowFocus?.();
+      if (screenshotPixelsCaptureOwner === captureRequestAbortController) screenshotPixelsCaptureOwner = null;
     }
 
     if (!dataUrl) {
@@ -19742,13 +19838,117 @@ async function captureAndSendScreenshot(options = {}) {
     screenshotAuthContext.signal.removeEventListener('abort', abortCaptureRequest);
     capturePolicySignal.removeEventListener('abort', abortCaptureRequest);
     screenshotCaptureInFlight = false;
+    if (screenshotPixelsCaptureOwner === captureRequestAbortController) screenshotPixelsCaptureOwner = null;
     if (screenshotImmediateCapturePending) {
       screenshotImmediateCapturePending = false;
       Promise.resolve().then(() => captureAndSendScreenshot({
         ...options,
         reason: 'authority-change',
       })).catch(() => {});
+    } else {
+      captureAndSendDetailPreview().catch(() => {});
     }
+  }
+}
+
+const SCREENSHOT_DETAIL_MAX_DATA_URL_LENGTH = 800_000;
+
+// Detail never falls back to an unbounded original. The ordinary thumbnail
+// keeps its existing fail-open encoder and its exact JPEG50 source unchanged.
+async function encodeDetailPreview(dataUrl, assertCurrent = () => {}) {
+  try {
+    return await boundedClassroomOperation((async () => {
+      const response = await fetch(dataUrl); assertCurrent();
+      const source = await response.blob(); assertCurrent();
+      const bitmap = await createImageBitmap(source);
+      try {
+        assertCurrent();
+        const width = Math.min(1920, bitmap.width);
+        if (!(width > 0) || !(bitmap.height > 0)) return null;
+        const canvas = new OffscreenCanvas(width, Math.max(1, Math.round(bitmap.height * width / bitmap.width)));
+        const context = canvas.getContext('2d');
+        if (!context) return null;
+        context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        const encoded = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+        assertCurrent();
+        const buffer = await encoded.arrayBuffer(); assertCurrent();
+        const bytes = new Uint8Array(buffer);
+        if (!bytes.length || bytes.length > 599_980) return null;
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        }
+        const result = `data:image/jpeg;base64,${btoa(binary)}`;
+        return result.length <= SCREENSHOT_DETAIL_MAX_DATA_URL_LENGTH ? result : null;
+      } finally { bitmap.close?.(); }
+    })(), SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS, 'selected student preview encode');
+  } catch { return null; }
+}
+
+async function captureAndSendDetailPreview() {
+  if (screenshotPixelsCaptureOwner || screenshotDetailCaptureInFlight) return;
+  let context;
+  try { context = captureAuthenticatedContext('selected student detail preview'); }
+  catch { return; }
+  if (!detailPreviewAllowed(context) || lastDetailPreviewPixelsAt && Date.now() - lastDetailPreviewPixelsAt < 5000) return;
+  const detail = screenshotPolicyState.detailPreview;
+  const generation = screenshotDetailGeneration;
+  const policyGeneration = screenshotPolicyGeneration;
+  const authorityScope = screenshotPolicyState.authorityScope;
+  const authority = screenshotPolicyState.authority;
+  const detailSignal = screenshotDetailAbortController.signal;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  context.signal.addEventListener('abort', abort, { once: true });
+  detailSignal.addEventListener('abort', abort, { once: true });
+  const assertCurrent = () => assertDetailPreviewCurrent(context, generation, policyGeneration, authorityScope, detail.leaseId);
+  screenshotDetailCaptureInFlight = true;
+  screenshotPixelsCaptureOwner = controller;
+  let cleanup = [];
+  try {
+    // Chrome allows two native captures per second. Serialize detail with the
+    // routine lane, leaving that lane's pixel clock and image cache untouched.
+    const wait = 550 - (Date.now() - lastScreenshotPixelsAt);
+    if (wait > 0) await new Promise(resolve => setTimeout(resolve, wait));
+    assertCurrent();
+    const query = () => boundedClassroomOperation(chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS, 'detail preview active tab');
+    const [tab] = await query(); assertCurrent();
+    if (!tab?.windowId || !/^https?:\/\//.test(tab.url || '')) return;
+    let changed = false;
+    cleanup = [subscribeTabActivationFence(tab, () => { changed = true; }),
+      subscribeTabNavigationFence(tab, () => { changed = true; }),
+      subscribeWindowFocusFence(tab, () => { changed = true; })];
+    const [before] = await query(); assertCurrent();
+    if (changed || !isSameActiveCaptureTab(before, tab)) return;
+    const pixels = await boundedClassroomOperation(chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 90 }),
+      SCREENSHOT_BROWSER_OPERATION_TIMEOUT_MS, 'detail preview native capture');
+    const capturedAt = new Date(Date.now() + detail.serverTimeOffsetMs).toISOString();
+    lastDetailPreviewPixelsAt = Date.now();
+    assertCurrent();
+    const [after] = await query(); assertCurrent();
+    if (!pixels || changed || !isSameActiveCaptureTab(after, tab)) return;
+    if (screenshotPixelsCaptureOwner === controller) screenshotPixelsCaptureOwner = null;
+    const screenshot = await encodeDetailPreview(pixels, assertCurrent); assertCurrent();
+    if (changed || !screenshot || screenshot.length > SCREENSHOT_DETAIL_MAX_DATA_URL_LENGTH) return;
+    const metadata = restrictionSafeMonitoringMetadata(tab);
+    const response = await fetchWithBackoff(`${context.serverOrigin}/api/classpilot/device/screenshot`, {
+      method: 'POST', headers: buildDeviceAuthHeaders(context), signal: controller.signal,
+      body: JSON.stringify({ ...extensionProtocolDescriptor(), captureKind: 'detail_preview',
+        detailPreviewLeaseId: detail.leaseId, screenshotAuthority: authority, capturedAt,
+        timestamp: Date.parse(capturedAt), screenshot,
+        tabTitle: metadata.title, tabUrl: metadata.url, tabFavicon: metadata.favicon }),
+    }, { maxAttempts: 1, backoffLane: 'screenshot', context: 'selected student preview upload', beforeAttempt: assertCurrent });
+    assertCurrent();
+    if (!response.ok) scheduleEventHeartbeat('detail-preview-upload-denied');
+  } catch {
+    // A missing, expired or retired optional preview leaves the grid intact.
+  } finally {
+    for (const unsubscribe of cleanup) unsubscribe?.();
+    context.signal.removeEventListener('abort', abort);
+    detailSignal.removeEventListener('abort', abort);
+    screenshotDetailCaptureInFlight = false;
+    if (screenshotPixelsCaptureOwner === controller) screenshotPixelsCaptureOwner = null;
   }
 }
 
@@ -26627,6 +26827,7 @@ async function handleOffscreenMessage(message) {
       || !activeObservationScreenshotCadenceAllowed(authContext)
     ) return { success: true, ignored: true };
     await captureAndSendScreenshot({ reason: 'active-view-tick' });
+    await captureAndSendDetailPreview();
     return { success: true };
   }
 
@@ -27464,6 +27665,7 @@ async function handleWsMessage(
           // This hint only triggers a fresh authorized heartbeat. It grants no lease.
           || !classroomStateContextIsCurrent(message)
         ) return;
+        pauseDetailPreviewForPolicyRefresh();
         scheduleEventHeartbeat('screenshot-policy-refresh');
         return;
       }

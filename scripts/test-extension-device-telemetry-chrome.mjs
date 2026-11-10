@@ -89,6 +89,104 @@ sockets.on('connection', socket => socket.on('message', raw => {
 await new Promise(resolveListen => http.listen(0, '127.0.0.1', resolveListen));
 const origin = `http://127.0.0.1:${http.address().port}`;
 
+async function authenticateTelemetryFixture(worker) {
+  let deadline;
+  try {
+    await Promise.race([(async () => {
+      while (!(await worker.evaluate(async () => {
+        // The offscreen socket can open before its worker event passes cold
+        // policy readiness. Drain that event before installing synthetic auth:
+        // processWsEvent('open') correctly resets wsConnected to false.
+        await awaitManagedAuthGatePolicyStable();
+        await wsMessageProcessingTail;
+        if (!wsTransportConnected || wsConnectionGeneration !== 101
+          || wsMessageProcessingGeneration !== 101) return false;
+        wsConnected = true; wsAuthenticatedGeneration = 101;
+        return true;
+      }))) await new Promise(resolve => setTimeout(resolve, 25));
+    })(), new Promise((_, reject) => {
+      deadline = setTimeout(() => reject(new Error('Synthetic telemetry worker open did not settle')), 10_000);
+    })]);
+  } finally { clearTimeout(deadline); }
+}
+
+async function installTelemetryFixtureDiagnostics(worker) {
+  await worker.evaluate(() => {
+    const fixture = globalThis.__telemetryFixture;
+    fixture.transportDiagnostics = [];
+    const record = (phase, details = {}) => {
+      fixture.transportDiagnostics.push({ phase, at: Date.now(), ...details });
+      if (fixture.transportDiagnostics.length > 96) fixture.transportDiagnostics.shift();
+    };
+    const state = () => ({
+      wsConnected, wsTransportConnected, wsConnectionGeneration, wsAuthenticatedGeneration,
+      wsMessageProcessingGeneration, wsPendingIngressCount,
+      transportIdentityMatches: wsIdentityMatchesContext(wsTransportIdentity, fixture.auth),
+      authAborted: fixture.auth.signal.aborted,
+      trackingState, offHoursNetworkPaused,
+      screenshotPixelsBusy: Boolean(screenshotPixelsCaptureOwner),
+      parents: Object.fromEntries(['scopedAuthorityChecksV1', 'deviceTelemetryTransportV1',
+        'scopedScreenshotReferencesV1', 'screenshotTrackingWindowLeaseV1'].map(name =>
+        [name, hasNegotiatedCapability(name, fixture.auth)])),
+    });
+    fixture.transportState = state;
+    fixture.recordTransportDiagnostic = record;
+    const prepare = prepareDeviceTelemetryRequest;
+    prepareDeviceTelemetryRequest = (url, init, options) => {
+      const result = prepare(url, init, options);
+      record('adapter-prepare', { kind: options.deviceTelemetry?.kind,
+        eligible: typeof result === 'function', method: init.method,
+        requestBytes: new TextEncoder().encode(init.body || '').byteLength, state: state() });
+      return result;
+    };
+    const clients = new WeakMap();
+    const getClient = getDeviceTelemetryClient;
+    getDeviceTelemetryClient = () => {
+      const client = getClient();
+      if (!clients.has(client)) clients.set(client, Object.freeze({ ...client,
+        async request(operation) {
+          const envelope = { type: 'device-telemetry', operationId: operation.operationId,
+            kind: operation.kind, studentToken: operation.studentToken };
+          const bytes = payload => new TextEncoder().encode(JSON.stringify({ ...envelope,
+            payload: { ...payload, telemetryOperationId: operation.operationId } })).byteLength;
+          const details = { kind: operation.kind, wireBytes: bytes(operation.payload),
+            logicalBytes: operation.logicalPayload ? bytes(operation.logicalPayload) : null,
+            imageForm: ['screenshot', 'screenshotReferenceId', 'screenshotDelta']
+              .filter(name => operation.payload[name] !== undefined), state: state() };
+          record('client-request', details);
+          try {
+            const result = await client.request(operation);
+            record('client-result', { kind: operation.kind, result: result === null ? 'http-fallback' : 'canonical',
+              status: result?.status ?? null, state: state() });
+            return result;
+          } catch (error) {
+            record('client-error', { kind: operation.kind, name: error?.name, code: error?.code, state: state() });
+            throw error;
+          }
+        },
+      }));
+      return clients.get(client);
+    };
+    const send = wsSend;
+    wsSend = async (...args) => {
+      record('ws-send', { state: state() });
+      const result = await send(...args);
+      record('ws-send-result', { sent: result, state: state() });
+      return result;
+    };
+  });
+}
+
+function telemetryPayloadSummary(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  return { capturedAt: payload.capturedAt, timestamp: payload.timestamp,
+    imageForm: ['screenshot', 'screenshotReferenceId', 'screenshotDelta'].filter(name => payload[name] !== undefined),
+    screenshotCharacters: typeof payload.screenshot === 'string' ? payload.screenshot.length : null,
+    deltaTargetBytes: payload.screenshotDelta?.targetBytes ?? null,
+    imageProtocol: payload.screenshotImageProtocolVersion ?? null,
+    captureKind: payload.captureKind ?? 'routine', hasOperationId: typeof payload.telemetryOperationId === 'string' };
+}
+
 try {
   browser = await chromium.launchPersistentContext(profile, {
     executablePath, headless: true,
@@ -137,13 +235,14 @@ try {
     await sendToOffscreen({ type: 'WS_CONNECT', url: origin.replace('http:', 'ws:') + '/ws',
       connectionGeneration: 101, authContextId: 'synthetic-auth', serverOrigin: origin });
   }, origin);
+  await installTelemetryFixtureDiagnostics(worker);
   for (let attempt = 0; attempt < 100; attempt++) {
     const status = await worker.evaluate(async () => queryOffscreenWebSocketStatus());
     if (status?.transportOpen === true) break;
     if (attempt === 99) throw new Error('Local offscreen WebSocket did not open: ' + JSON.stringify({ status, diagnostics }));
     await new Promise(resolveDelay => setTimeout(resolveDelay, 50));
   }
-  await worker.evaluate(() => { wsConnected = true; wsAuthenticatedGeneration = 101; });
+  await authenticateTelemetryFixture(worker);
   const runHeartbeat = () => worker.evaluate(async origin => {
     const response = await fetchWithBackoff(origin + '/api/device/heartbeat', {
       method: 'POST', body: JSON.stringify({ activeTabTitle: 'Synthetic lesson' }),
@@ -175,6 +274,8 @@ try {
       'scopedScreenshotReferencesV1', 'screenshotTrackingWindowLeaseV1'].includes(name);
   });
   const capture = () => worker.evaluate(async origin => {
+    const fixture = globalThis.__telemetryFixture;
+    fixture.recordTransportDiagnostic('capture-start', { state: fixture.transportState() });
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     if (tab?.url !== origin + '/capture' || tab?.title !== 'Telemetry capture fixture') {
       throw new Error('Capture fixture lost its active worksheet: ' + JSON.stringify({ url: tab?.url, title: tab?.title }));
@@ -182,6 +283,8 @@ try {
     const raw = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 50 });
     const capturedAt = new Date().toISOString();
     const source = await encodeScreenshotVariant(raw, 'thumbnail');
+    fixture.recordTransportDiagnostic('capture-encoded', { rawCharacters: raw.length,
+      thumbnailCharacters: source.length, state: fixture.transportState() });
     const auth = globalThis.__telemetryFixture.auth;
     const ticket = prepareScreenshotImageCapture(source, auth, 7, 'synthetic-class:1/revision:3');
     const result = await uploadRoutineScreenshot(origin + '/api/classpilot/device/screenshot',
@@ -189,13 +292,29 @@ try {
       { maxAttempts: 1, respectGlobalBackoff: false, deviceTelemetry: { kind: 'screenshot', authContext: auth } },
       { capturedAt, timestamp: Date.parse(capturedAt), tabTitle: 'Static worksheet',
         screenshotAuthority: { kind: 'teaching_session', teachingSessionId: 'synthetic-class', controlRevision: 3 } }, source, ticket);
-    return { status: result.response.status, capturedAt, bytes: source.length, source };
+    fixture.recordTransportDiagnostic('capture-complete', { status: result.response.status,
+      transport: result.responseBody.transport, state: fixture.transportState() });
+    return { status: result.response.status, transport: result.responseBody.transport,
+      capturedAt, rawBytes: raw.length, bytes: source.length, source };
   }, origin);
   const first = await capture();
   await page.waitForTimeout(550); // Chrome permits at most two captureVisibleTab calls per second.
   const second = await capture();
   assert.equal(first.status, 200); assert.equal(second.status, 200);
   const images = frames.filter(frame => frame.kind === 'screenshot');
+  assert.equal(images.length, 2, 'Initial native full/reference captures must both use WebSocket: '
+    + JSON.stringify({ browser: browser.browser().version(), captures: [first, second].map(({ source: _source, ...safe }) => safe),
+      frames: frames.map(frame => ({ kind: frame.kind, payload: telemetryPayloadSummary(frame.payload) })),
+      http: requests.map(request => ({ path: request.path, method: request.method,
+        payload: telemetryPayloadSummary(request.body) })),
+      worker: await worker.evaluate(async () => {
+        const fixture = globalThis.__telemetryFixture;
+        const proxy = await queryOffscreenWebSocketStatus();
+        return { state: fixture.transportState(), events: fixture.transportDiagnostics,
+          proxy: proxy ? { connectionGeneration: proxy.connectionGeneration, transportOpen: proxy.transportOpen,
+            authenticated: proxy.authenticated, readyState: proxy.readyState,
+            identityMatches: wsIdentityMatchesContext(proxy, fixture.auth) } : null };
+      }), console: diagnostics.slice(-16) }));
   assert.equal(typeof images[0].payload.screenshot, 'string');
   assert.equal(Boolean(images[1].payload.screenshotReferenceId), true,
     JSON.stringify({ imageBytes: images.map(frame => frame.payload.screenshot?.length), firstCaptureBytes: first.bytes, secondCaptureBytes: second.bytes }));
