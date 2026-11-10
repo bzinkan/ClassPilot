@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("3.0.4");
+    expect(manifest.version).toBe("3.0.5");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
@@ -1113,11 +1113,11 @@ describe("ClassPilot extension release package guards", () => {
     expect(serviceWorker.slice(encodeVariantStart, encodeVariantEnd))
       .not.toContain("sendToOffscreen(");
     // Order is load-bearing: the encode must land after capturedAt is fixed so
-    // upload time never relabels older pixels, and before the upload body so
-    // the frame we replaced is not the one that ships.
+    // upload time never relabels older pixels, and before selecting a full
+    // image/reference ticket so the unencoded frame can never be cached/sent.
     const capturedAtFixedIndex = serviceWorker.indexOf("capturedAt = new Date().toISOString();");
     const variantEncodeIndex = serviceWorker.indexOf("dataUrl = await encodeScreenshotVariant(");
-    const uploadBodyIndex = serviceWorker.indexOf("screenshot: dataUrl,  // base64 data URL");
+    const uploadBodyIndex = serviceWorker.indexOf("const imageCapture = prepareScreenshotImageCapture(dataUrl");
     expect(capturedAtFixedIndex).toBeGreaterThan(-1);
     expect(variantEncodeIndex).toBeGreaterThan(capturedAtFixedIndex);
     expect(uploadBodyIndex).toBeGreaterThan(variantEncodeIndex);

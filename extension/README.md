@@ -2,7 +2,14 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared Chromebook candidate is **3.0.4**, which repairs the storage queue
+The prepared Chromebook candidate is **3.0.5**. It adds negotiated routine
+telemetry over the authenticated WebSocket, exact-image screenshot references,
+and bounded lossless screenshot deltas. Fresh captures, JPEG quality, cadence,
+history and authority checks stay intact; HTTP and full-image recovery remain
+available. SchoolPilot independently controls rollout. See the
+[3.0.5 candidate record](../docs/CLASS_PILOT_3_0_5_CANDIDATE.md).
+
+It retains 3.0.4, which repairs the storage queue
 deadlock that could stop heartbeat, classroom and sign-in progress during a
 class transition. Cleanup drains parent/child writers before publishing its
 barrier, retaining exact identity and authentication-generation checks. See the
@@ -445,9 +452,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.0.4.zip`, with
-its matching `.sha256` record. Follow the [3.0.4 candidate
-record](../docs/CLASS_PILOT_3_0_4_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.0.5.zip`, with
+its matching `.sha256` record. Follow the [3.0.5 candidate
+record](../docs/CLASS_PILOT_3_0_5_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 
