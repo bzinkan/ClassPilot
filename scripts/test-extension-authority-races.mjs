@@ -721,7 +721,11 @@ async function main() {
       // even if the original window still reports its prior tab as active.
       const screenshotAuth = installIdentity('screenshot-focus');
       adoptNegotiatedProtocolState({ serverProtocolVersion: 3, acceptedCapabilities: [] }, screenshotAuth);
+      // This fixture supplies its own controlled native capture below. Do not
+      // start a separate automatic capture whose pixel mutex it cannot reset.
+      screenshotCaptureInFlight = true;
       adoptScreenshotPolicy(undefined, screenshotAuth);
+      screenshotImmediateCapturePending = false;
       lastScreenshotAttemptAt = 0;
       lastScreenshotPixelsAt = 0;
       screenshotCaptureInFlight = false;
@@ -897,7 +901,7 @@ async function main() {
         subscribeTabUpdate: () => () => {},
         subscribeWindowFocus: () => () => {},
       });
-      await trackingUploadStarted;
+      await boundedWait(trackingUploadStarted, 'tracking authority screenshot upload', 10_000);
       adoptScreenshotPolicy(trackingPolicy(uploadClassBAuthority), trackingWindowAuth);
       screenshotImmediateCapturePending = false;
       const classAUploadResult = await classAUploadPromise;
