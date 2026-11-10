@@ -1,5 +1,5 @@
 // GENERATED from src/services/screenshotDeltaCodec.ts; do not edit.
-// Canonical SHA-256: 635e06c20d4112d1d184ecc31739bb3fe5b83db1232ad50faae56d6738dbf46f
+// Canonical SHA-256: c23bd9a5efabf90e9b77da7b6a04738a7cc7a386acb0eeaf86b1a045b38866e0
 (function attachClassPilotScreenshotDeltaCodec(root) {
 'use strict';
 /** Lossless JPEG-byte deltas. No pixels are decoded or re-encoded here. */
@@ -8,8 +8,9 @@ const MAX_SCREENSHOT_DELTA_BYTES = 256 * 1024;
 const MAX_SCREENSHOT_DELTA_OPERATIONS = 8192;
 const HEADER_BYTES = 12;
 const MAX_INDEX_ENTRIES = 65536;
+const INDEX_SAMPLE_ENTRIES = 16384;
 const MAX_CANDIDATES = 12;
-const WINDOW_BYTES = 8;
+const WINDOW_BYTES = 4;
 const MIN_COPY_BYTES = 16;
 const MAX_ENCODE_MS = 8;
 const MIN_SAVINGS_BYTES = 512;
@@ -63,45 +64,30 @@ function encodeScreenshotDelta(base, target, options = {}) {
     const deadlineFallback = () => full(badClock ? "clock" : "budget");
     if (expired())
         return deadlineFallback();
-    const shifted = [base];
-    for (let shift = 1; shift < 8; shift++) {
-        const value = new Uint8Array(base.length - 1);
-        for (let index = 0; index < value.length; index++) {
-            value[index] = (base[index] << shift) | (base[index + 1] >>> (8 - shift));
-            if ((index & 1023) === 0 && expired())
-                return deadlineFallback();
-        }
-        shifted.push(value);
-    }
+    // Sample all eight alignments directly from the original bytes. Materializing
+    // seven shifted arrays and rolling across every byte spends the encode budget
+    // before matching an ordinary JPEG. Sparse samples cost at most a few literal
+    // bytes per match and keep both work and memory independent of image entropy.
     const heads = new Int32Array(MAX_INDEX_ENTRIES);
     heads.fill(-1);
-    const hashes = new Uint32Array(MAX_INDEX_ENTRIES), positions = new Uint32Array(MAX_INDEX_ENTRIES);
-    const next = new Int32Array(MAX_INDEX_ENTRIES);
-    const stride = Math.max(1, Math.ceil(8 * Math.max(0, base.length - WINDOW_BYTES + 1) / MAX_INDEX_ENTRIES));
-    const prime = 257;
-    let high = 1;
-    for (let index = 1; index < WINDOW_BYTES; index++)
-        high = Math.imul(high, prime) >>> 0;
+    const hashes = new Uint32Array(INDEX_SAMPLE_ENTRIES), positions = new Uint32Array(INDEX_SAMPLE_ENTRIES);
+    const next = new Int32Array(INDEX_SAMPLE_ENTRIES);
+    const stride = Math.max(1, Math.ceil(8 * Math.max(0, base.length - WINDOW_BYTES + 1) / INDEX_SAMPLE_ENTRIES));
+    const bucketFor = (word) => Math.imul(word ^ (word >>> 16), 0x9e3779b1) & (MAX_INDEX_ENTRIES - 1);
     let entries = 0;
-    for (let shift = 0; shift < shifted.length; shift++) {
-        const value = shifted[shift];
-        if (value.length < WINDOW_BYTES)
-            continue;
-        let hash = 0;
-        for (let index = 0; index < WINDOW_BYTES; index++)
-            hash = (Math.imul(hash, prime) + value[index]) >>> 0;
-        for (let offset = 0; offset <= value.length - WINDOW_BYTES; offset++) {
-            if (offset % stride === 0 && entries < MAX_INDEX_ENTRIES) {
-                const bucket = hash & (MAX_INDEX_ENTRIES - 1);
-                hashes[entries] = hash;
-                positions[entries] = offset * 8 + shift;
-                next[entries] = heads[bucket];
-                heads[bucket] = entries++;
-            }
-            if ((offset & 1023) === 0 && expired())
+    for (let shift = 0; shift < 8; shift++) {
+        const last = base.length - WINDOW_BYTES - (shift ? 1 : 0);
+        for (let offset = 0; offset <= last && entries < INDEX_SAMPLE_ENTRIES; offset += stride) {
+            let word = (base[offset] << 24) | (base[offset + 1] << 16) | (base[offset + 2] << 8) | base[offset + 3];
+            if (shift)
+                word = (word << shift) | (base[offset + 4] >>> (8 - shift));
+            const hash = word >>> 0, bucket = bucketFor(hash);
+            hashes[entries] = hash;
+            positions[entries] = offset * 8 + shift;
+            next[entries] = heads[bucket];
+            heads[bucket] = entries++;
+            if ((entries & 255) === 0 && expired())
                 return deadlineFallback();
-            if (offset + WINDOW_BYTES < value.length)
-                hash = (Math.imul((hash - Math.imul(value[offset], high)) >>> 0, prime) + value[offset + WINDOW_BYTES]) >>> 0;
         }
     }
     const operations = [];
@@ -115,16 +101,17 @@ function encodeScreenshotDelta(base, target, options = {}) {
     while (offset + WINDOW_BYTES <= target.length) {
         if (((iterations++) & 63) === 0 && expired())
             return deadlineFallback();
-        let hash = 0;
-        for (let index = 0; index < WINDOW_BYTES; index++)
-            hash = (Math.imul(hash, prime) + target[offset + index]) >>> 0;
-        let candidate = heads[hash & (MAX_INDEX_ENTRIES - 1)], longest = 0, bitOffset = 0, considered = 0;
+        const hash = ((target[offset] << 24) | (target[offset + 1] << 16)
+            | (target[offset + 2] << 8) | target[offset + 3]) >>> 0;
+        let candidate = heads[bucketFor(hash)], longest = 0, bitOffset = 0, considered = 0;
         while (candidate >= 0 && considered++ < MAX_CANDIDATES) {
             if (hashes[candidate] === hash) {
-                const position = positions[candidate], from = position >>> 3, value = shifted[position & 7];
-                const maximum = Math.min(value.length - from, target.length - offset);
+                const position = positions[candidate], from = position >>> 3, shift = position & 7;
+                const maximum = Math.min(base.length - from - (shift ? 1 : 0), target.length - offset);
                 let length = 0;
-                while (length < maximum && value[from + length] === target[offset + length]) {
+                while (length < maximum && (shift
+                    ? ((base[from + length] << shift) | (base[from + length + 1] >>> (8 - shift))) & 255
+                    : base[from + length]) === target[offset + length]) {
                     length++;
                     if ((length & 1023) === 0 && expired())
                         return deadlineFallback();
