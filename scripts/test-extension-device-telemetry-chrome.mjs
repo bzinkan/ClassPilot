@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import vm from 'node:vm';
 import { chromium } from 'playwright';
 import { WebSocketServer } from 'ws';
@@ -222,9 +223,15 @@ try {
     globalThis.ClassPilotScreenshotDeltaCodec = Object.freeze({ ...canonical,
       encodeScreenshotDelta(base, target, options) {
         const started = performance.now();
-        const result = canonical.encodeScreenshotDelta(base, target, options);
+        // Test-only scheduling fault for the final recovery scenario. The
+        // production eight-millisecond budget remains unchanged.
+        const clockFaultInjected = globalThis.__telemetryFixture.expireLostScreenshotEncoder === true;
+        let clockReads = 0;
+        const result = canonical.encodeScreenshotDelta(base, target, clockFaultInjected
+          ? { ...options, now: () => started + (clockReads++ ? 9 : 0) } : options);
         globalThis.__telemetryFixture.codecDecisions.push({ kind: result.kind, reason: result.reason,
           baseBytes: base.length, targetBytes: target.length, patchBytes: result.bytes?.length,
+          ...(clockFaultInjected ? { clockFaultInjected: true } : {}),
           elapsedMs: performance.now() - started });
         return result;
       },
@@ -256,17 +263,51 @@ try {
   assert.equal(missFrames[0].payload.capturedAt, missFrames[1].payload.capturedAt);
   assert.equal(missFrames[0].payload.timestamp, missFrames[1].payload.timestamp);
 
+  if (process.env.CLASSPILOT_TEST_EXPIRE_LOST_SCREENSHOT_ENCODER === '1') {
+    await worker.evaluate(() => { globalThis.__telemetryFixture.expireLostScreenshotEncoder = true; });
+  }
   replyEnabled = false;
   await changeAnswer('ABCDEF'); const lostOffset = frames.length; const lost = await capture();
   assert.equal(lost.status, 200);
-  const lostFrame = frames[lostOffset], httpRecovery = requests.at(-1);
-  assert.ok(lostFrame.payload.screenshotDelta);
+  const lostFrames = frames.slice(lostOffset).filter(frame => frame.kind === 'screenshot'
+    && frame.payload.capturedAt === lost.capturedAt);
+  assert.equal(lostFrames.length, 1, 'the genuine capture must attempt WebSocket delivery once');
+  const lostFrame = lostFrames[0];
+  const httpRecoveries = requests.filter(request => request.method === 'POST'
+    && request.path === '/api/classpilot/device/screenshot'
+    && request.body?.telemetryOperationId === lostFrame.operationId);
+  assert.equal(httpRecoveries.length, 1, 'the lost receipt must recover exactly once over HTTP');
+  const httpRecovery = httpRecoveries[0];
   assert.equal(httpRecovery.body.telemetryOperationId, lostFrame.operationId);
-  assert.deepEqual(httpRecovery.body.screenshotDelta, lostFrame.payload.screenshotDelta);
-  assert.equal(httpRecovery.body.screenshot, undefined);
+  assert.ok(isDeepStrictEqual(httpRecovery.body, lostFrame.payload),
+    'HTTP recovery must preserve the entire original payload and operation ID');
+  // Optimization is optional for each frame. A legal full/reference fallback
+  // must retain the same recovery guarantee as a delta, without recapturing.
+  const imageForms = ['screenshotDelta', 'screenshot', 'screenshotReferenceId']
+    .filter(name => lostFrame.payload[name] !== undefined);
+  assert.equal(imageForms.length, 1, 'exactly one legal screenshot image form is required');
+  const imageForm = imageForms[0];
+  if (imageForm === 'screenshot') {
+    assert.ok(lostFrame.payload.screenshot === lost.source, 'full fallback must use this genuine capture');
+  } else if (imageForm === 'screenshotReferenceId') {
+    assert.equal(typeof lostFrame.payload.screenshotReferenceId, 'string');
+  } else {
+    assert.equal(lostFrame.payload.screenshotDelta?.codec, 'cp-bit-copy-v1');
+  }
+  const lostImage = imagesById.get(receipts.get(lostFrame.operationId)?.body.imageId);
+  assert.ok(lostImage && Buffer.from(lostImage).equals(Buffer.from(lost.source.split(',')[1], 'base64')),
+    'the recovered image must materialize exactly this genuine capture');
+  const decisions = await worker.evaluate(() => globalThis.__telemetryFixture.codecDecisions);
+  if (process.env.CLASSPILOT_TEST_EXPIRE_LOST_SCREENSHOT_ENCODER === '1') {
+    assert.equal(imageForm, 'screenshot');
+    assert.equal(decisions.at(-1)?.clockFaultInjected, true);
+    assert.equal(decisions.at(-1)?.kind, 'full');
+    assert.equal(decisions.at(-1)?.reason, 'budget');
+  }
+  console.log('Lost screenshot receipt recovery: ' + JSON.stringify({ imageForm, httpStatus: lost.status,
+    clockFaultInjected: decisions.at(-1)?.clockFaultInjected === true }));
   console.log('PASS real Chrome: genuine changed JPEGs, exact lossless deltas, same-capture base-miss recovery and same-ID HTTP recovery');
-  console.log('Native bounded codec decisions: ' + JSON.stringify(
-    await worker.evaluate(() => globalThis.__telemetryFixture.codecDecisions)));
+  console.log('Native bounded codec decisions: ' + JSON.stringify(decisions));
 } finally {
   await browser?.close();
   for (const socket of sockets.clients) socket.terminate();

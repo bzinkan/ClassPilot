@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import vm from 'node:vm';
@@ -80,6 +81,32 @@ test('lost receipt recovers over HTTP with the same original payload and operati
   assert.equal(f.http[0].body.telemetryOperationId, operationId);
   assert.equal(f.http[0].body.activeTabTitle, 'Lesson');
   assert.equal(f.reply(), false);
+});
+
+test('a lost screenshot delta receipt recovers its exact descriptor and operation ID over HTTP', async () => {
+  const f = fixture();
+  const baseImageId = '22222222-2222-4222-8222-222222222222';
+  const target = Buffer.alloc(1024, 74); target.set([255, 216, 255, 224]); target.set([255, 217], 1022);
+  const patch = Buffer.from([67, 80, 68, 49, 0, 0, 4, 0, 0, 0, 4, 0, 1, 0, 0, 0, 0, 0, 0, 4, 0]);
+  const payload = { screenshotImageProtocolVersion: 1, capturedAt: '2026-11-10T14:00:00.000Z',
+    timestamp: Date.parse('2026-11-10T14:00:00.000Z'),
+    screenshotAuthority: { kind: 'teaching_session', teachingSessionId: 'class', controlRevision: 3 },
+    screenshotDelta: { codec: 'cp-bit-copy-v1', baseImageId, data: patch.toString('base64'), targetBytes: target.length,
+      uploadIntegrity: createHash('sha256').update('classpilot:screenshot-delta-upload:v1\0' + baseImageId + '\0').update(target).digest('hex') } };
+  const pending = f.prepare('screenshot', payload, {
+    logicalScreenshot: 'data:image/jpeg;base64,' + target.toString('base64'),
+  })();
+  await flush();
+  assert.equal(f.sent.length, 1); assert.equal(f.sent[0].kind, 'screenshot'); assert.equal(f.http.length, 0);
+  for (const callback of [...f.timers.values()]) callback();
+  const response = await pending;
+  assert.equal(response.status, 200); assert.equal(f.http.length, 1);
+  assert.equal(f.sent[0].operationId, operationId);
+  assert.deepEqual(f.sent[0].payload, { ...payload, telemetryOperationId: operationId });
+  assert.deepEqual(f.http[0].body, f.sent[0].payload);
+  assert.equal(f.http[0].body.screenshot, undefined);
+  assert.equal(f.http[0].body.logicalScreenshot, undefined);
+  assert.equal(f.reply(200, { ok: true }, { kind: 'screenshot' }), false, 'a late WS receipt cannot replace HTTP recovery');
 });
 
 test('disabled transport and oversize frames use HTTP, but canonical denial does not bypass to HTTP', async () => {
