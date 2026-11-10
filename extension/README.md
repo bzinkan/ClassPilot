@@ -5,7 +5,9 @@ A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on manag
 The prepared Chromebook candidate is **3.0.5**. It adds negotiated routine
 telemetry over the authenticated WebSocket, exact-image screenshot references,
 and bounded lossless screenshot deltas. Fresh captures, JPEG quality, cadence,
-history and authority checks stay intact; HTTP and full-image recovery remain
+history and authority checks stay intact. A separately leased selected-student
+detail preview can capture native JPEG90 up to 1920 pixels while ordinary
+640-pixel thumbnails and their efficiency path stay unchanged. HTTP and full-image recovery remain
 available. SchoolPilot independently controls rollout. See the
 [3.0.5 candidate record](../docs/CLASS_PILOT_3_0_5_CANDIDATE.md).
 
@@ -247,6 +249,36 @@ are still retained at capture resolution.
 
 The 640 px width is a starting point and should be re-derived from measured
 Chromebook viewports before it is treated as final.
+
+### Selected-student detail previews (3.0.5)
+
+While an authorized teaching or scheduled-supervision classroom preview is
+visible, SchoolPilot may add `screenshotPolicy.detailPreview` under the existing
+negotiated scoped-authority, tracking-window and active-observation leases.
+The exact student and classroom revision remain authoritative. The detail
+lease expires within 20 seconds and never outlasts either parent lease.
+Report-only observation keeps ordinary thumbnails and native-size zoom; this
+candidate adds no read-only observation authority or Windows capture support.
+
+A current detail lease allows one separate native JPEG90 frame per five
+seconds, preserving aspect ratio and native dimensions up to 1920 pixels.
+Ordinary capture stays JPEG50, followed by the existing 640-pixel JPEG0.6
+thumbnail encoder. Detail is serialized with ordinary capture to respect
+Chrome's native API limit. The pixel mutex is released after capture and its
+post-capture tab check, so a slow detail HTTP upload cannot block routine
+thumbnail captures. It uploads a full image over authenticated HTTP
+using `captureKind: 'detail_preview'` and its opaque `detailPreviewLeaseId`,
+outside thumbnail reference/delta caches and safety evidence. The data URL
+must fit 800,000 characters within the existing server request limit; an
+encoding or size failure leaves the thumbnail available.
+
+Every asynchronous stage rechecks authentication, exact authority and the
+detail lease. Expiry, release, policy refresh, context/revision changes and
+sign-out stop optional detail work. The server-clock offset from the current
+policy preserves acquisition timestamps on skewed device clocks; thumbnail
+timestamps are unchanged. Detail pixels are held only in bounded memory,
+never persisted by the extension. Older servers omit this policy, and older
+extensions continue sending ordinary thumbnails.
 
 ### Late-sign-in Waypoint and SSO handoff (2.7.9)
 
