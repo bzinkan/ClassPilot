@@ -638,7 +638,7 @@ describe("ClassPilot classroom runtime core", () => {
     });
   });
 
-  it("composes Waypoint with the tab limit while preserving the foreground page", () => {
+  it("composes explicit tab-limit enforcement with Waypoint while preserving the foreground page", () => {
     const normalized = state(6, {
       restrictions: {
         screenLock: { active: true, url: "https://ixl.com", domain: "ixl.com" },
@@ -653,10 +653,12 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.planClassroomTabReconciliation(normalized, tabs, {
       foregroundTabId: 3,
       maxTabs: 3,
+      existingTabLimitMode: "enforce-existing",
     }).removeTabIds).toEqual([]);
     expect(core.planClassroomTabReconciliation(normalized, tabs, {
       foregroundTabId: 3,
       maxTabs: 2,
+      existingTabLimitMode: "enforce-existing",
     })).toEqual({
       updates: [],
       removeTabIds: [1],
@@ -710,7 +712,7 @@ describe("ClassPilot classroom runtime core", () => {
     });
   });
 
-  it("keeps allowed Flight Path tabs and replaces only disallowed web tabs", () => {
+  it("keeps allowed Flight Path tabs and closes only disallowed web tabs", () => {
     const normalized = state(7, {
       restrictions: {
         flightPath: { active: true, allowedDomains: ["allowed.example"] },
@@ -724,10 +726,10 @@ describe("ClassPilot classroom runtime core", () => {
     ]);
 
     expect(plan).toEqual({
-      updates: [{ tabId: 3, url: "https://allowed.example" }],
-      removeTabIds: [4],
+      updates: [],
+      removeTabIds: [3, 4],
       createUrl: null,
-      activateTabId: 3,
+      activateTabId: 2,
       focusFallbackUrl: "https://allowed.example",
     });
   });
@@ -754,8 +756,8 @@ describe("ClassPilot classroom runtime core", () => {
       { id: 2, active: false, url: "https://notallowed.example/" },
     ]);
     expect(mixed).toEqual({
-      updates: [{ tabId: 2, url: "https://allowed.example" }],
-      removeTabIds: [],
+      updates: [],
+      removeTabIds: [2],
       createUrl: null,
       activateTabId: null,
       focusFallbackUrl: null,
@@ -1214,6 +1216,7 @@ describe("ClassPilot classroom runtime core", () => {
     ];
     const plan = core.planClassroomTabReconciliation(snapshot, tabs, {
       foregroundTabId: 1, maxTabs: 1,
+      existingTabLimitMode: "enforce-existing",
       restrictionAuthPassThrough: true, portalFirstOnLogin: true,
     });
     expect(plan.activateTabId).toBe(3);
@@ -1475,6 +1478,7 @@ describe("ClassPilot classroom runtime core", () => {
     const ambiguous = core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 1,
       maxTabs: 2,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
@@ -1482,6 +1486,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 1,
       maxTabs: 1,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     }).removeTabIds).toEqual([2, 3]);
@@ -1490,6 +1495,7 @@ describe("ClassPilot classroom runtime core", () => {
       foregroundTabId: 3,
       preserveRestrictionSsoTabIds: [3],
       maxTabs: 2,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
@@ -1499,6 +1505,7 @@ describe("ClassPilot classroom runtime core", () => {
       foregroundTabId: 3,
       preserveRestrictionSsoTabIds: [3],
       maxTabs: 1,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     }).removeTabIds).toEqual([2]);
@@ -1509,6 +1516,7 @@ describe("ClassPilot classroom runtime core", () => {
     expect(core.planClassroomTabReconciliation(deferred, tabs, {
       foregroundTabId: 2,
       maxTabs: 2,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     }).removeTabIds).toEqual([3]);
@@ -1519,6 +1527,7 @@ describe("ClassPilot classroom runtime core", () => {
     ], {
       foregroundTabId: 4,
       maxTabs: 2,
+      existingTabLimitMode: "enforce-existing",
       restrictionSsoPassThrough: true,
       visitedSsoHosts: ["clever.com"],
     });
@@ -1543,16 +1552,14 @@ describe("ClassPilot classroom runtime core", () => {
       {
         foregroundTabId: 4,
         maxTabs: 2,
+        existingTabLimitMode: "enforce-existing",
         restrictionSsoPassThrough: true,
         visitedSsoHosts: ["accounts.google.com"],
       },
     );
-    expect(staleFlightPathForeground.removeTabIds).toEqual([1, 2]);
-    expect(staleFlightPathForeground.updates).toEqual([{
-      tabId: 4,
-      url: "https://khanacademy.org",
-    }]);
-    expect(staleFlightPathForeground.activateTabId).toBe(4);
+    expect(staleFlightPathForeground.removeTabIds).toEqual([4, 2]);
+    expect(staleFlightPathForeground.updates).toEqual([]);
+    expect(staleFlightPathForeground.activateTabId).toBe(1);
     expect(staleFlightPathForeground.focusFallbackUrl).toBe("https://khanacademy.org");
 
     const coldWithInactiveStaleSso = core.planClassroomTabReconciliation(deferred, [

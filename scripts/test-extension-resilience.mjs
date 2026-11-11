@@ -1889,11 +1889,8 @@ async function main() {
       });
       let afterFlightPath = await waitForTabState((tabs) => {
         const webUrls = tabs.map(effectiveUrl).filter((url) => /^https?:\/\//.test(url));
-        // The retained disallowed tab is redirected to the allowed domain's
-        // canonical HTTPS origin. This local fixture only serves HTTP, so
-        // Chromium may replace that redirected tab with chrome-error:// before
-        // the poll observes it. The deterministic invariant is that at least
-        // the pre-existing allowed tab remains and no disallowed web URL does.
+        // Existing allowed work stays in place and disallowed web tabs close;
+        // no duplicate canonical landing is manufactured beside that work.
         return webUrls.length >= 1 && webUrls.every((url) =>
           new URL(url).hostname === 'flight.localhost'
         );

@@ -82,9 +82,11 @@ try {
     const removed = [], nativeRemove = chrome.tabs.remove.bind(chrome.tabs);
     chrome.tabs.remove = async ids => { removed.push(...(Array.isArray(ids) ? ids : [ids])); return nativeRemove(ids); };
     for (let index = 0; index < 8; index += 1) await chrome.tabs.create({ url: `https://limit.example.test/${index}`, active: false });
+    const initialCount = (await chrome.tabs.query({})).length;
     await applyWebSocketTabLimitSetting({ ...envelope(auth), settings: { maxTabsPerStudent: 8 } }, auth);
     const firstCount = (await chrome.tabs.query({})).length;
-    check(schoolMaxTabs === 8 && currentMaxTabs === 8 && firstCount === 8, 'canonical school limit was not applied');
+    check(schoolMaxTabs === 8 && currentMaxTabs === 8 && firstCount === initialCount,
+      'first school-limit baseline must apply without trimming existing tabs');
     const beforeStale = removed.length;
     const oldFrame = { ...envelope(auth), settings: { maxTabsPerStudent: 3 } };
     await applyWebSocketTabLimitSetting(oldFrame, auth);
@@ -213,9 +215,101 @@ try {
     check(oldAuthOutcome === 'AUTH_CONTEXT_SUPERSEDED' && schoolMaxTabs === 8
       && schoolSettingsScope === schoolPolicyScopeForAuthContext(auth), 'retired student HTTP response changed current school policy');
     passed.push('late HTTP from a retired student cannot change the new binding');
+
+    // Stage already-open work without a limit, then apply a Flight Path with
+    // a stricter existing numeric policy. Native Chrome tabs keep their exact
+    // assignment URLs, even above that limit and across routine reconciliation.
+    currentMaxTabs = null; teacherMaxTabs = null; schoolMaxTabs = null;
+    allowedDomains = []; flightPathResources = []; screenLocked = false;
+    const ixl = await chrome.tabs.create({ url: 'https://ixl.com/math/student-work', active: true });
+    const classroom = await chrome.tabs.create({ url: 'https://classroom.google.com/c/course/work', active: false });
+    const docs = await chrome.tabs.create({ url: 'https://docs.google.com/document/d/abcdefghijklmnopqrstuv/edit', active: false });
+    const expectedWork = [
+      { ...ixl, url: 'https://ixl.com/math/student-work' },
+      { ...classroom, url: 'https://classroom.google.com/c/course/work' },
+      { ...docs, url: 'https://docs.google.com/document/d/abcdefghijklmnopqrstuv/edit' },
+    ];
+    await wait(async () => (await Promise.all(expectedWork.map(tab => chrome.tabs.get(tab.id))))
+      .every(tab => !tab.pendingUrl && tab.status === 'complete'), 'native approved work');
+    await wait(() => pendingCreatedTabPolicies.size === 0, 'initial creation callbacks');
+    allowedDomains = ['ixl.com', 'classroom.google.com', 'docs.google.com'];
+    schoolMaxTabs = 1; currentMaxTabs = effectiveTabLimit();
+    const state = RuntimeCore.normalizeClassroomState({ schemaVersion: 1, revision: 1,
+      teachingSessionId: 'work-preservation-class', hardExpiresAt: Date.now() + 300_000,
+      restrictions: { flightPath: { active: true, allowedDomains } } });
+    currentClassroomState = state;
+    const verifyWork = async () => {
+      for (const tab of expectedWork) {
+        const current = await chrome.tabs.get(tab.id).catch(() => null);
+        check(current?.url === tab.url, `Flight Path replaced or closed approved native work ${tab.id}`);
+      }
+    };
+    const assertCurrent = () => assertAuthenticatedContextCurrent(auth, 'native work fixture');
+    await reconcileExistingTabsForClassroomState(state, assertCurrent, auth);
+    await verifyWork();
+    await reconcileExistingTabsForClassroomState(state, assertCurrent, auth);
+    await verifyWork();
+    passed.push('native Flight Path application and repeated snapshot preserve all approved work above the limit');
+
+    schoolSettings = { ...snapshot(1) }; schoolSettingsScope = schoolPolicyScopeForAuthContext(auth);
+    getSettings = async () => snapshot(1);
+    await refreshSchoolSettings({ force: true, authContext: auth });
+    await verifyWork();
+    passed.push('same-value authenticated school settings refresh preserves approved native work');
+
+    const excess = await chrome.tabs.create({ url: 'https://ixl.com/math/new-excess', active: false });
+    await wait(async () => !(await chrome.tabs.get(excess.id).catch(() => null)), 'new excess tab rejection');
+    await verifyWork();
+    passed.push('a new excess native tab closes without sacrificing older approved work');
+
+    // Hold an actual creation callback before its live policy decision while
+    // the Flight Path inventory records that tab as existing approved work.
+    chrome.tabs.onCreated.removeListener(handleCreatedTabForPolicy);
+    const delayed = await chrome.tabs.create({ url: 'https://classroom.google.com/c/course/existing-work', active: false });
+    await wait(async () => { const tab = await chrome.tabs.get(delayed.id); return !tab.pendingUrl && tab.status === 'complete'; }, 'delayed callback work');
+    let releaseCreated;
+    const createdGate = new Promise(done => { releaseCreated = done; });
+    const creation = handleCreatedTabForPolicy(delayed, { restorePromise: createdGate });
+    currentClassroomState = null;
+    const restoredState = { ...state, revision: 2 };
+    try {
+      // Exercise actual initial full-state adoption and its scheduled side
+      // effects with no explicit Flight Path apply option or helper call.
+      await applyClassroomState(restoredState, { authContext: auth, authorityEnvelope: envelope(auth) });
+      await wait(() => [...pendingCreatedTabPolicies.keys()].some(record => record.tabId === delayed.id
+        && record.preserveExistingWork), 'initial-sync retention of a callback waiting on restore');
+      // Removing the path is another ordinary state change, not an implicit
+      // instruction to reduce old work or reinterpret its pending callback.
+      const removedState = { ...restoredState, revision: 3, restrictions: {
+        ...restoredState.restrictions, flightPath: { active: false, allowedDomains: [] },
+      } };
+      await applyClassroomState(removedState, { authContext: auth, authorityEnvelope: envelope(auth) });
+    } finally {
+      releaseCreated(); await creation;
+    }
+    check((await chrome.tabs.get(delayed.id)).url === 'https://classroom.google.com/c/course/existing-work', 'delayed onCreated removed retained Classroom work');
+    await verifyWork();
+    chrome.tabs.onCreated.addListener(handleCreatedTabForPolicy);
+    passed.push('actual initial full-state sync preserves a native creation callback waiting on restore');
+
+    const laterExcess = await chrome.tabs.create({ url: 'https://outside.example/truly-later-tab', active: false });
+    await wait(async () => !(await chrome.tabs.get(laterExcess.id).catch(() => null)), 'later excess tab rejection after restore');
+    await verifyWork();
+
+    const nextState = { ...state, revision: 4 };
+    await applyClassroomState(nextState, { authContext: auth, authorityEnvelope: envelope(auth) });
+    await reconcileExistingTabsForClassroomState(nextState, assertCurrent, auth);
+    await verifyWork();
+    // State ACK delivery can precede the explicit command frame at the same
+    // revision. That exact command must still enforce the numeric action.
+    await applyClassroomState(nextState, { authContext: auth, authorityEnvelope: envelope(auth),
+      existingTabLimitMode: 'enforce-existing' });
+    await wait(async () => (await chrome.tabs.query({})).filter(tab => /^https?:/.test(tab.url || '')).length <= 1,
+      'explicit same-revision tab-limit action');
+    passed.push('explicit same-revision numeric enforcement still reduces approved native work');
     return passed;
   });
-  assert.equal(passed.length, 9);
+  assert.equal(passed.length, 14);
   console.log(`ClassPilot school tab-limit Chrome checks passed (${passed.length}):\n${passed.join('\n')}`);
 } finally {
   await context?.close().catch(() => {});
