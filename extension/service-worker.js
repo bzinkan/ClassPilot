@@ -5815,6 +5815,11 @@ async function refreshSchoolSettingsOnce(options = {}) {
     if (!validSchoolSettingsPayload(settings)) {
       throw new Error('School settings payload is incomplete');
     }
+    // Capture the validated prior school value before replacing the cache.
+    // A reconnect/first boot is not an administrator request to close work.
+    const previousSchoolLimit = schoolSettingsScope === expectedScope
+      && validSchoolSettingsPayload(schoolSettings)
+      ? schoolSettings.maxTabsPerStudent : undefined;
     await enqueueStudentAuthMutation(() => enqueueSchoolSettingsMutation(async () => {
       assertCurrent();
       await applyFabSettings(settings.fab || settings, { authContext, authorityEnvelope: settings });
@@ -5831,6 +5836,7 @@ async function refreshSchoolSettingsOnce(options = {}) {
     }));
     const tabLimitOutcome = await applySchoolTabLimitSettingsSnapshot({ ...settings, settings }, authContext, {
       assertCurrent,
+      previousSchoolLimit,
       enforceTabs: [TRACKING_STATES.ACTIVE, TRACKING_STATES.IDLE].includes(determineTrackingState()),
     });
     assertCurrent();
@@ -21158,6 +21164,7 @@ function scheduleClassroomStateSideEffects(state, options = {}) {
         runtimeOwner,
         tabMutationJournal: options.tabMutationJournal,
         transientCurrentPage: options.transientCurrentPage === true,
+        existingTabLimitMode: options.existingTabLimitMode,
       });
     } catch (error) {
       if (isAuthContextCancellation(error)) return;
@@ -21293,6 +21300,7 @@ async function reconcileClassroomStateTabsBestEffort(state, options = {}) {
       {
         foregroundRestrictionSsoTabId: options.foregroundRestrictionSsoTabId,
         transientCurrentPage: options.transientCurrentPage === true,
+        existingTabLimitMode: options.existingTabLimitMode,
       },
     );
     assertCurrent('classroom tab reconciliation');
@@ -21382,6 +21390,7 @@ async function reconcileExistingTabsForClassroomState(
     foregroundTabId: foregroundTab?.id,
     preserveRestrictionSsoTabIds: hintedForegroundSso ? [hintedForegroundSso.id] : [],
     maxTabs: currentMaxTabs,
+    existingTabLimitMode: browserApi.existingTabLimitMode,
     restrictionSsoPassThrough: restrictionSsoPassThroughForState(state),
     restrictionAuthPassThrough: restrictionAuthPassThroughForState(state),
     authPassThroughAttempt: restrictionAuthAttemptState,
@@ -21391,6 +21400,9 @@ async function reconcileExistingTabsForClassroomState(
     portalFirstLoginHandled: authContext
       ? hasNegotiatedCapability('restrictionPortalFirstV1', authContext) : false,
   });
+  if (browserApi.existingTabLimitMode !== 'enforce-existing') {
+    markPendingCreatedTabsAsExistingWork(state, tabs, authContext);
+  }
   if (portalFirstOnLogin && authContext) {
     const portalUpdate = plan.updates.find((update) => (
       RuntimeCore.isDefaultRestrictionPortalUrl(state.authPassThrough, update.url)
@@ -21407,9 +21419,25 @@ async function reconcileExistingTabsForClassroomState(
   for (const update of plan.updates) {
     try {
       assertCurrent('classroom tab update');
+      const currentTab = await getTab(update.tabId).catch(() => null);
+      assertCurrent('classroom tab update revalidation');
+      if (!currentTab) { failedUpdateIds.add(update.tabId); continue; }
+      const originalTab = tabs.find(tab => tab.id === update.tabId);
+      const targetChanged = !tabLimitTargetMatches(originalTab, currentTab);
+      // Navigation is independent of the mutation queues. Never overwrite
+      // work that became compliant after the inventory query. An unchanged
+      // legacy cold Focus target retains its separately authorized SSO entry.
+      const preserveApprovedWork = targetChanged || state?.restrictions?.flightPath?.active
+        && !state?.restrictions?.screenLock?.active;
+      if (preserveApprovedWork && RuntimeCore.isRestrictionDestinationUrl(state, currentTab.pendingUrl || currentTab.url || '')
+        || restrictionAuthenticationTab(currentTab, state)) continue;
+      if (targetChanged) {
+        scheduleClassroomStateReconciliationRetry();
+        continue;
+      }
       rememberClassroomTabUpdate(
         tabMutationJournal,
-        tabs.find((tab) => tab.id === update.tabId),
+        currentTab,
       );
       await updateTab(update.tabId, { url: update.url });
       assertCurrent('classroom tab update');
@@ -21424,9 +21452,20 @@ async function reconcileExistingTabsForClassroomState(
   for (const tabId of plan.removeTabIds) {
     try {
       assertCurrent('classroom tab removal');
+      const currentTab = await getTab(tabId).catch(() => null);
+      assertCurrent('classroom tab removal revalidation');
+      if (!currentTab) continue;
+      const originalTab = tabs.find(tab => tab.id === tabId);
+      if (!tabLimitTargetMatches(originalTab, currentTab)) {
+        scheduleClassroomStateReconciliationRetry();
+        continue;
+      }
+      if (browserApi.existingTabLimitMode !== 'enforce-existing'
+        && state?.restrictions?.flightPath?.active && !state?.restrictions?.screenLock?.active
+        && RuntimeCore.isRestrictionDestinationUrl(state, currentTab.pendingUrl || currentTab.url || '')) continue;
       rememberClassroomTabRemoval(
         tabMutationJournal,
-        tabs.find((tab) => tab.id === tabId),
+        currentTab,
       );
       await removeTab(tabId);
       assertCurrent('classroom tab removal');
@@ -21789,6 +21828,15 @@ async function applyClassroomStateNow(rawState, options = {}) {
       undefined,
       authContext,
     );
+    // The authoritative snapshot can win the network race against its
+    // explicit tab-limit command. The command must still enforce that exact
+    // revision; a stale command must not trim work under a newer Flight Path.
+    if (outcome === 'applied' && options.existingTabLimitMode === 'enforce-existing') {
+      scheduleClassroomStateSideEffects(currentClassroomState, {
+        authContext, authorityEnvelope, runtimeOwner: classroomRuntimeOwner,
+        existingTabLimitMode: 'enforce-existing',
+      });
+    }
     return {
       outcome,
       appliedRevision: currentClassroomState?.revision ?? 0,
@@ -21899,6 +21947,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
       authorityEnvelope,
       runtimeOwner,
       tabMutationJournal,
+      existingTabLimitMode: options.existingTabLimitMode,
     });
     sideEffectsScheduled = true;
     const restrictionTypes = classroomRestrictionTypes(normalized);
@@ -21982,6 +22031,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
           authorityEnvelope,
           runtimeOwner,
           tabMutationJournal,
+          existingTabLimitMode: options.existingTabLimitMode,
         });
       }
       console.warn('[Classroom State] Snapshot persisted with a deferred side effect:', safeDiagnosticError(error));
@@ -23132,6 +23182,7 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
           reason: 'stateful_command',
           authContext,
           authorityEnvelope: envelope,
+          existingTabLimitMode: commandType === 'limit-tabs' ? 'enforce-existing' : 'preserve-existing',
         });
       });
       result = {
@@ -24107,6 +24158,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
           assertCurrent: assertCommandExecutionCurrent,
           runtimeOwner: executionContext.runtimeOwner,
           tabMutationJournal: commandTabJournal,
+          existingTabLimitMode: 'enforce-existing',
         });
         assertCommandExecutionCurrent('tab-limit enforcement');
         
@@ -25467,8 +25519,14 @@ async function applySchoolTabLimitSettingsSnapshot(message, authContext, options
       : null;
     currentMaxTabs = effectiveTabLimit();
     const appliedLimit = currentMaxTabs;
+    const previousSchoolLimit = options.previousSchoolLimit;
+    const priorKnown = previousSchoolLimit === null || Number.isSafeInteger(Number(previousSchoolLimit))
+      && Number(previousSchoolLimit) > 0;
+    const priorNormalized = previousSchoolLimit === null ? null : Number(previousSchoolLimit);
+    const schoolLimitChanged = priorKnown && priorNormalized !== schoolMaxTabs;
     console.log('Applied tab limit from settings:', appliedLimit === null ? 'unlimited' : appliedLimit);
-    if (appliedLimit === null || appliedLimit <= 0 || options.enforceTabs === false) {
+    if (appliedLimit === null || appliedLimit <= 0 || options.enforceTabs === false
+      || !schoolLimitChanged) {
       return { applied: true, limit: appliedLimit, closed: 0 };
     }
 
@@ -25698,6 +25756,39 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
   }
 });
 
+// Only pending onCreated callbacks need coordination with a Flight Path
+// application. No browsing history or durable per-tab exception is retained.
+const pendingCreatedTabPolicies = new Map();
+
+function beginPendingCreatedTabPolicy(tab, authContext) {
+  const now = Date.now();
+  for (const [record] of pendingCreatedTabPolicies) {
+    if (record.createdAt + 60_000 < now) pendingCreatedTabPolicies.delete(record);
+  }
+  if (!Number.isInteger(tab?.id) || pendingCreatedTabPolicies.size >= 1000) return null;
+  const record = { tabId: tab.id, binding: authContextProtocolScope(authContext), createdAt: now,
+    preserveExistingWork: false };
+  pendingCreatedTabPolicies.set(record, record);
+  return record;
+}
+
+function markPendingCreatedTabsAsExistingWork(state, tabs, authContext) {
+  if (!authContext || !state?.restrictions) return;
+  const binding = authContextProtocolScope(authContext);
+  const restricted = state.restrictions.screenLock?.active || state.restrictions.flightPath?.active;
+  const approved = new Set(tabs.filter(tab => {
+    const url = tab.pendingUrl || tab.url || '';
+    return /^https?:\/\//i.test(url) && (!restricted || RuntimeCore.isRestrictionDestinationUrl(state, url));
+  }).map(tab => tab.id));
+  for (const [record] of pendingCreatedTabPolicies) {
+    if (record.binding === binding && approved.has(record.tabId)) record.preserveExistingWork = true;
+  }
+}
+
+function finishPendingCreatedTabPolicy(record) {
+  return pendingCreatedTabPolicies.delete(record);
+}
+
 function restrictionDestinationTab(tab) {
   const url = tab?.pendingUrl || tab?.url || '';
   if (!/^https?:\/\//i.test(url) || restrictionAuthenticationTab(tab)) return false;
@@ -25817,7 +25908,10 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
       evaluatedMaxTabs: policy.currentMaxTabs,
     };
   }
-  if (!policySource && policy.currentMaxTabs) {
+  // Retained work remains existing when a restriction is relaxed or removed.
+  // The current navigation policy above still rejects newly forbidden pages.
+  const retainedExistingWork = options.preserveExistingWork === true && navigationDecision.allowed;
+  if (!policySource && policy.currentMaxTabs && !retainedExistingWork) {
     const tabs = await queryTabs({});
     // School settings can arrive independently of browser tab enumeration.
     // Use the effective limit at the completed inventory boundary, not the
@@ -25890,7 +25984,7 @@ async function createdTabPolicyDecision(policyTab, queryTabs, options = {}) {
           message: `You can only have ${inventoryMaxTabs} tabs open at a time.`,
           priority: 1,
         };
-      } else if (removalIds.length > 0) {
+      } else if (removalIds.length > 0 && !preserveTabIds.includes(policyTab.id)) {
         // The new tab can be the sole compliant Waypoint target while an
         // older disallowed tab is the removable excess. Run the unified
         // authenticated reconciliation instead of leaving that excess
@@ -25932,6 +26026,7 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
   const queryTabs = options.queryTabs || ((query) => chrome.tabs.query(query));
   const reconcileTabs = options.reconcileTabs || reconcileClassroomStateTabsBestEffort;
   let eventAuthContext;
+  let pendingCreation = null;
   try {
     eventAuthContext = captureAuthenticatedContext('tab created policy event');
   } catch {
@@ -25939,7 +26034,8 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
     return;
   }
   try {
-    await classroomStateRestorePromise;
+    pendingCreation = beginPendingCreatedTabPolicy(tab, eventAuthContext);
+    await (options.restorePromise || classroomStateRestorePromise);
     let destinationAuthPopupPlaceholder = false;
     const createdUrl = tab?.pendingUrl || tab?.url || '';
     if (restrictionAuthPassThroughActive
@@ -26000,6 +26096,7 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         let decision = await createdTabPolicyDecision(policyTab, queryTabs, {
           createdRestrictionSsoTabId: eventRestrictionSsoTabId,
           destinationAuthPopupPlaceholder,
+          preserveExistingWork: pendingCreation?.preserveExistingWork === true,
         });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy decision');
 
@@ -26027,6 +26124,7 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         const currentDecision = await createdTabPolicyDecision(currentTab, queryTabs, {
           createdRestrictionSsoTabId: eventRestrictionSsoTabId,
           destinationAuthPopupPlaceholder,
+          preserveExistingWork: pendingCreation?.preserveExistingWork === true,
         });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy revalidation');
         if (currentDecision.reconcileExcessTabs) {
@@ -26053,6 +26151,7 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
         const finalDecision = await createdTabPolicyDecision(removalTab, queryTabs, {
           createdRestrictionSsoTabId: eventRestrictionSsoTabId,
           destinationAuthPopupPlaceholder,
+          preserveExistingWork: pendingCreation?.preserveExistingWork === true,
         });
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created final policy revalidation');
         if (finalDecision.reconcileExcessTabs) {
@@ -26102,6 +26201,8 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
   } catch (error) {
     if (isAuthContextCancellation(error)) return;
     console.warn('[Service Worker] Tab created handler error:', safeDiagnosticError(error));
+  } finally {
+    finishPendingCreatedTabPolicy(pendingCreation);
   }
 }
 chrome.tabs.onCreated.addListener(handleCreatedTabForPolicy);

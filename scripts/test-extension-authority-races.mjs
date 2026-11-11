@@ -1018,6 +1018,7 @@ async function main() {
       const tabLimitRemovalReady = new Promise((resolve) => { tabLimitRemovalStarted = resolve; });
       const tabLimitRemovalGate = new Promise((resolve) => { releaseTabLimitRemoval = resolve; });
       const tabLimitPromise = applySchoolTabLimitSettingsSnapshot(tabLimitMessage, tabLimitAuthA, {
+        previousSchoolLimit: 3,
         queryTabs: async () => tabLimitTabs,
         getTab: async (tabId) => tabLimitTabs.find((tab) => tab.id === tabId),
         removeTab: async (tabId) => {
@@ -3578,7 +3579,7 @@ async function main() {
         { createdRestrictionSsoTabId: foregroundSsoPopup.id },
       );
 
-      // Ordinary WebSocket tab-limit enforcement has no event-time foreground
+      // A verified changed school limit has no event-time foreground
       // hint. Only a fresh last-focused exact-SSO tab is protected; window-
       // local active tabs in dormant SSO windows must remain removable so the
       // numeric limit recovers once the destination is foreground.
@@ -3595,6 +3596,7 @@ async function main() {
           studentSessionId: firstContext.studentSessionId,
           settings: { maxTabsPerStudent: scenario.maxTabsPerStudent },
         }, firstContext, {
+          previousSchoolLimit: 8,
           queryTabs: async (query) => (
             query?.lastFocusedWindow ? [scenario.staleForegroundTab] : multiWindowInventory
           ),
@@ -3608,10 +3610,12 @@ async function main() {
         });
       }
 
-      // Exercise the complete onCreated -> generic reconciliation handoff.
-      // The onCreated hint preserves the exact Google popup while the generic
-      // last-focused query intentionally remains stale. The unrelated fourth
-      // tab and dormant Clever opener may be removed to recover the limit.
+      // An exact new SSO popup is exempt from numeric cleanup. Its creation
+      // must not trigger generic cleanup of older tabs. Explicit changed
+      // school limits and independent routine restriction reconciliation are
+      // exercised separately below.
+      // The last-focused query intentionally remains stale; neither the
+      // popup nor any older work may be sacrificed by that creation callback.
       const staleReconcileRemoved = [];
       const staleReconcileHints = [];
       const staleReconcileMarkedStates = [];
@@ -3671,8 +3675,8 @@ async function main() {
 
       // Generic worker-restart reconciliation has no onCreated hint. Active
       // tabs in background SSO windows cannot suppress activation/focus of the
-      // destination, and excess dormant flows must become removable once the
-      // last-focused noncompliant window is repaired.
+      // destination. Routine reconciliation removes the off-policy page while
+      // leaving old numeric excess to a separate explicit limit action.
       visitedRestrictionSsoHosts = new Set(['clever.com']);
       const genericRestartRemovedByLimit = [];
       const genericRestartUpdates = [];
@@ -4170,7 +4174,7 @@ async function main() {
     assert.equal(restrictionSsoFixture.lookalikeCreatedPolicySource, 'screen_lock');
     assert.equal(restrictionSsoFixture.ssoRaceRemovalStillApplies, false);
     assert.equal(restrictionSsoFixture.foregroundSsoPolicySource, null);
-    assert.equal(restrictionSsoFixture.foregroundSsoReconcilesBackgroundExcess, true);
+    assert.equal(restrictionSsoFixture.foregroundSsoReconcilesBackgroundExcess, false);
     assert.deepEqual(restrictionSsoFixture.multiWindowQueries, [
       {},
       { active: true, lastFocusedWindow: true },
@@ -4178,14 +4182,14 @@ async function main() {
     assert.equal(restrictionSsoFixture.staleForegroundSsoPolicySource, null);
     assert.equal(
       restrictionSsoFixture.staleForegroundSsoReconcilesBackgroundExcess,
-      true,
+      false,
     );
     assert.deepEqual(restrictionSsoFixture.staleMultiWindowQueries, [
       {},
       { active: true, lastFocusedWindow: true },
     ]);
     assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedPolicySource, null);
-    assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedReconciles, true);
+    assert.equal(restrictionSsoFixture.eventHintAfterActiveChangedReconciles, false);
     assert.deepEqual(restrictionSsoFixture.staleWebSocketRemoved, [
       7802,
       7803,
@@ -4197,23 +4201,18 @@ async function main() {
       { staleForegroundTabId: 7801, applied: true, limit: 2, closed: 1 },
       { staleForegroundTabId: 7802, applied: true, limit: 2, closed: 1 },
     ]);
-    assert.deepEqual(restrictionSsoFixture.staleReconcileRemoved, [
-      7804,
-      7802,
-      7804,
-      7802,
-    ]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileRemoved, []);
     assert.deepEqual(restrictionSsoFixture.staleReconcileRemovedByLimit, [
-      { limit: 1, removed: [7804, 7802] },
-      { limit: 2, removed: [7804, 7802] },
+      { limit: 1, removed: [] },
+      { limit: 2, removed: [] },
     ]);
-    assert.deepEqual(restrictionSsoFixture.staleReconcileHints, [7803, 7803]);
-    assert.deepEqual(restrictionSsoFixture.staleReconcileMarkedStates, [true, true]);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileHints, []);
+    assert.deepEqual(restrictionSsoFixture.staleReconcileMarkedStates, []);
     assert.deepEqual(restrictionSsoFixture.staleReconcileUpdates, []);
     assert.deepEqual(restrictionSsoFixture.staleReconcileFocusedWindows, []);
     assert.deepEqual(restrictionSsoFixture.genericRestartRemovedByLimit, [
-      { limit: 1, removed: [7804, 7802, 7803] },
-      { limit: 2, removed: [7804, 7802] },
+      { limit: 1, removed: [7804] },
+      { limit: 2, removed: [7804] },
     ]);
     assert.deepEqual(restrictionSsoFixture.genericRestartUpdates, [{
       tabId: 7801,

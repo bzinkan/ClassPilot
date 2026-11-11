@@ -2,7 +2,19 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-The prepared Chromebook candidate is **3.0.5**. It adds negotiated routine
+The prepared Chromebook candidate is **3.0.6**. Flight Paths retain every
+already-open approved work tab, including work above an existing numeric tab
+limit. New excess tabs remain blocked; an explicit teacher limit or a verified
+changed administrator limit can still reduce existing tabs. Same-value school
+settings refresh, reconnect and worker restore preserve approved work. Tab
+reconciliation rechecks exact current tabs before destructive mutations and
+does not create a duplicate landing when approved work already exists.
+SchoolPilot separately expands an ordinary Classroom website entry into its
+reviewed Google work-app domains; the extension enforces the delivered snapshot
+without adding domains locally. See the [3.0.6 candidate
+record](../docs/CLASS_PILOT_3_0_6_CANDIDATE.md).
+
+It retains 3.0.5, which adds negotiated routine
 telemetry over the authenticated WebSocket, exact-image screenshot references,
 and bounded lossless screenshot deltas. Fresh captures, JPEG quality, cadence,
 history and authority checks stay intact. A separately leased selected-student
@@ -486,9 +498,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.0.5.zip`, with
-its matching `.sha256` record. Follow the [3.0.5 candidate
-record](../docs/CLASS_PILOT_3_0_5_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.0.6.zip`, with
+its matching `.sha256` record. Follow the [3.0.6 candidate
+record](../docs/CLASS_PILOT_3_0_6_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 

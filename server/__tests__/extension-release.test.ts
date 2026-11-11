@@ -18,7 +18,7 @@ function optionsAround(source: string, context: string) {
 describe("ClassPilot extension release package guards", () => {
   it("bumps the extension manifest to the pre-upload version", () => {
     const manifest = JSON.parse(readRepoFile("extension/manifest.json"));
-    expect(manifest.version).toBe("3.0.5");
+    expect(manifest.version).toBe("3.0.6");
     expect(manifest.minimum_chrome_version).toBe("120");
     expect(manifest.storage?.managed_schema).toBe("managed_schema.json");
   });
@@ -700,9 +700,11 @@ describe("ClassPilot extension release package guards", () => {
     expect(runtimeCore).toContain("additionalTabCount: plan.createUrl ? 1 : 0");
     expect(serviceWorker).toContain("maxTabs: currentMaxTabs");
     expect(serviceWorker).toContain("RuntimeCore.planTabLimitRemovals");
-    expect(serviceWorker).toContain("if (!policySource && policy.currentMaxTabs)");
+    expect(serviceWorker).toContain("if (!policySource && policy.currentMaxTabs && !retainedExistingWork)");
     expect(serviceWorker).toContain("preserveTabId: existingCompliant?.id ?? policyTab.id");
-    expect(serviceWorker).toContain("else if (removalIds.length > 0)");
+    expect(serviceWorker).toContain("else if (removalIds.length > 0 && !preserveTabIds.includes(policyTab.id))");
+    expect(serviceWorker).toContain("existingTabLimitMode: commandType === 'limit-tabs' ? 'enforce-existing' : 'preserve-existing'");
+    expect(runtimeCore).toContain("if (options.existingTabLimitMode !== 'enforce-existing') return plan");
     expect(serviceWorker).toContain("reconcileExcessTabs = true");
     expect(serviceWorker).toContain("authContext: eventAuthContext");
     const tabCommandTypesStart = serviceWorker.indexOf("const AUTHORITY_BOUND_TAB_COMMAND_TYPES");

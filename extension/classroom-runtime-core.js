@@ -1581,6 +1581,9 @@
   }
 
   function appendTabLimitRemovals(plan, state, tabs, options, preserveTabId = null, preserveTabIds = []) {
+    // Reconciliation applies browsing restrictions. Only an explicit numeric
+    // action may discard existing tabs, including after a Flight Path ends.
+    if (options.existingTabLimitMode !== 'enforce-existing') return plan;
     const alreadyRemoved = new Set(plan.removeTabIds);
     const remainingTabs = tabs.filter((tab) => !alreadyRemoved.has(tab.id));
     const limitRemovals = planTabLimitRemovals(state, remainingTabs, {
@@ -1839,11 +1842,13 @@
       const foregroundAllowed = allowed.find((tab) => tab.id === foregroundTabId);
       const foregroundDisallowed = disallowed.find((tab) => tab.id === foregroundTabId);
       let preservedTabId = null;
-      if (foregroundAllowed) {
-        preservedTabId = foregroundAllowed.id;
-        if (disallowed[0]) {
-          plan.updates.push({ tabId: disallowed[0].id, url: firstUrl });
-          plan.removeTabIds.push(...disallowed.slice(1).map((tab) => tab.id));
+      if (allowed.length > 0) {
+        const retained = foregroundAllowed || allowed[0];
+        preservedTabId = retained.id;
+        plan.removeTabIds.push(...disallowed.map(tab => tab.id));
+        if (!foregroundAllowed) {
+          plan.activateTabId = retained.id;
+          plan.focusFallbackUrl = firstUrl;
         }
       } else if (foregroundDisallowed) {
         preservedTabId = foregroundDisallowed.id;
@@ -1852,11 +1857,6 @@
           .filter((tab) => tab.id !== foregroundDisallowed.id)
           .map((tab) => tab.id));
         plan.activateTabId = foregroundDisallowed.id;
-        plan.focusFallbackUrl = firstUrl;
-      } else if (allowed[0]) {
-        preservedTabId = allowed[0].id;
-        plan.removeTabIds.push(...disallowed.map((tab) => tab.id));
-        plan.activateTabId = allowed[0].id;
         plan.focusFallbackUrl = firstUrl;
       } else if (disallowed[0]) {
         preservedTabId = disallowed[0].id;
