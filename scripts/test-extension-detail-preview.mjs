@@ -69,6 +69,33 @@ function fixture() {
   };
 }
 
+// Keep the production request/retry path intact. Only the HTTP boundary and
+// timer completion are controlled, so a wrong lane changes observable sends.
+function backoffFixture() {
+  const f = fixture();
+  const requests = [], waits = [], responses = [];
+  Object.assign(f.context, {
+    apiBackoffUntilMs: 0, heartbeatBackoffUntilMs: 0, screenshotBackoffUntilMs: 0,
+    screenshotDetailBackoffUntilMs: 0, chatBackoffUntilMs: 0,
+    API_RETRY_MAX_ATTEMPTS: 3, API_RETRY_MAX_DELAY_MS: 30_000,
+    API_RETRY_BASE_DELAY_MS: 1000, API_RETRY_RATE_LIMIT_DELAY_MS: 10_000,
+    API_RETRY_STATUS_CODES: new Set([408, 429, 500, 502, 503, 504]),
+    Math: Object.assign(Object.create(Math), { random: () => 0 }),
+    setConnectivityBadge: async () => {}, connectivityStatus: () => 'connected',
+    scheduleEventHeartbeat: () => {},
+    sleepMs: ms => new Promise(resolve => { waits.push({ ms, resolve }); }),
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body || '{}'));
+      return responses.shift() || new Response('{"ok":true}', { status: 200 });
+    },
+  });
+  for (const name of ['randomIntBetween', 'parseRetryAfterMs', 'calculateRetryDelayMs',
+    'requestBackoffUntil', 'setRequestBackoffUntil', 'noteApiBackoff', 'waitForApiBackoff', 'fetchWithBackoff']) {
+    vm.runInContext(declaration(name), f.context);
+  }
+  return { ...f, requests, waits, responses };
+}
+
 test('selected detail lease is bounded to server, request, tracking and active-view deadlines', () => {
   const f = fixture();
   assert.equal(f.policy().expiresAt, now + 20_000);
@@ -169,4 +196,41 @@ test('an exact policy refresh revokes optional detail immediately without cleari
   assert.equal(f.context.screenshotPolicyGeneration, 8);
   assert.equal(f.context.screenshotPolicyState.authority.teachingSessionId, 'class');
   await f.context.captureAndSendDetailPreview(); assert.equal(f.captureOptions.length, 0);
+});
+
+test('a detail HTTP 429 leaves routine screenshot, heartbeat, chat and general API requests able to send', async () => {
+  const f = backoffFixture();
+  f.responses.push(new Response('{"code":"RATE_LIMITED"}', { status: 429, headers: { 'Retry-After': '10' } }));
+  await f.context.captureAndSendDetailPreview();
+  const pending = ['screenshot', 'heartbeat', 'chat', 'api'].map(lane => f.context.fetchWithBackoff(
+    `${f.auth.serverOrigin}/request/${lane}`, { method: 'POST', body: JSON.stringify({ lane }) },
+    { maxAttempts: 1, backoffLane: lane },
+  ));
+  await new Promise(setImmediate);
+  try {
+    assert.deepEqual(f.requests.slice(1).map(body => body.lane).sort(), ['api', 'chat', 'heartbeat', 'screenshot'],
+      'an optional detail cooldown must not suppress any existing request lane');
+    assert.equal(f.waits.length, 0, 'other lanes must not inherit the detail Retry-After');
+  } finally {
+    f.time(now + 10_000);
+    for (const wait of f.waits) wait.resolve();
+    await Promise.all(pending);
+  }
+});
+
+test('detail retries honor their HTTP cooldown and discard a lease retired during the wait', async () => {
+  const f = backoffFixture();
+  f.responses.push(new Response('{"code":"RATE_LIMITED"}', { status: 429, headers: { 'Retry-After': '10' } }));
+  await f.context.captureAndSendDetailPreview();
+  f.time(now + 5000);
+  const pending = f.context.captureAndSendDetailPreview();
+  await new Promise(setImmediate);
+  assert.equal(f.waits.length, 1);
+  assert.equal(f.waits[0].ms, 5000, 'five seconds of the detail Retry-After remain after the pixel cadence permits capture');
+  assert.equal(f.requests.length, 1, 'the second detail frame must not send before its cooldown');
+  assert.equal(f.context.screenshotPixelsCaptureOwner, null);
+  f.retire(); f.time(now + 10_000); f.waits[0].resolve();
+  await pending;
+  assert.equal(f.requests.length, 1, 'the retired lease must not send after its cooldown finishes');
+  assert.equal(f.context.screenshotDetailCaptureInFlight, false);
 });

@@ -26,6 +26,7 @@ const server = createServer((request, response) => {
   let body = '';
   request.on('data', chunk => { body += chunk; });
   request.on('end', () => {
+    let screenshotPolicy;
     if (request.url === '/api/classpilot/device/screenshot') {
       const payload = JSON.parse(body);
       uploads.push(payload);
@@ -33,9 +34,15 @@ const server = createServer((request, response) => {
         heldDetailResponses.push(response);
         return;
       }
+      screenshotPolicy = { mode: 'tracking_window_lease', captureAllowed: true, expiresInSeconds: 60,
+        serverTime: new Date().toISOString(),
+        authority: { kind: 'teaching_session', teachingSessionId: 'synthetic-class', controlRevision: 3 },
+        captureCadence: { mode: 'active_view', intervalSeconds: 5, expiresInSeconds: 40 },
+        detailPreview: { mode: 'selected_student', leaseId: 'abcdefghijklmnopqrstuvwx12345678',
+          expiresInSeconds: 20, intervalSeconds: 5, maxWidth: 1920, jpegQuality: 90 } };
     }
     response.writeHead(200, { 'content-type': 'application/json' });
-    response.end('{"ok":true}');
+    response.end(JSON.stringify({ ok: true, ...(screenshotPolicy ? { screenshotPolicy } : {}) }));
   });
 });
 await new Promise(done => server.listen(0, '127.0.0.1', done));
@@ -73,6 +80,7 @@ try {
     requestImmediateScreenshotCapture = () => {};
     scheduleScreenshotCapture = () => {};
     reconcileActiveScreenshotCadence = () => {};
+    scheduleEventHeartbeat = () => {};
   }, origin);
   const page = await browser.newPage(); await page.goto(origin + '/worksheet'); await page.bringToFront();
   await page.waitForTimeout(650);
@@ -110,20 +118,44 @@ try {
   const thumbnail = routine.screenshot;
   assert.equal((await sharp(Buffer.from(thumbnail.split(',')[1], 'base64')).metadata()).width, 640);
   for (const response of heldDetailResponses.splice(0)) {
-    response.writeHead(200, { 'content-type': 'application/json' }); response.end('{"ok":true}');
+    response.writeHead(429, { 'content-type': 'application/json', 'Retry-After': '8' });
+    response.end('{"code":"RATE_LIMITED"}');
   }
+  for (let i = 0; await worker.evaluate(() => screenshotDetailCaptureInFlight) && i < 100; i++) await page.waitForTimeout(50);
+  assert.equal(await worker.evaluate(() => screenshotDetailCaptureInFlight), false, 'the initial rate-limited detail request must finish');
   await worker.evaluate(async () => { await captureAndSendDetailPreview(); });
   assert.equal(uploads.filter(upload => upload.captureKind === 'detail_preview').length, 1, 'native detail obeys its five-second minimum');
+
+  // Exercise the actual capture functions and request cooldown with a real
+  // localhost 429. Only the cadence time passes; no backoff or capture helper
+  // is replaced. The optional request must wait while routine pixels advance.
+  await page.waitForTimeout(5050);
+  await worker.evaluate(() => { globalThis.__detailBackoffRetry = captureAndSendDetailPreview(); });
+  for (let i = 0; await worker.evaluate(() => Boolean(screenshotPixelsCaptureOwner)) && i < 100; i++) await page.waitForTimeout(25);
+  const waitingDetail = await worker.evaluate(() => ({
+    inFlight: screenshotDetailCaptureInFlight,
+    ownsPixels: Boolean(screenshotPixelsCaptureOwner),
+  }));
+  assert.equal(waitingDetail.inFlight, true, 'detail retry must respect its Retry-After cooldown');
+  assert.equal(waitingDetail.ownsPixels, false, 'waiting for detail HTTP must release the native pixel mutex');
+  assert.equal(uploads.filter(upload => upload.captureKind === 'detail_preview').length, 1, 'detail retry cannot upload before its cooldown expires');
+  await page.waitForTimeout(650);
+  await worker.evaluate(async () => { await captureAndSendScreenshot({ reason: 'active-view-tick' }); });
+  assert.equal(uploads.filter(upload => upload.captureKind !== 'detail_preview').length, 2,
+    'routine native capture/upload must progress after a detail 429 while detail respects its own cooldown');
   await worker.evaluate(async () => {
     screenshotPolicyState = Object.freeze({ ...screenshotPolicyState, detailPreview: null });
     retireDetailPreviewCapture();
+    await globalThis.__detailBackoffRetry;
     await captureAndSendDetailPreview();
   });
-  assert.equal(uploads.filter(upload => upload.captureKind === 'detail_preview').length, 1, 'release stops detail capture and leaves routine thumbnails available');
+  assert.equal(uploads.filter(upload => upload.captureKind === 'detail_preview').length, 1,
+    'retiring a detail lease during backoff must discard its waiting image without a late upload');
   const evidence = { browser: browser.browser().version(),
     firstLatencyMs, detailWidth: metadata.width, detailHeight: metadata.height,
     jpegBytes: Buffer.from(detail.screenshot.split(',')[1], 'base64').length, thumbnailWidth: 640,
     routineProgressedDuringDetailHttp: true,
+    routineProgressedDuringDetailBackoff: true, retiredDetailBackoffUploadDiscarded: true,
     extensionVersion: await worker.evaluate(() => chrome.runtime.getManifest().version) };
   const evidenceDir = join(repo, 'artifacts', 'detail-preview');
   mkdirSync(evidenceDir, { recursive: true });

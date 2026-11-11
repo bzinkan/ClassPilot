@@ -1076,6 +1076,8 @@ const MAX_REGISTRATION_RETRIES = 5;
 let apiBackoffUntilMs = 0;
 let heartbeatBackoffUntilMs = 0;
 let screenshotBackoffUntilMs = 0;
+// Optional selected-detail uploads must not pause routine grid thumbnails.
+let screenshotDetailBackoffUntilMs = 0;
 // Student chat has its own lane: a chat cooldown must never delay heartbeats,
 // acknowledgements or settings reads that share the general API lane.
 let chatBackoffUntilMs = 0;
@@ -2092,6 +2094,7 @@ function calculateRetryDelayMs(response, attempt) {
 function requestBackoffUntil(lane) {
   if (lane === 'heartbeat') return heartbeatBackoffUntilMs;
   if (lane === 'screenshot') return screenshotBackoffUntilMs;
+  if (lane === 'screenshot-detail') return screenshotDetailBackoffUntilMs;
   if (lane === 'chat') return chatBackoffUntilMs;
   return apiBackoffUntilMs;
 }
@@ -2099,6 +2102,7 @@ function requestBackoffUntil(lane) {
 function setRequestBackoffUntil(lane, value) {
   if (lane === 'heartbeat') heartbeatBackoffUntilMs = value;
   else if (lane === 'screenshot') screenshotBackoffUntilMs = value;
+  else if (lane === 'screenshot-detail') screenshotDetailBackoffUntilMs = value;
   else if (lane === 'chat') chatBackoffUntilMs = value;
   else apiBackoffUntilMs = value;
 }
@@ -19938,7 +19942,7 @@ async function captureAndSendDetailPreview() {
         detailPreviewLeaseId: detail.leaseId, screenshotAuthority: authority, capturedAt,
         timestamp: Date.parse(capturedAt), screenshot,
         tabTitle: metadata.title, tabUrl: metadata.url, tabFavicon: metadata.favicon }),
-    }, { maxAttempts: 1, backoffLane: 'screenshot', context: 'selected student preview upload', beforeAttempt: assertCurrent });
+    }, { maxAttempts: 1, backoffLane: 'screenshot-detail', context: 'selected student preview upload', beforeAttempt: assertCurrent });
     assertCurrent();
     if (!response.ok) scheduleEventHeartbeat('detail-preview-upload-denied');
   } catch {
