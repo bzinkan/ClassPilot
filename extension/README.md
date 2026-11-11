@@ -7,7 +7,9 @@ telemetry over the authenticated WebSocket, exact-image screenshot references,
 and bounded lossless screenshot deltas. Fresh captures, JPEG quality, cadence,
 history and authority checks stay intact. A separately leased selected-student
 detail preview can capture native JPEG90 up to 1920 pixels while ordinary
-640-pixel thumbnails and their efficiency path stay unchanged. HTTP and full-image recovery remain
+640-pixel thumbnails and their efficiency path stay unchanged. Detail HTTP rate
+limits use a separate cooldown so routine thumbnails continue; an expired or
+retired detail lease still discards its waiting frame. HTTP and full-image recovery remain
 available. SchoolPilot independently controls rollout. See the
 [3.0.5 candidate record](../docs/CLASS_PILOT_3_0_5_CANDIDATE.md).
 

@@ -54,6 +54,10 @@ Only a current detail lease permits a separate native JPEG90 capture, at most
 once per five seconds and serialized against ordinary capture with native API
 spacing. The native pixel mutex is released after capture and the post-capture
 tab fence; a pending detail HTTP response cannot block ordinary thumbnails.
+The November 10 follow-up also gives detail uploads their own HTTP cooldown:
+a detail 429 honors its Retry-After without pausing the routine screenshot,
+heartbeat, chat or general API lanes. A detail frame waiting on that cooldown
+still rechecks its exact current lease before sending; retirement discards it.
 The image preserves aspect ratio and native size up to 1920 pixels.
 An encoding failure or data URL over 800,000 characters skips detail while
 ordinary thumbnails continue. Detail uploads use full-image HTTP with
@@ -74,7 +78,10 @@ viewers and stores detail images outside the grid thumbnail/reference stores.
 The source and full packaged telemetry gates now include focused detail lease,
 revocation, cadence and payload tests plus an actual Chrome native capture of
 a synthetic worksheet. The browser gate checks a 1920-pixel detail, a separate
-640-pixel routine thumbnail, five-second throttling and release. Synthetic
+640-pixel routine thumbnail, five-second throttling and release.
+The follow-up regression uses the production backoff helpers and a real Chrome
+capture against a localhost detail 429: a routine frame progresses during the
+detail cooldown, and a retired waiting detail frame never uploads. Synthetic
 comparison images and measured dimensions/latency are saved under ignored
 `artifacts/detail-preview/`; these are functional browser evidence, not managed
 ChromeOS or fleet acceptance.
