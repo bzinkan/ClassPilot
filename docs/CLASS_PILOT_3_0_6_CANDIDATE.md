@@ -30,6 +30,10 @@ candidate, not Store publication, uploaded ZIP identity or fleet adoption.
   auth binding. This coordination is
   bounded, memory-only and removed when each callback finishes; no durable
   browsing history or per-tab permission is added.
+  The eligible callback set is frozen when each adoption/reconciliation request
+  begins, before queueing, validation, DNR or post-ACK work. Tabs created while
+  those operations wait remain new and are still rejected above the limit.
+  Retry, expiry and legacy command paths retain the same original boundary.
 - Destructive reconciliation re-reads exact tabs immediately before a URL
   update/removal. A tab that became approved is retained, and changed identities
   are deferred to a fresh reconciliation.

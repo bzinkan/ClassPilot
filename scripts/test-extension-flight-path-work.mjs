@@ -75,6 +75,7 @@ function reconciliationHarness() {
     restrictionAuthenticationTab: () => false, scheduleClassroomStateReconciliationRetry: () => {},
     tabLimitTargetMatches: (left, right) => left?.windowId === right?.windowId && left?.url === right?.url && left?.pendingUrl === right?.pendingUrl,
     markPendingCreatedTabsAsExistingWork: () => {},
+    capturePendingCreatedTabCandidates: () => new Set(),
     isAuthContextCancellation: () => false, safeDiagnosticError: String, chrome: {}, console,
   });
   vm.runInContext(sourceFunction('async function reconcileExistingTabsForClassroomState(', '\nasync function resolveCurrentUrlMarker'), context);
@@ -239,4 +240,158 @@ test('ordinary initial-sync, reconnect and retry reconciliation coordinate pendi
     removeTab: async () => { throw new Error('approved work must not be closed'); }, refreshTabs: async () => {},
   });
   assert.equal(marked, 1);
+});
+
+function pendingCreationHarness() {
+  const harness = reconciliationHarness();
+  harness.context.authContextProtocolScope = auth => auth.binding;
+  vm.runInContext(sourceFunction('const pendingCreatedTabPolicies = ', '\nfunction restrictionDestinationTab'), harness.context);
+  return harness;
+}
+
+test('queued state adoption freezes pending callbacks at request entry', async () => {
+  const { context } = pendingCreationHarness();
+  const auth = { binding: 'exact-session-A' };
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseQueue;
+  const gate = new Promise(resolve => { releaseQueue = resolve; });
+  let received;
+  context.enqueueClassroomStateOperation = async operation => { await gate; return operation(); };
+  context.applyClassroomStateNow = async (_state, options) => { received = options; };
+  vm.runInContext(sourceFunction('function applyClassroomState(rawState', '\nasync function expireClassroomState'), context);
+  const application = context.applyClassroomState(path, { authContext: auth });
+  const late = context.beginPendingCreatedTabPolicy({ id: 3 }, auth);
+  releaseQueue(); await application;
+  context.markPendingCreatedTabsAsExistingWork(path, work(), auth, received.pendingCreatedTabCandidates);
+  assert.equal(old.preserveExistingWork, true);
+  assert.equal(late.preserveExistingWork, false);
+});
+
+test('post-ACK side effects cannot grandfather a new callback created while the attention broadcast waits', async () => {
+  const { context } = pendingCreationHarness();
+  const state = { revision: 2, restrictions: { flightPath: { active: false, allowedDomains: [] }, attentionMode: { active: false } } };
+  const auth = { binding: 'exact-session-A' }, owner = {};
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseBroadcast, enteredBroadcast, completed;
+  const gate = new Promise(resolve => { releaseBroadcast = resolve; });
+  const entered = new Promise(resolve => { enteredBroadcast = resolve; });
+  const finished = new Promise(resolve => { completed = resolve; });
+  const tabs = work();
+  Object.assign(context, {
+    currentClassroomState: state, classroomRuntimeOwner: owner, classroomRuntimeIsOwnedBy: value => value === owner,
+    assertAuthenticatedContextCurrent: () => {}, assertCurrentStudentBinding: () => ({}), assertBindingMatchesAuthContext: () => {},
+    authContextSuperseded: () => new Error('retired'),
+    broadcastToAllTabsForAuth: async () => { enteredBroadcast(); await gate; },
+    raiseDeferredTeacherMessageNotification: async () => {}, refreshTabCache: async () => { completed(); },
+    restrictionAuthPolicyRefreshPending: false, restrictionPortalPolicyRefreshPending: false,
+    CLASSROOM_STATE_RECONCILE_ALARM: 'reconcile',
+    chrome: { tabs: { query: async query => structuredClone(query.active ? [tabs[0]] : tabs),
+      get: async id => tabs.find(tab => tab.id === id), update: async () => { throw new Error('unexpected update'); },
+      remove: async () => { throw new Error('unexpected removal'); } }, alarms: { clear: async () => {} } },
+  });
+  vm.runInContext(sourceFunction('async function reconcileClassroomStateTabsBestEffort(', '\nasync function reconcileExistingTabsForClassroomState'), context);
+  vm.runInContext(sourceFunction('function scheduleClassroomStateSideEffects(', '\nasync function failPrivateRetiredClassroomRuntime'), context);
+  context.scheduleClassroomStateSideEffects(state, { authContext: auth, runtimeOwner: owner });
+  await entered;
+  const late = context.beginPendingCreatedTabPolicy({ id: 4 }, auth);
+  tabs.push({ id: 4, windowId: 1, active: false, url: 'https://outside.example/truly-new' });
+  releaseBroadcast(); await finished;
+  assert.equal(old.preserveExistingWork, true, 'callback predating the state request remains existing work');
+  assert.equal(late.preserveExistingWork, false, 'callback created after the state request must remain new');
+});
+
+test('direct reconciliation freezes callbacks before its asynchronous tab inventory', async () => {
+  const { context } = pendingCreationHarness();
+  const auth = { binding: 'exact-session-A' };
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseQuery, queryStarted;
+  const gate = new Promise(resolve => { releaseQuery = resolve; });
+  const started = new Promise(resolve => { queryStarted = resolve; });
+  const application = context.reconcileExistingTabsForClassroomState(path, () => {}, auth, null, {
+    queryTabs: async query => {
+      if (!query.active) { queryStarted(); await gate; return work(); }
+      return [work()[0]];
+    }, getTab: async id => work().find(tab => tab.id === id), refreshTabs: async () => {},
+  });
+  await started;
+  const late = context.beginPendingCreatedTabPolicy({ id: 3 }, auth);
+  releaseQuery(); await application;
+  assert.equal(old.preserveExistingWork, true);
+  assert.equal(late.preserveExistingWork, false);
+});
+
+test('retry alarms freeze callbacks before waiting for restore and the mutation queues', async () => {
+  const { context } = pendingCreationHarness();
+  const auth = { binding: 'exact-session-A' };
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseRestore, received;
+  const gate = new Promise(resolve => { releaseRestore = resolve; });
+  Object.assign(context, { currentClassroomState: path, classroomRuntimeOwner: {},
+    enqueueStudentAuthMutation: async operation => operation(), enqueueClassroomStateOperation: async operation => operation(),
+    assertAuthenticatedContextCurrent: () => {}, createClassroomTabMutationJournal: () => ({}),
+    transientCurrentPageRestrictionActive: false,
+  });
+  vm.runInContext(sourceFunction('async function handleClassroomStateReconcileAlarm(', '\nasync function reconcileClassroomStateTabsBestEffort'), context);
+  const application = context.handleClassroomStateReconcileAlarm({ authContext: auth, restorePromise: gate,
+    reconcile: async (_state, options) => { received = options; } });
+  const late = context.beginPendingCreatedTabPolicy({ id: 3 }, auth);
+  releaseRestore(); await application;
+  context.markPendingCreatedTabsAsExistingWork(path, work(), auth, received.pendingCreatedTabCandidates);
+  assert.equal(old.preserveExistingWork, true);
+  assert.equal(late.preserveExistingWork, false);
+});
+
+test('an already-expired adoption keeps its original pending-callback boundary through expiry cleanup', async () => {
+  const { context } = pendingCreationHarness();
+  const auth = { binding: 'exact-session-A' };
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseValidation, validationStarted, received;
+  const gate = new Promise(resolve => { releaseValidation = resolve; });
+  const started = new Promise(resolve => { validationStarted = resolve; });
+  Object.assign(context, {
+    exactStudentBinding: () => ({ bindingVersion: 1, studentId: 'A', studentSessionId: 'session-A' }),
+    createClassroomRuntimeOwner: () => ({}), createClassroomTabMutationJournal: () => ({}),
+    currentStudentControlRevision: () => 1, assertAuthenticatedContextCurrent: () => {},
+    resolveCurrentUrlMarker: async state => { validationStarted(); await gate; return state; },
+    validateRestrictionSsoDeliveryContext: async () => null, validateRestrictionAuthPassThroughContext: async () => {},
+    nextRestrictionAuthPolicyFence: async () => null, prepareFocusAssignment: async () => null,
+    currentClassroomState: null, restrictionPortalPolicyRefreshPending: false, transientCurrentPageRestrictionActive: false,
+    restrictionAuthPolicyFenceState: null, restrictionAuthPolicyRefreshPending: false,
+    retireScreenshotAuthorityForClassroomChange: () => {}, scheduleEventHeartbeat: () => {},
+    expireClassroomState: async (_reason, options) => { received = options; },
+  });
+  vm.runInContext(sourceFunction('async function applyClassroomStateNow(', '\nfunction applyClassroomState(rawState'), context);
+  const expired = { schemaVersion: 1, revision: 2, teachingSessionId: 'expired-class',
+    hardExpiresAt: Date.now() - 1_000, restrictions: path.restrictions };
+  const application = context.applyClassroomStateNow(expired, { authContext: auth });
+  await started;
+  const late = context.beginPendingCreatedTabPolicy({ id: 3 }, auth);
+  releaseValidation(); await application;
+  context.markPendingCreatedTabsAsExistingWork(path, work(), auth, received.pendingCreatedTabCandidates);
+  assert.equal(old.preserveExistingWork, true);
+  assert.equal(late.preserveExistingWork, false);
+});
+
+test('queued expiry checks carry the request boundary through the expiry reducer', async () => {
+  const { context } = pendingCreationHarness();
+  const auth = { binding: 'exact-session-A' };
+  const old = context.beginPendingCreatedTabPolicy({ id: 2 }, auth);
+  let releaseQueue, received;
+  const gate = new Promise(resolve => { releaseQueue = resolve; });
+  Object.assign(context, {
+    currentClassroomState: core.normalizeClassroomState({ schemaVersion: 1, revision: 2,
+      teachingSessionId: 'expired-class', hardExpiresAt: Date.now() - 1_000, restrictions: path.restrictions }),
+    captureAuthenticatedContext: () => auth, assertAuthenticatedContextCurrent: () => {},
+    enqueueStudentAuthMutation: async operation => { await gate; return operation(); },
+    enqueueClassroomStateOperation: async operation => operation(),
+    expireClassroomState: async (_reason, options) => { received = options; },
+  });
+  vm.runInContext(sourceFunction('async function checkClassroomStateExpiryNow(', '\nfunction storedClassroomStateMatches'), context);
+  vm.runInContext(sourceFunction('function checkClassroomStateExpiry()', '\nfunction assertRemoteCommandExecutionContextCurrent'), context);
+  const application = context.checkClassroomStateExpiry();
+  const late = context.beginPendingCreatedTabPolicy({ id: 3 }, auth);
+  releaseQueue(); await application;
+  context.markPendingCreatedTabsAsExistingWork(path, work(), auth, received.pendingCreatedTabCandidates);
+  assert.equal(old.preserveExistingWork, true);
+  assert.equal(late.preserveExistingWork, false);
 });
