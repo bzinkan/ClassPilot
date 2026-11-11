@@ -34,6 +34,10 @@ candidate, not Store publication, uploaded ZIP identity or fleet adoption.
   begins, before queueing, validation, DNR or post-ACK work. Tabs created while
   those operations wait remain new and are still rejected above the limit.
   Retry, expiry and legacy command paths retain the same original boundary.
+  A new tab whose navigation commits during its final inventory receives up to
+  three additional fresh policy checks for that same tab. Exact target/auth
+  checks remain strict; continuous target changes stop safely with one
+  content-free diagnostic. Freshly retained work and sign-in exceptions win.
 - Destructive reconciliation re-reads exact tabs immediately before a URL
   update/removal. A tab that became approved is retained, and changed identities
   are deferred to a fresh reconciliation.
@@ -53,7 +57,8 @@ Focused red/green evidence is kept under ignored
 `artifacts/classroom-reliability/`. The new source/package regression
 `scripts/test-extension-flight-path-work.mjs` covers preservation above the
 numeric limit, exact destructive-boundary rechecks, settings baselines,
-authentication popup protection and pending-creation binding. The native Chrome
+authentication popup protection, pending-creation binding and bounded new-tab
+re-evaluation across navigation commits. The native Chrome
 school-limit suite includes real approved work tabs, repeated reconciliation,
 same-value settings refresh, a new excess tab, a held creation callback and
 explicit numeric enforcement. Prior 3.0.5 receipts do not validate these bytes.

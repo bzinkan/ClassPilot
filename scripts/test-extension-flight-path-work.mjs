@@ -213,6 +213,116 @@ test('an approved new authentication popup never sacrifices older work to the nu
   assert.equal(decision.reconcileExcessTabs, false);
 });
 
+function createdTabHandlerHarness() {
+  const auth = { binding: 'exact-created-session-A' };
+  const existing = work();
+  const pending = { id: 4, windowId: 1, active: false, url: '', pendingUrl: 'https://ixl.com/math/new-excess' };
+  const committed = { ...pending, url: pending.pendingUrl, pendingUrl: '' };
+  const removed = [], warnings = [];
+  let current = pending, gets = 0, queries = 0, retired = false;
+  const context = vm.createContext({ URL, Date, TextEncoder, Map, Set, RuntimeCore: core,
+    console: { warn: (...values) => warnings.push(values) },
+    currentMaxTabs: 1, screenLocked: false, lockedDomain: null,
+    allowedDomains: path.restrictions.flightPath.allowedDomains,
+    restrictionSsoPassThroughActive: false, restrictionAuthPassThroughActive: false,
+    restrictionAuthAttemptState: null, restrictionAuthPolicyRefreshPending: false,
+    runtimeClassroomStateForRules: () => path, globalBlockedDomains: [], flightPathIsActive: () => true,
+    restrictionDestinationTab: tab => core.isRestrictionDestinationUrl(path, tab.pendingUrl || tab.url || ''),
+    restrictionSsoTabLimitPreserveIds: () => [], activeCreatedRestrictionSsoTabId: () => null,
+    classroomRestrictionsFromRuntime: () => path.restrictions, authContextProtocolScope: value => value.binding,
+    captureAuthenticatedContext: () => auth,
+    assertAuthenticatedContextCurrent: () => { if (retired) throw Object.assign(new Error('retired'), { code: 'AUTH_CONTEXT_SUPERSEDED' }); },
+    enforceAuthGateForTab: async () => {}, classroomStateRestorePromise: Promise.resolve(),
+    enqueueStudentAuthMutation: async operation => operation(), enqueueClassroomStateOperation: async operation => operation(),
+    restrictionAuthenticationUrlAllowed: () => false,
+    reconcileClassroomStateTabsBestEffort: async () => { throw new Error('new tab must not clean up older work'); },
+    removeTabForAuth: async id => removed.push(id), refreshTabCache: async () => {},
+    recordNavigationBlockedForAuth: async () => {}, notifyNavigationBlockedForAuth: async () => {},
+    isAuthContextCancellation: error => error?.code === 'AUTH_CONTEXT_SUPERSEDED', safeDiagnosticError: String,
+    chrome: { tabs: { onCreated: { addListener: () => {} } } },
+  });
+  vm.runInContext(sourceFunction('function tabLimitTargetMatches(', '\nasync function applyWebSocketTabLimitSetting'), context);
+  vm.runInContext(sourceFunction('const pendingCreatedTabPolicies = ', '\nfunction restrictionDestinationTab'), context);
+  vm.runInContext(sourceFunction('async function createdTabPolicyDecision(', '\n// Refresh tab cache when tabs are removed'), context);
+  return { context, pending, committed, removed, warnings, existing,
+    get gets() { return gets; }, get queries() { return queries; },
+    set current(value) { current = value; }, retire: () => { retired = true; },
+    run: onQuery => context.handleCreatedTabForPolicy(pending, {
+      getTab: async () => { gets += 1; return structuredClone(current); },
+      queryTabs: async () => { queries += 1; await onQuery?.(queries); return structuredClone([...existing, current]); },
+    }),
+  };
+}
+
+test('an exact new excess tab is reconsidered when its navigation commits during the final inventory', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => { if (query === 3) harness.current = harness.committed; });
+  assert.deepEqual(harness.removed, [4]);
+  assert.ok(harness.gets > 3, 'a changed final target needs a fresh tab read before removal');
+});
+
+test('new-tab re-evaluation respects a limit relaxed during the final inventory', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => {
+    if (query === 3) { harness.current = harness.committed; harness.context.currentMaxTabs = null; }
+  });
+  assert.deepEqual(harness.removed, []);
+});
+
+test('new-tab re-evaluation cannot remove a tab after its exact authentication retires', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => { if (query === 3) { harness.current = harness.committed; harness.retire(); } });
+  assert.deepEqual(harness.removed, []);
+});
+
+test('new-tab re-evaluation observes legitimate existing-work retention granted during its final inventory', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => {
+    if (query === 3) {
+      vm.runInContext('for (const record of pendingCreatedTabPolicies.keys()) record.preserveExistingWork = true;', harness.context);
+    }
+  });
+  assert.deepEqual(harness.removed, []);
+});
+
+test('new-tab re-evaluation observes an authentication exception adopted during its final inventory', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => {
+    if (query === 3) {
+      harness.current = { ...harness.committed, active: true, url: 'https://accounts.google.com/ServiceLogin' };
+      harness.context.restrictionAuthPassThroughActive = true;
+      harness.context.RuntimeCore = { ...core, decideNavigation: () => ({ allowed: true }) };
+      harness.context.activeCreatedRestrictionSsoTabId = () => 4;
+      harness.context.restrictionSsoTabLimitPreserveIds = () => [1, 4];
+      harness.context.restrictionAuthenticationTab = tab => tab.id === 4;
+    }
+  });
+  assert.deepEqual(harness.removed, []);
+});
+
+test('new-tab re-evaluation waits for current authentication policy when it changes during its final inventory', async () => {
+  const harness = createdTabHandlerHarness();
+  harness.context.requestClassroomStateSync = () => {};
+  await harness.run(query => {
+    if (query === 3) {
+      harness.current = harness.committed;
+      harness.context.restrictionAuthPolicyRefreshPending = true;
+    }
+  });
+  assert.deepEqual(harness.removed, []);
+});
+
+test('new-tab re-evaluation is bounded and never mutates a continuously changing URL or window', async () => {
+  const harness = createdTabHandlerHarness();
+  await harness.run(query => {
+    harness.current = { ...harness.committed, windowId: query + 1, url: `https://ixl.com/math/changing-${query}` };
+  });
+  assert.deepEqual(harness.removed, []);
+  assert.equal(harness.queries, 12, 'the initial attempt permits only three additional fresh attempts');
+  assert.equal(harness.warnings.length, 1, 'exhausted fresh attempts need a bounded content-free diagnostic');
+  assert.equal(harness.warnings.flat().some(value => /https:|changing-|exact-created/.test(String(value))), false);
+});
+
 test('a delayed creation callback retained by Flight Path reconciliation is existing work only under its exact auth binding', () => {
   const context = vm.createContext({ Map, Date, RuntimeCore: core,
     authContextProtocolScope: auth => auth.binding,

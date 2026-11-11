@@ -26109,7 +26109,7 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
       assertAuthenticatedContextCurrent(eventAuthContext, 'tab created policy event');
       enforceAuthGateForTab(tab).catch(() => {});
       if (!Number.isInteger(tab?.id)) return;
-      const policyAction = await enqueueClassroomStateOperation(async () => {
+      const evaluateCreatedTabPolicy = () => enqueueClassroomStateOperation(async () => {
         assertAuthenticatedContextCurrent(eventAuthContext, 'tab created classroom policy event');
         // onCreated delivery can trail a classroom-state reconciliation that
         // already navigated this tab. Re-read it only after earlier classroom
@@ -26206,8 +26206,19 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
           assertCurrent('tab created final policy reconciliation');
           return null;
         }
-        if (!finalDecision.policySource
-          || !createdTabRemovalDecisionStillApplies(finalDecision, removalTab)) {
+        if (!finalDecision.policySource) {
+          return { refreshTabs: true };
+        }
+        if (finalDecision.policySource === 'tab_limit' && (
+          pendingCreation?.preserveExistingWork === true
+          || !createdTabRemovalDecisionStillApplies(finalDecision, removalTab)
+        )) {
+          // A navigation can commit between the last tab read and inventory,
+          // or earlier reconciliation can retain this pending callback while
+          // inventory waits. Re-evaluate this exact event tab from fresh state.
+          return { retryPolicy: true };
+        }
+        if (!createdTabRemovalDecisionStillApplies(finalDecision, removalTab)) {
           return { refreshTabs: true };
         }
         decision = finalDecision;
@@ -26218,6 +26229,18 @@ async function handleCreatedTabForPolicy(tab, options = {}) {
           policySource: decision.policySource,
         };
       });
+
+      let policyAction;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        policyAction = await evaluateCreatedTabPolicy();
+        if (!policyAction?.retryPolicy) break;
+        if (attempt === 3) {
+          // Continually changing targets cannot be safely removed. Keep the
+          // exact-target fence and bound both retries and diagnostic volume.
+          console.warn('[Service Worker] New tab policy remained unstable after bounded re-evaluation');
+          policyAction = { refreshTabs: true };
+        }
+      }
 
       if (policyAction?.refreshTabs) {
         await refreshTabCache(eventAuthContext);
