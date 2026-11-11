@@ -187,10 +187,40 @@ export async function exerciseWindowsWorkerParity(fixture){
   await install();checks.push('SSO provider/dependency/lesson navigation works while lookalike hosts and unapproved apps remain denied');
   await worker.evaluate(()=>{chrome.webNavigation.onErrorOccurred.removeListener(globalThis.__windowsNavigationListener);delete globalThis.__windowsNavigationListener;delete globalThis.__windowsNavigationErrors;});
 
+  const existingWork=await worker.evaluate(async()=>{
+    const work=[];
+    for(let index=0;index<3;index++){
+      const url=`https://lesson.example.test/existing-work-${index}`;
+      const tab=await chrome.tabs.create({url,active:false});work.push({id:tab.id,url});
+    }
+    return work;
+  });
+  await until(()=>worker.evaluate(async work=>(await Promise.all(work.map(async expected=>{
+    const tab=await chrome.tabs.get(expected.id).catch(()=>null);
+    return tab?.url===expected.url&&!tab.pendingUrl&&tab.status==='complete';
+  }))).every(Boolean),existingWork),'existing work loads before the numeric policy');
+  const existingIds=await worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(tab=>tab.id).sort((a,b)=>a-b)));
+  assert.ok(existingIds.length>2,'Preservation fixture must start above the numeric limit');
   await install({tabLimit:2});
-  await worker.evaluate(async()=>{for(let index=0;index<5;index++)await chrome.tabs.create({url:`https://lesson.example.test/overflow-${index}`,active:false}).catch(()=>{});});
-  await until(()=>worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.length<=2)),'tab-limit closes actual overflow tabs');
-  await install();checks.push('tab-limit overflow closes real excess browser tabs');
+  await until(()=>worker.evaluate(()=>currentMaxTabs===2),'snapshot installs the numeric policy');
+  const assertExistingWork=async()=>{
+    assert.deepEqual(await worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.map(tab=>tab.id).sort((a,b)=>a-b))),existingIds,
+      `${browserFamily} routine tab-limit snapshot must preserve every existing tab`);
+    const urls=await worker.evaluate(work=>Promise.all(work.map(expected=>chrome.tabs.get(expected.id).then(tab=>tab.url))),existingWork);
+    assert.deepEqual(urls,existingWork.map(tab=>tab.url),`${browserFamily} existing work URLs must remain unchanged`);
+  };
+  await assertExistingWork();
+  const overflowIds=await worker.evaluate(async()=>{
+    const ids=[];
+    for(let index=0;index<5;index++)ids.push((await chrome.tabs.create({url:`https://lesson.example.test/overflow-${index}`,active:false})).id);
+    return ids;
+  });
+  await until(()=>worker.evaluate(async ids=>(await Promise.all(ids.map(id=>chrome.tabs.get(id).then(()=>false,()=>true)))).every(Boolean),overflowIds),
+    'tab-limit rejects every newly created excess tab');
+  await assertExistingWork();
+  await command('limit-tabs',{maxTabs:2});
+  await until(()=>worker.evaluate(()=>chrome.tabs.query({}).then(tabs=>tabs.length<=2)),'explicit teacher tab-limit closes actual overflow tabs');
+  await install();checks.push('numeric snapshots preserve existing work; new excess tabs close; an exact teacher limit trims real tabs');
   if(lesson.isClosed())lesson=await context.newPage();
   if(popup.isClosed()){popup=await context.newPage();await popup.goto(`chrome-extension://${extensionId}/popup.html`);}
   await lesson.goto(`${origin}/parity-${browserFamily}`);
