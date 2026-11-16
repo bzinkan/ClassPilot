@@ -342,6 +342,7 @@ const EXTENSION_CAPABILITIES = Object.freeze([
   'lateSignInRestrictionSsoV1',
   'restrictionAuthPassThroughV1',
   'preciseRestrictionResourcesV1',
+  'classroomFocusScopeV1',
   'restrictionPortalFirstV1',
   'afterHoursSafetyOnlyV1',
   'schoolWebsiteBlockEnforcementV1',
@@ -373,6 +374,7 @@ const SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES = new Set([
   'focusTabV1',
   'privateChatLifecycleV1',
   'preciseRestrictionResourcesV1',
+  'classroomFocusScopeV1',
   'helpRequestsV1', 'questionParkingV1', 'timerControlsV1', 'lessonActivitiesV1', 'exitTicketsV1',
   'scheduledClassroomV1',
   'afterHoursSafetyOnlyV1',
@@ -11536,6 +11538,8 @@ function adoptNegotiatedProtocolState(raw = {}, context) {
     advertised.has(name)
     && (!SCOPED_AUTHORITY_DEPENDENT_CAPABILITIES.has(name) || scopedAuthorityAccepted)
     && (name !== 'privateChatLifecycleV1' || advertised.has('studentChatIdempotencyV1'))
+    && (name !== 'classroomFocusScopeV1' || !globalThis.CLASSPILOT_WINDOWS_BUILD
+      && advertised.has('preciseRestrictionResourcesV1'))
     && (name !== 'scopedScreenshotDeltasV1' || ['deviceTelemetryTransportV1', 'scopedScreenshotReferencesV1',
       'screenshotTrackingWindowLeaseV1'].every(parent => advertised.has(parent)))
   ));
@@ -18034,7 +18038,8 @@ async function preflightPreciseDnrRules(addRules, existingRules, requestedRanges
     throw Object.assign(new Error('DNR regex budget exceeded'), { code: 'DNR_REGEX_BUDGET_EXCEEDED' });
   if (typeof chrome.declarativeNetRequest.isRegexSupported !== 'function')
     throw Object.assign(new Error('DNR regex validation is unavailable'), { code: 'DNR_REGEX_UNSUPPORTED' });
-  const resources = lockedResource ? [lockedResource] : flightPathResources;
+  const resources = lockedClassroomScope ? lockedClassroomScope.resources
+    : lockedResource ? [lockedResource] : flightPathResources;
   const narrowShapes = resources.flatMap(resource => RuntimeCore.restrictionResourceRegexes(resource, true));
   const check = (regex, isCaseSensitive) => {
     const key = `${isCaseSensitive}:${regex}`;
@@ -18070,7 +18075,8 @@ function runtimeClassroomStateForRules() {
     } : {}),
     restrictions: {
       screenLock: { active: screenLocked, url: lockedUrl, domain: lockedDomain,
-        ...(lockedResource ? { resource: lockedResource } : {}) },
+        ...(lockedResource ? { resource: lockedResource } : {}),
+        ...(lockedClassroomScope ? { classroomScope: lockedClassroomScope } : {}) },
       flightPath: { active: flightPathIsActive(), allowedDomains,
         ...(flightPathResources.length ? { resources: flightPathResources } : {}) },
       blockList: { active: teacherBlockedDomains.length > 0, blockedDomains: teacherBlockedDomains },
@@ -20159,6 +20165,7 @@ let screenLocked = false;
 let lockedUrl = null;
 let lockedDomain = null; // Single domain for lock-screen (e.g., "ixl.com")
 let lockedResource = null;
+let lockedClassroomScope = null;
 let flightPathResources = [];
 let allowedDomains = []; // Multiple domains for apply-flight-path (e.g., ["ixl.com", "khanacademy.org"])
 let activeFlightPathName = null; // Name of the currently active scene
@@ -20603,6 +20610,12 @@ function persistedClassroomStateSnapshot(state) {
     persisted.schemaVersion = 2;
     persisted.precisePersistenceVersion = 1;
   }
+  if (state.restrictions?.screenLock?.classroomScope) {
+    // A prior client must refuse the stored scope as a whole rather than
+    // dropping reviewed material targets during a downgrade.
+    persisted.schemaVersion = 4;
+    persisted.classroomScopePersistenceVersion = 1;
+  }
   // Authentication start URLs may contain district routing hints or opaque
   // IdP query values. Profiles, host fences, and provider URLs are runtime-only
   // authority and must never enter chrome.storage.local/session. Dynamic DNR
@@ -20769,6 +20782,7 @@ function classroomRuntimeBackup() {
     lockedUrl,
     lockedDomain,
     lockedResource: lockedResource ? { ...lockedResource } : null,
+    lockedClassroomScope: lockedClassroomScope ? structuredClone(lockedClassroomScope) : null,
     flightPathResources: flightPathResources.map(resource => ({ ...resource })),
     allowedDomains: [...allowedDomains],
     activeFlightPathName,
@@ -20789,6 +20803,7 @@ function restoreClassroomRuntimeBackup(backup) {
   lockedUrl = backup.lockedUrl;
   lockedDomain = backup.lockedDomain;
   lockedResource = backup.lockedResource;
+  lockedClassroomScope = backup.lockedClassroomScope;
   flightPathResources = backup.flightPathResources;
   allowedDomains = backup.allowedDomains;
   activeFlightPathName = backup.activeFlightPathName;
@@ -20949,6 +20964,8 @@ async function restoreClassroomStateAwaitingAuthPolicy(rawState, attempt, policy
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
   lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
+  lockedClassroomScope = restrictions.screenLock.active && restrictions.screenLock.classroomScope
+    ? RuntimeCore.normalizeClassroomFocusScope(restrictions.screenLock.classroomScope) : null;
   allowedDomains = restrictions.flightPath.active ? [...restrictions.flightPath.allowedDomains] : [];
   flightPathResources = restrictions.flightPath.active ? (restrictions.flightPath.resources || []).map(resource => ({ ...resource })) : [];
   activeFlightPathName = restrictions.flightPath.active ? restrictions.flightPath.name : null;
@@ -21051,6 +21068,7 @@ function classroomRestrictionsFromRuntime() {
       url: lockedUrl,
       domain: lockedDomain,
       ...(lockedResource ? { resource: lockedResource } : {}),
+      ...(lockedClassroomScope ? { classroomScope: lockedClassroomScope } : {}),
     },
     flightPath: {
       active: flightPathIsActive(),
@@ -21126,6 +21144,8 @@ async function setRuntimeFromClassroomState(state, options = {}) {
   lockedUrl = restrictions.screenLock.active ? restrictions.screenLock.url : null;
   lockedDomain = restrictions.screenLock.active ? restrictions.screenLock.domain : null;
   lockedResource = restrictions.screenLock.active && restrictions.screenLock.resource ? { ...restrictions.screenLock.resource } : null;
+  lockedClassroomScope = restrictions.screenLock.active && restrictions.screenLock.classroomScope
+    ? RuntimeCore.normalizeClassroomFocusScope(restrictions.screenLock.classroomScope) : null;
   teacherBlockedDomains = restrictions.blockList.active ? [...restrictions.blockList.blockedDomains] : [];
   activeBlockListName = restrictions.blockList.active ? restrictions.blockList.name : null;
   temporaryAllowedDomains = restrictions.temporaryAllows.map((item) => ({ ...item }));
@@ -21218,6 +21238,7 @@ async function failPrivateRetiredClassroomRuntime(expectedOwner = null) {
   lockedUrl = null;
   lockedDomain = null;
   lockedResource = null;
+  lockedClassroomScope = null;
   allowedDomains = [];
   flightPathResources = [];
   activeFlightPathName = null;
@@ -21467,7 +21488,8 @@ async function reconcileExistingTabsForClassroomState(
       // Navigation is independent of the mutation queues. Never overwrite
       // work that became compliant after the inventory query. An unchanged
       // legacy cold Focus target retains its separately authorized SSO entry.
-      const preserveApprovedWork = targetChanged || state?.restrictions?.flightPath?.active
+      const preserveApprovedWork = targetChanged || state?.restrictions?.screenLock?.classroomScope
+        || state?.restrictions?.flightPath?.active
         && !state?.restrictions?.screenLock?.active;
       if (preserveApprovedWork && RuntimeCore.isRestrictionDestinationUrl(state, currentTab.pendingUrl || currentTab.url || '')
         || restrictionAuthenticationTab(currentTab, state)) continue;
@@ -21776,6 +21798,9 @@ async function applyClassroomStateNow(rawState, options = {}) {
   let preparedFocus = null;
   try {
     assertCurrent();
+    if (Object.prototype.hasOwnProperty.call(rawState?.restrictions?.screenLock || {}, 'classroomScope')
+      && rawState.restrictions.screenLock.url === 'CURRENT_URL')
+      throw Object.assign(new Error('Reviewed Classroom Focus requires an explicit destination'), { code: 'CLASSROOM_FOCUS_SCOPE_INVALID' });
     const prepared = await resolveCurrentUrlMarker(rawState, assertCurrent);
     assertCurrent();
     const restrictionSsoBinding = await validateRestrictionSsoDeliveryContext(
@@ -21793,6 +21818,14 @@ async function applyClassroomStateNow(rawState, options = {}) {
     );
     assertCurrent();
     normalized = RuntimeCore.normalizeClassroomState(prepared, Date.now());
+    if (normalized.restrictions.screenLock.classroomScope
+      && options.trustedPersistedRestrictionSso !== true) {
+      if (!authContext || !hasNegotiatedCapability('classroomFocusScopeV1', authContext)
+        || !hasNegotiatedCapability('preciseRestrictionResourcesV1', authContext))
+        throw Object.assign(new Error('Reviewed Classroom Focus was not negotiated'), { code: 'CLASSROOM_FOCUS_SCOPE_UNSUPPORTED' });
+      const scopeBinding = assertCurrentStudentBinding(authorityEnvelope, 'Classroom Focus scope delivery', { authContext });
+      assertBindingMatchesAuthContext(scopeBinding, authContext, 'Classroom Focus scope delivery', { requireFullAuthority: true });
+    }
     if (RuntimeCore.hasPreciseRestrictions(normalized)
       && options.trustedPersistedRestrictionSso !== true) {
       if (!authContext || !hasNegotiatedCapability('preciseRestrictionResourcesV1', authContext)) {
@@ -21827,7 +21860,7 @@ async function applyClassroomStateNow(rawState, options = {}) {
   } catch (error) {
     if (isAuthContextCancellation(error)) throw error;
     const ackState = classroomStateAckTarget(rawState);
-    const outcome = ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED'].includes(error?.code)
+    const outcome = ['UNSUPPORTED_CLASSROOM_STATE_SCHEMA', 'FOCUS_CAPABILITY_REQUIRED', 'CLASSROOM_FOCUS_SCOPE_UNSUPPORTED'].includes(error?.code)
       ? 'unsupported'
       : 'failed';
     sendClassroomStateAck(ackState, outcome, error, authContext);
@@ -22323,6 +22356,7 @@ async function checkClassroomStateExpiryNow(options = {}) {
     lockedUrl = null;
     lockedDomain = null;
     lockedResource = null;
+    lockedClassroomScope = null;
     allowedDomains = [];
     flightPathResources = [];
     activeFlightPathName = null;
@@ -22771,6 +22805,7 @@ async function clearTeacherSessionStateForSignOutNow(options = {}) {
   lockedUrl = null;
   lockedDomain = null;
   lockedResource = null;
+  lockedClassroomScope = null;
   allowedDomains = [];
   flightPathResources = [];
   activeFlightPathName = null;
@@ -23216,6 +23251,9 @@ async function handleRemoteControl(command, envelope = {}, executionOverrides = 
     // A lesson activity's link `resources` is transient Class tools content.
     if (!classroomState && RuntimeCore.commandPayloadRequiresPreciseState(commandType, command.data))
       throw Object.assign(new Error('Precise commands require an authoritative classroom state'), { code: 'PRECISE_RESTRICTION_INVALID' });
+    if (commandType === 'lock-screen' && Object.prototype.hasOwnProperty.call(command.data || {}, 'classroomScope')
+      && (!classroomState?.restrictions?.screenLock?.classroomScope || command.data.url === 'CURRENT_URL'))
+      throw Object.assign(new Error('Reviewed Classroom Focus requires its authoritative scope'), { code: 'CLASSROOM_FOCUS_SCOPE_INVALID' });
     if (commandType === 'focus-tab' && (!classroomState?.restrictions?.focus?.active
       || classroomState.restrictions.focus.tabRef !== exactFocusTarget.tabRef
       || classroomState.restrictions.focus.observedRevision !== exactFocusTarget.observedRevision))
@@ -23798,6 +23836,8 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         break;
 
       case 'lock-screen': {
+        if (Object.prototype.hasOwnProperty.call(command.data || {}, 'classroomScope'))
+          throw Object.assign(new Error('Reviewed Classroom Focus requires an authoritative state'), { code: 'CLASSROOM_FOCUS_SCOPE_INVALID' });
         const transientWaypoint = executionContext.transientCurrentPageWaypoint || null;
         let urlToLock = command.data?.url;
         if (urlToLock === 'CURRENT_URL') {
@@ -23825,6 +23865,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
 
         lockedUrl = urlToLock;
         lockedResource = null;
+        lockedClassroomScope = null;
         lockedDomain = extractDomain(lockedUrl);
         if (!lockedDomain) {
           throw new Error('Could not determine locked domain');
@@ -23963,6 +24004,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         lockedUrl = null;
         lockedDomain = null;
         lockedResource = null;
+        lockedClassroomScope = null;
         transientCurrentPageRestrictionActive = false;
         if (!screenOnly) {
           allowedDomains = [];
@@ -24042,6 +24084,7 @@ async function executeRemoteControlCommand(command, executionContext = {}) {
         lockedUrl = null; // Flight Path uses multiple domains, not a single URL
         lockedDomain = null;
         lockedResource = null; // Clear single domain when applying Flight Path
+        lockedClassroomScope = null;
         restrictionSsoPassThroughActive = false;
         restrictionAuthPassThroughActive = false;
         activeAuthPassThroughPolicy = null;
@@ -26078,7 +26121,7 @@ function createdTabRemovalDecisionStillApplies(decision, currentTab) {
     const currentUrl = currentTab.pendingUrl || currentTab.url || '';
     if ((restrictionSsoPassThroughActive || restrictionAuthPassThroughActive)
       && restrictionAuthenticationUrlAllowed(currentUrl)) return false;
-    return !/^https?:\/\//i.test(currentUrl) || !isOnSameDomain(currentUrl, lockedDomain);
+    return !RuntimeCore.isRestrictionDestinationUrl(runtimeClassroomStateForRules(), currentUrl);
   }
   if (decision.policySource === 'tab_limit') {
     return Number.isSafeInteger(currentMaxTabs)

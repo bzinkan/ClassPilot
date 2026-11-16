@@ -19,7 +19,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, '..');
 const sourceRoot = resolve(repoRoot, 'extension');
 const manifest = JSON.parse(readFileSync(resolve(sourceRoot, 'manifest.json'), 'utf8'));
-const expectedPreparedReleaseVersion = '3.0.6';
+const expectedPreparedReleaseVersion = '3.0.7';
 assert.equal(
   manifest.version,
   expectedPreparedReleaseVersion,
@@ -186,6 +186,8 @@ async function runPackagedTests() {
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
     'test-extension-storage-handoff.mjs',
+    'test-classroom-focus-scope.mjs',
+    'test-extension-classroom-focus.mjs',
     'test-extension-shared-login.mjs',
     'test-extension-login-response.mjs',
     'test-extension-school-tab-limit.mjs',

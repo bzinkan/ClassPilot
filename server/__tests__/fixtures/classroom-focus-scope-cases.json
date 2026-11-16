@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scope": {
+    "schemaVersion": 1,
+    "sourceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "allowedDomains": ["classroom.google.com", "docs.google.com", "drive.google.com", "sheets.google.com", "slides.google.com", "forms.google.com", "forms.gle", "assigned.example"],
+    "resources": [{"type":"resource","hostname":"youtube.com","includeSubdomains":false,"provider":"youtube","resourceId":"dQw4w9WgXcQ","canonicalUrl":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}]
+  },
+  "match": [
+    {"name":"Classroom assignments remain available","url":"https://classroom.google.com/u/0/c/course/a/assignment/details","allowed":true},
+    {"name":"student-created document copies are available","url":"https://docs.google.com/document/d/student-created-copy/edit","allowed":true},
+    {"name":"Drive attachments are available","url":"https://drive.google.com/file/d/assigned-file/view","allowed":true},
+    {"name":"Forms short links are available","url":"https://forms.gle/assigned-form","allowed":true},
+    {"name":"reviewed external websites retain query links","url":"https://assigned.example/lesson?assignment=123&attempt=2","allowed":true},
+    {"name":"reviewed website scopes include their subdomains","url":"https://student.assigned.example/lesson","allowed":true},
+    {"name":"the assigned YouTube video is available","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=3","allowed":true},
+    {"name":"the assigned YouTube short link is available","url":"https://youtu.be/dQw4w9WgXcQ","allowed":true},
+    {"name":"other YouTube videos remain blocked","url":"https://www.youtube.com/watch?v=abcdefghijk","allowed":false},
+    {"name":"the YouTube home page remains blocked","url":"https://www.youtube.com/","allowed":false},
+    {"name":"unassigned websites remain blocked","url":"https://unassigned.example/lesson","allowed":false},
+    {"name":"hostname suffix tricks remain blocked","url":"https://assigned.example.evil.example/lesson","allowed":false},
+    {"name":"Gmail is not a work-app companion","url":"https://mail.google.com/mail/u/0/","allowed":false},
+    {"name":"authentication is separate authority","url":"https://accounts.google.com/signin","allowed":false}
+  ]
+}

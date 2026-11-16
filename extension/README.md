@@ -2,11 +2,19 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
-An unreleased shared-Chromebook sign-in repair is documented in
+The 3.0.7 shared-Chromebook sign-in repair is documented in
 [Shared Chromebook login recovery](../docs/SHARED_CHROMEBOOK_LOGIN_RECOVERY.md).
-It requires a separately versioned successor before Store distribution.
+It is included in the separately prepared 3.0.7 successor.
 
-The prepared Chromebook candidate is **3.0.6**. Flight Paths retain every
+The 3.0.7 Chromebook source also adds server-reviewed Classroom
+Focus work/material scopes. External websites are explicitly reviewed as whole
+websites; assigned YouTube videos remain precise resources. See
+[Reviewed Classroom Focus scope](../docs/CLASSROOM_FOCUS_SCOPE.md). This source
+change requires its own server capability and installed 3.0.7 successor.
+
+The prepared Chromebook candidate is **3.0.7**. See the [3.0.7 candidate
+record](../docs/CLASS_PILOT_3_0_7_CANDIDATE.md) for coordinated server prerequisites,
+verification and artifact custody. It retains 3.0.6: Flight Paths retain every
 already-open approved work tab, including work above an existing numeric tab
 limit. New excess tabs remain blocked; an explicit teacher limit or a verified
 changed administrator limit can still reduce existing tabs. Same-value school
@@ -502,9 +510,9 @@ checks on a Google Admin-managed Chromebook before organizational-unit rollout.
 4. Run `npm run test:extension:package` to repeat the Chrome integration suites
    against the unpacked versioned ZIP.
 
-The current Chromebook candidate output is `dist/ClassPilot-v3.0.6.zip`, with
-its matching `.sha256` record. Follow the [3.0.6 candidate
-record](../docs/CLASS_PILOT_3_0_6_CANDIDATE.md), preserve every older versioned
+The current Chromebook candidate output is `dist/ClassPilot-v3.0.7.zip`, with
+its matching `.sha256` record. Follow the [3.0.7 candidate
+record](../docs/CLASS_PILOT_3_0_7_CANDIDATE.md), preserve every older versioned
 archive, and keep the exact verified ZIP unchanged. The 2.9.6 release paragraph
 below remains historical evidence.
 
