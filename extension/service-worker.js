@@ -15390,6 +15390,12 @@ async function clearStudentAuthNow(reason = 'manual-clear', options = {}, invali
 }
 
 async function expireManualAuthIfStale(reason = 'stale-check') {
+  // A credentialed replacement owns its new generation before the old manual
+  // timestamp is replaced. Background checks must not invalidate that login;
+  // an already raised clear fence also owns the stale identity's cleanup.
+  // Keep that ownership until the request settles even if another explicit
+  // auth mutation supersedes it; its outcome is still unknown in the meantime.
+  if (manualStudentLoginPendingGeneration || studentAuthInvalidating) return false;
   const source = CONFIG.identitySource;
   if (!isManualIdentitySource(source)) {
     return false;
@@ -15405,6 +15411,7 @@ async function expireManualAuthIfStale(reason = 'stale-check') {
 }
 
 function expireManualAuthIfStaleFailClosed(reason = 'stale-check') {
+  if (manualStudentLoginPendingGeneration || studentAuthInvalidating) return false;
   if (!isManualIdentitySource()) return false;
   if (isManualLoginTimestampFresh(CONFIG.manualLoginLastSeenAt)) return false;
 
@@ -16352,22 +16359,44 @@ async function manualStudentLoginNow(payload, mutationGeneration, policyGuard) {
   let mixedVersionRecoveryRetried = false;
   while (true) {
     const loginAuthorization = loginAuthorizationHeader(recoveryGrant);
-    response = await fetchWithBackoff(`${loginServerUrl}/api/extension/student-login`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
-        ...(loginAuthorization
-          ? { Authorization: loginAuthorization }
-          : {}),
-      },
-      body: JSON.stringify(body),
-    }, {
-      context: 'student login',
-      maxAttempts: 1,
-      respectGlobalBackoff: false,
-    });
-    data = await response.json().catch(() => ({}));
+    const requestStartedAt = Date.now();
+    const controller = new AbortController();
+    // Headers do not complete a login response. Keep the same bounded request
+    // owner through JSON consumption, so a stalled 200 body cannot retain the
+    // serialized auth queue after the sign-in frame has lost its reply.
+    const timeoutId = setTimeout(() => controller.abort(), AUTH_GATE_REQUEST_TIMEOUT_MS);
+    try {
+      response = await fetchWithBackoff(`${loginServerUrl}/api/extension/student-login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(CONFIG.enrollmentKey ? { 'X-ClassPilot-Enrollment-Key': CONFIG.enrollmentKey } : {}),
+          ...(loginAuthorization
+            ? { Authorization: loginAuthorization }
+            : {}),
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }, {
+        context: 'student login',
+        maxAttempts: 1,
+        respectGlobalBackoff: false,
+      });
+      data = await response.json().catch((error) => {
+        if (controller.signal.aborted) throw error;
+        return {};
+      });
+    } catch (error) {
+      if (controller.signal.aborted) {
+        recordAuthGateRecoveryDiagnostic('server_request', 'timeout', Date.now() - requestStartedAt);
+        const timeoutError = new Error('ClassPilot request timed out');
+        timeoutError.code = 'AUTH_GATE_TIMEOUT';
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     // During a bounded mixed-version rollout, an older backend can silently
     // ignore the new ClassPilot-Device credential and report the still-active

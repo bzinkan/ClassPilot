@@ -2,6 +2,10 @@
 
 A privacy-aware Chrome Extension (Manifest V3) for classroom monitoring on managed Chromebooks.
 
+An unreleased shared-Chromebook sign-in repair is documented in
+[Shared Chromebook login recovery](../docs/SHARED_CHROMEBOOK_LOGIN_RECOVERY.md).
+It requires a separately versioned successor before Store distribution.
+
 The prepared Chromebook candidate is **3.0.6**. Flight Paths retain every
 already-open approved work tab, including work above an existing numeric tab
 limit. New excess tabs remain blocked; an explicit teacher limit or a verified

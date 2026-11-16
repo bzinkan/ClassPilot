@@ -186,6 +186,8 @@ async function runPackagedTests() {
     'test-extension-resilience.mjs',
     'test-extension-authority-races.mjs',
     'test-extension-storage-handoff.mjs',
+    'test-extension-shared-login.mjs',
+    'test-extension-login-response.mjs',
     'test-extension-school-tab-limit.mjs',
     'test-extension-flight-path-work.mjs',
     'test-extension-command-ack-diagnostics.mjs',

@@ -392,6 +392,60 @@ try {
     } finally { await page.close(); }
   }
 
+  await scenario('interrupted login presentation automatically confirms a committed session without replay or reload', 'normal', async (page, frame) => {
+    await submit(frame);
+    await frame.evaluate(() => fixture.broadcast({
+      type: 'CLASSPILOT_AUTH_REQUIRED',
+      state: { phase: 'unavailable', authRequired: true, revision: 6,
+        errorCode: 'AUTH_GATE_UNAVAILABLE', retryAt: Date.now() + 2000 },
+    }, { id: 'fixture-extension' }));
+    assert.equal(await phase(frame), 'unavailable');
+    const initialStateReads = await frame.evaluate(() => fixture.calls.filter(call => call.type === 'get-auth-state').length);
+    await page.clock.runFor(1990);
+    assert.equal(await frame.evaluate(() => fixture.calls.filter(call => call.type === 'get-auth-state').length), initialStateReads,
+      'uncertain confirmation respects the recovery deadline');
+    await page.clock.runFor(20);
+    assert.equal(await phase(frame), 'unavailable', 'a still-pending worker cannot release the gate');
+    assert.equal(await frame.evaluate(() => fixture.calls.filter(call => call.type === 'get-auth-state').length), initialStateReads + 1);
+    await frame.evaluate(() => {
+      fixture.stateMode = 'normal';
+      fixture.state = { phase: 'authenticated', authRequired: false, revision: 7 };
+      fixture.manualCallback({ success: true });
+    });
+    assert.equal(await phase(frame), 'unavailable', 'superseded submission callback cannot release the gate');
+    const stateReads = await frame.evaluate(() => fixture.calls.filter(call => call.type === 'get-auth-state').length);
+    await page.clock.runFor(2010);
+    assert.equal(await phase(frame), 'authenticated', 'a fresh read-only confirmation must recover a missed completion push');
+    assert.ok(await frame.evaluate(before => fixture.calls.filter(call => call.type === 'get-auth-state').length > before, stateReads));
+    assert.equal(await frame.evaluate(() => fixture.calls.filter(call => call.type === 'manual-student-login').length), 1);
+    assert.equal(await page.evaluate(() => messages.some(message => message.type === 'CLASSPILOT_AUTH_FRAME_RELOAD_REQUEST')), false);
+  });
+
+  await scenario('automatic uncertain confirmation preserves a newer sign-in context against the old success callback', 'normal', async (page, frame) => {
+    await submit(frame);
+    await frame.evaluate(() => {
+      fixture.broadcast({ type: 'CLASSPILOT_AUTH_REQUIRED', state: {
+        phase: 'unavailable', authRequired: true, revision: 6,
+        errorCode: 'AUTH_GATE_UNAVAILABLE', retryAt: Date.now() + 2000,
+      } }, { id: 'fixture-extension' });
+      fixture.stateMode = 'normal';
+      fixture.state = { phase: 'ready', authRequired: true, loginMethod: 'email_id',
+        revision: 8, rosterContextGeneration: 2 };
+    });
+    await page.clock.runFor(2010);
+    assert.equal(await phase(frame), 'ready');
+    await frame.evaluate(() => {
+      fixture.manualCallback({ success: true });
+      fixture.broadcast({ type: 'CLASSPILOT_AUTH_COMPLETE',
+        state: { phase: 'authenticated', authRequired: false, revision: 7 } },
+      { id: 'fixture-extension' });
+    });
+    await page.clock.runFor(2010);
+    assert.equal(await phase(frame), 'ready', 'old completion cannot unlock the newer required sign-in');
+    assert.equal(await frame.locator('#classpilot-auth-email').inputValue(), '');
+    assert.equal(await frame.evaluate(() => fixture.calls.filter(call => call.type === 'manual-student-login').length), 1);
+  });
+
   await scenario('uncertain manual login is never replayed and can reconcile a committed session', 'normal', async (page, frame) => {
     await submit(frame); await page.clock.runFor(10_010);
     assert.equal(await phase(frame), 'unavailable');
