@@ -515,7 +515,10 @@
       document.getElementById('classpilot-auth-retry')?.addEventListener('click', () => requestRefresh(true));
       document.getElementById('classpilot-auth-reload')?.addEventListener('click', requestPageReload);
       installFocusTrap(state.errorCode === 'AUTH_GATE_CONTEXT_INVALIDATED' ? '#classpilot-auth-reload' : '#classpilot-auth-retry');
-      if (state.errorCode !== 'AUTH_GATE_CONTEXT_INVALIDATED' && !state.loginConfirmationPending) scheduleUnavailableRetry(state);
+      // An unknown submission can still commit after a repaint retires its
+      // callback. Retry only reads worker state while manualLoginUncertain;
+      // keep that confirmation alive when the completion push is missed.
+      if (state.errorCode !== 'AUTH_GATE_CONTEXT_INVALIDATED') scheduleUnavailableRetry(state);
       return;
     }
 
